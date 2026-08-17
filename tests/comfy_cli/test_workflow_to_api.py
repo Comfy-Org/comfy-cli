@@ -2419,3 +2419,102 @@ class TestSeedreamDynamicCombo:
 
         assert "model.images" not in inputs
         assert "fixed" not in inputs.values()
+
+
+class TestSubgraphPromotedWidgets:
+    """A subgraph instance's promoted-widget values must reach the interior
+    nodes. Regression: conversion used the interior nodes' saved defaults, so
+    an instance-edited prompt or seed silently never made it into the API
+    graph (bit every official MiniMax H3 template, whose prompt is a promoted
+    widget on the pipeline subgraph)."""
+
+    SG = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    def _workflow(self, instance_widgets, instance_inputs=None, external_links=None):
+        return {
+            "nodes": [
+                {
+                    "id": 100,
+                    "type": self.SG,
+                    "inputs": instance_inputs or [],
+                    "outputs": [],
+                    "mode": 0,
+                    "widgets_values": instance_widgets,
+                },
+            ],
+            "links": external_links or [],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": self.SG,
+                        "name": "Promoted",
+                        # IMAGE first: connection-only def inputs consume no
+                        # widgets_values entry.
+                        "inputs": [
+                            {"name": "pixels", "type": "IMAGE", "linkIds": [300]},
+                            {"name": "text", "type": "STRING", "linkIds": [301]},
+                        ],
+                        "outputs": [],
+                        "nodes": [
+                            {
+                                "id": 50,
+                                "type": "CLIPTextEncode",
+                                "inputs": [
+                                    {"name": "clip", "link": None},
+                                    {"name": "text", "link": 301, "widget": {"name": "text"}},
+                                ],
+                                "outputs": [],
+                                "mode": 0,
+                                "widgets_values": ["interior default text"],
+                            },
+                        ],
+                        "links": [
+                            {
+                                "id": 301,
+                                "origin_id": -10,
+                                "origin_slot": 1,
+                                "target_id": 50,
+                                "target_slot": 1,
+                                "type": "STRING",
+                            },
+                        ],
+                    }
+                ]
+            },
+        }
+
+    def test_instance_widget_overrides_interior_default(self, object_info):
+        result = convert_ui_to_api(self._workflow(["instance text wins"]), object_info)
+        assert result["100:50"]["inputs"]["text"] == "instance text wins"
+
+    def test_virtual_primitive_not_emitted(self, object_info):
+        result = convert_ui_to_api(self._workflow(["instance text wins"]), object_info)
+        assert not any("promoted" in key for key in result)
+
+    def test_external_link_beats_stale_instance_widget(self, object_info):
+        # The def input is wired externally on the instance; its stale
+        # widgets_values entry must be ignored (link wins).
+        wf = self._workflow(
+            ["stale residue"],
+            instance_inputs=[{"name": "text", "link": 400}],
+            external_links=[[400, 7, 0, 100, 0, "STRING"]],
+        )
+        wf["nodes"].insert(
+            0,
+            {
+                "id": 7,
+                "type": "PrimitiveNode",
+                "inputs": [],
+                "outputs": [{"links": [400]}],
+                "mode": 0,
+                "widgets_values": ["linked value wins"],
+            },
+        )
+        # External link enters the subgraph at def-input index 1 ("text").
+        wf["definitions"]["subgraphs"][0]["inputs"][1]["linkIds"] = [301]
+        result = convert_ui_to_api(wf, object_info)
+        assert result["100:50"]["inputs"]["text"] == "linked value wins"
+
+    def test_missing_instance_widgets_keeps_interior_default(self, object_info):
+        result = convert_ui_to_api(self._workflow([]), object_info)
+        assert result["100:50"]["inputs"]["text"] == "interior default text"
