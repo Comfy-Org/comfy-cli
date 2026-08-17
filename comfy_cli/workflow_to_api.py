@@ -397,9 +397,7 @@ def _expand_one_subgraph(
             ]
         )
 
-    next_id = _inject_promoted_widget_values(
-        outer_node, sg_def, input_targets, expanded_nodes, expanded_links, next_id
-    )
+    next_id = _inject_promoted_widget_values(outer_node, sg_def, input_targets, expanded_nodes, expanded_links, next_id)
 
     return expanded_nodes, expanded_links, input_targets, output_sources
 
@@ -470,9 +468,7 @@ def _inject_promoted_widget_values(
             }
         )
         for target_id, target_slot in targets:
-            expanded_links.append(
-                [next_id, virtual_id, 0, f"{outer_id}:{target_id}", target_slot, in_def.get("type")]
-            )
+            expanded_links.append([next_id, virtual_id, 0, f"{outer_id}:{target_id}", target_slot, in_def.get("type")])
             target = node_by_id.get(f"{outer_id}:{target_id}")
             if target is not None:
                 inputs = target.get("inputs") or []
