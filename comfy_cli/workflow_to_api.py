@@ -1114,6 +1114,18 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
     pairs: list[tuple[str, Any]] = []
     vidx = 0
 
+    def next_widget_spec(entries: list[tuple[str, Any]], start: int) -> Any:
+        # The spec of the next WIDGET-owning input, not the next declared one.
+        # Connection inputs own no widgets_values slot, so the slot following a
+        # seed belongs to the next widget — handing the companion guard a
+        # connection's spec defeated its COMBO-membership refusal, and one
+        # connection input between an unflagged seed INT and a COMBO made the
+        # guard consume the combo's real value as a phantom marker.
+        for _n, s in entries[start:]:
+            if _is_widget_input(s)[0]:
+                return s
+        return None
+
     def consume(name: str, spec: Any, depth: int = 0, next_spec: Any = None) -> None:
         # ``next_spec`` is the schema of the widget that follows this one at the
         # same level. The implicit-seed rule matches any INT whose name contains
@@ -1150,7 +1162,7 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
                 )
             else:
                 for j, (sub_name, sub_spec) in enumerate(subs):
-                    consume(sub_name, sub_spec, depth + 1, subs[j + 1][1] if j + 1 < len(subs) else None)
+                    consume(sub_name, sub_spec, depth + 1, next_widget_spec(subs, j + 1))
         elif vidx < len(widget_values) and _has_control_after_generate_companion(
             name, spec, widget_values[vidx], next_spec
         ):
@@ -1164,7 +1176,7 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
             continue
         ordered.extend(section_def.items())
     for i, (input_name, input_spec) in enumerate(ordered):
-        consume(input_name, input_spec, 0, ordered[i + 1][1] if i + 1 < len(ordered) else None)
+        consume(input_name, input_spec, 0, next_widget_spec(ordered, i + 1))
     return pairs
 
 
