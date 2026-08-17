@@ -190,8 +190,10 @@ class TestAckSummaryPartialFailure:
         """Op 2 of 3 (0-based index 1) fails → same code/atomicity as full
         mode, plus a structured receipt: failed.{index,op,code} + applied_count.
 
-        `applied_count` counts specs applied before the abort; the batch is
-        atomic, so all of them were then discarded (nothing was written).
+        The batch is atomic — everything applied before the abort is discarded,
+        so `applied_count` is always 0 on failure (op-vocabulary-v1.md §4):
+        nothing was written, and reporting the discarded count taught a merge
+        consumer that k-1 ops persisted.
         """
         path = _empty(tmp_path)
         before = path.read_text()
@@ -208,7 +210,7 @@ class TestAckSummaryPartialFailure:
         assert path.read_text() == before
         details = env["error"]["details"]
         assert details["failed"] == {"index": 1, "op": "add_node", "code": "workflow_edit_invalid"}
-        assert details["applied_count"] == 1
+        assert details["applied_count"] == 0
 
     def test_full_mode_failure_envelope_unchanged(self, patched_graph, tmp_path, capsys):
         """Default mode keeps today's failure envelope: no details block."""

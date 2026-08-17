@@ -607,3 +607,82 @@ must move the SHA and their applier pin together.
 **No change to §§2, 4-7, 8.1-8.8** beyond the §3 table row and the §1.2
 conflict bullet cited above. No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
+
+## 12. Amendment v1.3 — 2026-08-17 (slot-drift totality; oracle id normalization; dict widgets; implicit seed markers)
+
+Adversarial review of the apply path against shape-drifted documents (a merge
+consumer replaying ops minted from a different catalog generation) found four
+guard gaps, each a sibling of a rule that already existed elsewhere. All are
+apply/replay semantics the conformance consumers must mirror.
+
+### 12.1 Concrete `connect`: slot drift is as total as node drift
+
+Totality (§1.2) covered a vanished *node*; it did not cover a vanished *slot*.
+A concrete `connect` whose `to_slot` does not exist on the replayed document
+(out of range, or a malformed entry) raised `IndexError` — **after** claiming
+the LWW register and **before** recording the `op_id`. That pairing is a
+poison state: a retry of the identical op loses to the failed attempt's own
+stamp and the connect is silently dropped forever, even after the document is
+repaired.
+
+**The rule:** a concrete `connect` whose destination slot is absent or
+malformed is a total no-op that claims **no** register — there is no slot, so
+there is nothing to occupy. A SOURCE slot that is absent or malformed gets the
+deleted-source treatment (§1.2): the register claim stands, the input stays
+empty, no link is recorded. Additionally, the apply dispatcher now guarantees
+that an exception escaping any handler restores the stamp map to its
+pre-dispatch state — no code path may leave a stamp committed without its
+`op_id` recorded.
+
+### 12.2 `canonical()` accepts the id mix v1.2 declares legal
+
+v1.2 normalized *write targets* with `str()` but left the convergence oracle
+sorting nodes and links by raw id — `canonical()` raised `TypeError` on a
+document holding both int and string node ids, i.e. it could not compare the
+exact traffic v1.2 legitimized. Every key and sort key in `canonical()` now
+normalizes with `str()` (nodes, links, `grow_id`, and the link→slot-identity
+lookup, which previously missed when the link stored `"7"` and the node `7`).
+Ordering inside `canonical()` output changes for pure-int documents
+(lexicographic, not numeric) — immaterial, since the oracle is an equality
+check both replicas compute with the same function.
+
+### 12.3 Dict-shaped `widgets_values` is projected, never destroyed
+
+The VHS_* family serializes `widgets_values` as a named dict. Write paths that
+read it through the list-only view treated it as "no values": one `set_widget`
+replaced the whole dict with a sparse list (siblings destroyed, silently), the
+`inputcount` bump wrote an integer key INTO the dict (leaving the count stale
+next to a garbage key), and `capture` crashed. Wherever a catalog is in scope,
+the dict form is now **projected onto the class's default widget order** —
+named values land at their schema positions and survive the write; without a
+catalog the old "values unknown" degradation stands. `comfy workflow slots`
+now reports the real values for such nodes.
+
+### 12.4 The implicit seed companion reaches every order surface
+
+The frontend companions a seed-like INT with `control_after_generate`
+regardless of the schema flag, and partner nodes ship such inputs unflagged
+under many names (`image_seed`, `model_seed`, `Seed`, `rand_seed`,
+`variation_seed`). The engine's order surfaces disagreed about this:
+`widget_order_for_node` applied an exact-name implicit rule while
+`widget_order`, `widget_order_default` and `widget_defaults` honored only the
+explicit flag — so the exported **widget catalog** (the name↔index contract
+the doc host consumes, pinned by `catalog_version`) was off by one for every
+implicitly-companioned node. All four surfaces now share one predicate whose
+implicit rule matches the converter's: an INT whose leaf name contains
+``seed`` (case-insensitive). The UI→API converter's companion guard also now
+peeks at the next *widget-owning* input rather than the next declared input,
+so a connection-only input between a seed and a COMBO no longer defeats the
+guard and eats the combo's real value. **`catalog_version` hashes change** for
+affected classes; consumers pinning the catalog re-pin with this SHA.
+
+### 12.5 `applied_count` compliance
+
+§4 has always said "``applied_count`` is always 0 on failure — nothing is
+written." The implementation reported the number of specs applied before the
+abort (all discarded). The code now complies with the doc; no contract change.
+
+**No change to §§2, 4-7** beyond the compliance fix above. No op kind was
+added, removed, or re-scoped; `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS`
+are untouched. Downstream repos pinning this document by SHA move the SHA and
+their applier/catalog pins together.

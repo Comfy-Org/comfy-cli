@@ -1593,7 +1593,17 @@ def validate_api_workflow(
             host, port = resolve_host_port(host, port)
 
     try:
-        graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)
+        # Through the resilient loader — NOT a direct `Graph.load` — so validate
+        # honors the same chain as every other consumer: `--input` >
+        # COMFY_OBJECT_INFO_FILE > cloud TTL cache > live fetch (+forced-refresh
+        # retry) > stale cache. A direct load silently dropped the env-pinned
+        # offline catalog and every fallback for the one command an agent runs
+        # before every submit.
+        from comfy_cli.cql.loader import resilient_load_object_info
+
+        raw = resilient_load_object_info(mode=mode, host=host, port=port, input_path=input_path)
+        graph = Graph.from_object_info(raw)
+        graph._try_default_annotations()
     except LoadError as e:
         renderer.error(
             code="cql_no_graph",

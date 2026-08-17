@@ -573,7 +573,7 @@ def _set_widget_impl(
         target = _navigate_subgraph_path(workflow, segments)  # read-only: current value + schema
         inner_type = target.get("type", "")
         value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value)
-        cur = _engine._widgets_as_list(target.get("widgets_values"))
+        cur = _engine._widgets_as_positional(target.get("widgets_values"), graph, inner_type)
         order = graph.widget_order_for_node(inner_type, cur)
         old = None
         if inner_widget in order:
@@ -599,7 +599,7 @@ def _set_widget_impl(
 
     node = _require(workflow, node_id)
     class_type = node.get("type", "")
-    widgets = _engine._widgets_as_list(node.get("widgets_values"))
+    widgets = _engine._widgets_as_positional(node.get("widgets_values"), graph, class_type)
     idx = _widget_index(graph, class_type, widget, widgets)  # raises on unknown widget name
     value, norm_note = _normalize_combo(graph, class_type, widget, value)
     old = widgets[idx] if idx < len(widgets) else None
@@ -1233,7 +1233,9 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
         if n.get("pos"):
             add["at"] = n["pos"]
         ops.append(add)
-        widgets = n.get("widgets_values") or []
+        from comfy_cli.cql import engine as _engine
+
+        widgets = _engine._widgets_as_positional(n.get("widgets_values"), graph, class_type)
         order = graph.widget_order_for_node(class_type, widgets)
         defaults = graph.widget_defaults(class_type)
         for i, wname in enumerate(order):
@@ -1400,7 +1402,11 @@ def apply_specs(
         # variables at raise time; guard for a non-dict spec.
         err.spec_index = i  # type: ignore[attr-defined]
         err.spec_op = spec.get("op") if isinstance(spec, dict) else None  # type: ignore[attr-defined]
-        err.applied_count = len(ops)  # type: ignore[attr-defined]
+        # The whole batch was discarded — nothing persisted. Reporting the
+        # specs that applied-then-were-discarded taught a merge consumer that
+        # k-1 ops survived (docs/op-vocabulary-v1.md: "``applied_count`` is
+        # always 0 on failure — nothing is written").
+        err.applied_count = 0  # type: ignore[attr-defined]
         raise err from e
     return workflow, ops, aliases
 
@@ -1417,20 +1423,30 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     if op["op_id"] in applied:
         return workflow
     kind = op["op"]
-    if kind == "add_node":
-        _apply_add_node(workflow, op)
-    elif kind == "set_widget":
-        _apply_set_widget(workflow, op, graph)
-    elif kind == "connect":
-        _apply_connect(workflow, op, graph)
-    elif kind == "delete_node":
-        _apply_delete_node(workflow, op)
-    elif kind == "clear":
-        _apply_clear(workflow, op)
-    elif kind == "reset_doc":
-        _apply_reset_doc(workflow, op)
-    else:
-        raise ValueError(f"unknown op {kind!r}")
+    # Snapshot the LWW bookkeeping so an exception escaping a handler cannot
+    # leave a stamp committed WITHOUT its op_id recorded below. That pairing is
+    # the poison state: a retry of the identical op loses to the failed
+    # attempt's own stamp and is silently dropped forever.
+    stamps_before = dict(workflow.get("_widget_stamps") or {})
+    try:
+        if kind == "add_node":
+            _apply_add_node(workflow, op)
+        elif kind == "set_widget":
+            _apply_set_widget(workflow, op, graph)
+        elif kind == "connect":
+            _apply_connect(workflow, op, graph)
+        elif kind == "delete_node":
+            _apply_delete_node(workflow, op)
+        elif kind == "clear":
+            _apply_clear(workflow, op)
+        elif kind == "reset_doc":
+            _apply_reset_doc(workflow, op)
+        else:
+            raise ValueError(f"unknown op {kind!r}")
+    except BaseException:
+        if stamps_before or "_widget_stamps" in workflow:
+            workflow["_widget_stamps"] = stamps_before
+        raise
     # NOT ``applied.append`` — ``_apply_reset_doc`` REPLACES ``_applied_ops``
     # with a fresh list (that is what makes it a history barrier), so the local
     # binding above is stale for that kind and the reset's own op_id would be
@@ -1480,7 +1496,7 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
         return  # target concurrently deleted => no-op (delete wins).
     from comfy_cli.cql import engine as _engine
 
-    widgets = _engine._widgets_as_list(node.get("widgets_values"))
+    widgets = _engine._widgets_as_positional(node.get("widgets_values"), graph, node.get("type", ""))
     node["widgets_values"] = widgets
     idx = _widget_index(graph, node.get("type", ""), op["widget"], widgets)
     if idx >= len(widgets):
@@ -1512,7 +1528,13 @@ def _apply_inputcount_bump(workflow: dict, dst: dict, op: dict, graph, widget: s
     }
     if not _lww_gate(workflow, widget_op):
         return
-    widgets = dst.setdefault("widgets_values", [])
+    from comfy_cli.cql import engine as _engine
+
+    # A VHS-style dict form must be projected, not indexed into: setdefault
+    # returned the dict itself, and the positional write below installed an
+    # integer key into it — leaving ``inputcount`` stale next to a garbage key.
+    widgets = _engine._widgets_as_positional(dst.get("widgets_values"), graph, dst.get("type", ""))
+    dst["widgets_values"] = widgets
     idx = _widget_index(graph, dst.get("type", ""), widget, widgets)
     if idx >= len(widgets):
         widgets.extend([None] * (idx + 1 - len(widgets)))
@@ -1585,6 +1607,22 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                 _apply_inputcount_bump(workflow, dst, op, graph, inputcount["widget"], inputcount["value"])
     else:
         to_idx = op["to_slot"]
+        ins = dst.get("inputs")
+        # Slot drift: a replay against a document whose destination SLOT no
+        # longer exists (or never did — a node minted from a different catalog
+        # generation) must be as total as a vanished node. There is no register
+        # to claim: claiming it here would poison the target — the failed op's
+        # own stamp would outrank a retry of the identical op, silently losing
+        # the connect forever even after the document is repaired.
+        if (
+            not isinstance(ins, list)
+            or not isinstance(to_idx, int)
+            or isinstance(to_idx, bool)
+            or to_idx < 0
+            or to_idx >= len(ins)
+            or not isinstance(ins[to_idx], dict)
+        ):
+            return
         # --- The concrete-input LWW register (op-vocabulary-v1.md amendment v1.2)
         #
         # A concrete input holds at most one link, so "who occupies this slot" is
@@ -1611,12 +1649,26 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
     src = _find_by_str(workflow, op["from_node"])
     if src is None:
         return
+    # Source SLOT drift gets the same treatment as a deleted source: delete
+    # wins over the LINK, not over the register claim — no crash, the input
+    # stays empty, and the claim above (concrete branch) stands.
+    outs = src.get("outputs")
+    from_slot = op["from_slot"]
+    if (
+        not isinstance(outs, list)
+        or not isinstance(from_slot, int)
+        or isinstance(from_slot, bool)
+        or from_slot < 0
+        or from_slot >= len(outs)
+        or not isinstance(outs[from_slot], dict)
+    ):
+        return
     link = [op["link_id"], op["from_node"], op["from_slot"], op["to_node"], to_idx, op["link_type"]]
     links = workflow.setdefault("links", [])
     if not any(ln[0] == op["link_id"] for ln in links):
         links.append(link)
     dst["inputs"][to_idx]["link"] = op["link_id"]
-    out_port = src["outputs"][op["from_slot"]]
+    out_port = outs[from_slot]
     # A real ComfyUI-serialized never-wired output carries `"links": null` — the
     # key EXISTS, so `setdefault` returns the existing `None` instead of
     # installing a fresh list, and the membership check below would raise
@@ -1770,12 +1822,17 @@ def canonical(workflow: dict) -> dict:
     nodes = w.get("nodes")
     # Capture each node's original index -> slot identity BEFORE reordering
     # inputs, so links (which reference the raw index) can be rewritten.
-    slot_identity: dict[Any, dict[int, tuple]] = {}
+    # Node/link ids are legitimately either JSON type (amendment v1.2) — every
+    # key and sort below normalizes with ``str()``: the oracle must be able to
+    # COMPARE any legal document, and a raw-typed sort key raised ``TypeError``
+    # on the very int/string mix the vocabulary declares legal, while a
+    # raw-typed identity key made ``7`` and ``"7"`` miss each other.
+    slot_identity: dict[str, dict[int, tuple]] = {}
     if isinstance(nodes, list):
         for n in nodes:
             if not isinstance(n, dict):
                 continue
-            slot_identity[n.get("id")] = {i: _slot_identity(inp) for i, inp in enumerate(n.get("inputs") or [])}
+            slot_identity[str(n.get("id"))] = {i: _slot_identity(inp) for i, inp in enumerate(n.get("inputs") or [])}
         # Reorder each node's grown slots deterministically (by grow_id) and drop
         # their display name, which is order-dependent (image0 vs image1).
         for n in nodes:
@@ -1784,23 +1841,23 @@ def canonical(workflow: dict) -> dict:
             fixed = [i for i in n["inputs"] if not (isinstance(i, dict) and i.get("grow_id") is not None)]
             grown = sorted(
                 (i for i in n["inputs"] if isinstance(i, dict) and i.get("grow_id") is not None),
-                key=lambda i: i["grow_id"],
+                key=lambda i: str(i["grow_id"]),
             )
             for i in grown:
                 i["name"] = "\x00grow"
             n["inputs"] = fixed + grown
-        w["nodes"] = sorted(nodes, key=lambda n: n.get("id"))
+        w["nodes"] = sorted(nodes, key=lambda n: str(n.get("id")))
     links = w.get("links")
     if isinstance(links, list):
         canon = []
         for ln in links:
             ln = list(ln)
             if len(ln) >= 5:
-                ident = slot_identity.get(ln[3], {}).get(ln[4])
+                ident = slot_identity.get(str(ln[3]), {}).get(ln[4]) if isinstance(ln[4], int) else None
                 if ident is not None:
                     ln[4] = ident
             canon.append(ln)
-        w["links"] = sorted(canon, key=lambda ln: ln[0])
+        w["links"] = sorted(canon, key=lambda ln: str(ln[0]))
     defs = (w.get("definitions") or {}).get("subgraphs")
     if isinstance(defs, list):
         w["definitions"]["subgraphs"] = sorted(defs, key=lambda sg: str(sg.get("id", "")))
