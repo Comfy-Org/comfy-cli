@@ -607,6 +607,35 @@ class _RecordingRenderer:
         self.codes.append(code)
 
 
+def test_builder_client_uses_injected_token(monkeypatch):
+    # The agent service / CI inject a JWT via COMFY_BUILDER_TOKEN; from_session (the
+    # interactive OAuth path) must not be consulted.
+    monkeypatch.setenv("COMFY_BUILDER_TOKEN", "injected-jwt")
+    called = {"from_session": False}
+
+    def fake_from_session(cls, base):
+        called["from_session"] = True
+        raise AssertionError("from_session should not be called when a token is injected")
+
+    monkeypatch.setattr("comfy_cli.distribution_api.BuilderClient.from_session", classmethod(fake_from_session))
+    from comfy_cli.command.distribution import _builder_client
+
+    client = _builder_client(_RecordingRenderer(), "https://builder.test/")
+    assert client.target.auth_token == "injected-jwt"
+    assert called["from_session"] is False
+
+
+def test_builder_client_falls_back_to_session(monkeypatch):
+    monkeypatch.delenv("COMFY_BUILDER_TOKEN", raising=False)
+    sentinel = object()
+    monkeypatch.setattr(
+        "comfy_cli.distribution_api.BuilderClient.from_session", classmethod(lambda cls, base: sentinel)
+    )
+    from comfy_cli.command.distribution import _builder_client
+
+    assert _builder_client(_RecordingRenderer(), None) is sentinel
+
+
 def test_builder_call_maps_beta_403_to_not_enabled():
     import io
     import urllib.error

@@ -862,15 +862,7 @@ def _create_execute(renderer, definition: dict, *, name: str, builder_url: str |
     failure class to a single error envelope + exit(1)."""
     import urllib.error
 
-    from comfy_cli.distribution_api import BuilderAuthError, BuilderClient
-
-    base_url = builder_url or os.environ.get("COMFY_BUILDER_URL") or DEFAULT_BUILDER_URL
-
-    try:
-        client = BuilderClient.from_session(base_url)
-    except BuilderAuthError as e:
-        renderer.error(code="distribution_not_signed_in", message=str(e))
-        raise typer.Exit(code=1) from e
+    client = _builder_client(renderer, builder_url)
 
     # Resolve models to public URLs where a hash-verified match exists. Best
     # effort: if resolution is unavailable, everything just falls through to
@@ -920,10 +912,19 @@ def _create_execute(renderer, definition: dict, *, name: str, builder_url: str |
 
 
 def _builder_client(renderer, builder_url: str | None):
-    """Build an authed BuilderClient, or emit a not-signed-in envelope + exit(1)."""
+    """Build an authed BuilderClient, or emit a not-signed-in envelope + exit(1).
+
+    A caller that already holds a Cloud JWT — the Developer Platform agent service
+    forwarding the request's token, or CI — injects it via ``COMFY_BUILDER_TOKEN``
+    and skips the interactive OAuth session ``from_session`` uses. The env var wins
+    over a stored session so an explicit token always takes precedence.
+    """
     from comfy_cli.distribution_api import BuilderAuthError, BuilderClient
 
     base_url = builder_url or os.environ.get("COMFY_BUILDER_URL") or DEFAULT_BUILDER_URL
+    token = os.environ.get("COMFY_BUILDER_TOKEN")
+    if token:
+        return BuilderClient(base_url, token)
     try:
         return BuilderClient.from_session(base_url)
     except BuilderAuthError as e:
