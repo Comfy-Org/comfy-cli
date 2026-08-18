@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/distribution_create.json",
+  "title": "comfy distribution create --json data payload",
+  "type": "object",
+  "required": ["name", "plan", "executed"],
+  "additionalProperties": true,
+  "properties": {
+    "name": {"type": "string"},
+    "executed": {"type": "boolean"},
+    "plan": {
+      "type": "object",
+      "required": ["definition", "uploads", "upload_count", "upload_bytes"],
+      "additionalProperties": true,
+      "properties": {
+        "definition": {
+          "type": "object",
+          "required": ["models", "customNodes"],
+          "additionalProperties": true,
+          "properties": {
+            "models": {"type": "array"},
+            "customNodes": {"type": "array"}
+          }
+        },
+        "uploads": {"type": "array"},
+        "upload_count": {"type": "integer"},
+        "upload_bytes": {"type": "integer"}
+      }
+    }
+  }
+}

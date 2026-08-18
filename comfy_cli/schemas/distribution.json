@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/distribution.json",
+  "title": "comfy distribution scan --json data payload",
+  "type": "object",
+  "required": ["models_dir", "count", "custom_node_count", "total_bytes", "definition"],
+  "additionalProperties": true,
+  "properties": {
+    "models_dir": {"type": "string"},
+    "custom_nodes_dir": {"type": ["string", "null"]},
+    "base_comfy_version": {"type": ["string", "null"]},
+    "pip_captured": {"type": "boolean"},
+    "environment": {"type": ["object", "null"]},
+    "count": {"type": "integer"},
+    "custom_node_count": {"type": "integer"},
+    "total_bytes": {"type": "integer"},
+    "definition": {
+      "type": "object",
+      "required": ["schema", "models", "customNodes"],
+      "additionalProperties": true,
+      "properties": {
+        "schema": {"type": "string"},
+        "baseComfyVersion": {"type": "string"},
+        "pipDependencies": {"type": "string"},
+        "environment": {"type": "object"},
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type", "filename", "sha256", "sizeBytes", "source"],
+            "additionalProperties": true,
+            "properties": {
+              "type": {"type": "string"},
+              "filename": {"type": "string"},
+              "sha256": {"type": "string"},
+              "sizeBytes": {"type": "integer"},
+              "source": {"type": "string"}
+            }
+          }
+        },
+        "customNodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "source"],
+            "additionalProperties": true,
+            "properties": {
+              "name": {"type": "string"},
+              "repository": {"type": ["string", "null"]},
+              "gitRef": {"type": ["string", "null"]},
+              "source": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
+  }
+}

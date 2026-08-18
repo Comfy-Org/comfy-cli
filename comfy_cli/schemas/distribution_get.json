@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/distribution_get.json",
+  "title": "comfy distribution get --json data payload",
+  "description": "A distribution with its full definition, as returned by GET /v1/distributions/{id}.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "id": {"type": "string"},
+    "name": {"type": "string"},
+    "definition": {"type": "object", "additionalProperties": true}
+  }
+}

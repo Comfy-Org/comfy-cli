@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/distribution_version_create.json",
+  "title": "comfy distribution version create --json data payload",
+  "type": "object",
+  "required": ["distributionId", "versionId", "statusUrl"],
+  "additionalProperties": true,
+  "properties": {
+    "distributionId": {"type": "string"},
+    "versionId": {"type": "string"},
+    "statusUrl": {"type": "string"}
+  }
+}

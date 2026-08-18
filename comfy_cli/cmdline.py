@@ -20,6 +20,7 @@ from comfy_cli.command import (
     custom_nodes,
     pr_command,
 )
+from comfy_cli.command import distribution as distribution_command
 from comfy_cli.command import generate as generate_command
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import (
@@ -1984,6 +1985,11 @@ app.add_typer(tracking.app, name="tracking", help="Manage analytics tracking set
 app.add_typer(cloud_command.app, name="cloud", help="Comfy Cloud — sign in, route commands, inspect session.")
 app.add_typer(auth_command.app, name="auth", help="Manage API tokens for model hosts (Civitai, Hugging Face).")
 app.add_typer(jobs_command.app, name="jobs", help="List, inspect, and live-watch ComfyUI prompts.")
+app.add_typer(
+    distribution_command.app,
+    name="distribution",
+    help="Package a local ComfyUI environment into a serverless distribution.",
+)
 app.add_typer(project_command.app, name="project", help="Project conventions: init and status.")
 app.add_typer(
     project_command.assets_app,
