@@ -969,8 +969,17 @@ def _builder_call(renderer, fn):
     + exit(1) via _report_builder_error."""
     import urllib.error
 
+    from comfy_cli.http import ResponseTooLarge
+
     try:
         return fn()
+    except ResponseTooLarge as e:
+        # Mostly the build log outgrowing even the raised logs cap; a clear message
+        # beats an unhandled traceback.
+        renderer.error(
+            code="distribution_builder_error", message=f"builder response exceeded the client size cap ({e})"
+        )
+        raise typer.Exit(code=1) from e
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
         _report_builder_error(renderer, e)
         raise typer.Exit(code=1) from e

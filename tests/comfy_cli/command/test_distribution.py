@@ -699,6 +699,36 @@ def test_upload_blob_sends_generation_match_header(monkeypatch, tmp_path):
     assert captured["allow_redirects"] is False
 
 
+def test_get_version_logs_uses_large_cap(monkeypatch):
+    seen = {}
+
+    def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
+        seen["max_bytes"] = max_bytes
+        return 200, {"versionId": "v1", "log": "x", "truncated": False}
+
+    monkeypatch.setattr("comfy_cli.distribution_api.request_json", fake_request_json)
+    from comfy_cli.distribution_api import BuilderClient
+
+    BuilderClient("https://builder.test/", "jwt").get_version_logs("v1")
+    # the builder caps a served log at 8 MiB; the client cap must sit above that
+    assert seen["max_bytes"] > 8 * 1024 * 1024
+
+
+def test_builder_call_catches_response_too_large():
+    import typer
+
+    from comfy_cli.command.distribution import _builder_call
+    from comfy_cli.http import ResponseTooLarge
+
+    def raise_too_large():
+        raise ResponseTooLarge("response exceeds cap")
+
+    r = _RecordingRenderer()
+    with pytest.raises(typer.Exit):
+        _builder_call(r, raise_too_large)
+    assert r.codes == ["distribution_builder_error"]
+
+
 def test_create_command_missing_comfy_version(tmp_path):
     d = tmp_path / "def.json"
     d.write_text(json.dumps({"schema": "distribution-definition/0", "models": [], "customNodes": []}))

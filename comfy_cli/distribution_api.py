@@ -27,6 +27,10 @@ from comfy_cli.target import Target
 # Builder JSON responses are small (ids, status, a manifest pointer); cap well
 # above that but far below anything that could OOM the CLI.
 _MAX_JSON = 5 * 1024 * 1024
+# Build logs are the exception: the builder caps a served log at 8 MiB, and the
+# JSON envelope escapes it on top, so the logs call needs a cap well above 8 MiB
+# or a large log is rejected client-side. Generous headroom for a future raise.
+_MAX_LOG_JSON = 32 * 1024 * 1024
 # Presigned model PUTs can be many GB: generous read timeout, sane connect.
 _UPLOAD_TIMEOUT = (10, 600)
 
@@ -120,13 +124,13 @@ class BuilderClient:
         r = self._post(("models", "resolve"), {"filenames": filenames})
         return r.get("results", [])
 
-    def _get(self, parts: tuple[str, ...], params: dict | None = None) -> dict:
+    def _get(self, parts: tuple[str, ...], params: dict | None = None, *, max_bytes: int = _MAX_JSON) -> dict:
         url = self.target.url(*parts)
         if params:
             query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
             if query:
                 url = f"{url}?{query}"
-        _, parsed = request_json(url, self.target, method="GET", max_bytes=_MAX_JSON)
+        _, parsed = request_json(url, self.target, method="GET", max_bytes=max_bytes)
         return parsed or {}
 
     def list_distributions(self) -> list[dict]:
@@ -144,8 +148,9 @@ class BuilderClient:
     def get_version_logs(self, version_id: str, *, os: str | None = None, gpu: str | None = None) -> dict:
         """GET /v1/distribution-versions/{id}/logs -> the build log for one target
         (``os``/``gpu`` select which; the builder picks a target when omitted).
-        Returns ``{versionId, os?, gpu?, log, truncated}``."""
-        return self._get(("distribution-versions", version_id, "logs"), {"os": os, "gpu": gpu})
+        Returns ``{versionId, os?, gpu?, log, truncated}``. Uses a larger response
+        cap than other reads because a build log can be several MiB."""
+        return self._get(("distribution-versions", version_id, "logs"), {"os": os, "gpu": gpu}, max_bytes=_MAX_LOG_JSON)
 
     def delete_distribution(self, distribution_id: str) -> None:
         """DELETE /v1/distributions/{id} -> soft-delete. Idempotent (204 even when
