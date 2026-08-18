@@ -2518,3 +2518,252 @@ class TestSubgraphPromotedWidgets:
     def test_missing_instance_widgets_keeps_interior_default(self, object_info):
         result = convert_ui_to_api(self._workflow([]), object_info)
         assert result["100:50"]["inputs"]["text"] == "interior default text"
+
+
+class TestSubgraphPromotedWidgetOrdering:
+    """``widgets_values`` maps to promoted def inputs positionally, so the set
+    of def inputs that *count* as promoted has to be exactly right — one
+    missed entry shifts every later value into the wrong input.
+
+    Regression: promotion was decided from an allowlist of def-input types
+    (STRING/INT/FLOAT/BOOLEAN/COMBO). A promoted widget can carry any type at
+    all, so a node-pack type like ``COMFY_DYNAMICCOMBO_V3`` fell through the
+    allowlist and shifted the rest — on the real corpus that put
+    ``"two_speakers"`` into a FLOAT ``audio_scale`` and ``1`` into
+    ``CLIPTextEncode.text``. Promotion is now read off the interior input's
+    ``widget`` marker instead.
+
+    The fixture deliberately has five promoted inputs of five distinct types,
+    interleaved with connection-only inputs, so any off-by-N or reordering
+    surfaces as a type error rather than a silently plausible value.
+    """
+
+    SG = "cccccccc-dddd-eeee-ffff-000000000000"
+
+    # Declared type per promoted def input, in def order, with the instance
+    # value each must receive. Values are mutually type-incompatible so a
+    # shift cannot masquerade as a correct assignment.
+    PROMOTED = [
+        ("mode", "COMFY_DYNAMICCOMBO_V3", "two_speakers", str),
+        ("text", "STRING", "instance prompt", str),
+        ("steps", "INT", 24, int),
+        ("cfg", "FLOAT", 3.5, float),
+        ("sampler_name", "COMBO", "ddim", str),
+    ]
+
+    @pytest.fixture
+    def object_info(self, object_info):
+        object_info["DynamicModeNode"] = {
+            "input": {"required": {"mode": ["COMFY_DYNAMICCOMBO_V3", {"default": "one_speaker"}]}},
+            "input_order": {"required": ["mode"]},
+            "output_node": False,
+            "output": ["MODE"],
+            "display_name": "Dynamic Mode",
+        }
+        return object_info
+
+    def _workflow(self, instance_widgets, *, instance_inputs=None):
+        return {
+            "nodes": [
+                {
+                    "id": 100,
+                    "type": self.SG,
+                    "inputs": instance_inputs or [],
+                    "outputs": [],
+                    "mode": 0,
+                    "widgets_values": instance_widgets,
+                },
+            ],
+            "links": [],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": self.SG,
+                        "name": "Ordering",
+                        # Connection-only inputs are interleaved with promoted
+                        # ones: they consume no widgets_values slot, so a rule
+                        # that miscounts them shifts the tail.
+                        "inputs": [
+                            {"name": "pixels", "type": "IMAGE", "linkIds": [310]},
+                            {"name": "mode", "type": "COMFY_DYNAMICCOMBO_V3", "linkIds": [311]},
+                            {"name": "text", "type": "STRING", "linkIds": [312]},
+                            {"name": "clip", "type": "CLIP", "linkIds": [313]},
+                            {"name": "steps", "type": "INT", "linkIds": [314]},
+                            {"name": "cfg", "type": "FLOAT", "linkIds": [315]},
+                            {"name": "sampler_name", "type": "COMBO", "linkIds": [316]},
+                        ],
+                        "outputs": [],
+                        "nodes": [
+                            {
+                                "id": 50,
+                                "type": "DynamicModeNode",
+                                "inputs": [{"name": "mode", "link": 311, "widget": {"name": "mode"}}],
+                                "outputs": [],
+                                "mode": 0,
+                                "widgets_values": ["interior mode"],
+                            },
+                            {
+                                "id": 51,
+                                "type": "CLIPTextEncode",
+                                "inputs": [
+                                    {"name": "text", "link": 312, "widget": {"name": "text"}},
+                                    {"name": "clip", "link": 313},
+                                ],
+                                "outputs": [],
+                                "mode": 0,
+                                "widgets_values": ["interior text"],
+                            },
+                            {
+                                "id": 52,
+                                "type": "KSampler",
+                                "inputs": [
+                                    {"name": "model", "link": None},
+                                    {"name": "seed", "link": None, "widget": {"name": "seed"}},
+                                    {"name": "steps", "link": 314, "widget": {"name": "steps"}},
+                                    {"name": "cfg", "link": 315, "widget": {"name": "cfg"}},
+                                    {
+                                        "name": "sampler_name",
+                                        "link": 316,
+                                        "widget": {"name": "sampler_name"},
+                                    },
+                                    {"name": "positive", "link": None},
+                                    {"name": "negative", "link": None},
+                                    {"name": "latent_image", "link": None},
+                                ],
+                                "outputs": [],
+                                "mode": 0,
+                                "widgets_values": [7, 99, 1.0, "euler", "normal", 1.0],
+                            },
+                            {
+                                "id": 53,
+                                "type": "PreviewImage",
+                                "inputs": [{"name": "images", "link": 310}],
+                                "outputs": [],
+                                "mode": 0,
+                            },
+                        ],
+                        "links": [
+                            {
+                                "id": 310,
+                                "origin_id": -10,
+                                "origin_slot": 0,
+                                "target_id": 53,
+                                "target_slot": 0,
+                                "type": "IMAGE",
+                            },
+                            {
+                                "id": 311,
+                                "origin_id": -10,
+                                "origin_slot": 1,
+                                "target_id": 50,
+                                "target_slot": 0,
+                                "type": "COMFY_DYNAMICCOMBO_V3",
+                            },
+                            {
+                                "id": 312,
+                                "origin_id": -10,
+                                "origin_slot": 2,
+                                "target_id": 51,
+                                "target_slot": 0,
+                                "type": "STRING",
+                            },
+                            {
+                                "id": 313,
+                                "origin_id": -10,
+                                "origin_slot": 3,
+                                "target_id": 51,
+                                "target_slot": 1,
+                                "type": "CLIP",
+                            },
+                            {
+                                "id": 314,
+                                "origin_id": -10,
+                                "origin_slot": 4,
+                                "target_id": 52,
+                                "target_slot": 2,
+                                "type": "INT",
+                            },
+                            {
+                                "id": 315,
+                                "origin_id": -10,
+                                "origin_slot": 5,
+                                "target_id": 52,
+                                "target_slot": 3,
+                                "type": "FLOAT",
+                            },
+                            {
+                                "id": 316,
+                                "origin_id": -10,
+                                "origin_slot": 6,
+                                "target_id": 52,
+                                "target_slot": 4,
+                                "type": "COMBO",
+                            },
+                        ],
+                    }
+                ]
+            },
+        }
+
+    def _values(self, result):
+        """Flatten every promoted input's resulting value, by def-input name."""
+        by_name = {}
+        for node in result.values():
+            for key, value in (node.get("inputs") or {}).items():
+                by_name.setdefault(key, value)
+        return by_name
+
+    def test_every_promoted_value_lands_in_its_own_input(self, object_info):
+        values = self._values(convert_ui_to_api(self._workflow([v for _, _, v, _ in self.PROMOTED]), object_info))
+        assert {name: values.get(name) for name, _, _, _ in self.PROMOTED} == {
+            name: value for name, _, value, _ in self.PROMOTED
+        }
+
+    def test_promoted_value_types_match_declared_input_types(self, object_info):
+        """The whole class of ordering bug: a shifted value is usually the
+        wrong Python type for the slot it lands in."""
+        values = self._values(convert_ui_to_api(self._workflow([v for _, _, v, _ in self.PROMOTED]), object_info))
+        mistyped = {
+            name: values.get(name) for name, _, _, py_type in self.PROMOTED if not isinstance(values.get(name), py_type)
+        }
+        assert not mistyped
+
+    def test_connection_only_input_consumes_no_slot(self, object_info):
+        """``pixels``/``clip`` are link inputs with no interior widget: if
+        either were counted, the tail of widgets_values would shift."""
+        result = convert_ui_to_api(self._workflow([v for _, _, v, _ in self.PROMOTED]), object_info)
+        assert self._values(result)["sampler_name"] == "ddim"
+
+    def test_external_link_still_consumes_its_slot(self, object_info):
+        """A promoted input wired externally loses to the link, but its stale
+        entry keeps its place — dropping the slot would shift everything after
+        it."""
+        wf = self._workflow(
+            [v for _, _, v, _ in self.PROMOTED],
+            instance_inputs=[{"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": 400}],
+        )
+        wf["nodes"].insert(
+            0,
+            {
+                "id": 7,
+                "type": "PrimitiveNode",
+                "inputs": [],
+                "outputs": [{"links": [400]}],
+                "mode": 0,
+                "widgets_values": ["linked value wins"],
+            },
+        )
+        wf["links"] = [[400, 7, 0, 100, 0, "STRING"]]
+        values = self._values(convert_ui_to_api(wf, object_info))
+        assert values["text"] == "linked value wins"
+        # Everything after the linked input keeps its own value.
+        assert (values["steps"], values["cfg"], values["sampler_name"]) == (24, 3.5, "ddim")
+
+    def test_count_disagreement_falls_back_to_interior_defaults(self, object_info):
+        """Fail closed. If we cannot say which value belongs to which input,
+        the interior defaults are wrong but self-consistent and executable; a
+        misaligned guess submits a string into an INT slot."""
+        values = self._values(convert_ui_to_api(self._workflow(["two_speakers", "instance prompt"]), object_info))
+        assert values["text"] == "interior text"
+        assert values["mode"] == "interior mode"
+        assert values["steps"] == 99

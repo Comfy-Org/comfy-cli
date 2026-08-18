@@ -402,13 +402,39 @@ def _expand_one_subgraph(
     return expanded_nodes, expanded_links, input_targets, output_sources
 
 
-# Def-input types the frontend materializes as widgets on a subgraph instance.
-# The instance's ``widgets_values`` array holds one entry per def input of
-# these types, in def-input order (connection-only types such as IMAGE/MODEL
-# contribute no entry). Entries whose def input also has an external link on
-# the instance are stale residue — the link wins, same as any widget-behind-a-
-# link on a regular node.
-_PROMOTED_WIDGET_TYPES = frozenset({"STRING", "INT", "FLOAT", "BOOLEAN", "COMBO"})
+def _promoted_widget_def_indices(
+    sg_def: dict,
+    input_targets: dict[int, list[tuple[Any, int]]],
+    node_by_id: dict[Any, dict],
+    outer_id: Any,
+) -> list[int]:
+    """Def-input indices that materialize as widgets on a subgraph instance.
+
+    The instance's ``widgets_values`` array holds one entry per promoted
+    widget, in def-input order. A def input is widget-backed exactly when the
+    interior input it feeds is itself widget-backed — which the serialized
+    graph marks with a ``widget`` key on that interior input slot. Deriving it
+    from the interior (rather than guessing from the def input's declared
+    type) is what keeps the indices aligned: a promoted widget can carry any
+    type at all, including node-pack types like ``COMFY_DYNAMICCOMBO_V3``, and
+    an allowlist that misses one shifts every later value into the wrong slot.
+    """
+    indices: list[int] = []
+    for def_idx, in_def in enumerate(sg_def.get("inputs") or []):
+        if not isinstance(in_def, dict):
+            continue
+        for target_id, target_slot in input_targets.get(def_idx) or []:
+            target = node_by_id.get(f"{outer_id}:{target_id}")
+            if not isinstance(target, dict):
+                continue
+            inputs = target.get("inputs") or []
+            if not (isinstance(target_slot, int) and 0 <= target_slot < len(inputs)):
+                continue
+            slot = inputs[target_slot]
+            if isinstance(slot, dict) and slot.get("widget"):
+                indices.append(def_idx)
+                break
+    return indices
 
 
 def _inject_promoted_widget_values(
@@ -421,37 +447,53 @@ def _inject_promoted_widget_values(
 ) -> int:
     """Apply the instance's promoted-widget values to the expanded interior.
 
-    A subgraph instance exposes unlinked widget-type def inputs as its own
-    widgets; the frontend's graphToPrompt substitutes those instance values
-    into the interior nodes. Without this, conversion silently falls back to
-    the interior nodes' saved defaults — an instance-edited prompt or seed
-    never reaches the API graph.
+    A subgraph instance exposes its interior nodes' unlinked widgets as its
+    own; the frontend's graphToPrompt substitutes those instance values into
+    the interior nodes at queue time. Without this, conversion silently falls
+    back to the interior nodes' saved defaults — an instance-edited prompt or
+    seed never reaches the API graph.
 
     Mechanism: for each promoted value, synthesize a virtual ``PrimitiveNode``
     carrying it and link it to every interior target of that def input. The
     existing primitive-value machinery then injects the value (and skips the
     virtual node in the output), exactly as it does for user-placed primitives.
+
+    Values whose def input is externally linked on the instance are stale
+    residue — the link wins, same as any widget-behind-a-link on a regular
+    node — but they still occupy their slot in ``widgets_values``.
     """
     inst_widgets = outer_node.get("widgets_values")
     if not isinstance(inst_widgets, list) or not inst_widgets:
         return next_id
     outer_id = outer_node.get("id")
+    node_by_id = {n.get("id"): n for n in expanded_nodes}
+    promoted = _promoted_widget_def_indices(sg_def, input_targets, node_by_id, outer_id)
+
+    # Fail closed. The value<->slot correspondence is purely positional, so a
+    # length disagreement means we cannot say which value belongs to which
+    # input. Falling back to the interior defaults is wrong but self-consistent
+    # and executable; a misaligned guess submits a prompt string into an INT
+    # slot. Prefer the recoverable failure.
+    if len(promoted) != len(inst_widgets):
+        logger.debug(
+            "Subgraph instance %s: %d promoted widget(s) but %d widgets_values — "
+            "skipping instance-value injection, interior defaults kept",
+            outer_id,
+            len(promoted),
+            len(inst_widgets),
+        )
+        return next_id
+
     externally_linked = {
         inp.get("name")
         for inp in outer_node.get("inputs") or []
         if isinstance(inp, dict) and inp.get("link") is not None
     }
-    node_by_id = {n.get("id"): n for n in expanded_nodes}
 
-    widget_idx = 0
-    for def_idx, in_def in enumerate(sg_def.get("inputs") or []):
-        if not isinstance(in_def, dict) or in_def.get("type") not in _PROMOTED_WIDGET_TYPES:
-            continue
-        if widget_idx >= len(inst_widgets):
-            break
+    for widget_idx, def_idx in enumerate(promoted):
+        in_def = sg_def["inputs"][def_idx]
         value = inst_widgets[widget_idx]
-        widget_idx += 1
-        if in_def.get("name") in externally_linked or value is None:
+        if value is None or in_def.get("name") in externally_linked:
             continue
         targets = input_targets.get(def_idx) or []
         if not targets:
