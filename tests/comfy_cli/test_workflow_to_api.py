@@ -2767,3 +2767,12 @@ class TestSubgraphPromotedWidgetOrdering:
         assert values["text"] == "interior text"
         assert values["mode"] == "interior mode"
         assert values["steps"] == 99
+
+    def test_count_disagreement_warns(self, object_info, caplog):
+        """Dropping every instance value is not something to do quietly: the
+        prompt still converts and still runs, just with the wrong values."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="comfy_cli.workflow_to_api"):
+            convert_ui_to_api(self._workflow(["two_speakers", "instance prompt"]), object_info)
+        assert any("interior defaults run instead" in rec.getMessage() for rec in caplog.records)

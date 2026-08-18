@@ -473,11 +473,13 @@ def _inject_promoted_widget_values(
     # length disagreement means we cannot say which value belongs to which
     # input. Falling back to the interior defaults is wrong but self-consistent
     # and executable; a misaligned guess submits a prompt string into an INT
-    # slot. Prefer the recoverable failure.
+    # slot. Prefer the recoverable failure — but warn, because every value the
+    # instance carries is being dropped and the run would otherwise look fine.
     if len(promoted) != len(inst_widgets):
-        logger.debug(
-            "Subgraph instance %s: %d promoted widget(s) but %d widgets_values — "
-            "skipping instance-value injection, interior defaults kept",
+        logger.warning(
+            "Subgraph instance %s exposes %d promoted widget(s) but carries %d "
+            "widgets_values; cannot align them, so the instance's values are "
+            "ignored and the subgraph's interior defaults run instead",
             outer_id,
             len(promoted),
             len(inst_widgets),
