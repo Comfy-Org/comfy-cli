@@ -584,6 +584,43 @@ def test_builder_client_delete_and_validate(monkeypatch):
     assert ("POST", "https://builder.test/v1/distributions/d1/validate") in calls
 
 
+def test_builder_client_reference_and_update_endpoints(monkeypatch):
+    calls = []
+
+    def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
+        calls.append((method, url))
+        if url.endswith("/v1/base-images"):
+            return 200, {"baseImages": [{"id": "cuda"}]}
+        if url.endswith("/v1/build-targets"):
+            return 200, {"targets": [{"os": "linux", "gpu": "nvidia"}]}
+        if url.endswith("/v1/model-directories"):
+            return 200, {"directories": ["checkpoints", "vae"]}
+        if url.endswith("/v1/blobs"):
+            return 200, {"blobs": [{"blobId": "b1", "filename": "m.safetensors"}]}
+        if url.endswith("/v1/distributions/d1"):
+            return 200, {"id": "d1", "definition": {"models": []}}
+        if url.endswith("/manifest"):
+            return 200, {"models": [{"filename": "ae"}]}
+        if url.endswith("/download"):
+            return 200, {"downloadUrl": "https://dl", "expiresAt": "t"}
+        return 200, {}
+
+    monkeypatch.setattr("comfy_cli.distribution_api.request_json", fake_request_json)
+    from comfy_cli.distribution_api import BuilderClient
+
+    c = BuilderClient("https://builder.test/", "jwt")
+    assert c.list_base_images() == [{"id": "cuda"}]
+    assert c.list_build_targets() == [{"os": "linux", "gpu": "nvidia"}]
+    assert c.list_model_directories() == ["checkpoints", "vae"]
+    assert c.list_blobs() == [{"blobId": "b1", "filename": "m.safetensors"}]
+    assert c.update_distribution("d1", {"models": []})["id"] == "d1"
+    assert c.get_version_manifest("v1")["models"][0]["filename"] == "ae"
+    assert c.get_artifact_download("a1")["downloadUrl"] == "https://dl"
+    # update is a PATCH; the reference lists are GETs under /v1
+    assert ("PATCH", "https://builder.test/v1/distributions/d1") in calls
+    assert ("GET", "https://builder.test/v1/base-images") in calls
+
+
 def test_delete_command_needs_confirm_non_interactive():
     env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
     proc = subprocess.run(

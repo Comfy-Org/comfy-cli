@@ -171,3 +171,40 @@ class BuilderClient:
             max_bytes=_MAX_JSON,
         )
         return parsed or {}
+
+    def update_distribution(self, distribution_id: str, definition: dict) -> dict:
+        """PATCH /v1/distributions/{id} -> replace the stored definition. Returns
+        the updated distribution."""
+        _, parsed = request_json(
+            self.target.url("distributions", distribution_id),
+            self.target,
+            method="PATCH",
+            body={"definition": definition},
+            max_bytes=_MAX_JSON,
+        )
+        return parsed or {}
+
+    def get_version_manifest(self, version_id: str) -> dict:
+        """GET /v1/distribution-versions/{id}/manifest -> the version's models and
+        runtime policies."""
+        return self._get(("distribution-versions", version_id, "manifest"))
+
+    def get_artifact_download(self, artifact_id: str) -> dict:
+        """GET /v1/build-artifacts/{id}/download -> ``{downloadUrl, expiresAt?}``."""
+        return self._get(("build-artifacts", artifact_id, "download"))
+
+    def list_blobs(self) -> list[dict]:
+        """GET /v1/blobs -> the workspace's private uploaded content (summaries)."""
+        return self._get(("blobs",)).get("blobs", [])
+
+    def list_base_images(self) -> list[dict]:
+        """GET /v1/base-images -> the curated base images a distribution may build on."""
+        return self._get(("base-images",)).get("baseImages", [])
+
+    def list_build_targets(self) -> list[dict]:
+        """GET /v1/build-targets -> the build targets a version can be cut for."""
+        return self._get(("build-targets",)).get("targets", [])
+
+    def list_model_directories(self) -> list[str]:
+        """GET /v1/model-directories -> the model directories a model may land in."""
+        return self._get(("model-directories",)).get("directories", [])
