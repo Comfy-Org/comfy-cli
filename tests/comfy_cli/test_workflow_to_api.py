@@ -2775,4 +2775,11 @@ class TestSubgraphPromotedWidgetOrdering:
 
         with caplog.at_level(logging.WARNING, logger="comfy_cli.workflow_to_api"):
             convert_ui_to_api(self._workflow(["two_speakers", "instance prompt"]), object_info)
-        assert any("interior defaults run instead" in rec.getMessage() for rec in caplog.records)
+        # Assert the level explicitly rather than leaning on at_level's
+        # threshold to filter a debug-level regression for us.
+        assert any(
+            rec.name == "comfy_cli.workflow_to_api"
+            and rec.levelno == logging.WARNING
+            and "interior defaults run instead" in rec.getMessage()
+            for rec in caplog.records
+        )
