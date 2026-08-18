@@ -367,10 +367,12 @@ class _FakeBuilder:
 
     def __init__(self):
         self.uploaded = []
+        self.blobs_created = []
         self.created = None
         self.cut = None
 
     def create_blob(self, kind, filename, sha256, size_bytes):
+        self.blobs_created.append(filename)
         return f"blob-{filename}", f"https://put.example/{filename}"
 
     def upload_blob(self, upload_url, path):
@@ -414,6 +416,22 @@ def test_execute_create_rejects_local_node_upload():
     plan = distribution.plan_create(scan_def)
     with pytest.raises(NotImplementedError):
         distribution.execute_create(plan, client=_FakeBuilder(), name="d", locate_bytes=lambda u: Path("/x"))
+
+
+def test_execute_create_preflights_uploads_before_moving_bytes():
+    # One model upload, then a local (non-git) node that makes the whole create
+    # unsupported. The failure must be detected before any model bytes upload,
+    # otherwise a real install uploads gigabytes only to raise and create nothing.
+    scan_def = {
+        "models": [{"type": "vae", "filename": "ae.safetensors", "sha256": "h", "sizeBytes": 5, "source": "local"}],
+        "customNodes": [{"name": "handmade", "repository": None, "gitRef": None, "source": "local"}],
+    }
+    plan = distribution.plan_create(scan_def)
+    fake = _FakeBuilder()
+    with pytest.raises(NotImplementedError):
+        distribution.execute_create(plan, client=fake, name="demo", locate_bytes=lambda u: Path("/tmp/x"))
+    assert fake.blobs_created == [], "no model should upload when a later node makes the create unsupported"
+    assert fake.created is None
 
 
 class _FakeResolver:

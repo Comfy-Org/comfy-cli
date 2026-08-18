@@ -500,11 +500,17 @@ def execute_create(plan: dict, *, client, name: str, locate_bytes, targets=None)
     NotImplementedError so the caller can surface a clear message. Returns
     ``{distributionId, versionId, statusUrl, uploaded}``."""
     definition = plan["definition"]
-    uploaded = 0
+    # Preflight the whole upload list before any bytes move: an unsupported local
+    # node, or a model whose file can't be found (missing --models-dir), must fail
+    # here — not after uploading gigabytes of other models that would be orphaned
+    # when the create never happens.
+    prepared = []
     for u in plan["uploads"]:
         if u["kind"] != "model":
             raise NotImplementedError(f"uploading a local custom node ({u.get('name')}) isn't supported yet")
-        path = locate_bytes(u)
+        prepared.append((u, locate_bytes(u)))
+    uploaded = 0
+    for u, path in prepared:
         blob_id, upload_url = client.create_blob("model", u["filename"], u["sha256"], u["sizeBytes"])
         client.upload_blob(upload_url, path)
         section, idx = u["slot"]
@@ -899,13 +905,10 @@ def _create_execute(renderer, definition: dict, *, name: str, builder_url: str |
         renderer.error(code="distribution_upload_unavailable", message=str(e))
         raise typer.Exit(code=1) from e
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
-        # If the distribution was created but the version cut failed, surface its id
-        # so the caller can delete or retry it instead of orphaning it.
-        renderer.error(
-            code="distribution_builder_error",
-            message=f"builder call failed: {e}",
-            details={"distributionId": getattr(e, "distribution_id", None)},
-        )
+        # Same handler as the read verbs: surface the builder's own message (and the
+        # limited-beta 403), plus the created distribution's id when a cut failed
+        # after create, so the caller can delete or retry it rather than orphan it.
+        _report_builder_error(renderer, e, dist_id=getattr(e, "distribution_id", None))
         raise typer.Exit(code=1) from e
 
     if renderer.is_pretty():
@@ -928,15 +931,16 @@ def _builder_client(renderer, builder_url: str | None):
         raise typer.Exit(code=1) from e
 
 
-def _builder_call(renderer, fn):
-    """Run a builder API call, mapping every failure class to one error envelope
-    + exit(1). The limited-beta 403 (FEATURE_NOT_ENABLED) gets its own code so the
-    user sees why rather than a generic builder error."""
+def _report_builder_error(renderer, e, *, dist_id: str | None = None) -> None:
+    """Emit one error envelope for a builder failure. Prefers the limited-beta 403,
+    then the builder's own error body (e.g. `INVALID_DEFINITION: …` or
+    `SUBSCRIPTION_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
+    generic transport error. Includes a created distribution's id when supplied,
+    so a cut that fails after create doesn't orphan an unnamed distribution."""
     import urllib.error
 
-    try:
-        return fn()
-    except urllib.error.HTTPError as e:  # a subclass of URLError — catch it first
+    base = {"distributionId": dist_id} if dist_id else {}
+    if isinstance(e, urllib.error.HTTPError):
         body = ""
         try:
             body = e.read().decode("utf-8", "replace")
@@ -946,19 +950,28 @@ def _builder_call(renderer, fn):
             renderer.error(
                 code="distribution_not_enabled",
                 message="The developer platform is in limited beta and your account isn't enabled yet.",
+                details=base or None,
             )
-            raise typer.Exit(code=1) from e
-        # Surface the builder's own error (e.g. "INVALID_DEFINITION: models.0.type is
-        # required") instead of urllib's opaque "HTTP Error 400: Bad Request".
+            return
         detail = _builder_msg(body) or getattr(e, "reason", None) or str(e)
         renderer.error(
             code="distribution_builder_error",
             message=f"builder call failed ({e.code}): {detail}",
-            details={"status": e.code, "body": body[:1000]},
+            details={**base, "status": e.code, "body": body[:1000]},
         )
-        raise typer.Exit(code=1) from e
+        return
+    renderer.error(code="distribution_builder_error", message=f"builder call failed: {e}", details=base or None)
+
+
+def _builder_call(renderer, fn):
+    """Run a builder API call, mapping every failure class to one error envelope
+    + exit(1) via _report_builder_error."""
+    import urllib.error
+
+    try:
+        return fn()
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
-        renderer.error(code="distribution_builder_error", message=f"builder call failed: {e}")
+        _report_builder_error(renderer, e)
         raise typer.Exit(code=1) from e
 
 
