@@ -81,6 +81,13 @@ class BuilderClient:
                 data=f,
                 headers={"x-goog-if-generation-match": "0"},
                 timeout=_UPLOAD_TIMEOUT,
+                # A presigned PUT targets one exact object; a 3xx would divert the file
+                # stream to another host. Never follow it (raise_for_status ignores 3xx).
+                allow_redirects=False,
+            )
+        if 300 <= resp.status_code < 400:
+            raise requests.HTTPError(
+                f"presigned upload was redirected ({resp.status_code}); refusing to follow", response=resp
             )
         resp.raise_for_status()
 

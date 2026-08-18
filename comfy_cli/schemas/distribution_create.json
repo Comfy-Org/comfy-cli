@@ -2,15 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://comfy.org/schemas/distribution_create.json",
   "title": "comfy distribution create --json data payload",
+  "description": "Two shapes: preview (executed=false) carries `plan`; the live run (executed=true) carries the created ids.",
   "type": "object",
-  "required": ["name", "plan", "executed"],
+  "required": ["name", "executed"],
   "additionalProperties": true,
   "properties": {
     "name": {"type": "string"},
     "executed": {"type": "boolean"},
     "plan": {
       "type": "object",
-      "required": ["definition", "uploads", "upload_count", "upload_bytes"],
       "additionalProperties": true,
       "properties": {
         "definition": {
@@ -26,6 +26,14 @@
         "upload_count": {"type": "integer"},
         "upload_bytes": {"type": "integer"}
       }
-    }
-  }
+    },
+    "distributionId": {"type": "string"},
+    "versionId": {"type": "string"},
+    "statusUrl": {"type": "string"},
+    "uploaded": {"type": "integer"}
+  },
+  "oneOf": [
+    {"properties": {"executed": {"const": false}}, "required": ["plan"]},
+    {"properties": {"executed": {"const": true}}, "required": ["distributionId", "versionId", "statusUrl"]}
+  ]
 }

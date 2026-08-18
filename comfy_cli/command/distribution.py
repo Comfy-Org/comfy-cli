@@ -219,7 +219,7 @@ def detect_comfy_version(root: Path) -> str | None:
         m = _COMFY_VERSION_RE.search(marker.read_text(encoding="utf-8"))
         if m:
             return m.group(1)
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pass
     described = _git_output(root, "describe", "--tags", "--always")
     if described:
@@ -229,7 +229,7 @@ def detect_comfy_version(root: Path) -> str | None:
             stripped = line.strip()
             if stripped.startswith("version") and "=" in stripped:
                 return stripped.split("=", 1)[1].strip().strip("\"'")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         pass
     return None
 
@@ -308,10 +308,13 @@ def _freeze_env(python_exe: str) -> str | None:
     """`pip freeze` for a Python env, falling back to `uv pip freeze` when the
     env has no pip module (uv-created venvs, common for ComfyUI). Returns the
     requirements text, or None if both fail."""
-    attempts = [
-        [python_exe, "-m", "pip", "freeze"],
-        ["uv", "pip", "freeze", "--python", python_exe],
-    ]
+    attempts = [[python_exe, "-m", "pip", "freeze"]]
+    # Resolve uv the same way as git (absolute path + typed miss) rather than a
+    # bare PATH name; skip the fallback only when uv is genuinely absent.
+    try:
+        attempts.append([resolve_required_binary("uv"), "pip", "freeze", "--python", python_exe])
+    except BinaryNotFoundError:
+        pass
     for cmd in attempts:
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -418,8 +421,9 @@ def resolve_models_via_builder(models: list[dict], client) -> int:
         if not local or m.get("sourceUri"):
             continue
         for cand in by_name.get(m["filename"], []):
-            if (cand.get("sha256") or "").lower() == local:
-                m["sourceUri"] = cand["sourceUri"]
+            uri = cand.get("sourceUri")
+            if uri and (cand.get("sha256") or "").lower() == local:
+                m["sourceUri"] = uri
                 resolved += 1
                 break
     return resolved
@@ -507,7 +511,13 @@ def execute_create(plan: dict, *, client, name: str, locate_bytes, targets=None)
         definition[section][idx]["blobId"] = blob_id
         uploaded += 1
     dist_id = client.create_distribution(name, definition)
-    version_id, status_url = client.cut_version(dist_id, targets)
+    try:
+        version_id, status_url = client.cut_version(dist_id, targets)
+    except Exception as e:
+        # The distribution now exists server-side; carry its id on the error so the
+        # command can surface it (the user can then delete or retry it, not orphan it).
+        e.distribution_id = dist_id
+        raise
     return {"distributionId": dist_id, "versionId": version_id, "statusUrl": status_url, "uploaded": uploaded}
 
 
@@ -741,8 +751,8 @@ def _load_definition(path: Path) -> dict:
     """Read a scan definition JSON file. Raises ValueError on any problem so the
     command can map it to one error envelope."""
     try:
-        raw = path.read_text()
-    except OSError as e:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
         raise ValueError(f"cannot read {path}: {e}") from e
     try:
         data = json.loads(raw)
@@ -750,6 +760,14 @@ def _load_definition(path: Path) -> dict:
         raise ValueError(f"{path} is not valid JSON: {e}") from e
     if not isinstance(data, dict) or "models" not in data:
         raise ValueError(f"{path} is not a distribution definition (no 'models' key)")
+    # Guard the fields the create path indexes, so a hand-edited definition returns
+    # an error envelope rather than a bare KeyError traceback downstream.
+    for i, m in enumerate(data.get("models") or []):
+        if not isinstance(m, dict) or not m.get("type") or not m.get("filename"):
+            raise ValueError(f"{path}: models[{i}] needs both 'type' and 'filename'")
+    for i, n in enumerate(data.get("customNodes") or []):
+        if not isinstance(n, dict) or not n.get("name"):
+            raise ValueError(f"{path}: customNodes[{i}] needs a 'name'")
     return data
 
 
@@ -881,7 +899,13 @@ def _create_execute(renderer, definition: dict, *, name: str, builder_url: str |
         renderer.error(code="distribution_upload_unavailable", message=str(e))
         raise typer.Exit(code=1) from e
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
-        renderer.error(code="distribution_builder_error", message=f"builder call failed: {e}")
+        # If the distribution was created but the version cut failed, surface its id
+        # so the caller can delete or retry it instead of orphaning it.
+        renderer.error(
+            code="distribution_builder_error",
+            message=f"builder call failed: {e}",
+            details={"distributionId": getattr(e, "distribution_id", None)},
+        )
         raise typer.Exit(code=1) from e
 
     if renderer.is_pretty():

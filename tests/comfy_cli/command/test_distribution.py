@@ -629,12 +629,15 @@ def test_upload_blob_sends_generation_match_header(monkeypatch, tmp_path):
     captured = {}
 
     class _Resp:
+        status_code = 200
+
         def raise_for_status(self):
             pass
 
-    def fake_put(url, data=None, headers=None, timeout=None):
+    def fake_put(url, data=None, headers=None, timeout=None, allow_redirects=None):
         captured["url"] = url
         captured["headers"] = headers or {}
+        captured["allow_redirects"] = allow_redirects
         return _Resp()
 
     monkeypatch.setattr("comfy_cli.distribution_api.requests.put", fake_put)
@@ -645,6 +648,8 @@ def test_upload_blob_sends_generation_match_header(monkeypatch, tmp_path):
     BuilderClient("https://builder.test/", "jwt").upload_blob("https://storage.example/put?sig=1", f)
     # the builder signs the URL requiring this header; without it GCS 400s
     assert captured["headers"].get("x-goog-if-generation-match") == "0"
+    # presigned PUTs must not follow redirects (a 3xx could divert the file stream)
+    assert captured["allow_redirects"] is False
 
 
 def test_create_command_missing_comfy_version(tmp_path):
