@@ -613,11 +613,16 @@ def test_builder_client_reference_and_update_endpoints(monkeypatch):
     assert c.list_build_targets() == [{"os": "linux", "gpu": "nvidia"}]
     assert c.list_model_directories() == ["checkpoints", "vae"]
     assert c.list_blobs() == [{"blobId": "b1", "filename": "m.safetensors"}]
-    assert c.update_distribution("d1", {"models": []})["id"] == "d1"
+    assert c.update_distribution("d1", {"models": []}, "2026-08-01T00:00:00Z")["id"] == "d1"
     assert c.get_version_manifest("v1")["models"][0]["filename"] == "ae"
     assert c.get_artifact_download("a1")["downloadUrl"] == "https://dl"
-    # update is a PATCH with the definition body; the rest are GETs under /v1
-    assert ("PATCH", "https://builder.test/v1/distributions/d1", {"definition": {"models": []}}) in calls
+    # update is a PATCH carrying the definition AND the expectedUpdatedAt guard the
+    # builder requires (a missing one 409s STALE); the rest are GETs under /v1
+    assert (
+        "PATCH",
+        "https://builder.test/v1/distributions/d1",
+        {"definition": {"models": []}, "expectedUpdatedAt": "2026-08-01T00:00:00Z"},
+    ) in calls
     assert ("GET", "https://builder.test/v1/base-images", None) in calls
     assert ("GET", "https://builder.test/v1/build-targets", None) in calls
     assert ("GET", "https://builder.test/v1/model-directories", None) in calls
@@ -678,7 +683,31 @@ def test_builder_client_falls_back_to_session(monkeypatch):
     assert _builder_client(_RecordingRenderer(), None) is sentinel
 
 
-def test_builder_call_maps_beta_403_to_not_enabled():
+def test_update_command_reads_updated_at_before_patch(monkeypatch, tmp_path):
+    # Regression guard for "update always 409s": the command must GET the current
+    # updatedAt and echo it back as expectedUpdatedAt in the PATCH. Also exercises a
+    # nodes-only definition (no `models` key), which `update` must accept.
+    monkeypatch.setenv("COMFY_BUILDER_TOKEN", "jwt")
+    calls = []
+
+    def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
+        calls.append((method, url, body))
+        if method == "GET" and url.endswith("/v1/distributions/d1"):
+            return 200, {"id": "d1", "updatedAt": "2026-08-01T12:00:00Z"}
+        if method == "PATCH":
+            return 200, {"id": "d1"}
+        return 200, {}
+
+    monkeypatch.setattr("comfy_cli.distribution_api.request_json", fake_request_json)
+    from comfy_cli.command import distribution
+
+    d = tmp_path / "def.json"  # nodes-only, no `models` key
+    d.write_text(json.dumps({"customNodes": [{"name": "x", "repository": "https://g/x", "gitRef": "a"}]}))
+    distribution.update_cmd(distribution_id="d1", from_=str(d), builder_url="https://builder.test/")
+
+    assert [c[0] for c in calls] == ["GET", "PATCH"]  # read-modify-write order
+    patch = next(c for c in calls if c[0] == "PATCH")
+    assert patch[2]["expectedUpdatedAt"] == "2026-08-01T12:00:00Z"
     import io
     import urllib.error
 

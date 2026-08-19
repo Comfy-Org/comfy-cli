@@ -760,9 +760,10 @@ def scan_cmd(
     )
 
 
-def _load_definition(path: Path) -> dict:
+def _load_definition(path: Path, *, require_models: bool = True) -> dict:
     """Read a scan definition JSON file. Raises ValueError on any problem so the
-    command can map it to one error envelope."""
+    command can map it to one error envelope. ``require_models`` is relaxed for
+    ``update``, where a nodes-only or pins-only edit is legitimate."""
     try:
         raw = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
@@ -771,7 +772,7 @@ def _load_definition(path: Path) -> dict:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
         raise ValueError(f"{path} is not valid JSON: {e}") from e
-    if not isinstance(data, dict) or "models" not in data:
+    if not isinstance(data, dict) or (require_models and "models" not in data):
         raise ValueError(f"{path} is not a distribution definition (no 'models' key)")
     # Guard the fields the create path indexes, so a hand-edited definition returns
     # an error envelope rather than a bare KeyError traceback downstream.
@@ -1164,12 +1165,20 @@ def update_cmd(
 ):
     renderer = get_renderer()
     try:
-        definition = _load_definition(Path(from_).expanduser())
+        definition = _load_definition(Path(from_).expanduser(), require_models=False)
     except ValueError as e:
         renderer.error(code="distribution_definition_invalid", message=str(e), details={"path": from_})
         raise typer.Exit(code=1) from e
     client = _builder_client(renderer, builder_url)
-    dist = _builder_call(renderer, lambda: client.update_distribution(distribution_id, definition))
+    # The builder guards the save with the updatedAt the caller last saw (optimistic
+    # concurrency, meant for the website's read-edit-save). For a CLI that's just
+    # last-writer-wins: fetch the current updatedAt and echo it back, else the save
+    # 409s STALE on a missing/zero timestamp.
+    current = _builder_call(renderer, lambda: client.get_distribution(distribution_id))
+    dist = _builder_call(
+        renderer,
+        lambda: client.update_distribution(distribution_id, definition, current.get("updatedAt")),
+    )
     if renderer.is_pretty():
         renderer.success(f"Updated distribution {distribution_id}")
     renderer.emit(dist, command="distribution update", changed=True)
@@ -1258,10 +1267,13 @@ def artifact_download(
 
 @blob_app.command("list", help="List the workspace's private blobs.")
 @tracking.track_command("distribution")
-def blob_list(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
+def blob_list(
+    kind: Annotated[str | None, typer.Option("--kind", help="Filter by blob kind: model or node_zip.")] = None,
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    blobs = _builder_call(renderer, client.list_blobs)
+    blobs = _builder_call(renderer, lambda: client.list_blobs(kind))
     if renderer.is_pretty():
         if not blobs:
             renderer.info("No blobs.")
