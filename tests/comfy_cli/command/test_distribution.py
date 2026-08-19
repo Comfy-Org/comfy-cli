@@ -588,7 +588,7 @@ def test_builder_client_reference_and_update_endpoints(monkeypatch):
     calls = []
 
     def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
-        calls.append((method, url))
+        calls.append((method, url, body))
         if url.endswith("/v1/base-images"):
             return 200, {"baseImages": [{"id": "cuda"}]}
         if url.endswith("/v1/build-targets"):
@@ -616,9 +616,14 @@ def test_builder_client_reference_and_update_endpoints(monkeypatch):
     assert c.update_distribution("d1", {"models": []})["id"] == "d1"
     assert c.get_version_manifest("v1")["models"][0]["filename"] == "ae"
     assert c.get_artifact_download("a1")["downloadUrl"] == "https://dl"
-    # update is a PATCH; the reference lists are GETs under /v1
-    assert ("PATCH", "https://builder.test/v1/distributions/d1") in calls
-    assert ("GET", "https://builder.test/v1/base-images") in calls
+    # update is a PATCH with the definition body; the rest are GETs under /v1
+    assert ("PATCH", "https://builder.test/v1/distributions/d1", {"definition": {"models": []}}) in calls
+    assert ("GET", "https://builder.test/v1/base-images", None) in calls
+    assert ("GET", "https://builder.test/v1/build-targets", None) in calls
+    assert ("GET", "https://builder.test/v1/model-directories", None) in calls
+    assert ("GET", "https://builder.test/v1/blobs", None) in calls
+    assert ("GET", "https://builder.test/v1/distribution-versions/v1/manifest", None) in calls
+    assert ("GET", "https://builder.test/v1/build-artifacts/a1/download", None) in calls
 
 
 def test_delete_command_needs_confirm_non_interactive():

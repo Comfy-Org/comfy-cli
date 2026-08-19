@@ -1183,7 +1183,12 @@ def resolve_cmd(
 ):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    results = _builder_call(renderer, lambda: client.resolve_models(list(filenames)))
+    # The builder caps /v1/models/resolve at 32 filenames per call; batch so a large
+    # argument list doesn't 400.
+    results = _builder_call(
+        renderer,
+        lambda: [r for batch in _chunks(list(filenames), _RESOLVE_BATCH) for r in client.resolve_models(batch)],
+    )
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(results))
     renderer.emit({"results": results}, command="distribution resolve")
