@@ -53,13 +53,18 @@ Every op carries the common envelope stamped by `_new_op`:
 Spec form (batch input):
 
 ```json
-{"op": "add_node", "class_type": "KSampler", "at": [x, y], "as": "sampler"}
+{"op": "add_node", "class_type": "KSampler", "at": [x, y], "as": "sampler", "mode": 4}
 ```
 
 `at` is optional (layout assigns a collision-free position at mint time; the
 position freezes into the op). `as` is optional and declares a batch-local alias
-(section 5). Minted op fields beyond the envelope: `node_id` (mint_id int),
-`class_type`, `pos`, `node` (the complete node object — replay inserts it verbatim).
+(section 5). `mode` is optional (amendment v1.4): the litegraph execution mode
+the node is minted with — `0` always (default, omitted), `1` on-event, `2` mute,
+`3` on-trigger, `4` bypass. Mute/bypass change what executes, so a recipe that
+dropped them rebuilt a different API prompt. Minted op fields beyond the
+envelope: `node_id` (mint_id int), `class_type`, `pos`, `node` (the complete
+node object — replay inserts it verbatim; a nonzero mode is stamped into it and
+echoed as an op-level `mode` field).
 
 * Idempotency: re-applying the same `op_id` is a no-op; independently, replaying
   an `add_node` whose `node_id` already exists in the graph is a no-op.
@@ -686,3 +691,33 @@ abort (all discarded). The code now complies with the doc; no contract change.
 added, removed, or re-scoped; `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS`
 are untouched. Downstream repos pinning this document by SHA move the SHA and
 their applier/catalog pins together.
+
+## 13. Amendment v1.4 — 2026-08-19 (node mode; capture/apply agreement on UI-only nodes)
+
+### 13.1 `add_node` carries an optional `mode`
+
+A spec (and the minted op) may set `mode` to a litegraph execution mode
+(`0` always — the default, omitted; `1` on-event; `2` mute; `3` on-trigger;
+`4` bypass). Mute and bypass are graph-semantic — a bypassed node passes its
+input through instead of executing — so capture→apply previously revived
+bypassed nodes and produced a *different API prompt* from the source workflow.
+The mode is stamped into `op.node` (which stays authoritative for replay, §8.5)
+and echoed as an op-level field when nonzero. An op without `mode` is exactly
+the pre-amendment shape, so existing ops replay unchanged.
+
+### 13.2 `capture` no longer emits ops `apply` refuses
+
+`add_node` has always rejected UI-only node types (`Note`, `MarkdownNote`,
+`PrimitiveNode`, `GetNode`, `SetNode`, `Reroute`) — they exist only in the
+editor graph and never reach the API. `capture` nevertheless emitted `add_node`
+specs for them, so any workflow containing so much as a documentation note
+captured into a recipe the (correctly atomic) `apply` discarded whole. capture
+now skips UI-only nodes and preserves the data flow they carried: links through
+`Reroute` chains and `GetNode`→`SetNode` pairs are spliced to the real upstream
+source (the same resolution the UI→API converter applies), and a
+`PrimitiveNode`'s value is captured as the fed widget's value. Skipped nodes
+are reported as structured warnings on the capture envelope. The recipe
+rebuilds the executable graph — the API prompt — not the canvas decoration.
+
+**No change to §§2-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.

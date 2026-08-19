@@ -574,6 +574,25 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "the nearest matching option was used. Surfaced in the op's `warnings`.",
         "see the warning's `from`/`to`; pass an exact option to avoid the fuzzy match",
     ),
+    ErrorCode(
+        "ui_only_node_skipped",
+        "Warning (not fatal): `workflow capture` skipped a UI-only node (Note/MarkdownNote/"
+        "Reroute/GetNode/SetNode/PrimitiveNode) — those never reach the API and `apply` "
+        "refuses to mint them. Data flow through the node was spliced to the real source.",
+        "expected for annotated workflows; the recipe rebuilds the executable graph, not canvas decoration",
+    ),
+    ErrorCode(
+        "ui_only_link_dropped",
+        "Warning (not fatal): a captured link traced back through UI-only nodes to no real "
+        "source (e.g. a dangling Reroute), so `workflow capture` dropped it.",
+        "check the named node/input; wire it to a real source before capturing if the link matters",
+    ),
+    ErrorCode(
+        "primitive_feed_unrepresentable",
+        "Warning (not fatal): a PrimitiveNode feeds an input that is not a widget on the "
+        "target node, so `workflow capture` could not express its value as a set_widget.",
+        "set the target input from a real node or widget before capturing",
+    ),
     # --- workflow fragments / compose ---------------------------------------
     ErrorCode(
         "fragment_invalid",

@@ -483,6 +483,31 @@ def _write(tmp_path: Path, data: dict, name: str = "wf.json") -> Path:
     return p
 
 
+def _force_pretty_renderer():
+    r = Renderer.resolve(
+        is_stdout_tty=True,
+        env={},
+        caller=Caller(kind="user", agentic=False, source_env=None),
+        no_json_flag=True,
+    )
+    r.mode = OutputMode.PRETTY
+    set_renderer(r)
+    return r
+
+
+def _invoke_raw(args: list[str], capsys, force=_force_json_renderer) -> tuple[str, str, Any]:
+    """Invoke and return raw (stdout, stderr, result) — for asserting on the
+    stream contract itself rather than the parsed envelope."""
+    force()
+    runner = CliRunner()
+    result = runner.invoke(workflow_cmd.app, args, standalone_mode=False)
+    captured = capsys.readouterr()
+    out = captured.out
+    if not out.strip():
+        out = result.stdout or ""
+    return out, captured.err, result
+
+
 def _run(args: list[str], capsys) -> dict[str, Any]:
     _force_json_renderer()
     runner = CliRunner()
@@ -1527,6 +1552,235 @@ class TestCapture:
         env = _run(["capture", str(path)], capsys)
         assert env["ok"] is False
         assert "subgraph" in env["error"]["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# capture ↔ apply agreement on UI-only nodes (PR-511 review, Finding 1):
+# capture must not emit ops apply refuses — one MarkdownNote in the source
+# used to discard the whole atomic batch (114/306 official templates).
+# ---------------------------------------------------------------------------
+
+
+class TestCaptureUiOnlyNodes:
+    def _apply_on_empty(self, recipe: dict, tmp_path, capsys) -> dict:
+        empty = _write(tmp_path, {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}, "empty.json")
+        rp = tmp_path / "recipe.json"
+        rp.write_text(json.dumps(recipe), encoding="utf-8")
+        env = _run(["apply", str(empty), "--ops", str(rp)], capsys)
+        assert env["ok"] is True, env
+        return json.loads(empty.read_text())
+
+    def test_capture_skips_markdown_note_and_apply_accepts(self, patched_graph, tmp_path, capsys):
+        wf = _base_workflow()
+        wf["nodes"].append(
+            {
+                "id": 40,
+                "type": "MarkdownNote",
+                "pos": [0, 300],
+                "inputs": [],
+                "outputs": [],
+                "widgets_values": ["# doc"],
+            }
+        )
+        wf["last_node_id"] = 40
+        src = _write(tmp_path, wf)
+        cap = _run(["capture", str(src)], capsys)
+        assert cap["ok"] is True, cap
+        recipe = cap["data"]["recipe_doc"]
+        assert not any(o.get("class_type") == "MarkdownNote" for o in recipe["ops"])
+        warns = cap["data"]["warnings"]
+        assert any(w["code"] == "ui_only_node_skipped" and w["class_type"] == "MarkdownNote" for w in warns)
+        # The headline contract: the captured recipe round-trips through apply.
+        rebuilt = self._apply_on_empty(recipe, tmp_path, capsys)
+        assert sorted(n["type"] for n in rebuilt["nodes"]) == ["EmptyLatentImage", "KSampler"]
+        assert len(rebuilt["links"]) == 1
+
+    def test_capture_splices_links_through_reroute(self, patched_graph, tmp_path, capsys):
+        """EmptyLatentImage → Reroute → KSampler must capture as a direct
+        connect — skipping the Reroute must not lose the wire."""
+        wf = _base_workflow()
+        ks = next(n for n in wf["nodes"] if n["id"] == 3)
+        ks["inputs"][3]["link"] = 2
+        lat = next(n for n in wf["nodes"] if n["id"] == 7)
+        lat["outputs"][0]["links"] = [1]
+        wf["nodes"].append(
+            {
+                "id": 30,
+                "type": "Reroute",
+                "pos": [50, 50],
+                "inputs": [{"name": "", "type": "*", "link": 1}],
+                "outputs": [{"name": "", "type": "LATENT", "links": [2]}],
+                "widgets_values": [],
+            }
+        )
+        wf["links"] = [[1, 7, 0, 30, 0, "LATENT"], [2, 30, 0, 3, 3, "LATENT"]]
+        wf["last_node_id"] = 30
+        wf["last_link_id"] = 2
+        src = _write(tmp_path, wf)
+        cap = _run(["capture", str(src)], capsys)
+        assert cap["ok"] is True, cap
+        recipe = cap["data"]["recipe_doc"]
+        connects = [o for o in recipe["ops"] if o["op"] == "connect"]
+        assert connects == [{"op": "connect", "from": "emptylatentimage.LATENT", "to": "ksampler.latent_image"}]
+        rebuilt = self._apply_on_empty(recipe, tmp_path, capsys)
+        assert len(rebuilt["links"]) == 1  # spliced wire survives the round-trip
+
+    def test_capture_splices_links_through_get_set_nodes(self, patched_graph, tmp_path, capsys):
+        wf = _base_workflow()
+        ks = next(n for n in wf["nodes"] if n["id"] == 3)
+        ks["inputs"][3]["link"] = 2
+        lat = next(n for n in wf["nodes"] if n["id"] == 7)
+        lat["outputs"][0]["links"] = [1]
+        wf["nodes"].extend(
+            [
+                {
+                    "id": 32,
+                    "type": "SetNode",
+                    "pos": [50, 0],
+                    "inputs": [{"name": "LATENT", "type": "LATENT", "link": 1}],
+                    "outputs": [],
+                    "widgets_values": ["lat"],
+                },
+                {
+                    "id": 33,
+                    "type": "GetNode",
+                    "pos": [50, 100],
+                    "inputs": [],
+                    "outputs": [{"name": "LATENT", "type": "LATENT", "links": [2]}],
+                    "widgets_values": ["lat"],
+                },
+            ]
+        )
+        wf["links"] = [[1, 7, 0, 32, 0, "LATENT"], [2, 33, 0, 3, 3, "LATENT"]]
+        wf["last_node_id"] = 33
+        wf["last_link_id"] = 2
+        src = _write(tmp_path, wf)
+        cap = _run(["capture", str(src)], capsys)
+        assert cap["ok"] is True, cap
+        recipe = cap["data"]["recipe_doc"]
+        connects = [o for o in recipe["ops"] if o["op"] == "connect"]
+        assert connects == [{"op": "connect", "from": "emptylatentimage.LATENT", "to": "ksampler.latent_image"}]
+
+    def test_capture_carries_primitive_value_into_widget(self, patched_graph, tmp_path, capsys):
+        """A PrimitiveNode feeding a widget-input captures as the widget's
+        value, not a wire — the primitive itself is skipped."""
+        wf = _base_workflow()
+        lat = next(n for n in wf["nodes"] if n["id"] == 7)
+        lat["inputs"] = [{"name": "width", "type": "INT", "link": 5, "widget": {"name": "width"}}]
+        wf["nodes"].append(
+            {
+                "id": 31,
+                "type": "PrimitiveNode",
+                "pos": [0, 200],
+                "inputs": [],
+                "outputs": [{"name": "INT", "type": "INT", "links": [5]}],
+                "widgets_values": [768, "fixed"],
+            }
+        )
+        wf["links"].append([5, 31, 0, 7, 0, "INT"])
+        wf["last_node_id"] = 31
+        wf["last_link_id"] = 5
+        src = _write(tmp_path, wf)
+        cap = _run(["capture", str(src)], capsys)
+        assert cap["ok"] is True, cap
+        recipe = cap["data"]["recipe_doc"]
+        assert not any(o.get("class_type") == "PrimitiveNode" for o in recipe["ops"])
+        assert not any(o["op"] == "connect" and "primitive" in o.get("from", "") for o in recipe["ops"])
+        assert any(o["op"] == "set_widget" and o["widget"] == "width" and o["value"] == 768 for o in recipe["ops"])
+        rebuilt = self._apply_on_empty(recipe, tmp_path, capsys)
+        g = _graph()
+        lat = next(n for n in rebuilt["nodes"] if n["type"] == "EmptyLatentImage")
+        assert lat["widgets_values"][g.widget_order("EmptyLatentImage").index("width")] == 768
+
+    def test_capture_preserves_node_mode(self, patched_graph, tmp_path, capsys):
+        """A bypassed (mode 4) node must come back bypassed — reviving it
+        changes what executes (api_elevenLabs_speech_to_text: 4 API nodes in,
+        5 out)."""
+        wf = _base_workflow()
+        next(n for n in wf["nodes"] if n["id"] == 3)["mode"] = 4
+        src = _write(tmp_path, wf)
+        cap = _run(["capture", str(src)], capsys)
+        assert cap["ok"] is True, cap
+        recipe = cap["data"]["recipe_doc"]
+        add = next(o for o in recipe["ops"] if o["op"] == "add_node" and o["class_type"] == "KSampler")
+        assert add["mode"] == 4
+        rebuilt = self._apply_on_empty(recipe, tmp_path, capsys)
+        assert next(n for n in rebuilt["nodes"] if n["type"] == "KSampler")["mode"] == 4
+
+
+# ---------------------------------------------------------------------------
+# --stdout envelope contract (PR-511 review, Finding 2): same rules set-slot
+# pins — JSON mode puts ONE envelope on stdout with the document riding in
+# data.workflow_json; human mode puts exactly the raw workflow on stdout (the
+# ✓ line used to land inside `> new.json` redirects and corrupt them).
+# ---------------------------------------------------------------------------
+
+
+class TestStdoutEnvelopeContract:
+    def test_add_node_stdout_json_is_single_envelope(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _base_workflow())
+        original = path.read_text()
+        out, _err, _ = _invoke_raw(["add-node", str(path), "VAEDecode", "--stdout"], capsys)
+        lines = [ln for ln in out.strip().splitlines() if ln.strip()]
+        assert len(lines) == 1, f"JSON mode must put exactly one envelope on stdout, got {len(lines)} lines"
+        env = json.loads(lines[0])
+        assert env["schema"] == "envelope/1" and env["ok"] is True
+        assert env["changed"] is False, "--stdout writes nothing, so the envelope must not claim a change"
+        data = env["data"]
+        assert data["out"] == "stdout" and data["wrote"] is None
+        assert any(n["type"] == "VAEDecode" for n in data["workflow_json"]["nodes"])
+        assert path.read_text() == original
+
+    def test_add_node_stdout_human_prints_raw_workflow(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _base_workflow())
+        out, _err, _ = _invoke_raw(["add-node", str(path), "VAEDecode", "--stdout"], capsys, _force_pretty_renderer)
+        wf = json.loads(out)  # the WHOLE stream must parse as one document
+        assert any(n["type"] == "VAEDecode" for n in wf["nodes"])
+
+    def test_delete_nodes_stdout_json_carries_workflow(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _base_workflow())
+        original = path.read_text()
+        out, _err, _ = _invoke_raw(["delete-nodes", str(path), "7", "--stdout"], capsys)
+        lines = [ln for ln in out.strip().splitlines() if ln.strip()]
+        assert len(lines) == 1
+        env = json.loads(lines[0])
+        assert env["ok"] is True and env["changed"] is False
+        data = env["data"]
+        assert data["out"] == "stdout" and data["wrote"] is None
+        assert all(n["id"] != 7 for n in data["workflow_json"]["nodes"])
+        assert path.read_text() == original
+
+    def test_delete_nodes_stdout_human_prints_raw_workflow(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _base_workflow())
+        out, _err, _ = _invoke_raw(["delete-nodes", str(path), "7", "--stdout"], capsys, _force_pretty_renderer)
+        wf = json.loads(out)
+        assert all(n["id"] != 7 for n in wf["nodes"])
+
+    def _ops_file(self, tmp_path) -> Path:
+        rp = tmp_path / "ops.json"
+        rp.write_text(json.dumps([{"op": "add_node", "class_type": "VAEDecode"}]), encoding="utf-8")
+        return rp
+
+    def test_apply_stdout_json_carries_workflow(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _base_workflow())
+        original = path.read_text()
+        out, _err, _ = _invoke_raw(["apply", str(path), "--ops", str(self._ops_file(tmp_path)), "--stdout"], capsys)
+        lines = [ln for ln in out.strip().splitlines() if ln.strip()]
+        assert len(lines) == 1
+        env = json.loads(lines[0])
+        assert env["ok"] is True and env["changed"] is False
+        data = env["data"]
+        assert data["out"] == "stdout" and data["wrote"] is None
+        assert any(n["type"] == "VAEDecode" for n in data["workflow_json"]["nodes"])
+        assert path.read_text() == original
+
+    def test_apply_stdout_human_prints_raw_workflow(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _base_workflow())
+        out, _err, _ = _invoke_raw(
+            ["apply", str(path), "--ops", str(self._ops_file(tmp_path)), "--stdout"], capsys, _force_pretty_renderer
+        )
+        wf = json.loads(out)
+        assert any(n["type"] == "VAEDecode" for n in wf["nodes"])
 
 
 # ---------------------------------------------------------------------------

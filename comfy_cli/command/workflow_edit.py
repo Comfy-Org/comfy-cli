@@ -33,7 +33,16 @@ from comfy_cli.output import get_renderer, rprint
 # between the 7 near-identical signatures.
 ActorOpt = Annotated[str, typer.Option("--actor", help="Op author id (for CRDT stamping).")]
 BaseVersionOpt = Annotated[int, typer.Option("--base-version", help="Draft version this edit is based on.")]
-StdoutOpt = Annotated[bool, typer.Option("--stdout/--in-place", show_default=False)]
+StdoutOpt = Annotated[
+    bool,
+    typer.Option(
+        "--stdout/--in-place",
+        show_default=False,
+        help="Return the result instead of writing back to <file>: `data.workflow_json` in the "
+        "envelope under --json, or the raw workflow on stdout with --no-json. Redirecting "
+        "stdout selects JSON mode, so `--stdout > new.json` needs --no-json to get a raw workflow.",
+    ),
+]
 InputOpt = Annotated[str | None, typer.Option("--input", show_default=False)]
 HostOpt = Annotated[str | None, typer.Option(show_default=False)]
 PortOpt = Annotated[int | None, typer.Option(show_default=False)]
@@ -76,16 +85,28 @@ def _split_addr(addr: str, renderer) -> tuple[Any, str]:
 
 
 def _finish(renderer, p, workflow: dict, op: dict, base_version: int, stdout: bool, command: str) -> None:
-    """Serialize the mutated workflow (file or stdout) and emit the op envelope."""
+    """Serialize the mutated workflow (file or stdout) and emit the op envelope.
+
+    ``--stdout`` follows the contract ``set-slot`` established (docs/json-output.md):
+    in human mode stdout is a pipe target and must hold EXACTLY the workflow —
+    the ``✓`` success line would land inside a ``> new.json`` redirect, so it is
+    suppressed and warnings go to stderr. In JSON mode stdout is reserved for
+    the envelope, so the document rides in ``data.workflow_json`` instead — a
+    bare workflow object is not an ``envelope/1`` and machine callers reject it.
+    """
     workflow_ops.strip_internal(workflow)
     serialized = json.dumps(workflow, indent=2)
-    wrote: str | None = None
-    if stdout:
+    if stdout and renderer.is_pretty():
         import sys
 
         sys.stdout.write(serialized)
         sys.stdout.write("\n")
-    else:
+        sys.stdout.flush()
+        for w in op.get("warnings") or []:
+            renderer.stderr_console().print(f"[yellow]warning:[/yellow] {w}")
+        return
+    wrote: str | None = None
+    if not stdout:
         _atomic_write_text(p, serialized)
         wrote = str(p)
     payload = {
@@ -95,11 +116,14 @@ def _finish(renderer, p, workflow: dict, op: dict, base_version: int, stdout: bo
         "version": base_version + 1,
         "wrote": wrote,
     }
+    if stdout:
+        payload["out"] = "stdout"
+        payload["workflow_json"] = workflow
     if op.get("warnings"):
         payload["warnings"] = op["warnings"]
     if renderer.is_pretty():
         rprint(f"[bold green]✓[/bold green] {op['op']} → [dim]{p}[/dim]")
-    renderer.emit(payload, command=command, changed=True)
+    renderer.emit(payload, command=command, changed=not stdout)
 
 
 def _graph_or_exit(input_path, host, port, renderer, where=None):
@@ -327,12 +351,17 @@ def delete_nodes_cmd(
 
     workflow_ops.strip_internal(workflow)
     serialized = json.dumps(workflow, indent=2)
-    wrote: str | None = None
-    if stdout:
+    # --stdout: same contract as _finish — human mode gets exactly the raw
+    # workflow (success line suppressed); JSON mode keeps stdout for the
+    # envelope and the document rides in data.workflow_json.
+    if stdout and renderer.is_pretty():
         import sys
 
         sys.stdout.write(serialized + "\n")
-    else:
+        sys.stdout.flush()
+        return
+    wrote: str | None = None
+    if not stdout:
         _atomic_write_text(p, serialized)
         wrote = str(p)
     payload = {
@@ -343,9 +372,12 @@ def delete_nodes_cmd(
         "version": base_version + len(ops),
         "wrote": wrote,
     }
+    if stdout:
+        payload["out"] = "stdout"
+        payload["workflow_json"] = workflow
     if renderer.is_pretty():
         rprint(f"[bold green]✓[/bold green] deleted {len(ops)} node(s) → [dim]{p}[/dim]")
-    renderer.emit(payload, command="workflow delete-nodes", changed=True)
+    renderer.emit(payload, command="workflow delete-nodes", changed=not stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -514,7 +546,7 @@ def capture_cmd(
         node_id: Any = int(node_str) if node_str.lstrip("-").isdigit() else node_str
         lift[(node_id, widget)] = pname.strip()
     try:
-        recipe = workflow_ops.capture_recipe(workflow, graph, name=name or p.stem, lift=lift)
+        recipe, warnings = workflow_ops.capture_recipe(workflow, graph, name=name or p.stem, lift=lift)
     except workflow_ops.RecipeError as e:
         renderer.error(code="workflow_edit_invalid", message=str(e))
         raise typer.Exit(code=1) from e
@@ -536,8 +568,18 @@ def capture_cmd(
         "out": wrote or "stdout",
         "recipe_doc": recipe,
     }
-    if renderer.is_pretty() and wrote:
-        rprint(f"[bold green]✓[/bold green] captured {len(recipe['ops'])} ops → [dim]{wrote}[/dim]")
+    if warnings:
+        payload["warnings"] = warnings
+    if renderer.is_pretty():
+        if wrote:
+            rprint(f"[bold green]✓[/bold green] captured {len(recipe['ops'])} ops → [dim]{wrote}[/dim]")
+            for w in warnings:
+                rprint(f"  [yellow]warning:[/yellow] {w.get('message', w)}")
+        else:
+            # stdout holds exactly the recipe JSON; warnings would corrupt a
+            # redirect, so they go to stderr rather than being dropped.
+            for w in warnings:
+                renderer.stderr_console().print(f"[yellow]warning:[/yellow] {w.get('message', w)}")
     renderer.emit(payload, command="workflow capture")
 
 
@@ -650,12 +692,17 @@ def apply_cmd(
 
     workflow_ops.strip_internal(workflow)
     serialized = json.dumps(workflow, indent=2)
-    wrote: str | None = None
-    if stdout:
+    # --stdout: same contract as _finish — human mode gets exactly the raw
+    # workflow (success/summary lines suppressed); JSON mode keeps stdout for
+    # the envelope and the document rides in data.workflow_json.
+    if stdout and renderer.is_pretty():
         import sys
 
         sys.stdout.write(serialized + "\n")
-    else:
+        sys.stdout.flush()
+        return
+    wrote: str | None = None
+    if not stdout:
         _atomic_write_text(p, serialized)
         wrote = str(p)
     if ack == "summary":
@@ -684,6 +731,11 @@ def apply_cmd(
             "version": base_version + len(ops),
             "wrote": wrote,
         }
+    if stdout:
+        # Additive-only against the pinned summary shape: present only under
+        # --stdout, where the envelope is the sole place the document can ride.
+        payload["out"] = "stdout"
+        payload["workflow_json"] = workflow
     if renderer.is_pretty():
         rprint(f"[bold green]✓[/bold green] applied {len(ops)} edit(s) → [dim]{p}[/dim]")
         if ack == "summary":
@@ -692,7 +744,7 @@ def apply_cmd(
                 rprint(f"  [dim]{kinds}[/dim]")
             for alias, node_id in aliases.items():
                 rprint(f"  [dim]alias {alias} → {node_id}[/dim]")
-    renderer.emit(payload, command="workflow apply", changed=True)
+    renderer.emit(payload, command="workflow apply", changed=not stdout)
 
 
 # ---------------------------------------------------------------------------

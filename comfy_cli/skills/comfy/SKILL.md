@@ -375,7 +375,11 @@ comfy --json workflow apply fresh.json --ops t2i.recipe.json --param positive="a
 `capture --param <node_id>.<widget>=<name>` lifts that widget to a `${name}` hole
 (current value becomes its default) — use it for the fields you want to vary, since
 plain `capture` omits widgets left at their default. Recipes are UI-format op-batches
-— mergeable and canvas-native. `compose`/`decompose` (the fragment/blueprint path)
+— mergeable and canvas-native. UI-only nodes (Note/MarkdownNote/Reroute/GetNode/
+SetNode/PrimitiveNode) are **skipped at capture** (reported as `warnings` on the
+envelope): links through Reroute and Get/Set chains are spliced to the real source
+and a PrimitiveNode's value lands on the widget it feeds, so the recipe rebuilds
+the executable graph — canvas decoration doesn't round-trip. `compose`/`decompose` (the fragment/blueprint path)
 are **legacy**: they emit API format and can't co-edit; use recipes for anything
 you'll reuse or edit on the canvas.
 

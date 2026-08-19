@@ -243,7 +243,7 @@ class TestDictWidgetsValuesSurvival:
             ],
             "links": [],
         }
-        recipe = W.capture_recipe(wf, graph)  # must not raise
+        recipe, _warnings = W.capture_recipe(wf, graph)  # must not raise
         sets = {(o["widget"], o["value"]) for o in recipe["ops"] if o["op"] == "set_widget"}
         assert ("width", 768) in sets  # non-default value survived the dict form
 

@@ -462,12 +462,19 @@ def _next_inputcount_name(ins: list, requested: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Litegraph node modes: 0 always, 1 on-event, 2 never (mute), 3 on-trigger,
+# 4 bypass. Mirrors workflow_to_api._MODE_MUTED/_MODE_BYPASS and the
+# _MODE_LABELS table in workflow_edit's ls-nodes.
+_VALID_NODE_MODES = frozenset({0, 1, 2, 3, 4})
+
+
 def add_node(
     workflow: dict,
     graph,
     class_type: str,
     *,
     pos: list | None = None,
+    mode: int = 0,
     actor: str = "cli",
     base_version: int = 0,
 ) -> tuple[dict, dict]:
@@ -492,6 +499,16 @@ def add_node(
         # stays convergent (P1). Existing nodes are never moved.
         pos = layout.cascade_pos(workflow, size)
     node = _build_node(mint_id(), class_type, m, graph, pos, size)
+    if mode:
+        # Node mode (mute/bypass) is graph-semantic state — a bypassed node
+        # executes differently — so it must survive capture→apply. op.node is
+        # authoritative for replay (§8.5), so stamping the node covers it; the
+        # explicit op field keeps the receipt inspectable.
+        if not isinstance(mode, int) or isinstance(mode, bool) or mode not in _VALID_NODE_MODES:
+            raise ValueError(
+                f"invalid node mode {mode!r}; valid: 0 (always), 1 (on-event), 2 (mute), 3 (on-trigger), 4 (bypass)"
+            )
+        node["mode"] = mode
     op = _new_op(
         "add_node",
         actor,
@@ -500,6 +517,7 @@ def add_node(
         class_type=class_type,
         pos=node["pos"],
         node=node,
+        **({"mode": mode} if mode else {}),
     )
     return apply_op(workflow, op, graph), op
 
@@ -1194,10 +1212,26 @@ def _param(name: str, params: dict[str, Any]) -> Any:
     return params[name]
 
 
-def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | None = None) -> dict:
+def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | None = None) -> tuple[dict, list[dict]]:
     """Project a UI-format graph into a recipe — the op-batch that rebuilds it
     (add_node + non-default set_widget + connect). The inverse of `apply`:
     `apply(empty, capture(wf))` reproduces `wf`. Top-level nodes only.
+    Returns ``(recipe, warnings)``.
+
+    UI-only node types (:data:`UI_ONLY_NODE_TYPES`) never reach the API and
+    ``add_node`` refuses to mint them, so capturing them verbatim produced
+    recipes ``apply`` could not run — one MarkdownNote in the source discarded
+    the whole atomic batch. capture therefore SKIPS them, preserving the data
+    flow they carried so the rebuilt graph's API prompt is unchanged:
+
+      * links THROUGH ``Reroute`` and ``GetNode``→``SetNode`` chains are
+        spliced to the real upstream source;
+      * a ``PrimitiveNode``'s value lands as the fed widget's captured value;
+      * pure annotations (``Note``/``MarkdownNote``) simply drop.
+
+    Each skipped node (and any link that could not be spliced) is reported in
+    ``warnings`` — the recipe rebuilds the executable graph, not the canvas
+    decoration.
 
     `lift` maps `(node_id, widget_name) -> param_name`: those widgets become
     `${param_name}` holes (with a `params` header entry defaulting to the current
@@ -1206,32 +1240,151 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
     if (workflow.get("definitions") or {}).get("subgraphs"):
         raise RecipeError("capture does not support subgraphs yet — edit/flatten top-level nodes first")
     lift = lift or {}
-    nodes = [n for n in (workflow.get("nodes") or []) if isinstance(n, dict) and "id" in n]
-    by_id = {n["id"]: n for n in nodes}
+    all_nodes = [n for n in (workflow.get("nodes") or []) if isinstance(n, dict) and "id" in n]
+    by_id = {n["id"]: n for n in all_nodes}
+    nodes = [n for n in all_nodes if n.get("type") not in UI_ONLY_NODE_TYPES]
+    ui_nodes = [n for n in all_nodes if n.get("type") in UI_ONLY_NODE_TYPES]
 
     # Validate lift targets up front — no silently-ignored typos.
     for (node_id, widget), _pname in lift.items():
         node = by_id.get(node_id)
         if node is None:
             raise RecipeError(f"--param target node {node_id!r} not in workflow")
+        if node.get("type") in UI_ONLY_NODE_TYPES:
+            raise RecipeError(
+                f"--param target node {node_id} is a UI-only {node.get('type')} — capture skips it (it never reaches the API)"
+            )
         if widget not in graph.widget_order_default(node.get("type", "")):
             raise RecipeError(f"--param target {node_id}.{widget!r}: not a widget on {node.get('type')}")
 
-    alias_by_id: dict[Any, str] = {}
+    warnings: list[dict] = []
+    for n in ui_nodes:
+        warnings.append(
+            {
+                "code": "ui_only_node_skipped",
+                "node_id": n["id"],
+                "class_type": n.get("type"),
+                "message": (
+                    f"{n.get('type')} (id {n['id']}) is UI-only and cannot be rebuilt by apply — skipped; "
+                    "data flow through it (if any) is spliced to the real source"
+                ),
+            }
+        )
+
+    links = [ln for ln in (workflow.get("links") or []) if isinstance(ln, list) and len(ln) >= 5]
+    # link_id -> (source_id, source_slot). Node identity is compared as a STRING
+    # (amendment v1.2) — ids are legitimately either JSON type.
+    link_map = {ln[0]: (ln[1], ln[2]) for ln in links if isinstance(ln[0], int)}
+    node_by_sid = {str(n["id"]): n for n in all_nodes}
+
+    def _first_input_source(n: dict) -> tuple[Any, Any] | None:
+        for inp in n.get("inputs") or []:
+            if isinstance(inp, dict):
+                lid = inp.get("link")
+                if isinstance(lid, int) and lid in link_map:
+                    return link_map[lid]
+        return None
+
+    # Same upstream-resolution model as workflow_to_api's tracers: hop through
+    # Reroute chains and GetNode -> SetNode pairs; a seen-set guards cycles.
+    reroute_src: dict[str, tuple[Any, Any]] = {}
+    set_src: dict[str, tuple[Any, Any]] = {}
+    get_var: dict[str, str] = {}
+    prim_val: dict[str, Any] = {}
+    for n in ui_nodes:
+        t = n.get("type")
+        if t == "Reroute":
+            src = _first_input_source(n)
+            if src is not None:
+                reroute_src[str(n["id"])] = src
+        elif t in ("SetNode", "GetNode"):
+            w = n.get("widgets_values")
+            var = w[0] if isinstance(w, list) and w else None
+            if not isinstance(var, str) or not var:
+                continue
+            if t == "GetNode":
+                get_var[str(n["id"])] = var
+            else:
+                src = _first_input_source(n)
+                if src is not None:
+                    set_src[var] = src
+        elif t == "PrimitiveNode":
+            w = n.get("widgets_values")
+            if isinstance(w, list) and w:
+                prim_val[str(n["id"])] = w[0]
+
+    def _trace(src_id: Any, src_slot: Any) -> tuple[Any, Any]:
+        seen: set[str] = set()
+        while str(src_id) not in seen:
+            key = str(src_id)
+            seen.add(key)
+            if key in reroute_src:
+                src_id, src_slot = reroute_src[key]
+            elif key in get_var and get_var[key] in set_src:
+                src_id, src_slot = set_src[get_var[key]]
+            else:
+                break
+        return src_id, src_slot
+
+    alias_by_sid: dict[str, str] = {}
     counts: dict[str, int] = {}
     for n in nodes:
         slug = re.sub(r"[^a-z0-9]+", "_", str(n.get("type", "node")).lower()).strip("_") or "node"
         counts[slug] = counts.get(slug, 0) + 1
-        alias_by_id[n["id"]] = slug if counts[slug] == 1 else f"{slug}_{counts[slug]}"
+        alias_by_sid[str(n["id"])] = slug if counts[slug] == 1 else f"{slug}_{counts[slug]}"
+
+    # First pass over links: real-target links become connect specs (spliced
+    # through UI-only chains); a PrimitiveNode source becomes a widget value on
+    # the target (`prim_feeds`) rather than a wire.
+    connect_specs: list[dict] = []
+    prim_feeds: dict[tuple[str, str], Any] = {}  # (target_sid, widget_name) -> value
+    for ln in links:
+        _lid, from_id, from_slot, to_id, to_slot = ln[0], ln[1], ln[2], ln[3], ln[4]
+        to_node = node_by_sid.get(str(to_id))
+        if to_node is None or to_node.get("type") in UI_ONLY_NODE_TYPES:
+            # Feeds a UI-only node — its flow is captured when tracing the
+            # downstream real consumer, so nothing is lost by skipping here.
+            continue
+        in_name = _slot_name(to_node.get("inputs"), to_slot)
+        src_id, src_slot = _trace(from_id, from_slot)
+        if str(src_id) in prim_val:
+            prim_feeds[(str(to_id), str(in_name))] = prim_val[str(src_id)]
+            continue
+        src_node = node_by_sid.get(str(src_id))
+        if src_node is None or src_node.get("type") in UI_ONLY_NODE_TYPES:
+            warnings.append(
+                {
+                    "code": "ui_only_link_dropped",
+                    "node_id": to_node["id"],
+                    "input": str(in_name),
+                    "message": (
+                        f"link into {to_node.get('type')} (id {to_node['id']}).{in_name} traces back to a UI-only "
+                        "node with no real source — dropped"
+                    ),
+                }
+            )
+            continue
+        out_name = _slot_name(src_node.get("outputs"), src_slot)
+        connect_specs.append(
+            {
+                "op": "connect",
+                "from": f"{alias_by_sid[str(src_id)]}.{out_name}",
+                "to": f"{alias_by_sid[str(to_id)]}.{in_name}",
+            }
+        )
 
     ops: list[dict] = []
     params_header: dict[str, Any] = {}
     for n in nodes:
-        alias = alias_by_id[n["id"]]
+        alias = alias_by_sid[str(n["id"])]
         class_type = n.get("type")
         add: dict[str, Any] = {"op": "add_node", "class_type": class_type, "as": alias}
         if n.get("pos"):
             add["at"] = n["pos"]
+        if n.get("mode"):
+            # mute (2) / bypass (4) change what executes — a recipe that
+            # silently revived a bypassed node produced a different API prompt.
+            add["mode"] = n["mode"]
         ops.append(add)
         from comfy_cli.cql import engine as _engine
 
@@ -1239,31 +1392,37 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
         order = graph.widget_order_for_node(class_type, widgets)
         defaults = graph.widget_defaults(class_type)
         for i, wname in enumerate(order):
-            if i >= len(widgets):
-                break
+            if i >= len(widgets) and (str(n["id"]), wname) not in prim_feeds:
+                continue
             pname = lift.get((n["id"], wname))
+            # A PrimitiveNode feeding this widget-input is authoritative over the
+            # (possibly stale) serialized widgets_values slot — same precedence
+            # the UI→API converter applies.
+            value = prim_feeds.pop((str(n["id"]), wname), widgets[i] if i < len(widgets) else None)
             if pname is not None:
                 # Explicitly lifted → a ${param} hole, current value as its default.
                 ops.append({"op": "set_widget", "node": alias, "widget": wname, "value": f"${{{pname}}}"})
-                params_header[pname] = {"type": _widget_param_type(graph, class_type, wname), "default": widgets[i]}
-            elif widgets[i] != defaults.get(wname):
+                params_header[pname] = {"type": _widget_param_type(graph, class_type, wname), "default": value}
+            elif value != defaults.get(wname):
                 # Only widgets that differ from the fresh-node default — add_node fills the rest.
-                ops.append({"op": "set_widget", "node": alias, "widget": wname, "value": widgets[i]})
+                ops.append({"op": "set_widget", "node": alias, "widget": wname, "value": value})
 
-    node_by_id = {n["id"]: n for n in nodes}
-    for ln in workflow.get("links") or []:
-        if not (isinstance(ln, list) and len(ln) >= 5):
-            continue
-        _lid, from_id, from_slot, to_id, to_slot = ln[0], ln[1], ln[2], ln[3], ln[4]
-        if from_id not in alias_by_id or to_id not in alias_by_id:
-            continue
-        out_name = _slot_name(node_by_id[from_id].get("outputs"), from_slot)
-        in_name = _slot_name(node_by_id[to_id].get("inputs"), to_slot)
-        ops.append(
-            {"op": "connect", "from": f"{alias_by_id[from_id]}.{out_name}", "to": f"{alias_by_id[to_id]}.{in_name}"}
+    for (to_sid, in_name), value in prim_feeds.items():
+        target = node_by_sid.get(to_sid, {})
+        warnings.append(
+            {
+                "code": "primitive_feed_unrepresentable",
+                "node_id": target.get("id"),
+                "input": in_name,
+                "message": (
+                    f"PrimitiveNode value {value!r} feeds {target.get('type')} (id {target.get('id')}).{in_name}, "
+                    "which is not a widget on that node — dropped"
+                ),
+            }
         )
 
-    return {"recipe": name, "params": params_header, "ops": ops}
+    ops.extend(connect_specs)
+    return {"recipe": name, "params": params_header, "ops": ops}, warnings
 
 
 def _widget_param_type(graph, class_type: str, widget: str) -> str:
@@ -1350,7 +1509,13 @@ def apply_specs(
             try:
                 if kind == "add_node":
                     workflow, op = add_node(
-                        workflow, graph, spec["class_type"], pos=spec.get("at"), actor=actor, base_version=base_version
+                        workflow,
+                        graph,
+                        spec["class_type"],
+                        pos=spec.get("at"),
+                        mode=spec.get("mode") or 0,
+                        actor=actor,
+                        base_version=base_version,
                     )
                     alias = spec.get("as")
                     if alias:
