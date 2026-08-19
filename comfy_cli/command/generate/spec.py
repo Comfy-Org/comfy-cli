@@ -336,6 +336,26 @@ def _detect_polling(partner: str, response_schema: dict[str, Any]) -> str | None
     return None
 
 
+_DEPRECATED_SUMMARY_RE = _re.compile(r"\bdeprecated\b", _re.IGNORECASE)
+
+
+def _is_deprecated_op(op: dict[str, Any]) -> bool:
+    """Whether a proxy operation is deprecated.
+
+    True when the machine ``deprecated`` flag is set OR the operation's
+    ``summary`` says so. Matching the summary (not the description) is
+    deliberate: the live ``stability/.../generate/sd3`` endpoint is current
+    ("Stable Diffusion 3.5") yet its long description mentions the older SD 3.0
+    API being deprecated — a description-wide scan would wrongly drop it. The
+    genuinely retired endpoints (``veo/generate``, ``veo/poll``) carry
+    "Deprecated. Use … instead." in the summary itself.
+    """
+    if op.get("deprecated") is True:
+        return True
+    summary = op.get("summary")
+    return isinstance(summary, str) and bool(_DEPRECATED_SUMMARY_RE.search(summary))
+
+
 @lru_cache(maxsize=1)
 def _registry() -> dict[str, Endpoint]:
     spec = load_raw_spec()
@@ -349,6 +369,12 @@ def _registry() -> dict[str, Endpoint]:
         # All image endpoints are POST; pick the first defined method anyway.
         method = "post" if "post" in node else next(iter(node.keys()))
         op = node[method]
+        if _is_deprecated_op(op):
+            # Never surface a deprecated endpoint through `comfy generate`.
+            # Same silent-skip contract as the missing-node case above: keep
+            # retired endpoints off the creative surface even if one lingers in
+            # the allowlist or is deprecated upstream after a `generate refresh`.
+            continue
         partner = endpoint_id.split("/", 1)[0]
 
         req_body = op.get("requestBody") or {}
