@@ -584,6 +584,53 @@ def test_builder_client_delete_and_validate(monkeypatch):
     assert ("POST", "https://builder.test/v1/distributions/d1/validate") in calls
 
 
+def test_builder_client_reference_and_update_endpoints(monkeypatch):
+    calls = []
+
+    def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
+        calls.append((method, url, body))
+        if url.endswith("/v1/base-images"):
+            return 200, {"baseImages": [{"id": "cuda"}]}
+        if url.endswith("/v1/build-targets"):
+            return 200, {"targets": [{"os": "linux", "gpu": "nvidia"}]}
+        if url.endswith("/v1/model-directories"):
+            return 200, {"directories": ["checkpoints", "vae"]}
+        if url.endswith("/v1/blobs"):
+            return 200, {"blobs": [{"blobId": "b1", "filename": "m.safetensors"}]}
+        if url.endswith("/v1/distributions/d1"):
+            return 200, {"id": "d1", "definition": {"models": []}}
+        if url.endswith("/manifest"):
+            return 200, {"models": [{"filename": "ae"}]}
+        if url.endswith("/download"):
+            return 200, {"downloadUrl": "https://dl", "expiresAt": "t"}
+        return 200, {}
+
+    monkeypatch.setattr("comfy_cli.distribution_api.request_json", fake_request_json)
+    from comfy_cli.distribution_api import BuilderClient
+
+    c = BuilderClient("https://builder.test/", "jwt")
+    assert c.list_base_images() == [{"id": "cuda"}]
+    assert c.list_build_targets() == [{"os": "linux", "gpu": "nvidia"}]
+    assert c.list_model_directories() == ["checkpoints", "vae"]
+    assert c.list_blobs() == [{"blobId": "b1", "filename": "m.safetensors"}]
+    assert c.update_distribution("d1", {"models": []}, "2026-08-01T00:00:00Z")["id"] == "d1"
+    assert c.get_version_manifest("v1")["models"][0]["filename"] == "ae"
+    assert c.get_artifact_download("a1")["downloadUrl"] == "https://dl"
+    # update is a PATCH carrying the definition AND the expectedUpdatedAt guard the
+    # builder requires (a missing one 409s STALE); the rest are GETs under /v1
+    assert (
+        "PATCH",
+        "https://builder.test/v1/distributions/d1",
+        {"definition": {"models": []}, "expectedUpdatedAt": "2026-08-01T00:00:00Z"},
+    ) in calls
+    assert ("GET", "https://builder.test/v1/base-images", None) in calls
+    assert ("GET", "https://builder.test/v1/build-targets", None) in calls
+    assert ("GET", "https://builder.test/v1/model-directories", None) in calls
+    assert ("GET", "https://builder.test/v1/blobs", None) in calls
+    assert ("GET", "https://builder.test/v1/distribution-versions/v1/manifest", None) in calls
+    assert ("GET", "https://builder.test/v1/build-artifacts/a1/download", None) in calls
+
+
 def test_delete_command_needs_confirm_non_interactive():
     env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
     proc = subprocess.run(
@@ -636,7 +683,31 @@ def test_builder_client_falls_back_to_session(monkeypatch):
     assert _builder_client(_RecordingRenderer(), None) is sentinel
 
 
-def test_builder_call_maps_beta_403_to_not_enabled():
+def test_update_command_reads_updated_at_before_patch(monkeypatch, tmp_path):
+    # Regression guard for "update always 409s": the command must GET the current
+    # updatedAt and echo it back as expectedUpdatedAt in the PATCH. Also exercises a
+    # nodes-only definition (no `models` key), which `update` must accept.
+    monkeypatch.setenv("COMFY_BUILDER_TOKEN", "jwt")
+    calls = []
+
+    def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
+        calls.append((method, url, body))
+        if method == "GET" and url.endswith("/v1/distributions/d1"):
+            return 200, {"id": "d1", "updatedAt": "2026-08-01T12:00:00Z"}
+        if method == "PATCH":
+            return 200, {"id": "d1"}
+        return 200, {}
+
+    monkeypatch.setattr("comfy_cli.distribution_api.request_json", fake_request_json)
+    from comfy_cli.command import distribution
+
+    d = tmp_path / "def.json"  # nodes-only, no `models` key
+    d.write_text(json.dumps({"customNodes": [{"name": "x", "repository": "https://g/x", "gitRef": "a"}]}))
+    distribution.update_cmd(distribution_id="d1", from_=str(d), builder_url="https://builder.test/")
+
+    assert [c[0] for c in calls] == ["GET", "PATCH"]  # read-modify-write order
+    patch = next(c for c in calls if c[0] == "PATCH")
+    assert patch[2]["expectedUpdatedAt"] == "2026-08-01T12:00:00Z"
     import io
     import urllib.error
 

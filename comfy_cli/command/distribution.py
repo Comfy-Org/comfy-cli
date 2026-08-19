@@ -62,6 +62,13 @@ version_app = typer.Typer(
 )
 app.add_typer(version_app, name="version")
 
+# `comfy distribution artifact <verb>` / `blob <verb>` — the per-target build
+# outputs and the workspace's private uploaded content.
+artifact_app = typer.Typer(no_args_is_help=True, help="Build artifacts (per-target outputs of a cut version).")
+app.add_typer(artifact_app, name="artifact")
+blob_app = typer.Typer(no_args_is_help=True, help="Workspace private blobs (uploaded models / nodes).")
+app.add_typer(blob_app, name="blob")
+
 # @singleton — the same instance the top-level callback set up, so
 # `workspace_path` is already resolved by the time a command runs.
 workspace_manager = WorkspaceManager()
@@ -753,9 +760,10 @@ def scan_cmd(
     )
 
 
-def _load_definition(path: Path) -> dict:
+def _load_definition(path: Path, *, require_models: bool = True) -> dict:
     """Read a scan definition JSON file. Raises ValueError on any problem so the
-    command can map it to one error envelope."""
+    command can map it to one error envelope. ``require_models`` is relaxed for
+    ``update``, where a nodes-only or pins-only edit is legitimate."""
     try:
         raw = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
@@ -764,7 +772,7 @@ def _load_definition(path: Path) -> dict:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
         raise ValueError(f"{path} is not valid JSON: {e}") from e
-    if not isinstance(data, dict) or "models" not in data:
+    if not isinstance(data, dict) or (require_models and "models" not in data):
         raise ValueError(f"{path} is not a distribution definition (no 'models' key)")
     # Guard the fields the create path indexes, so a hand-edited definition returns
     # an error envelope rather than a bare KeyError traceback downstream.
@@ -1146,3 +1154,129 @@ def delete_cmd(
     if renderer.is_pretty():
         renderer.success(f"Deleted distribution {distribution_id}")
     renderer.emit({"distributionId": distribution_id, "deleted": True}, command="distribution delete", changed=True)
+
+
+@app.command("update", help="Replace a distribution's definition from a scan/edited JSON.")
+@tracking.track_command("distribution")
+def update_cmd(
+    distribution_id: Annotated[str, typer.Argument(help="Distribution id.")],
+    from_: Annotated[str, typer.Option("--from", "-f", help="Path to a definition JSON.")],
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
+    renderer = get_renderer()
+    try:
+        definition = _load_definition(Path(from_).expanduser(), require_models=False)
+    except ValueError as e:
+        renderer.error(code="distribution_definition_invalid", message=str(e), details={"path": from_})
+        raise typer.Exit(code=1) from e
+    client = _builder_client(renderer, builder_url)
+    # The builder guards the save with the updatedAt the caller last saw (optimistic
+    # concurrency, meant for the website's read-edit-save). For a CLI that's just
+    # last-writer-wins: fetch the current updatedAt and echo it back, else the save
+    # 409s STALE on a missing/zero timestamp.
+    current = _builder_call(renderer, lambda: client.get_distribution(distribution_id))
+    dist = _builder_call(
+        renderer,
+        lambda: client.update_distribution(distribution_id, definition, current.get("updatedAt")),
+    )
+    if renderer.is_pretty():
+        renderer.success(f"Updated distribution {distribution_id}")
+    renderer.emit(dist, command="distribution update", changed=True)
+
+
+@app.command("resolve", help="Resolve model filenames to public download candidates (HF/CivitAI).")
+@tracking.track_command("distribution")
+def resolve_cmd(
+    filenames: Annotated[list[str], typer.Argument(help="Model filenames to resolve.")],
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
+    renderer = get_renderer()
+    client = _builder_client(renderer, builder_url)
+    # The builder caps /v1/models/resolve at 32 filenames per call; batch so a large
+    # argument list doesn't 400.
+    results = _builder_call(
+        renderer,
+        lambda: [r for batch in _chunks(list(filenames), _RESOLVE_BATCH) for r in client.resolve_models(batch)],
+    )
+    if renderer.is_pretty():
+        renderer.console().print_json(json.dumps(results))
+    renderer.emit({"results": results}, command="distribution resolve")
+
+
+@app.command("base-images", help="List the curated base images a distribution can build on.")
+@tracking.track_command("distribution")
+def base_images_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
+    renderer = get_renderer()
+    client = _builder_client(renderer, builder_url)
+    images = _builder_call(renderer, client.list_base_images)
+    if renderer.is_pretty():
+        renderer.console().print_json(json.dumps(images))
+    renderer.emit({"baseImages": images}, command="distribution base-images")
+
+
+@app.command("build-targets", help="List the build targets (os/gpu) a version can be cut for.")
+@tracking.track_command("distribution")
+def build_targets_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
+    renderer = get_renderer()
+    client = _builder_client(renderer, builder_url)
+    targets = _builder_call(renderer, client.list_build_targets)
+    if renderer.is_pretty():
+        renderer.console().print_json(json.dumps(targets))
+    renderer.emit({"targets": targets}, command="distribution build-targets")
+
+
+@app.command("model-dirs", help="List the model directories a model may be placed in.")
+@tracking.track_command("distribution")
+def model_dirs_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
+    renderer = get_renderer()
+    client = _builder_client(renderer, builder_url)
+    dirs = _builder_call(renderer, client.list_model_directories)
+    if renderer.is_pretty():
+        for d in dirs:
+            renderer.print(f"  {d}")
+    renderer.emit({"directories": dirs}, command="distribution model-dirs")
+
+
+@version_app.command("manifest", help="Show a version's models and runtime policies.")
+@tracking.track_command("distribution")
+def version_manifest(
+    version_id: Annotated[str, typer.Argument(help="Distribution version id.")],
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
+    renderer = get_renderer()
+    client = _builder_client(renderer, builder_url)
+    manifest = _builder_call(renderer, lambda: client.get_version_manifest(version_id))
+    if renderer.is_pretty():
+        renderer.console().print_json(json.dumps(manifest))
+    renderer.emit(manifest, command="distribution version manifest")
+
+
+@artifact_app.command("download", help="Get a signed download link for a build artifact.")
+@tracking.track_command("distribution")
+def artifact_download(
+    artifact_id: Annotated[str, typer.Argument(help="Build artifact id.")],
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
+    renderer = get_renderer()
+    client = _builder_client(renderer, builder_url)
+    signed = _builder_call(renderer, lambda: client.get_artifact_download(artifact_id))
+    if renderer.is_pretty():
+        renderer.print(signed.get("downloadUrl", "(no url)"))
+    renderer.emit(signed, command="distribution artifact download")
+
+
+@blob_app.command("list", help="List the workspace's private blobs.")
+@tracking.track_command("distribution")
+def blob_list(
+    kind: Annotated[str | None, typer.Option("--kind", help="Filter by blob kind: model or node_zip.")] = None,
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
+    renderer = get_renderer()
+    client = _builder_client(renderer, builder_url)
+    blobs = _builder_call(renderer, lambda: client.list_blobs(kind))
+    if renderer.is_pretty():
+        if not blobs:
+            renderer.info("No blobs.")
+        for b in blobs:
+            renderer.print(f"  {b.get('blobId', b.get('id', '?'))}  {b.get('filename', '')}")
+    renderer.emit({"blobs": blobs}, command="distribution blob list")

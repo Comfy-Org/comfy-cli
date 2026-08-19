@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/distribution_update.json",
+  "title": "comfy distribution update --json data payload",
+  "description": "The updated distribution returned by PATCH /v1/distributions/{id}.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "definition": {"type": "object"}}
+}
