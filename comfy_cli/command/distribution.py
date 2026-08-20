@@ -9,10 +9,11 @@ POC scope: ``scan`` inspects a local ComfyUI install and emits a builder-ready
   gap: a workflow only carries a bare model name (path stripped, no hash), but a
   build needs the placement folder, filename, and a content hash to fetch and
   verify the right file.
-- **custom nodes** — walk ``custom_nodes/`` and record each node's git
-  ``repository`` + commit ``gitRef`` (the builder fetches ``repo@ref``). Nodes
-  with no fetchable upstream are marked ``source: local`` — they must be uploaded
-  as a blob.
+- **custom nodes** — walk ``custom_nodes/`` and record each node's most precise
+  source: a git ``repository`` + commit ``gitRef`` (the builder fetches
+  ``repo@ref``), else the ``id`` + ``registryVersion`` its ``pyproject.toml``
+  declares (the builder fetches the published artifact). Nodes with neither are
+  marked ``source: local`` — they must be uploaded as a blob.
 
 The scan runs entirely on the user's machine — the one place the real files and
 node checkouts exist — and is the agreed compatibility shim for users who won't
@@ -36,6 +37,8 @@ from pathlib import Path
 from typing import Annotated
 
 import requests
+import tomlkit
+import tomlkit.exceptions
 import typer
 
 from comfy_cli import tracking
@@ -175,15 +178,47 @@ def _git_output(repo_path: Path, *args: str) -> str | None:
     return result.stdout.strip() or None
 
 
+def read_registry_pin(node_dir: Path) -> tuple[str, str] | None:
+    """Return ``(registry id, version)`` from a pack's ``pyproject.toml``, or None.
+
+    A pack installed by ``comfy node install`` comes from the Comfy Registry as an
+    archive, so it has no git history at all — but its ``pyproject.toml`` still
+    carries the two fields that name the published version the builder can fetch:
+    ``project.name`` is the registry node id and ``project.version`` its package
+    version. Silent on every failure (absent, unreadable, malformed, missing
+    either field): a pack that cannot answer simply has no registry pin."""
+    try:
+        with open(node_dir / "pyproject.toml", encoding="utf-8-sig") as f:
+            data = tomlkit.load(f)
+    except (OSError, UnicodeDecodeError, tomlkit.exceptions.TOMLKitError):
+        return None
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return None
+    node_id = project.get("name")
+    version = project.get("version")
+    if not isinstance(node_id, str) or not isinstance(version, str):
+        return None
+    node_id, version = node_id.strip(), version.strip()
+    return (node_id, version) if node_id and version else None
+
+
 def scan_custom_nodes(custom_nodes_root: Path) -> list[dict]:
     """Return one definition entry per custom-node directory, sorted by name.
 
-    Each top-level directory under ``custom_nodes/`` is one node. For a git
-    checkout we record its ``repository`` (origin remote) and ``gitRef`` (HEAD
-    commit) so the builder can fetch ``repo@ref`` reproducibly. A directory that
-    is not a git checkout, or has no fetchable origin, is marked ``source:
-    local`` — it has no upstream and must be uploaded as a blob. Returns an empty
-    list when the folder is absent (a workflow may use no custom nodes)."""
+    Each top-level directory under ``custom_nodes/`` is one node, recorded as the
+    most precise source the builder can rebuild it from:
+
+    - a git checkout with a fetchable origin → ``repository`` + ``gitRef`` (HEAD),
+      which pins an exact commit;
+    - otherwise a published registry version → ``id`` + ``registryVersion`` read
+      from its ``pyproject.toml``, which pins an exact artifact. This is the case
+      for everything ``comfy node install`` writes, since it unpacks archives
+      rather than cloning;
+    - otherwise ``source: local`` — no upstream, so it must be uploaded as a blob.
+
+    Returns an empty list when the folder is absent (a workflow may use no custom
+    nodes)."""
     nodes: list[dict] = []
     if not custom_nodes_root.is_dir():
         return nodes
@@ -195,17 +230,17 @@ def scan_custom_nodes(custom_nodes_root: Path) -> list[dict]:
         is_git = (entry / ".git").exists()
         repository = _git_output(entry, "remote", "get-url", "origin") if is_git else None
         git_ref = _git_output(entry, "rev-parse", "HEAD") if is_git else None
-        nodes.append(
-            {
-                "name": entry.name,
-                "repository": repository,
-                "gitRef": git_ref,
-                # Fetchable only when we have BOTH a remote and a pinned commit;
-                # a local-only or detached checkout can't be reconstructed from
-                # a repo@ref, so it must be uploaded.
-                "source": "git" if (repository and git_ref) else "local",
-            }
-        )
+        node: dict = {"name": entry.name, "repository": repository, "gitRef": git_ref}
+        if repository and git_ref:
+            node["source"] = "git"
+        else:
+            pin = read_registry_pin(entry)
+            if pin:
+                node["id"], node["registryVersion"] = pin
+                node["source"] = "registry"
+            else:
+                node["source"] = "local"
+        nodes.append(node)
     return nodes
 
 
