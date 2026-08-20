@@ -828,3 +828,52 @@ def test_create_command_bad_definition(tmp_path):
     assert proc.returncode == 1
     envelope = json.loads(proc.stdout.strip().splitlines()[-1])
     assert envelope["error"]["code"] == "distribution_definition_invalid"
+
+
+# --- create: the definition survives the trip ---------------------------------
+
+REGISTRY_DEF = {
+    "schema": "distribution-definition/0",
+    "baseComfyVersion": "v0.3.40",
+    "baseImage": "cuda130-py312",
+    "modelPolicy": {"mode": "allowlist", "list": ["ae.safetensors"]},
+    "partnerNodePolicy": {"mode": "blocklist", "list": []},
+    "models": [],
+    "customNodes": [
+        {"name": "comfyui-kjnodes", "id": "comfyui-kjnodes", "registryVersion": "1.4.9", "source": "registry"},
+        {"name": "priv", "blobId": "blob-1"},
+        {"name": "gitpack", "repository": "https://github.com/x/gitpack", "gitRef": "deadbeef"},
+    ],
+}
+
+
+def test_plan_create_keeps_registry_pins_out_of_the_upload_plan():
+    """A registry-pinned node is a source the builder can resolve, so it travels as
+    (id, registryVersion) rather than becoming an upload `--execute` would refuse."""
+    plan = distribution.plan_create(REGISTRY_DEF)
+    kj = next(n for n in plan["definition"]["customNodes"] if n["name"] == "comfyui-kjnodes")
+    assert kj == {"name": "comfyui-kjnodes", "id": "comfyui-kjnodes", "registryVersion": "1.4.9"}
+    assert plan["upload_count"] == 0
+
+
+def test_plan_create_keeps_a_blob_reference():
+    """An already-uploaded node names its blob; re-uploading it would orphan bytes."""
+    priv = next(n for n in distribution.plan_create(REGISTRY_DEF)["definition"]["customNodes"] if n["name"] == "priv")
+    assert priv == {"name": "priv", "blobId": "blob-1"}
+
+
+def test_plan_create_honours_a_hand_written_git_node_with_no_source_tag():
+    """`source` is the scan's own annotation. A definition written by hand names its
+    fields and nothing else, and must not be read as an upload."""
+    g = next(n for n in distribution.plan_create(REGISTRY_DEF)["definition"]["customNodes"] if n["name"] == "gitpack")
+    assert g == {"name": "gitpack", "repository": "https://github.com/x/gitpack", "gitRef": "deadbeef"}
+
+
+def test_plan_create_carries_base_image_and_policies():
+    """These reach the builder or they do not exist: an absent baseImage silently
+    becomes the catalog default, and an absent policy seals as allow-all."""
+    d = distribution.plan_create(REGISTRY_DEF)["definition"]
+    assert d["baseImage"] == "cuda130-py312"
+    assert d["modelPolicy"] == {"mode": "allowlist", "list": ["ae.safetensors"]}
+    assert d["partnerNodePolicy"] == {"mode": "blocklist", "list": []}
+    assert d["baseComfyVersion"] == "v0.3.40"

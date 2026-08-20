@@ -442,8 +442,10 @@ def plan_create(definition: dict, resolver=resolve_model_source) -> dict:
     For each model: if the resolver finds a public URL → reference it as
     ``sourceUri`` (no upload); otherwise it's a private blob → goes in the upload
     plan and will be referenced by ``blobId`` once uploaded. For each custom node:
-    a ``git`` node is referenced by ``repository``+``gitRef`` (no upload); a
-    ``local`` node has no upstream → uploaded as a ``node_zip`` blob.
+    ``repository``+``gitRef``, ``id``+``registryVersion`` or ``blobId`` is carried
+    through as-is; only a node naming none of them has no upstream and is uploaded
+    as a ``node_zip`` blob. Every other definition key travels untouched, because
+    a dropped one is not an error the builder reports, just a different build.
 
     Pure and backend-free: it decides *what* would be sent/uploaded without making
     any network call. The ``blobId`` values are filled in later by the upload step;
@@ -476,19 +478,31 @@ def plan_create(definition: dict, resolver=resolve_model_source) -> dict:
 
     for j, n in enumerate(definition.get("customNodes", [])):
         entry = {"name": n["name"]}
-        if n.get("source") == "git" and n.get("repository") and n.get("gitRef"):
+        # The builder takes exactly one source per node. Try them most-precise
+        # first: a pinned git checkout reconstructs an exact commit, a registry
+        # version an exact published artifact, a blob is bytes we already hold.
+        # Keyed on the fields themselves rather than the scan's `source` tag, so a
+        # hand-edited definition that names a source without one is honoured too.
+        if n.get("repository") and n.get("gitRef"):
             entry["repository"] = n["repository"]
             entry["gitRef"] = n["gitRef"]
+        elif n.get("registryVersion") and n.get("id"):
+            entry["id"] = n["id"]
+            entry["registryVersion"] = n["registryVersion"]
+        elif n.get("blobId"):
+            entry["blobId"] = n["blobId"]
         else:
             uploads.append({"kind": "node_zip", "name": n["name"], "sizeBytes": 0, "slot": ["customNodes", j]})
         nodes_out.append(entry)
 
     builder_definition: dict = {"models": models_out, "customNodes": nodes_out}
-    # Carry environment fields the scan captured straight through to the builder.
-    if definition.get("baseComfyVersion"):
-        builder_definition["baseComfyVersion"] = definition["baseComfyVersion"]
-    if definition.get("pipDependencies"):
-        builder_definition["pipDependencies"] = definition["pipDependencies"]
+    # Everything else the definition declares goes through untouched. Dropping a
+    # key here does not fail loudly: the builder just applies its own default, so a
+    # base image silently becomes the catalog's current one and an absent policy
+    # seals as allow-all.
+    for key in ("baseComfyVersion", "baseImage", "pipDependencies", "modelPolicy", "partnerNodePolicy"):
+        if definition.get(key):
+            builder_definition[key] = definition[key]
     return {
         "definition": builder_definition,
         "uploads": uploads,
