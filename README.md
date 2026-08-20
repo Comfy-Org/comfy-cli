@@ -642,7 +642,8 @@ We welcome contributions to comfy-cli! For ideas, suggestions, or bug reports,
 open an issue at [Comfy-Org/comfy-cli](https://github.com/Comfy-Org/comfy-cli/issues).
 For code changes, fork the repo and open a pull request.
 
-See the [Dev Guide](/DEV_README.md) for setup details.
+See [CONTRIBUTING.md](/CONTRIBUTING.md) for setup, the checks CI enforces,
+and PR conventions. Notable changes are recorded in [CHANGELOG.md](/CHANGELOG.md).
 
 ## License
 
