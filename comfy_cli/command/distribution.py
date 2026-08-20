@@ -27,7 +27,9 @@ scan/hash logic is kept in pure helpers so it stays unit-testable.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -37,12 +39,11 @@ from pathlib import Path
 from typing import Annotated
 
 import requests
-import tomlkit
-import tomlkit.exceptions
 import typer
 
 from comfy_cli import tracking
 from comfy_cli._safe_exec import BinaryNotFoundError, resolve_required_binary
+from comfy_cli.command.pack_scan import read_pyproject
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH, SUPPORTED_PT_EXTENSIONS
 from comfy_cli.file_utils import atomic_write_text
 from comfy_cli.output import get_renderer
@@ -202,16 +203,27 @@ def _read_registry_pin(node_dir: Path) -> tuple[str, str] | None:
     unreadable, malformed, missing either field, or a value neither the registry
     nor the builder would accept — because a pack that cannot answer simply has no
     registry pin, and the scan must not die on one bad neighbour."""
+    path = node_dir / "pyproject.toml"
+    # Guarded rather than caught: the shared parser reports an absent file to the
+    # user, and most packs in a scan do not have one.
+    if not path.is_file():
+        return None
     try:
-        with open(node_dir / "pyproject.toml", encoding="utf-8-sig") as f:
-            data = tomlkit.load(f)
-    except (OSError, UnicodeDecodeError, tomlkit.exceptions.TOMLKitError):
+        # The repo's one pack-pyproject parser, so this agrees with `comfy
+        # outdated` and `comfy node deps` — including PEP 621 `dynamic = [
+        # "version"]`, which a hand-rolled read of `project.version` misses and
+        # which comfy-cli's own publish path resolves.
+        #
+        # Muted: that parser writes advice aimed at someone publishing a pack
+        # ("License should be in one of these two formats"), which is noise once
+        # per pack in a scan of somebody else's install and not actionable there.
+        with contextlib.redirect_stderr(io.StringIO()):
+            config = read_pyproject(str(path))
+    except Exception:
         return None
-    project = data.get("project")
-    if not isinstance(project, dict):
+    if config is None:
         return None
-    node_id = project.get("name")
-    version = project.get("version")
+    node_id, version = config.project.name, config.project.version
     if not isinstance(node_id, str) or not isinstance(version, str):
         return None
     node_id, version = node_id.strip(), version.strip()
@@ -385,6 +397,21 @@ def find_comfy_python(comfy_root: Path | None, explicit: str | None) -> Path | N
 _TORCH_RE = re.compile(r"^torch==(\S+)", re.MULTILINE)
 
 
+# userinfo in a direct-reference URL, e.g.
+# `pkg @ git+https://x-access-token:ghp_xxx@github.com/org/private.git@sha`.
+_URL_USERINFO_RE = re.compile(r"(?P<scheme>[a-zA-Z][\w+.-]*://)(?P<userinfo>[^/@\s]+)@")
+
+
+def _redact_freeze_credentials(freeze: str) -> str:
+    """Strip userinfo from any URL in a freeze.
+
+    A freeze can carry direct references to private repositories, and pip writes
+    those with whatever credential was used to install them. The definition is
+    written to disk, POSTed to the builder, and often committed, so a token in it
+    travels a long way from the machine that minted it."""
+    return _URL_USERINFO_RE.sub(lambda m: m.group("scheme") + "***@", freeze)
+
+
 def _freeze_env(python_exe: str) -> str | None:
     """`pip freeze` for a Python env, falling back to `uv pip freeze` when the
     env has no pip module (uv-created venvs, common for ComfyUI). Returns the
@@ -396,13 +423,17 @@ def _freeze_env(python_exe: str) -> str | None:
         attempts.append([resolve_required_binary("uv"), "pip", "freeze", "--python", python_exe])
     except BinaryNotFoundError:
         pass
+    # PYTHONPATH would put whatever it points at into the freeze as an installed
+    # package, so a caller with one set gets phantom pins the builder then tries
+    # to resolve. The freeze must describe the target env and nothing else.
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     for cmd in attempts:
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env)
         except (subprocess.SubprocessError, OSError):
             continue
         if r.returncode == 0 and r.stdout.strip():
-            return r.stdout
+            return _redact_freeze_credentials(r.stdout)
     return None
 
 
@@ -599,6 +630,21 @@ def resolve_models_via_builder(models: list[dict], client) -> int:
                 resolved += 1
                 break
     return resolved
+
+
+def _is_scan_shaped(definition: dict) -> bool:
+    """Whether this definition still carries the scan's own vocabulary.
+
+    A definition round-tripped out of the builder already names sources the way
+    the builder does; one straight from `scan` does not. The tell is a member that
+    names no builder source at all, which the builder would reject."""
+    for m in definition.get("models", []):
+        if not m.get("sourceUri") and not m.get("blobId"):
+            return True
+    for n in definition.get("customNodes", []):
+        if not n.get("repository") and not n.get("registryVersion") and not n.get("blobId"):
+            return True
+    return False
 
 
 def plan_create(definition: dict, resolver=resolve_model_source) -> dict:
@@ -1134,6 +1180,16 @@ def _create_execute(
 
     plan = plan_create(definition)
 
+    # An absent policy is not neutral: the version seals as allow-all. The CLI does
+    # not write one on the user's behalf — an invented allow-all is a no-op today
+    # and a pinned posture if the platform default ever changes — but it says so,
+    # because on this path there is no wizard to have said it.
+    missing = [k for k in ("modelPolicy", "partnerNodePolicy") if definition.get(k) is None]
+    if missing:
+        renderer.warn(
+            f"no {' or '.join(missing)} set; this version will be sealed permitting everything in those categories"
+        )
+
     # Locate bytes for private-model uploads: models/<type>/<filename>. Only
     # needed when something actually uploads.
     mroot = Path(models_dir).expanduser() if models_dir else None
@@ -1441,6 +1497,30 @@ def update_cmd(
         renderer.error(code="distribution_definition_invalid", message=str(e), details={"path": from_})
         raise typer.Exit(code=1) from e
     client = _builder_client(renderer, builder_url)
+
+    # A scan definition is not a builder definition: its models carry {sizeBytes,
+    # source} and no sourceUri or blobId, and its nodes name a source the builder
+    # spells differently. Sending the file verbatim means the builder rejects every
+    # model with "must set exactly one of sourceUri or blobId". Map it the same way
+    # create does, so the same file works through either command.
+    if _is_scan_shaped(definition):
+        # Batched, one call per 32 filenames, exactly as create does it. The
+        # annotation it leaves is what the default resolver in plan_create reads.
+        try:
+            resolve_models_via_builder(definition.get("models", []), client)
+        except (requests.RequestException, KeyError, ValueError) as e:
+            renderer.warn(f"model resolution unavailable ({e})")
+        plan = plan_create(definition)
+        if plan["uploads"]:
+            names = ", ".join(sorted(u.get("filename") or u["name"] for u in plan["uploads"]))
+            renderer.error(
+                code="distribution_upload_unavailable",
+                message=f"these need uploading, which update cannot do: {names}",
+                hint="use `comfy distribution create --from ... --execute`, which uploads private blobs",
+            )
+            raise typer.Exit(code=1)
+        definition = plan["definition"]
+
     # The builder guards the save with the updatedAt the caller last saw (optimistic
     # concurrency, meant for the website's read-edit-save). For a CLI that's just
     # last-writer-wins: fetch the current updatedAt and echo it back, else the save
