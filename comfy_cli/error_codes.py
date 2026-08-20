@@ -512,6 +512,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "A slot override failed validation (bad shape, unknown address, etc.).",
         "see `details` — addresses follow `<instance_id>.<input_name>`",
     ),
+    ErrorCode(
+        "workflow_mode_invalid",
+        "A workflow node-mode override failed validation.",
+        "use `NODE_ID=MODE` or `INSTANCE_ID/INNER_ID=MODE`; MODE is normal, mute, or bypass",
+    ),
     # --- workflow fragments / compose ---------------------------------------
     ErrorCode(
         "fragment_invalid",

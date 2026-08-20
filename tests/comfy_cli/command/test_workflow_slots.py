@@ -441,7 +441,6 @@ class TestSetSlotDirectMode:
         assert "not found" in env["error"]["message"].lower()
 
 
-
 # ---------------------------------------------------------------------------
 # set-mode — structural workflow variants
 # ---------------------------------------------------------------------------
@@ -513,6 +512,7 @@ class TestSetMode:
         assert env["ok"] is False
         assert env["error"]["code"] == "workflow_mode_invalid"
         assert path.read_text() == original_text
+
 
 # ---------------------------------------------------------------------------
 # vary — direct mode

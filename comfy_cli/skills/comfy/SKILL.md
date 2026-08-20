@@ -778,8 +778,8 @@ fan-out outputs by array order** — read `outputs_by_item`.
 
 ## Edit workflows in place
 
-`workflow slots`, `set-slot`, and `vary` work on any frontend-format
-workflow JSON — not just templates. Get slot addresses first:
+`workflow slots`, `set-slot`, `set-mode`, and `vary` work on any
+frontend-format workflow JSON — not just templates. Get slot addresses first:
 
 ```bash
 # 1. Discover addressable slots — addresses are <node_id>.<input>, never titles
@@ -790,6 +790,11 @@ comfy --json workflow slots path.json
 
 # 2. Set a single slot
 comfy workflow set-slot path.json 6.text="a cat"
+
+# Toggle structural branches without paying the runtime cost of a zero-strength node
+comfy workflow set-mode path.json 105=bypass
+# subgraph interior: <instance_id>/<inner_id>
+comfy workflow set-mode path.json 10/20=mute
 
 # 3. Generate variations (slot lists are zipped — same length required)
 comfy --json workflow slots wf.json          # discover addresses first

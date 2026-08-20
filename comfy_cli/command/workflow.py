@@ -1,11 +1,11 @@
 """``comfy workflow`` — slot-based editing of ComfyUI frontend-format workflows.
 
-Three primitives:
+Four editing primitives:
 
     comfy workflow slots <file>                        # what can I tweak?
-    comfy workflow set-slot <file> ADDR=VALUE [...]    # tweak one or more
+    comfy workflow set-slot <file> ADDR=VALUE [...]    # tweak widget values
+    comfy workflow set-mode <file> NODE=MODE [...]     # normal/mute/bypass nodes
     comfy workflow vary <file> --slot ADDR='[v1,v2]'   # produce N variants
-
 Plus one read-only reader that needs no object_info at all:
 
     comfy workflow notes <file>                        # what did the author write?
@@ -320,6 +320,140 @@ def set_slot_cmd(
         for w in warnings:
             rprint(f"  [yellow]warning:[/yellow] {w}")
     renderer.emit(payload, command="workflow set-slot", changed=not stdout)
+
+
+# ---------------------------------------------------------------------------
+# set-mode
+# ---------------------------------------------------------------------------
+
+
+_NODE_MODES = {"normal": 0, "mute": 2, "bypass": 4}
+
+
+def _node_with_id(nodes: Any, node_id: str) -> dict[str, Any] | None:
+    if not isinstance(nodes, list):
+        return None
+    return next(
+        (node for node in nodes if isinstance(node, dict) and str(node.get("id")) == node_id),
+        None,
+    )
+
+
+def _resolve_mode_node(workflow: dict[str, Any], address: str) -> dict[str, Any]:
+    parts = [part.strip() for part in address.split("/")]
+    if not parts or any(not part for part in parts):
+        raise ValueError(f"Invalid node address {address!r}; expected NODE_ID or INSTANCE_ID/INNER_ID")
+
+    node = _node_with_id(workflow.get("nodes"), parts[0])
+    if node is None:
+        raise ValueError(f"Node {parts[0]!r} not found")
+
+    definitions = workflow.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    for inner_id in parts[1:]:
+        node_type = node.get("type")
+        subgraph = (
+            next(
+                (item for item in subgraphs if isinstance(item, dict) and item.get("id") == node_type),
+                None,
+            )
+            if isinstance(subgraphs, list)
+            else None
+        )
+        if subgraph is None:
+            raise ValueError(f"Node {parts[0]!r} is not a subgraph instance at {address!r}")
+        node = _node_with_id(subgraph.get("nodes"), inner_id)
+        if node is None:
+            raise ValueError(f"Node {inner_id!r} not found in {address!r}")
+
+    return node
+
+
+@app.command(
+    "set-mode",
+    help="Set one or more nodes to normal, mute, or bypass in place (or --stdout).",
+)
+@tracking.track_command("workflow")
+def set_mode_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    overrides: Annotated[
+        list[str],
+        typer.Argument(
+            metavar="NODE=MODE...",
+            help="NODE_ID=MODE or INSTANCE_ID/INNER_ID=MODE; MODE is normal, mute, or bypass.",
+        ),
+    ],
+    stdout: Annotated[
+        bool,
+        typer.Option(
+            "--stdout/--in-place",
+            show_default=False,
+            help="Return the modified workflow instead of writing back to <file>.",
+        ),
+    ] = False,
+):
+    renderer = get_renderer()
+    p, workflow = _load_workflow_or_fail(renderer, file)
+
+    parsed: dict[str, int] = {}
+    for raw in overrides:
+        if "=" not in raw:
+            renderer.error(
+                code="workflow_mode_invalid",
+                message=f"Expected `NODE=MODE`, got {raw!r}",
+                hint="MODE must be normal, mute, or bypass",
+            )
+            raise typer.Exit(code=1)
+        address, _, raw_mode = raw.partition("=")
+        address = address.strip()
+        mode = raw_mode.strip().lower()
+        if mode not in _NODE_MODES:
+            renderer.error(
+                code="workflow_mode_invalid",
+                message=f"Unknown node mode {raw_mode.strip()!r} for {address!r}",
+                hint="MODE must be normal, mute, or bypass",
+            )
+            raise typer.Exit(code=1)
+        parsed[address] = _NODE_MODES[mode]
+
+    try:
+        resolved = [(address, _resolve_mode_node(workflow, address), mode) for address, mode in parsed.items()]
+    except ValueError as e:
+        renderer.error(
+            code="workflow_mode_invalid",
+            message=str(e),
+            hint="use NODE_ID or INSTANCE_ID/INNER_ID from the frontend workflow",
+        )
+        raise typer.Exit(code=1) from e
+
+    for _address, node, mode in resolved:
+        node["mode"] = mode
+
+    if stdout and renderer.is_pretty():
+        import sys
+
+        sys.stdout.write(json.dumps(workflow, indent=2))
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        return
+
+    if not stdout:
+        atomic_write_text(p, json.dumps(workflow, indent=2))
+
+    payload: dict[str, Any] = {
+        "workflow": str(p),
+        "applied": list(parsed),
+        "warnings": [],
+        "wrote": None if stdout else str(p),
+    }
+    if stdout:
+        payload["out"] = "stdout"
+        payload["workflow_json"] = workflow
+    if renderer.is_pretty():
+        rprint(f"[bold green]✓[/bold green] applied {len(parsed)} node mode(s) → [dim]{p}[/dim]")
+        for address in parsed:
+            rprint(f"  [dim]·[/dim] {address}")
+    renderer.emit(payload, command="workflow set-mode", changed=not stdout)
 
 
 # ---------------------------------------------------------------------------
