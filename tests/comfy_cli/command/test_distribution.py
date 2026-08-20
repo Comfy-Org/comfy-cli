@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 
 import pytest
+import requests
+import typer
 
 from comfy_cli.command import distribution
 
@@ -299,10 +301,12 @@ def test_plan_create_maps_to_builder_schema_all_upload():
 
 
 def test_plan_create_carries_environment_fields():
-    """baseComfyVersion / pipDependencies pass straight through to the builder def."""
+    """pipDependencies passes straight through; baseComfyVersion is normalized to a
+    ref the builder can resolve, here rather than only in `scan`, so a definition
+    written before that fix does not spend its cut discovering the difference."""
     definition = {**SCAN_DEF, "baseComfyVersion": "0.3.40", "pipDependencies": "numpy==1.26.0\n"}
     d = distribution.plan_create(definition)["definition"]
-    assert d["baseComfyVersion"] == "0.3.40"
+    assert d["baseComfyVersion"] == "v0.3.40"
     assert d["pipDependencies"] == "numpy==1.26.0\n"
 
 
@@ -894,6 +898,19 @@ def _write_pack(root, name, *, project=None, git=False):
     return d
 
 
+def test_scan_drops_the_git_keys_when_it_records_a_registry_pin(tmp_path, monkeypatch):
+    """Exactly one source per node, which the builder enforces. A half-git checkout
+    (an origin but no resolvable HEAD) would otherwise carry both, which `create`
+    hides by picking one but `update --from` sends verbatim and the builder 400s."""
+    _write_pack(tmp_path, "half", project='[project]\nname = "half"\nversion = "1.0.0"\n', git=True)
+    monkeypatch.setattr(
+        distribution, "_git_output", lambda path, *args: "https://github.com/x/half" if args[0] == "remote" else None
+    )
+    (node,) = distribution.scan_custom_nodes(tmp_path / "custom_nodes")
+    assert node["source"] == "registry"
+    assert node.get("repository") is None and node.get("gitRef") is None
+
+
 def test_scan_reads_the_registry_pin_off_an_archive_install(tmp_path):
     """`comfy node install` unpacks archives, so a pack has no git history at all.
     Its pyproject still names the published version the builder can fetch."""
@@ -928,10 +945,25 @@ def test_scan_prefers_git_over_the_registry_pin(tmp_path, monkeypatch):
     assert "registryVersion" not in node
 
 
-def test_read_registry_pin_is_silent_on_a_broken_pyproject(tmp_path):
-    """A malformed file is a pack without a pin, never a crashed scan."""
-    d = _write_pack(tmp_path, "broken", project="this is not toml [[[")
-    assert distribution.read_registry_pin(d) is None
+@pytest.mark.parametrize(
+    ("body", "why"),
+    [
+        ("this is not toml [[[", "malformed"),
+        ('[project]\nname = "ok"\nversion = 1.0\n', "version is a toml float, not a string"),
+        ('[project]\nname = "ok"\nversion = 2024-01-01\n', "version is a toml date"),
+        ('[project]\nname = ""\nversion = "1.0.0"\n', "empty id"),
+        ('[project]\nname = "ok"\nversion = "1.0"\n', "not a package version; the builder rejects it"),
+        ('[project]\nname = "ok"\nversion = "0.1.0b1"\n', "prerelease is not a package version"),
+        ('[project]\nname = "../../publishers/x"\nversion = "1.0.0"\n', "escapes the registry path"),
+        ('[project]\nname = "ok#frag"\nversion = "1.0.0"\n', "truncates server-side to a different id"),
+        ('project = "hello"\n', "project is not a table"),
+    ],
+)
+def test_read_registry_pin_is_silent_on_anything_it_cannot_trust(tmp_path, body, why):
+    """A pack that cannot answer has no pin. It must never crash the scan, and never
+    hand on a value the registry or the builder would reject."""
+    d = _write_pack(tmp_path, "pack", project=body)
+    assert distribution._read_registry_pin(d) is None, why
 
 
 # --- scan: the ComfyUI pin has to be a ref that resolves ----------------------
@@ -1009,9 +1041,12 @@ def test_validate_prints_the_warnings_beside_the_verdict(monkeypatch, capsys):
             "warnings": [{"field": "baseComfyVersion", "reason": "ref not found in remote advertisement"}],
         },
     )
-    assert "baseComfyVersion" in out
-    assert "ref not found in remote advertisement" in out
-    assert "a cut will fail on these" in out
+    # Assert on the text BEFORE the JSON dump: the dump repeats every one of these
+    # strings, so a whole-output assertion passes even with the warn lines deleted.
+    head = out.split("{", 1)[0]
+    assert "1 reference(s)" in head
+    assert "the build will fail on these" in head
+    assert "baseComfyVersion: ref not found in remote advertisement" in head
 
 
 def test_validate_does_not_claim_the_definition_resolves(monkeypatch, capsys):
@@ -1022,64 +1057,183 @@ def test_validate_does_not_claim_the_definition_resolves(monkeypatch, capsys):
     assert "Definition resolves." not in out
 
 
-# --- create: a registry id the registry does not have -------------------------
+# --- create: a pin the registry cannot serve ----------------------------------
 
 
 class _FakeRegistry:
-    """Answers get_node from a known set; anything else 404s. `unreachable` ids
-    raise a non-404, which must never be read as 'no such node'."""
+    """Stands in for RegistryAPI. `known` holds published (id, version) pairs;
+    `unreachable` ids raise a non-404, and `flaky` ids raise the transport error a
+    real timeout produces. Both must be read as "no answer", never as "no node"."""
 
-    def __init__(self, known, unreachable=()):
-        self.known = set(known)
+    def __init__(self, known=(), unreachable=(), flaky=()):
+        self.known = {tuple(k) for k in known}
         self.unreachable = set(unreachable)
+        self.flaky = set(flaky)
         self.asked = []
 
-    def get_node(self, node_id):
-        self.asked.append(node_id)
+    def get_node_version(self, node_id, version):
+        self.asked.append((node_id, version))
+        if node_id in self.flaky:
+            raise requests.ConnectionError("connection reset")
         if node_id in self.unreachable:
             raise distribution.NodeFetchError("registry down", status_code=503)
-        if node_id not in self.known:
-            raise distribution.NodeFetchError("no such node", status_code=404)
-        return {"id": node_id}
+        if (node_id, version) not in self.known:
+            raise distribution.NodeFetchError("no such node version", status_code=404)
+        return {"id": node_id, "version": version}
 
 
-def test_repair_registry_ids_falls_back_to_the_install_directory():
-    """A pack published from a PR preview carries that preview's id, which no
-    released version exists under. The directory it was installed into is named
-    for the real registry id."""
-    nodes = [{"name": "was-node-suite-comfyui", "id": "pr-was-node-suite-comfyui-47064894", "registryVersion": "1.0.1"}]
-    api = _FakeRegistry(known={"was-node-suite-comfyui"})
-    assert distribution.repair_registry_ids(nodes, api) == [
-        ("pr-was-node-suite-comfyui-47064894", "was-node-suite-comfyui")
+WAS_PREVIEW = {
+    "name": "was-node-suite-comfyui",
+    "id": "pr-was-node-suite-comfyui-47064894",
+    "registryVersion": "1.0.1",
+}
+
+
+def test_verify_registry_pins_checks_the_pair_not_just_the_node():
+    """Freeze resolves (id, version). A node that exists at some other version is
+    not a buildable pin, and proving the node alone would pass it through."""
+    nodes = [{"name": "kj", "id": "kj", "registryVersion": "9.9.9"}]
+    api = _FakeRegistry(known=[("kj", "1.4.9")])
+    assert distribution.verify_registry_pins(nodes, api)["unresolved"] == [("kj", "kj", "9.9.9", None)]
+
+
+def test_verify_registry_pins_reports_the_candidate_without_applying_it():
+    """The default is to say what was found. A directory name is not evidence: it
+    is user-controlled and registry ids are first-come, so using it silently could
+    install a stranger's package."""
+    nodes = [dict(WAS_PREVIEW)]
+    api = _FakeRegistry(known=[("was-node-suite-comfyui", "1.0.1")])
+    out = distribution.verify_registry_pins(nodes, api)
+    assert out["repaired"] == []
+    assert out["unresolved"] == [
+        ("was-node-suite-comfyui", "pr-was-node-suite-comfyui-47064894", "1.0.1", "was-node-suite-comfyui")
     ]
+    assert nodes[0]["id"] == "pr-was-node-suite-comfyui-47064894"  # untouched
+
+
+def test_verify_registry_pins_applies_the_candidate_only_under_repair():
+    nodes = [dict(WAS_PREVIEW)]
+    api = _FakeRegistry(known=[("was-node-suite-comfyui", "1.0.1")])
+    out = distribution.verify_registry_pins(nodes, api, repair=True)
+    assert out["repaired"] == [("pr-was-node-suite-comfyui-47064894", "was-node-suite-comfyui")]
+    assert out["unresolved"] == []
     assert nodes[0]["id"] == "was-node-suite-comfyui"
 
 
-def test_repair_registry_ids_leaves_a_good_id_alone():
-    nodes = [{"name": "comfyui-kjnodes", "id": "comfyui-kjnodes", "registryVersion": "1.4.9"}]
-    api = _FakeRegistry(known={"comfyui-kjnodes"})
-    assert distribution.repair_registry_ids(nodes, api) == []
-    assert api.asked == []  # name equals id: nothing to disambiguate, so nothing is asked
+def test_verify_registry_pins_repair_still_requires_the_candidate_version_to_exist():
+    """Repair rewrites the id and keeps the version. If the released series never
+    had that version, rewriting would only move the failure back to freeze."""
+    nodes = [dict(WAS_PREVIEW)]
+    api = _FakeRegistry(known=[("was-node-suite-comfyui", "1.0.2")])
+    out = distribution.verify_registry_pins(nodes, api, repair=True)
+    assert out["repaired"] == []
+    assert out["unresolved"] == [("was-node-suite-comfyui", "pr-was-node-suite-comfyui-47064894", "1.0.1", None)]
 
 
-def test_repair_registry_ids_does_not_rewrite_on_an_unreachable_registry():
-    """A 503 is not evidence the node is missing. Rewriting on it would corrupt a
-    correct definition whenever the registry hiccups."""
-    nodes = [{"name": "realname", "id": "declared", "registryVersion": "1.0.0"}]
-    api = _FakeRegistry(known={"realname"}, unreachable={"declared"})
-    assert distribution.repair_registry_ids(nodes, api) == []
-    assert nodes[0]["id"] == "declared"
+@pytest.mark.parametrize("kind", ["unreachable", "flaky"])
+def test_verify_registry_pins_never_rewrites_on_a_non_answer(kind):
+    """A 503 or a dropped connection is not evidence a pin is missing. Treating it
+    as one would corrupt a correct definition every time the registry hiccups."""
+    nodes = [dict(WAS_PREVIEW)]
+    api = _FakeRegistry(**{kind: {"pr-was-node-suite-comfyui-47064894"}})
+    out = distribution.verify_registry_pins(nodes, api, repair=True)
+    assert out["unreachable"] is True
+    assert out["repaired"] == [] and out["unresolved"] == []
+    assert nodes[0]["id"] == "pr-was-node-suite-comfyui-47064894"
 
 
-def test_repair_registry_ids_leaves_both_misses_alone():
-    """Nothing to point at: the definition stays as written and the build reports it."""
-    nodes = [{"name": "realname", "id": "declared", "registryVersion": "1.0.0"}]
-    assert distribution.repair_registry_ids(nodes, _FakeRegistry(known=set())) == []
-    assert nodes[0]["id"] == "declared"
+def test_verify_registry_pins_stops_asking_once_the_registry_stops_answering():
+    """One timeout per pack turns a 40-pack install into a 20-minute hang."""
+    nodes = [dict(WAS_PREVIEW), {"name": "b", "id": "b", "registryVersion": "1.0.0"}]
+    api = _FakeRegistry(unreachable={"pr-was-node-suite-comfyui-47064894", "b"})
+    distribution.verify_registry_pins(nodes, api)
+    assert len(api.asked) == 1
 
 
-def test_repair_registry_ids_ignores_nodes_with_no_registry_pin():
+def test_verify_registry_pins_ignores_nodes_with_no_registry_pin():
+    api = _FakeRegistry()
     nodes = [{"name": "gitpack", "repository": "https://github.com/x/gitpack", "gitRef": "deadbeef"}]
-    api = _FakeRegistry(known=set())
-    assert distribution.repair_registry_ids(nodes, api) == []
+    assert distribution.verify_registry_pins(nodes, api)["unresolved"] == []
     assert api.asked == []
+
+
+def test_verify_registry_pins_checks_a_pack_whose_name_matches_its_id():
+    """The common shape of a self-authored pack. Skipping it because there is
+    nothing to fall back to would leave the pin unverified, which is the case that
+    creates the distribution and then dies at freeze."""
+    nodes = [{"name": "my-inhouse-pack", "id": "my-inhouse-pack", "registryVersion": "0.1.0"}]
+    api = _FakeRegistry()
+    out = distribution.verify_registry_pins(nodes, api)
+    assert api.asked == [("my-inhouse-pack", "0.1.0")]
+    assert out["unresolved"] == [("my-inhouse-pack", "my-inhouse-pack", "0.1.0", None)]
+
+
+def test_create_execute_stops_before_creating_anything_on_a_bad_pin(monkeypatch, capsys):
+    """The wiring, not the logic: a pin the registry cannot serve must fail here,
+    before a distribution exists, which is the whole point of checking early."""
+    created = []
+
+    class FakeBuilder:
+        def resolve_models(self, *a, **k):
+            return {}
+
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: FakeBuilder())
+    monkeypatch.setattr(distribution, "_registry_client", lambda: _FakeRegistry())
+    monkeypatch.setattr(distribution, "execute_create", lambda *a, **k: created.append(a) or {})
+
+    with pytest.raises(typer.Exit) as e:
+        distribution._create_execute(
+            distribution.get_renderer(),
+            {"models": [], "customNodes": [dict(WAS_PREVIEW)], "baseComfyVersion": "v0.30.2"},
+            name="d",
+            builder_url=None,
+            models_dir=None,
+        )
+    assert e.value.exit_code == 1
+    assert created == []  # nothing was created, so there is no cut to reclaim
+    assert "pr-was-node-suite-comfyui-47064894" in capsys.readouterr().out
+
+
+def test_create_execute_passes_the_repaired_id_to_the_builder(monkeypatch):
+    """Under --repair-registry-ids the rewritten id must actually reach the
+    definition that is sent, not just the warning line."""
+    sent = {}
+
+    class FakeBuilder:
+        def resolve_models(self, *a, **k):
+            return {}
+
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: FakeBuilder())
+    monkeypatch.setattr(
+        distribution, "_registry_client", lambda: _FakeRegistry(known=[("was-node-suite-comfyui", "1.0.1")])
+    )
+
+    def fake_execute(plan, **kwargs):
+        sent.update(plan["definition"])
+        return {"distributionId": "d1", "versionId": "v1", "uploaded": 0, "statusUrl": "u"}
+
+    monkeypatch.setattr(distribution, "execute_create", fake_execute)
+    distribution._create_execute(
+        distribution.get_renderer(),
+        {"models": [], "customNodes": [dict(WAS_PREVIEW)], "baseComfyVersion": "v0.30.2"},
+        name="d",
+        builder_url=None,
+        models_dir=None,
+        repair=True,
+    )
+    assert sent["customNodes"][0]["id"] == "was-node-suite-comfyui"
+
+
+def test_plan_create_prefers_git_when_a_node_carries_both_sources():
+    """plan_create re-decides precedence from the fields, independently of scan. A
+    commit pins bytes; a package version is resolved later, so git wins."""
+    node = {
+        "name": "dual",
+        "repository": "https://github.com/x/dual",
+        "gitRef": "deadbeef",
+        "id": "dual",
+        "registryVersion": "2.0.0",
+    }
+    entry = distribution.plan_create({"models": [], "customNodes": [node]})["definition"]["customNodes"][0]
+    assert entry["gitRef"] == "deadbeef"
+    assert "registryVersion" not in entry
