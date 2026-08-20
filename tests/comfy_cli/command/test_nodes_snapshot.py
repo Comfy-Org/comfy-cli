@@ -140,6 +140,29 @@ def test_stream_snapshot_rejects_non_catalog_json(monkeypatch, tmp_path):
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_stream_snapshot_bounds_one_catalog_entry(monkeypatch, tmp_path):
+    body = json.dumps(
+        {
+            "KSampler": {
+                "input": {"required": {}},
+                "description": "x" * 256,
+            }
+        }
+    ).encode()
+    monkeypatch.setattr(nodes_cmd, "_OBJECT_INFO_ENTRY_MAX_CHARS", 64)
+    monkeypatch.setattr(
+        nodes_cmd,
+        "authed_urlopen",
+        lambda *_a, **_kw: _ChunkedResponse(body),
+    )
+
+    with pytest.raises(ValueError, match="catalog entry exceeds"):
+        nodes_cmd._stream_object_info_snapshot(
+            Target(kind="local", base_url="http://127.0.0.1:8188"),
+            tmp_path / "object_info.json",
+        )
+
+
 @pytest.mark.parametrize(
     ("mode", "expected_host", "expected_port"),
     [("local", "gpu-box", 8288), ("cloud", None, None)],
