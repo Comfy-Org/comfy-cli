@@ -194,7 +194,10 @@ def build_authed_request(
     Target can't carry a stray credential into this path either.
     """
     req = urllib.request.Request(url, data=data, method=method)
-    for k, v in target_auth_headers(target).items():
+    auth_headers = target_auth_headers(target)
+    if auth_headers and urllib.parse.urlsplit(url).scheme == "http":
+        assert_safe_url(url)
+    for k, v in auth_headers.items():
         req.add_header(k, v)
     if content_type:
         req.add_header("Content-Type", content_type)

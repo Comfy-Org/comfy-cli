@@ -102,13 +102,13 @@ def test_bearer_when_only_auth_token():
     assert req.get_header("X-api-key") is None
 
 
-
 def test_credential_rejected_on_plaintext_non_loopback_url():
     with pytest.raises(ValueError, match="non-https, non-loopback"):
         build_authed_request(
             "http://api.example.com/object_info",
             _target(auth_token="secret"),
         )
+
 
 def test_no_auth_header_when_uncredentialed():
     """A local (uncredentialed) target gets no credential header."""

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import io
 import json
+import types
 from pathlib import Path
 from typing import Any
 
-import pytest
 import jsonschema
+import pytest
 from typer.testing import CliRunner
 
 from comfy_cli.caller import Caller
@@ -92,9 +93,7 @@ def test_stream_snapshot_preserves_existing_file_on_invalid_json(monkeypatch, tm
 
 def test_stream_snapshot_accepts_exact_size_limit(monkeypatch, tmp_path):
     body = json.dumps(_object_info()).encode()
-    monkeypatch.setattr(
-        nodes_cmd, "_OBJECT_INFO_SNAPSHOT_MAX_BYTES", len(body)
-    )
+    monkeypatch.setattr(nodes_cmd, "_OBJECT_INFO_SNAPSHOT_MAX_BYTES", len(body))
     monkeypatch.setattr(
         nodes_cmd,
         "authed_urlopen",
@@ -102,9 +101,7 @@ def test_stream_snapshot_accepts_exact_size_limit(monkeypatch, tmp_path):
     )
     output = tmp_path / "object_info.json"
 
-    result = nodes_cmd._stream_object_info_snapshot(
-        Target(kind="local", base_url="http://127.0.0.1:8188"), output
-    )
+    result = nodes_cmd._stream_object_info_snapshot(Target(kind="local", base_url="http://127.0.0.1:8188"), output)
 
     assert result["bytes"] == len(body)
     assert output.is_file()
@@ -112,9 +109,7 @@ def test_stream_snapshot_accepts_exact_size_limit(monkeypatch, tmp_path):
 
 def test_stream_snapshot_rejects_over_limit_without_replacing(monkeypatch, tmp_path):
     body = json.dumps(_object_info()).encode()
-    monkeypatch.setattr(
-        nodes_cmd, "_OBJECT_INFO_SNAPSHOT_MAX_BYTES", len(body) - 1
-    )
+    monkeypatch.setattr(nodes_cmd, "_OBJECT_INFO_SNAPSHOT_MAX_BYTES", len(body) - 1)
     monkeypatch.setattr(
         nodes_cmd,
         "authed_urlopen",
@@ -124,9 +119,7 @@ def test_stream_snapshot_rejects_over_limit_without_replacing(monkeypatch, tmp_p
     output.write_text('{"existing": true}')
 
     with pytest.raises(ValueError, match="snapshot limit"):
-        nodes_cmd._stream_object_info_snapshot(
-            Target(kind="local", base_url="http://127.0.0.1:8188"), output
-        )
+        nodes_cmd._stream_object_info_snapshot(Target(kind="local", base_url="http://127.0.0.1:8188"), output)
 
     assert output.read_text() == '{"existing": true}'
     assert not list(tmp_path.glob("*.tmp"))
@@ -141,12 +134,42 @@ def test_stream_snapshot_rejects_non_catalog_json(monkeypatch, tmp_path):
     output = tmp_path / "object_info.json"
 
     with pytest.raises(ValueError, match="not a node catalog"):
-        nodes_cmd._stream_object_info_snapshot(
-            Target(kind="local", base_url="http://127.0.0.1:8188"), output
-        )
+        nodes_cmd._stream_object_info_snapshot(Target(kind="local", base_url="http://127.0.0.1:8188"), output)
 
     assert not output.exists()
     assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_host", "expected_port"),
+    [("local", "gpu-box", 8288), ("cloud", None, None)],
+)
+def test_snapshot_target_uses_normal_routing(monkeypatch, mode, expected_host, expected_port):
+    from comfy_cli import host_port
+    from comfy_cli import where as where_module
+
+    target_kind = where_module.WhereTarget.LOCAL if mode == "local" else where_module.WhereTarget.CLOUD
+    monkeypatch.setattr(
+        where_module,
+        "resolve_default_or_exit",
+        lambda flag=None: types.SimpleNamespace(target=target_kind),
+    )
+    monkeypatch.setattr(
+        host_port,
+        "resolve_host_port",
+        lambda host, port: ("gpu-box", 8288),
+    )
+    calls: list[dict[str, Any]] = []
+
+    def fake_resolve_target(**kwargs):
+        calls.append(kwargs)
+        return Target(kind=mode, base_url="https://example.com")
+
+    monkeypatch.setattr(nodes_cmd, "resolve_target", fake_resolve_target)
+
+    nodes_cmd._resolve_snapshot_target(mode, None, None)
+
+    assert calls == [{"where": mode, "host": expected_host, "port": expected_port}]
 
 
 def test_snapshot_command_emits_written_catalog(monkeypatch, tmp_path, capsys):
@@ -172,11 +195,7 @@ def test_snapshot_command_emits_written_catalog(monkeypatch, tmp_path, capsys):
     assert envelope["data"]["output"] == str(output)
     assert envelope["data"]["classes"] == 1
     assert calls == [(target, output)]
-    schema = json.loads(
-        (
-            Path(nodes_cmd.__file__).parent.parent / "schemas" / "nodes.json"
-        ).read_text()
-    )
+    schema = json.loads((Path(nodes_cmd.__file__).parent.parent / "schemas" / "nodes.json").read_text())
     jsonschema.validate(instance=envelope["data"], schema=schema)
 
 
@@ -192,7 +211,6 @@ def test_snapshot_command_reports_invalid_where(tmp_path, capsys):
             "--where",
             "somewhere",
         ],
-        standalone_mode=False,
     )
     captured = capsys.readouterr().out or result.stdout
     envelope = json.loads(captured.strip().splitlines()[-1])
@@ -202,19 +220,36 @@ def test_snapshot_command_reports_invalid_where(tmp_path, capsys):
     assert envelope["error"]["code"] == "where_invalid"
 
 
-def test_snapshot_command_maps_unresolvable_home_to_envelope(
-    monkeypatch, capsys
-):
+def test_snapshot_command_maps_unresolvable_home_to_envelope(monkeypatch, capsys):
     target = Target(kind="local", base_url="http://127.0.0.1:8188")
-    monkeypatch.setattr(
-        nodes_cmd, "_resolve_snapshot_target", lambda *_a, **_kw: target
-    )
+    monkeypatch.setattr(nodes_cmd, "_resolve_snapshot_target", lambda *_a, **_kw: target)
     _force_json_renderer()
 
     result = CliRunner().invoke(
         nodes_cmd.app,
         ["snapshot", "--output", "~comfy-cli-user-that-does-not-exist/catalog.json"],
-        standalone_mode=False,
+    )
+    captured = capsys.readouterr().out or result.stdout
+    envelope = json.loads(captured.strip().splitlines()[-1])
+
+    assert result.exit_code == 1
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "nodes_snapshot_failed"
+
+
+def test_snapshot_command_maps_fetch_failure_to_envelope(monkeypatch, tmp_path, capsys):
+    target = Target(kind="local", base_url="http://127.0.0.1:8188")
+    monkeypatch.setattr(nodes_cmd, "_resolve_snapshot_target", lambda *_a, **_kw: target)
+
+    def fail_snapshot(*_args, **_kwargs):
+        raise OSError("connection lost")
+
+    monkeypatch.setattr(nodes_cmd, "_stream_object_info_snapshot", fail_snapshot)
+    _force_json_renderer()
+
+    result = CliRunner().invoke(
+        nodes_cmd.app,
+        ["snapshot", "--output", str(tmp_path / "object_info.json")],
     )
     captured = capsys.readouterr().out or result.stdout
     envelope = json.loads(captured.strip().splitlines()[-1])

@@ -1052,11 +1052,14 @@ def categories_cmd(
 
 
 _OBJECT_INFO_SNAPSHOT_CHUNK_BYTES = 1024 * 1024
-_OBJECT_INFO_SNAPSHOT_MAX_BYTES = 512 * 1024 * 1024
+_OBJECT_INFO_SNAPSHOT_MAX_BYTES = 128 * 1024 * 1024
 
 
 def _resolve_snapshot_target(where: str | None, host: str | None, port: int | None) -> Target:
-    mode = _resolved_where(where)
+    from comfy_cli import where as where_module
+
+    decision = where_module.resolve_default_or_exit(flag=where)
+    mode = decision.target.value
     get_renderer().where = mode
     if mode == "local":
         from comfy_cli.host_port import report_usage_error, resolve_host_port
@@ -1077,7 +1080,7 @@ def _stream_object_info_snapshot(target: Target, output: Path) -> dict[str, int]
                 while chunk := response.read(_OBJECT_INFO_SNAPSHOT_CHUNK_BYTES):
                     total += len(chunk)
                     if total > _OBJECT_INFO_SNAPSHOT_MAX_BYTES:
-                        raise ValueError("object_info response exceeds the 512 MiB snapshot limit")
+                        raise ValueError("object_info response exceeds the 128 MiB snapshot limit")
                     dst.write(chunk)
             dst.flush()
             os.fsync(dst.fileno())
@@ -1085,7 +1088,7 @@ def _stream_object_info_snapshot(target: Target, output: Path) -> dict[str, int]
         try:
             with temp_path.open(encoding="utf-8") as handle:
                 data = json.load(handle)
-        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as e:
             raise ValueError("object_info response is not valid JSON") from e
 
         if (
@@ -1127,10 +1130,10 @@ def snapshot_cmd(
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
 ):
     renderer = get_renderer()
-    target = _resolve_snapshot_target(where, host, port)
     try:
+        target = _resolve_snapshot_target(where, host, port)
         result = _stream_object_info_snapshot(target, output)
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, RuntimeError, RecursionError) as e:
         renderer.error(
             code="nodes_snapshot_failed",
             message=f"Could not save object_info snapshot: {e}",
