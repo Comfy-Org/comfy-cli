@@ -841,3 +841,80 @@ def test_cursor_description_falls_back_when_frontmatter_has_none(tmp_path: Path)
     from comfy_cli.skills import _cursor_description_for
 
     assert _cursor_description_for("x", "# no frontmatter\n") == "comfy CLI skill: x"
+
+
+# ---------------------------------------------------------------------------
+# Token resolution — the default set is names, never paths
+# ---------------------------------------------------------------------------
+
+
+def test_cwd_directory_named_like_a_skill_does_not_shadow_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Every ComfyUI checkout has a `comfy/` directory, and `comfy` is a skill.
+
+    Resolving the default set by path would make a plain install crash there, or
+    quietly install whatever that directory contained into the user's agent config.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "comfy").mkdir()
+    (tmp_path / "comfy" / "SKILL.md").write_text(
+        "---\nname: comfy\ndescription: Impostor.\n---\n\nNot the bundled skill.\n", encoding="utf-8"
+    )
+    target = tmp_path / "target"
+    target.mkdir()
+
+    results = install(scope="project", project_root=target, targets=["claude-code"])
+
+    assert all(r.action == "wrote" for r in results), [r for r in results if r.action != "wrote"]
+    installed = (target / ".claude/skills/comfy/SKILL.md").read_text(encoding="utf-8")
+    assert installed == skill_content("comfy")
+    assert "Impostor" not in installed
+
+
+def test_plan_and_install_agree_on_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Both go through one resolution, so a name can never appear in one and not the other."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "comfy").mkdir()
+    planned = {p.skill for p in plan_install(scope="project", project_root=tmp_path / "t")}
+    installed = {r.skill for r in install(scope="project", project_root=tmp_path / "t", dry_run=True)}
+    assert planned == installed == set(default_skill_names())
+
+
+def test_path_installed_skill_gets_no_remote_source(tmp_path: Path):
+    """A local skill that happens to share the remote one's name did not come from the repository."""
+    from comfy_cli.skills import read_manifest
+
+    name = REMOTE_SKILLS[0].name
+    skill_dir = tmp_path / name
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Local.\n---\n\nLocal.\n", "utf-8")
+    target = tmp_path / "target"
+    target.mkdir()
+
+    install(scope="project", project_root=target, skills=[str(skill_dir)], targets=["claude-code"])
+
+    entry = read_manifest()[str(target / ".claude" / "skills" / name / "SKILL.md")]
+    assert "source" not in entry
+
+
+def test_staging_failure_skips_rather_than_aborting(monkeypatch: pytest.MonkeyPatch):
+    """A full disk or unwritable TMPDIR must not take the whole install down with it."""
+    fetch = _real_fetch(monkeypatch, REMOTE_SKILL_MD.encode("utf-8"))
+
+    def no_tmp(*a, **kw):
+        raise OSError("[Errno 28] No space left on device")
+
+    monkeypatch.setattr(skills_pkg.tempfile, "TemporaryDirectory", no_tmp)
+    with pytest.raises(RemoteSkillUnavailable, match="could not stage"):
+        fetch(REMOTE_SKILLS[0])
+
+
+def test_description_is_read_from_frontmatter_only():
+    """A `description:` line in the body documents something else."""
+    body_only = "# No frontmatter\n\ndescription: not mine\n"
+    assert frontmatter_description(body_only) == ""
+
+    with_example = (
+        "---\nname: x\ndescription: The real one.\n---\n\n"
+        "Example config:\n\n```yaml\ndescription: an example, not this skill\n```\n"
+    )
+    assert frontmatter_description(with_example) == "The real one."

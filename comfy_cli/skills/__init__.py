@@ -261,14 +261,18 @@ def fetch_remote_skill(remote: RemoteSkill) -> SkillSource:
     except UnicodeDecodeError as e:
         raise RemoteSkillUnavailable(f"{remote.url} is not UTF-8 text") from e
 
-    with tempfile.TemporaryDirectory() as tmp:
-        staged = Path(tmp) / remote.name
-        staged.mkdir()
-        (staged / _SKILL_FILE).write_text(text, encoding="utf-8")
-        try:
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = Path(tmp) / remote.name
+            staged.mkdir()
+            (staged / _SKILL_FILE).write_text(text, encoding="utf-8")
             return load_skill_source(str(staged))
-        except ValueError as e:
-            raise RemoteSkillUnavailable(f"{remote.url} is not a valid skill: {e}") from e
+    except ValueError as e:
+        raise RemoteSkillUnavailable(f"{remote.url} is not a valid skill: {e}") from e
+    except OSError as e:
+        # A full disk or an unwritable TMPDIR skips this skill; it must not abort
+        # the install of every other one.
+        raise RemoteSkillUnavailable(f"could not stage {remote.url}: {e}") from e
 
 
 # ---------------------------------------------------------------------------
@@ -419,52 +423,56 @@ def _looks_like_path(token: str) -> bool:
     return os.sep in token or token.startswith((".", "~")) or Path(token).expanduser().exists()
 
 
-def _planned_names(skills: Sequence[str] | None) -> list[str]:
-    """Resolve skill tokens to names without fetching anything.
+@dataclass(frozen=True)
+class _ResolvedSkill:
+    """One skill to install, resolved from a token."""
 
-    Planning and ``status`` need to know *which* skills are in play and where
-    they would land, not what is in them. Keeping the network out of here is
-    what lets ``status`` report a remote skill as missing on a machine that has
-    never fetched it, rather than hanging or omitting it.
+    name: str
+    content: str | None = None  # None when not fetched, or when the fetch failed
+    origin: dict | None = None  # where a fetch got it, for the manifest
+    unavailable: str | None = None  # why a remote skill has no content
+
+
+def _resolve(skills: Sequence[str] | None, *, fetch: bool) -> list[_ResolvedSkill]:
+    """Resolve skill tokens once, so planning and installing cannot disagree.
+
+    With ``fetch=False`` nothing is downloaded and ``content`` stays None. That
+    is all planning and ``status`` need, and it is why ``status`` works on a
+    machine that has never fetched anything.
+
+    The default set is resolved by name and never as a path. A directory in the
+    working directory can share a skill's name, which every ComfyUI checkout
+    does, and it must not shadow the bundled skill or abort the install.
     """
     if not skills:
-        return list(default_skill_names())
-    out: list[str] = []
-    for s in skills:
-        if _looks_like_path(s):
+        return [_resolve_named(name, fetch=fetch) for name in default_skill_names()]
+    out: list[_ResolvedSkill] = []
+    for token in skills:
+        if _looks_like_path(token):
             # Raises ValueError on invalid path skills — caller handles.
-            out.append(load_skill_source(s).name)
-        elif _resolve_remote(s) is not None:
-            out.append(s)
+            src = load_skill_source(token)
+            out.append(_ResolvedSkill(name=src.name, content=src.content if fetch else None))
         else:
-            _resolve_subdir(s)  # validates bundled name; raises ValueError on unknown
-            out.append(s)
+            out.append(_resolve_named(token, fetch=fetch))
     return out
 
 
-def _resolve_contents(skills: Sequence[str] | None) -> tuple[dict[str, str], dict[str, str]]:
-    """Return the SKILL.md text per skill name, and the reason per skill that has none.
-
-    Only a remote fetch lands in the second map. A bundled skill that cannot be
-    read and a path token that does not validate are both programming or usage
-    errors and still raise.
-    """
-    contents: dict[str, str] = {}
-    failures: dict[str, str] = {}
-    for s in skills if skills else default_skill_names():
-        if _looks_like_path(s):
-            src = load_skill_source(s)
-            contents[src.name] = src.content
-            continue
-        remote = _resolve_remote(s)
-        if remote is None:
-            contents[s] = skill_content(s)
-            continue
-        try:
-            contents[remote.name] = fetch_remote_skill(remote).content
-        except RemoteSkillUnavailable as e:
-            failures[remote.name] = str(e)
-    return contents, failures
+def _resolve_named(name: str, *, fetch: bool) -> _ResolvedSkill:
+    remote = _resolve_remote(name)
+    if remote is None:
+        _resolve_subdir(name)  # validates bundled name; raises ValueError on unknown
+        return _ResolvedSkill(name=name, content=skill_content(name) if fetch else None)
+    if not fetch:
+        return _ResolvedSkill(name=name)
+    try:
+        source = fetch_remote_skill(remote)
+    except RemoteSkillUnavailable as e:
+        return _ResolvedSkill(name=name, unavailable=str(e))
+    return _ResolvedSkill(
+        name=name,
+        content=source.content,
+        origin={"repo": remote.repo, "ref": remote.ref, "path": remote.path},
+    )
 
 
 def plan_install(
@@ -481,7 +489,8 @@ def plan_install(
     """
     root = project_root or Path.cwd()
     plans: list[TargetPlan] = []
-    for name in _planned_names(skills):
+    for resolved in _resolve(skills, fetch=False):
+        name = resolved.name
         all_paths = _resolve_paths(skill_name=name, scope=scope, project_root=root)
         kinds: list[TargetKind] = list(targets) if targets else list(all_paths.keys())
         for kind in kinds:
@@ -510,59 +519,45 @@ def install(
     """
     root = project_root or Path.cwd()
     results: list[TargetResult] = []
-    content_map, fetch_failures = _resolve_contents(skills)
-    plans = plan_install(scope=scope, targets=targets, skills=skills, project_root=root)
-    for plan in plans:
-        unavailable = fetch_failures.get(plan.skill)
-        if unavailable is not None:
-            results.append(
-                TargetResult(
-                    skill=plan.skill,
-                    kind=plan.kind,
-                    scope=plan.scope,
-                    path=plan.path,
-                    action="skipped",
-                    reason=unavailable,
+    for resolved in _resolve(skills, fetch=True):
+        all_paths = _resolve_paths(skill_name=resolved.name, scope=scope, project_root=root)
+        kinds: list[TargetKind] = list(targets) if targets else list(all_paths.keys())
+        for kind in kinds:
+            path = all_paths[kind]
+            if resolved.unavailable is not None:
+                results.append(
+                    TargetResult(
+                        skill=resolved.name,
+                        kind=kind,
+                        scope=scope,
+                        path=path,
+                        action="skipped",
+                        reason=resolved.unavailable,
+                    )
                 )
-            )
-            continue
-        if dry_run:
-            results.append(
-                TargetResult(
-                    skill=plan.skill,
-                    kind=plan.kind,
-                    scope=plan.scope,
-                    path=plan.path,
-                    action="would_write",
+                continue
+            if dry_run:
+                results.append(
+                    TargetResult(skill=resolved.name, kind=kind, scope=scope, path=path, action="would_write")
                 )
-            )
-            continue
-        try:
-            content = content_map[plan.skill]
-            remote = _resolve_remote(plan.skill)
-            origin = {"repo": remote.repo, "ref": remote.ref, "path": remote.path} if remote else None
-            if plan.kind == "claude-code":
-                _write_claude_skill(plan.path, content)
-                _record_installed(plan.path, plan.skill, content, source=origin)
-            elif plan.kind == "cursor":
-                _write_cursor_rule(plan.path, content, skill_name=plan.skill)
-                _record_installed(plan.path, plan.skill, content, source=origin)
-            elif plan.kind == "agents-md":
-                _upsert_agents_md_block(plan.path, content, skill_name=plan.skill)
-            results.append(
-                TargetResult(skill=plan.skill, kind=plan.kind, scope=plan.scope, path=plan.path, action="wrote")
-            )
-        except OSError as e:
-            results.append(
-                TargetResult(
-                    skill=plan.skill,
-                    kind=plan.kind,
-                    scope=plan.scope,
-                    path=plan.path,
-                    action="skipped",
-                    reason=str(e),
+                continue
+            content = resolved.content or ""
+            try:
+                if kind == "claude-code":
+                    _write_claude_skill(path, content)
+                    _record_installed(path, resolved.name, content, source=resolved.origin)
+                elif kind == "cursor":
+                    _write_cursor_rule(path, content, skill_name=resolved.name)
+                    _record_installed(path, resolved.name, content, source=resolved.origin)
+                elif kind == "agents-md":
+                    _upsert_agents_md_block(path, content, skill_name=resolved.name)
+                results.append(TargetResult(skill=resolved.name, kind=kind, scope=scope, path=path, action="wrote"))
+            except OSError as e:
+                results.append(
+                    TargetResult(
+                        skill=resolved.name, kind=kind, scope=scope, path=path, action="skipped", reason=str(e)
+                    )
                 )
-            )
     return results
 
 
@@ -738,8 +733,16 @@ def _write_claude_skill(path: Path, content: str) -> None:
 
 
 def frontmatter_description(content: str) -> str:
-    """The skill's own ``description:`` line, whitespace-collapsed, or ""."""
-    m = _FRONTMATTER_DESC_RE.search(content)
+    """The skill's ``description:`` from its frontmatter, whitespace-collapsed, or "".
+
+    Searches the frontmatter block alone. A ``description:`` line in the body,
+    inside a YAML example say, documents something else.
+    """
+    if not content.startswith("---\n"):
+        return ""
+    _, _, rest = content.partition("---\n")
+    front, _, _ = rest.partition("---\n")
+    m = _FRONTMATTER_DESC_RE.search(front)
     return " ".join(m.group(1).split()) if m and m.group(1).strip() else ""
 
 
