@@ -34,6 +34,17 @@ def _force_json_renderer():
     set_renderer(renderer)
 
 
+def _force_pretty_renderer():
+    renderer = Renderer.resolve(
+        is_stdout_tty=True,
+        env={},
+        caller=Caller(kind="user", agentic=False, source_env=None),
+        no_json_flag=True,
+    )
+    renderer.mode = OutputMode.PRETTY
+    set_renderer(renderer)
+
+
 class _ChunkedResponse:
     def __init__(self, body: bytes, chunk_size: int = 7):
         self._body = io.BytesIO(body)
@@ -242,6 +253,35 @@ def test_snapshot_command_emits_written_catalog(monkeypatch, tmp_path, capsys):
     assert calls == [(target, output)]
     schema = json.loads((Path(nodes_cmd.__file__).parent.parent / "schemas" / "nodes.json").read_text())
     jsonschema.validate(instance=envelope["data"], schema=schema)
+
+
+def test_snapshot_command_sanitizes_pretty_output(
+    monkeypatch, tmp_path, capsys
+):
+    target = Target(kind="local", base_url="http://127.0.0.1:8188")
+    monkeypatch.setattr(
+        nodes_cmd, "_resolve_snapshot_target", lambda *_a, **_kw: target
+    )
+
+    def fake_snapshot(_target: Target, output: Path):
+        output.write_text(json.dumps(_object_info()))
+        return {"bytes": output.stat().st_size, "classes": 1}
+
+    monkeypatch.setattr(
+        nodes_cmd, "_stream_object_info_snapshot", fake_snapshot
+    )
+    output = tmp_path / "[red]snapshot.json"
+    _force_pretty_renderer()
+
+    result = CliRunner().invoke(
+        nodes_cmd.app,
+        ["snapshot", "--output", str(output)],
+        standalone_mode=False,
+    )
+    captured = capsys.readouterr().out or result.stdout
+
+    assert result.exit_code == 0
+    assert "[red]snapshot.json" in captured
 
 
 def test_snapshot_command_reports_invalid_where(tmp_path, capsys):
