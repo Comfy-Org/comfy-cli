@@ -2348,33 +2348,48 @@ def _resolve_node_path(workflow: dict, segments: list[str], defs_by_id: dict[str
     return node
 
 
-def _count_instances(workflow: dict, def_id: str) -> int:
-    """Count nodes (top-level + interior-of-definitions) instantiating ``def_id``."""
-    count = 0
-    for n in workflow.get("nodes") or []:
-        if isinstance(n, dict) and str(n.get("type", "")) == def_id:
-            count += 1
-    for sg in (workflow.get("definitions") or {}).get("subgraphs") or []:
-        if isinstance(sg, dict):
-            for n in sg.get("nodes") or []:
-                if isinstance(n, dict) and str(n.get("type", "")) == def_id:
-                    count += 1
-    return count
+def _iter_workflow_nodes(workflow: dict):
+    for node in workflow.get("nodes") or []:
+        if isinstance(node, dict):
+            yield node
+    for definition in (workflow.get("definitions") or {}).get("subgraphs") or []:
+        if not isinstance(definition, dict):
+            continue
+        for node in definition.get("nodes") or []:
+            if isinstance(node, dict):
+                yield node
+
+
+def _count_instances(workflow: dict, definition: dict, defs_by_id: dict[str, dict]) -> int:
+    """Count every raw type alias that resolves to ``definition``."""
+    return sum(defs_by_id.get(str(node.get("type", ""))) is definition for node in _iter_workflow_nodes(workflow))
 
 
 def _isolate_shared_subgraph(workflow: dict, instance: dict, defs_by_id: dict[str, dict]) -> None:
-    """If ``instance``'s subgraph definition is shared with another instance,
-    deep-copy it under a fresh id and repoint ``instance`` so an interior write
-    can't alias sibling instances. No-op when the instance already owns its def.
+    """Fork a shared definition and leave every sibling on the original.
+
+    Legacy saves may type an instance by a unique definition name rather than
+    its UUID. Resolve sharing by definition identity, then canonicalize every
+    alias to the original id before adding the fork; otherwise the duplicate
+    name makes the untouched legacy sibling unresolvable.
     """
-    def_id = str(instance.get("type", ""))
-    sg = defs_by_id.get(def_id)
-    if sg is None or _count_instances(workflow, def_id) <= 1:
+    definition = defs_by_id.get(str(instance.get("type", "")))
+    if definition is None or _count_instances(workflow, definition, defs_by_id) <= 1:
         return
-    new_sg = copy.deepcopy(sg)
+
+    original_id = definition.get("id")
+    if not isinstance(original_id, str) or not original_id:
+        original_id = str(_uuid.uuid4())
+        definition["id"] = original_id
+
+    for node in _iter_workflow_nodes(workflow):
+        if defs_by_id.get(str(node.get("type", ""))) is definition:
+            node["type"] = original_id
+
+    new_definition = copy.deepcopy(definition)
     new_id = str(_uuid.uuid4())
-    new_sg["id"] = new_id
-    workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(new_sg)
+    new_definition["id"] = new_id
+    workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(new_definition)
     instance["type"] = new_id
 
 

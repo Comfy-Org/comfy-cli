@@ -2292,17 +2292,10 @@ class TestSubgraphIsolation:
 
         _apply_one_slot(wf, "10/9.text", "legacy-only", graph)
 
-        definitions = {
-            definition["id"]: definition
-            for definition in wf["definitions"]["subgraphs"]
-        }
+        definitions = {definition["id"]: definition for definition in wf["definitions"]["subgraphs"]}
         instances = {node["id"]: node for node in wf["nodes"]}
-        assert definitions[instances[10]["type"]]["nodes"][0]["widgets_values"][
-            0
-        ] == "legacy-only"
-        assert definitions[instances[12]["type"]]["nodes"][0]["widgets_values"][
-            0
-        ] == "orig"
+        assert definitions[instances[10]["type"]]["nodes"][0]["widgets_values"][0] == "legacy-only"
+        assert definitions[instances[12]["type"]]["nodes"][0]["widgets_values"][0] == "orig"
 
     def test_fork_keeps_second_legacy_instance_resolvable(self, graph: Graph):
         from comfy_cli.cql.engine import _apply_one_slot
@@ -2332,17 +2325,10 @@ class TestSubgraphIsolation:
         _apply_one_slot(wf, "10/9.text", "first", graph)
         _apply_one_slot(wf, "12/9.text", "second", graph)
 
-        definitions = {
-            definition["id"]: definition
-            for definition in wf["definitions"]["subgraphs"]
-        }
+        definitions = {definition["id"]: definition for definition in wf["definitions"]["subgraphs"]}
         instances = {node["id"]: node for node in wf["nodes"]}
-        assert definitions[instances[10]["type"]]["nodes"][0]["widgets_values"][
-            0
-        ] == "first"
-        assert definitions[instances[12]["type"]]["nodes"][0]["widgets_values"][
-            0
-        ] == "second"
+        assert definitions[instances[10]["type"]]["nodes"][0]["widgets_values"][0] == "first"
+        assert definitions[instances[12]["type"]]["nodes"][0]["widgets_values"][0] == "second"
 
 
 # ===========================================================================
