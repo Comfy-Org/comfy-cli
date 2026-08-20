@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib import resources
@@ -259,8 +260,6 @@ def fetch_remote_skill(remote: RemoteSkill) -> SkillSource:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as e:
         raise RemoteSkillUnavailable(f"{remote.url} is not UTF-8 text") from e
-
-    import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
         staged = Path(tmp) / remote.name

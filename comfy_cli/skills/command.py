@@ -36,6 +36,7 @@ from comfy_cli.skills import (
     REMOTE_SKILLS,
     TargetKind,
     _compute_skill_state,
+    _looks_like_path,
     default_skill_names,
     frontmatter_description,
     load_skill_source,
@@ -82,14 +83,10 @@ def _kinds(targets: list[str] | None) -> list[TargetKind] | None:
 def _validate_skills(skills: list[str] | None) -> list[str] | None:
     if not skills:
         return None
-    import os
-
     renderer = get_renderer()
     known = default_skill_names()
     for s in skills:
-        p = Path(s).expanduser()
-        looks_like_path = os.sep in s or s.startswith((".", "~")) or p.exists()
-        if looks_like_path:
+        if _looks_like_path(s):
             # Path-based token: validate it eagerly so we fail fast before any writes.
             try:
                 load_skill_source(s)
