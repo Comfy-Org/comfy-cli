@@ -1020,3 +1020,66 @@ def test_validate_does_not_claim_the_definition_resolves(monkeypatch, capsys):
     out = _run_validate(monkeypatch, capsys, {"ok": True})
     assert "not a full resolve" in out
     assert "Definition resolves." not in out
+
+
+# --- create: a registry id the registry does not have -------------------------
+
+
+class _FakeRegistry:
+    """Answers get_node from a known set; anything else 404s. `unreachable` ids
+    raise a non-404, which must never be read as 'no such node'."""
+
+    def __init__(self, known, unreachable=()):
+        self.known = set(known)
+        self.unreachable = set(unreachable)
+        self.asked = []
+
+    def get_node(self, node_id):
+        self.asked.append(node_id)
+        if node_id in self.unreachable:
+            raise distribution.NodeFetchError("registry down", status_code=503)
+        if node_id not in self.known:
+            raise distribution.NodeFetchError("no such node", status_code=404)
+        return {"id": node_id}
+
+
+def test_repair_registry_ids_falls_back_to_the_install_directory():
+    """A pack published from a PR preview carries that preview's id, which no
+    released version exists under. The directory it was installed into is named
+    for the real registry id."""
+    nodes = [{"name": "was-node-suite-comfyui", "id": "pr-was-node-suite-comfyui-47064894", "registryVersion": "1.0.1"}]
+    api = _FakeRegistry(known={"was-node-suite-comfyui"})
+    assert distribution.repair_registry_ids(nodes, api) == [
+        ("pr-was-node-suite-comfyui-47064894", "was-node-suite-comfyui")
+    ]
+    assert nodes[0]["id"] == "was-node-suite-comfyui"
+
+
+def test_repair_registry_ids_leaves_a_good_id_alone():
+    nodes = [{"name": "comfyui-kjnodes", "id": "comfyui-kjnodes", "registryVersion": "1.4.9"}]
+    api = _FakeRegistry(known={"comfyui-kjnodes"})
+    assert distribution.repair_registry_ids(nodes, api) == []
+    assert api.asked == []  # name equals id: nothing to disambiguate, so nothing is asked
+
+
+def test_repair_registry_ids_does_not_rewrite_on_an_unreachable_registry():
+    """A 503 is not evidence the node is missing. Rewriting on it would corrupt a
+    correct definition whenever the registry hiccups."""
+    nodes = [{"name": "realname", "id": "declared", "registryVersion": "1.0.0"}]
+    api = _FakeRegistry(known={"realname"}, unreachable={"declared"})
+    assert distribution.repair_registry_ids(nodes, api) == []
+    assert nodes[0]["id"] == "declared"
+
+
+def test_repair_registry_ids_leaves_both_misses_alone():
+    """Nothing to point at: the definition stays as written and the build reports it."""
+    nodes = [{"name": "realname", "id": "declared", "registryVersion": "1.0.0"}]
+    assert distribution.repair_registry_ids(nodes, _FakeRegistry(known=set())) == []
+    assert nodes[0]["id"] == "declared"
+
+
+def test_repair_registry_ids_ignores_nodes_with_no_registry_pin():
+    nodes = [{"name": "gitpack", "repository": "https://github.com/x/gitpack", "gitRef": "deadbeef"}]
+    api = _FakeRegistry(known=set())
+    assert distribution.repair_registry_ids(nodes, api) == []
+    assert api.asked == []

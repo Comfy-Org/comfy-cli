@@ -46,6 +46,7 @@ from comfy_cli._safe_exec import BinaryNotFoundError, resolve_required_binary
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH, SUPPORTED_PT_EXTENSIONS
 from comfy_cli.file_utils import atomic_write_text
 from comfy_cli.output import get_renderer
+from comfy_cli.registry import NodeFetchError, RegistryAPI
 from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer(
@@ -444,6 +445,49 @@ def resolve_model_source(model: dict) -> str | None:
     call, so ``plan_create`` stays offline and testable. Injectable, so tests can
     still substitute a fake resolver."""
     return model.get("sourceUri")
+
+
+def registry_knows(api, node_id: str) -> bool | None:
+    """Whether the Comfy Registry has a node under ``node_id``.
+
+    True / False on a definite answer, None when the registry could not be asked
+    (transport, timeout, 5xx). Uses the read-only node endpoint rather than the
+    install one, which records an installation and fires an analytics event on
+    every call — a verification must not look like a install."""
+    try:
+        api.get_node(node_id)
+        return True
+    except NodeFetchError as e:
+        return False if e.status_code == 404 else None
+    except (requests.RequestException, KeyError, ValueError):
+        return None
+
+
+def repair_registry_ids(nodes: list[dict], api) -> list[tuple[str, str]]:
+    """Point a registry-pinned node at an id the registry actually has.
+
+    A pack published from a pull-request preview carries that preview's id in its
+    ``pyproject.toml`` (``pr-was-node-suite-comfyui-47064894``), which no released
+    version exists under: the definition looks right, validates, and dies at
+    freeze. The directory the pack was installed into is named for its real
+    registry id, so it is the candidate to try.
+
+    Only a definite 404 on the declared id plus a definite hit on the directory
+    name rewrites anything; an unreachable registry leaves the definition exactly
+    as the user wrote it. Mutates ``nodes`` in place and returns what it changed,
+    so the caller can say so out loud."""
+    repaired: list[tuple[str, str]] = []
+    for n in nodes:
+        declared = (n.get("id") or "").strip()
+        fallback = (n.get("name") or "").strip()
+        if not n.get("registryVersion") or not declared or fallback == declared:
+            continue
+        if registry_knows(api, declared) is not False:
+            continue
+        if fallback and registry_knows(api, fallback) is True:
+            n["id"] = fallback
+            repaired.append((declared, fallback))
+    return repaired
 
 
 # The builder's POST /v1/models/resolve accepts at most this many filenames/call.
@@ -950,6 +994,11 @@ def _create_execute(renderer, definition: dict, *, name: str, builder_url: str |
             renderer.info(f"Resolved {n} model(s) to public URLs — skipping their upload")
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
         renderer.warn(f"model resolution unavailable ({e}); all models will be uploaded")
+
+    # A registry id the registry does not have builds nothing, and only says so at
+    # freeze — after the cut is spent. Check it here, where we are already online.
+    for was, now in repair_registry_ids(definition.get("customNodes", []), RegistryAPI()):
+        renderer.warn(f"registry id {was!r} does not exist; using {now!r}, which does")
 
     plan = plan_create(definition)
 
