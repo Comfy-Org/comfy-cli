@@ -1053,6 +1053,111 @@ def categories_cmd(
 
 _OBJECT_INFO_SNAPSHOT_CHUNK_BYTES = 1024 * 1024
 _OBJECT_INFO_SNAPSHOT_MAX_BYTES = 128 * 1024 * 1024
+_OBJECT_INFO_PARSE_CHUNK_CHARS = 1024 * 1024
+_OBJECT_INFO_KEY_MAX_CHARS = 64 * 1024
+_OBJECT_INFO_ENTRY_MAX_CHARS = 8 * 1024 * 1024
+
+
+def _validate_object_info_stream(path: Path) -> int:
+    """Validate a top-level object_info mapping without loading it all at once."""
+    decoder = json.JSONDecoder()
+    with path.open(encoding="utf-8") as handle:
+        buffer = ""
+        pos = 0
+        eof = False
+
+        def refill(*, compact: bool) -> bool:
+            nonlocal buffer, pos, eof
+            if compact and pos:
+                buffer = buffer[pos:]
+                pos = 0
+            chunk = handle.read(_OBJECT_INFO_PARSE_CHUNK_CHARS)
+            if not chunk:
+                eof = True
+                return False
+            buffer += chunk
+            return True
+
+        def skip_whitespace() -> None:
+            nonlocal pos
+            while True:
+                while pos < len(buffer) and buffer[pos].isspace():
+                    pos += 1
+                if pos < len(buffer) or eof:
+                    return
+                refill(compact=True)
+
+        def current() -> str | None:
+            skip_whitespace()
+            if pos < len(buffer):
+                return buffer[pos]
+            return None
+
+        def decode_value(label: str, max_chars: int):
+            nonlocal buffer, pos, eof
+            start = pos
+            while True:
+                try:
+                    value, end = decoder.raw_decode(buffer, pos)
+                except json.JSONDecodeError as e:
+                    if len(buffer) - start > max_chars:
+                        raise ValueError(f"object_info {label} exceeds the {max_chars:,}-character limit") from e
+                    chunk = handle.read(_OBJECT_INFO_PARSE_CHUNK_CHARS)
+                    if not chunk:
+                        eof = True
+                        raise ValueError("object_info response is not valid JSON") from e
+                    buffer += chunk
+                    continue
+                if end - start > max_chars:
+                    raise ValueError(f"object_info {label} exceeds the {max_chars:,}-character limit")
+                pos = end
+                return value
+
+        if not refill(compact=False) or current() != "{":
+            raise ValueError("object_info response is valid JSON but not a node catalog")
+        pos += 1
+        classes = 0
+
+        while True:
+            token = current()
+            if token == "}":
+                pos += 1
+                break
+            if token is None:
+                raise ValueError("object_info response is not valid JSON")
+
+            key = decode_value("class name", _OBJECT_INFO_KEY_MAX_CHARS)
+            if not isinstance(key, str):
+                raise ValueError("object_info response is valid JSON but not a node catalog")
+            if current() != ":":
+                raise ValueError("object_info response is not valid JSON")
+            pos += 1
+            skip_whitespace()
+            entry = decode_value("catalog entry", _OBJECT_INFO_ENTRY_MAX_CHARS)
+            if not isinstance(entry, dict) or not ("input" in entry or "category" in entry):
+                raise ValueError("object_info response is valid JSON but not a node catalog")
+            classes += 1
+
+            token = current()
+            if token == ",":
+                pos += 1
+                if current() in (None, "}"):
+                    raise ValueError("object_info response is not valid JSON")
+            elif token == "}":
+                pos += 1
+                break
+            else:
+                raise ValueError("object_info response is not valid JSON")
+
+            if pos > _OBJECT_INFO_PARSE_CHUNK_CHARS:
+                buffer = buffer[pos:]
+                pos = 0
+
+        if classes == 0:
+            raise ValueError("object_info response is valid JSON but not a node catalog")
+        if current() is not None:
+            raise ValueError("object_info response is not valid JSON")
+        return classes
 
 
 def _resolve_snapshot_target(where: str | None, host: str | None, port: int | None) -> Target:
@@ -1086,20 +1191,12 @@ def _stream_object_info_snapshot(target: Target, output: Path) -> dict[str, int]
             os.fsync(dst.fileno())
 
         try:
-            with temp_path.open(encoding="utf-8") as handle:
-                data = json.load(handle)
-        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as e:
+            classes = _validate_object_info_stream(temp_path)
+        except (UnicodeDecodeError, RecursionError) as e:
             raise ValueError("object_info response is not valid JSON") from e
 
-        if (
-            not isinstance(data, dict)
-            or not data
-            or not any(isinstance(value, dict) and ("input" in value or "category" in value) for value in data.values())
-        ):
-            raise ValueError("object_info response is valid JSON but not a node catalog")
-
         os.replace(temp_path, output)
-        return {"bytes": total, "classes": len(data)}
+        return {"bytes": total, "classes": classes}
     finally:
         temp_path.unlink(missing_ok=True)
 

@@ -66,6 +66,7 @@ def test_stream_snapshot_writes_valid_object_info_atomically(monkeypatch, tmp_pa
     body = json.dumps(_object_info()).encode()
     response = _ChunkedResponse(body)
     monkeypatch.setattr(nodes_cmd, "authed_urlopen", lambda *_a, **_kw: response)
+    monkeypatch.setattr(nodes_cmd, "_OBJECT_INFO_PARSE_CHUNK_CHARS", 5)
     target = Target(kind="local", base_url="http://127.0.0.1:8188")
     output = tmp_path / "object_info.json"
 
