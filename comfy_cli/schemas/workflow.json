@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "comfy workflow *",
-  "description": "Output shape for workflow editing commands (slots, set-slot, vary) and the read-only notes reader.",
+  "description": "Output shape for workflow editing commands (slots, set-slot, set-mode, vary) and the read-only notes reader.",
   "type": "object",
   "properties": {
     "workflow": { "type": "string" },
@@ -32,9 +32,9 @@
     },
     "applied": { "type": "array" },
     "warnings": { "type": "array" },
-    "wrote": { "type": ["string", "null"], "description": "file written, or null when nothing was written (set-slot --stdout)" },
-    "out": { "type": "string", "description": "set-slot: where the result went — \"stdout\" when --stdout returned it instead of writing the file" },
-    "workflow_json": { "type": "object", "description": "set-slot --stdout: the modified workflow itself (human mode prints it raw on stdout instead)" },
+    "wrote": { "type": ["string", "null"], "description": "file written, or null when nothing was written (--stdout)" },
+    "out": { "type": "string", "description": "where the result went — \"stdout\" when --stdout returned it instead of writing the file" },
+    "workflow_json": { "type": "object", "description": "--stdout: the modified workflow itself (human mode prints it raw on stdout instead)" },
     "variants": { "type": ["array", "null"], "description": "vary without --out-dir: the produced workflows (human mode prints them as NDJSON on stdout instead); null when they were written to --out-dir" },
     "written": { "type": "array" },
     "out_dir": { "type": ["string", "null"] },

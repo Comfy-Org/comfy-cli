@@ -2265,6 +2265,71 @@ class TestSubgraphIsolation:
         # The single def got the new value directly
         assert wf["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"][0] == "NEW"
 
+    def test_legacy_and_uuid_instances_share_one_definition(self, graph: Graph):
+        from comfy_cli.cql.engine import _apply_one_slot
+
+        wf = {
+            "nodes": [
+                {"id": 10, "type": "Sub"},
+                {"id": 12, "type": "uuid-def-1"},
+            ],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": "uuid-def-1",
+                        "name": "Sub",
+                        "nodes": [
+                            {
+                                "id": 9,
+                                "type": "CLIPTextEncode",
+                                "widgets_values": ["orig"],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+
+        _apply_one_slot(wf, "10/9.text", "legacy-only", graph)
+
+        definitions = {definition["id"]: definition for definition in wf["definitions"]["subgraphs"]}
+        instances = {node["id"]: node for node in wf["nodes"]}
+        assert definitions[instances[10]["type"]]["nodes"][0]["widgets_values"][0] == "legacy-only"
+        assert definitions[instances[12]["type"]]["nodes"][0]["widgets_values"][0] == "orig"
+
+    def test_fork_keeps_second_legacy_instance_resolvable(self, graph: Graph):
+        from comfy_cli.cql.engine import _apply_one_slot
+
+        wf = {
+            "nodes": [
+                {"id": 10, "type": "Sub"},
+                {"id": 12, "type": "Sub"},
+            ],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": "uuid-def-1",
+                        "name": "Sub",
+                        "nodes": [
+                            {
+                                "id": 9,
+                                "type": "CLIPTextEncode",
+                                "widgets_values": ["orig"],
+                            }
+                        ],
+                    }
+                ]
+            },
+        }
+
+        _apply_one_slot(wf, "10/9.text", "first", graph)
+        _apply_one_slot(wf, "12/9.text", "second", graph)
+
+        definitions = {definition["id"]: definition for definition in wf["definitions"]["subgraphs"]}
+        instances = {node["id"]: node for node in wf["nodes"]}
+        assert definitions[instances[10]["type"]]["nodes"][0]["widgets_values"][0] == "first"
+        assert definitions[instances[12]["type"]]["nodes"][0]["widgets_values"][0] == "second"
+
 
 # ===========================================================================
 # TestExpandVariations
