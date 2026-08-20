@@ -757,7 +757,12 @@ def _cursor_description_for(skill_name: str, content: str) -> str:
 
 def _write_cursor_rule(path: Path, content: str, *, skill_name: str) -> None:
     body = _strip_frontmatter(content)
-    description = _cursor_description_for(skill_name, content)
+    # Quote the description: it is now the skill's own text, and a remote skill's
+    # text is not ours to constrain. An unquoted `Build: a thing` or a leading `#`
+    # is a YAML parse error, so Cursor drops a rule that installed fine. A JSON
+    # string is a valid YAML double-quoted scalar, and the description is already
+    # whitespace-collapsed to one line.
+    description = json.dumps(_cursor_description_for(skill_name, content), ensure_ascii=False)
     rule = f'---\ndescription: {description}\nglobs: "**/*"\nalwaysApply: false\n---\n\n{body}'
     _backup_if_user_edited(path, rule)
     atomic_write_text(path, rule)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from comfy_cli.skills import (
     SkillSource,
     bundled_skill_names,
     default_skill_names,
+    frontmatter_description,
     install,
     plan_install,
     prune_retired,
@@ -794,14 +796,45 @@ def test_cursor_rule_uses_the_skill_frontmatter_description(tmp_path: Path):
     the skill's real description rather than a generic label."""
     install(scope="project", project_root=tmp_path, targets=["cursor"])
 
-    fetched = (tmp_path / f".cursor/rules/{REMOTE_SKILLS[0].name}.mdc").read_text(encoding="utf-8")
-    assert "description: A test double for the fetched builder skill." in fetched
-    assert "comfy CLI skill:" not in fetched
-
-    for name in bundled_skill_names():
+    def _described(name: str) -> str:
         rule = (tmp_path / f".cursor/rules/{name}.mdc").read_text(encoding="utf-8")
-        first_line = next(ln for ln in rule.splitlines() if ln.startswith("description:"))
-        assert first_line != f"description: comfy CLI skill: {name}", f"{name} fell back to the generic label"
+        return json.loads(next(ln for ln in rule.splitlines() if ln.startswith("description:"))[len("description: ") :])
+
+    assert _described(REMOTE_SKILLS[0].name) == "A test double for the fetched builder skill."
+    for name in bundled_skill_names():
+        assert _described(name) == frontmatter_description(skill_content(name))
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Build: a distribution, then deploy it.",
+        "#1 way to break YAML",
+        'Say "hello" to the parser',
+        "Costs 50% @ {runtime}: careful",
+    ],
+)
+def test_cursor_rule_frontmatter_parses_for_any_description(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, description: str
+):
+    """A skill's description is its own text, and a remote skill's is not ours to
+    constrain, so the rule has to stay loadable whatever it contains."""
+    yaml = pytest.importorskip("yaml")
+
+    monkeypatch.setattr(
+        skills_pkg,
+        "fetch_remote_skill",
+        lambda remote: SkillSource(
+            name=remote.name,
+            content=f"---\nname: {remote.name}\ndescription: {description}\n---\n\nBody.\n",
+            bundled=False,
+        ),
+    )
+    install(scope="project", project_root=tmp_path, skills=[REMOTE_SKILLS[0].name], targets=["cursor"])
+
+    rule = (tmp_path / f".cursor/rules/{REMOTE_SKILLS[0].name}.mdc").read_text(encoding="utf-8")
+    front = rule.split("---\n")[1]
+    assert yaml.safe_load(front)["description"] == description
 
 
 def test_cursor_description_falls_back_when_frontmatter_has_none(tmp_path: Path):
