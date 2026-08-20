@@ -276,6 +276,23 @@ def detect_comfy_version(root: Path) -> str | None:
     return None
 
 
+# A bare release number, as `comfyui_version.py` and `/system_stats` report it.
+_BARE_RELEASE_RE = re.compile(r"^\d+(?:\.\d+)+$")
+
+
+def as_comfy_git_ref(version: str) -> str:
+    """Return ``version`` as a ref the builder can actually resolve.
+
+    ``baseComfyVersion`` is resolved with ``git ls-remote`` against upstream
+    ComfyUI, which tags its releases ``vX.Y.Z`` — but every source we detect the
+    version from reports the bare number, so the value we recorded was guaranteed
+    to miss, and a build was the first thing to say so. Only a bare release number
+    is rewritten; a branch, a commit sha, a describe string or an
+    already-prefixed tag is left exactly as given."""
+    v = version.strip()
+    return "v" + v if _BARE_RELEASE_RE.match(v) else v
+
+
 # ComfyUI's default local address; the running server reports its version at
 # /system_stats even when the code dir has no version marker (split layouts).
 DEFAULT_COMFY_URL = "http://127.0.0.1:8188"
@@ -731,6 +748,9 @@ def scan_cmd(
     base_version = comfy_version or (detect_comfy_version(comfy_root) if comfy_root else None)
     if not base_version:
         base_version = detect_comfy_version_from_server(comfy_url or DEFAULT_COMFY_URL)
+    # Whatever named it, the definition records a ref the builder can resolve.
+    if base_version:
+        base_version = as_comfy_git_ref(base_version)
 
     # pip deps: freeze the ComfyUI env (evidence for the resolver, tagged with the
     # source platform). Never guess the interpreter — omit if we can't find it.

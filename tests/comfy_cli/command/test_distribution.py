@@ -932,3 +932,42 @@ def test_read_registry_pin_is_silent_on_a_broken_pyproject(tmp_path):
     """A malformed file is a pack without a pin, never a crashed scan."""
     d = _write_pack(tmp_path, "broken", project="this is not toml [[[")
     assert distribution.read_registry_pin(d) is None
+
+
+# --- scan: the ComfyUI pin has to be a ref that resolves ----------------------
+
+
+@pytest.mark.parametrize(
+    ("detected", "expected"),
+    [
+        ("0.30.2", "v0.30.2"),  # the packaged marker, the common case
+        ("0.30", "v0.30"),
+        ("v0.30.2", "v0.30.2"),  # already a tag: untouched
+        ("master", "master"),  # a branch
+        ("0.30.2-5-gdeadbee", "0.30.2-5-gdeadbee"),  # git describe output
+        ("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+    ],
+)
+def test_as_comfy_git_ref(detected, expected):
+    """Upstream tags releases `vX.Y.Z` while every version source reports the bare
+    number, so only a bare release number is rewritten."""
+    assert distribution.as_comfy_git_ref(detected) == expected
+
+
+def test_scan_command_writes_a_resolvable_comfy_ref(models_tree, tmp_path):
+    """End-to-end: a bare `--comfy-version` reaches the definition as a tag. The
+    builder resolves this field with git ls-remote, so the bare number it used to
+    record could only ever be discovered by a failed build."""
+    out = tmp_path / "definition.json"
+    env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
+    proc = subprocess.run(
+        [
+            sys.executable, "-m", "comfy_cli", "distribution", "scan",
+            "--models-dir", str(models_tree), "--comfy-version", "0.30.2", "-o", str(out),
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(out.read_text())["baseComfyVersion"] == "v0.30.2"
