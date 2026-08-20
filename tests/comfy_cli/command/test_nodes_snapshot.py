@@ -103,9 +103,7 @@ def test_stream_snapshot_preserves_existing_file_on_invalid_json(monkeypatch, tm
     assert not list(tmp_path.glob("*.tmp"))
 
 
-def test_stream_snapshot_rejects_non_json_unicode_whitespace(
-    monkeypatch, tmp_path
-):
+def test_stream_snapshot_rejects_non_json_unicode_whitespace(monkeypatch, tmp_path):
     body = '{"KSampler":\u00a0{"input":{"required":{}}}}'.encode()
     monkeypatch.setattr(
         nodes_cmd,
@@ -116,9 +114,7 @@ def test_stream_snapshot_rejects_non_json_unicode_whitespace(
     output.write_text('{"existing": true}')
 
     with pytest.raises(ValueError, match="valid JSON"):
-        nodes_cmd._stream_object_info_snapshot(
-            Target(kind="local", base_url="http://127.0.0.1:8188"), output
-        )
+        nodes_cmd._stream_object_info_snapshot(Target(kind="local", base_url="http://127.0.0.1:8188"), output)
 
     assert output.read_text() == '{"existing": true}'
     assert not list(tmp_path.glob("*.tmp"))
@@ -255,21 +251,15 @@ def test_snapshot_command_emits_written_catalog(monkeypatch, tmp_path, capsys):
     jsonschema.validate(instance=envelope["data"], schema=schema)
 
 
-def test_snapshot_command_sanitizes_pretty_output(
-    monkeypatch, tmp_path, capsys
-):
+def test_snapshot_command_sanitizes_pretty_output(monkeypatch, tmp_path, capsys):
     target = Target(kind="local", base_url="http://127.0.0.1:8188")
-    monkeypatch.setattr(
-        nodes_cmd, "_resolve_snapshot_target", lambda *_a, **_kw: target
-    )
+    monkeypatch.setattr(nodes_cmd, "_resolve_snapshot_target", lambda *_a, **_kw: target)
 
     def fake_snapshot(_target: Target, output: Path):
         output.write_text(json.dumps(_object_info()))
         return {"bytes": output.stat().st_size, "classes": 1}
 
-    monkeypatch.setattr(
-        nodes_cmd, "_stream_object_info_snapshot", fake_snapshot
-    )
+    monkeypatch.setattr(nodes_cmd, "_stream_object_info_snapshot", fake_snapshot)
     output = tmp_path / "[red]snapshot.json"
     _force_pretty_renderer()
 

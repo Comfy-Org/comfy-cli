@@ -1242,7 +1242,8 @@ def snapshot_cmd(
     payload = {"output": str(output.expanduser()), **result}
     if renderer.is_pretty():
         rprint(
-            f"[green]✓[/green] {result['classes']:,} node classes ({result['bytes']:,} bytes) → {output.expanduser()}"
+            f"[green]✓[/green] {result['classes']:,} node classes ({result['bytes']:,} bytes) → "
+            f"{sanitize_markup(output.expanduser())}"
         )
     renderer.emit(payload, command="nodes snapshot", changed=True)
 
