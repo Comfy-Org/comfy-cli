@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from urllib.parse import quote
 
 from comfy_cli.http import DEFAULT_HTTP_TIMEOUT
 
@@ -69,8 +70,11 @@ class NodeFetchError(Exception):
 
 
 class RegistryAPI:
-    def __init__(self):
-        self.base_url = self.determine_base_url()
+    def __init__(self, base_url: str | None = None):
+        # An explicit host pins the check to one registry. Callers that must agree
+        # with another service (the builder resolves nodes against prod in every
+        # environment) pass it rather than following $ENVIRONMENT.
+        self.base_url = base_url or self.determine_base_url()
 
     def determine_base_url(self):
         env = os.getenv("ENVIRONMENT")
@@ -237,6 +241,28 @@ class RegistryAPI:
                 f"Failed to retrieve node: {response.status_code} - {response.text}",
                 status_code=response.status_code,
             )
+
+    def get_node_version(self, node_id, version):
+        """Check that ``version`` of ``node_id`` is published, read-only.
+
+        This is the pair the builder resolves at freeze time: a node can exist
+        while the version asked for does not, so proving the node alone proves
+        nothing about the build. Like ``get_node`` and unlike ``install_node``,
+        this records no installation and fires no analytics event.
+
+        Raises:
+          NodeFetchError: carrying ``status_code``, 404 when the pair is not
+            published and anything else when the registry could not answer.
+        """
+        url = f"{self.base_url}/nodes/{quote(str(node_id), safe='')}/versions/{quote(str(version), safe='')}"
+        # Same rationale as get_node: a stalled registry must not hang callers.
+        response = requests.get(url, timeout=DEFAULT_HTTP_TIMEOUT)
+        if response.status_code == 200:
+            return response.json()
+        raise NodeFetchError(
+            f"Failed to retrieve node version: {response.status_code} - {sanitize_error_body(response.text)}",
+            status_code=response.status_code,
+        )
 
 
 def map_node_version(api_node_version):
