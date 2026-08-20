@@ -355,8 +355,10 @@ partner-API node, `false` for a free open-weights one. Two nodes can share a
 display name and differ only in this flag, so read it off the row instead of
 running `nodes show` per candidate.
 
-If no local server is running and you're not signed into cloud, pass
-`--input <object_info.json>` to query against a saved dump.
+Save the live catalog for repeatable offline checks:
+`comfy nodes snapshot --output object_info.json`. If the target is later
+unreachable, pass `--input object_info.json` to node discovery or workflow
+validation.
 
 ## Models — find what's installed, with metadata
 
@@ -512,15 +514,15 @@ matches, and `total` is only how many guesses it found. Each row carries
 comfy --json workflow slots path.json   # every addressable slot, by address
 ```
 
-`workflow slots`/`set-slot`/`vary` and all `nodes` commands resolve
-object_info through the routing chain with a cached fallback — cloud-signed-in
-works with no local server. If the live fetch fails, the command still succeeds
-from cache and the envelope carries `data.stale: true` +
-`warnings[] {code: "object_info_stale"}` — treat results as possibly outdated
-re-run the command once the live fetch recovers to pick up fresh object_info.
-`comfy nodes refresh` is a different cache — it re-pulls node
-*annotations* (pack/labels/cloud_disabled) from Comfy-Org/comfy-complete, not
-object_info.
+`workflow slots`/`set-slot`/`vary` and the `nodes` query commands (`ls`,
+`show`, `search`, `upstream`, `downstream`, `path`, `types`, `categories`)
+resolve object_info through the routing chain with a cached fallback. If the
+live fetch fails, they can succeed from cache with `data.stale: true` plus
+`warnings[] {code: "object_info_stale"}`; treat results as possibly outdated
+and re-run once the target recovers. `nodes snapshot` is deliberately different:
+it requires a reachable live target so it never labels cached bytes as a fresh
+snapshot. `nodes refresh` maintains the separate annotation cache
+(pack/labels/cloud_disabled) from Comfy-Org/comfy-complete.
 
 Slot addresses are `<instance_id>.<input_name>`. Feed them to
 `workflow set-slot` / `workflow vary` in the Execution half. Works on

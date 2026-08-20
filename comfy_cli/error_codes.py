@@ -603,6 +603,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "re-run once the server/session is reachable to get a fresh schema",
     ),
     ErrorCode(
+        "nodes_snapshot_failed",
+        "The target object_info catalog could not be streamed, validated, or written atomically.",
+        "check the target, destination directory, and available disk space",
+    ),
+    ErrorCode(
         "description_ignored",
         "`comfy workflow save --where local --description` was given a description, but the local "
         "file-backed `/userdata` store has nowhere to keep it. Surfaced in `data.warnings[]` "
