@@ -1191,7 +1191,19 @@ def validate_cmd(
     # message + details.body so the caller sees exactly what failed to resolve.
     result = _builder_call(renderer, lambda: client.validate_distribution(distribution_id))
     if renderer.is_pretty():
-        renderer.success("Definition resolves.")
+        # "resolves" was a promise this endpoint never made: it checks the
+        # definition's shape, that a ComfyUI version is pinned, and that each
+        # pinned package and version exists. Whether the set installs together is
+        # only answered by a build, so say what was actually checked.
+        renderer.success("Definition is valid: shape and pin existence checked, not a full resolve.")
+        # Warnings ride alongside ok: true. A ref the builder could not find on
+        # its remote is non-blocking here and fatal at freeze. Printed rather than
+        # left for the reader to spot inside the JSON below.
+        warnings = result.get("warnings") or []
+        if warnings:
+            renderer.warn(f"{len(warnings)} reference(s) the builder could not resolve; a cut will fail on these:")
+            for w in warnings:
+                renderer.warn(f"  {w.get('field', '?')}: {w.get('reason', '')}")
         renderer.console().print_json(json.dumps(result))
     renderer.emit(result, command="distribution validate")
 
