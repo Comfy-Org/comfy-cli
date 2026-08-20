@@ -971,3 +971,43 @@ def test_scan_command_writes_a_resolvable_comfy_ref(models_tree, tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     assert json.loads(out.read_text())["baseComfyVersion"] == "v0.30.2"
+
+
+# --- validate: say what was checked, and surface the warnings -----------------
+
+
+def _run_validate(monkeypatch, capsys, result):
+    """Drive validate_cmd against a stand-in builder, in pretty mode."""
+
+    class FakeClient:
+        def validate_distribution(self, distribution_id):
+            return result
+
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: FakeClient())
+    distribution.validate_cmd("d1")
+    return capsys.readouterr().out
+
+
+def test_validate_prints_the_warnings_beside_the_verdict(monkeypatch, capsys):
+    """A ref the builder cannot find rides alongside `ok: true`. It was reachable
+    only by reading the JSON dump, under a line that said the definition resolved,
+    so the one thing that will fail the cut was the easiest thing to miss."""
+    out = _run_validate(
+        monkeypatch,
+        capsys,
+        {
+            "ok": True,
+            "warnings": [{"field": "baseComfyVersion", "reason": "ref not found in remote advertisement"}],
+        },
+    )
+    assert "baseComfyVersion" in out
+    assert "ref not found in remote advertisement" in out
+    assert "a cut will fail on these" in out
+
+
+def test_validate_does_not_claim_the_definition_resolves(monkeypatch, capsys):
+    """The endpoint checks shape and pin existence; whether the set installs
+    together is only answered by a build."""
+    out = _run_validate(monkeypatch, capsys, {"ok": True})
+    assert "not a full resolve" in out
+    assert "Definition resolves." not in out
