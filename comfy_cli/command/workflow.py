@@ -20,6 +20,7 @@ Slot addresses follow CQL's format: ``<instance_id>.<input_name>``. Run
 
 from __future__ import annotations
 
+import copy
 import json
 import unicodedata
 from pathlib import Path
@@ -330,45 +331,6 @@ def set_slot_cmd(
 _NODE_MODES = {"normal": 0, "mute": 2, "bypass": 4}
 
 
-def _node_with_id(nodes: Any, node_id: str) -> dict[str, Any] | None:
-    if not isinstance(nodes, list):
-        return None
-    return next(
-        (node for node in nodes if isinstance(node, dict) and str(node.get("id")) == node_id),
-        None,
-    )
-
-
-def _resolve_mode_node(workflow: dict[str, Any], address: str) -> dict[str, Any]:
-    parts = [part.strip() for part in address.split("/")]
-    if not parts or any(not part for part in parts):
-        raise ValueError(f"Invalid node address {address!r}; expected NODE_ID or INSTANCE_ID/INNER_ID")
-
-    node = _node_with_id(workflow.get("nodes"), parts[0])
-    if node is None:
-        raise ValueError(f"Node {parts[0]!r} not found")
-
-    definitions = workflow.get("definitions")
-    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
-    for inner_id in parts[1:]:
-        node_type = node.get("type")
-        subgraph = (
-            next(
-                (item for item in subgraphs if isinstance(item, dict) and item.get("id") == node_type),
-                None,
-            )
-            if isinstance(subgraphs, list)
-            else None
-        )
-        if subgraph is None:
-            raise ValueError(f"Node {parts[0]!r} is not a subgraph instance at {address!r}")
-        node = _node_with_id(subgraph.get("nodes"), inner_id)
-        if node is None:
-            raise ValueError(f"Node {inner_id!r} not found in {address!r}")
-
-    return node
-
-
 @app.command(
     "set-mode",
     help="Set one or more nodes to normal, mute, or bypass in place (or --stdout).",
@@ -416,8 +378,17 @@ def set_mode_cmd(
             raise typer.Exit(code=1)
         parsed[address] = _NODE_MODES[mode]
 
+    new_workflow = copy.deepcopy(workflow)
+    resolved: list[tuple[str, dict[str, Any], int]] = []
     try:
-        resolved = [(address, _resolve_mode_node(workflow, address), mode) for address, mode in parsed.items()]
+        from comfy_cli.cql.engine import _resolve_node_path, _subgraph_defs_by_id
+
+        for address, mode in parsed.items():
+            segments = [part.strip() for part in address.split("/")]
+            if not segments or any(not part for part in segments):
+                raise ValueError(f"invalid node address {address!r}; expected NODE_ID or INSTANCE_ID/INNER_ID")
+            node = _resolve_node_path(new_workflow, segments, _subgraph_defs_by_id(new_workflow))
+            resolved.append((address, node, mode))
     except ValueError as e:
         renderer.error(
             code="workflow_mode_invalid",
@@ -432,13 +403,13 @@ def set_mode_cmd(
     if stdout and renderer.is_pretty():
         import sys
 
-        sys.stdout.write(json.dumps(workflow, indent=2))
+        sys.stdout.write(json.dumps(new_workflow, indent=2))
         sys.stdout.write("\n")
         sys.stdout.flush()
         return
 
     if not stdout:
-        atomic_write_text(p, json.dumps(workflow, indent=2))
+        atomic_write_text(p, json.dumps(new_workflow, indent=2))
 
     payload: dict[str, Any] = {
         "workflow": str(p),
@@ -448,11 +419,11 @@ def set_mode_cmd(
     }
     if stdout:
         payload["out"] = "stdout"
-        payload["workflow_json"] = workflow
+        payload["workflow_json"] = new_workflow
     if renderer.is_pretty():
-        rprint(f"[bold green]✓[/bold green] applied {len(parsed)} node mode(s) → [dim]{p}[/dim]")
+        rprint(f"[bold green]✓[/bold green] applied {len(parsed)} node mode(s) → [dim]{sanitize_markup(p)}[/dim]")
         for address in parsed:
-            rprint(f"  [dim]·[/dim] {address}")
+            rprint(f"  [dim]·[/dim] {sanitize_markup(address)}")
     renderer.emit(payload, command="workflow set-mode", changed=not stdout)
 
 
