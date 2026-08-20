@@ -441,6 +441,79 @@ class TestSetSlotDirectMode:
         assert "not found" in env["error"]["message"].lower()
 
 
+
+# ---------------------------------------------------------------------------
+# set-mode — structural workflow variants
+# ---------------------------------------------------------------------------
+
+
+class TestSetMode:
+    def test_set_mode_updates_top_level_node_in_place(self, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _direct_workflow())
+
+        env = _run(["set-mode", str(path), "6=bypass"], capsys)
+
+        assert env["ok"] is True
+        on_disk = json.loads(path.read_text())
+        clip = next(n for n in on_disk["nodes"] if n["id"] == 6)
+        assert clip["mode"] == 4
+        assert env["data"]["applied"] == ["6"]
+
+    def test_set_mode_addresses_subgraph_interior_node(self, tmp_path, capsys):
+        workflow = {
+            "nodes": [{"id": 10, "type": "subgraph-definition"}],
+            "links": [],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": "subgraph-definition",
+                        "nodes": [{"id": 20, "type": "LoraLoader", "mode": 0}],
+                    }
+                ]
+            },
+        }
+        path = _write_workflow(tmp_path, workflow)
+
+        env = _run(["set-mode", str(path), "10/20=mute"], capsys)
+
+        assert env["ok"] is True
+        on_disk = json.loads(path.read_text())
+        inner = on_disk["definitions"]["subgraphs"][0]["nodes"][0]
+        assert inner["mode"] == 2
+
+    def test_set_mode_supports_stdout_without_modifying_source(self, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _direct_workflow())
+        original_text = path.read_text()
+
+        env = _run(["set-mode", str(path), "3=normal", "6=bypass", "--stdout"], capsys)
+
+        assert env["ok"] is True
+        assert env["changed"] is False
+        assert path.read_text() == original_text
+        nodes = {n["id"]: n for n in env["data"]["workflow_json"]["nodes"]}
+        assert nodes[3]["mode"] == 0
+        assert nodes[6]["mode"] == 4
+
+    def test_set_mode_rejects_invalid_mode_without_partial_write(self, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _direct_workflow())
+        original_text = path.read_text()
+
+        env = _run(["set-mode", str(path), "3=bypass", "6=disabled"], capsys)
+
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_mode_invalid"
+        assert path.read_text() == original_text
+
+    def test_set_mode_rejects_unknown_node_without_partial_write(self, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _direct_workflow())
+        original_text = path.read_text()
+
+        env = _run(["set-mode", str(path), "3=bypass", "999=mute"], capsys)
+
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_mode_invalid"
+        assert path.read_text() == original_text
+
 # ---------------------------------------------------------------------------
 # vary — direct mode
 # ---------------------------------------------------------------------------
