@@ -962,8 +962,17 @@ def test_scan_command_writes_a_resolvable_comfy_ref(models_tree, tmp_path):
     env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
     proc = subprocess.run(
         [
-            sys.executable, "-m", "comfy_cli", "distribution", "scan",
-            "--models-dir", str(models_tree), "--comfy-version", "0.30.2", "-o", str(out),
+            sys.executable,
+            "-m",
+            "comfy_cli",
+            "distribution",
+            "scan",
+            "--models-dir",
+            str(models_tree),
+            "--comfy-version",
+            "0.30.2",
+            "-o",
+            str(out),
         ],
         capture_output=True,
         text=True,
