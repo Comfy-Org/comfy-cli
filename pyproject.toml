@@ -87,7 +87,9 @@ target-version = "py310"
 
 line-length = 120
 lint.select = [
+  "C901",   # mccabe - complexity ratchet, see [tool.ruff.lint.mccabe] below
   "E",      # pycodestyle - Error
+  "ERA001", # eradicate - commented-out code
   "F",      # default
   "I",      # isort-like behavior (import statement sorting)
   "Q",      # flake8-quotes
@@ -98,3 +100,17 @@ lint.select = [
 lint.extend-ignore = [
   "E501", # Line too long
 ]
+
+[tool.ruff.lint.mccabe]
+# Ratchet, not a target. 48 is the complexity of the single worst function in
+# the tree today (`execute` in comfy_cli/command/run/__init__.py), so this
+# enabling adds no new failures. Lower it whenever the worst offender drops;
+# never raise it. At the eventual default of 10 there are 92 hits, so getting
+# there is a long refactor, not a lint flip.
+max-complexity = 48
+
+[tool.ruff.lint.per-file-ignores]
+# TODO: drop once fix/tarfile-extraction-filter (#734) lands - it rewrites the
+# extraction helper that holds this file's single commented-out-code hit, and
+# touching the file here would conflict with that branch.
+"comfy_cli/utils.py" = ["ERA001"]
