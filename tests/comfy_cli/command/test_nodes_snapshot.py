@@ -92,6 +92,27 @@ def test_stream_snapshot_preserves_existing_file_on_invalid_json(monkeypatch, tm
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_stream_snapshot_rejects_non_json_unicode_whitespace(
+    monkeypatch, tmp_path
+):
+    body = '{"KSampler":\u00a0{"input":{"required":{}}}}'.encode()
+    monkeypatch.setattr(
+        nodes_cmd,
+        "authed_urlopen",
+        lambda *_a, **_kw: _ChunkedResponse(body),
+    )
+    output = tmp_path / "object_info.json"
+    output.write_text('{"existing": true}')
+
+    with pytest.raises(ValueError, match="valid JSON"):
+        nodes_cmd._stream_object_info_snapshot(
+            Target(kind="local", base_url="http://127.0.0.1:8188"), output
+        )
+
+    assert output.read_text() == '{"existing": true}'
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 def test_stream_snapshot_accepts_exact_size_limit(monkeypatch, tmp_path):
     body = json.dumps(_object_info()).encode()
     monkeypatch.setattr(nodes_cmd, "_OBJECT_INFO_SNAPSHOT_MAX_BYTES", len(body))
