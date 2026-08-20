@@ -996,6 +996,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "re-scan with `--comfy-version <ref>` (a tag, branch, or commit), or add a `baseComfyVersion` to the definition JSON",
     ),
     ErrorCode(
+        "distribution_registry_pin_missing",
+        "`comfy distribution create --execute` found a custom node pinned to a registry id or version the "
+        "registry does not have. The pin comes from the pack's own `pyproject.toml`, which says what the pack "
+        "calls itself rather than proving it was published, so the build would only discover this at freeze, "
+        "after the cut is spent. The message names each pack, and names the install directory as a candidate "
+        "when the registry does have that one.",
+        "re-run with `--repair-registry-ids` to use the suggested ids, or edit the definition to name a "
+        "published version",
+    ),
+    ErrorCode(
         "distribution_delete_needs_confirm",
         "`comfy distribution delete` was run without `--yes` in a non-interactive context (JSON output, an agent, "
         "or a pipe) where there is no TTY to confirm on. Delete is refused rather than blocking on a prompt.",
