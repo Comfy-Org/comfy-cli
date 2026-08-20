@@ -877,3 +877,58 @@ def test_plan_create_carries_base_image_and_policies():
     assert d["modelPolicy"] == {"mode": "allowlist", "list": ["ae.safetensors"]}
     assert d["partnerNodePolicy"] == {"mode": "blocklist", "list": []}
     assert d["baseComfyVersion"] == "v0.3.40"
+
+
+# --- scan: a registry-installed pack has an upstream --------------------------
+
+
+def _write_pack(root, name, *, project=None, git=False):
+    # Under `custom_nodes/`, not tmp_path itself: autouse fixtures put their own
+    # directories there, and scan reads every directory it is handed as a pack.
+    d = root / "custom_nodes" / name
+    d.mkdir(parents=True)
+    if project is not None:
+        d.joinpath("pyproject.toml").write_text(project, encoding="utf-8")
+    if git:
+        d.joinpath(".git").mkdir()
+    return d
+
+
+def test_scan_reads_the_registry_pin_off_an_archive_install(tmp_path):
+    """`comfy node install` unpacks archives, so a pack has no git history at all.
+    Its pyproject still names the published version the builder can fetch."""
+    _write_pack(tmp_path, "comfyui-kjnodes", project='[project]\nname = "comfyui-kjnodes"\nversion = "1.4.9"\n')
+    (node,) = distribution.scan_custom_nodes(tmp_path / "custom_nodes")
+    assert node["source"] == "registry"
+    assert node["id"] == "comfyui-kjnodes"
+    assert node["registryVersion"] == "1.4.9"
+
+
+def test_scan_keeps_a_pack_local_when_nothing_names_an_upstream(tmp_path):
+    """No git, no usable pyproject: it really must be uploaded."""
+    _write_pack(tmp_path, "handmade")
+    _write_pack(tmp_path, "half", project='[project]\nname = "half"\n')
+    assert {n["name"]: n["source"] for n in distribution.scan_custom_nodes(tmp_path / "custom_nodes")} == {
+        "handmade": "local",
+        "half": "local",
+    }
+
+
+def test_scan_prefers_git_over_the_registry_pin(tmp_path, monkeypatch):
+    """A commit pins bytes exactly; a package version is resolved later. When a pack
+    has both, the more precise one wins."""
+    _write_pack(tmp_path, "dual", project='[project]\nname = "dual"\nversion = "2.0.0"\n', git=True)
+    monkeypatch.setattr(
+        distribution,
+        "_git_output",
+        lambda path, *args: "https://github.com/x/dual" if args[0] == "remote" else "cafebabe",
+    )
+    (node,) = distribution.scan_custom_nodes(tmp_path / "custom_nodes")
+    assert node["source"] == "git"
+    assert "registryVersion" not in node
+
+
+def test_read_registry_pin_is_silent_on_a_broken_pyproject(tmp_path):
+    """A malformed file is a pack without a pin, never a crashed scan."""
+    d = _write_pack(tmp_path, "broken", project="this is not toml [[[")
+    assert distribution.read_registry_pin(d) is None
