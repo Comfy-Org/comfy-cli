@@ -169,31 +169,47 @@ def extract_tarball(
     shutil.rmtree(extractPath, ignore_errors=True)
     shutil.rmtree(outPath, ignore_errors=True)
 
+    # Both extraction paths below use the stdlib "data" filter so a member with an
+    # absolute path or a `../` traversal is rejected instead of being written
+    # wherever it points (CVE-2007-4559).
+    #
+    # This used to be skipped because of https://github.com/python/cpython/issues/107845,
+    # where data_filter resolved symlink targets against the destination root rather
+    # than against the directory holding the link, and so falsely raised
+    # LinkOutsideDestinationError on valid archives. That was a false-rejection bug,
+    # never an escape, and it was fixed in 3.10.13 / 3.11.5 / 3.12.0rc2 (2023-08-24).
+    # The only affected releases in our range are 3.10.12 and 3.11.4 — and since
+    # `extractall(filter=...)` does not exist before 3.10.12 at all, that is the whole
+    # window. On those two, the worst case is a loud error rather than a silent escape.
     if not show_progress:
         with tarfile.open(inPath) as tar:
-            tar.extractall(filter=None)
+            tar.extractall(filter="data")
         shutil.move(extractPath, outPath)
         return
 
     fileSize = inPath.stat().st_size
 
-    _size = 0
-
     with _tarball_progress("extracting tarball...", fileSize) as (barProg, barTask, pathProg, pathTask):
 
-        def _filter(tinfo: tarfile.TarInfo, _path: PathLike):
-            nonlocal _size
-            pathProg.update(pathTask, description=tinfo.path)
-            barProg.advance(barTask, _size)
-            _size = tinfo.size
+        def _reporting_members(tar: tarfile.TarFile):
+            """Yield every member, driving the progress bars as we go.
 
-            # TODO: ideally we'd use data_filter here, but it's busted: https://github.com/python/cpython/issues/107845
-            # return tarfile.data_filter(tinfo, _path)
-            return tinfo
+            Progress reporting used to ride on the ``filter`` argument, which
+            meant the extraction filter had to be a custom callable that
+            returned members unmodified — silently disabling the CVE-2007-4559
+            checks. The two concerns are separable: ``members`` drives the UI
+            and ``filter`` stays the stdlib ``"data"`` filter.
+            """
+            size = 0
+            for tinfo in tar:
+                pathProg.update(pathTask, description=tinfo.path)
+                barProg.advance(barTask, size)
+                size = tinfo.size
+                yield tinfo
+            barProg.advance(barTask, size)
 
         with tarfile.open(inPath) as tar:
-            tar.extractall(filter=_filter)
-        barProg.advance(barTask, _size)
+            tar.extractall(members=_reporting_members(tar), filter="data")
         pathProg.update(pathTask, description="")
 
     shutil.move(extractPath, outPath)
