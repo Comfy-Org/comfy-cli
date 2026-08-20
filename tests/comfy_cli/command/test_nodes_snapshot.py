@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import jsonschema
 from typer.testing import CliRunner
 
 from comfy_cli.caller import Caller
@@ -89,6 +90,65 @@ def test_stream_snapshot_preserves_existing_file_on_invalid_json(monkeypatch, tm
     assert not list(tmp_path.glob("*.tmp"))
 
 
+def test_stream_snapshot_accepts_exact_size_limit(monkeypatch, tmp_path):
+    body = json.dumps(_object_info()).encode()
+    monkeypatch.setattr(
+        nodes_cmd, "_OBJECT_INFO_SNAPSHOT_MAX_BYTES", len(body)
+    )
+    monkeypatch.setattr(
+        nodes_cmd,
+        "authed_urlopen",
+        lambda *_a, **_kw: _ChunkedResponse(body),
+    )
+    output = tmp_path / "object_info.json"
+
+    result = nodes_cmd._stream_object_info_snapshot(
+        Target(kind="local", base_url="http://127.0.0.1:8188"), output
+    )
+
+    assert result["bytes"] == len(body)
+    assert output.is_file()
+
+
+def test_stream_snapshot_rejects_over_limit_without_replacing(monkeypatch, tmp_path):
+    body = json.dumps(_object_info()).encode()
+    monkeypatch.setattr(
+        nodes_cmd, "_OBJECT_INFO_SNAPSHOT_MAX_BYTES", len(body) - 1
+    )
+    monkeypatch.setattr(
+        nodes_cmd,
+        "authed_urlopen",
+        lambda *_a, **_kw: _ChunkedResponse(body),
+    )
+    output = tmp_path / "object_info.json"
+    output.write_text('{"existing": true}')
+
+    with pytest.raises(ValueError, match="snapshot limit"):
+        nodes_cmd._stream_object_info_snapshot(
+            Target(kind="local", base_url="http://127.0.0.1:8188"), output
+        )
+
+    assert output.read_text() == '{"existing": true}'
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_stream_snapshot_rejects_non_catalog_json(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        nodes_cmd,
+        "authed_urlopen",
+        lambda *_a, **_kw: _ChunkedResponse(b'{"status": "ok"}'),
+    )
+    output = tmp_path / "object_info.json"
+
+    with pytest.raises(ValueError, match="not a node catalog"):
+        nodes_cmd._stream_object_info_snapshot(
+            Target(kind="local", base_url="http://127.0.0.1:8188"), output
+        )
+
+    assert not output.exists()
+    assert not list(tmp_path.glob("*.tmp"))
+
+
 def test_snapshot_command_emits_written_catalog(monkeypatch, tmp_path, capsys):
     target = Target(kind="local", base_url="http://127.0.0.1:8188")
     monkeypatch.setattr(nodes_cmd, "_resolve_snapshot_target", lambda *_a, **_kw: target)
@@ -112,3 +172,53 @@ def test_snapshot_command_emits_written_catalog(monkeypatch, tmp_path, capsys):
     assert envelope["data"]["output"] == str(output)
     assert envelope["data"]["classes"] == 1
     assert calls == [(target, output)]
+    schema = json.loads(
+        (
+            Path(nodes_cmd.__file__).parent.parent / "schemas" / "nodes.json"
+        ).read_text()
+    )
+    jsonschema.validate(instance=envelope["data"], schema=schema)
+
+
+def test_snapshot_command_reports_invalid_where(tmp_path, capsys):
+    _force_json_renderer()
+
+    result = CliRunner().invoke(
+        nodes_cmd.app,
+        [
+            "snapshot",
+            "--output",
+            str(tmp_path / "object_info.json"),
+            "--where",
+            "somewhere",
+        ],
+        standalone_mode=False,
+    )
+    captured = capsys.readouterr().out or result.stdout
+    envelope = json.loads(captured.strip().splitlines()[-1])
+
+    assert result.exit_code == 1
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "where_invalid"
+
+
+def test_snapshot_command_maps_unresolvable_home_to_envelope(
+    monkeypatch, capsys
+):
+    target = Target(kind="local", base_url="http://127.0.0.1:8188")
+    monkeypatch.setattr(
+        nodes_cmd, "_resolve_snapshot_target", lambda *_a, **_kw: target
+    )
+    _force_json_renderer()
+
+    result = CliRunner().invoke(
+        nodes_cmd.app,
+        ["snapshot", "--output", "~comfy-cli-user-that-does-not-exist/catalog.json"],
+        standalone_mode=False,
+    )
+    captured = capsys.readouterr().out or result.stdout
+    envelope = json.loads(captured.strip().splitlines()[-1])
+
+    assert result.exit_code == 1
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "nodes_snapshot_failed"
