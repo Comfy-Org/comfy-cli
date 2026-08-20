@@ -1081,7 +1081,7 @@ def _validate_object_info_stream(path: Path) -> int:
         def skip_whitespace() -> None:
             nonlocal pos
             while True:
-                while pos < len(buffer) and buffer[pos].isspace():
+                while pos < len(buffer) and buffer[pos] in " \t\r\n":
                     pos += 1
                 if pos < len(buffer) or eof:
                     return
