@@ -355,8 +355,10 @@ partner-API node, `false` for a free open-weights one. Two nodes can share a
 display name and differ only in this flag, so read it off the row instead of
 running `nodes show` per candidate.
 
-If no local server is running and you're not signed into cloud, pass
-`--input <object_info.json>` to query against a saved dump.
+Save the live catalog for repeatable offline checks:
+`comfy nodes snapshot --output object_info.json`. If the target is later
+unreachable, pass `--input object_info.json` to node discovery or workflow
+validation.
 
 ## Models — find what's installed, with metadata
 

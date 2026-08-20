@@ -20,14 +20,20 @@ Backed by the pure-Python CQL engine (``comfy_cli.cql.engine.Graph``).
 from __future__ import annotations
 
 import difflib
+import json
+import os
+import tempfile
+from pathlib import Path
 from typing import Annotated, Any
 
 import typer
 
 from comfy_cli import tracking
 from comfy_cli.cql.engine import Graph, LoadError
+from comfy_cli.http import authed_urlopen
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.output.sanitize import sanitize_markup
+from comfy_cli.target import Target, resolve_target
 
 app = typer.Typer(no_args_is_help=True, help="Introspect ComfyUI node classes (inputs, outputs, categories).")
 
@@ -1038,6 +1044,107 @@ def categories_cmd(
             renderer.console().print(tbl)
             rprint(f"[dim]{len(flat)} categories[/dim]")
     renderer.emit(payload, command="nodes categories")
+
+
+# ---------------------------------------------------------------------------
+# snapshot — persist raw object_info for offline validation
+# ---------------------------------------------------------------------------
+
+
+_OBJECT_INFO_SNAPSHOT_CHUNK_BYTES = 1024 * 1024
+_OBJECT_INFO_SNAPSHOT_MAX_BYTES = 512 * 1024 * 1024
+
+
+def _resolve_snapshot_target(where: str | None, host: str | None, port: int | None) -> Target:
+    mode = _resolved_where(where)
+    get_renderer().where = mode
+    if mode == "local":
+        from comfy_cli.host_port import report_usage_error, resolve_host_port
+
+        with report_usage_error(get_renderer()):
+            host, port = resolve_host_port(host, port)
+    return resolve_target(where=mode, host=host, port=port)
+
+
+def _stream_object_info_snapshot(target: Target, output: Path) -> dict[str, int]:
+    output = output.expanduser()
+    fd, temp_name = tempfile.mkstemp(dir=str(output.parent), prefix=f"{output.name}.", suffix=".tmp")
+    temp_path = Path(temp_name)
+    total = 0
+    try:
+        with os.fdopen(fd, "wb") as dst:
+            with authed_urlopen(target.url("object_info"), target, timeout=60.0) as response:
+                while chunk := response.read(_OBJECT_INFO_SNAPSHOT_CHUNK_BYTES):
+                    total += len(chunk)
+                    if total > _OBJECT_INFO_SNAPSHOT_MAX_BYTES:
+                        raise ValueError("object_info response exceeds the 512 MiB snapshot limit")
+                    dst.write(chunk)
+            dst.flush()
+            os.fsync(dst.fileno())
+
+        try:
+            with temp_path.open(encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise ValueError("object_info response is not valid JSON") from e
+
+        if (
+            not isinstance(data, dict)
+            or not data
+            or not any(isinstance(value, dict) and ("input" in value or "category" in value) for value in data.values())
+        ):
+            raise ValueError("object_info response is valid JSON but not a node catalog")
+
+        os.replace(temp_path, output)
+        return {"bytes": total, "classes": len(data)}
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+@app.command(
+    "snapshot",
+    help="Save the target's raw object_info catalog for offline validation.",
+)
+@tracking.track_command("nodes")
+def snapshot_cmd(
+    output: Annotated[
+        Path,
+        typer.Option(
+            "--output",
+            "-o",
+            help="Destination object_info JSON file (written atomically).",
+        ),
+    ],
+    where: Annotated[
+        str | None,
+        typer.Option(
+            "--where",
+            show_default=False,
+            help="'local' or 'cloud'; defaults through the normal routing chain.",
+        ),
+    ] = None,
+    host: Annotated[str | None, typer.Option(show_default=False)] = None,
+    port: Annotated[int | None, typer.Option(show_default=False)] = None,
+):
+    renderer = get_renderer()
+    target = _resolve_snapshot_target(where, host, port)
+    try:
+        result = _stream_object_info_snapshot(target, output)
+    except (OSError, ValueError) as e:
+        renderer.error(
+            code="nodes_snapshot_failed",
+            message=f"Could not save object_info snapshot: {e}",
+            hint="check the target, destination directory, and available disk space",
+            details={"output": str(output)},
+        )
+        raise typer.Exit(code=1) from e
+
+    payload = {"output": str(output.expanduser()), **result}
+    if renderer.is_pretty():
+        rprint(
+            f"[green]✓[/green] {result['classes']:,} node classes ({result['bytes']:,} bytes) → {output.expanduser()}"
+        )
+    renderer.emit(payload, command="nodes snapshot", changed=True)
 
 
 # ---------------------------------------------------------------------------

@@ -71,6 +71,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy nodes path": "nodes",
     "comfy nodes types": "nodes",
     "comfy nodes categories": "nodes",
+    "comfy nodes snapshot": "nodes",
     "comfy nodes refresh": "nodes",
     # workflow editing
     "comfy workflow slots": "workflow",
