@@ -1237,3 +1237,106 @@ def test_plan_create_prefers_git_when_a_node_carries_both_sources():
     entry = distribution.plan_create({"models": [], "customNodes": [node]})["definition"]["customNodes"][0]
     assert entry["gitRef"] == "deadbeef"
     assert "registryVersion" not in entry
+
+
+# --- the freeze describes the target env, and carries no credential -----------
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        (
+            "cstr @ git+https://x-access-token:ghp_SECRET@github.com/org/p.git@abc",
+            "cstr @ git+https://***@github.com/org/p.git@abc",
+        ),
+        ("pkg @ https://user:pw@example.com/x.whl", "pkg @ https://***@example.com/x.whl"),
+        # no userinfo: untouched, including the @ that pins a git ref
+        (
+            "ffmpy @ git+https://github.com/WASasquatch/ffmpy.git@f000",
+            "ffmpy @ git+https://github.com/WASasquatch/ffmpy.git@f000",
+        ),
+        ("numpy==1.26.4", "numpy==1.26.4"),
+    ],
+)
+def test_redact_freeze_credentials(line, expected):
+    """A definition is written to disk, POSTed to the builder and often committed,
+    so a token pip recorded in a direct reference travels far from where it was
+    minted."""
+    assert distribution._redact_freeze_credentials(line) == expected
+
+
+def test_freeze_ignores_the_callers_pythonpath(tmp_path, monkeypatch):
+    """PYTHONPATH puts whatever it points at into the freeze as an installed
+    package, and the builder then tries to resolve a pin for a phantom."""
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["env"] = kwargs.get("env") or {}
+
+        class R:
+            returncode = 0
+            stdout = "numpy==1.26.4\n"
+
+        return R()
+
+    monkeypatch.setenv("PYTHONPATH", "/somewhere/else")
+    monkeypatch.setattr(distribution.subprocess, "run", fake_run)
+    assert distribution._freeze_env("/x/bin/python") == "numpy==1.26.4\n"
+    assert "PYTHONPATH" not in seen["env"]
+
+
+# --- update: the same file works through either command -----------------------
+
+
+def test_update_maps_a_scan_definition_instead_of_sending_it_raw(monkeypatch):
+    """`update --from` sent the file verbatim, so a scan definition's models
+    arrived with neither sourceUri nor blobId and the builder rejected every one.
+    The same file must work through create and update alike."""
+    sent = {}
+
+    class FakeClient:
+        def get_distribution(self, did):
+            return {"updatedAt": "t0"}
+
+        def update_distribution(self, did, definition, updated_at):
+            sent.update(definition)
+            return {"id": did}
+
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: FakeClient())
+    monkeypatch.setattr(
+        distribution,
+        "resolve_models_via_builder",
+        lambda models, client: [m.__setitem__("sourceUri", "https://hf.co/x") for m in models] and len(models),
+    )
+    defn = {
+        "models": [{"type": "vae", "filename": "a.safetensors", "sha256": "d", "sizeBytes": 1, "source": "local"}],
+        "customNodes": [{"name": "kj", "id": "kj", "registryVersion": "1.4.9", "source": "registry"}],
+        "baseComfyVersion": "0.30.2",
+    }
+    monkeypatch.setattr(distribution, "_load_definition", lambda p, require_models=False: defn)
+    distribution.update_cmd("d1", from_="ignored.json")
+
+    assert sent["models"][0]["sourceUri"] == "https://hf.co/x"
+    assert "sizeBytes" not in sent["models"][0] and "source" not in sent["models"][0]
+    assert sent["customNodes"][0] == {"name": "kj", "id": "kj", "registryVersion": "1.4.9"}
+    assert sent["baseComfyVersion"] == "v0.30.2"
+
+
+def test_update_refuses_what_it_cannot_upload(monkeypatch):
+    """update has no upload step, so a model with no public source is a clear
+    refusal naming the command that can, not a builder 400."""
+
+    class FakeClient:
+        def get_distribution(self, did):
+            return {"updatedAt": "t0"}
+
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: FakeClient())
+    monkeypatch.setattr(distribution, "resolve_models_via_builder", lambda models, client: 0)
+    defn = {
+        "models": [{"type": "vae", "filename": "private.safetensors", "sha256": "d", "source": "local"}],
+        "customNodes": [],
+    }
+    monkeypatch.setattr(distribution, "_load_definition", lambda p, require_models=False: defn)
+    with pytest.raises(typer.Exit) as e:
+        distribution.update_cmd("d1", from_="ignored.json")
+    assert e.value.exit_code == 1
