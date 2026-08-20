@@ -480,6 +480,145 @@ class TestSetMode:
         inner = on_disk["definitions"]["subgraphs"][0]["nodes"][0]
         assert inner["mode"] == 2
 
+    def test_set_mode_forks_shared_subgraph_definition(self, tmp_path, capsys):
+        workflow = {
+            "nodes": [
+                {"id": 10, "type": "shared-definition"},
+                {"id": 11, "type": "shared-definition"},
+            ],
+            "links": [],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": "shared-definition",
+                        "nodes": [{"id": 20, "type": "LoraLoader", "mode": 0}],
+                    }
+                ]
+            },
+        }
+        path = _write_workflow(tmp_path, workflow)
+
+        env = _run(["set-mode", str(path), "10/20=bypass"], capsys)
+
+        assert env["ok"] is True
+        on_disk = json.loads(path.read_text())
+        instances = {node["id"]: node for node in on_disk["nodes"]}
+        assert instances[10]["type"] != instances[11]["type"]
+        definitions = {
+            definition["id"]: definition
+            for definition in on_disk["definitions"]["subgraphs"]
+        }
+        changed = definitions[instances[10]["type"]]["nodes"][0]
+        unchanged = definitions[instances[11]["type"]]["nodes"][0]
+        assert changed["mode"] == 4
+        assert unchanged["mode"] == 0
+
+    def test_set_mode_forks_shared_definitions_at_every_depth(self, tmp_path, capsys):
+        workflow = {
+            "nodes": [
+                {"id": 10, "type": "outer-definition"},
+                {"id": 11, "type": "outer-definition"},
+            ],
+            "links": [],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": "outer-definition",
+                        "nodes": [{"id": 20, "type": "inner-definition"}],
+                    },
+                    {
+                        "id": "inner-definition",
+                        "nodes": [{"id": 30, "type": "LoraLoader", "mode": 0}],
+                    },
+                ]
+            },
+        }
+        path = _write_workflow(tmp_path, workflow)
+
+        env = _run(["set-mode", str(path), "10/20/30=bypass"], capsys)
+
+        assert env["ok"] is True
+        on_disk = json.loads(path.read_text())
+        definitions = {
+            definition["id"]: definition
+            for definition in on_disk["definitions"]["subgraphs"]
+        }
+        top = {node["id"]: node for node in on_disk["nodes"]}
+        changed_outer = definitions[top[10]["type"]]
+        unchanged_outer = definitions[top[11]["type"]]
+        changed_inner_instance = changed_outer["nodes"][0]
+        unchanged_inner_instance = unchanged_outer["nodes"][0]
+        assert changed_inner_instance["type"] != unchanged_inner_instance["type"]
+        assert definitions[changed_inner_instance["type"]]["nodes"][0]["mode"] == 4
+        assert definitions[unchanged_inner_instance["type"]]["nodes"][0]["mode"] == 0
+
+    def test_set_mode_supports_legacy_name_typed_subgraph(self, tmp_path, capsys):
+        workflow = {
+            "nodes": [{"id": 10, "type": "Legacy Subgraph"}],
+            "links": [],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": "subgraph-uuid",
+                        "name": "Legacy Subgraph",
+                        "nodes": [{"id": 20, "type": "LoraLoader", "mode": 0}],
+                    }
+                ]
+            },
+        }
+        path = _write_workflow(tmp_path, workflow)
+
+        env = _run(["set-mode", str(path), "10/20=mute"], capsys)
+
+        assert env["ok"] is True
+        on_disk = json.loads(path.read_text())
+        assert on_disk["definitions"]["subgraphs"][0]["nodes"][0]["mode"] == 2
+
+    def test_set_mode_keeps_shared_source_unchanged_after_late_failure(
+        self, tmp_path, capsys
+    ):
+        workflow = {
+            "nodes": [
+                {"id": 10, "type": "shared-definition"},
+                {"id": 11, "type": "shared-definition"},
+            ],
+            "links": [],
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": "shared-definition",
+                        "nodes": [{"id": 20, "type": "LoraLoader", "mode": 0}],
+                    }
+                ]
+            },
+        }
+        path = _write_workflow(tmp_path, workflow)
+        original_text = path.read_text()
+
+        env = _run(
+            ["set-mode", str(path), "10/20=bypass", "999=mute"], capsys
+        )
+
+        assert env["ok"] is False
+        assert path.read_text() == original_text
+
+    def test_set_mode_sanitizes_pretty_output(self, tmp_path, capsys):
+        workflow = {
+            "nodes": [{"id": "[blue]6[/blue]", "type": "CLIPTextEncode"}],
+            "links": [],
+        }
+        path = _write_workflow(tmp_path, workflow, "[red]workflow.json")
+
+        captured, _stderr, result = _invoke(
+            ["set-mode", str(path), "[blue]6[/blue]=bypass"],
+            capsys,
+            _force_pretty_renderer,
+        )
+
+        assert result.exit_code == 0
+        assert "[red]workflow.json" in captured
+        assert "[blue]6[/blue]" in captured
+
     def test_set_mode_supports_stdout_without_modifying_source(self, tmp_path, capsys):
         path = _write_workflow(tmp_path, _direct_workflow())
         original_text = path.read_text()
