@@ -49,7 +49,7 @@ def tracking_module(tmp_path):
 
 def _last_track_call(provider):
     args, kwargs = provider.track.call_args
-    # Provider.track(event_name, distinct_id=..., properties=...)
+    # Provider.track signature - event_name, distinct_id=..., properties=...
     event_name = args[0] if args else kwargs.get("event_name")
     distinct_id = kwargs.get("distinct_id", args[1] if len(args) > 1 else None)
     properties = kwargs.get("properties", args[2] if len(args) > 2 else {})

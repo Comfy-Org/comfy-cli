@@ -417,7 +417,7 @@ def _violations_in(path: Path) -> list[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     found: list[str] = []
     for node in ast.walk(tree):
-        # os.environ.get("COMFY_..."), os.getenv("COMFY_...")
+        # attribute reads - os.environ.get or os.getenv of a COMFY_* name
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             func = node.func
             if func.attr == "get" and _is_environ_node(func.value) and node.args:
@@ -430,7 +430,7 @@ def _violations_in(path: Path) -> list[str]:
         # bare get_cloud_session(...) / ensure_fresh_session(...)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in SESSION_FUNCS:
             found.append(f"{path}:{node.lineno}: call to {node.func.id}()")
-        # os.environ["COMFY_..."]
+        # subscript reads - os.environ indexed by a COMFY_* name
         if isinstance(node, ast.Subscript) and _is_environ_node(node.value):
             if _literal(node.slice) in ENV_VARS:
                 found.append(f"{path}:{node.lineno}: os.environ[{_literal(node.slice)!r}]")

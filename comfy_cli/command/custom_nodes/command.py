@@ -122,14 +122,12 @@ def get_installed_packages():
 
 def try_install_script(repo_path, install_cmd, instant_execution=False):
     startup_script_path = os.path.join(workspace_manager.workspace_path, "startup-scripts")
+    # Windows always defers to the startup script. ComfyUI-Manager additionally
+    # gated this on the ComfyUI checkout being newer than a required commit;
+    # that comparison was deliberately dropped (Yoland) because comfy-cli tracks
+    # no required-commit datetime to compare against.
     if not instant_execution and (
-        (len(install_cmd) > 0 and install_cmd[0].startswith("#"))
-        or (
-            platform.system() == "Windows"
-            # From Yoland: disable commit compare
-            # and comfy_ui_commit_datetime.date()
-            # >= comfy_ui_required_commit_datetime.date()
-        )
+        (len(install_cmd) > 0 and install_cmd[0].startswith("#")) or platform.system() == "Windows"
     ):
         if not os.path.exists(startup_script_path):
             os.makedirs(startup_script_path)
@@ -141,26 +139,15 @@ def try_install_script(repo_path, install_cmd, instant_execution=False):
 
         return True
     else:
-        # From Yoland: Disable blacklisting
-        # if len(install_cmd) == 5 and install_cmd[2:4] == ['pip', 'install']:
-        #     if is_blacklisted(install_cmd[4]):
-        #         print(f"[ComfyUI-Manager] skip black listed pip installation: '{install_cmd[4]}'")
-        #         return True
-
+        # ComfyUI-Manager screened pip installs against a package blacklist here.
+        # Deliberately not carried over (Yoland): comfy-cli ships no blacklist,
+        # so every install command runs as given.
         print(f"\n## ComfyUI-Manager: EXECUTE => {install_cmd}")
         code = run_script(install_cmd, cwd=repo_path)
 
-        # From Yoland: Disable warning
-        # if platform.system() != "Windows":
-        #     try:
-        #         if comfy_ui_commit_datetime.date() < comfy_ui_required_commit_datetime.date():
-        #             print("\n\n###################################################################")
-        #             print(f"[WARN] ComfyUI-Manager: Your ComfyUI version ({comfy_ui_revision})[{comfy_ui_commit_datetime.date()}] is too old. Please update to the latest version.")
-        #             print(f"[WARN] The extension installation feature may not work properly in the current installed ComfyUI version on Windows environment.")
-        #             print("###################################################################\n\n")
-        #     except:
-        #         pass
-
+        # ComfyUI-Manager also warned on non-Windows when the ComfyUI checkout
+        # was older than the required commit. Dropped for the same reason as
+        # above — there is no required-commit datetime here.
         if code != 0:
             print("install script failed")
             return False
@@ -170,12 +157,10 @@ def execute_install_script(repo_path):
     install_script_path = os.path.join(repo_path, "install.py")
     requirements_path = os.path.join(repo_path, "requirements.txt")
 
-    # From Yoland: disable lazy mode
-    # if lazy_mode:
-    #     install_cmd = ["#LAZY-INSTALL-SCRIPT",  sys.executable]
-    #     try_install_script(repo_path, install_cmd)
-    # else:
-
+    # ComfyUI-Manager's "lazy mode" — queueing a #LAZY-INSTALL-SCRIPT marker for
+    # the next startup instead of installing now — was deliberately not carried
+    # over (Yoland). comfy-cli installs eagerly so failures surface in the
+    # command that caused them rather than on some later launch.
     if os.path.exists(requirements_path):
         print("Install: pip packages")
         python = resolve_workspace_python(workspace_manager.workspace_path)
@@ -1166,7 +1151,6 @@ def validate():
     Run validation checks that would be performed during publishing.
     """
     validate_node_for_publishing()
-    # print("[green]✓ All validation checks passed successfully[/green]")
 
 
 def resolve_publish_changelog(changelog: str | None, changelog_file: str | None) -> str:

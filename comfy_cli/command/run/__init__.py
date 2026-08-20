@@ -232,8 +232,8 @@ def execute(
     renderer = get_renderer()
 
     # `preloaded` short-circuits file loading: an in-memory API-format graph
-    # (e.g. the `comfy run --prompt` injected default) is handed straight in as
-    # (workflow_dict, display_name, is_ui, checkpoint_user_set). Everything
+    # (e.g. the `comfy run --prompt` injected default) is handed straight in as a
+    # workflow_dict / display_name / is_ui / checkpoint_user_set tuple. Everything
     # downstream is unchanged; `checkpoint_user_set` gates runtime checkpoint
     # resolution for the bundled default (skip it when the user pinned one).
     if preloaded is not None:
