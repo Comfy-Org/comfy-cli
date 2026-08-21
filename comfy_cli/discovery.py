@@ -32,6 +32,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy cloud login": "auth",
     "comfy cloud logout": "auth",
     "comfy cloud whoami": "auth",
+    "comfy cloud status": "cloud_status",
     "comfy distribution scan": "distribution",
     "comfy distribution create": "distribution_create",
     "comfy distribution list": "distribution_list",
