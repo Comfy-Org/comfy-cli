@@ -491,23 +491,23 @@ widget values it ships (e.g. `model="kling-v3"`, `model.resolution="720p"`).
 
 ## Models — find what's installed, with metadata
 
-On **cloud**, `comfy models search` hits the live asset catalog
+On **cloud**, `comfy model search` hits the live asset catalog
 (`/api/assets`) and returns enriched rows: `name`, `type`, `tags`,
 `base_model`, `source_url`, `preview_url`, `size`. On **local**, the same
 command falls back to `/models/<folder>` listings (filenames only).
 
 ```bash
-comfy --json models list-folders                 # every model folder (loras, checkpoints, vae, …)
-comfy --json models list-folder loras            # files in a folder, with pathIndex
-comfy --json models search --text "wan2.2" --type lora --limit 10
-comfy --json models search --text "flux"         # text search across the catalog
-comfy --json models show <rows[0].name>          # full Asset + projected row (cloud-only)
+comfy --json model list-folders                 # every model folder (loras, checkpoints, vae, …)
+comfy --json model list-folder loras            # files in a folder, with pathIndex
+comfy --json model search --text "wan2.2" --type lora --limit 10
+comfy --json model search --text "flux"         # text search across the catalog
+comfy --json model show <rows[0].name>          # full Asset + projected row (cloud-only)
 ```
 
-`models search --type <X>` accepts the conventional folder names
+`model search --type <X>` accepts the conventional folder names
 (`lora`/`loras`, `checkpoint`/`checkpoints`, `vae`, `controlnet`,
 `upscale`, `clip`, `clip_vision`, `unet`/`diffusion_models`, …). Use
-`models list-folders` first if you're unsure what types the backend
+`model list-folders` first if you're unsure what types the backend
 exposes.
 
 **Discover → wire loop — every asset type, never hardcoded names:**
@@ -520,12 +520,12 @@ pattern is the same regardless of type:
 
 ```bash
 # 1. Discover available assets for any type
-comfy --json models search --type lora --where cloud --text "detail" --limit 5
-comfy --json models search --type controlnet --where cloud --limit 5
-comfy --json models search --type checkpoint --where cloud --limit 5
-comfy --json models search --type vae --where cloud --limit 5
-comfy --json models search --type upscale --where cloud --limit 5
-comfy --json models search --type embeddings --where cloud --limit 5
+comfy --json model search --type lora --where cloud --text "detail" --limit 5
+comfy --json model search --type controlnet --where cloud --limit 5
+comfy --json model search --type checkpoint --where cloud --limit 5
+comfy --json model search --type vae --where cloud --limit 5
+comfy --json model search --type upscale --where cloud --limit 5
+comfy --json model search --type embeddings --where cloud --limit 5
 
 # 2. Take rows[0].name verbatim — paste it into your fragment's required param
 
@@ -540,8 +540,8 @@ recommendation.** On this backend, today, the survey returned the rows
 sketched below; yours will differ — pick from YOUR rows:
 
 ```bash
-comfy --json models search --type checkpoint --where cloud --limit 5  # → picked <ckpt> from rows
-comfy --json models search --type lora --where cloud --limit 5        # → picked <lora> from rows
+comfy --json model search --type checkpoint --where cloud --limit 5  # → picked <ckpt> from rows
+comfy --json model search --type lora --where cloud --limit 5        # → picked <lora> from rows
 # Learn the lora wiring from a real graph, not memory — fetch a matching template:
 comfy --json templates ls --type image --model "<family of <ckpt>, from its row>"
 comfy templates fetch <name-from-those-rows> --out ref.json   # read how it wires
@@ -625,11 +625,11 @@ comfy --json nodes ls --produces AUDIO --limit 1 # AUDIO producer count
 comfy --json nodes ls --api-only --limit 1       # partner API node count
 comfy --json nodes categories --prefix "partner"# API provider categories
 comfy --json nodes types                         # all connection types
-comfy --json models list-folders                 # all model folders
+comfy --json model list-folders                 # all model folders
 comfy --json templates ls --limit 1              # template count
 ```
 
-The `total` field in `nodes ls`, `nodes search`, and `models search`
+The `total` field in `nodes ls`, `nodes search`, and `model search`
 gives the full count even when `--limit` caps the returned rows.
 (One exception: when `nodes search` finds nothing it falls back to the
 closest node names and sets `data.close_match: true` — check that flag, not
@@ -877,8 +877,8 @@ comfy --json nodes show <ClassName>
 # If error.code == "node_not_found", check details.close_matches
 
 # Confirm a model filename is actually available on the resolved backend (cloud-only)
-# On local: use `comfy models list-folder <type>` instead
-comfy --json models show <filename>
+# On local: use `comfy model list-folder <type>` instead
+comfy --json model show <filename>
 # If error.code == "model_not_found", check details.close_matches and pick one
 ```
 
@@ -1048,11 +1048,11 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
 
 ## Image
 
-- Survey first: `comfy nodes ls --produces IMAGE --api-only` (partner APIs), `comfy templates ls --type image`, `comfy models search --type checkpoint` — then choose
+- Survey first: `comfy nodes ls --produces IMAGE --api-only` (partner APIs), `comfy templates ls --type image`, `comfy model search --type checkpoint` — then choose
 - Batch sweeps: `comfy workflow vary` for multi-prompt/seed generation
 - Text rendering: use Ideogram (IdeogramV3), NOT Flux — Flux garbles text
 - Partner API escape hatch (one-shots only, via the proxy — not a workflow Job): `comfy generate flux-ultra --prompt "..."`
-- Never hardcode checkpoint/LoRA names — discover via `models search`
+- Never hardcode checkpoint/LoRA names — discover via `model search`
 
 ## Video
 

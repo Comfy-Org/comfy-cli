@@ -200,7 +200,9 @@ def _resolve_and_stamp(renderer, where: str | None):
 
 @app.command(
     "list-folders",
-    help="List model folders available to the resolved backend (cloud: /api/experiment/models, local: /models).",
+    help="List model folders on the backend/cloud — the resolved server "
+    "(cloud: /api/experiment/models, local server: /models). For files already "
+    "on disk in your workspace, use `comfy model list`.",
 )
 @tracking.track_command("models")
 def list_folders_cmd(
@@ -268,7 +270,9 @@ def list_folders_cmd(
 
 @app.command(
     "list-folder",
-    help="List model files in a specific folder. Returns name + pathIndex per entry — no enrichment.",
+    help="List model files in a specific folder on the backend/cloud (the resolved "
+    "server). Returns name + pathIndex per entry — no enrichment. For files already "
+    "on disk in your workspace, use `comfy model list`.",
 )
 @tracking.track_command("models")
 def list_folder_cmd(
