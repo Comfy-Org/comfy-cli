@@ -1433,3 +1433,27 @@ def test_as_snapshot_envelope_wraps_the_file_desktop_actually_writes():
 def test_as_snapshot_envelope_leaves_a_real_export_alone():
     export = {"type": "comfyui-desktop-2-snapshot", "version": 2, "snapshots": [{"customNodes": []}]}
     assert distribution.as_snapshot_envelope(export) is export
+
+
+def test_create_execute_does_not_read_a_renamed_pack_as_a_dropped_one(monkeypatch):
+    """The importer derives a pack's folder by lowercasing. A name it normalises is
+    still the pack that was sent, and refusing it would stop a create the builder
+    was happy with."""
+    builder = _ImportingBuilder(
+        resolved={
+            "definition": {
+                "customNodes": [{"name": "comfyui-kjnodes", "id": "comfyui-kjnodes", "registryVersion": "1.4.9"}]
+            },
+            "report": {},
+        }
+    )
+    _execute(
+        monkeypatch,
+        builder,
+        {
+            "baseComfyVersion": "v0.30.2",
+            "models": [],
+            "customNodes": [{"name": "ComfyUI-KJNodes", "id": "comfyui-kjnodes", "registryVersion": "1.4.9"}],
+        },
+    )
+    assert builder.created_with is not None

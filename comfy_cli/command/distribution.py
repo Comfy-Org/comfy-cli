@@ -1160,13 +1160,19 @@ def _create_execute(
         if checked is not None:
             # A pack it could not vouch for is absent from what it returns, and
             # an image quietly missing a pack is worse than a refused create.
-            kept = {n.get("name") for n in checked}
+            # Matched case-insensitively: the importer derives a pack's folder by
+            # lowercasing, so a name it chose to normalise must not read as a pack
+            # it dropped, which would refuse a create the builder was happy with.
+            def _key(name):
+                return (name or "").strip().casefold()
+
+            kept = {_key(n.get("name")) for n in checked}
             # A collision is the importer resolving a conflict the cut would refuse
             # outright, so its definition is the buildable one and stopping would
             # help nobody. Every other absence means the user asked for something
             # that does not exist, which only they can fix.
-            colliding = set(imported_report.get("collidingNodes") or [])
-            missing = [n for n in declared if n not in kept and n not in colliding]
+            colliding = {_key(n) for n in imported_report.get("collidingNodes") or []}
+            missing = [n for n in declared if _key(n) not in kept and _key(n) not in colliding]
             if missing:
                 renderer.error(
                     code="distribution_registry_pin_missing",
