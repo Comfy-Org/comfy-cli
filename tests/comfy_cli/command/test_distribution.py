@@ -11,8 +11,11 @@ import sys
 from pathlib import Path
 
 import pytest
+import requests
+import typer
 
 from comfy_cli.command import distribution
+from comfy_cli.output import get_renderer
 
 
 @pytest.fixture
@@ -299,10 +302,12 @@ def test_plan_create_maps_to_builder_schema_all_upload():
 
 
 def test_plan_create_carries_environment_fields():
-    """baseComfyVersion / pipDependencies pass straight through to the builder def."""
+    """pipDependencies passes straight through; baseComfyVersion is normalized to a
+    ref the builder can resolve, here rather than only in `scan`, so a definition
+    written before that fix does not spend its cut discovering the difference."""
     definition = {**SCAN_DEF, "baseComfyVersion": "0.3.40", "pipDependencies": "numpy==1.26.0\n"}
     d = distribution.plan_create(definition)["definition"]
-    assert d["baseComfyVersion"] == "0.3.40"
+    assert d["baseComfyVersion"] == "v0.3.40"
     assert d["pipDependencies"] == "numpy==1.26.0\n"
 
 
@@ -828,3 +833,627 @@ def test_create_command_bad_definition(tmp_path):
     assert proc.returncode == 1
     envelope = json.loads(proc.stdout.strip().splitlines()[-1])
     assert envelope["error"]["code"] == "distribution_definition_invalid"
+
+
+# --- create: the definition survives the trip ---------------------------------
+
+REGISTRY_DEF = {
+    "schema": "distribution-definition/0",
+    "baseComfyVersion": "v0.3.40",
+    "baseImage": "cuda130-py312",
+    "modelPolicy": {"mode": "allowlist", "list": ["ae.safetensors"]},
+    "partnerNodePolicy": {"mode": "blocklist", "list": []},
+    "models": [],
+    "customNodes": [
+        {"name": "comfyui-kjnodes", "id": "comfyui-kjnodes", "registryVersion": "1.4.9", "source": "registry"},
+        {"name": "priv", "blobId": "blob-1"},
+        {"name": "gitpack", "repository": "https://github.com/x/gitpack", "gitRef": "deadbeef"},
+    ],
+}
+
+
+def test_plan_create_keeps_registry_pins_out_of_the_upload_plan():
+    """A registry-pinned node is a source the builder can resolve, so it travels as
+    (id, registryVersion) rather than becoming an upload `--execute` would refuse."""
+    plan = distribution.plan_create(REGISTRY_DEF)
+    kj = next(n for n in plan["definition"]["customNodes"] if n["name"] == "comfyui-kjnodes")
+    assert kj == {"name": "comfyui-kjnodes", "id": "comfyui-kjnodes", "registryVersion": "1.4.9"}
+    assert plan["upload_count"] == 0
+
+
+def test_plan_create_keeps_a_blob_reference():
+    """An already-uploaded node names its blob; re-uploading it would orphan bytes."""
+    priv = next(n for n in distribution.plan_create(REGISTRY_DEF)["definition"]["customNodes"] if n["name"] == "priv")
+    assert priv == {"name": "priv", "blobId": "blob-1"}
+
+
+def test_plan_create_honours_a_hand_written_git_node_with_no_source_tag():
+    """`source` is the scan's own annotation. A definition written by hand names its
+    fields and nothing else, and must not be read as an upload."""
+    g = next(n for n in distribution.plan_create(REGISTRY_DEF)["definition"]["customNodes"] if n["name"] == "gitpack")
+    assert g == {"name": "gitpack", "repository": "https://github.com/x/gitpack", "gitRef": "deadbeef"}
+
+
+def test_plan_create_carries_base_image_and_policies():
+    """These reach the builder or they do not exist: an absent baseImage silently
+    becomes the catalog default, and an absent policy seals as allow-all."""
+    d = distribution.plan_create(REGISTRY_DEF)["definition"]
+    assert d["baseImage"] == "cuda130-py312"
+    assert d["modelPolicy"] == {"mode": "allowlist", "list": ["ae.safetensors"]}
+    assert d["partnerNodePolicy"] == {"mode": "blocklist", "list": []}
+    assert d["baseComfyVersion"] == "v0.3.40"
+
+
+# --- scan: a registry-installed pack has an upstream --------------------------
+
+
+def _write_pack(root, name, *, project=None, git=False):
+    # Under `custom_nodes/`, not tmp_path itself: autouse fixtures put their own
+    # directories there, and scan reads every directory it is handed as a pack.
+    d = root / "custom_nodes" / name
+    d.mkdir(parents=True)
+    if project is not None:
+        d.joinpath("pyproject.toml").write_text(project, encoding="utf-8")
+    if git:
+        d.joinpath(".git").mkdir()
+    return d
+
+
+def test_scan_drops_the_git_keys_when_it_records_a_registry_pin(tmp_path, monkeypatch):
+    """Exactly one source per node, which the builder enforces. A half-git checkout
+    (an origin but no resolvable HEAD) would otherwise carry both, which `create`
+    hides by picking one but `update --from` sends verbatim and the builder 400s."""
+    _write_pack(tmp_path, "half", project='[project]\nname = "half"\nversion = "1.0.0"\n', git=True)
+    monkeypatch.setattr(
+        distribution, "_git_output", lambda path, *args: "https://github.com/x/half" if args[0] == "remote" else None
+    )
+    (node,) = distribution.scan_custom_nodes(tmp_path / "custom_nodes")
+    assert node["source"] == "registry"
+    assert node.get("repository") is None and node.get("gitRef") is None
+
+
+def test_scan_reads_the_registry_pin_off_an_archive_install(tmp_path):
+    """`comfy node install` unpacks archives, so a pack has no git history at all.
+    Its pyproject still names the published version the builder can fetch."""
+    _write_pack(tmp_path, "comfyui-kjnodes", project='[project]\nname = "comfyui-kjnodes"\nversion = "1.4.9"\n')
+    (node,) = distribution.scan_custom_nodes(tmp_path / "custom_nodes")
+    assert node["source"] == "registry"
+    assert node["id"] == "comfyui-kjnodes"
+    assert node["registryVersion"] == "1.4.9"
+
+
+def test_scan_keeps_a_pack_local_when_nothing_names_an_upstream(tmp_path):
+    """No git, no usable pyproject: it really must be uploaded."""
+    _write_pack(tmp_path, "handmade")
+    _write_pack(tmp_path, "half", project='[project]\nname = "half"\n')
+    assert {n["name"]: n["source"] for n in distribution.scan_custom_nodes(tmp_path / "custom_nodes")} == {
+        "handmade": "local",
+        "half": "local",
+    }
+
+
+def test_scan_prefers_git_over_the_registry_pin(tmp_path, monkeypatch):
+    """A commit pins bytes exactly; a package version is resolved later. When a pack
+    has both, the more precise one wins."""
+    _write_pack(tmp_path, "dual", project='[project]\nname = "dual"\nversion = "2.0.0"\n', git=True)
+    monkeypatch.setattr(
+        distribution,
+        "_git_output",
+        lambda path, *args: "https://github.com/x/dual" if args[0] == "remote" else "cafebabe",
+    )
+    (node,) = distribution.scan_custom_nodes(tmp_path / "custom_nodes")
+    assert node["source"] == "git"
+    assert "registryVersion" not in node
+
+
+@pytest.mark.parametrize(
+    ("body", "why"),
+    [
+        ("this is not toml [[[", "malformed"),
+        ('[project]\nname = "ok"\nversion = 1.0\n', "version is a toml float, not a string"),
+        ('[project]\nname = "ok"\nversion = 2024-01-01\n', "version is a toml date"),
+        ('[project]\nname = ""\nversion = "1.0.0"\n', "empty id"),
+        ('[project]\nname = "ok"\nversion = "1.0"\n', "not a package version; the builder rejects it"),
+        ('[project]\nname = "ok"\nversion = "0.1.0b1"\n', "prerelease is not a package version"),
+        ('[project]\nname = "../../publishers/x"\nversion = "1.0.0"\n', "escapes the registry path"),
+        ('[project]\nname = "ok#frag"\nversion = "1.0.0"\n', "truncates server-side to a different id"),
+        ('project = "hello"\n', "project is not a table"),
+    ],
+)
+def test_read_registry_pin_is_silent_on_anything_it_cannot_trust(tmp_path, body, why):
+    """A pack that cannot answer has no pin. It must never crash the scan, and never
+    hand on a value the registry or the builder would reject."""
+    d = _write_pack(tmp_path, "pack", project=body)
+    assert distribution._read_registry_pin(d) is None, why
+
+
+# --- scan: the ComfyUI pin has to be a ref that resolves ----------------------
+
+
+@pytest.mark.parametrize(
+    ("detected", "expected"),
+    [
+        ("0.30.2", "v0.30.2"),  # the packaged marker, the common case
+        ("0.30", "v0.30"),
+        ("v0.30.2", "v0.30.2"),  # already a tag: untouched
+        ("master", "master"),  # a branch
+        ("0.30.2-5-gdeadbee", "0.30.2-5-gdeadbee"),  # git describe output
+        ("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+    ],
+)
+def test_as_comfy_git_ref(detected, expected):
+    """Upstream tags releases `vX.Y.Z` while every version source reports the bare
+    number, so only a bare release number is rewritten."""
+    assert distribution.as_comfy_git_ref(detected) == expected
+
+
+def test_scan_command_writes_a_resolvable_comfy_ref(models_tree, tmp_path):
+    """End-to-end: a bare `--comfy-version` reaches the definition as a tag. The
+    builder resolves this field with git ls-remote, so the bare number it used to
+    record could only ever be discovered by a failed build."""
+    out = tmp_path / "definition.json"
+    env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "comfy_cli",
+            "distribution",
+            "scan",
+            "--models-dir",
+            str(models_tree),
+            "--comfy-version",
+            "0.30.2",
+            "-o",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(out.read_text())["baseComfyVersion"] == "v0.30.2"
+
+
+# --- validate: say what was checked, and surface the warnings -----------------
+
+
+def _run_validate(monkeypatch, capsys, result):
+    """Drive validate_cmd against a stand-in builder, in pretty mode."""
+
+    class FakeClient:
+        def validate_distribution(self, distribution_id):
+            return result
+
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: FakeClient())
+    distribution.validate_cmd("d1")
+    return capsys.readouterr().out
+
+
+def test_validate_prints_the_warnings_beside_the_verdict(monkeypatch, capsys):
+    """A ref the builder cannot find rides alongside `ok: true`. It was reachable
+    only by reading the JSON dump, under a line that said the definition resolved,
+    so the one thing that will fail the cut was the easiest thing to miss."""
+    out = _run_validate(
+        monkeypatch,
+        capsys,
+        {
+            "ok": True,
+            "warnings": [{"field": "baseComfyVersion", "reason": "ref not found in remote advertisement"}],
+        },
+    )
+    # Assert on the text BEFORE the JSON dump: the dump repeats every one of these
+    # strings, so a whole-output assertion passes even with the warn lines deleted.
+    head = out.split("{", 1)[0]
+    assert "1 reference(s)" in head
+    assert "the build will fail on these" in head
+    assert "baseComfyVersion: ref not found in remote advertisement" in head
+
+
+def test_validate_does_not_claim_the_definition_resolves(monkeypatch, capsys):
+    """The endpoint checks shape and pin existence; whether the set installs
+    together is only answered by a build."""
+    out = _run_validate(monkeypatch, capsys, {"ok": True})
+    assert "not a full resolve" in out
+    assert "Definition resolves." not in out
+
+
+# --- create: the builder reads the pins, not us -------------------------------
+
+
+def test_snapshot_from_definition_maps_each_source_to_its_snapshot_kind():
+    """The importer reads a Desktop export; a scan holds the same facts under other
+    names. Translating is what lets one implementation of registry truth serve both."""
+    snap = distribution.snapshot_from_definition(
+        {
+            "baseComfyVersion": "v0.30.2",
+            "environment": {"pythonVersion": "3.12.7"},
+            "customNodes": [
+                {"name": "was-node-suite-comfyui", "id": "pr-was-47064894", "registryVersion": "1.0.1"},
+                {"name": "gitpack", "repository": "https://github.com/x/gitpack", "gitRef": "deadbeef"},
+                {"name": "handmade"},
+            ],
+        }
+    )
+    assert snap["type"] == "comfyui-desktop-2-snapshot"
+    (entry,) = snap["snapshots"]
+    assert entry["comfyui"]["baseTag"] == "v0.30.2"
+    assert entry["pythonVersion"] == "3.12.7"
+    assert entry["customNodes"] == [
+        {
+            "type": "cnr",
+            "id": "pr-was-47064894",
+            "dirName": "was-node-suite-comfyui",
+            "version": "1.0.1",
+            "enabled": True,
+        },
+        {
+            "type": "git",
+            "id": "gitpack",
+            "dirName": "gitpack",
+            "url": "https://github.com/x/gitpack",
+            "commit": "deadbeef",
+            "enabled": True,
+        },
+    ]
+
+
+def test_snapshot_from_definition_keeps_only_plain_pins():
+    """A freeze is one pin per line; a snapshot is a map. A comment, a git direct
+    reference and a bare name are not pins and have no key to occupy."""
+    snap = distribution.snapshot_from_definition(
+        {
+            "pipDependencies": (
+                "# captured on Darwin/arm64\n"
+                "numpy==1.26.4\n"
+                "cstr @ git+https://github.com/WASasquatch/cstr@0520c29\n"
+                "torch\n"
+                "\n"
+                "timm==1.0.28\n"
+            )
+        }
+    )
+    assert snap["snapshots"][0]["pipPackages"] == {"numpy": "1.26.4", "timm": "1.0.28"}
+
+
+def test_snapshot_from_definition_carries_no_models():
+    """A snapshot describes an environment. Models are the caller's half and stay
+    with the definition, which is why the importer's answer is merged, not adopted."""
+    snap = distribution.snapshot_from_definition({"models": [{"type": "vae", "filename": "ae.safetensors"}]})
+    assert "models" not in snap["snapshots"][0]
+
+
+def test_report_advisories_names_every_thing_the_import_could_not_carry():
+    lines = distribution.report_advisories(
+        {"notInRegistry": ["was-node-suite-comfyui"], "unpinnablePins": ["torch"], "pythonSatisfied": True}
+    )
+    assert any("was-node-suite-comfyui" in line and "does not publish" in line for line in lines)
+    assert any("torch" in line and "not a public PyPI release" in line for line in lines)
+    assert len(lines) == 2  # pythonSatisfied True says nothing
+
+
+def test_report_advisories_says_when_no_base_image_matches_the_python():
+    """The scan ran on one Python and the build runs on another, which is how a
+    freeze that resolved locally fails in the build."""
+    (line,) = distribution.report_advisories({"pythonSatisfied": False})
+    assert "closest one" in line
+
+
+class _ImportingBuilder:
+    """Stands in for the builder across the whole execute path."""
+
+    def __init__(self, resolved=None, fail=None):
+        self.resolved = resolved
+        self.fail = fail
+        self.created_with = None
+        self.snapshot_seen = None
+
+    def resolve_snapshot(self, snapshot):
+        self.snapshot_seen = snapshot
+        if self.fail:
+            raise self.fail
+        return self.resolved
+
+    def resolve_models(self, filenames):
+        return []
+
+    def create_distribution(self, name, definition, description=None):
+        self.created_with = definition
+        return "dist-1"
+
+    def cut_version(self, distribution_id, targets=None):
+        return ("ver-1", "status-url")
+
+
+def _execute(monkeypatch, builder, definition):
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: builder)
+    distribution._create_execute(get_renderer(), definition, name="demo", builder_url=None, models_dir=None)
+
+
+def test_create_execute_sends_the_definition_for_reading_and_takes_back_what_it_says(monkeypatch):
+    """The whole point of the call: the id the builder vouched for is the id that
+    gets created, without the CLI holding its own copy of registry truth."""
+    builder = _ImportingBuilder(
+        resolved={
+            "definition": {
+                "customNodes": [{"name": "was", "id": "was-node-suite-comfyui", "registryVersion": "1.0.1"}]
+            },
+            "report": {},
+        }
+    )
+    _execute(
+        monkeypatch,
+        builder,
+        {
+            "baseComfyVersion": "v0.30.2",
+            "models": [],
+            "customNodes": [{"name": "was", "id": "pr-was-47064894", "registryVersion": "1.0.1"}],
+        },
+    )
+    assert builder.snapshot_seen["snapshots"][0]["customNodes"][0]["id"] == "pr-was-47064894"
+    (node,) = builder.created_with["customNodes"]
+    assert node["id"] == "was-node-suite-comfyui"
+
+
+def test_create_execute_refuses_when_the_builder_drops_a_pack(monkeypatch):
+    """A pack the importer could not vouch for is absent from what it returns.
+    Building an image quietly missing what the user asked for is worse than failing."""
+    builder = _ImportingBuilder(resolved={"definition": {"customNodes": []}, "report": {"notInRegistry": ["was"]}})
+    with pytest.raises(typer.Exit):
+        _execute(
+            monkeypatch,
+            builder,
+            {
+                "baseComfyVersion": "v0.30.2",
+                "models": [],
+                "customNodes": [{"name": "was", "id": "nope", "registryVersion": "1.0.1"}],
+            },
+        )
+    assert builder.created_with is None
+
+
+def test_create_execute_still_creates_when_the_builder_cannot_read_pins(monkeypatch):
+    """An older builder has no importer. The pins go to the cut unchecked, which is
+    where they were checked before this existed; refusing to create would be worse."""
+    builder = _ImportingBuilder(fail=requests.RequestException("404 no such endpoint"))
+    _execute(
+        monkeypatch,
+        builder,
+        {
+            "baseComfyVersion": "v0.30.2",
+            "models": [],
+            "customNodes": [{"name": "was", "id": "pr-was-47064894", "registryVersion": "1.0.1"}],
+        },
+    )
+    assert builder.created_with["customNodes"][0]["id"] == "pr-was-47064894"
+
+
+# --- the freeze describes the target env, and carries no credential -----------
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        (
+            "cstr @ git+https://x-access-token:ghp_SECRET@github.com/org/p.git@abc",
+            "cstr @ git+https://***@github.com/org/p.git@abc",
+        ),
+        ("pkg @ https://user:pw@example.com/x.whl", "pkg @ https://***@example.com/x.whl"),
+        # no userinfo: untouched, including the @ that pins a git ref
+        (
+            "ffmpy @ git+https://github.com/WASasquatch/ffmpy.git@f000",
+            "ffmpy @ git+https://github.com/WASasquatch/ffmpy.git@f000",
+        ),
+        ("numpy==1.26.4", "numpy==1.26.4"),
+    ],
+)
+def test_redact_freeze_credentials(line, expected):
+    """A definition is written to disk, POSTed to the builder and often committed,
+    so a token pip recorded in a direct reference travels far from where it was
+    minted."""
+    assert distribution._redact_freeze_credentials(line) == expected
+
+
+def test_freeze_ignores_the_callers_pythonpath(tmp_path, monkeypatch):
+    """PYTHONPATH puts whatever it points at into the freeze as an installed
+    package, and the builder then tries to resolve a pin for a phantom."""
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["env"] = kwargs.get("env") or {}
+
+        class R:
+            returncode = 0
+            stdout = "numpy==1.26.4\n"
+
+        return R()
+
+    monkeypatch.setenv("PYTHONPATH", "/somewhere/else")
+    monkeypatch.setattr(distribution.subprocess, "run", fake_run)
+    assert distribution._freeze_env("/x/bin/python") == "numpy==1.26.4\n"
+    assert "PYTHONPATH" not in seen["env"]
+
+
+# --- update: the same file works through either command -----------------------
+
+
+def test_update_maps_a_scan_definition_instead_of_sending_it_raw(monkeypatch):
+    """`update --from` sent the file verbatim, so a scan definition's models
+    arrived with neither sourceUri nor blobId and the builder rejected every one.
+    The same file must work through create and update alike."""
+    sent = {}
+
+    class FakeClient:
+        def get_distribution(self, did):
+            return {"updatedAt": "t0"}
+
+        def update_distribution(self, did, definition, updated_at):
+            sent.update(definition)
+            return {"id": did}
+
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: FakeClient())
+    monkeypatch.setattr(
+        distribution,
+        "resolve_models_via_builder",
+        lambda models, client: [m.__setitem__("sourceUri", "https://hf.co/x") for m in models] and len(models),
+    )
+    defn = {
+        "models": [{"type": "vae", "filename": "a.safetensors", "sha256": "d", "sizeBytes": 1, "source": "local"}],
+        "customNodes": [{"name": "kj", "id": "kj", "registryVersion": "1.4.9", "source": "registry"}],
+        "baseComfyVersion": "0.30.2",
+    }
+    monkeypatch.setattr(distribution, "_load_definition", lambda p, require_models=False: defn)
+    distribution.update_cmd("d1", from_="ignored.json")
+
+    assert sent["models"][0]["sourceUri"] == "https://hf.co/x"
+    assert "sizeBytes" not in sent["models"][0] and "source" not in sent["models"][0]
+    assert sent["customNodes"][0] == {"name": "kj", "id": "kj", "registryVersion": "1.4.9"}
+    assert sent["baseComfyVersion"] == "v0.30.2"
+
+
+def test_update_refuses_what_it_cannot_upload(monkeypatch):
+    """update has no upload step, so a model with no public source is a clear
+    refusal naming the command that can, not a builder 400."""
+
+    class FakeClient:
+        def get_distribution(self, did):
+            return {"updatedAt": "t0"}
+
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: FakeClient())
+    monkeypatch.setattr(distribution, "resolve_models_via_builder", lambda models, client: 0)
+    defn = {
+        "models": [{"type": "vae", "filename": "private.safetensors", "sha256": "d", "source": "local"}],
+        "customNodes": [],
+    }
+    monkeypatch.setattr(distribution, "_load_definition", lambda p, require_models=False: defn)
+    with pytest.raises(typer.Exit) as e:
+        distribution.update_cmd("d1", from_="ignored.json")
+    assert e.value.exit_code == 1
+
+
+# --- blobs: a private file is uploaded once and referenced by id ---------------
+
+
+def test_plan_create_keeps_a_model_blob_reference():
+    """A model the caller already uploaded names its blob. Re-uploading it would
+    orphan the bytes it replaced and spend the transfer twice."""
+    plan = distribution.plan_create(
+        {"models": [{"type": "vae", "filename": "ae.safetensors", "sha256": "def", "blobId": "blob-9"}]}
+    )
+    assert plan["definition"]["models"][0]["blobId"] == "blob-9"
+    assert plan["upload_count"] == 0
+
+
+def test_a_definition_naming_only_blobs_goes_through_update_untouched():
+    """Every member names a builder source, so update has nothing to map and sends
+    the file as written."""
+    assert not distribution._is_scan_shaped(
+        {
+            "models": [{"type": "vae", "filename": "ae.safetensors", "blobId": "blob-9"}],
+            "customNodes": [{"name": "priv", "blobId": "blob-1"}],
+        }
+    )
+
+
+def test_report_advisories_reads_the_refused_release_as_one_value():
+    """`droppedComfyVersion` is a string where its neighbours are lists. Iterated as
+    a list it renders one entry per character."""
+    (line,) = distribution.report_advisories({"droppedComfyVersion": "v9.9.9"})
+    assert "'v9.9.9'" in line and "6 " not in line
+
+
+def test_report_advisories_names_a_folder_collision():
+    (line,) = distribution.report_advisories({"collidingNodes": ["ComfyUI-Easy-Use"]})
+    assert "already claimed the folder" in line and "ComfyUI-Easy-Use" in line
+
+
+def test_create_execute_proceeds_when_a_pack_was_dropped_for_colliding(monkeypatch):
+    """The importer drops the loser of a folder collision on purpose, and what comes
+    back is the definition the cut accepts. Refusing it would help nobody."""
+    builder = _ImportingBuilder(
+        resolved={
+            "definition": {"customNodes": [{"name": "first", "id": "first", "registryVersion": "1.0.0"}]},
+            "report": {"collidingNodes": ["Second"]},
+        }
+    )
+    _execute(
+        monkeypatch,
+        builder,
+        {
+            "baseComfyVersion": "v0.30.2",
+            "models": [],
+            "customNodes": [
+                {"name": "first", "id": "first", "registryVersion": "1.0.0"},
+                {"name": "Second", "id": "Second", "registryVersion": "1.0.0"},
+            ],
+        },
+    )
+    assert [n["name"] for n in builder.created_with["customNodes"]] == ["first"]
+
+
+# --- from-snapshot: a Desktop export becomes a distribution in one call -------
+
+
+def test_from_snapshot_reads_the_created_id_and_report_from_their_own_keys(monkeypatch, tmp_path, capsys):
+    """The endpoint answers {distribution, report}, not a distribution carrying its
+    report. Reading the id off the envelope prints `None` and loses every advisory."""
+
+    class FakeClient:
+        def create_distribution_from_snapshot(self, name, snapshot, *, description=None, base_image_id=None):
+            return {
+                "distribution": {"id": "dist-7", "name": name},
+                "report": {"notInRegistry": ["was-node-suite-comfyui"]},
+            }
+
+    snap = tmp_path / "export.json"
+    snap.write_text(json.dumps({"type": "comfyui-desktop-2-snapshot", "snapshots": [{}]}), encoding="utf-8")
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: FakeClient())
+    distribution.from_snapshot_cmd(from_=str(snap), name="demo")
+    out = capsys.readouterr().out
+    assert "dist-7" in out and "None" not in out
+    assert "was-node-suite-comfyui" in out
+
+
+def test_from_snapshot_refuses_a_file_that_is_not_json(tmp_path, capsys):
+    bad = tmp_path / "export.json"
+    bad.write_text("not json at all", encoding="utf-8")
+    with pytest.raises(typer.Exit):
+        distribution.from_snapshot_cmd(from_=str(bad), name="demo")
+
+
+def test_as_snapshot_envelope_wraps_the_file_desktop_actually_writes():
+    """Desktop stores one bare snapshot per file under `.launcher/snapshots/` and
+    only its export action wraps them, so the file a user has is refused."""
+    bare = {"comfyui": {"baseTag": "v0.30.2"}, "customNodes": [], "pipPackages": {}, "pythonVersion": "3.12.7"}
+    wrapped = distribution.as_snapshot_envelope(bare)
+    assert wrapped["type"] == "comfyui-desktop-2-snapshot"
+    assert wrapped["snapshots"] == [bare]
+
+
+def test_as_snapshot_envelope_leaves_a_real_export_alone():
+    export = {"type": "comfyui-desktop-2-snapshot", "version": 2, "snapshots": [{"customNodes": []}]}
+    assert distribution.as_snapshot_envelope(export) is export
+
+
+def test_create_execute_does_not_read_a_renamed_pack_as_a_dropped_one(monkeypatch):
+    """The importer derives a pack's folder by lowercasing. A name it normalises is
+    still the pack that was sent, and refusing it would stop a create the builder
+    was happy with."""
+    builder = _ImportingBuilder(
+        resolved={
+            "definition": {
+                "customNodes": [{"name": "comfyui-kjnodes", "id": "comfyui-kjnodes", "registryVersion": "1.4.9"}]
+            },
+            "report": {},
+        }
+    )
+    _execute(
+        monkeypatch,
+        builder,
+        {
+            "baseComfyVersion": "v0.30.2",
+            "models": [],
+            "customNodes": [{"name": "ComfyUI-KJNodes", "id": "comfyui-kjnodes", "registryVersion": "1.4.9"}],
+        },
+    )
+    assert builder.created_with is not None

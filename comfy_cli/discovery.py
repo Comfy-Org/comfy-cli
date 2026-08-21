@@ -51,6 +51,8 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy distribution version manifest": "distribution_version_manifest",
     "comfy distribution artifact download": "distribution_artifact_download",
     "comfy distribution blob list": "distribution_blob_list",
+    "comfy distribution blob upload": "distribution_blob_upload",
+    "comfy distribution from-snapshot": "distribution_from_snapshot",
     "comfy jobs ls": "jobs",
     "comfy jobs status": "jobs",
     "comfy jobs watch": "jobs",

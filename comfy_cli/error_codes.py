@@ -1092,6 +1092,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "re-scan with `--comfy-version <ref>` (a tag, branch, or commit), or add a `baseComfyVersion` to the definition JSON",
     ),
     ErrorCode(
+        "distribution_registry_pin_missing",
+        "`comfy distribution create --execute` sent the definition to the builder's snapshot importer, which "
+        "could not vouch for one or more custom node pins and returned a definition without them. Creating "
+        "anyway would build an image quietly missing what the user asked for, so create stops. The advisories "
+        "printed above name why each pack could not be carried.",
+        "edit the definition to name a published registry version, or remove the pack",
+    ),
+    ErrorCode(
         "distribution_delete_needs_confirm",
         "`comfy distribution delete` was run without `--yes` in a non-interactive context (JSON output, an agent, "
         "or a pipe) where there is no TTY to confirm on. Delete is refused rather than blocking on a prompt.",

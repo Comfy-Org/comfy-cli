@@ -9,10 +9,11 @@ POC scope: ``scan`` inspects a local ComfyUI install and emits a builder-ready
   gap: a workflow only carries a bare model name (path stripped, no hash), but a
   build needs the placement folder, filename, and a content hash to fetch and
   verify the right file.
-- **custom nodes** — walk ``custom_nodes/`` and record each node's git
-  ``repository`` + commit ``gitRef`` (the builder fetches ``repo@ref``). Nodes
-  with no fetchable upstream are marked ``source: local`` — they must be uploaded
-  as a blob.
+- **custom nodes** — walk ``custom_nodes/`` and record each node's most precise
+  source: a git ``repository`` + commit ``gitRef`` (the builder fetches
+  ``repo@ref``), else the ``id`` + ``registryVersion`` its ``pyproject.toml``
+  declares (the builder fetches the published artifact). Nodes with neither are
+  marked ``source: local`` — they must be uploaded as a blob.
 
 The scan runs entirely on the user's machine — the one place the real files and
 node checkouts exist — and is the agreed compatibility shim for users who won't
@@ -26,7 +27,9 @@ scan/hash logic is kept in pure helpers so it stays unit-testable.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import re
@@ -40,9 +43,11 @@ import typer
 
 from comfy_cli import tracking
 from comfy_cli._safe_exec import BinaryNotFoundError, resolve_required_binary
+from comfy_cli.command.pack_scan import read_pyproject
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH, SUPPORTED_PT_EXTENSIONS
 from comfy_cli.file_utils import atomic_write_text
 from comfy_cli.output import get_renderer
+from comfy_cli.registry.api import sanitize_error_body
 from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer(
@@ -175,15 +180,85 @@ def _git_output(repo_path: Path, *args: str) -> str | None:
     return result.stdout.strip() or None
 
 
+# What the two consumers of a pin accept. The builder rejects a registryVersion
+# that is not a package version (definition.go), and a node id is a slug: reading
+# either straight out of a pyproject and sending it on lets a pack put arbitrary
+# text into a registry URL and into the definition.
+_REGISTRY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+_REGISTRY_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+def _read_registry_pin(node_dir: Path) -> tuple[str, str] | None:
+    """Return the ``(id, version)`` a pack's ``pyproject.toml`` CLAIMS, or None.
+
+    A pack installed by ``comfy node install`` comes from the Comfy Registry as an
+    archive, so it has no git history at all — but its ``pyproject.toml`` still
+    carries the two fields that name a published version: ``project.name`` is the
+    registry node id and ``project.version`` its package version.
+
+    This is the pack's own claim about itself, not evidence: the file is written by
+    whoever wrote the pack, so a pin from here is unverified until the registry is
+    asked (see :func:`verify_registry_pins`). Silent on every failure — absent,
+    unreadable, malformed, missing either field, or a value neither the registry
+    nor the builder would accept — because a pack that cannot answer simply has no
+    registry pin, and the scan must not die on one bad neighbour."""
+    path = node_dir / "pyproject.toml"
+    # Guarded rather than caught: the shared parser reports an absent file to the
+    # user, and most packs in a scan do not have one.
+    if not path.is_file():
+        return None
+    try:
+        # The repo's one pack-pyproject parser, which also resolves a PEP 621
+        # `dynamic = ["version"]`. Muted: it writes advice for someone publishing
+        # a pack, which is noise when reading somebody else's install.
+        with contextlib.redirect_stderr(io.StringIO()):
+            config = read_pyproject(str(path))
+    except Exception:
+        return None
+    if config is None:
+        return None
+    node_id, version = config.project.name, config.project.version
+    if not isinstance(node_id, str) or not isinstance(version, str):
+        return None
+    node_id, version = node_id.strip(), version.strip()
+    if not _REGISTRY_ID_RE.match(node_id) or not _REGISTRY_VERSION_RE.match(version):
+        return None
+    return node_id, version
+
+
+def _identify_node(node_dir: Path) -> dict:
+    """One definition entry for one pack, naming the single source it has."""
+    repository = git_ref = None
+    if (node_dir / ".git").exists():
+        repository = _git_output(node_dir, "remote", "get-url", "origin")
+        git_ref = _git_output(node_dir, "rev-parse", "HEAD")
+    # A repo@ref reconstructs an exact commit, so it wins where both exist.
+    if repository and git_ref:
+        return {"name": node_dir.name, "repository": repository, "gitRef": git_ref, "source": "git"}
+    pin = _read_registry_pin(node_dir)
+    if pin:
+        # The builder takes exactly one source, so a half-git checkout keeps none
+        # of its git fields: an origin without a resolvable HEAD is not fetchable.
+        return {"name": node_dir.name, "id": pin[0], "registryVersion": pin[1], "source": "registry"}
+    return {"name": node_dir.name, "repository": repository, "gitRef": git_ref, "source": "local"}
+
+
 def scan_custom_nodes(custom_nodes_root: Path) -> list[dict]:
     """Return one definition entry per custom-node directory, sorted by name.
 
-    Each top-level directory under ``custom_nodes/`` is one node. For a git
-    checkout we record its ``repository`` (origin remote) and ``gitRef`` (HEAD
-    commit) so the builder can fetch ``repo@ref`` reproducibly. A directory that
-    is not a git checkout, or has no fetchable origin, is marked ``source:
-    local`` — it has no upstream and must be uploaded as a blob. Returns an empty
-    list when the folder is absent (a workflow may use no custom nodes)."""
+    Each top-level directory under ``custom_nodes/`` is one node, recorded as the
+    most precise source the builder can rebuild it from:
+
+    - a git checkout with a fetchable origin → ``repository`` + ``gitRef`` (HEAD),
+      which pins an exact commit;
+    - otherwise a published registry version → ``id`` + ``registryVersion`` read
+      from its ``pyproject.toml``, which pins an exact artifact. This is the case
+      for everything ``comfy node install`` writes, since it unpacks archives
+      rather than cloning;
+    - otherwise ``source: local`` — no upstream, so it must be uploaded as a blob.
+
+    Returns an empty list when the folder is absent (a workflow may use no custom
+    nodes)."""
     nodes: list[dict] = []
     if not custom_nodes_root.is_dir():
         return nodes
@@ -192,20 +267,7 @@ def scan_custom_nodes(custom_nodes_root: Path) -> list[dict]:
             continue  # single-file .py nodes aren't buildable units here
         if entry.name.startswith(".") or entry.name == "__pycache__":
             continue
-        is_git = (entry / ".git").exists()
-        repository = _git_output(entry, "remote", "get-url", "origin") if is_git else None
-        git_ref = _git_output(entry, "rev-parse", "HEAD") if is_git else None
-        nodes.append(
-            {
-                "name": entry.name,
-                "repository": repository,
-                "gitRef": git_ref,
-                # Fetchable only when we have BOTH a remote and a pinned commit;
-                # a local-only or detached checkout can't be reconstructed from
-                # a repo@ref, so it must be uploaded.
-                "source": "git" if (repository and git_ref) else "local",
-            }
-        )
+        nodes.append(_identify_node(entry))
     return nodes
 
 
@@ -239,6 +301,23 @@ def detect_comfy_version(root: Path) -> str | None:
     except (OSError, UnicodeDecodeError):
         pass
     return None
+
+
+# A bare release number, as `comfyui_version.py` and `/system_stats` report it.
+_BARE_RELEASE_RE = re.compile(r"^\d+(?:\.\d+)+$")
+
+
+def as_comfy_git_ref(version: str) -> str:
+    """Return ``version`` as a ref the builder can actually resolve.
+
+    ``baseComfyVersion`` is resolved with ``git ls-remote`` against upstream
+    ComfyUI, which tags its releases ``vX.Y.Z`` — but every source we detect the
+    version from reports the bare number, so the value we recorded was guaranteed
+    to miss, and a build was the first thing to say so. Only a bare release number
+    is rewritten; a branch, a commit sha, a describe string or an
+    already-prefixed tag is left exactly as given."""
+    v = version.strip()
+    return "v" + v if _BARE_RELEASE_RE.match(v) else v
 
 
 # ComfyUI's default local address; the running server reports its version at
@@ -311,6 +390,21 @@ def find_comfy_python(comfy_root: Path | None, explicit: str | None) -> Path | N
 _TORCH_RE = re.compile(r"^torch==(\S+)", re.MULTILINE)
 
 
+# userinfo in a direct-reference URL, e.g.
+# `pkg @ git+https://x-access-token:ghp_xxx@github.com/org/private.git@sha`.
+_URL_USERINFO_RE = re.compile(r"(?P<scheme>[a-zA-Z][\w+.-]*://)(?P<userinfo>[^/@\s]+)@")
+
+
+def _redact_freeze_credentials(freeze: str) -> str:
+    """Strip userinfo from any URL in a freeze.
+
+    A freeze can carry direct references to private repositories, and pip writes
+    those with whatever credential was used to install them. The definition is
+    written to disk, POSTed to the builder, and often committed, so a token in it
+    travels a long way from the machine that minted it."""
+    return _URL_USERINFO_RE.sub(lambda m: m.group("scheme") + "***@", freeze)
+
+
 def _freeze_env(python_exe: str) -> str | None:
     """`pip freeze` for a Python env, falling back to `uv pip freeze` when the
     env has no pip module (uv-created venvs, common for ComfyUI). Returns the
@@ -322,13 +416,17 @@ def _freeze_env(python_exe: str) -> str | None:
         attempts.append([resolve_required_binary("uv"), "pip", "freeze", "--python", python_exe])
     except BinaryNotFoundError:
         pass
+    # PYTHONPATH would put whatever it points at into the freeze as an installed
+    # package, so a caller with one set gets phantom pins the builder then tries
+    # to resolve. The freeze must describe the target env and nothing else.
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     for cmd in attempts:
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, env=env)
         except (subprocess.SubprocessError, OSError):
             continue
         if r.returncode == 0 and r.stdout.strip():
-            return r.stdout
+            return _redact_freeze_credentials(r.stdout)
     return None
 
 
@@ -394,7 +492,95 @@ def resolve_model_source(model: dict) -> str | None:
     return model.get("sourceUri")
 
 
-# The builder's POST /v1/models/resolve accepts at most this many filenames/call.
+def snapshot_from_definition(definition: dict) -> dict:
+    """Wrap a scanned definition as the snapshot envelope the builder reads.
+
+    The builder's importer is the one place that knows what the Comfy Registry
+    actually publishes, which curated base image a Python fits, and how a pin
+    normalizes. It takes a Desktop export, and a scan collects the same facts
+    under different names, so the scan is translated rather than that knowledge
+    being reimplemented here and drifting from it.
+
+    Models have no place in a snapshot and stay with the caller."""
+    nodes = []
+    for n in definition.get("customNodes", []):
+        name = n.get("name") or ""
+        if n.get("registryVersion"):
+            nodes.append(
+                {
+                    "type": "cnr",
+                    "id": n.get("id") or name,
+                    "dirName": name,
+                    "version": n["registryVersion"],
+                    "enabled": True,
+                }
+            )
+        elif n.get("repository"):
+            node = {"type": "git", "id": name, "dirName": name, "url": n["repository"], "enabled": True}
+            if n.get("gitRef"):
+                node["commit"] = n["gitRef"]
+            nodes.append(node)
+
+    # A freeze is one pin per line; a snapshot is a name -> version map. Anything
+    # that is not a plain `==` pin (a comment, a direct git reference, an extras
+    # marker) has no place in that map, and the importer reports what it drops.
+    pips: dict[str, str] = {}
+    for line in (definition.get("pipDependencies") or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "==" not in line:
+            continue
+        pip_name, _, pip_version = line.partition("==")
+        if pip_name.strip() and pip_version.strip():
+            pips[pip_name.strip()] = pip_version.strip()
+
+    environment = definition.get("environment") or {}
+    return {
+        "type": "comfyui-desktop-2-snapshot",
+        "version": 2,
+        "snapshots": [
+            {
+                "comfyui": {"baseTag": definition.get("baseComfyVersion") or ""},
+                "customNodes": nodes,
+                "pipPackages": pips,
+                "pythonVersion": environment.get("pythonVersion") or "",
+            }
+        ],
+    }
+
+
+# Each entry is (report key, what it means to the reader).
+_REPORT_ADVISORIES = (
+    ("notInRegistry", "pinned to something the Comfy Registry does not publish"),
+    ("collidingNodes", "left out: another pack already claimed the folder they install into"),
+    ("registryPending", "published but not yet servable; the build will wait or fail on it"),
+    ("unresolvedNodes", "named nothing the builder can install from"),
+    ("unverifiedPins", "left unchecked because the registry did not answer"),
+    ("skippedPins", "dropped: the build owns these packages"),
+    ("unpinnablePins", "dropped: not a public PyPI release"),
+)
+
+
+def report_advisories(report: dict) -> list[str]:
+    """One line per thing the importer could not carry, in reader's terms."""
+    lines = []
+    # Present and false is the finding; absent means the importer did not say.
+    if report.get("pythonSatisfied") is False:
+        lines.append(
+            "no curated base image matches the scanned Python exactly; the build runs on the closest one, "
+            "so a pin resolved against your Python may not resolve against the build's"
+        )
+    # The release the importer refused, so the empty version field has a reason.
+    dropped = report.get("droppedComfyVersion")
+    if dropped:
+        lines.append(f"the ComfyUI release {str(dropped)!r} is not a ref the build can use, so none was set")
+    for key, meaning in _REPORT_ADVISORIES:
+        entries = report.get(key) or []
+        # Every one of these is a list; a scalar would render one line per character.
+        if entries and isinstance(entries, list | tuple):
+            lines.append(f"{len(entries)} {meaning}: {', '.join(str(e) for e in entries[:8])}")
+    return lines
+
+
 _RESOLVE_BATCH = 32
 
 
@@ -436,14 +622,31 @@ def resolve_models_via_builder(models: list[dict], client) -> int:
     return resolved
 
 
+def _is_scan_shaped(definition: dict) -> bool:
+    """Whether this definition still carries the scan's own vocabulary.
+
+    A definition round-tripped out of the builder already names sources the way
+    the builder does; one straight from `scan` does not. The tell is a member that
+    names no builder source at all, which the builder would reject."""
+    for m in definition.get("models", []):
+        if not m.get("sourceUri") and not m.get("blobId"):
+            return True
+    for n in definition.get("customNodes", []):
+        if not n.get("repository") and not n.get("registryVersion") and not n.get("blobId"):
+            return True
+    return False
+
+
 def plan_create(definition: dict, resolver=resolve_model_source) -> dict:
     """Turn a scan definition into a builder definition + an upload plan.
 
     For each model: if the resolver finds a public URL → reference it as
     ``sourceUri`` (no upload); otherwise it's a private blob → goes in the upload
     plan and will be referenced by ``blobId`` once uploaded. For each custom node:
-    a ``git`` node is referenced by ``repository``+``gitRef`` (no upload); a
-    ``local`` node has no upstream → uploaded as a ``node_zip`` blob.
+    ``repository``+``gitRef``, ``id``+``registryVersion`` or ``blobId`` is carried
+    through as-is; only a node naming none of them has no upstream and is uploaded
+    as a ``node_zip`` blob. Every other definition key travels untouched, because
+    a dropped one is not an error the builder reports, just a different build.
 
     Pure and backend-free: it decides *what* would be sent/uploaded without making
     any network call. The ``blobId`` values are filled in later by the upload step;
@@ -457,7 +660,11 @@ def plan_create(definition: dict, resolver=resolve_model_source) -> dict:
         if m.get("sha256"):
             entry["sha256"] = m["sha256"]
         uri = resolver(m)
-        if uri:
+        # A blob the caller already holds is a source, so it is neither resolved
+        # nor uploaded again: re-uploading would orphan the bytes it replaced.
+        if m.get("blobId"):
+            entry["blobId"] = m["blobId"]
+        elif uri:
             entry["sourceUri"] = uri
         else:
             # `slot` points at the builder-definition entry this upload fills, so
@@ -476,19 +683,45 @@ def plan_create(definition: dict, resolver=resolve_model_source) -> dict:
 
     for j, n in enumerate(definition.get("customNodes", [])):
         entry = {"name": n["name"]}
-        if n.get("source") == "git" and n.get("repository") and n.get("gitRef"):
+        # `id` is not a source: the builder uses it to name the install directory,
+        # so it rides along whatever the source turns out to be.
+        if n.get("id"):
+            entry["id"] = n["id"]
+        # Most precise first, and keyed on the fields rather than the scan's
+        # `source` tag, so a hand-written definition is read the same way.
+        if n.get("repository"):
             entry["repository"] = n["repository"]
-            entry["gitRef"] = n["gitRef"]
+            # The website emits repository+commit and no gitRef, so requiring
+            # gitRef here would send those nodes to be uploaded instead.
+            for key in ("gitRef", "commit"):
+                if n.get(key):
+                    entry[key] = n[key]
+        elif n.get("registryVersion") and n.get("id"):
+            entry["registryVersion"] = n["registryVersion"]
+        elif n.get("blobId"):
+            entry["blobId"] = n["blobId"]
         else:
             uploads.append({"kind": "node_zip", "name": n["name"], "sizeBytes": 0, "slot": ["customNodes", j]})
         nodes_out.append(entry)
 
     builder_definition: dict = {"models": models_out, "customNodes": nodes_out}
-    # Carry environment fields the scan captured straight through to the builder.
-    if definition.get("baseComfyVersion"):
-        builder_definition["baseComfyVersion"] = definition["baseComfyVersion"]
-    if definition.get("pipDependencies"):
-        builder_definition["pipDependencies"] = definition["pipDependencies"]
+    # Every key the builder's Definition accepts, which is an allowlist rather than
+    # a passthrough: `schema` and `environment` are the scan's own bookkeeping and
+    # stay local. Dropping one of these does not fail loudly — the builder applies
+    # its own default, so a base image silently becomes the catalog's current one.
+    for key in ("baseComfyVersion", "baseImage", "pipDependencies"):
+        if definition.get(key):
+            builder_definition[key] = definition[key]
+    # A policy is permission-bearing, so absent and empty must not be the same: an
+    # absent policy seals as allow-all, while `{}` is something the user wrote.
+    for key in ("modelPolicy", "partnerNodePolicy"):
+        if definition.get(key) is not None:
+            builder_definition[key] = definition[key]
+    # The ref the builder resolves, not the number every version source reports.
+    # Applied here rather than only in `scan` so a definition written before this
+    # existed does not spend its cut discovering the difference.
+    if builder_definition.get("baseComfyVersion"):
+        builder_definition["baseComfyVersion"] = as_comfy_git_ref(builder_definition["baseComfyVersion"])
     return {
         "definition": builder_definition,
         "uploads": uploads,
@@ -600,11 +833,17 @@ def _render_nodes_table(renderer, nodes: list[dict]) -> None:
     table = Table(title=title)
     table.add_column("node", style="cyan", no_wrap=True)
     table.add_column("source", style="green")
-    table.add_column("repository", style="white")
-    table.add_column("ref", style="dim")
+    table.add_column("from", style="white")
+    table.add_column("pinned to", style="dim")
     for n in nodes:
-        ref = (n["gitRef"][:12] + "…") if n["gitRef"] else "—"
-        table.add_row(n["name"], n["source"], n["repository"] or "—", ref)
+        # One row per node whatever its source, so a registry pin is as visible as
+        # a git one rather than rendering as two dashes.
+        if n.get("registryVersion"):
+            origin, pin = n.get("id") or "—", n["registryVersion"]
+        else:
+            origin = n.get("repository") or "—"
+            pin = (n["gitRef"][:12] + "…") if n.get("gitRef") else "—"
+        table.add_row(n["name"], n["source"], origin, pin)
     renderer.console().print(table)
 
 
@@ -682,6 +921,9 @@ def scan_cmd(
     base_version = comfy_version or (detect_comfy_version(comfy_root) if comfy_root else None)
     if not base_version:
         base_version = detect_comfy_version_from_server(comfy_url or DEFAULT_COMFY_URL)
+    # Whatever named it, the definition records a ref the builder can resolve.
+    if base_version:
+        base_version = as_comfy_git_ref(base_version)
 
     # pip deps: freeze the ComfyUI env (evidence for the resolver, tagged with the
     # source platform). Never guess the interpreter — omit if we can't find it.
@@ -841,23 +1083,36 @@ def create_cmd(
         raise typer.Exit(code=1)
 
     if execute:
-        _create_execute(renderer, definition, name=name, builder_url=builder_url, models_dir=models_dir)
+        _create_execute(
+            renderer,
+            definition,
+            name=name,
+            builder_url=builder_url,
+            models_dir=models_dir,
+        )
         return
 
     # Preview (default): offline plan, no network — so no resolution, everything
     # shows as an upload (the live --execute path resolves first).
     plan = plan_create(definition)
     resolved = sum(1 for m in plan["definition"]["models"] if m.get("sourceUri"))
-    git_nodes = sum(1 for n in plan["definition"]["customNodes"] if n.get("repository"))
+    nodes_out = plan["definition"]["customNodes"]
+    git_nodes = sum(1 for n in nodes_out if n.get("repository"))
+    registry_nodes = sum(1 for n in nodes_out if n.get("registryVersion"))
+    # From the plan, not from the definition: a registry-pinned node has no
+    # repository, and counting it as an upload overstates the one number a user
+    # reads before deciding to spend.
+    node_uploads = sum(1 for u in plan["uploads"] if u["kind"] == "node_zip")
+    model_uploads = plan["upload_count"] - node_uploads
     if renderer.is_pretty():
         renderer.info(f"Distribution '{name}' — preview (no calls made)")
         renderer.print(
             f"  models: {len(plan['definition']['models'])}  "
-            f"({resolved} resolved to URL, {plan['upload_count']} to upload · {_human_size(plan['upload_bytes'])})"
+            f"({resolved} resolved to URL, {model_uploads} to upload · {_human_size(plan['upload_bytes'])})"
         )
         renderer.print(
-            f"  custom nodes: {len(plan['definition']['customNodes'])}  "
-            f"({git_nodes} from git, {len(plan['definition']['customNodes']) - git_nodes} to upload)"
+            f"  custom nodes: {len(nodes_out)}  "
+            f"({git_nodes} from git, {registry_nodes} from the registry, {node_uploads} to upload)"
         )
         renderer.print("\n  Builder definition that would be sent:")
         renderer.console().print_json(json.dumps(plan["definition"]))
@@ -865,7 +1120,15 @@ def create_cmd(
     renderer.emit({"name": name, "plan": plan, "executed": False}, command="distribution create")
 
 
-def _create_execute(renderer, definition: dict, *, name: str, builder_url: str | None, models_dir: str | None) -> None:
+def _create_execute(
+    renderer,
+    definition: dict,
+    *,
+    name: str,
+    builder_url: str | None,
+    models_dir: str | None,
+    repair: bool = False,
+) -> None:
     """The live --execute path: auth, resolve, upload, create, cut. Maps every
     failure class to a single error envelope + exit(1)."""
     import urllib.error
@@ -882,7 +1145,52 @@ def _create_execute(renderer, definition: dict, *, name: str, builder_url: str |
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
         renderer.warn(f"model resolution unavailable ({e}); all models will be uploaded")
 
+    # The importer is the side of the boundary that knows what the registry
+    # publishes. Best effort: a builder without it leaves the pins to the cut.
+    declared = [n.get("name") for n in definition.get("customNodes", [])]
+    try:
+        imported = client.resolve_snapshot(snapshot_from_definition(definition))
+    except (urllib.error.URLError, requests.RequestException, KeyError, ValueError) as e:
+        renderer.warn(f"the builder could not read the definition's pins ({e}); they go to the cut unchecked")
+    else:
+        imported_report = imported.get("report") or {}
+        for line in report_advisories(imported_report):
+            renderer.warn(line)
+        checked = (imported.get("definition") or {}).get("customNodes")
+        if checked is not None:
+            # A pack it could not vouch for is absent from what it returns, and
+            # an image quietly missing a pack is worse than a refused create.
+            # Matched case-insensitively: the importer derives a pack's folder by
+            # lowercasing, so a name it chose to normalise must not read as a pack
+            # it dropped, which would refuse a create the builder was happy with.
+            def _key(name):
+                return (name or "").strip().casefold()
+
+            kept = {_key(n.get("name")) for n in checked}
+            # A collision is the importer resolving a conflict the cut would refuse
+            # outright, so its definition is the buildable one and stopping would
+            # help nobody. Every other absence means the user asked for something
+            # that does not exist, which only they can fix.
+            colliding = {_key(n) for n in imported_report.get("collidingNodes") or []}
+            missing = [n for n in declared if _key(n) not in kept and _key(n) not in colliding]
+            if missing:
+                renderer.error(
+                    code="distribution_registry_pin_missing",
+                    message="the builder could not resolve these custom nodes: " + ", ".join(sorted(missing)),
+                    hint="see the advisories above; edit the definition to name a published version, or remove the pack",
+                )
+                raise typer.Exit(code=1)
+            definition["customNodes"] = checked
+
     plan = plan_create(definition)
+
+    # An absent policy seals as allow-all. Said rather than written on the user's
+    # behalf, which would pin a posture nobody chose if the default ever moves.
+    missing = [k for k in ("modelPolicy", "partnerNodePolicy") if definition.get(k) is None]
+    if missing:
+        renderer.warn(
+            f"no {' or '.join(missing)} set; this version will be sealed permitting everything in those categories"
+        )
 
     # Locate bytes for private-model uploads: models/<type>/<filename>. Only
     # needed when something actually uploads.
@@ -1122,7 +1430,23 @@ def validate_cmd(
     # message + details.body so the caller sees exactly what failed to resolve.
     result = _builder_call(renderer, lambda: client.validate_distribution(distribution_id))
     if renderer.is_pretty():
-        renderer.success("Definition resolves.")
+        # The endpoint checks shape and pin existence. Whether the set installs
+        # together is answered by a build, so the line claims only what it did.
+        renderer.success("Definition is valid: shape and pin existence checked, not a full resolve.")
+        # Non-blocking here and fatal at freeze, so they are printed rather than
+        # left to be found in the JSON below. The cut itself still passes.
+        warnings = result.get("warnings") if isinstance(result, dict) else None
+        warnings = warnings if isinstance(warnings, list) else []
+        if warnings:
+            renderer.warn(f"{len(warnings)} reference(s) the builder could not resolve; the build will fail on these:")
+            for w in warnings:
+                # Builder-supplied text, so it goes through the same scrub as any
+                # other remote error body rather than straight at the terminal.
+                if isinstance(w, dict):
+                    field, reason = w.get("field", "?"), w.get("reason", "")
+                else:
+                    field, reason = "?", w
+                renderer.warn(f"  {sanitize_error_body(str(field))}: {sanitize_error_body(str(reason))}")
         renderer.console().print_json(json.dumps(result))
     renderer.emit(result, command="distribution validate")
 
@@ -1170,6 +1494,27 @@ def update_cmd(
         renderer.error(code="distribution_definition_invalid", message=str(e), details={"path": from_})
         raise typer.Exit(code=1) from e
     client = _builder_client(renderer, builder_url)
+
+    # A scan definition names sources the builder does not take verbatim, so it is
+    # mapped the way create maps it and one file works through either command.
+    if _is_scan_shaped(definition):
+        # Batched, one call per 32 filenames, exactly as create does it. The
+        # annotation it leaves is what the default resolver in plan_create reads.
+        try:
+            resolve_models_via_builder(definition.get("models", []), client)
+        except (requests.RequestException, KeyError, ValueError) as e:
+            renderer.warn(f"model resolution unavailable ({e})")
+        plan = plan_create(definition)
+        if plan["uploads"]:
+            names = ", ".join(sorted(u.get("filename") or u["name"] for u in plan["uploads"]))
+            renderer.error(
+                code="distribution_upload_unavailable",
+                message=f"these need uploading, which update cannot do: {names}",
+                hint="use `comfy distribution create --from ... --execute`, which uploads private blobs",
+            )
+            raise typer.Exit(code=1)
+        definition = plan["definition"]
+
     # The builder guards the save with the updatedAt the caller last saw (optimistic
     # concurrency, meant for the website's read-edit-save). For a CLI that's just
     # last-writer-wins: fetch the current updatedAt and echo it back, else the save
@@ -1182,6 +1527,101 @@ def update_cmd(
     if renderer.is_pretty():
         renderer.success(f"Updated distribution {distribution_id}")
     renderer.emit(dist, command="distribution update", changed=True)
+
+
+def as_snapshot_envelope(data: dict) -> dict:
+    """Wrap a bare Desktop snapshot in the envelope the importer requires.
+
+    Desktop writes one snapshot per file under `.launcher/snapshots/`, and only
+    its export action wraps them. The importer takes the wrapped shape, so the
+    file a user actually has on disk is refused as not a Desktop export."""
+    if data.get("type") or "snapshots" in data:
+        return data
+    if "customNodes" not in data and "pipPackages" not in data:
+        return data
+    return {"type": "comfyui-desktop-2-snapshot", "version": 2, "snapshots": [data]}
+
+
+@app.command("from-snapshot", help="Create a distribution from a ComfyUI Desktop snapshot export.")
+@tracking.track_command("distribution")
+def from_snapshot_cmd(
+    from_: Annotated[str, typer.Option("--from", "-f", help="Path to a Desktop snapshot export JSON.")],
+    name: Annotated[str, typer.Option("--name", help="Name for the new distribution.")],
+    description: Annotated[str | None, typer.Option("--description", help="Optional description.")] = None,
+    base_image: Annotated[
+        str | None,
+        typer.Option("--base-image", help="Build on this base image rather than the one the snapshot's Python picks."),
+    ] = None,
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
+    renderer = get_renderer()
+    path = Path(from_).expanduser()
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        renderer.error(
+            code="distribution_definition_invalid",
+            message=f"could not read {path}: {e}",
+            details={"path": str(path)},
+        )
+        raise typer.Exit(code=1) from e
+
+    client = _builder_client(renderer, builder_url)
+    result = _builder_call(
+        renderer,
+        lambda: client.create_distribution_from_snapshot(
+            name, as_snapshot_envelope(snapshot), description=description, base_image_id=base_image
+        ),
+    )
+    created = result.get("distribution") or {}
+    distribution_id = created.get("id")
+    if renderer.is_pretty():
+        renderer.success(f"Created distribution {distribution_id} from {path.name}")
+        for line in report_advisories(result.get("report") or {}):
+            renderer.warn(line)
+        renderer.info(f"cut a build with `comfy distribution version create {distribution_id}`")
+    renderer.emit(result, command="distribution from-snapshot", changed=True)
+
+
+@blob_app.command("upload", help="Upload a private file and print the blobId a definition can reference.")
+@tracking.track_command("distribution")
+def blob_upload_cmd(
+    path: Annotated[str, typer.Argument(help="File to upload.")],
+    kind: Annotated[str, typer.Option("--kind", help="What the file is: model or node_zip.")] = "model",
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
+    renderer = get_renderer()
+    if kind not in ("model", "node_zip"):
+        renderer.error(
+            code="distribution_definition_invalid",
+            message=f"unknown blob kind {kind!r}",
+            hint="use --kind model or --kind node_zip",
+        )
+        raise typer.Exit(code=1)
+    file_path = Path(path).expanduser()
+    if not file_path.is_file():
+        renderer.error(
+            code="distribution_models_dir_missing",
+            message=f"no file at {file_path}",
+            details={"path": str(file_path)},
+        )
+        raise typer.Exit(code=1)
+
+    client = _builder_client(renderer, builder_url)
+    size_bytes = file_path.stat().st_size
+    sha256 = _sha256_file(file_path)
+    blob_id, upload_url = _builder_call(renderer, lambda: client.create_blob(kind, file_path.name, sha256, size_bytes))
+    _builder_call(renderer, lambda: client.upload_blob(upload_url, file_path))
+    if renderer.is_pretty():
+        renderer.success(f"Uploaded {file_path.name} as {blob_id}")
+        # A model entry needs the hash as well as the id, and the cut refuses one
+        # that is not a real sha256, so both are printed rather than just the id.
+        renderer.info(f'reference it as "blobId": "{blob_id}", "sha256": "{sha256}"')
+    renderer.emit(
+        {"blobId": blob_id, "kind": kind, "filename": file_path.name, "sha256": sha256, "sizeBytes": size_bytes},
+        command="distribution blob upload",
+        changed=True,
+    )
 
 
 @app.command("resolve", help="Resolve model filenames to public download candidates (HF/CivitAI).")

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/distribution_blob_upload.json",
+  "title": "comfy distribution blob upload --json data payload",
+  "type": "object",
+  "required": ["blobId", "kind", "filename", "sha256", "sizeBytes"],
+  "additionalProperties": true,
+  "properties": {
+    "blobId": {"type": "string"},
+    "kind": {"type": "string", "enum": ["model", "node_zip"]},
+    "filename": {"type": "string"},
+    "sha256": {"type": "string"},
+    "sizeBytes": {"type": "integer"}
+  }
+}
