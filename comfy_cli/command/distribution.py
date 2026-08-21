@@ -208,14 +208,9 @@ def _read_registry_pin(node_dir: Path) -> tuple[str, str] | None:
     if not path.is_file():
         return None
     try:
-        # The repo's one pack-pyproject parser, so this agrees with `comfy
-        # outdated` and `comfy node deps` — including PEP 621 `dynamic = [
-        # "version"]`, which a hand-rolled read of `project.version` misses and
-        # which comfy-cli's own publish path resolves.
-        #
-        # Muted: that parser writes advice aimed at someone publishing a pack
-        # ("License should be in one of these two formats"), which is noise once
-        # per pack in a scan of somebody else's install and not actionable there.
+        # The repo's one pack-pyproject parser, which also resolves a PEP 621
+        # `dynamic = ["version"]`. Muted: it writes advice for someone publishing
+        # a pack, which is noise when reading somebody else's install.
         with contextlib.redirect_stderr(io.StringIO()):
             config = read_pyproject(str(path))
     except Exception:
@@ -229,6 +224,23 @@ def _read_registry_pin(node_dir: Path) -> tuple[str, str] | None:
     if not _REGISTRY_ID_RE.match(node_id) or not _REGISTRY_VERSION_RE.match(version):
         return None
     return node_id, version
+
+
+def _identify_node(node_dir: Path) -> dict:
+    """One definition entry for one pack, naming the single source it has."""
+    repository = git_ref = None
+    if (node_dir / ".git").exists():
+        repository = _git_output(node_dir, "remote", "get-url", "origin")
+        git_ref = _git_output(node_dir, "rev-parse", "HEAD")
+    # A repo@ref reconstructs an exact commit, so it wins where both exist.
+    if repository and git_ref:
+        return {"name": node_dir.name, "repository": repository, "gitRef": git_ref, "source": "git"}
+    pin = _read_registry_pin(node_dir)
+    if pin:
+        # The builder takes exactly one source, so a half-git checkout keeps none
+        # of its git fields: an origin without a resolvable HEAD is not fetchable.
+        return {"name": node_dir.name, "id": pin[0], "registryVersion": pin[1], "source": "registry"}
+    return {"name": node_dir.name, "repository": repository, "gitRef": git_ref, "source": "local"}
 
 
 def scan_custom_nodes(custom_nodes_root: Path) -> list[dict]:
@@ -255,25 +267,7 @@ def scan_custom_nodes(custom_nodes_root: Path) -> list[dict]:
             continue  # single-file .py nodes aren't buildable units here
         if entry.name.startswith(".") or entry.name == "__pycache__":
             continue
-        is_git = (entry / ".git").exists()
-        repository = _git_output(entry, "remote", "get-url", "origin") if is_git else None
-        git_ref = _git_output(entry, "rev-parse", "HEAD") if is_git else None
-        node: dict = {"name": entry.name, "repository": repository, "gitRef": git_ref}
-        if repository and git_ref:
-            node["source"] = "git"
-        else:
-            pin = _read_registry_pin(entry)
-            if pin:
-                # Exactly one source per node, which the builder enforces. A
-                # half-git checkout (an origin but no resolvable HEAD, or the
-                # reverse) would otherwise carry both and be rejected at validate.
-                node.pop("repository", None)
-                node.pop("gitRef", None)
-                node["id"], node["registryVersion"] = pin
-                node["source"] = "registry"
-            else:
-                node["source"] = "local"
-        nodes.append(node)
+        nodes.append(_identify_node(entry))
     return nodes
 
 
@@ -683,16 +677,12 @@ def plan_create(definition: dict, resolver=resolve_model_source) -> dict:
         # so it rides along whatever the source turns out to be.
         if n.get("id"):
             entry["id"] = n["id"]
-        # The builder takes exactly one source per node. Try them most-precise
-        # first: a pinned git checkout reconstructs an exact commit, a registry
-        # version an exact published artifact, a blob is bytes we already hold.
-        # Keyed on the fields themselves rather than the scan's `source` tag, so a
-        # hand-edited definition that names a source without one is honoured too.
+        # Most precise first, and keyed on the fields rather than the scan's
+        # `source` tag, so a hand-written definition is read the same way.
         if n.get("repository"):
             entry["repository"] = n["repository"]
-            # Both optional to the builder, and `commit` lets freeze skip ref
-            # resolution entirely. The website emits repository+commit and no
-            # gitRef, so requiring gitRef here would send it to be uploaded.
+            # The website emits repository+commit and no gitRef, so requiring
+            # gitRef here would send those nodes to be uploaded instead.
             for key in ("gitRef", "commit"):
                 if n.get(key):
                     entry[key] = n[key]
@@ -1145,11 +1135,8 @@ def _create_execute(
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
         renderer.warn(f"model resolution unavailable ({e}); all models will be uploaded")
 
-    # A pin the registry does not have builds nothing and only says so at freeze,
-    # after the cut is spent. The builder's own importer already answers that, and
-    # it is the side of the boundary that knows: a second implementation here would
-    # be a second thing to keep in step with the registry. Best effort, because a
-    # builder without the endpoint must still be able to create.
+    # The importer is the side of the boundary that knows what the registry
+    # publishes. Best effort: a builder without it leaves the pins to the cut.
     declared = [n.get("name") for n in definition.get("customNodes", [])]
     try:
         imported = client.resolve_snapshot(snapshot_from_definition(definition))
@@ -1160,9 +1147,8 @@ def _create_execute(
             renderer.warn(line)
         checked = (imported.get("definition") or {}).get("customNodes")
         if checked is not None:
-            # A pack the importer could not vouch for is absent from what it
-            # returns. Building without it silently is the one outcome worse than
-            # failing, since the user gets an image missing what they asked for.
+            # A pack it could not vouch for is absent from what it returns, and
+            # an image quietly missing a pack is worse than a refused create.
             kept = {n.get("name") for n in checked}
             dropped = [n for n in declared if n not in kept]
             if dropped:
@@ -1176,10 +1162,8 @@ def _create_execute(
 
     plan = plan_create(definition)
 
-    # An absent policy is not neutral: the version seals as allow-all. The CLI does
-    # not write one on the user's behalf — an invented allow-all is a no-op today
-    # and a pinned posture if the platform default ever changes — but it says so,
-    # because on this path there is no wizard to have said it.
+    # An absent policy seals as allow-all. Said rather than written on the user's
+    # behalf, which would pin a posture nobody chose if the default ever moves.
     missing = [k for k in ("modelPolicy", "partnerNodePolicy") if definition.get(k) is None]
     if missing:
         renderer.warn(
@@ -1424,16 +1408,11 @@ def validate_cmd(
     # message + details.body so the caller sees exactly what failed to resolve.
     result = _builder_call(renderer, lambda: client.validate_distribution(distribution_id))
     if renderer.is_pretty():
-        # "resolves" was a promise this endpoint never made: it checks the
-        # definition's shape, that a ComfyUI version is pinned, and that each
-        # pinned package and version exists. Whether the set installs together is
-        # only answered by a build, so say what was actually checked.
+        # The endpoint checks shape and pin existence. Whether the set installs
+        # together is answered by a build, so the line claims only what it did.
         renderer.success("Definition is valid: shape and pin existence checked, not a full resolve.")
-        # Warnings ride alongside ok: true. A ref the builder could not find on
-        # its remote is non-blocking here and fatal at freeze. Printed rather than
-        # left for the reader to spot inside the JSON below.
-        # The cut itself passes: refs are resolved inside the build, at freeze, so
-        # this is a build failure in waiting rather than a cut failure.
+        # Non-blocking here and fatal at freeze, so they are printed rather than
+        # left to be found in the JSON below. The cut itself still passes.
         warnings = result.get("warnings") if isinstance(result, dict) else None
         warnings = warnings if isinstance(warnings, list) else []
         if warnings:
@@ -1494,11 +1473,8 @@ def update_cmd(
         raise typer.Exit(code=1) from e
     client = _builder_client(renderer, builder_url)
 
-    # A scan definition is not a builder definition: its models carry {sizeBytes,
-    # source} and no sourceUri or blobId, and its nodes name a source the builder
-    # spells differently. Sending the file verbatim means the builder rejects every
-    # model with "must set exactly one of sourceUri or blobId". Map it the same way
-    # create does, so the same file works through either command.
+    # A scan definition names sources the builder does not take verbatim, so it is
+    # mapped the way create maps it and one file works through either command.
     if _is_scan_shaped(definition):
         # Batched, one call per 32 filenames, exactly as create does it. The
         # annotation it leaves is what the default resolver in plan_create reads.
