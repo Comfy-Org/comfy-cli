@@ -58,6 +58,23 @@ def _isolate_config_path(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_object_info_cache_dir(tmp_path, monkeypatch):
+    """Redirect the ``object_info`` disk cache to a per-test tmp dir.
+
+    ``resilient_load_object_info`` (comfy_cli.cql.loader) reads/writes
+    ``~/.cache/comfy-cli/object_info-*.json`` (or ``$XDG_CACHE_HOME``) as a
+    side effect of every cache-first fetch. Now that `comfy run`'s UI-convert
+    and preflight-validate call sites route through it too, any test that
+    exercises those paths would otherwise read stale state from — or write
+    real dumps into — the developer's actual cache directory.
+    """
+    fake = tmp_path / "comfy-cli-cache"
+    fake.mkdir(mode=0o700, parents=True, exist_ok=True)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(fake))
+    yield fake
+
+
+@pytest.fixture(autouse=True)
 def _isolate_jobs_state_dir(tmp_path, monkeypatch):
     """Redirect ``jobs_state.state_dir`` to a per-test tmp dir.
 

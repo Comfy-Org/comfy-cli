@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import BinaryIO, cast
 
 import psutil
-import requests
 from rich import progress
 from rich.live import Live
 from rich.table import Table
@@ -104,6 +103,10 @@ def download_url(
 ) -> PathLike:
     """download url to local file fname and show a progress bar.
     See https://stackoverflow.com/q/37573483"""
+    # Imported lazily: requests costs ~30ms to import and utils is on the
+    # import path of every CLI invocation; only downloads need it.
+    import requests
+
     cwd = Path(cwd).expanduser().resolve()
     fpath = cwd / fname
 

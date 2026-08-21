@@ -41,6 +41,15 @@ if TYPE_CHECKING:
 # (Re-exported by ``comfy_cli.target`` for back-compat.)
 CLOUD_API_KEY_PROVIDER = "comfy-cloud-api-key"
 
+# Env var carrying a pre-obtained Comfy Cloud Bearer token (a Firebase/Cloud
+# JWT). Unlike ``COMFY_CLOUD_API_KEY`` (sent as ``X-API-Key``), this is sent as
+# ``Authorization: Bearer``. It exists so a trusted caller that already holds
+# the user's validated token — e.g. the cloud agent forwarding the request's
+# ``X-Comfy-Token`` — can authenticate as that user without an interactive
+# ``comfy cloud login`` session. It is NOT refreshed client-side; the server
+# validates it at request time (and a 401 surfaces normally).
+CLOUD_BEARER_ENV_VAR = "COMFY_CLOUD_AUTH_TOKEN"
+
 Purpose = Literal["cloud", "partner"]
 
 # purpose → (env var, stored-key provider, strip ambient values?)
@@ -117,6 +126,18 @@ def find_api_key(*, purpose: Purpose) -> Credential | None:
     return None
 
 
+def cloud_bearer_env_token() -> str | None:
+    """Return a forwarded Comfy Cloud Bearer token from the environment, or None.
+
+    Reads ``COMFY_CLOUD_AUTH_TOKEN`` (see :data:`CLOUD_BEARER_ENV_VAR`). Cloud-only
+    — it authenticates as the token's user via ``Authorization: Bearer``.
+    """
+    import os
+
+    tok = os.environ.get(CLOUD_BEARER_ENV_VAR)
+    return tok.strip() if tok and tok.strip() else None
+
+
 def resolve_cloud_credential(
     *,
     purpose: Purpose,
@@ -136,8 +157,11 @@ def resolve_cloud_credential(
        ``base_url`` is given, a session minted for a *different* base URL is
        skipped (replay-guard: never send a token to a host the user didn't
        authenticate against).
-    3. The purpose's env var (``COMFY_CLOUD_API_KEY`` / ``COMFY_API_KEY``).
-    4. The stored ``comfy-cloud-api-key`` key (``comfy cloud set-key``).
+    3. (cloud only) A forwarded Bearer token in ``COMFY_CLOUD_AUTH_TOKEN``,
+       sent as ``Authorization: Bearer`` — the trusted-caller path (see
+       :data:`CLOUD_BEARER_ENV_VAR`).
+    4. The purpose's env var (``COMFY_CLOUD_API_KEY`` / ``COMFY_API_KEY``).
+    5. The stored ``comfy-cloud-api-key`` key (``comfy cloud set-key``).
 
     ``allow_clear=False`` is forwarded into :func:`get_session` (and on to
     ``ensure_fresh_session``) so a fatal refresh error on THIS call does not
@@ -158,5 +182,10 @@ def resolve_cloud_credential(
         and (base_url is None or session.base_url == base_url)
     ):
         return Credential(kind="oauth", value=session.access_token, source="session")
+
+    if purpose == "cloud":
+        env_bearer = cloud_bearer_env_token()
+        if env_bearer:
+            return Credential(kind="oauth", value=env_bearer, source=f"env:{CLOUD_BEARER_ENV_VAR}")
 
     return find_api_key(purpose=purpose)

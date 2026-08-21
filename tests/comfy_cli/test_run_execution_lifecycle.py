@@ -221,3 +221,41 @@ class TestRunFailurePath:
 
         assert result.exit_code == 0
         assert _event_names(tracked_run) == ["execution_start", "execution_success"]
+
+
+class TestRunCloudLifecycle:
+    """Cloud submissions must emit the SAME start→success lifecycle as local.
+
+    Regression: the cloud branch `return`ed after `execute_cloud`, skipping the
+    try's `else` — so a successful cloud run fired `execution_start` but never
+    `execution_success`. Local runs (which fall through) were unaffected.
+    """
+
+    def test_cloud_success_emits_start_then_success(self, runner, tracked_run, monkeypatch):
+        from comfy_cli.cmdline import app
+
+        monkeypatch.setattr("comfy_cli.cmdline.where_module.cloud_preflight_or_exit", lambda: None)
+        with patch("comfy_cli.cmdline.run_inner.execute_cloud") as mock_cloud:
+            mock_cloud.return_value = None
+            result = runner.invoke(app, ["run", "--workflow", "wf.json", "--where", "cloud"])
+
+        assert result.exit_code == 0, f"stdout={result.output!r} exc={result.exception!r}"
+        assert _event_names(tracked_run) == ["execution_start", "execution_success"]
+        mock_cloud.assert_called_once()
+
+    def test_resolved_target_rides_on_terminal_events(self, runner, tracked_run, monkeypatch):
+        """The resolved routing target (cloud vs local) is recorded so a
+        submission is attributable even when --where was defaulted."""
+        from comfy_cli.cmdline import app
+
+        monkeypatch.setattr("comfy_cli.cmdline.where_module.cloud_preflight_or_exit", lambda: None)
+        with patch("comfy_cli.cmdline.run_inner.execute_cloud"):
+            runner.invoke(app, ["run", "--workflow", "wf.json", "--where", "cloud"])
+        cloud_success = next(props for name, props in _events(tracked_run) if name == "execution_success")
+        assert cloud_success.get("target") == "cloud"
+
+        tracked_run.clear()
+        with patch("comfy_cli.cmdline.run_inner.execute"):
+            runner.invoke(app, ["run", "--workflow", "wf.json", "--where", "local"])
+        local_success = next(props for name, props in _events(tracked_run) if name == "execution_success")
+        assert local_success.get("target") == "local"

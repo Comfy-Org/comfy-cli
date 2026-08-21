@@ -10,7 +10,6 @@ from collections.abc import Callable
 from typing import Annotated
 from urllib.parse import parse_qs, unquote, urlparse, urlsplit, urlunsplit
 
-import requests
 import typer
 from rich.markup import escape
 
@@ -284,6 +283,10 @@ def check_civitai_url(url: str) -> tuple[bool, bool, int | None, int | None]:
 
 
 def request_civitai_model_version_api(version_id: int, headers: dict | None = None):
+    # Imported lazily: requests costs ~30ms to import and this module is on
+    # the import path of every CLI invocation.
+    import requests
+
     # Make a request to the CivitAI API to get the model information
     response = requests.get(
         f"https://civitai.com/api/v1/model-versions/{version_id}",
@@ -303,6 +306,8 @@ def request_civitai_model_version_api(version_id: int, headers: dict | None = No
 
 
 def request_civitai_model_api(model_id: int, version_id: int = None, headers: dict | None = None):
+    import requests  # deferred; see request_civitai_model_version_api
+
     # Make a request to the CivitAI API to get the model information
     response = requests.get(f"https://civitai.com/api/v1/models/{model_id}", headers=headers, timeout=10)
     response.raise_for_status()  # Raise an error for bad status codes

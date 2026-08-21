@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/cloud_status.json",
+  "title": "comfy cloud status --json data payload",
+  "description": "Read-only billing and entitlement snapshot for the signed-in Comfy Cloud workspace: balance, subscription tier, concurrency limit and upgrade suggestion. Every field sourced from an endpoint that can be unavailable is nullable, because the command degrades one row rather than failing when a non-essential call fails.",
+  "type": "object",
+  "required": ["currency", "balance_confirmed", "subscription", "manage_url"],
+  "additionalProperties": true,
+  "properties": {
+    "cloud_workspace": {
+      "description": "The workspace the credential is bound to. Null when the backend predates GET /api/workspaces/current. Named `cloud_workspace`, not `workspace`: in comfy-cli a bare workspace is the local ComfyUI install directory.",
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "properties": {
+        "id": {"type": ["string", "null"]},
+        "name": {"type": ["string", "null"]},
+        "type": {"type": ["string", "null"], "description": "e.g. 'personal' or 'team'."},
+        "role": {"type": ["string", "null"], "description": "Caller's role, null for bare API-key auth."}
+      }
+    },
+    "balance_confirmed": {
+      "type": "boolean",
+      "description": "True only when a balance figure came back from a call that succeeded. False in three cases: the trust guard fired (no balance reported, no subscription, has_funds false), the balance call did not answer at all, or it answered with no balance fields. When false, the three balance fields are null rather than 0, so a consumer can never render '$0.00' for a workspace whose balance we could not establish. Note a failed balance fetch alone does NOT set `message`, because a transient error is not evidence the account is mid-migration."
+    },
+    "credit_balance_usd": {
+      "type": ["number", "null"],
+      "description": "Balance in USD. Can be negative on an overdrawn account; never clamped. Null when balance_confirmed is false."
+    },
+    "credit_balance_credits": {
+      "type": ["integer", "null"],
+      "description": "Balance in credits at 211 credits per USD, truncated toward zero."
+    },
+    "effective_balance_micros": {
+      "type": ["integer", "null"],
+      "description": "Raw micro-dollar balance chosen by the zero-masking chain (effective_balance_micros, then amount_micros, then prepaid_balance_micros, then cloud_credit_balance_micros), skipping present-but-zero fields so a literal 0 cannot mask a positive component."
+    },
+    "currency": {"type": "string", "const": "USD"},
+    "subscription": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "tier": {"type": ["string", "null"], "description": "Absent entirely from the upstream payload when there is no subscription, surfaced as null here."},
+        "status": {"type": ["string", "null"]},
+        "is_active": {"type": ["boolean", "null"]},
+        "plan_slug": {"type": ["string", "null"]},
+        "renewal_date": {"type": ["string", "null"]},
+        "cancel_at": {"type": ["string", "null"]}
+      }
+    },
+    "billing_rail": {
+      "type": ["string", "null"],
+      "description": "When 'legacy_stripe', figures may be partial pending billing migration and `message` says so."
+    },
+    "max_concurrent_jobs": {
+      "type": ["integer", "null"],
+      "description": "Live concurrency limit for this credential from GET /api/features. Null when that call was unavailable. API-key callers get the tier limit; browser sessions may differ."
+    },
+    "tier_default_concurrent_jobs": {
+      "type": ["integer", "null"],
+      "description": "Documented default for the reported tier, as context for max_concurrent_jobs. Null for an unrecognized tier."
+    },
+    "free_tier_balance": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "properties": {
+        "allowance": {"type": ["number", "null"]},
+        "used": {"type": ["number", "null"]},
+        "remaining": {"type": ["number", "null"]}
+      }
+    },
+    "upgrade_suggestion": {
+      "description": "Cheapest available plan priced above the current one, or null when there is nothing to suggest.",
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "properties": {
+        "plan_slug": {"type": "string"},
+        "price_usd": {"type": ["number", "null"]},
+        "credits": {"type": ["integer", "null"]}
+      }
+    },
+    "blocked_upgrades": {
+      "description": "Plans the caller cannot buy, with the server's stated reason (e.g. requires_team, exceeds_max_seats), so an unsuggested visible tier is explained.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["plan_slug", "reason"],
+        "properties": {
+          "plan_slug": {"type": "string"},
+          "reason": {"type": "string"}
+        }
+      }
+    },
+    "seats": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "max": {"type": ["integer", "null"]},
+        "occupied": {"type": ["integer", "null"]}
+      }
+    },
+    "plans": {
+      "description": "Full tier table. Present only with --plans.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["plan_slug", "available"],
+        "additionalProperties": true,
+        "properties": {
+          "plan_slug": {"type": "string"},
+          "price_cents": {"type": ["integer", "null"]},
+          "price_usd": {"type": ["number", "null"]},
+          "credits": {"type": ["integer", "null"]},
+          "available": {"type": "boolean"},
+          "unavailable_reason": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "manage_url": {
+      "type": "string",
+      "description": "Subscription page, derived from the resolved cloud base URL so a preview or staging env points at its own page."
+    },
+    "message": {
+      "type": ["string", "null"],
+      "description": "Neutral copy when the balance could not be confirmed, and/or the legacy-rail caveat. Consumers should pass this through verbatim rather than re-deriving it."
+    }
+  }
+}

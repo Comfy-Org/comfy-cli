@@ -75,7 +75,6 @@ def _force_json_renderer():
 def test_bundles_expected_skills():
     names = bundled_skill_names()
     assert "comfy" in names
-    assert "comfy-fragments" in names
     assert "comfy-debug" in names
     assert "comfy-relay" in names
 
@@ -110,12 +109,6 @@ def test_comfy_skill_covers_cloud_setup_and_routing():
         assert needle in text, f"comfy skill should mention {needle}"
 
 
-def test_comfy_fragments_skill_covers_composition():
-    text = skill_content("comfy-fragments")
-    for needle in ("workflow compose", "_fragment", "blueprint"):
-        assert needle in text, f"comfy-fragments skill should mention {needle}"
-
-
 def test_skill_content_rejects_unknown_name():
     with pytest.raises(ValueError) as exc:
         skill_content("not-a-real-skill")
@@ -144,8 +137,8 @@ def test_plan_install_project_scope_paths(tmp_path: Path):
 
 
 def test_plan_install_filters_by_skill(tmp_path: Path):
-    plans = plan_install(scope="project", project_root=tmp_path, skills=["comfy", "comfy-fragments"])
-    assert {p.skill for p in plans} == {"comfy", "comfy-fragments"}
+    plans = plan_install(scope="project", project_root=tmp_path, skills=["comfy", "comfy-debug"])
+    assert {p.skill for p in plans} == {"comfy", "comfy-debug"}
 
 
 # ---------------------------------------------------------------------------
@@ -177,11 +170,11 @@ def test_install_one_skill_only(tmp_path: Path):
     install(scope="project", project_root=tmp_path, skills=["comfy-debug"])
     assert (tmp_path / ".claude/skills/comfy-debug/SKILL.md").exists()
     assert not (tmp_path / ".claude/skills/comfy/SKILL.md").exists()
-    assert not (tmp_path / ".claude/skills/comfy-fragments/SKILL.md").exists()
+    assert not (tmp_path / ".claude/skills/comfy-relay/SKILL.md").exists()
     agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "<!-- comfy-debug:start -->" in agents
     assert "<!-- comfy:start -->" not in agents
-    assert "<!-- comfy-fragments:start -->" not in agents
+    assert "<!-- comfy-relay:start -->" not in agents
 
 
 def test_install_is_idempotent_across_skills(tmp_path: Path):

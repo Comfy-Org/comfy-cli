@@ -4,12 +4,11 @@ The unlock: instead of running an MCP server, this command teaches every
 agent on the machine how to call ``comfy`` natively. One file per skill,
 three targets, zero protocol.
 
-Bundled skills (5 total) — see ``comfy skills list`` for descriptions:
+Bundled skills (4 total) — see ``comfy skills list`` for descriptions:
 
   - ``comfy``           — the consolidated driver skill (command surface,
                           output contract, routing, discovery, execution,
                           image, video, audio, cloud, edit, condition, pipeline)
-  - ``comfy-fragments`` — typed reusable workflow fragments + YAML blueprint composition
   - ``comfy-debug``     — debugging when workflows fail or jobs hang
   - ``comfy-relay``     — what to put in chat while driving the CLI
   - ``comfy-director``  — narrative multi-shot video production (screenplay,

@@ -17,7 +17,6 @@ halves are independent — you can scan only what's relevant to the task.
 
 **This is one of a skill family — skim the siblings before a big task so you
 know what exists, and reach for the right one rather than improvising its job:**
-`comfy-fragments` (compose large graphs from reusable, validated pieces),
 `comfy-director` (multi-shot narrative video — story, continuity, conform),
 `comfy-debug` (any failed job: error code → fix), `comfy-relay` (surface a
 workflow/result in chat, never leave it in /tmp). When a task spans several,
@@ -199,15 +198,12 @@ mechanism by complexity and reuse — not as a quality ranking:
    Re-typing a fragment from a node schema re-introduces those as transcription
    bugs you only discover when the cloud rejects the job. Start from what works.
 
-   Only author `./fragments/<name>.json` by hand when there is **no** working
-   graph to project from (you're building a shape that doesn't exist yet): 1-15
-   API-format nodes wrapped with a `_fragment` header declaring typed inputs,
-   outputs, and params (caller-supplied values marked `"PLACEHOLDER"`). Make
-   EVERY asset/model name a required param with no default. Load the
-   `comfy-fragments` skill for the format, then check your work:
-   ```bash
-   comfy --json workflow fragment validate <name>
-   ```
+   When there is **no** working graph to project from (you're building a shape
+   that doesn't exist yet), author a **recipe** instead (see the recipe section
+   above): build it once with the structured-edit primitives, `capture` it, and
+   lift the asset/model/prompt fields to `${param}`. Recipes are UI-format,
+   mergeable, and reusable — prefer them over the legacy fragment/blueprint
+   authoring described below.
 
    **d. Compose + run** — a YAML blueprint in `blueprints/<name>.yaml`
    wires your fragments together; cross-step refs use `$alias.output_name`,
@@ -264,7 +260,12 @@ mechanism by complexity and reuse — not as a quality ranking:
 blueprint.** Even for smaller workflows, prefer fragments if any part could be
 extended, repeated, or reused.
 
-## The compile model — edit source, never the artifact (REQUIRED)
+## The compile model — edit source, never the artifact (fragments; legacy)
+
+> **Legacy.** Fragments/blueprints/`compose` produce **API format**, which can't live
+> on the canvas or merge (CRDT). For reuse/composition prefer **recipes** (`apply
+> --param` + `capture`, above). This section remains for the existing project/blueprint
+> convention and headless batch compiles; new authoring should use recipes.
 
 The folders are **source**; the workflow JSON is a **build artifact**.
 `fragments/` + `blueprints/` are what you edit; `compose` is the compiler;
@@ -291,9 +292,126 @@ This is a hard contract, not a style preference:
 
 **Red flag — STOP:** you typed `jq`/`sed`/`Edit` against a workflow's
 `widgets_values` or `inputs`, or you're hunting for a node by numeric id
-(`select(.id==128)`). That means the source representation failed. `decompose`
-it and set a named param. (This rule exists because that exact jq-on-`id==128`
-hand-edit is the anti-pattern `decompose` was built to kill.)
+(`select(.id==128)`). That means the source representation failed. For **reusable**
+work, `decompose` it and set a named param. For a **programmatic structured edit**
+of a live graph, use the structured-edit primitives below — never raw `jq`/`sed`.
+(This rule exists because that exact jq-on-`id==128` hand-edit is the anti-pattern
+`decompose` — and these primitives — were built to kill.)
+
+## Structured graph edits — `add-node` / `connect` / `set-widget` / `delete-node`
+
+The **sanctioned** way to mutate a graph's *structure* from code — the
+alternative to `jq`/`sed` on `nodes`/`links`/`widgets_values`. Each edit is
+validated against `object_info` (node class, widget name, widget value **shape**,
+and connection **type** are hard-checked; unknown COMBO values / out-of-range
+numbers come back as soft `warnings`) and emits a replayable **operation** in
+`data.op`.
+
+**When to use which editing path:**
+- **Reusable / human-authored workflow** → fragments + blueprint (above). *Default.*
+- **Throwaway value tweak on a template** → `slots` → `set-slot`/`vary`.
+- **Programmatic structured edit of a live/draft graph** (add or wire or remove
+  nodes; the in-app agent's path; any edit that must merge with a concurrent
+  human editor) → the primitives here.
+
+> **Live co-editing / CRDT:** only the structured-edit primitives (`add-node`/
+> `connect`/`set-widget`/`delete-node`/`apply`) emit a mergeable **op** in
+> `data.op`/`data.ops` (`op_id` + `actor` + `base_version` + `stamp`). Fragments +
+> `compose` produce a **whole-document** graph — fine for authoring a *fresh*
+> draft (the base), but it does **not** emit ops and will clobber a concurrent
+> editor if used to re-generate an existing draft. **Any edit that must merge with
+> a human's canvas MUST go through the primitives, not a recompose.**
+
+```bash
+# Catalog source: `--where cloud|local` (default routing if omitted), or an
+# offline `--input object_info.json` dump. `--where` and `--input` are the only
+# catalog flags on these commands.
+CAT="--where cloud"
+
+# Start from an existing graph, or an empty one:
+echo '{"nodes":[],"links":[],"last_node_id":0,"last_link_id":0}' > wf.json
+
+comfy --json workflow add-node    wf.json KSampler --at 400,200 $CAT  # → data.op.node_id (minted)
+comfy --json workflow connect     wf.json 7.LATENT 3.samples $CAT     # source out-slot → target in-slot
+comfy --json workflow set-widget  wf.json 3.steps 35 $CAT             # widget by NAME; op carries {old,value}
+comfy --json workflow delete-node wf.json 7 $CAT                      # removes node + its links
+comfy --json workflow ls-nodes    wf.json                            # id / type / title (no catalog needed)
+```
+
+**Building more than one or two nodes? Use `apply` — one batch, one catalog load,
+and `as` aliases so you never capture a minted id by hand:**
+
+```bash
+cat > ops.json <<'JSON'
+[ {"op":"add_node","class_type":"CheckpointLoaderSimple","as":"ckpt"},
+  {"op":"add_node","class_type":"KSampler","as":"ks"},
+  {"op":"connect","from":"ckpt.MODEL","to":"ks.model"},
+  {"op":"set_widget","node":"ks","widget":"steps","value":30} ]
+JSON
+comfy --json workflow apply wf.json --ops ops.json $CAT   # or --ops - to read stdin
+# → data.ops[] (all minted ids), data.aliases{ckpt,ks}. Atomic: nothing writes if any spec fails.
+```
+
+**Reusable recipes (the reuse path — prefer this over fragments/compose).** A recipe
+is an ops file with a `params` header and `${param}` holes:
+
+```jsonc
+{ "recipe":"t2i",
+  "params": { "positive": {"type":"string"},          // required (no default)
+              "steps":    {"type":"int", "default":20} },  // type: string|int|float|bool
+  "ops": [ …, {"op":"set_widget","node":"ks","widget":"steps","value":"${steps}"} ] }
+```
+
+`apply --param k=v` fills the holes — **typed and strict**: a value exactly `${x}`
+takes the param's real value; a missing required param, an unknown param, or a bad
+type all error (never a silent blank).
+
+```bash
+# capture a working graph into a recipe, PARAMETERIZING the fields you'll vary:
+comfy --json workflow capture wf.json --name t2i --param 6.text=positive --param 3.seed=seed -o t2i.recipe.json $CAT
+comfy --json workflow apply fresh.json --ops t2i.recipe.json --param positive="a fox" --param seed=42 $CAT
+```
+
+`capture --param <node_id>.<widget>=<name>` lifts that widget to a `${name}` hole
+(current value becomes its default) — use it for the fields you want to vary, since
+plain `capture` omits widgets left at their default. Recipes are UI-format op-batches
+— mergeable and canvas-native. UI-only nodes (Note/MarkdownNote/Reroute/GetNode/
+SetNode/PrimitiveNode) are **skipped at capture** (reported as `warnings` on the
+envelope): links through Reroute and Get/Set chains are spliced to the real source
+and a PrimitiveNode's value lands on the widget it feeds, so the recipe rebuilds
+the executable graph — canvas decoration doesn't round-trip. `compose`/`decompose` (the fragment/blueprint path)
+are **legacy**: they emit API format and can't co-edit; use recipes for anything
+you'll reuse or edit on the canvas.
+
+**Run it and get the image back.** Inside a project, outputs land in `outputs/`.
+Outside one (a bare `wf.json`), submit and pipe the result into `download`:
+
+```bash
+comfy --json run --workflow wf.json --where cloud --wait > run.json   # blocks until done; data.prompt_id + output refs
+comfy --json download --out-dir ./out < run.json                      # pull the produced image(s) to ./out
+```
+
+- **Addresses:** `<node_id>.<slot_or_widget>`. Connection slots accept a **name**
+  (source output like `LATENT`, target input like `samples`) or an index; widgets
+  are addressed **by name**. Discover them with `comfy --json nodes show <class>`
+  (input/output slot names) and `comfy --json workflow slots <file>` (widget
+  names — note `slots` lists **widgets only**, not connection slots).
+- **Identity:** `add-node` mints a **large random integer** id (leaderless,
+  collision-free) and returns it in `data.op.node_id`; **capture it** to wire the
+  new node (e.g. `id=$(comfy --json workflow add-node … | jq -r .data.op.node_id)`).
+  Do not assume small/sequential ids. `add-node` fills widget defaults (COMBO →
+  first choice), so a new node is runtime-valid without extra `set-widget` calls.
+- **The op** (`data.op`): `{op, op_id, node_id/link_id, actor, base_version, stamp}`
+  — a structured, idempotent, mergeable record of the change (`set_widget` also
+  carries `old`/`value`). `--actor <id>` and `--base-version <n>` stamp it for
+  concurrent/CRDT consumers; `--stdout` prints the new graph instead of writing
+  in place.
+- **`delete-node` ≠ `delete`:** `delete-node` removes a *node from the graph file*;
+  `comfy workflow delete` deletes a *saved workflow from Comfy Cloud*. Do not confuse them.
+- `add-node`/`connect`/`delete-node` operate on **top-level** nodes only.
+  `set-widget` additionally resolves values **inside a subgraph** directly — use
+  the flat promoted address `slots` advertises (e.g. `57.text`) or the nested
+  form (`57/27.text`); no decompose needed.
 
 ---
 
@@ -318,8 +436,15 @@ codes, and capabilities. Everything below flows from it.
 comfy --json env             # what's installed locally
 comfy --json which           # workspace path
 comfy --json cloud whoami    # signed_in, auth_method (oauth/api_key), base_url, api_key_source
+comfy --json cloud status    # cloud_workspace, balance, tier, max_concurrent_jobs, upgrade_suggestion
 comfy --json auth list       # all credentials (redacted)
 ```
+
+`cloud status` answers "how many credits do I have / what plan am I on /
+what's my concurrency". It is read-only and spends nothing. Two fields need
+care: when `balance_confirmed` is `false` the balance fields are `null` rather
+than `0`, so never render "$0.00" from them, and `message` carries the copy to
+show instead. Pass `message` through verbatim rather than composing your own.
 
 ## Nodes — introspect the graph
 
@@ -357,6 +482,12 @@ running `nodes show` per candidate.
 
 If no local server is running and you're not signed into cloud, pass
 `--input <object_info.json>` to query against a saved dump.
+
+**Dynamic-combo gotcha:** some partner nodes declare a `COMFY_DYNAMICCOMBO_V3`
+widget (e.g. a Kling/Grok `model` or `model.resolution`) whose **`choices` come
+back empty from `nodes show`** — the options are resolved at runtime. To learn the
+valid values, `comfy templates fetch <api_template>` for that node and read the
+widget values it ships (e.g. `model="kling-v3"`, `model.resolution="720p"`).
 
 ## Models — find what's installed, with metadata
 
@@ -1075,8 +1206,8 @@ names files `<item>_<nnn>.<ext>`. Read outputs by item, never by array
 order. Avoid the old `PIDS=()` shell-loop pattern — it duplicates
 scheduling the engine already does and gives you N jobs to babysit instead
 of one. (For a pure prompt/seed sweep over the *same* graph, `comfy
-workflow vary` is the right tool; see the `comfy-fragments` skill for the
-full blueprint syntax.)
+workflow vary` is the right tool; for reusable parameterized generation use a
+recipe with `workflow foreach`.)
 
 **The exception — when fan-out across separate jobs IS right.** A multi-shot
 film built on **partner-API video/avatar nodes** (KlingAvatar, Kling i2v, Sora,

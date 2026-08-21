@@ -638,6 +638,76 @@ class TestRedactionThroughFanOut:
             assert "hf-secret" not in str(properties)
 
 
+class TestLazyProviderConstruction:
+    """Providers must be built on first dispatch, never at module import.
+
+    Eager construction started PostHog's consumer thread, whose atexit join
+    stalls every CLI exit by the full flush_interval — even for invocations
+    that never send a single event (e.g. ``comfy --version`` with
+    ``DO_NOT_TRACK=1``)."""
+
+    def test_first_track_event_constructs_providers(self, tracking_with_two_providers):
+        tracking_mod, _, _ = tracking_with_two_providers
+        built = [MagicMock(), MagicMock()]
+        with (
+            patch.object(tracking_mod, "PROVIDERS", None),
+            patch.object(tracking_mod, "MixpanelProvider", return_value=built[0]),
+            patch.object(tracking_mod, "PostHogProvider", return_value=built[1]),
+        ):
+            assert tracking_mod.PROVIDERS is None
+            tracking_mod.track_event("some_event")
+            assert tracking_mod.PROVIDERS == built
+            built[0].track.assert_called_once()
+            built[1].track.assert_called_once()
+
+    def test_disabled_tracking_never_constructs_providers(self, tracking_with_two_providers):
+        tracking_mod, _, _ = tracking_with_two_providers
+        tracking_mod.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "False")
+        with patch.object(tracking_mod, "PROVIDERS", None):
+            tracking_mod.track_event("some_event")
+            assert tracking_mod.PROVIDERS is None
+
+    def test_env_opt_out_never_constructs_providers(self, tracking_with_two_providers):
+        tracking_mod, _, _ = tracking_with_two_providers
+        with (
+            patch.object(tracking_mod, "PROVIDERS", None),
+            patch.dict("os.environ", {"DO_NOT_TRACK": "1"}),
+        ):
+            tracking_mod.track_event("some_event")
+            assert tracking_mod.PROVIDERS is None
+
+    def test_get_providers_constructs_once_and_caches(self):
+        import comfy_cli.tracking as tracking_mod
+
+        built = MagicMock()
+        with (
+            patch.object(tracking_mod, "PROVIDERS", None),
+            patch.object(tracking_mod, "MixpanelProvider", return_value=built) as mp_cls,
+            patch.object(tracking_mod, "PostHogProvider", return_value=built) as ph_cls,
+        ):
+            first = tracking_mod._get_providers()
+            second = tracking_mod._get_providers()
+            assert first is second
+            mp_cls.assert_called_once()
+            ph_cls.assert_called_once()
+
+    def test_posthog_flush_interval_is_bounded(self):
+        """The Posthog client must be constructed with an explicit, small
+        flush_interval: its atexit join waits out the full interval on an
+        empty queue, and the library default varies by version (0.5s → 5.0s),
+        which would add multi-second dead time to every CLI exit."""
+        with patch("posthog.Posthog") as posthog_cls:
+            provider = PostHogProvider("phc_test", "https://t.comfy.org")
+        assert provider.enabled is True
+        kwargs = posthog_cls.call_args.kwargs
+        # main (BE-3403) replaced the branch's `flush_interval=0.2` with a
+        # tighter, more direct bound: cap the consumer's drain budget, and
+        # unregister posthog's own atexit join so `_flush_all_providers` is the
+        # only shutdown drain and its deadline actually governs.
+        assert kwargs["max_retries"] == 1
+        assert kwargs["timeout"] <= 10
+
+
 class TestAtexitFlush:
     def test_flush_all_providers_calls_each_flush(self):
         """The module registers ``_flush_all_providers`` with ``atexit`` at import
@@ -652,6 +722,22 @@ class TestAtexitFlush:
 
         p1.flush.assert_called_once()
         p2.flush.assert_called_once()
+
+    def test_flush_is_noop_when_providers_never_constructed(self):
+        """The atexit flush must not itself trigger provider construction:
+        if no provider was ever built, no event was ever dispatched, so there
+        is nothing to flush and no reason to pay the construction cost."""
+        import comfy_cli.tracking as tracking_mod
+
+        with (
+            patch.object(tracking_mod, "PROVIDERS", None),
+            patch.object(tracking_mod, "MixpanelProvider") as mp_cls,
+            patch.object(tracking_mod, "PostHogProvider") as ph_cls,
+        ):
+            tracking_mod._flush_all_providers()
+            assert tracking_mod.PROVIDERS is None
+            mp_cls.assert_not_called()
+            ph_cls.assert_not_called()
 
     def test_flush_swallows_provider_errors(self):
         import comfy_cli.tracking as tracking_mod

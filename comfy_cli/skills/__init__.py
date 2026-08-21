@@ -51,7 +51,6 @@ _SKILL_FILE = "SKILL.md"
 # name). The bundled skills must satisfy their own convention.
 BUNDLED_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy", "comfy"),
-    ("comfy-fragments", "comfy-fragments"),
     ("comfy-debug", "comfy-debug"),
     ("comfy-relay", "comfy-relay"),
     ("comfy-director", "comfy-director"),

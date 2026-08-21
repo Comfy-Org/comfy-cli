@@ -268,6 +268,196 @@ def which_panel(
 
 
 # ---------------------------------------------------------------------------
+# Cloud status panel (billing / plan / concurrency)
+# ---------------------------------------------------------------------------
+
+
+def _fmt_usd(usd: float | None) -> str | None:
+    if usd is None:
+        return None
+    # Negative balances are real (an overdrawn account) and must read as
+    # negative rather than as a parenthesised accounting figure.
+    sign = "-" if usd < 0 else ""
+    return f"{sign}${abs(usd):,.2f}"
+
+
+def cloud_status_panel(*, payload: Mapping[str, Any], version: str, show_plans: bool = False) -> Panel:
+    """Pretty-mode rendering of the ``comfy cloud status`` payload.
+
+    Reads the already-assembled envelope payload rather than re-deriving
+    anything, so the human surface and the JSON surface cannot disagree. In
+    particular the trust guard is honored upstream: when ``balance_confirmed``
+    is false the balance keys are null and this function prints no figure at
+    all, which is the whole point of BE-1798.
+
+    Server-supplied strings (workspace name, plan slugs, the message) go
+    through ``Text`` or ``sanitize_markup`` so a crafted name cannot inject
+    Rich markup into the panel.
+    """
+    rows: list[tuple[str, Any]] = []
+
+    workspace = payload.get("cloud_workspace")
+    if isinstance(workspace, Mapping):
+        # "Cloud workspace" is spelled out everywhere: in comfy-cli a bare
+        # "workspace" is the local ComfyUI install directory.
+        name = sanitize_optional(workspace.get("name")) or "—"
+        wtype = sanitize_optional(workspace.get("type"))
+        role = sanitize_optional(workspace.get("role"))
+        parts: list[tuple[str, str]] = [(str(name), "bold white")]
+        if wtype:
+            parts.append((f"  ({wtype})", "dim"))
+        if role:
+            parts.append((f"  {_TARGET_DIM_CHAR} {role}", "dim"))
+        rows.append(("Cloud workspace", Text.assemble(*parts)))
+
+    if payload.get("balance_confirmed"):
+        usd = _fmt_usd(payload.get("credit_balance_usd"))
+        credits = payload.get("credit_balance_credits")
+        micros = payload.get("effective_balance_micros")
+        negative = isinstance(micros, int) and micros < 0
+        balance_parts: list[tuple[str, str]] = [(usd or "—", "bold red" if negative else "bold green")]
+        if credits is not None:
+            balance_parts.append((f"  ({credits:,} credits)", "dim"))
+        rows.append(("Balance", Text.assemble(*balance_parts)))
+    else:
+        rows.append(("Balance", Text("not confirmed", style="yellow")))
+
+    subscription = payload.get("subscription")
+    if isinstance(subscription, Mapping):
+        tier = sanitize_optional(subscription.get("tier"))
+        status = sanitize_optional(subscription.get("status"))
+        is_active = subscription.get("is_active")
+        if tier or status:
+            sub_parts: list[tuple[str, str]] = [(str(tier or "—"), "bold white")]
+            if status:
+                sub_parts.append((f"  {status}", "green" if is_active else "yellow"))
+            rows.append(("Subscription", Text.assemble(*sub_parts)))
+        plan_slug = sanitize_optional(subscription.get("plan_slug"))
+        if plan_slug:
+            rows.append(("Plan", Text(str(plan_slug), style="white")))
+        renewal = sanitize_optional(subscription.get("renewal_date"))
+        cancel_at = sanitize_optional(subscription.get("cancel_at"))
+        if cancel_at:
+            rows.append(("Cancels", Text(str(cancel_at), style="yellow")))
+        elif renewal:
+            rows.append(("Renews", Text(str(renewal), style="dim")))
+
+    free_tier = payload.get("free_tier_balance")
+    if isinstance(free_tier, Mapping):
+        # Sanitized like every other server-supplied field here. `Text` does not
+        # parse Rich markup but it does pass `\x1b` straight through, so an
+        # unsanitized CSI/OSC payload in one of these numbers would reach the
+        # terminal live. Reachable in practice: a user can point the CLI at a
+        # hostile host via the documented `comfy cloud set-base-url`.
+        remaining = sanitize_optional(free_tier.get("remaining"))
+        allowance = sanitize_optional(free_tier.get("allowance"))
+        if remaining is not None or allowance is not None:
+            rows.append(
+                (
+                    "Free tier",
+                    Text.assemble(
+                        (remaining if remaining is not None else "—", "bold white"),
+                        (f" of {allowance} remaining" if allowance is not None else " remaining", "dim"),
+                    ),
+                )
+            )
+
+    concurrency = payload.get("max_concurrent_jobs")
+    tier_default_concurrency = payload.get("tier_default_concurrent_jobs")
+    # Fall back to the tier default when /api/features was unavailable, rather
+    # than printing no concurrency row at all. The payload ships that field
+    # precisely to provide this context, and dropping the row hid a number we
+    # already knew.
+    shown_concurrency = concurrency if isinstance(concurrency, int) else None
+    from_tier_default = False
+    if shown_concurrency is None and isinstance(tier_default_concurrency, int):
+        shown_concurrency = tier_default_concurrency
+        from_tier_default = True
+    if shown_concurrency is not None:
+        conc_parts: list[tuple[str, str]] = [(f"{shown_concurrency}", "bold white")]
+        conc_parts.append((f"  concurrent job{'s' if shown_concurrency != 1 else ''}", "dim"))
+        if from_tier_default:
+            conc_parts.append(("  (tier default)", "dim"))
+        rows.append(("Concurrency", Text.assemble(*conc_parts)))
+
+    upgrade = payload.get("upgrade_suggestion")
+    if isinstance(upgrade, Mapping):
+        slug = sanitize_optional(upgrade.get("plan_slug")) or "—"
+        price = _fmt_usd(upgrade.get("price_usd"))
+        up_parts: list[tuple[str, str]] = [(str(slug), "bold cyan")]
+        if price:
+            up_parts.append((f"  {price}", "white"))
+        credits = upgrade.get("credits")
+        if credits is not None:
+            up_parts.append((f"  ({credits:,} credits)", "dim"))
+        rows.append(("Upgrade", Text.assemble(*up_parts)))
+
+    manage_url = payload.get("manage_url")
+    if manage_url:
+        rows.append(("Manage", Text(str(sanitize_value(manage_url)), style="cyan")))
+
+    tbl = Table.grid(padding=(0, 2), expand=False)
+    tbl.add_column(justify="right", style="bold cyan", no_wrap=True)
+    tbl.add_column(overflow="fold")
+    for label, value in rows:
+        tbl.add_row(label, value)
+
+    blocks: list[Any] = [tbl]
+
+    message = payload.get("message")
+    if message:
+        blocks.append(Text(""))
+        blocks.append(Text(str(sanitize_value(message)), style="yellow"))
+
+    if shown_concurrency is not None:
+        # API-key callers get the tier limit; a browser session can differ
+        # because parallel execution is gated separately on the frontend.
+        blocks.append(Text(""))
+        blocks.append(
+            Text(
+                "Concurrency is the limit for this credential; browser sessions may differ.",
+                style="dim",
+            )
+        )
+
+    if show_plans:
+        plans = payload.get("plans")
+        if isinstance(plans, Sequence) and plans:
+            plan_tbl = Table(box=None, pad_edge=False, show_edge=False)
+            plan_tbl.add_column("Plan", style="white", no_wrap=True)
+            plan_tbl.add_column("Price", justify="right")
+            plan_tbl.add_column("Credits", justify="right")
+            plan_tbl.add_column("Available")
+            for plan in plans:
+                if not isinstance(plan, Mapping):
+                    continue
+                credits = plan.get("credits")
+                available = plan.get("available")
+                reason = sanitize_optional(plan.get("unavailable_reason"))
+                avail_text = (
+                    Text("yes", style="green") if available else Text(f"no ({reason})" if reason else "no", style="dim")
+                )
+                plan_tbl.add_row(
+                    Text(str(sanitize_value(plan.get("plan_slug") or "—"))),
+                    Text(_fmt_usd(plan.get("price_usd")) or "—"),
+                    Text(f"{credits:,}" if credits is not None else "—"),
+                    avail_text,
+                )
+            blocks.append(Text(""))
+            blocks.append(plan_tbl)
+
+    from comfy_cli.output.branding import branded_panel
+
+    return branded_panel(
+        Group(*blocks),
+        title="cloud status",
+        version=version,
+        where="cloud",
+        padding=(0, 1),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Auth list table / empty panel
 # ---------------------------------------------------------------------------
 

@@ -11,7 +11,6 @@ from collections.abc import Callable
 from http import HTTPStatus
 
 import httpx
-import requests
 from pathspec import PathSpec
 
 from comfy_cli import constants, ui
@@ -296,6 +295,10 @@ def check_unauthorized(url: str, headers: dict | None = None) -> bool:
     Returns:
         bool: True if the response status code is 401, False otherwise.
     """
+    # Imported lazily: requests costs ~30ms to import and this module is on
+    # the import path of every CLI invocation.
+    import requests
+
     try:
         with requests.get(
             url, headers=headers, allow_redirects=True, stream=True, timeout=DEFAULT_HTTP_TIMEOUT
@@ -1047,6 +1050,8 @@ def zip_files(zip_filename, includes=None):
 
 
 def upload_file_to_signed_url(signed_url: str, file_path: str):
+    import requests  # deferred; see check_unauthorized
+
     with open(file_path, "rb") as f:
         headers = {"Content-Type": "application/zip"}
         response = requests.put(signed_url, data=f, headers=headers, timeout=DOWNLOAD_TIMEOUT)

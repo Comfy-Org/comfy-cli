@@ -31,7 +31,7 @@ def _mock_streaming_response(mock_get, content):
 
 
 class TestDownloadUrl:
-    @patch("comfy_cli.utils.requests.get")
+    @patch("requests.get")
     def test_writes_file(self, mock_get, tmp_path):
         content = b"file contents here"
         _mock_streaming_response(mock_get, content)
@@ -40,7 +40,7 @@ class TestDownloadUrl:
         assert result == tmp_path / "f.bin"
         assert (tmp_path / "f.bin").read_bytes() == content
 
-    @patch("comfy_cli.utils.requests.get")
+    @patch("requests.get")
     def test_passes_download_timeout(self, mock_get, tmp_path):
         """A streaming download must set a (connect, read) timeout so a stalled peer can't hang."""
         _mock_streaming_response(mock_get, b"x")
@@ -48,7 +48,7 @@ class TestDownloadUrl:
         download_url("http://example.com/f.bin", "f.bin", cwd=tmp_path, show_progress=False)
         assert mock_get.call_args.kwargs["timeout"] == DOWNLOAD_TIMEOUT
 
-    @patch("comfy_cli.utils.requests.get")
+    @patch("requests.get")
     def test_releases_connection_on_error_status(self, mock_get, tmp_path):
         """A non-200 must still release the streamed connection rather than leak it until GC."""
         mock_response = _mock_streaming_response(mock_get, b"")

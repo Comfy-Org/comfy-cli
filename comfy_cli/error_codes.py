@@ -310,6 +310,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check `details.body` for the server's message",
     ),
     ErrorCode(
+        "cloud_billing_unavailable",
+        "`comfy cloud status` could not read `/api/billing/status`, so there is no tier or "
+        "subscription state to report. Distinct from `cloud_unauthorized` (a rejected "
+        "credential) and from the command's own degraded rows: the workspace, features and "
+        "plans calls each drop a single row when they fail, and only this one is fatal.",
+        "retry shortly; if it persists, contact Comfy support",
+    ),
+    ErrorCode(
         "cloud_timeout",
         "Cloud wait_for_completion exceeded `--timeout`.",
         "raise `--timeout`, or `comfy jobs watch <id> --where cloud`",
@@ -349,6 +357,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "for local filename listing use `comfy models list-folder <folder>`",
     ),
     ErrorCode(
+        "cloud_only_command",
+        "The command requires Comfy Cloud (e.g. `comfy assets library`); there is no local equivalent.",
+        "sign in with `comfy cloud login` and re-run with `--where cloud`",
+    ),
+    ErrorCode(
         "template_fetch_failed",
         "Fetching the per-template workflow JSON from `Comfy-Org/workflow_templates` failed.",
         "check network; if 404, the gallery and templates dir are out of sync — report upstream",
@@ -357,6 +370,20 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "template_workflow_invalid_json",
         "Upstream `templates/<name>.json` was not parseable JSON.",
         "report at https://github.com/Comfy-Org/workflow_templates/issues",
+    ),
+    ErrorCode(
+        "template_ambiguous",
+        "`comfy templates get --where …` matched more than one template; `get` resolves exactly one. "
+        "`details.candidates` carries up to 10 matches (name + title/type/tags/models) and "
+        "`details.matched` the full count.",
+        "add another --where filter (e.g. name=<substring>) to narrow to a single template",
+    ),
+    ErrorCode(
+        "template_filter_invalid",
+        "A `comfy templates get --where` filter was malformed (not key=value), used an unknown key, "
+        "or no filter was given at all. Valid keys: type, category, tag, model, provider, name — "
+        "identical semantics to the `templates ls` flags.",
+        "pass repeatable `--where key=value` pairs, e.g. `--where type=video --where tag=API`",
     ),
     ErrorCode(
         "cancel_failed",
@@ -489,6 +516,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Requested feature is not available in JSON output mode.",
         "drop `--json` (or pass `--no-json`) for this command",
     ),
+    ErrorCode(
+        "select_no_match",
+        "A `--select <expr>` projection was malformed or matched nothing in the payload. The command "
+        "fails open — `ok` stays true and exit code stays 0 — and `data` carries a bounded key "
+        "inventory of the full payload (`data.inventory`: top-level keys, value types, sizes, one "
+        "nested level of keys) plus this advisory in `data.warnings[]`.",
+        "read `data.inventory` for the payload's real keys, then re-run with a corrected --select; "
+        "grammar: dot path `a.b.c`, array index `a.0.b`, wildcard `items.#.name`, comma multi-select "
+        "`name,inputs`",
+    ),
     # --- skills --------------------------------------------------------------
     ErrorCode(
         "unknown_skill",
@@ -511,6 +548,58 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "workflow_slot_invalid",
         "A slot override failed validation (bad shape, unknown address, etc.).",
         "see `details` — addresses follow `<instance_id>.<input_name>`",
+    ),
+    ErrorCode(
+        "workflow_edit_invalid",
+        "A structured edit (add-node/connect/set-widget/delete-node) failed: "
+        "unknown class_type, missing node, bad slot/widget name, or malformed address.",
+        "run `comfy workflow slots <file>` for widget addresses or `comfy nodes types` for class_types",
+    ),
+    ErrorCode(
+        "workflow_clear_not_batchable",
+        "A batch (`workflow apply` / `workflow foreach`) contained a `clear` op. `clear` wipes the whole "
+        "graph and is standalone-only (docs/op-vocabulary-v1.md: batchable = no), so the batch was "
+        "rejected atomically — nothing was applied.",
+        "run the standalone `comfy workflow clear <file>` first, then apply the remaining ops as a batch",
+    ),
+    ErrorCode(
+        "workflow_reset_doc_not_batchable",
+        "A batch (`workflow apply` / `workflow foreach`) contained a `reset_doc` op. `reset_doc` resets the "
+        "whole document to the empty baseline and erases its replay history, so it is standalone-only "
+        "(docs/op-vocabulary-v1.md: batchable = no) and the batch was rejected atomically — nothing was applied.",
+        "run the standalone `comfy workflow reset-doc <file> --confirm` first, then apply the remaining ops as a batch",
+    ),
+    ErrorCode(
+        "workflow_reset_doc_unconfirmed",
+        "`comfy workflow reset-doc` was called without `--confirm`. The command fails closed: it erases every "
+        "node AND the document's replay history, which no later op can undo.",
+        "re-run with `--confirm` if that is really what you want — otherwise `comfy workflow clear <file>` "
+        "empties the graph while keeping the document's history",
+    ),
+    ErrorCode(
+        "normalized_value",
+        "Warning (not fatal): a set-widget value wasn't an exact COMBO option, so "
+        "the nearest matching option was used. Surfaced in the op's `warnings`.",
+        "see the warning's `from`/`to`; pass an exact option to avoid the fuzzy match",
+    ),
+    ErrorCode(
+        "ui_only_node_skipped",
+        "Warning (not fatal): `workflow capture` skipped a UI-only node (Note/MarkdownNote/"
+        "Reroute/GetNode/SetNode/PrimitiveNode) — those never reach the API and `apply` "
+        "refuses to mint them. Data flow through the node was spliced to the real source.",
+        "expected for annotated workflows; the recipe rebuilds the executable graph, not canvas decoration",
+    ),
+    ErrorCode(
+        "ui_only_link_dropped",
+        "Warning (not fatal): a captured link traced back through UI-only nodes to no real "
+        "source (e.g. a dangling Reroute), so `workflow capture` dropped it.",
+        "check the named node/input; wire it to a real source before capturing if the link matters",
+    ),
+    ErrorCode(
+        "primitive_feed_unrepresentable",
+        "Warning (not fatal): a PrimitiveNode feeds an input that is not a widget on the "
+        "target node, so `workflow capture` could not express its value as a set_widget.",
+        "set the target input from a real node or widget before capturing",
     ),
     # --- workflow fragments / compose ---------------------------------------
     ErrorCode(
@@ -625,6 +714,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "path at all, so the search is refused rather than returning an empty result that would read "
         "as a proof that no route exists.",
         "use `--max-depth 6 --max-paths 10` (or any bound >= 1)",
+    ),
+    ErrorCode(
+        "expand_miss",
+        "`comfy nodes search --expand-top N` matched a node class but could not resolve its full schema "
+        "from the catalog. Surfaced as a per-hit error entry inside `data.expanded[]` (not as an error "
+        "envelope) — the search itself still succeeds and the other hits still expand.",
+        "the hit itself is still valid; inspect it directly with `comfy nodes show <class_type>`",
     ),
     # --- file transfer (upload / download) -----------------------------------
     ErrorCode(

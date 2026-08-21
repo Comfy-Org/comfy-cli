@@ -32,6 +32,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy cloud login": "auth",
     "comfy cloud logout": "auth",
     "comfy cloud whoami": "auth",
+    "comfy cloud status": "cloud_status",
     "comfy distribution scan": "distribution",
     "comfy distribution create": "distribution_create",
     "comfy distribution list": "distribution_list",
@@ -72,11 +73,25 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy nodes types": "nodes",
     "comfy nodes categories": "nodes",
     "comfy nodes refresh": "nodes",
+    # The widget catalog gets its OWN schema, not `nodes`: `nodes.json` declares
+    # `types` as an array of connection-type names (`nodes types`), and the
+    # catalog's `types` is a class_type→entry map. Same key, different contract.
+    "comfy nodes widget-catalog": "widget_catalog",
     # workflow editing
     "comfy workflow slots": "workflow",
     "comfy workflow set-slot": "workflow",
     "comfy workflow vary": "workflow",
     "comfy workflow notes": "workflow",
+    # structured edit primitives + recipes (CRDT op-based authoring)
+    "comfy workflow add-node": "workflow",
+    "comfy workflow connect": "workflow",
+    "comfy workflow set-widget": "workflow",
+    "comfy workflow delete-node": "workflow",
+    "comfy workflow delete-nodes": "workflow",
+    "comfy workflow ls-nodes": "workflow",
+    "comfy workflow apply": "workflow",
+    "comfy workflow capture": "workflow",
+    "comfy workflow foreach": "workflow",
     # workflow cloud CRUD + fragment composition
     "comfy workflow list": "workflow",
     "comfy workflow get": "workflow",
@@ -120,6 +135,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy templates ls": "templates",
     "comfy templates show": "templates",
     "comfy templates fetch": "templates",
+    "comfy templates get": "templates",
     "comfy templates refresh": "templates",
     "comfy templates check": "templates",
     # lifecycle
@@ -132,6 +148,8 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy project init": "project",
     "comfy project status": "project",
     "comfy assets push": "assets",
+    "comfy assets library ls": "assets_library",
+    "comfy assets library ensure": "assets_library",
     # config
     "comfy set-default": "set_default",
     # Not a subcommand: the root `--version` flag emits `command="version"`,
