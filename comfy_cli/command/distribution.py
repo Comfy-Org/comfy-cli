@@ -1,5 +1,5 @@
-"""``comfy distribution`` — package a local ComfyUI environment into a
-serverless distribution build.
+"""``comfy build`` — package a local ComfyUI environment into a
+serverless build.
 
 POC scope: ``scan`` inspects a local ComfyUI install and emits a builder-ready
 *definition* covering the two halves a build needs:
@@ -53,21 +53,21 @@ from comfy_cli.workspace_manager import WorkspaceManager
 app = typer.Typer(
     no_args_is_help=True,
     help=(
-        "Package a local ComfyUI environment into a serverless distribution. "
+        "Package a local ComfyUI environment into a serverless build. "
         "[Limited beta] — builder access is granted per account; commands that reach the "
         "builder return a 'not enabled yet' message until your account is enabled."
     ),
 )
 
-# `comfy distribution version <verb>` — the resource-verb surface for versions
+# `comfy build version <verb>` — the resource-verb surface for versions
 # (a version is an immutable build cut of a distribution).
 version_app = typer.Typer(
     no_args_is_help=True,
-    help="Inspect and cut distribution versions (builds).",
+    help="Inspect and cut build versions.",
 )
 app.add_typer(version_app, name="version")
 
-# `comfy distribution artifact <verb>` / `blob <verb>` — the per-target build
+# `comfy build artifact <verb>` / `blob <verb>` — the per-target build
 # outputs and the workspace's private uploaded content.
 artifact_app = typer.Typer(no_args_is_help=True, help="Build artifacts (per-target outputs of a cut version).")
 app.add_typer(artifact_app, name="artifact")
@@ -851,7 +851,7 @@ def _render_nodes_table(renderer, nodes: list[dict]) -> None:
     "scan",
     help="Scan a local ComfyUI install (models + custom nodes) and emit a builder-ready definition.",
 )
-@tracking.track_command("distribution")
+@tracking.track_command("build")
 def scan_cmd(
     models_dir: Annotated[
         str | None,
@@ -899,7 +899,7 @@ def scan_cmd(
     root = _resolve_models_dir(models_dir)
     if root is None or not root.is_dir():
         renderer.error(
-            code="distribution_models_dir_missing",
+            code="build_models_dir_missing",
             message=f"No models/ directory to scan at {root!s}." if root else "No workspace selected.",
             details={"path": str(root) if root else None},
         )
@@ -958,7 +958,7 @@ def scan_cmd(
             atomic_write_text(out_path, json.dumps(definition, indent=2, sort_keys=True), fsync=True)
         except OSError as e:
             renderer.error(
-                code="distribution_output_write_error",
+                code="build_output_write_error",
                 message=f"Could not write definition to {out_path}: {e}",
                 details={"path": str(out_path), "error": str(e)},
             )
@@ -997,7 +997,7 @@ def scan_cmd(
             "total_bytes": total_bytes,
             "definition": definition,
         },
-        command="distribution scan",
+        command="build scan",
         changed=bool(output),
     )
 
@@ -1036,17 +1036,17 @@ DEFAULT_BUILDER_URL = "https://platformapi.comfy.org/builder"
 
 @app.command(
     "create",
-    help="Create a serverless distribution from a scan definition (preview by default; --execute goes live).",
+    help="Create a serverless build from a scan definition (preview by default; --execute goes live).",
 )
-@tracking.track_command("distribution")
+@tracking.track_command("build")
 def create_cmd(
     from_: Annotated[
         str,
-        typer.Option("--from", "-f", help="Path to a definition JSON produced by `comfy distribution scan -o`."),
+        typer.Option("--from", "-f", help="Path to a definition JSON produced by `comfy build scan -o`."),
     ],
     name: Annotated[
         str,
-        typer.Option("--name", help="Name for the distribution."),
+        typer.Option("--name", help="Name for the build."),
     ] = "untitled-distribution",
     execute: Annotated[
         bool,
@@ -1066,7 +1066,7 @@ def create_cmd(
     try:
         definition = _load_definition(Path(from_).expanduser())
     except ValueError as e:
-        renderer.error(code="distribution_definition_invalid", message=str(e), details={"path": from_})
+        renderer.error(code="build_definition_invalid", message=str(e), details={"path": from_})
         raise typer.Exit(code=1) from e
 
     # Preflight: the builder allows a version-less definition to be *created* but
@@ -1075,7 +1075,7 @@ def create_cmd(
     # letting it surface as a raw builder 400 after work has already happened.
     if not definition.get("baseComfyVersion"):
         renderer.error(
-            code="distribution_missing_comfy_version",
+            code="build_missing_comfy_version",
             message="the definition has no baseComfyVersion — the builder needs a pinned ComfyUI version to build.",
             hint='re-scan with `--comfy-version <ref>` (a tag, branch, or commit), or add "baseComfyVersion" to the definition',
             details={"path": from_},
@@ -1105,7 +1105,7 @@ def create_cmd(
     node_uploads = sum(1 for u in plan["uploads"] if u["kind"] == "node_zip")
     model_uploads = plan["upload_count"] - node_uploads
     if renderer.is_pretty():
-        renderer.info(f"Distribution '{name}' — preview (no calls made)")
+        renderer.info(f"Build '{name}' — preview (no calls made)")
         renderer.print(
             f"  models: {len(plan['definition']['models'])}  "
             f"({resolved} resolved to URL, {model_uploads} to upload · {_human_size(plan['upload_bytes'])})"
@@ -1117,7 +1117,7 @@ def create_cmd(
         renderer.print("\n  Builder definition that would be sent:")
         renderer.console().print_json(json.dumps(plan["definition"]))
 
-    renderer.emit({"name": name, "plan": plan, "executed": False}, command="distribution create")
+    renderer.emit({"name": name, "plan": plan, "executed": False}, command="build create")
 
 
 def _create_execute(
@@ -1175,7 +1175,7 @@ def _create_execute(
             missing = [n for n in declared if _key(n) not in kept and _key(n) not in colliding]
             if missing:
                 renderer.error(
-                    code="distribution_registry_pin_missing",
+                    code="build_registry_pin_missing",
                     message="the builder could not resolve these custom nodes: " + ", ".join(sorted(missing)),
                     hint="see the advisories above; edit the definition to name a published version, or remove the pack",
                 )
@@ -1207,10 +1207,10 @@ def _create_execute(
     try:
         result = execute_create(plan, client=client, name=name, locate_bytes=locate_bytes)
     except NotImplementedError as e:
-        renderer.error(code="distribution_upload_unavailable", message=str(e))
+        renderer.error(code="build_upload_unavailable", message=str(e))
         raise typer.Exit(code=1) from e
     except FileNotFoundError as e:
-        renderer.error(code="distribution_upload_unavailable", message=str(e))
+        renderer.error(code="build_upload_unavailable", message=str(e))
         raise typer.Exit(code=1) from e
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
         # Same handler as the read verbs: surface the builder's own message (and the
@@ -1220,11 +1220,11 @@ def _create_execute(
         raise typer.Exit(code=1) from e
 
     if renderer.is_pretty():
-        renderer.success(f"Created distribution '{name}'")
-        renderer.print(f"  distribution: {result['distributionId']}")
-        renderer.print(f"  version:      {result['versionId']}  (uploaded {result['uploaded']} blob(s))")
-        renderer.print(f"  status:       {result['statusUrl']}")
-    renderer.emit({"name": name, "executed": True, **result}, command="distribution create", changed=True)
+        renderer.success(f"Created build '{name}'")
+        renderer.print(f"  build:   {result['distributionId']}")
+        renderer.print(f"  version: {result['versionId']}  (uploaded {result['uploaded']} blob(s))")
+        renderer.print(f"  status:  {result['statusUrl']}")
+    renderer.emit({"name": name, "executed": True, **result}, command="build create", changed=True)
 
 
 def _builder_client(renderer, builder_url: str | None):
@@ -1244,7 +1244,7 @@ def _builder_client(renderer, builder_url: str | None):
     try:
         return BuilderClient.from_session(base_url)
     except BuilderAuthError as e:
-        renderer.error(code="distribution_not_signed_in", message=str(e))
+        renderer.error(code="build_not_signed_in", message=str(e))
         raise typer.Exit(code=1) from e
 
 
@@ -1265,19 +1265,19 @@ def _report_builder_error(renderer, e, *, dist_id: str | None = None) -> None:
             pass
         if e.code == 403 and "FEATURE_NOT_ENABLED" in body:
             renderer.error(
-                code="distribution_not_enabled",
+                code="build_not_enabled",
                 message="The developer platform is in limited beta and your account isn't enabled yet.",
                 details=base or None,
             )
             return
         detail = _builder_msg(body) or getattr(e, "reason", None) or str(e)
         renderer.error(
-            code="distribution_builder_error",
+            code="build_builder_error",
             message=f"builder call failed ({e.code}): {detail}",
             details={**base, "status": e.code, "body": body[:1000]},
         )
         return
-    renderer.error(code="distribution_builder_error", message=f"builder call failed: {e}", details=base or None)
+    renderer.error(code="build_builder_error", message=f"builder call failed: {e}", details=base or None)
 
 
 def _builder_call(renderer, fn):
@@ -1292,9 +1292,7 @@ def _builder_call(renderer, fn):
     except ResponseTooLarge as e:
         # Mostly the build log outgrowing even the raised logs cap; a clear message
         # beats an unhandled traceback.
-        renderer.error(
-            code="distribution_builder_error", message=f"builder response exceeded the client size cap ({e})"
-        )
+        renderer.error(code="build_builder_error", message=f"builder response exceeded the client size cap ({e})")
         raise typer.Exit(code=1) from e
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
         _report_builder_error(renderer, e)
@@ -1318,24 +1316,24 @@ def _builder_msg(body: str) -> str:
 _BUILDER_URL_OPT = typer.Option("--builder-url", help="Builder base URL. Default: $COMFY_BUILDER_URL, else built-in.")
 
 
-@app.command("list", help="List the workspace's distributions.")
-@tracking.track_command("distribution")
+@app.command("list", help="List the workspace's builds.")
+@tracking.track_command("build")
 def list_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
     dists = _builder_call(renderer, client.list_distributions)
     if renderer.is_pretty():
         if not dists:
-            renderer.info("No distributions yet.")
+            renderer.info("No builds yet.")
         for d in dists:
             renderer.print(f"  {d.get('id', '?')}  {d.get('name', '')}")
-    renderer.emit({"distributions": dists}, command="distribution list")
+    renderer.emit({"distributions": dists}, command="build list")
 
 
-@app.command("get", help="Show a distribution and its full definition.")
-@tracking.track_command("distribution")
+@app.command("get", help="Show a build and its full definition.")
+@tracking.track_command("build")
 def get_cmd(
-    distribution_id: Annotated[str, typer.Argument(help="Distribution id.")],
+    distribution_id: Annotated[str, typer.Argument(help="Build id.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
@@ -1343,13 +1341,13 @@ def get_cmd(
     dist = _builder_call(renderer, lambda: client.get_distribution(distribution_id))
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(dist))
-    renderer.emit(dist, command="distribution get")
+    renderer.emit(dist, command="build get")
 
 
-@version_app.command("create", help="Cut a new version (build) of a distribution.")
-@tracking.track_command("distribution")
+@version_app.command("create", help="Cut a new version of a build.")
+@tracking.track_command("build")
 def version_create(
-    distribution_id: Annotated[str, typer.Argument(help="Distribution id to build.")],
+    distribution_id: Annotated[str, typer.Argument(help="Build id to cut a version of.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
@@ -1360,15 +1358,15 @@ def version_create(
         renderer.print(f"  status: {status_url}")
     renderer.emit(
         {"distributionId": distribution_id, "versionId": version_id, "statusUrl": status_url},
-        command="distribution version create",
+        command="build version create",
         changed=True,
     )
 
 
-@version_app.command("list", help="List a distribution's versions.")
-@tracking.track_command("distribution")
+@version_app.command("list", help="List a build's versions.")
+@tracking.track_command("build")
 def version_list(
-    distribution_id: Annotated[str, typer.Argument(help="Distribution id.")],
+    distribution_id: Annotated[str, typer.Argument(help="Build id.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
@@ -1379,13 +1377,13 @@ def version_list(
             renderer.info("No versions yet.")
         for v in versions:
             renderer.print(f"  {v.get('id', '?')}  {v.get('status', '')}")
-    renderer.emit({"versions": versions}, command="distribution version list")
+    renderer.emit({"versions": versions}, command="build version list")
 
 
 @version_app.command("get", help="Show a version's build status.")
-@tracking.track_command("distribution")
+@tracking.track_command("build")
 def version_get(
-    version_id: Annotated[str, typer.Argument(help="Distribution version id.")],
+    version_id: Annotated[str, typer.Argument(help="Build version id.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
@@ -1393,13 +1391,13 @@ def version_get(
     version = _builder_call(renderer, lambda: client.get_version(version_id))
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(version))
-    renderer.emit(version, command="distribution version get")
+    renderer.emit(version, command="build version get")
 
 
 @version_app.command("logs", help="Read a version's build log for one target.")
-@tracking.track_command("distribution")
+@tracking.track_command("build")
 def version_logs(
-    version_id: Annotated[str, typer.Argument(help="Distribution version id.")],
+    version_id: Annotated[str, typer.Argument(help="Build version id.")],
     os_target: Annotated[
         str | None, typer.Option("--os", help="Target OS to read (linux/windows/mac); builder picks one if omitted.")
     ] = None,
@@ -1414,13 +1412,13 @@ def version_logs(
         renderer.print(log if log else "(no build log captured yet)")
         if content.get("truncated"):
             renderer.warn("log truncated (head and tail kept; middle dropped)")
-    renderer.emit(content, command="distribution version logs")
+    renderer.emit(content, command="build version logs")
 
 
-@app.command("validate", help="Dry-run resolve a distribution's definition (no build).")
-@tracking.track_command("distribution")
+@app.command("validate", help="Dry-run resolve a build's definition (nothing is built).")
+@tracking.track_command("build")
 def validate_cmd(
-    distribution_id: Annotated[str, typer.Argument(help="Distribution id.")],
+    distribution_id: Annotated[str, typer.Argument(help="Build id.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
@@ -1448,26 +1446,26 @@ def validate_cmd(
                     field, reason = "?", w
                 renderer.warn(f"  {sanitize_error_body(str(field))}: {sanitize_error_body(str(reason))}")
         renderer.console().print_json(json.dumps(result))
-    renderer.emit(result, command="distribution validate")
+    renderer.emit(result, command="build validate")
 
 
-@app.command("delete", help="Delete a distribution (soft-delete).")
-@tracking.track_command("distribution")
+@app.command("delete", help="Delete a build (soft-delete).")
+@tracking.track_command("build")
 def delete_cmd(
-    distribution_id: Annotated[str, typer.Argument(help="Distribution id.")],
+    distribution_id: Annotated[str, typer.Argument(help="Build id.")],
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
     if not yes:
         if renderer.is_pretty():
-            if not typer.confirm(f"Delete distribution {distribution_id}?"):
+            if not typer.confirm(f"Delete build {distribution_id}?"):
                 renderer.info("Aborted.")
                 raise typer.Exit(code=0)
         else:
             # No TTY to prompt on (JSON / agent / pipe): refuse rather than block.
             renderer.error(
-                code="distribution_delete_needs_confirm",
+                code="build_delete_needs_confirm",
                 message="refusing to delete without confirmation in non-interactive mode.",
                 hint="pass --yes to confirm the delete",
                 details={"distributionId": distribution_id},
@@ -1476,14 +1474,14 @@ def delete_cmd(
     client = _builder_client(renderer, builder_url)
     _builder_call(renderer, lambda: client.delete_distribution(distribution_id))
     if renderer.is_pretty():
-        renderer.success(f"Deleted distribution {distribution_id}")
-    renderer.emit({"distributionId": distribution_id, "deleted": True}, command="distribution delete", changed=True)
+        renderer.success(f"Deleted build {distribution_id}")
+    renderer.emit({"distributionId": distribution_id, "deleted": True}, command="build delete", changed=True)
 
 
-@app.command("update", help="Replace a distribution's definition from a scan/edited JSON.")
-@tracking.track_command("distribution")
+@app.command("update", help="Replace a build's definition from a scan/edited JSON.")
+@tracking.track_command("build")
 def update_cmd(
-    distribution_id: Annotated[str, typer.Argument(help="Distribution id.")],
+    distribution_id: Annotated[str, typer.Argument(help="Build id.")],
     from_: Annotated[str, typer.Option("--from", "-f", help="Path to a definition JSON.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
@@ -1491,7 +1489,7 @@ def update_cmd(
     try:
         definition = _load_definition(Path(from_).expanduser(), require_models=False)
     except ValueError as e:
-        renderer.error(code="distribution_definition_invalid", message=str(e), details={"path": from_})
+        renderer.error(code="build_definition_invalid", message=str(e), details={"path": from_})
         raise typer.Exit(code=1) from e
     client = _builder_client(renderer, builder_url)
 
@@ -1508,9 +1506,9 @@ def update_cmd(
         if plan["uploads"]:
             names = ", ".join(sorted(u.get("filename") or u["name"] for u in plan["uploads"]))
             renderer.error(
-                code="distribution_upload_unavailable",
+                code="build_upload_unavailable",
                 message=f"these need uploading, which update cannot do: {names}",
-                hint="use `comfy distribution create --from ... --execute`, which uploads private blobs",
+                hint="use `comfy build create --from ... --execute`, which uploads private blobs",
             )
             raise typer.Exit(code=1)
         definition = plan["definition"]
@@ -1525,8 +1523,8 @@ def update_cmd(
         lambda: client.update_distribution(distribution_id, definition, current.get("updatedAt")),
     )
     if renderer.is_pretty():
-        renderer.success(f"Updated distribution {distribution_id}")
-    renderer.emit(dist, command="distribution update", changed=True)
+        renderer.success(f"Updated build {distribution_id}")
+    renderer.emit(dist, command="build update", changed=True)
 
 
 def as_snapshot_envelope(data: dict) -> dict:
@@ -1542,11 +1540,11 @@ def as_snapshot_envelope(data: dict) -> dict:
     return {"type": "comfyui-desktop-2-snapshot", "version": 2, "snapshots": [data]}
 
 
-@app.command("from-snapshot", help="Create a distribution from a ComfyUI Desktop snapshot export.")
-@tracking.track_command("distribution")
+@app.command("from-snapshot", help="Create a build from a ComfyUI Desktop snapshot export.")
+@tracking.track_command("build")
 def from_snapshot_cmd(
     from_: Annotated[str, typer.Option("--from", "-f", help="Path to a Desktop snapshot export JSON.")],
-    name: Annotated[str, typer.Option("--name", help="Name for the new distribution.")],
+    name: Annotated[str, typer.Option("--name", help="Name for the new build.")],
     description: Annotated[str | None, typer.Option("--description", help="Optional description.")] = None,
     base_image: Annotated[
         str | None,
@@ -1560,7 +1558,7 @@ def from_snapshot_cmd(
         snapshot = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         renderer.error(
-            code="distribution_definition_invalid",
+            code="build_definition_invalid",
             message=f"could not read {path}: {e}",
             details={"path": str(path)},
         )
@@ -1573,18 +1571,18 @@ def from_snapshot_cmd(
             name, as_snapshot_envelope(snapshot), description=description, base_image_id=base_image
         ),
     )
-    created = result.get("distribution") or {}
+    created = result.get("build") or {}
     distribution_id = created.get("id")
     if renderer.is_pretty():
-        renderer.success(f"Created distribution {distribution_id} from {path.name}")
+        renderer.success(f"Created build {distribution_id} from {path.name}")
         for line in report_advisories(result.get("report") or {}):
             renderer.warn(line)
-        renderer.info(f"cut a build with `comfy distribution version create {distribution_id}`")
-    renderer.emit(result, command="distribution from-snapshot", changed=True)
+        renderer.info(f"cut a build with `comfy build version create {distribution_id}`")
+    renderer.emit(result, command="build from-snapshot", changed=True)
 
 
 @blob_app.command("upload", help="Upload a private file and print the blobId a definition can reference.")
-@tracking.track_command("distribution")
+@tracking.track_command("build")
 def blob_upload_cmd(
     path: Annotated[str, typer.Argument(help="File to upload.")],
     kind: Annotated[str, typer.Option("--kind", help="What the file is: model or node_zip.")] = "model",
@@ -1593,7 +1591,7 @@ def blob_upload_cmd(
     renderer = get_renderer()
     if kind not in ("model", "node_zip"):
         renderer.error(
-            code="distribution_definition_invalid",
+            code="build_definition_invalid",
             message=f"unknown blob kind {kind!r}",
             hint="use --kind model or --kind node_zip",
         )
@@ -1601,7 +1599,7 @@ def blob_upload_cmd(
     file_path = Path(path).expanduser()
     if not file_path.is_file():
         renderer.error(
-            code="distribution_models_dir_missing",
+            code="build_models_dir_missing",
             message=f"no file at {file_path}",
             details={"path": str(file_path)},
         )
@@ -1619,13 +1617,13 @@ def blob_upload_cmd(
         renderer.info(f'reference it as "blobId": "{blob_id}", "sha256": "{sha256}"')
     renderer.emit(
         {"blobId": blob_id, "kind": kind, "filename": file_path.name, "sha256": sha256, "sizeBytes": size_bytes},
-        command="distribution blob upload",
+        command="build blob upload",
         changed=True,
     )
 
 
 @app.command("resolve", help="Resolve model filenames to public download candidates (HF/CivitAI).")
-@tracking.track_command("distribution")
+@tracking.track_command("build")
 def resolve_cmd(
     filenames: Annotated[list[str], typer.Argument(help="Model filenames to resolve.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
@@ -1640,33 +1638,33 @@ def resolve_cmd(
     )
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(results))
-    renderer.emit({"results": results}, command="distribution resolve")
+    renderer.emit({"results": results}, command="build resolve")
 
 
-@app.command("base-images", help="List the curated base images a distribution can build on.")
-@tracking.track_command("distribution")
+@app.command("base-images", help="List the curated base images a build can build on.")
+@tracking.track_command("build")
 def base_images_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
     images = _builder_call(renderer, client.list_base_images)
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(images))
-    renderer.emit({"baseImages": images}, command="distribution base-images")
+    renderer.emit({"baseImages": images}, command="build base-images")
 
 
 @app.command("build-targets", help="List the build targets (os/gpu) a version can be cut for.")
-@tracking.track_command("distribution")
+@tracking.track_command("build")
 def build_targets_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
     targets = _builder_call(renderer, client.list_build_targets)
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(targets))
-    renderer.emit({"targets": targets}, command="distribution build-targets")
+    renderer.emit({"targets": targets}, command="build build-targets")
 
 
 @app.command("model-dirs", help="List the model directories a model may be placed in.")
-@tracking.track_command("distribution")
+@tracking.track_command("build")
 def model_dirs_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
@@ -1674,13 +1672,13 @@ def model_dirs_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
     if renderer.is_pretty():
         for d in dirs:
             renderer.print(f"  {d}")
-    renderer.emit({"directories": dirs}, command="distribution model-dirs")
+    renderer.emit({"directories": dirs}, command="build model-dirs")
 
 
 @version_app.command("manifest", help="Show a version's models and runtime policies.")
-@tracking.track_command("distribution")
+@tracking.track_command("build")
 def version_manifest(
-    version_id: Annotated[str, typer.Argument(help="Distribution version id.")],
+    version_id: Annotated[str, typer.Argument(help="Build version id.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
@@ -1688,11 +1686,11 @@ def version_manifest(
     manifest = _builder_call(renderer, lambda: client.get_version_manifest(version_id))
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(manifest))
-    renderer.emit(manifest, command="distribution version manifest")
+    renderer.emit(manifest, command="build version manifest")
 
 
 @artifact_app.command("download", help="Get a signed download link for a build artifact.")
-@tracking.track_command("distribution")
+@tracking.track_command("build")
 def artifact_download(
     artifact_id: Annotated[str, typer.Argument(help="Build artifact id.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
@@ -1702,11 +1700,11 @@ def artifact_download(
     signed = _builder_call(renderer, lambda: client.get_artifact_download(artifact_id))
     if renderer.is_pretty():
         renderer.print(signed.get("downloadUrl", "(no url)"))
-    renderer.emit(signed, command="distribution artifact download")
+    renderer.emit(signed, command="build artifact download")
 
 
 @blob_app.command("list", help="List the workspace's private blobs.")
-@tracking.track_command("distribution")
+@tracking.track_command("build")
 def blob_list(
     kind: Annotated[str | None, typer.Option("--kind", help="Filter by blob kind: model or node_zip.")] = None,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
@@ -1719,4 +1717,4 @@ def blob_list(
             renderer.info("No blobs.")
         for b in blobs:
             renderer.print(f"  {b.get('blobId', b.get('id', '?'))}  {b.get('filename', '')}")
-    renderer.emit({"blobs": blobs}, command="distribution blob list")
+    renderer.emit({"blobs": blobs}, command="build blob list")

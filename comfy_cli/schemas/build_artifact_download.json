@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://comfy.org/schemas/distribution_artifact_download.json",
-  "title": "comfy distribution artifact download --json data payload",
+  "$id": "https://comfy.org/schemas/build_artifact_download.json",
+  "title": "comfy build artifact download --json data payload",
   "type": "object",
   "additionalProperties": true,
   "properties": {"downloadUrl": {"type": "string"}, "expiresAt": {"type": "string"}}

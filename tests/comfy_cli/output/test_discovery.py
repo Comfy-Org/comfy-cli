@@ -253,3 +253,17 @@ def test_discover_pretty_mode_shows_counts():
     assert "Capabilities" in result.stdout
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.stdout)
+
+
+def test_every_registered_schema_names_a_shipped_file():
+    """Every ``COMMAND_SCHEMAS`` / ``STREAM_EVENT_SCHEMAS`` value must name a
+    file in comfy_cli/schemas/; a schema-file rename that leaves a stale
+    mapping would make every envelope for that command unvalidatable."""
+    from comfy_cli.discovery import COMMAND_SCHEMAS, STREAM_EVENT_SCHEMAS
+
+    missing = sorted(
+        name
+        for name in {*COMMAND_SCHEMAS.values(), *STREAM_EVENT_SCHEMAS.values()}
+        if not (SCHEMAS_DIR / f"{name}.json").is_file()
+    )
+    assert not missing, f"registered schemas with no shipped file: {missing}"

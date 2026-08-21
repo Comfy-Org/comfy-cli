@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://comfy.org/schemas/distribution_blob_list.json",
-  "title": "comfy distribution blob list --json data payload",
+  "$id": "https://comfy.org/schemas/build_blob_list.json",
+  "title": "comfy build blob list --json data payload",
   "type": "object",
   "required": ["blobs"],
   "additionalProperties": true,

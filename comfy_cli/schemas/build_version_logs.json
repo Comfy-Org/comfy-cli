@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://comfy.org/schemas/distribution_version_logs.json",
-  "title": "comfy distribution version logs --json data payload",
-  "description": "One build target's captured log, as returned by GET /v1/distribution-versions/{id}/logs.",
+  "$id": "https://comfy.org/schemas/build_version_logs.json",
+  "title": "comfy build version logs --json data payload",
+  "description": "One build target's captured log, as returned by GET /v1/build-versions/{id}/logs.",
   "type": "object",
   "required": ["versionId", "log", "truncated"],
   "additionalProperties": true,

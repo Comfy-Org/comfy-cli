@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://comfy.org/schemas/distribution.json",
-  "title": "comfy distribution scan --json data payload",
+  "$id": "https://comfy.org/schemas/build.json",
+  "title": "comfy build scan --json data payload",
   "type": "object",
   "required": ["models_dir", "count", "custom_node_count", "total_bytes", "definition"],
   "additionalProperties": true,

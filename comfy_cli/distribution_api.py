@@ -1,4 +1,4 @@
-"""HTTP client for the comfy-builder distribution API (``/v1``).
+"""HTTP client for the comfy-builder build API (``/v1``).
 
 Authenticates with the OAuth Cloud JWT the CLI already holds after
 ``comfy cloud login`` — the builder validates it by signature (issuer
@@ -8,9 +8,9 @@ URL and never transit the builder.
 
 Field names match services/comfy-builder/openapi.yaml exactly:
   POST /v1/blobs {kind, filename, sizeBytes, sha256}     -> {blobId, uploadUrl, expiresAt}
-  POST /v1/distributions {name, definition}              -> {id, ...}
-  POST /v1/distributions/{id}/versions {targets?}        -> {distributionVersionId, statusUrl}
-  GET  /v1/distribution-versions/{id}                    -> {status, ...}
+  POST /v1/builds {name, definition}              -> {id, ...}
+  POST /v1/builds/{id}/versions {targets?}        -> {buildVersionId, statusUrl}
+  GET  /v1/build-versions/{id}                    -> {status, ...}
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class BuilderClient:
 
     def __init__(self, base_url: str, token: str):
         # kind="cloud" is what makes the shared http layer attach the Bearer;
-        # path_prefix carries the /v1 base so target.url("distributions") is right.
+        # path_prefix carries the /v1 base so target.url("builds") is right.
         self.target = Target(
             kind="cloud",
             base_url=base_url.rstrip("/"),
@@ -100,20 +100,20 @@ class BuilderClient:
         body: dict = {"name": name, "definition": definition}
         if description:
             body["description"] = description
-        return self._post(("distributions",), body)["id"]
+        return self._post(("builds",), body)["id"]
 
     def cut_version(self, distribution_id: str, targets: list[dict] | None = None) -> tuple[str, str]:
         """Freeze the definition and enqueue a build. Returns (versionId, statusUrl)."""
         body: dict = {}
         if targets:
             body["targets"] = targets
-        r = self._post(("distributions", distribution_id, "versions"), body)
-        return r["distributionVersionId"], r["statusUrl"]
+        r = self._post(("builds", distribution_id, "versions"), body)
+        return r["buildVersionId"], r["statusUrl"]
 
     def get_version(self, version_id: str) -> dict:
         """Poll a version's build status."""
         _, parsed = request_json(
-            self.target.url("distribution-versions", version_id), self.target, method="GET", max_bytes=_MAX_JSON
+            self.target.url("build-versions", version_id), self.target, method="GET", max_bytes=_MAX_JSON
         )
         return parsed or {}
 
@@ -136,14 +136,14 @@ class BuilderClient:
     def create_distribution_from_snapshot(
         self, name: str, snapshot: dict, *, description: str | None = None, base_image_id: str | None = None
     ) -> dict:
-        """POST /v1/distributions/from-snapshot — read a snapshot and store what it
-        maps to, in one call. Returns ``{distribution, report}``."""
+        """POST /v1/builds/from-snapshot — read a snapshot and store what it
+        maps to, in one call. Returns ``{build, report}``."""
         body: dict = {"name": name, "snapshot": snapshot}
         if description:
             body["description"] = description
         if base_image_id:
             body["baseImageId"] = base_image_id
-        return self._post(("distributions", "from-snapshot"), body)
+        return self._post(("builds", "from-snapshot"), body)
 
     def _get(self, parts: tuple[str, ...], params: dict | None = None, *, max_bytes: int = _MAX_JSON) -> dict:
         url = self.target.url(*parts)
@@ -155,38 +155,36 @@ class BuilderClient:
         return parsed or {}
 
     def list_distributions(self) -> list[dict]:
-        """GET /v1/distributions -> the caller's distributions (summaries)."""
-        return self._get(("distributions",)).get("distributions", [])
+        """GET /v1/builds -> the caller's distributions (summaries)."""
+        return self._get(("builds",)).get("builds", [])
 
     def get_distribution(self, distribution_id: str) -> dict:
-        """GET /v1/distributions/{id} -> a distribution with its full definition."""
-        return self._get(("distributions", distribution_id))
+        """GET /v1/builds/{id} -> a distribution with its full definition."""
+        return self._get(("builds", distribution_id))
 
     def list_distribution_versions(self, distribution_id: str) -> list[dict]:
-        """GET /v1/distributions/{id}/versions -> the distribution's versions."""
-        return self._get(("distributions", distribution_id, "versions")).get("versions", [])
+        """GET /v1/builds/{id}/versions -> the distribution's versions."""
+        return self._get(("builds", distribution_id, "versions")).get("versions", [])
 
     def get_version_logs(self, version_id: str, *, os: str | None = None, gpu: str | None = None) -> dict:
-        """GET /v1/distribution-versions/{id}/logs -> the build log for one target
+        """GET /v1/build-versions/{id}/logs -> the build log for one target
         (``os``/``gpu`` select which; the builder picks a target when omitted).
         Returns ``{versionId, os?, gpu?, log, truncated}``. Uses a larger response
         cap than other reads because a build log can be several MiB."""
-        return self._get(("distribution-versions", version_id, "logs"), {"os": os, "gpu": gpu}, max_bytes=_MAX_LOG_JSON)
+        return self._get(("build-versions", version_id, "logs"), {"os": os, "gpu": gpu}, max_bytes=_MAX_LOG_JSON)
 
     def delete_distribution(self, distribution_id: str) -> None:
-        """DELETE /v1/distributions/{id} -> soft-delete. Idempotent (204 even when
+        """DELETE /v1/builds/{id} -> soft-delete. Idempotent (204 even when
         already gone); the builder returns 409 while a deployment still runs one of
         its versions."""
-        request_json(
-            self.target.url("distributions", distribution_id), self.target, method="DELETE", max_bytes=_MAX_JSON
-        )
+        request_json(self.target.url("builds", distribution_id), self.target, method="DELETE", max_bytes=_MAX_JSON)
 
     def validate_distribution(self, distribution_id: str) -> dict:
-        """POST /v1/distributions/{id}/validate -> dry-run resolve the stored
+        """POST /v1/builds/{id}/validate -> dry-run resolve the stored
         definition (no build). 200 with a ValidateResult when resolvable; the
         builder returns 400 with the issues when the definition has problems."""
         _, parsed = request_json(
-            self.target.url("distributions", distribution_id, "validate"),
+            self.target.url("builds", distribution_id, "validate"),
             self.target,
             method="POST",
             max_bytes=_MAX_JSON,
@@ -194,13 +192,13 @@ class BuilderClient:
         return parsed or {}
 
     def update_distribution(self, distribution_id: str, definition: dict, expected_updated_at: str | None) -> dict:
-        """PATCH /v1/distributions/{id} -> replace the stored definition. Returns
+        """PATCH /v1/builds/{id} -> replace the stored definition. Returns
         the updated distribution. ``expected_updated_at`` is the ``updatedAt`` the
         caller last saw (optimistic concurrency); the builder rejects the save with
         409 STALE if it is stale or missing, so pass the value from a fresh GET."""
         body = {"definition": definition, "expectedUpdatedAt": expected_updated_at}
         _, parsed = request_json(
-            self.target.url("distributions", distribution_id),
+            self.target.url("builds", distribution_id),
             self.target,
             method="PATCH",
             body=body,
@@ -209,9 +207,9 @@ class BuilderClient:
         return parsed or {}
 
     def get_version_manifest(self, version_id: str) -> dict:
-        """GET /v1/distribution-versions/{id}/manifest -> the version's models and
+        """GET /v1/build-versions/{id}/manifest -> the version's models and
         runtime policies."""
-        return self._get(("distribution-versions", version_id, "manifest"))
+        return self._get(("build-versions", version_id, "manifest"))
 
     def get_artifact_download(self, artifact_id: str) -> dict:
         """GET /v1/build-artifacts/{id}/download -> ``{downloadUrl, expiresAt?}``."""
