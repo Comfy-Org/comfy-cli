@@ -2038,7 +2038,7 @@ app.add_typer(
 app.add_typer(
     skill_command.app,
     name="skills",
-    help="Install the bundled comfy agent skills into Claude Code, Cursor, Aider, and any AGENTS.md-aware tool.",
+    help="Install the comfy agent skills into Claude Code, Cursor, Aider, and any AGENTS.md-aware tool.",
 )
 # Keep the singular alias for backward compat
 app.add_typer(skill_command.app, name="skill", hidden=True)
