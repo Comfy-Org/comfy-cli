@@ -1419,3 +1419,17 @@ def test_from_snapshot_refuses_a_file_that_is_not_json(tmp_path, capsys):
     bad.write_text("not json at all", encoding="utf-8")
     with pytest.raises(typer.Exit):
         distribution.from_snapshot_cmd(from_=str(bad), name="demo")
+
+
+def test_as_snapshot_envelope_wraps_the_file_desktop_actually_writes():
+    """Desktop stores one bare snapshot per file under `.launcher/snapshots/` and
+    only its export action wraps them, so the file a user has is refused."""
+    bare = {"comfyui": {"baseTag": "v0.30.2"}, "customNodes": [], "pipPackages": {}, "pythonVersion": "3.12.7"}
+    wrapped = distribution.as_snapshot_envelope(bare)
+    assert wrapped["type"] == "comfyui-desktop-2-snapshot"
+    assert wrapped["snapshots"] == [bare]
+
+
+def test_as_snapshot_envelope_leaves_a_real_export_alone():
+    export = {"type": "comfyui-desktop-2-snapshot", "version": 2, "snapshots": [{"customNodes": []}]}
+    assert distribution.as_snapshot_envelope(export) is export

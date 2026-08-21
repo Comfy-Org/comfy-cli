@@ -1523,6 +1523,19 @@ def update_cmd(
     renderer.emit(dist, command="distribution update", changed=True)
 
 
+def as_snapshot_envelope(data: dict) -> dict:
+    """Wrap a bare Desktop snapshot in the envelope the importer requires.
+
+    Desktop writes one snapshot per file under `.launcher/snapshots/`, and only
+    its export action wraps them. The importer takes the wrapped shape, so the
+    file a user actually has on disk is refused as not a Desktop export."""
+    if data.get("type") or "snapshots" in data:
+        return data
+    if "customNodes" not in data and "pipPackages" not in data:
+        return data
+    return {"type": "comfyui-desktop-2-snapshot", "version": 2, "snapshots": [data]}
+
+
 @app.command("from-snapshot", help="Create a distribution from a ComfyUI Desktop snapshot export.")
 @tracking.track_command("distribution")
 def from_snapshot_cmd(
@@ -1551,7 +1564,7 @@ def from_snapshot_cmd(
     result = _builder_call(
         renderer,
         lambda: client.create_distribution_from_snapshot(
-            name, snapshot, description=description, base_image_id=base_image
+            name, as_snapshot_envelope(snapshot), description=description, base_image_id=base_image
         ),
     )
     created = result.get("distribution") or {}
