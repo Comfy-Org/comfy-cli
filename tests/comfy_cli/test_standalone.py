@@ -34,37 +34,37 @@ def _mock_response(text, status_code=200):
 
 
 class TestResolvePythonVersion:
-    @patch("comfy_cli.standalone.requests.get")
+    @patch("requests.get")
     def test_resolves_312(self, mock_get):
         mock_get.return_value = _mock_response(SAMPLE_SHA256SUMS)
         result = _resolve_python_version("https://example.com/release", "3.12")
         assert result == "3.12.13"
 
-    @patch("comfy_cli.standalone.requests.get")
+    @patch("requests.get")
     def test_resolves_310(self, mock_get):
         mock_get.return_value = _mock_response(SAMPLE_SHA256SUMS)
         result = _resolve_python_version("https://example.com/release", "3.10")
         assert result == "3.10.20"
 
-    @patch("comfy_cli.standalone.requests.get")
+    @patch("requests.get")
     def test_resolves_313(self, mock_get):
         mock_get.return_value = _mock_response(SAMPLE_SHA256SUMS)
         result = _resolve_python_version("https://example.com/release", "3.13")
         assert result == "3.13.12"
 
-    @patch("comfy_cli.standalone.requests.get")
+    @patch("requests.get")
     def test_missing_version_raises(self, mock_get):
         mock_get.return_value = _mock_response(SAMPLE_SHA256SUMS)
         with pytest.raises(RuntimeError, match="No Python 3.14.x found"):
             _resolve_python_version("https://example.com/release", "3.14")
 
-    @patch("comfy_cli.standalone.requests.get")
+    @patch("requests.get")
     def test_http_error_propagates(self, mock_get):
         mock_get.return_value = _mock_response("", status_code=404)
         with pytest.raises(Exception, match="HTTP 404"):
             _resolve_python_version("https://example.com/release", "3.12")
 
-    @patch("comfy_cli.standalone.requests.get")
+    @patch("requests.get")
     def test_picks_highest_patch(self, mock_get):
         """If multiple patch versions exist for a minor series, pick the highest."""
         sha256sums = """\
@@ -76,14 +76,14 @@ ccc  cpython-3.12.9+20260310-x86_64-install_only.tar.gz
         result = _resolve_python_version("https://example.com/release", "3.12")
         assert result == "3.12.13"
 
-    @patch("comfy_cli.standalone.requests.get")
+    @patch("requests.get")
     def test_url_construction(self, mock_get):
         mock_get.return_value = _mock_response(SAMPLE_SHA256SUMS)
         _resolve_python_version("https://example.com/release/", "3.12")
         # A timeout must always be passed so a stalled peer can't hang the CLI.
         mock_get.assert_called_once_with("https://example.com/release/SHA256SUMS", timeout=DEFAULT_HTTP_TIMEOUT)
 
-    @patch("comfy_cli.standalone.requests.get")
+    @patch("requests.get")
     def test_no_false_match_across_minor(self, mock_get):
         """3.1 should not match 3.12 or 3.10."""
         mock_get.return_value = _mock_response(SAMPLE_SHA256SUMS)
@@ -93,7 +93,7 @@ ccc  cpython-3.12.9+20260310-x86_64-install_only.tar.gz
 
 class TestDownloadStandalonePython:
     @patch("comfy_cli.standalone.download_url")
-    @patch("comfy_cli.standalone.requests.get")
+    @patch("requests.get")
     def test_minor_version_triggers_resolution(self, mock_get, mock_download):
         """When version is a minor version (X.Y), it should resolve the patch."""
         mock_get.side_effect = [
@@ -111,7 +111,7 @@ class TestDownloadStandalonePython:
         assert "3.12.13" in call_args[1].get("url", "") or "3.12.13" in str(call_args)
 
     @patch("comfy_cli.standalone.download_url")
-    @patch("comfy_cli.standalone.requests.get")
+    @patch("requests.get")
     def test_full_version_skips_resolution(self, mock_get, mock_download):
         """When version is a full version (X.Y.Z), no resolution needed."""
         mock_get.return_value = _mock_response('{"tag": "20260310", "asset_url_prefix": "https://example.com/release"}')
@@ -123,7 +123,7 @@ class TestDownloadStandalonePython:
         assert mock_get.call_count == 1
 
     @patch("comfy_cli.standalone.download_url")
-    @patch("comfy_cli.standalone.requests.get")
+    @patch("requests.get")
     def test_latest_release_fetch_passes_timeout(self, mock_get, mock_download):
         """The latest-release.json fetch must set a timeout so a stalled peer can't hang."""
         mock_get.return_value = _mock_response('{"tag": "20260310", "asset_url_prefix": "https://example.com/release"}')

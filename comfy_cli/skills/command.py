@@ -9,7 +9,6 @@ Bundled skills (5 total) — see ``comfy skills list`` for descriptions:
   - ``comfy``           — the consolidated driver skill (command surface,
                           output contract, routing, discovery, execution,
                           image, video, audio, cloud, edit, condition, pipeline)
-  - ``comfy-fragments`` — typed reusable workflow fragments + YAML blueprint composition
   - ``comfy-debug``     — debugging when workflows fail or jobs hang
   - ``comfy-relay``     — what to put in chat while driving the CLI
   - ``comfy-director``  — narrative multi-shot video production (screenplay,

@@ -5,7 +5,6 @@ import sys
 import webbrowser
 from typing import Annotated
 
-import questionary
 import typer
 from rich.console import Console
 
@@ -963,6 +962,27 @@ def run(
             ),
         ),
     ] = False,
+    workflow_id: Annotated[
+        str | None,
+        typer.Option(
+            "--workflow-id",
+            show_default=False,
+            help="Cloud workflow entity id to associate this run with (enables draft auto-save on run).",
+        ),
+    ] = None,
+    no_watch: Annotated[
+        bool,
+        typer.Option(
+            "--no-watch",
+            show_default=False,
+            help=(
+                "Suppress the detached background watcher subprocess for non-blocking "
+                "runs (equivalent to setting COMFY_NO_WATCH=1). Agentic callers with "
+                "their own job-wait loop don't need a second process polling in the "
+                "background; it just holds onto credentials after the parent exits."
+            ),
+        ),
+    ] = False,
     allow_spend: Annotated[
         bool,
         typer.Option(
@@ -986,6 +1006,8 @@ def run(
     # would mislabel any envelope emitted before *this* run routes (e.g.
     # `where_invalid`). Start every invocation unrouted.
     renderer.where = None
+    if no_watch:
+        os.environ["COMFY_NO_WATCH"] = "1"
 
     try:
         if api_key:
@@ -1011,6 +1033,10 @@ def run(
         # only fills the fallback (``where or self.where``) that error() and
         # emit() resolve against.
         renderer.where = decision.target.value
+        # Record the RESOLVED routing target so submission analytics can tell a
+        # cloud run from a local one even when --where was defaulted (the raw
+        # `where` kwarg is None then). Rides on the execution_success/_error events.
+        _track_props["target"] = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
 
         # Default for --notify: on when a human is at the terminal, off for
         # agents (they shouldn't get surprise side-channel processes they didn't
@@ -1057,6 +1083,10 @@ def run(
         if decision.target is where_module.WhereTarget.CLOUD:
             where_module.cloud_preflight_or_exit()
             # Cloud path uses HTTPS + Bearer auth; host/port aren't applicable.
+            # NOTE: do NOT `return` here — falling through to the try's `else`
+            # is what fires `execution_success`. An early return skipped it, so
+            # successful cloud submissions emitted `execution_start` but never
+            # `execution_success` (local runs were unaffected).
             run_inner.execute_cloud(
                 workflow,
                 wait=wait,
@@ -1064,6 +1094,7 @@ def run(
                 timeout=timeout,
                 notify=effective_notify,
                 print_prompt=print_prompt,
+                workflow_id=workflow_id,
                 preloaded=preloaded,
                 allow_spend=allow_spend,
             )
@@ -1142,7 +1173,7 @@ def run(
 def validate(
     workflow: Annotated[
         str,
-        typer.Option(help="Path to the API-format workflow JSON file."),
+        typer.Option(help="Path to the workflow JSON file (API format or a frontend/canvas graph)."),
     ],
     where: Annotated[
         str | None,
@@ -1851,6 +1882,10 @@ def feedback(
             else str(usability_satisfaction_score),
         },
     )
+    # Imported lazily: questionary pulls in prompt_toolkit (~50ms) and is only
+    # needed on this interactive feedback path.
+    import questionary
+
     if (
         sent
         and questionary.confirm("Do you want to provide additional feature-specific feedback on our GitHub page?").ask()

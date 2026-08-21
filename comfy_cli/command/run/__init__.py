@@ -895,6 +895,7 @@ def execute_cloud(
     timeout: int = 600,
     notify: bool = False,
     print_prompt: bool = False,
+    workflow_id: str | None = None,
     preloaded: tuple[dict, str, bool, bool] | None = None,
     allow_spend: bool = False,
 ):
@@ -932,12 +933,15 @@ def execute_cloud(
         # exporter and `comfy templates fetch`) have to be lowered to the API
         # shape before submit. We do it client-side using the cloud snapshot
         # of object_info — the cloud server has no /workflow/convert endpoint.
-        from comfy_cli.cql.engine import _load_from_target
+        # Routed through resilient_load_object_info so COMFY_OBJECT_INFO_FILE
+        # (a pre-warmed/baked catalog, e.g. from an agent host) is honored
+        # before falling back to a live multi-MB /object_info fetch.
+        from comfy_cli.cql.loader import resilient_load_object_info
 
         if renderer.is_pretty():
             pprint("[yellow]Detected UI-format workflow, converting to API format…[/yellow]")
         try:
-            object_info = cloud_object_info = _load_from_target(mode="cloud")
+            object_info = cloud_object_info = resilient_load_object_info(mode="cloud")
         except Exception as e:  # noqa: BLE001
             renderer.error(
                 code="cql_no_graph",
@@ -990,6 +994,12 @@ def execute_cloud(
     # Already fetched above when the workflow arrived in UI format.
     if cloud_object_info is None:
         try:
+            # Deliberately `_load_from_target`, not `resilient_load_object_info`:
+            # the resilient loader resolves a Target to build its cache key, and
+            # the spend gate below must fire before ANY cloud credential is
+            # resolved (BE-4326) — `test_cloud_partner_node_machine_mode_fails_closed`
+            # pins that. Trade-off: COMFY_OBJECT_INFO_FILE is honored on the
+            # UI-conversion path above but not on this API-format fallback.
             from comfy_cli.cql.engine import _load_from_target
 
             cloud_object_info = _load_from_target(mode="cloud")
@@ -1064,9 +1074,9 @@ def execute_cloud(
     try:
         if not wait and renderer.is_pretty():
             with renderer.console().status("[cyan]Submitting to Comfy Cloud…", spinner="dots"):
-                submit = client.submit_prompt(parsed_workflow, client_id)
+                submit = client.submit_prompt(parsed_workflow, client_id, workflow_id=workflow_id)
         else:
-            submit = client.submit_prompt(parsed_workflow, client_id)
+            submit = client.submit_prompt(parsed_workflow, client_id, workflow_id=workflow_id)
     except Unauthenticated as e:
         renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e

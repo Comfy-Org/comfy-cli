@@ -582,3 +582,40 @@ def test_ipv6_source_is_unbracketed_in_payload_and_bracketed_for_display(runner,
             runner, _valid_workflow(tmp_path), "--host", "::1", "--port", "9000", json_mode="--no-json"
         )
     assert "object_info from http://[::1]:9000" in pretty.stdout
+
+
+class TestValidateUsesTheResilientLoader:
+    """`validate` must route its live catalog fetch through
+    ``resilient_load_object_info`` like every other consumer — the loader's own
+    docstring names it as one. Bypassing it (a direct ``Graph.load``) silently
+    dropped COMFY_OBJECT_INFO_FILE support, the cloud TTL cache, the
+    force-refresh retry, and the stale fallback for the one command an agent
+    runs before every submit."""
+
+    def test_object_info_file_env_is_honored_without_input(self, runner, tmp_path):
+        wf = _write(
+            tmp_path,
+            "wf.json",
+            {"9": {"class_type": "KSampler", "inputs": {}}},
+        )
+        import comfy_cli.cql.engine as engine
+
+        def _no_network(**_kw):
+            raise AssertionError("validate must not open a socket when COMFY_OBJECT_INFO_FILE is set")
+
+        with patch.object(engine, "_load_from_target", _no_network):
+            result = runner.invoke(
+                app,
+                ["--json", "validate", "--workflow", str(wf)],
+                env={"COMFY_WHERE": "local", "COMFY_OBJECT_INFO_FILE": str(OBJECT_INFO)},
+            )
+        env_out = _envelope(result)
+        # The verdict itself doesn't matter here — what matters is that an
+        # envelope was produced at all: the patched network fetch raises, so
+        # reaching the envelope proves the catalog came from the env-pinned
+        # file through the resilient loader.
+        assert env_out["command"] == "validate"
+        # The toy workflow legitimately fails validation (missing required
+        # inputs) — the point is that validation RAN, against the env catalog.
+        assert "valid" in env_out["data"]
+        assert "error_count" in env_out["data"]

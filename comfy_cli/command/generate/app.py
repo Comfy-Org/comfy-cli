@@ -841,12 +841,20 @@ def _list_models(extra_args: list[str]) -> None:
     partner = _arg_value(clean, "--partner", "-p")
     category = _arg_value(clean, "--category", "--style", "-c")
     query = _arg_value(clean, "--query", "-q")
+    # `list`-only, deliberately NOT in `_separate_meta_flags`' meta_names: that
+    # set applies to every generate sub-action, and --select belongs to the
+    # four heavy read commands only (V1-011).
+    select_expr = _arg_value(clean, "--select")
     eps = spec.list_endpoints(partner=partner, category=category, query=query)
     payload = {
         "models": [_model_record(e) for e in eps],
         "count": len(eps),
         "filters": {"partner": partner, "category": category, "query": query},
     }
+    if select_expr is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select_expr, command="generate list")
     if renderer.is_pretty():
         if not eps:
             rprint("[yellow]No models match those filters.[/yellow]")

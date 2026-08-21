@@ -152,6 +152,15 @@ def _coerce(flag: FlagDef, raw: str) -> Any:
             except json.JSONDecodeError as e:
                 raise SchemaError(f"--{flag.name}: invalid file list: {e}") from e
             return [Path(p).expanduser() for p in parsed]
+        if flag.kind == "array" and flag.item_kind == "string" and not raw.lstrip().startswith("["):
+            # Callers naturally pass a single path/value or a comma list for a
+            # string array (prod: --image 'Linked profile pic.jpeg'); demanding
+            # JSON here only manufactures failures. Explicit JSON ('[' prefix)
+            # still takes the strict path below.
+            items = [p.strip() for p in raw.split(",") if p.strip()]
+            if not items:
+                raise SchemaError(f"--{flag.name}: expected at least one value")
+            return items
         try:
             return json.loads(raw)
         except json.JSONDecodeError as e:

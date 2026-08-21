@@ -85,7 +85,7 @@ def _load_workflow_or_fail(renderer, path: str) -> tuple[Path, dict[str, Any]]:
     return p, data
 
 
-def _get_graph(input_path: str | None, host: str | None, port: int | None, on_stale=None):
+def _get_graph(input_path: str | None, host: str | None, port: int | None, on_stale=None, where: str | None = None):
     """Build a Graph from the resolved object_info source.
 
     The live (non-``--input``) fetch goes through ``resilient_load_object_info``,
@@ -106,10 +106,12 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
         # Live fetch: resolve mode from global routing chain, then use resilient loader.
         from comfy_cli import where as where_module
 
-        # ``_or_exit``: this command has no per-command --where flag to fall
-        # back to, so a bad COMFY_WHERE / project / persisted where_default
-        # becomes a clean `where_invalid` envelope rather than a traceback.
-        decision = where_module.resolve_default_or_exit()
+        # Honor an explicit --where (threaded from the agent edit commands).
+        # ``resolve_default_or_exit`` is main's shared wrapper and emits exactly
+        # the ``where_invalid`` envelope this hand-rolled block used to build,
+        # and it takes the flag — so the branch keeps its --where threading and
+        # drops the duplicate error handling.
+        decision = where_module.resolve_default_or_exit(where)
         mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
         # Routing resolved — stamp it so the `cql_no_graph` envelope below names
         # the catalog these verbs annotated against, matching what `nodes` does
@@ -134,6 +136,27 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
             hint=e.details.get("hint", "pass --input <path>, or start the server with `comfy launch`"),
         )
         raise typer.Exit(code=1) from e
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write via tmp + rename so SIGINT mid-write can't leave a half-written file.
+
+    Branch-local helper: main removed the two call sites this served when it
+    reworked those paths, which took the definition with it, but the CRDT edit
+    commands in ``workflow_edit`` still write drafts through it.
+    """
+    import os
+
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _parse_value(raw: str) -> Any:
@@ -176,6 +199,14 @@ def slots_cmd(
         str,
         typer.Option("--id", show_default=False, help="Template ID label; cosmetic only — defaults to the filename."),
     ] = "",
+    select: Annotated[
+        str | None,
+        typer.Option(
+            "--select",
+            show_default=False,
+            help="Project the payload: dot path (slots.0.address), wildcard (slots.#.address), comma multi-select.",
+        ),
+    ] = None,
 ):
     renderer = get_renderer()
     p, workflow = _load_workflow_or_fail(renderer, file)
@@ -203,6 +234,11 @@ def slots_cmd(
         payload["warnings"] = [
             {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
         ]
+
+    if select is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select, command="workflow slots")
 
     if renderer.is_pretty():
         from rich.table import Table
@@ -1557,7 +1593,17 @@ def validate_api_workflow(
             host, port = resolve_host_port(host, port)
 
     try:
-        graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)
+        # Through the resilient loader — NOT a direct `Graph.load` — so validate
+        # honors the same chain as every other consumer: `--input` >
+        # COMFY_OBJECT_INFO_FILE > cloud TTL cache > live fetch (+forced-refresh
+        # retry) > stale cache. A direct load silently dropped the env-pinned
+        # offline catalog and every fallback for the one command an agent runs
+        # before every submit.
+        from comfy_cli.cql.loader import resilient_load_object_info
+
+        raw = resilient_load_object_info(mode=mode, host=host, port=port, input_path=input_path)
+        graph = Graph.from_object_info(raw)
+        graph._try_default_annotations()
     except LoadError as e:
         renderer.error(
             code="cql_no_graph",
@@ -1605,6 +1651,19 @@ def validate_api_workflow(
         converted_from_ui = True
 
     result = graph.validate_workflow(wf_data)
+
+    # When the caller handed us a CANVAS graph, they have never seen the
+    # flattened ids the lowering mints for subgraph interiors (`57:3`) — their
+    # edit surface (slots / set-widget) speaks `57/3`. Key every issue by the
+    # editable address so a validate error can be acted on directly; keep the
+    # raw API id alongside for anyone correlating with server node_errors. An
+    # already-API input skips this: its ids address the document as given.
+    if converted_from_ui:
+        for issue in (*result["errors"], *result["warnings"]):
+            nid = str(issue.get("node_id", ""))
+            if ":" in nid:
+                issue["api_node_id"] = nid
+                issue["node_id"] = nid.replace(":", "/")
 
     # Preview credit spend: partner-API (paid) nodes spend Comfy credits when the
     # workflow is run. This is the same detection `comfy run` uses (authoritative
@@ -1740,3 +1799,36 @@ app.command(
     help="Project a workflow (template or API JSON) into a reusable fragment — the inverse of compose.",
 )(_wfrag.decompose_cmd)
 app.add_typer(_wfrag.fragment_app, name="fragment")
+
+
+# ---------------------------------------------------------------------------
+# Structured, CRDT-ready edit primitives (add-node / connect / set-widget /
+# delete). Implemented in workflow_edit.py; mounted here so the surface stays
+# under `comfy workflow`. Each emits a replayable op in `data.op`.
+# ---------------------------------------------------------------------------
+
+from comfy_cli.command import workflow_edit as _wedit  # noqa: E402
+
+app.command("add-node", help="Add a node to the graph; emits an add_node op.")(_wedit.add_node_cmd)
+app.command("connect", help="Wire an output slot to an input slot; emits a connect op.")(_wedit.connect_cmd)
+app.command("set-widget", help="Set a widget by name (`<id>.<widget>`); emits a set_widget op.")(_wedit.set_widget_cmd)
+app.command("delete-node", help="Delete a node and its links; emits a delete_node op.")(_wedit.delete_cmd)
+app.command(
+    "delete-nodes",
+    help="Delete N nodes in one atomic write; emits one delete_node op per id (all-or-nothing).",
+)(_wedit.delete_nodes_cmd)
+app.command("clear", help="Remove every node, link, and group; emits one clear op.")(_wedit.clear_cmd)
+app.command(
+    "reset-doc",
+    help="Reset the document to the empty baseline — nodes, ids AND replay history. Requires --confirm.",
+)(_wedit.reset_doc_cmd)
+app.command("ls-nodes", help="List nodes (id/type/title) in a workflow file.")(_wedit.ls_nodes_cmd)
+app.command("apply", help="Apply a recipe / batch of edits in one pass; supports node aliases + --param.")(
+    _wedit.apply_cmd
+)
+app.command("capture", help="Project a workflow into a reusable recipe (the op-batch that rebuilds it).")(
+    _wedit.capture_cmd
+)
+app.command("foreach", help="Instantiate a recipe over N param-sets → N workflows (bulk generation).")(
+    _wedit.foreach_cmd
+)

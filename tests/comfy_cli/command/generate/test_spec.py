@@ -109,6 +109,84 @@ def test_proxy_prefix_accepted():
     assert ep.id == "bfl/flux-pro-1.1/generate"
 
 
+def test_unknown_model_suggests_leading_token_family(monkeypatch):
+    """Test that unknown-model errors suggest family members keyed on leading token.
+
+    Regression test for difflib alone ranking cross-partner shape-alikes over
+    the caller's intended family. Monkeypatches both _registry and _ALIASES to
+    fully isolate the candidate pool — difflib returns no close matches, so only
+    the family-finding code contributes suggestions.
+    """
+    # Mock registry with kling-extend, kling-lipsync (kling family), plus runway
+    mock_registry = {
+        "kling/v1/videos/video-extend": spec.Endpoint(
+            id="kling/v1/videos/video-extend",
+            path="/proxy/kling/v1/videos/video-extend",
+            method="post",
+            partner="kling",
+            summary="Extend video",
+            category="video-extend",
+            request_schema={},
+            request_content_type="application/json",
+            response_schema={},
+            polling="kling",
+        ),
+        "kling/v1/videos/lip-sync": spec.Endpoint(
+            id="kling/v1/videos/lip-sync",
+            path="/proxy/kling/v1/videos/lip-sync",
+            method="post",
+            partner="kling",
+            summary="Lip sync",
+            category="lipsync",
+            request_schema={},
+            request_content_type="application/json",
+            response_schema={},
+            polling="kling",
+        ),
+        "runway/image_to_video": spec.Endpoint(
+            id="runway/image_to_video",
+            path="/proxy/runway/image_to_video",
+            method="post",
+            partner="runway",
+            summary="Image to video",
+            category="image-to-video",
+            request_schema={},
+            request_content_type="application/json",
+            response_schema={},
+            polling=None,
+        ),
+    }
+    # Fully isolate candidates: mock both _registry and _ALIASES so the test
+    # is not driven by real-world aliases that happen to match the input.
+    mock_aliases = {}  # Empty: no alias coincidences to mask the family logic
+    spec._registry.cache_clear()
+    monkeypatch.setattr(spec, "_registry", lambda: mock_registry)
+    monkeypatch.setattr(spec, "_ALIASES", mock_aliases)
+
+    msg = spec._unknown_endpoint_message("kling-image-to-video")
+
+    # difflib finds no close matches (cutoff=0.5, minimal overlap).
+    # Only the family-finding code (leading token="kling") contributes suggestions.
+    # Exactly two kling family members should appear, sorted, in the message.
+    assert msg.startswith("Unknown model: 'kling-image-to-video'")
+    assert "Did you mean:" in msg
+    assert "kling/v1/videos/lip-sync" in msg
+    assert "kling/v1/videos/video-extend" in msg
+    assert "comfy generate list" in msg
+
+
+def test_unknown_model_no_family_still_helpful(monkeypatch):
+    """Test that errors are helpful even when there's no family match."""
+    # Isolate to ensure _ALIASES is controlled
+    mock_aliases = {"some-unrelated": "foo/bar/baz"}
+    spec._registry.cache_clear()
+    monkeypatch.setattr(spec, "_ALIASES", mock_aliases)
+
+    msg = spec._unknown_endpoint_message("krea-2")
+    assert msg.startswith("Unknown model: 'krea-2'")
+    assert "comfy generate list" in msg
+
+
 @pytest.mark.parametrize("text", ["1e+16", "1e-07", "-2e+5"])
 def test_pointless_exponent_parses_as_float(text):
     """Regression (BE-2982): the spec is now fetched as JSON, and `json.dumps`

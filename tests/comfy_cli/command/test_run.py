@@ -2367,6 +2367,42 @@ class TestExecuteCloudAutoConvert:
         submitted_args, _ = mock_client.submit_prompt.call_args
         assert submitted_args[0] == self.CONVERTED
 
+    def test_ui_workflow_conversion_honors_object_info_file_env(
+        self, ui_workflow_file, fake_target, tmp_path, monkeypatch
+    ):
+        """Both cloud object_info loads on this path (UI→API conversion, then
+        preflight-validate) are routed through resilient_load_object_info, so
+        COMFY_OBJECT_INFO_FILE — a pre-warmed/baked catalog an agent host
+        provides — must be read with NO live /object_info fetch at all."""
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+
+        dump_path = tmp_path / "object_info.json"
+        # `output_node: True`: preflight now rejects a prompt with zero output
+        # nodes (prompt_no_outputs), and this fixture is about the catalog SOURCE,
+        # not about validation — so give the catalog an output node.
+        dump_path.write_text(json.dumps({"KSampler": {"output_node": True}}))
+        monkeypatch.setenv("COMFY_OBJECT_INFO_FILE", str(dump_path))
+
+        mock_client = MagicMock()
+        mock_client.submit_prompt.return_value = SubmitResult(prompt_id="prompt-env", number=1, node_errors={})
+
+        def _network_fetch_should_not_run(**_kwargs):
+            raise AssertionError("network object_info fetch should not run with COMFY_OBJECT_INFO_FILE set")
+
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch("comfy_cli.command.run.convert_ui_to_api", return_value=self.CONVERTED) as mock_convert,
+            patch("comfy_cli.cql.engine._load_from_target", side_effect=_network_fetch_should_not_run),
+            patch("comfy_cli.comfy_client.Client", return_value=mock_client),
+            patch("comfy_cli.command.run._spawn_watcher"),
+        ):
+            execute_cloud(ui_workflow_file, wait=False)
+
+        assert mock_convert.called
+        submitted_args, _ = mock_client.submit_prompt.call_args
+        assert submitted_args[0] == self.CONVERTED
+
     def test_ui_workflow_conversion_failure_surfaces_conversion_error(self, ui_workflow_file, fake_target):
         from comfy_cli.command.run import execute_cloud
         from comfy_cli.workflow_to_api import WorkflowConversionError
@@ -2976,6 +3012,14 @@ class TestRunJournal:
         with (
             patch("comfy_cli.target.resolve_target", return_value=fake_target),
             patch("comfy_cli.cql.engine._load_from_target", return_value={}),
+            # `execute_cloud` reaches object_info through the RESILIENT loader,
+            # not `engine._load_from_target` directly. Patching only the latter
+            # left the loader's own cache/refresh/stale-fallback path live, so
+            # this test performed a real cloud fetch — ~9s in isolation, and an
+            # indefinite hang once an earlier test in the file had populated the
+            # credential/cache state it depends on. Stub the loader itself so the
+            # test is hermetic regardless of which path the implementation picks.
+            patch("comfy_cli.cql.loader.resilient_load_object_info", return_value={}),
             patch("comfy_cli.comfy_client.Client", return_value=mock_client),
             patch("comfy_cli.command.run._spawn_watcher"),
         ):

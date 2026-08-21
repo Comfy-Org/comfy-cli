@@ -355,6 +355,14 @@ def show_cmd(
             show_default=False, help="ComfyUI port (defaults to COMFY_LOCAL_URL, the background server, or 8188)."
         ),
     ] = None,
+    select: Annotated[
+        str | None,
+        typer.Option(
+            "--select",
+            show_default=False,
+            help="Project the payload: dot path (inputs.0.name), wildcard (inputs.#.name), comma multi-select.",
+        ),
+    ] = None,
 ):
     renderer = get_renderer()
     _stale: dict = {}
@@ -368,6 +376,28 @@ def show_cmd(
 
     m = graph.node(name)
     if m is None:
+        # A subgraph instance's `type` is its definition UUID, and ls-nodes
+        # prints that verbatim — so callers ask show for a "class" the catalog
+        # can never have. `workflow add-node` already names this shape
+        # (UnknownNodeType subgraph_id); show was left behind with the generic
+        # miss, and prod agents retried it verbatim. Say what the UUID is and
+        # which surface CAN inspect it. difflib against a UUID is pure noise.
+        from comfy_cli.workflow_ops import _UUID_RE
+
+        if _UUID_RE.match(name.strip()):
+            renderer.error(
+                code="node_not_found",
+                message=(
+                    f"{name!r} is a subgraph type id, not a node class — `ls-nodes` prints a subgraph instance's "
+                    "definition uuid as its type, and the catalog has no schema for it."
+                ),
+                hint=(
+                    "inspect the instance's editable inputs with `comfy workflow slots <file>` / `ls-nodes`; "
+                    "interior nodes are addressed `<instance>/<interior>` and written with `set-widget`."
+                ),
+                details={"requested": name, "subgraph_id": True},
+            )
+            raise typer.Exit(code=1)
         # Surface near-matches so the agent can self-correct from the error.
         all_names = [n.id for n in graph.all_nodes()]
         close = difflib.get_close_matches(name, all_names, n=5, cutoff=0.6)
@@ -393,6 +423,11 @@ def show_cmd(
                 "message": f"served from cache ({_stale['source']}): {_stale['reason']}",
             }
         ]
+
+    if select is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select, command="nodes show")
 
     if renderer.is_pretty():
         from rich.table import Table
@@ -452,6 +487,18 @@ def search_cmd(
         ),
     ],
     limit: Annotated[int, typer.Option(help="Cap output to N rows.")] = 20,
+    expand_top: Annotated[
+        int,
+        typer.Option(
+            "--expand-top",
+            metavar="N",
+            help=(
+                "Also attach the full `nodes show` schema (inputs, defaults, enum choices, outputs) "
+                "for the top-N hits under `expanded`, so no follow-up `show` calls are needed. "
+                "0 (the default) leaves the output unchanged."
+            ),
+        ),
+    ] = 0,
     input_path: Annotated[
         str | None,
         typer.Option("--input", show_default=False, help="Path to a local object_info JSON (offline mode)."),
@@ -565,6 +612,31 @@ def search_cmd(
             for m in matched
         ],
     }
+
+    # --expand-top N: kill the search → show × N loop (measured on prod agent
+    # traces: the follow-up `show` args are overwhelmingly a verbatim copy of the
+    # hit name). The top-N returned rows are re-resolved through the SAME catalog
+    # path `nodes show` uses (graph.node → morphism_to_dict), so `expanded[i]` is
+    # exactly the show payload plus a `class_type` key to join back on the row.
+    # A per-hit miss degrades to a per-hit error entry — it never fails the
+    # search, since the rows themselves are still perfectly good results.
+    if expand_top > 0:
+        expanded: list[dict[str, Any]] = []
+        for m in matched[: max(0, expand_top)]:
+            resolved = graph.node(m.id)
+            if resolved is None:
+                expanded.append(
+                    {
+                        "class_type": m.id,
+                        "error": {
+                            "code": "expand_miss",
+                            "message": f"search matched {m.id!r} but the catalog could not resolve its schema",
+                        },
+                    }
+                )
+                continue
+            expanded.append({"class_type": m.id, **graph.morphism_to_dict(resolved)})
+        payload["expanded"] = expanded
 
     if _stale:
         payload["stale"] = True
@@ -742,6 +814,83 @@ def downstream_cmd(
     renderer.emit(payload, command="nodes downstream")
 
 
+def _alias_slug(class_type: str) -> str:
+    """A spec-batch alias for a class name — the same slugging
+    ``workflow_ops.capture_recipe`` uses, so the two surfaces mint identical
+    alias vocabulary."""
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "_", str(class_type or "node").lower()).strip("_") or "node"
+
+
+def _emit_path_ops(graph, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project a routed path (``steps`` from ``find_paths``/``exact_paths``)
+    into a ready-to-apply spec batch in the frozen edit vocabulary.
+
+    THE CONTRACT IS THE ROUND-TRIP: the returned specs must pass
+    ``workflow_ops.apply_specs`` unchanged. Shape:
+
+    * one ``add_node`` per step, with a deterministic dedup-suffixed ``as:``
+      alias (``tinysampler``, ``tinysampler_2``, …);
+    * one ``connect`` per step whose consumed type is produced by an earlier
+      step — from the NEAREST prior producer's matching output to this step's
+      first link input accepting that type. Alias references are emitted as
+      bare names (the freeze vocabulary's valid form; the ``$``-canonical
+      sugar lands with the vocabulary-freeze PR).
+
+    The path's seed FROM type is produced by nothing in the path, so the first
+    step's input deliberately stays unbound — never a phantom connect.
+    """
+    from comfy_cli.workflow_ops import _types_compatible
+
+    # Deterministic dedup-suffixed aliases, one add_node per step.
+    counts: dict[str, int] = {}
+    aliases: list[str] = []
+    specs: list[dict[str, Any]] = []
+    for step in steps:
+        class_type = str(step.get("node") or "")
+        slug = _alias_slug(class_type)
+        counts[slug] = counts.get(slug, 0) + 1
+        alias = slug if counts[slug] == 1 else f"{slug}_{counts[slug]}"
+        aliases.append(alias)
+        specs.append({"op": "add_node", "class_type": class_type, "as": alias})
+
+    def _producer_output(class_type: str, want: str) -> str | None:
+        m = graph.node(class_type)
+        for p in m.outputs if m is not None else ():
+            types = {t.strip() for t in str(p.type).split(",") if t.strip()}
+            if want in types or "*" in types:
+                return p.name
+        return None
+
+    def _consumer_input(class_type: str, want: str) -> str | None:
+        m = graph.node(class_type)
+        ports = [p for p in (m.inputs if m is not None else ()) if p.is_link]
+        # Required inputs first — that's the slot the plan is routing through.
+        for p in sorted(ports, key=lambda p: not p.required):
+            if _types_compatible(want, p.type):
+                return p.name
+        return None
+
+    for j, step in enumerate(steps):
+        want = str(step.get("input_type") or "")
+        if not want:
+            continue  # step consumes nothing from the path (e.g. a loader)
+        # Nearest prior step whose node actually produces `want` — in exact
+        # mode the recorded per-step output_type is one of possibly several
+        # outputs, so resolve against the schema, not just the step record.
+        for k in range(j - 1, -1, -1):
+            src_class = str(steps[k].get("node") or "")
+            out_name = _producer_output(src_class, want)
+            if out_name is None:
+                continue
+            in_name = _consumer_input(str(step.get("node") or ""), want)
+            if in_name is not None:
+                specs.append({"op": "connect", "from": f"{aliases[k]}.{out_name}", "to": f"{aliases[j]}.{in_name}"})
+            break
+    return specs
+
+
 @app.command("path", help="Routed paths from one type to another (e.g. MODEL -> IMAGE).")
 @tracking.track_command("nodes")
 def path_cmd(
@@ -756,6 +905,17 @@ def path_cmd(
             help="Exact: every step's other required link inputs must be satisfiable (reported per path as 'support'). Loose: any routed sequence.",
         ),
     ] = True,
+    emit_ops: Annotated[
+        bool,
+        typer.Option(
+            "--emit-ops",
+            help=(
+                "Attach each path's plan as a ready-to-apply spec batch under `paths[].ops` "
+                "(frozen add_node/connect vocabulary with `as:` aliases) — feed it straight "
+                "to `comfy workflow apply --ops`."
+            ),
+        ),
+    ] = False,
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
     host: Annotated[str | None, typer.Option(show_default=False)] = None,
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
@@ -852,6 +1012,10 @@ def path_cmd(
                     for s in (p.get("steps") or [])
                 ],
                 "support": list(p.get("support") or []),
+                # --emit-ops: the plan as a ready-to-apply spec batch (round-trips
+                # through workflow_ops.apply_specs unchanged). Absent without the
+                # flag so the default output stays byte-identical.
+                **({"ops": _emit_path_ops(graph, list(p.get("steps") or []))} if emit_ops else {}),
             }
             for p in paths
         ],
@@ -1038,6 +1202,102 @@ def categories_cmd(
             renderer.console().print(tbl)
             rprint(f"[dim]{len(flat)} categories[/dim]")
     renderer.emit(payload, command="nodes categories")
+
+
+# ---------------------------------------------------------------------------
+# widget-catalog — the derived name↔index projection the CRDT applier needs
+# ---------------------------------------------------------------------------
+
+
+@app.command(
+    "widget-catalog",
+    help=(
+        "Emit the widget catalog: per-class widget order (plus autogrow/inputcount families) "
+        "with a content-hash catalog_version. The projection of object_info a name<->index "
+        "widget converter needs."
+    ),
+)
+@tracking.track_command("nodes")
+def widget_catalog_cmd(
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="'cloud' to query Comfy Cloud's catalog; default is local."),
+    ] = None,
+    input_path: Annotated[
+        str | None,
+        typer.Option("--input", show_default=False, help="Path to a local object_info JSON (offline mode)."),
+    ] = None,
+    host: Annotated[str | None, typer.Option(show_default=False)] = None,
+    port: Annotated[int | None, typer.Option(show_default=False)] = None,
+    select: Annotated[
+        str | None,
+        typer.Option(
+            "--select",
+            show_default=False,
+            help="Project the payload: dot path (types.KSampler.widget_order), comma multi-select.",
+        ),
+    ] = None,
+):
+    """Export ``{types: {<class_type>: {widget_order, ...}}}`` + ``catalog_version``.
+
+    A ComfyUI workflow stores widget values POSITIONALLY (``widgets_values``);
+    the CRDT document the cloud agent and the frontend co-edit stores them BY
+    NAME. Converting between the two needs the widget order — which
+    ``cql.engine.Graph`` already computes for every ``set-widget`` in this CLI,
+    including the two shapes a naive projection gets wrong (the synthetic
+    ``control_after_generate`` slot, and dynamic-combo sub-widget expansion).
+    Exporting it from here means there is one implementation of widget order,
+    not one per consumer; see ``comfy_cli.cql.widget_catalog``.
+
+    Offline is the normal case for a server-side host: with
+    ``COMFY_OBJECT_INFO_FILE`` set (or ``--input``) this reads a baked dump and
+    never touches the network or a credential.
+    """
+    from comfy_cli.cql.widget_catalog import build_catalog
+
+    renderer = get_renderer()
+    _stale: dict = {}
+    graph = _get_graph(
+        input_path,
+        host,
+        port,
+        where=where,
+        on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
+    )
+
+    payload = build_catalog(graph)
+
+    if _stale:
+        # A stale catalog is still a usable catalog — the version pins WHICH one
+        # it is, so a consumer that cached a different version re-fetches. Warn,
+        # don't fail: the alternative is no catalog at all.
+        payload["stale"] = True
+        payload["warnings"] = [
+            {
+                "code": "object_info_stale",
+                "message": f"served from cache ({_stale['source']}): {_stale['reason']}",
+            }
+        ]
+
+    if select is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select, command="nodes widget-catalog")
+
+    if renderer.is_pretty():
+        from rich.table import Table
+
+        rprint(f"[bold]{payload['class_count']}[/bold] class(es)  [dim]{payload['catalog_version']}[/dim]")
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("class_type")
+        table.add_column("widgets")
+        table.add_column("widget_order")
+        for class_type, entry in sorted(payload["types"].items()):
+            order = entry["widget_order"]
+            table.add_row(sanitize_markup(class_type), str(len(order)), sanitize_markup(", ".join(order)))
+        renderer.console().print(table)
+
+    renderer.emit(payload, command="nodes widget-catalog")
 
 
 # ---------------------------------------------------------------------------
