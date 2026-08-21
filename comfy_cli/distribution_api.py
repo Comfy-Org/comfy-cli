@@ -133,6 +133,18 @@ class BuilderClient:
         did not translate rather than leaving it to fail inside a build."""
         return self._post(("snapshots", "resolve"), {"snapshot": snapshot})
 
+    def create_distribution_from_snapshot(
+        self, name: str, snapshot: dict, *, description: str | None = None, base_image_id: str | None = None
+    ) -> dict:
+        """POST /v1/distributions/from-snapshot — read a snapshot and store what it
+        maps to, in one call. Returns ``{distribution, report}``."""
+        body: dict = {"name": name, "snapshot": snapshot}
+        if description:
+            body["description"] = description
+        if base_image_id:
+            body["baseImageId"] = base_image_id
+        return self._post(("distributions", "from-snapshot"), body)
+
     def _get(self, parts: tuple[str, ...], params: dict | None = None, *, max_bytes: int = _MAX_JSON) -> dict:
         url = self.target.url(*parts)
         if params:

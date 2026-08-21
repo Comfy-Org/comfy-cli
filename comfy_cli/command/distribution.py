@@ -1523,6 +1523,47 @@ def update_cmd(
     renderer.emit(dist, command="distribution update", changed=True)
 
 
+@app.command("from-snapshot", help="Create a distribution from a ComfyUI Desktop snapshot export.")
+@tracking.track_command("distribution")
+def from_snapshot_cmd(
+    from_: Annotated[str, typer.Option("--from", "-f", help="Path to a Desktop snapshot export JSON.")],
+    name: Annotated[str, typer.Option("--name", help="Name for the new distribution.")],
+    description: Annotated[str | None, typer.Option("--description", help="Optional description.")] = None,
+    base_image: Annotated[
+        str | None,
+        typer.Option("--base-image", help="Build on this base image rather than the one the snapshot's Python picks."),
+    ] = None,
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
+    renderer = get_renderer()
+    path = Path(from_).expanduser()
+    try:
+        snapshot = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        renderer.error(
+            code="distribution_definition_invalid",
+            message=f"could not read {path}: {e}",
+            details={"path": str(path)},
+        )
+        raise typer.Exit(code=1) from e
+
+    client = _builder_client(renderer, builder_url)
+    result = _builder_call(
+        renderer,
+        lambda: client.create_distribution_from_snapshot(
+            name, snapshot, description=description, base_image_id=base_image
+        ),
+    )
+    created = result.get("distribution") or {}
+    distribution_id = created.get("id")
+    if renderer.is_pretty():
+        renderer.success(f"Created distribution {distribution_id} from {path.name}")
+        for line in report_advisories(result.get("report") or {}):
+            renderer.warn(line)
+        renderer.info(f"cut a build with `comfy distribution version create {distribution_id}`")
+    renderer.emit(result, command="distribution from-snapshot", changed=True)
+
+
 @app.command("blob-upload", help="Upload a private file and print the blobId a definition can reference.")
 @tracking.track_command("distribution")
 def blob_upload_cmd(

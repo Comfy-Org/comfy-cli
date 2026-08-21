@@ -1389,3 +1389,33 @@ def test_create_execute_proceeds_when_a_pack_was_dropped_for_colliding(monkeypat
         },
     )
     assert [n["name"] for n in builder.created_with["customNodes"]] == ["first"]
+
+
+# --- from-snapshot: a Desktop export becomes a distribution in one call -------
+
+
+def test_from_snapshot_reads_the_created_id_and_report_from_their_own_keys(monkeypatch, tmp_path, capsys):
+    """The endpoint answers {distribution, report}, not a distribution carrying its
+    report. Reading the id off the envelope prints `None` and loses every advisory."""
+
+    class FakeClient:
+        def create_distribution_from_snapshot(self, name, snapshot, *, description=None, base_image_id=None):
+            return {
+                "distribution": {"id": "dist-7", "name": name},
+                "report": {"notInRegistry": ["was-node-suite-comfyui"]},
+            }
+
+    snap = tmp_path / "export.json"
+    snap.write_text(json.dumps({"type": "comfyui-desktop-2-snapshot", "snapshots": [{}]}), encoding="utf-8")
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: FakeClient())
+    distribution.from_snapshot_cmd(from_=str(snap), name="demo")
+    out = capsys.readouterr().out
+    assert "dist-7" in out and "None" not in out
+    assert "was-node-suite-comfyui" in out
+
+
+def test_from_snapshot_refuses_a_file_that_is_not_json(tmp_path, capsys):
+    bad = tmp_path / "export.json"
+    bad.write_text("not json at all", encoding="utf-8")
+    with pytest.raises(typer.Exit):
+        distribution.from_snapshot_cmd(from_=str(bad), name="demo")
