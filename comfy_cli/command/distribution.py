@@ -1577,7 +1577,7 @@ def from_snapshot_cmd(
     renderer.emit(result, command="distribution from-snapshot", changed=True)
 
 
-@app.command("blob-upload", help="Upload a private file and print the blobId a definition can reference.")
+@blob_app.command("upload", help="Upload a private file and print the blobId a definition can reference.")
 @tracking.track_command("distribution")
 def blob_upload_cmd(
     path: Annotated[str, typer.Argument(help="File to upload.")],
@@ -1608,26 +1608,14 @@ def blob_upload_cmd(
     _builder_call(renderer, lambda: client.upload_blob(upload_url, file_path))
     if renderer.is_pretty():
         renderer.success(f"Uploaded {file_path.name} as {blob_id}")
-        renderer.info(f'reference it in a definition as "blobId": "{blob_id}", then `comfy distribution update`')
+        # A model entry needs the hash as well as the id, and the cut refuses one
+        # that is not a real sha256, so both are printed rather than just the id.
+        renderer.info(f'reference it as "blobId": "{blob_id}", "sha256": "{sha256}"')
     renderer.emit(
         {"blobId": blob_id, "kind": kind, "filename": file_path.name, "sha256": sha256, "sizeBytes": size_bytes},
-        command="distribution blob-upload",
+        command="distribution blob upload",
         changed=True,
     )
-
-
-@app.command("blobs", help="List the workspace's uploaded private files.")
-@tracking.track_command("distribution")
-def blobs_cmd(
-    kind: Annotated[str | None, typer.Option("--kind", help="Filter by kind: model or node_zip.")] = None,
-    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
-):
-    renderer = get_renderer()
-    client = _builder_client(renderer, builder_url)
-    blobs = _builder_call(renderer, lambda: client.list_blobs(kind))
-    if renderer.is_pretty():
-        renderer.console().print_json(json.dumps(blobs))
-    renderer.emit({"blobs": blobs}, command="distribution blobs")
 
 
 @app.command("resolve", help="Resolve model filenames to public download candidates (HF/CivitAI).")

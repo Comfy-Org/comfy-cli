@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/distribution_from_snapshot.json",
+  "title": "comfy distribution from-snapshot --json data payload",
+  "type": "object",
+  "required": ["distribution"],
+  "additionalProperties": true,
+  "properties": {
+    "distribution": {"type": "object", "additionalProperties": true},
+    "report": {"type": "object", "additionalProperties": true}
+  }
+}
