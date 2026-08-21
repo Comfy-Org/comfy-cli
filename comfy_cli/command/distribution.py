@@ -47,7 +47,6 @@ from comfy_cli.command.pack_scan import read_pyproject
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH, SUPPORTED_PT_EXTENSIONS
 from comfy_cli.file_utils import atomic_write_text
 from comfy_cli.output import get_renderer
-from comfy_cli.registry import NodeFetchError, RegistryAPI
 from comfy_cli.registry.api import sanitize_error_body
 from comfy_cli.workspace_manager import WorkspaceManager
 
@@ -499,96 +498,87 @@ def resolve_model_source(model: dict) -> str | None:
     return model.get("sourceUri")
 
 
-def _registry_has_pin(api, node_id: str, version: str) -> bool | None:
-    """Whether the registry has ``version`` of ``node_id`` published.
+def snapshot_from_definition(definition: dict) -> dict:
+    """Wrap a scanned definition as the snapshot envelope the builder reads.
 
-    True / False on a definite answer, None when the registry could not be asked
-    (transport, timeout, 5xx). This is the pair the builder resolves at freeze,
-    not just the node: a node can exist while the version asked for does not, so
-    proving the node alone proves nothing about the build."""
-    try:
-        api.get_node_version(node_id, version)
-        return True
-    except NodeFetchError as e:
-        return False if e.status_code == 404 else None
-    except (requests.RequestException, KeyError, ValueError):
-        return None
+    The builder's importer is the one place that knows what the Comfy Registry
+    actually publishes, which curated base image a Python fits, and how a pin
+    normalizes. It takes a Desktop export, and a scan collects the same facts
+    under different names, so the scan is translated rather than that knowledge
+    being reimplemented here and drifting from it.
 
+    Models have no place in a snapshot and stay with the caller."""
+    nodes = []
+    for n in definition.get("customNodes", []):
+        name = n.get("name") or ""
+        if n.get("registryVersion"):
+            nodes.append(
+                {
+                    "type": "cnr",
+                    "id": n.get("id") or name,
+                    "dirName": name,
+                    "version": n["registryVersion"],
+                    "enabled": True,
+                }
+            )
+        elif n.get("repository"):
+            node = {"type": "git", "id": name, "dirName": name, "url": n["repository"], "enabled": True}
+            if n.get("gitRef"):
+                node["commit"] = n["gitRef"]
+            nodes.append(node)
 
-def verify_registry_pins(nodes: list[dict], api, *, repair: bool = False) -> dict:
-    """Check every registry pin against the registry before a cut is spent on one.
-
-    A pin comes from the pack's own ``pyproject.toml``, which says what the pack
-    calls itself — not that it was ever published, nor that the copy on disk is
-    what was published. Unchecked, a pack that is not in the registry sails past
-    create and dies at freeze, which is the failure this whole command set exists
-    to move earlier.
-
-    For a pin the registry does not have, the install directory's name is a
-    candidate: ``comfy node install`` names the directory after the node id, so a
-    pack whose ``pyproject`` carries a pull-request preview id still sits in a
-    directory named for the real one. But a directory name is not evidence —
-    nothing binds it to the bytes inside, registry ids are first-come, and a pack
-    unpacked from a zip is in whatever directory its author or the user chose. So
-    the candidate is only *used* under ``repair``; otherwise it is reported and
-    the caller decides.
-
-    Returns ``{"repaired": [(from, to)], "unresolved": [(name, id, version,
-    candidate|None)], "unreachable": bool}``. Mutates ``nodes`` in place, and only
-    under ``repair``."""
-    repaired: list[tuple[str, str]] = []
-    unresolved: list[tuple[str, str, str, str | None]] = []
-    for n in nodes:
-        node_id = (n.get("id") or "").strip()
-        version = (n.get("registryVersion") or "").strip()
-        if not node_id or not version:
+    # A freeze is one pin per line; a snapshot is a name -> version map. Anything
+    # that is not a plain `==` pin (a comment, a direct git reference, an extras
+    # marker) has no place in that map, and the importer reports what it drops.
+    pips: dict[str, str] = {}
+    for line in (definition.get("pipDependencies") or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "==" not in line:
             continue
-        answer = _registry_has_pin(api, node_id, version)
-        if answer is None:
-            # The registry is not answering. Every later pin would get the same
-            # non-answer, so stop rather than spend a timeout per pack.
-            return {"repaired": repaired, "unresolved": unresolved, "unreachable": True}
-        if answer:
-            continue
-        name = (n.get("name") or "").strip()
-        candidate = name if name and name != node_id and _registry_has_pin(api, name, version) is True else None
-        if candidate and repair:
-            n["id"] = candidate
-            repaired.append((node_id, candidate))
-        else:
-            unresolved.append((name or node_id, node_id, version, candidate))
-    return {"repaired": repaired, "unresolved": unresolved, "unreachable": False}
+        pip_name, _, pip_version = line.partition("==")
+        if pip_name.strip() and pip_version.strip():
+            pips[pip_name.strip()] = pip_version.strip()
+
+    environment = definition.get("environment") or {}
+    return {
+        "type": "comfyui-desktop-2-snapshot",
+        "version": 2,
+        "snapshots": [
+            {
+                "comfyui": {"baseTag": definition.get("baseComfyVersion") or ""},
+                "customNodes": nodes,
+                "pipPackages": pips,
+                "pythonVersion": environment.get("pythonVersion") or "",
+            }
+        ],
+    }
 
 
-# The builder's POST /v1/models/resolve accepts at most this many filenames/call.
-def _unresolved_pin_message(unresolved: list[tuple[str, str, str, str | None]]) -> str:
-    """One line per pack the registry does not have, naming the candidate when the
-    install directory suggests one. The candidate is a suggestion the user accepts
-    with --repair-registry-ids, never something applied on their behalf."""
+# Each entry is (report key, what it means to the reader).
+_REPORT_ADVISORIES = (
+    ("notInRegistry", "pinned to something the Comfy Registry does not publish"),
+    ("registryPending", "published but not yet servable; the build will wait or fail on it"),
+    ("unresolvedNodes", "named nothing the builder can install from"),
+    ("unverifiedPins", "left unchecked because the registry did not answer"),
+    ("skippedPins", "dropped: the build owns these packages"),
+    ("unpinnablePins", "dropped: not a public PyPI release"),
+)
+
+
+def report_advisories(report: dict) -> list[str]:
+    """One line per thing the importer could not carry, in reader's terms."""
     lines = []
-    for name, node_id, version, candidate in unresolved:
-        line = f"  {name}: the registry has no {node_id!r} at version {version}"
-        if candidate:
-            line += f"; the install directory suggests {candidate!r}, which it does have"
-        lines.append(line)
-    tail = (
-        "\nRe-run with --repair-registry-ids to use the suggested ids, or edit the definition."
-        if any(c for *_, c in unresolved)
-        else "\nEdit the definition to name a published version, or remove the pack."
-    )
-    return "these custom nodes are pinned to something the registry cannot serve:\n" + "\n".join(lines) + tail
-
-
-# The registry the BUILDER resolves nodes against, in every environment: its
-# workers hard-code this host. RegistryAPI() would otherwise follow $ENVIRONMENT
-# and check a staging run's ids against a registry the build never calls.
-_REGISTRY_BASE_URL = "https://api.comfy.org"
-
-
-def _registry_client():
-    """The registry the pin check asks. A function for the same reason
-    ``_builder_client`` is one: it is where the remote is chosen."""
-    return RegistryAPI(_REGISTRY_BASE_URL)
+    # Present and false is the finding; absent means the importer did not say.
+    if report.get("pythonSatisfied") is False:
+        lines.append(
+            "no curated base image matches the scanned Python exactly; the build runs on the closest one, "
+            "so a pin resolved against your Python may not resolve against the build's"
+        )
+    for key, meaning in _REPORT_ADVISORIES:
+        entries = report.get(key) or []
+        if entries:
+            lines.append(f"{len(entries)} {meaning}: {', '.join(str(e) for e in entries[:8])}")
+    return lines
 
 
 _RESOLVE_BATCH = 32
@@ -1070,13 +1060,6 @@ def create_cmd(
         str | None,
         typer.Option("--models-dir", help="Models folder, to locate bytes for private-model uploads (--execute)."),
     ] = None,
-    repair_registry_ids: Annotated[
-        bool,
-        typer.Option(
-            "--repair-registry-ids",
-            help="When a pack's declared registry id is not published, use its install directory's name instead.",
-        ),
-    ] = False,
 ):
     renderer = get_renderer()
 
@@ -1106,7 +1089,6 @@ def create_cmd(
             name=name,
             builder_url=builder_url,
             models_dir=models_dir,
-            repair=repair_registry_ids,
         )
         return
 
@@ -1164,19 +1146,33 @@ def _create_execute(
         renderer.warn(f"model resolution unavailable ({e}); all models will be uploaded")
 
     # A pin the registry does not have builds nothing and only says so at freeze,
-    # after the cut is spent. Check here, where we are already online, against the
-    # registry the builder itself resolves against.
-    pins = verify_registry_pins(definition.get("customNodes", []), _registry_client(), repair=repair)
-    if pins["unreachable"]:
-        renderer.warn("could not reach the registry; declared node pins were not checked")
-    for was, now in pins["repaired"]:
-        renderer.warn(f"registry pin {was!r} does not exist; using {now!r}, which does")
-    if pins["unresolved"]:
-        renderer.error(
-            code="distribution_registry_pin_missing",
-            message=_unresolved_pin_message(pins["unresolved"]),
-        )
-        raise typer.Exit(code=1)
+    # after the cut is spent. The builder's own importer already answers that, and
+    # it is the side of the boundary that knows: a second implementation here would
+    # be a second thing to keep in step with the registry. Best effort, because a
+    # builder without the endpoint must still be able to create.
+    declared = [n.get("name") for n in definition.get("customNodes", [])]
+    try:
+        imported = client.resolve_snapshot(snapshot_from_definition(definition))
+    except (urllib.error.URLError, requests.RequestException, KeyError, ValueError) as e:
+        renderer.warn(f"the builder could not read the definition's pins ({e}); they go to the cut unchecked")
+    else:
+        for line in report_advisories(imported.get("report") or {}):
+            renderer.warn(line)
+        checked = (imported.get("definition") or {}).get("customNodes")
+        if checked is not None:
+            # A pack the importer could not vouch for is absent from what it
+            # returns. Building without it silently is the one outcome worse than
+            # failing, since the user gets an image missing what they asked for.
+            kept = {n.get("name") for n in checked}
+            dropped = [n for n in declared if n not in kept]
+            if dropped:
+                renderer.error(
+                    code="distribution_registry_pin_missing",
+                    message="the builder could not resolve these custom nodes: " + ", ".join(sorted(dropped)),
+                    hint="see the advisories above; edit the definition to name a published version, or remove the pack",
+                )
+                raise typer.Exit(code=1)
+            definition["customNodes"] = checked
 
     plan = plan_create(definition)
 

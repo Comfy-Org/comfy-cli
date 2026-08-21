@@ -1085,13 +1085,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "distribution_registry_pin_missing",
-        "`comfy distribution create --execute` found a custom node pinned to a registry id or version the "
-        "registry does not have. The pin comes from the pack's own `pyproject.toml`, which says what the pack "
-        "calls itself rather than proving it was published, so the build would only discover this at freeze, "
-        "after the cut is spent. The message names each pack, and names the install directory as a candidate "
-        "when the registry does have that one.",
-        "re-run with `--repair-registry-ids` to use the suggested ids, or edit the definition to name a "
-        "published version",
+        "`comfy distribution create --execute` sent the definition to the builder's snapshot importer, which "
+        "could not vouch for one or more custom node pins and returned a definition without them. Creating "
+        "anyway would build an image quietly missing what the user asked for, so create stops. The advisories "
+        "printed above name why each pack could not be carried.",
+        "edit the definition to name a published registry version, or remove the pack",
     ),
     ErrorCode(
         "distribution_delete_needs_confirm",
