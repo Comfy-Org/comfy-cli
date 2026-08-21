@@ -241,3 +241,156 @@ def test_tier_concurrency_covers_the_documented_tiers():
     assert billing.TIER_CONCURRENCY["CREATOR"] == 3
     assert billing.TIER_CONCURRENCY["PRO"] == 5
     assert billing.TIER_CONCURRENCY["TEAM"] == 25
+
+
+# ---------------------------------------------------------------------------
+# Review regressions: malformed scalars from the server
+#
+# Every test below is a finding from the review of the original PR. The common
+# cause was fixtures that were all well-formed, so the code trusted types the
+# billing endpoints do not actually guarantee.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_floats_are_rejected_not_raised(bad):
+    """`json.loads` accepts bare NaN/Infinity, and int(nan) raises.
+
+    These are pure calls made outside every try in status_cmd, so a raise here
+    becomes a traceback where an error envelope belongs.
+    """
+    assert billing.select_effective_balance_micros({"effective_balance_micros": bad}) is None
+    assert billing._coerce_int(bad) is None
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "Infinity", "1e400"])
+def test_non_finite_strings_are_rejected_not_raised(bad):
+    """`int(float("1e400"))` raises OverflowError, which ValueError misses."""
+    assert billing._coerce_int(bad) is None
+
+
+def test_absurdly_large_integers_are_rejected():
+    """An unbounded JSON int would blow up the later division, not this call."""
+    assert billing._coerce_int(10**400) is None
+    assert billing.select_effective_balance_micros({"effective_balance_micros": 10**400}) is None
+    # And the bound leaves realistic values alone.
+    assert billing._coerce_int(10**12) == 10**12
+
+
+def test_micros_to_usd_survives_every_value_coerce_int_admits():
+    """No input that clears _coerce_int may raise downstream."""
+    for raw in (10**18, -(10**18), 0, 1):
+        assert billing.micros_to_usd(billing._coerce_int(raw)) is not None
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (True, True),
+        (False, False),
+        ("true", True),
+        ("TRUE", True),
+        ("false", False),
+        ("False", False),
+        ("0", False),
+        ("1", True),
+        # Not booleans: unknown beats guessing.
+        ("maybe", None),
+        (None, None),
+        (1, None),
+        ({}, None),
+    ],
+)
+def test_coerce_bool(value, expected):
+    assert billing.coerce_bool(value) is expected
+
+
+def test_string_false_has_funds_does_not_suppress_the_trust_guard():
+    """`bool("false")` is True, which would silently disable the guard."""
+    assert billing.is_unconfirmed(balance_micros=None, subscription_status=None, has_funds="false") is True
+    assert billing.is_unconfirmed(balance_micros=None, subscription_status=None, has_funds="true") is False
+
+
+def test_non_string_subscription_status_is_not_a_subscription():
+    """A JSON `subscription_status: false` used to stringify to "false".
+
+    That missed the no-subscription set and read as a real subscription,
+    suppressing the guard on exactly the silent-backend payload it targets.
+    """
+    assert billing.has_subscription(False) is False
+    assert billing.has_subscription(0) is False
+    assert billing.has_subscription({}) is False
+    assert billing.is_unconfirmed(balance_micros=None, subscription_status=False, has_funds=False) is True
+
+
+# ---------------------------------------------------------------------------
+# Review regression: a failed balance fetch is not a verdict
+# ---------------------------------------------------------------------------
+
+
+def test_failed_balance_fetch_does_not_trip_the_trust_guard():
+    """A timeout is not evidence the account is mid-migration.
+
+    Without this, a user holding real credit but no subscription row gets told
+    their account may be migrating because one request failed.
+    """
+    assert (
+        billing.is_unconfirmed(
+            balance_micros=None,
+            subscription_status=None,
+            has_funds=False,
+            balance_fetch_failed=True,
+        )
+        is False
+    )
+
+
+def test_failed_balance_fetch_still_withholds_the_figure():
+    """The other half: it must not read as a confirmed balance either."""
+    assert billing.balance_is_confirmed(balance_micros=None, balance_fetch_failed=True, unconfirmed=False) is False
+
+
+@pytest.mark.parametrize(
+    ("micros", "failed", "unconfirmed", "expected"),
+    [
+        (5, False, False, True),  # a real number from a call that worked
+        (0, False, False, True),  # a confirmed zero is publishable
+        (None, False, False, False),  # answered, but reported no fields
+        (5, True, False, False),  # fetch failed: withhold regardless
+        (5, False, True, False),  # guard fired: withhold regardless
+    ],
+)
+def test_balance_is_confirmed_matrix(micros, failed, unconfirmed, expected):
+    assert (
+        billing.balance_is_confirmed(balance_micros=micros, balance_fetch_failed=failed, unconfirmed=unconfirmed)
+        is expected
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review regression: plan availability edges
+# ---------------------------------------------------------------------------
+
+
+def test_explicit_null_availability_is_treated_as_available():
+    """`bool(None)` is False, which made the plan vanish from both lists.
+
+    It would be dropped from upgrade_suggestion as unavailable AND from
+    blocked_upgrades (which needs a reason string), so it disappeared with no
+    explanation.
+    """
+    plans, _ = billing.normalize_plans([{"slug": "creator", "price_cents": 2000, "availability": {"available": None}}])
+    assert plans[0]["available"] is True
+
+
+def test_string_false_availability_does_not_recommend_a_blocked_plan():
+    """`bool("false")` is truthy and would recommend an unavailable plan."""
+    plans, _ = billing.normalize_plans(
+        [
+            {"slug": "free", "price_cents": 0},
+            {"slug": "ent", "price_cents": 9999, "availability": {"available": "false"}},
+        ]
+    )
+    ent = next(p for p in plans if p["plan_slug"] == "ent")
+    assert ent["available"] is False
+    assert billing.suggest_upgrade(plans, "free") is None

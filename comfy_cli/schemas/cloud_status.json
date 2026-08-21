@@ -20,7 +20,7 @@
     },
     "balance_confirmed": {
       "type": "boolean",
-      "description": "False when the trust guard fired: no balance was reported, no subscription exists and has_funds was false. The three balance fields are then null rather than 0, so a consumer can never render '$0.00' for an unconfirmed workspace."
+      "description": "True only when a balance figure came back from a call that succeeded. False in three cases: the trust guard fired (no balance reported, no subscription, has_funds false), the balance call did not answer at all, or it answered with no balance fields. When false, the three balance fields are null rather than 0, so a consumer can never render '$0.00' for a workspace whose balance we could not establish. Note a failed balance fetch alone does NOT set `message`, because a transient error is not evidence the account is mid-migration."
     },
     "credit_balance_usd": {
       "type": ["number", "null"],

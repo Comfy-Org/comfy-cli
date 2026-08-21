@@ -451,8 +451,12 @@ def test_unconfirmed_payload_also_validates(monkeypatch, capsys):
     env = _run(
         monkeypatch,
         capsys,
-        {"/billing/status": {"is_active": False, "has_funds": False, "subscription_status": None}},
+        {
+            "/billing/status": {"is_active": False, "has_funds": False, "subscription_status": None},
+            "/billing/balance": {},
+        },
     )
+    assert env["data"]["balance_confirmed"] is False
     schema = json.loads(_SCHEMA_PATH.read_text())
     jsonschema.Draft202012Validator(schema).validate(env["data"])
 
@@ -465,7 +469,14 @@ def test_pretty_mode_renders_without_asserting_a_balance(monkeypatch, capsys):
     """
     _install(
         monkeypatch,
-        {"/billing/status": {"is_active": False, "has_funds": False, "subscription_status": None}},
+        {
+            "/billing/status": {"is_active": False, "has_funds": False, "subscription_status": None},
+            # An explicit empty body, not an absent route. The guard fires on a
+            # backend that ANSWERED and reported nothing; a route that fails to
+            # answer is a different case and is covered separately, since a
+            # transient error is not evidence about the account.
+            "/billing/balance": {},
+        },
     )
     set_renderer(Renderer(mode=OutputMode.PRETTY, command="cloud status", version="test"))
     command.status_cmd(plans=False)
@@ -507,3 +518,255 @@ def test_pretty_mode_does_not_interpret_markup_from_a_server_supplied_name(monke
     out = capsys.readouterr().out
     # Rendered literally by Text(), so the tags survive as characters.
     assert "[red]pwned[/red]" in out
+
+
+# ---------------------------------------------------------------------------
+# Review regressions
+#
+# Each test below is a finding from the review of the original PR. They share a
+# root cause: the original fixtures were all well-formed, so nothing exercised
+# the shapes the billing endpoints actually permit.
+# ---------------------------------------------------------------------------
+
+
+class _ExplodingBodyHTTPError(urllib.error.HTTPError):
+    """An HTTPError whose body read fails, as a reset stream would."""
+
+    def __init__(self, url: str, code: int):
+        super().__init__(url, code, f"HTTP {code}", {}, io.BytesIO(b""))
+        self.read_calls: list[int | None] = []
+
+    def read(self, amt=None):  # noqa: D102 - mirrors HTTPError.read
+        self.read_calls.append(amt)
+        raise OSError("connection reset while draining the error body")
+
+
+def test_error_body_read_failure_does_not_escape_the_handler(monkeypatch, capsys):
+    """A raise while quoting the body must not pre-empt the envelope.
+
+    The original code called `e.read()` unguarded inside the except block, so a
+    reset mid-drain turned a transient 503 into a traceback.
+    """
+    boom = _ExplodingBodyHTTPError(f"{_BASE}/api/billing/status", 503)
+    _install(monkeypatch, {"/billing/status": boom})
+    set_renderer(Renderer(mode=OutputMode.JSON, command="cloud status", version="test"))
+
+    with pytest.raises(typer.Exit):
+        command.status_cmd(plans=False)
+    env = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert env["ok"] is False
+    assert env["error"]["code"] == "cloud_billing_unavailable"
+    assert env["error"]["details"]["body"] == ""
+
+
+def test_error_body_read_is_bounded_by_the_cap_not_sliced_after(monkeypatch, capsys):
+    """`e.read(n)` must carry the limit, so the server can't pick our memory use."""
+    seen: list[int | None] = []
+
+    class _RecordingHTTPError(urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__(f"{_BASE}/api/billing/status", 503, "boom", {}, io.BytesIO(b"x" * 10_000))
+
+        def read(self, amt=None):
+            seen.append(amt)
+            return b"x" * (amt or 10_000)
+
+    _install(monkeypatch, {"/billing/status": _RecordingHTTPError()})
+    set_renderer(Renderer(mode=OutputMode.JSON, command="cloud status", version="test"))
+    with pytest.raises(typer.Exit):
+        command.status_cmd(plans=False)
+
+    assert seen == [command._MAX_ERROR_BODY_BYTES]
+    env = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert len(env["error"]["details"]["body"]) <= command._MAX_ERROR_BODY_BYTES
+
+
+def test_unsafe_base_url_produces_an_envelope_not_a_traceback(monkeypatch, capsys):
+    """`assert_safe_url` raises a bare ValueError for plaintext non-loopback.
+
+    Reachable through the documented `comfy cloud set-base-url` and
+    COMFY_CLOUD_BASE_URL, neither of which validates the scheme.
+    """
+    _install(monkeypatch, {"/billing/status": ValueError("refusing to send request to non-https URL")})
+    set_renderer(Renderer(mode=OutputMode.JSON, command="cloud status", version="test"))
+
+    with pytest.raises(typer.Exit):
+        command.status_cmd(plans=False)
+    env = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert env["error"]["code"] == "cloud_billing_unavailable"
+    assert "https" in env["error"]["hint"]
+
+
+def test_unsafe_base_url_on_an_optional_endpoint_degrades(monkeypatch, capsys):
+    """The same ValueError on a non-required call must not kill the command."""
+    env = _run(
+        monkeypatch,
+        capsys,
+        {
+            "/billing/status": _ACTIVE_CREATOR,
+            "/billing/balance": ValueError("refusing to send request to non-https URL"),
+        },
+    )
+    assert env["ok"] is True
+    assert env["data"]["balance_confirmed"] is False
+
+
+# --- a failed balance fetch is not a verdict about the account -------------
+
+
+def test_failed_balance_fetch_with_a_subscription_withholds_without_accusing(monkeypatch, capsys):
+    """The schema-contradiction case.
+
+    Previously this emitted `balance_confirmed: true` beside three null balance
+    fields, violating cloud_status.json, which agents are told to validate
+    against.
+    """
+    env = _run(
+        monkeypatch,
+        capsys,
+        {"/billing/status": _ACTIVE_CREATOR, "/billing/balance": _http_error(f"{_BASE}/api/billing/balance", 503)},
+    )
+    data = env["data"]
+    assert data["balance_confirmed"] is False
+    assert data["credit_balance_usd"] is None
+    assert data["effective_balance_micros"] is None
+    # Says what actually happened, and does not imply a migration.
+    assert data["message"] == billing.BALANCE_UNAVAILABLE_NOTE
+    assert "mid-migration" not in data["message"]
+    # The rest of the answer still lands.
+    assert data["subscription"]["tier"] == "CREATOR"
+
+    schema = json.loads(_SCHEMA_PATH.read_text())
+    jsonschema.Draft202012Validator(schema).validate(data)
+
+
+def test_failed_balance_fetch_without_a_subscription_does_not_accuse_either(monkeypatch, capsys):
+    """One blip must not flip the guard for a user who may hold real credit."""
+    env = _run(
+        monkeypatch,
+        capsys,
+        {
+            "/billing/status": {"is_active": False, "has_funds": False, "subscription_status": None},
+            "/billing/balance": _http_error(f"{_BASE}/api/billing/balance", 500),
+        },
+    )
+    data = env["data"]
+    assert data["balance_confirmed"] is False
+    assert "Couldn't confirm an active subscription" not in (data["message"] or "")
+    assert data["message"] == billing.BALANCE_UNAVAILABLE_NOTE
+
+
+def test_balance_answered_with_nothing_still_trips_the_guard(monkeypatch, capsys):
+    """The distinction: answered-and-empty is a verdict, failed-to-answer isn't."""
+    env = _run(
+        monkeypatch,
+        capsys,
+        {
+            "/billing/status": {"is_active": False, "has_funds": False, "subscription_status": None},
+            "/billing/balance": {},
+        },
+    )
+    assert "Couldn't confirm an active subscription" in env["data"]["message"]
+
+
+# --- malformed scalars must not violate our own schema --------------------
+
+
+def test_wrongly_typed_server_scalars_are_coerced_or_dropped(monkeypatch, capsys):
+    """A backend sending "3" or `is_active: "false"` must still validate."""
+    env = _run(
+        monkeypatch,
+        capsys,
+        {
+            "/billing/status": {
+                "is_active": "false",
+                "has_funds": "true",
+                "subscription_status": "active",
+                "subscription_tier": "PRO",
+                "plan_slug": "  pro-monthly  ",
+                "max_seats": "40",
+                "occupied_seats": 39.0,
+                "renewal_date": 20260911,
+            },
+            "/billing/balance": {"effective_balance_micros": "1500000"},
+            "/features": {"max_concurrent_jobs": "5", "free_tier_balance": {"allowance": "100", "remaining": "60"}},
+            "/workspaces/current": {"id": "w-1", "name": 12345, "type": "team", "role": None},
+        },
+    )
+    data = env["data"]
+    assert data["subscription"]["is_active"] is False
+    assert data["max_concurrent_jobs"] == 5
+    assert data["seats"] == {"max": 40, "occupied": 39}
+    assert data["free_tier_balance"]["allowance"] == 100
+    # Non-string values in string-typed fields are dropped, not stringified.
+    assert data["subscription"]["renewal_date"] is None
+    assert data["cloud_workspace"]["name"] is None
+    # The padded slug is stripped so it can match a plan and not leak padding.
+    assert data["subscription"]["plan_slug"] == "pro-monthly"
+
+    schema = json.loads(_SCHEMA_PATH.read_text())
+    jsonschema.Draft202012Validator(schema).validate(data)
+
+
+def test_nan_balance_does_not_crash_the_command(monkeypatch, capsys):
+    """`json.loads` accepts a bare NaN literal; int(nan) raises."""
+    env = _run(
+        monkeypatch,
+        capsys,
+        {"/billing/status": _ACTIVE_CREATOR, "/billing/balance": {"effective_balance_micros": float("nan")}},
+    )
+    assert env["ok"] is True
+    assert env["data"]["credit_balance_usd"] is None
+
+
+def test_padded_plan_slug_still_matches_a_plan_for_the_upgrade_suggestion(monkeypatch, capsys):
+    """The strip fix, observed end to end: padding used to drop the suggestion."""
+    env = _run(
+        monkeypatch,
+        capsys,
+        {
+            "/billing/status": {**_ACTIVE_CREATOR, "plan_slug": " creator-monthly "},
+            "/billing/plans": {"plans": _PLANS["plans"]},
+        },
+    )
+    assert env["data"]["upgrade_suggestion"]["plan_slug"] == "pro-monthly"
+
+
+# --- panel hardening ------------------------------------------------------
+
+
+def test_panel_sanitizes_escape_sequences_from_features(monkeypatch, capsys):
+    """`Text` blocks markup but passes \\x1b through, so these need sanitizing.
+
+    Reachable whenever a user points the CLI at a hostile host via the
+    documented `comfy cloud set-base-url` flow.
+    """
+    _install(
+        monkeypatch,
+        {
+            "/billing/status": _ACTIVE_CREATOR,
+            "/billing/balance": {"effective_balance_micros": 1_000_000},
+            "/features": {"max_concurrent_jobs": 1, "free_tier_balance": {"allowance": "\x1b]0;pwned\x07100"}},
+        },
+    )
+    set_renderer(Renderer(mode=OutputMode.PRETTY, command="cloud status", version="test"))
+    command.status_cmd(plans=False)
+    out = capsys.readouterr().out
+    assert "\x1b" not in out
+
+
+def test_panel_falls_back_to_the_tier_default_concurrency(monkeypatch, capsys):
+    """/api/features down should not hide a number the tier already tells us."""
+    _install(
+        monkeypatch,
+        {
+            "/billing/status": _ACTIVE_CREATOR,
+            "/billing/balance": {"effective_balance_micros": 1_000_000},
+            # /features absent -> 404
+        },
+    )
+    set_renderer(Renderer(mode=OutputMode.PRETTY, command="cloud status", version="test"))
+    command.status_cmd(plans=False)
+    out = capsys.readouterr().out
+    assert "Concurrency" in out
+    assert "tier default" in out

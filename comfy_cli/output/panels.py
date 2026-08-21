@@ -344,23 +344,40 @@ def cloud_status_panel(*, payload: Mapping[str, Any], version: str, show_plans: 
 
     free_tier = payload.get("free_tier_balance")
     if isinstance(free_tier, Mapping):
-        remaining = free_tier.get("remaining")
-        allowance = free_tier.get("allowance")
+        # Sanitized like every other server-supplied field here. `Text` does not
+        # parse Rich markup but it does pass `\x1b` straight through, so an
+        # unsanitized CSI/OSC payload in one of these numbers would reach the
+        # terminal live. Reachable in practice: a user can point the CLI at a
+        # hostile host via the documented `comfy cloud set-base-url`.
+        remaining = sanitize_optional(free_tier.get("remaining"))
+        allowance = sanitize_optional(free_tier.get("allowance"))
         if remaining is not None or allowance is not None:
             rows.append(
                 (
                     "Free tier",
                     Text.assemble(
-                        (f"{remaining if remaining is not None else '—'}", "bold white"),
+                        (remaining if remaining is not None else "—", "bold white"),
                         (f" of {allowance} remaining" if allowance is not None else " remaining", "dim"),
                     ),
                 )
             )
 
     concurrency = payload.get("max_concurrent_jobs")
-    if concurrency is not None:
-        conc_parts: list[tuple[str, str]] = [(f"{concurrency}", "bold white")]
-        conc_parts.append((f"  concurrent job{'s' if concurrency != 1 else ''}", "dim"))
+    tier_default_concurrency = payload.get("tier_default_concurrent_jobs")
+    # Fall back to the tier default when /api/features was unavailable, rather
+    # than printing no concurrency row at all. The payload ships that field
+    # precisely to provide this context, and dropping the row hid a number we
+    # already knew.
+    shown_concurrency = concurrency if isinstance(concurrency, int) else None
+    from_tier_default = False
+    if shown_concurrency is None and isinstance(tier_default_concurrency, int):
+        shown_concurrency = tier_default_concurrency
+        from_tier_default = True
+    if shown_concurrency is not None:
+        conc_parts: list[tuple[str, str]] = [(f"{shown_concurrency}", "bold white")]
+        conc_parts.append((f"  concurrent job{'s' if shown_concurrency != 1 else ''}", "dim"))
+        if from_tier_default:
+            conc_parts.append(("  (tier default)", "dim"))
         rows.append(("Concurrency", Text.assemble(*conc_parts)))
 
     upgrade = payload.get("upgrade_suggestion")
@@ -392,7 +409,7 @@ def cloud_status_panel(*, payload: Mapping[str, Any], version: str, show_plans: 
         blocks.append(Text(""))
         blocks.append(Text(str(sanitize_value(message)), style="yellow"))
 
-    if concurrency is not None:
+    if shown_concurrency is not None:
         # API-key callers get the tier limit; a browser session can differ
         # because parallel execution is gated separately on the frontend.
         blocks.append(Text(""))

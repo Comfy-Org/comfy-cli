@@ -18,8 +18,9 @@ live under ``comfy auth`` since they're not cloud-specific.
 
 from __future__ import annotations
 
+import urllib.error
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich import markup as rich_markup
@@ -277,6 +278,38 @@ def whoami_cmd():
 _STATUS_MAX_BYTES = 1 * 1024 * 1024
 
 
+# Bound on the slice of a server error body we quote back in `details`. Read
+# via `HTTPError.read(n)` so the cap is applied by the read itself; draining
+# the whole body and slicing afterwards would let the server decide how much
+# memory we spend on the error path, which is the one path least able to
+# afford it.
+_MAX_ERROR_BODY_BYTES = 1000
+
+
+def _as_optional_str(value: Any) -> str | None:
+    """Keep a value only if it is genuinely a string, else None.
+
+    Dates and rail names are declared as nullable strings in
+    ``cloud_status.json``; a backend sending a number or an object for one of
+    them would otherwise produce an envelope that fails our own schema.
+    """
+    return value if isinstance(value, str) else None
+
+
+def _read_error_body(e: urllib.error.HTTPError) -> str:
+    """Best-effort read of a bounded slice of the server's error body.
+
+    Mirrors ``comfy_cli/command/_cloud_errors.py::_read_error_body``. Failures
+    degrade to an empty body rather than escaping: a reset or truncated stream
+    while quoting an error must not pre-empt the very envelope the caller is in
+    the middle of emitting, turning a transient fault into a traceback.
+    """
+    try:
+        return (e.read(_MAX_ERROR_BODY_BYTES) or b"").decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001 — a failed courtesy read must never mask the envelope
+        return ""
+
+
 def _billing_get(url: str, target, *, timeout: float = 30.0):
     """Authenticated GET returning the parsed body. Raises errors verbatim."""
     from comfy_cli.http import request_json
@@ -285,30 +318,41 @@ def _billing_get(url: str, target, *, timeout: float = 30.0):
     return body
 
 
-def _billing_get_optional(url: str, target, *, timeout: float = 30.0):
-    """Same, but returns None instead of raising.
+def _billing_get_optional(url: str, target, *, timeout: float = 30.0) -> tuple[Any, bool]:
+    """Fetch an optional endpoint, returning ``(body, failed)``.
 
     Used for every endpoint whose absence should degrade one row rather than
     fail the command: an older backend that 404s ``/api/workspaces/current``,
     or a features/plans call that times out, must still let the user see their
     balance and tier. The command's whole job is answering "what do I have",
     so partial data beats no answer.
+
+    The ``failed`` flag exists because ``None`` is ambiguous: it means both
+    "the call did not answer" and "the call answered with nothing useful". For
+    the balance endpoint those must not be conflated, or a transient blip
+    silently changes the trust guard's verdict. See
+    :func:`billing.is_unconfirmed`.
+
+    ``ValueError`` is caught alongside the HTTP families because
+    ``assert_safe_url`` raises it for a non-loopback plaintext URL, and
+    ``comfy cloud set-base-url`` / ``COMFY_CLOUD_BASE_URL`` both accept such a
+    URL without validation. Note ``JSONDecodeError`` is a ``ValueError``
+    subclass, so naming the parent covers it.
     """
-    import json as _json
     import urllib.error
 
     from comfy_cli.http import ResponseTooLarge
 
     try:
-        return _billing_get(url, target, timeout=timeout)
+        return _billing_get(url, target, timeout=timeout), False
     except (
         urllib.error.HTTPError,
         urllib.error.URLError,
         OSError,
-        _json.JSONDecodeError,
+        ValueError,
         ResponseTooLarge,
     ):
-        return None
+        return None, True
 
 
 @app.command(
@@ -325,7 +369,6 @@ def status_cmd(
         typer.Option("--plans", help="Include the full tier table, not just the current plan and one suggestion."),
     ] = False,
 ):
-    import json as _json
     import urllib.error
 
     from comfy_cli.cloud import billing
@@ -367,14 +410,23 @@ def status_cmd(
             code="cloud_billing_unavailable",
             message=f"HTTP {e.code} from {status_url}",
             hint="retry shortly; if it persists, contact Comfy support",
-            details={"status": e.code, "body": (e.read() or b"")[:1000].decode("utf-8", "replace")},
+            details={"status": e.code, "body": _read_error_body(e)},
         )
         raise typer.Exit(code=1) from e
-    except (urllib.error.URLError, OSError, _json.JSONDecodeError, ResponseTooLarge) as e:
+    except (urllib.error.URLError, OSError, ValueError, ResponseTooLarge) as e:
+        # ValueError covers `assert_safe_url` rejecting a plaintext non-loopback
+        # base URL, which a user can reach through the documented
+        # `comfy cloud set-base-url` / COMFY_CLOUD_BASE_URL paths. It also
+        # covers JSONDecodeError, which subclasses it.
+        unsafe_url = not isinstance(e, (urllib.error.URLError, OSError, ResponseTooLarge))
         renderer.error(
             code="cloud_billing_unavailable",
             message=f"failed to fetch {status_url}: {e}",
-            hint="check your network connection and try again",
+            hint=(
+                "the cloud base URL must be https (or loopback); fix it with `comfy cloud set-base-url`"
+                if unsafe_url
+                else "check your network connection and try again"
+            ),
         )
         raise typer.Exit(code=1) from e
 
@@ -387,10 +439,10 @@ def status_cmd(
         raise typer.Exit(code=1)
 
     # Everything below degrades independently.
-    balance_body = _billing_get_optional(target.url("billing", "balance"), target)
-    features_body = _billing_get_optional(target.url("features"), target)
-    workspace_body = _billing_get_optional(target.url("workspaces", "current"), target)
-    plans_body = _billing_get_optional(target.url("billing", "plans"), target)
+    balance_body, balance_failed = _billing_get_optional(target.url("billing", "balance"), target)
+    features_body, _ = _billing_get_optional(target.url("features"), target)
+    workspace_body, _ = _billing_get_optional(target.url("workspaces", "current"), target)
+    plans_body, _ = _billing_get_optional(target.url("billing", "plans"), target)
 
     balance_micros = billing.select_effective_balance_micros(balance_body if isinstance(balance_body, dict) else None)
     balance_usd = billing.micros_to_usd(balance_micros)
@@ -407,6 +459,15 @@ def status_cmd(
         balance_micros=balance_micros,
         subscription_status=subscription_status,
         has_funds=has_funds,
+        balance_fetch_failed=balance_failed,
+    )
+    # Distinct from `not unconfirmed`: a failed balance fetch alongside an
+    # active subscription is not "unconfirmed" (we know the account is real)
+    # but still has no figure to publish.
+    balance_confirmed = billing.balance_is_confirmed(
+        balance_micros=balance_micros,
+        balance_fetch_failed=balance_failed,
+        unconfirmed=unconfirmed,
     )
     legacy_rail = billing.is_legacy_rail(billing_rail)
 
@@ -415,30 +476,50 @@ def status_cmd(
         message = billing.unconfirmed_message(manage_url)
         if legacy_rail:
             message = f"{message} {billing.LEGACY_RAIL_NOTE}"
+    elif balance_failed:
+        # A request-level failure, so say that plainly instead of borrowing the
+        # mid-migration wording, which would be a claim about the account.
+        message = billing.BALANCE_UNAVAILABLE_NOTE
+        if legacy_rail:
+            message = f"{message} {billing.LEGACY_RAIL_NOTE}"
     elif legacy_rail:
         message = billing.LEGACY_RAIL_NOTE
 
     cloud_workspace: dict[str, object | None] | None = None
     if isinstance(workspace_body, dict):
         cloud_workspace = {
-            "id": workspace_body.get("id"),
-            "name": workspace_body.get("name"),
-            "type": workspace_body.get("type"),
-            "role": workspace_body.get("role"),
+            "id": _as_optional_str(workspace_body.get("id")),
+            "name": _as_optional_str(workspace_body.get("name")),
+            "type": _as_optional_str(workspace_body.get("type")),
+            "role": _as_optional_str(workspace_body.get("role")),
         }
 
+    # Every server-supplied scalar below goes through a coercion before it
+    # enters the payload. `cloud_status.json` constrains these types and agents
+    # are told to validate against it, so a backend sending "3" or
+    # `is_active: "false"` would otherwise emit an envelope that fails our own
+    # schema. Values that don't fit are dropped to null, the same way
+    # `normalize_plans` already treats malformed plan entries.
     max_concurrent_jobs = None
     free_tier_balance = None
     if isinstance(features_body, dict):
-        max_concurrent_jobs = features_body.get("max_concurrent_jobs")
+        max_concurrent_jobs = billing.coerce_int(features_body.get("max_concurrent_jobs"))
         raw_free_tier = features_body.get("free_tier_balance")
         if isinstance(raw_free_tier, dict):
-            free_tier_balance = raw_free_tier
+            free_tier_balance = {
+                "allowance": billing.coerce_int(raw_free_tier.get("allowance")),
+                "used": billing.coerce_int(raw_free_tier.get("used")),
+                "remaining": billing.coerce_int(raw_free_tier.get("remaining")),
+            }
 
     plan_list, current_plan_slug = billing.normalize_plans(plans_body)
     if current_plan_slug is None:
         slug = status_body.get("plan_slug")
-        current_plan_slug = slug if isinstance(slug, str) and slug.strip() else None
+        # Assign the STRIPPED slug, not the raw one: `normalize_plans` strips
+        # every slug it emits, so a whitespace-padded value here would never
+        # match in `suggest_upgrade` (silently dropping the suggestion) and the
+        # padding would leak into the payload.
+        current_plan_slug = slug.strip() if isinstance(slug, str) and slug.strip() else None
     upgrade_suggestion = billing.suggest_upgrade(plan_list, current_plan_slug)
 
     tier_default_concurrency = None
@@ -449,20 +530,20 @@ def status_cmd(
         "cloud_workspace": cloud_workspace,
         # Withhold the figure entirely when it isn't confirmed. A null here is
         # "we don't know"; printing 0.0 would assert a balance we cannot back up.
-        "credit_balance_usd": None if unconfirmed else balance_usd,
-        "credit_balance_credits": None if unconfirmed else balance_credits,
-        "effective_balance_micros": None if unconfirmed else balance_micros,
+        "credit_balance_usd": balance_usd if balance_confirmed else None,
+        "credit_balance_credits": balance_credits if balance_confirmed else None,
+        "effective_balance_micros": balance_micros if balance_confirmed else None,
         "currency": "USD",
-        "balance_confirmed": not unconfirmed,
+        "balance_confirmed": balance_confirmed,
         "subscription": {
-            "tier": subscription_tier,
-            "status": subscription_status,
-            "is_active": status_body.get("is_active"),
+            "tier": subscription_tier if isinstance(subscription_tier, str) else None,
+            "status": subscription_status if isinstance(subscription_status, str) else None,
+            "is_active": billing.coerce_bool(status_body.get("is_active")),
             "plan_slug": current_plan_slug,
-            "renewal_date": status_body.get("renewal_date"),
-            "cancel_at": status_body.get("cancel_at"),
+            "renewal_date": _as_optional_str(status_body.get("renewal_date")),
+            "cancel_at": _as_optional_str(status_body.get("cancel_at")),
         },
-        "billing_rail": billing_rail,
+        "billing_rail": billing_rail if isinstance(billing_rail, str) else None,
         "max_concurrent_jobs": max_concurrent_jobs,
         "tier_default_concurrent_jobs": tier_default_concurrency,
         "free_tier_balance": free_tier_balance,
@@ -471,7 +552,10 @@ def status_cmd(
         "manage_url": manage_url,
         "message": message,
     }
-    seats = {"max": status_body.get("max_seats"), "occupied": status_body.get("occupied_seats")}
+    seats = {
+        "max": billing.coerce_int(status_body.get("max_seats")),
+        "occupied": billing.coerce_int(status_body.get("occupied_seats")),
+    }
     if seats["max"] is not None or seats["occupied"] is not None:
         payload["seats"] = seats
     if plans:

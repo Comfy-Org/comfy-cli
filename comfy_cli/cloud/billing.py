@@ -17,6 +17,7 @@ The rules encoded here are not arbitrary. Two of them are scar tissue:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -63,6 +64,13 @@ UNCONFIRMED_MESSAGE = (
 # whether or not the trust guard fired: figures on that rail can be partial.
 LEGACY_RAIL_NOTE = "This workspace is on the legacy billing rail, so balance data may be incomplete pending migration."
 
+# Shown when the balance endpoint itself did not answer. Deliberately distinct
+# from UNCONFIRMED_MESSAGE: this is a statement about our request, not about
+# the account, and must not imply the user's billing rows are mid-migration.
+BALANCE_UNAVAILABLE_NOTE = (
+    "Couldn't reach the balance service, so no credit balance is shown. Everything else here is current."
+)
+
 # Values of ``subscription_status`` that mean "there is no subscription", as
 # opposed to one that exists but is lapsed/cancelled. Kept tight on purpose:
 # a lapsed subscription is confirmation the account is real, so it must not
@@ -71,27 +79,89 @@ _NO_SUBSCRIPTION_STATUSES = {"", "none", "null", "no_subscription"}
 
 _LEGACY_RAIL = "legacy_stripe"
 
+# Strings a JSON boolean field has been seen carrying instead of a real bool.
+# Anything outside these two sets is not a boolean and is treated as unknown,
+# because guessing is what lets `"false"` read as affirmative.
+_TRUE_STRINGS = {"true", "1", "yes"}
+_FALSE_STRINGS = {"false", "0", "no"}
+
+# Ceiling for any accepted integer. Micro-dollars, cents and job counts all sit
+# far below this; the point is that `json.loads` will happily hand us an
+# unbounded integer literal, and a few-hundred-digit value turns a later
+# division into an OverflowError inside a pure function that no `try` wraps.
+_MAX_ABS_INT = 10**18
+
 
 def _coerce_int(value: Any) -> int | None:
-    """Best-effort int from a JSON scalar, or None if it isn't numeric.
+    """Best-effort int from a JSON scalar, or None if it isn't a usable number.
 
     The billing endpoints have historically sent micro-dollar fields as both
     JSON numbers and decimal strings, so tolerate both rather than crashing on
-    a shape the server is entitled to send. ``bool`` is rejected explicitly:
-    it is an ``int`` subclass in Python, and a stray ``True`` coercing to 1
-    would read as a one-micro balance.
+    a shape the server is entitled to send.
+
+    Three rejections are deliberate, and each one is a crash this function used
+    to pass through to the caller:
+
+    * ``bool`` is an ``int`` subclass, so a stray ``True`` would otherwise read
+      as a one-micro balance.
+    * ``NaN`` and ``±inf`` reach us as real floats, because ``json.loads``
+      accepts the bare ``NaN`` / ``Infinity`` literals. ``int(float("nan"))``
+      raises ``ValueError`` and ``int(float("inf"))`` raises ``OverflowError``.
+    * An integer beyond :data:`_MAX_ABS_INT` is discarded here rather than
+      surviving to blow up a downstream division.
+
+    These are pure calls made outside every ``try`` in ``status_cmd``, so
+    anything raised here becomes a traceback where an error envelope belongs.
     """
     if isinstance(value, bool) or value is None:
         return None
     if isinstance(value, int):
-        return value
+        return value if abs(value) <= _MAX_ABS_INT else None
     if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        if abs(value) > _MAX_ABS_INT:
+            return None
         return int(value)
     if isinstance(value, str):
         try:
-            return int(float(value.strip()))
+            parsed = float(value.strip())
         except (TypeError, ValueError):
             return None
+        if not math.isfinite(parsed) or abs(parsed) > _MAX_ABS_INT:
+            return None
+        try:
+            return int(parsed)
+        except (ValueError, OverflowError):
+            return None
+    return None
+
+
+def coerce_int(value: Any) -> int | None:
+    """Public alias for :func:`_coerce_int`.
+
+    Exported so ``command.py`` can put server-supplied integers through the
+    same guard before they enter a payload whose schema constrains their type.
+    """
+    return _coerce_int(value)
+
+
+def coerce_bool(value: Any) -> bool | None:
+    """Strict-ish bool from a JSON scalar, or None when it isn't a boolean.
+
+    Returning None for unrecognized input is the whole point. ``bool("false")``
+    is ``True``, so a backend sending the *string* ``"false"`` for ``has_funds``
+    would otherwise read as affirmative and suppress the trust guard for
+    exactly the silent-backend shape the guard was written for.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _TRUE_STRINGS:
+            return True
+        if text in _FALSE_STRINGS:
+            return False
     return None
 
 
@@ -143,10 +213,16 @@ def has_subscription(subscription_status: Any) -> bool:
 
     A lapsed or cancelled subscription counts: it confirms the account is real,
     which is the only question the trust guard asks.
+
+    Only a genuine string can name a subscription. This used to stringify
+    whatever it was given, which meant a JSON ``subscription_status: false``
+    became the string ``"false"``, missed ``_NO_SUBSCRIPTION_STATUSES``, and
+    read as an existing subscription, suppressing the trust guard on precisely
+    the payload shape it exists to catch.
     """
-    if subscription_status is None:
+    if not isinstance(subscription_status, str):
         return False
-    return str(subscription_status).strip().lower() not in _NO_SUBSCRIPTION_STATUSES
+    return subscription_status.strip().lower() not in _NO_SUBSCRIPTION_STATUSES
 
 
 def is_legacy_rail(billing_rail: Any) -> bool:
@@ -158,6 +234,7 @@ def is_unconfirmed(
     balance_micros: int | None,
     subscription_status: Any,
     has_funds: Any,
+    balance_fetch_failed: bool = False,
 ) -> bool:
     """True when we cannot confirm either a subscription or a balance.
 
@@ -165,9 +242,51 @@ def is_unconfirmed(
     genuine free-tier user with a confirmed zero balance and a FREE
     subscription row still gets normal output. It is only the all-silent shape,
     where the backend told us nothing affirmative, that earns neutral copy.
+
+    ``balance_fetch_failed`` distinguishes "the balance endpoint did not
+    answer" from "the balance endpoint answered and reported nothing", which
+    ``balance_micros=None`` alone cannot express. It matters in both
+    directions:
+
+    * A transient failure on ``/api/billing/balance`` must not, on its own,
+      flip the verdict and tell a subscriber their account may be
+      mid-migration. So a failed fetch alongside an affirmative subscription
+      or ``has_funds`` is NOT unconfirmed.
+    * But a failed fetch cannot be treated as a confirmed balance either, or
+      the payload would claim ``balance_confirmed: true`` while carrying three
+      null balance fields, contradicting the schema.
+
+    ``has_funds`` goes through :func:`coerce_bool` rather than ``bool()``:
+    ``bool("false")`` is ``True``, and that alone would suppress the guard.
     """
+    if balance_fetch_failed:
+        # The guard's premise is that the backend answered and said nothing
+        # affirmative. A call that never answered is not evidence about the
+        # account, so we make no claim about migration state: a user with real
+        # credit and no subscription row would otherwise be told their account
+        # may be mid-migration purely because one request timed out.
+        # `balance_is_confirmed` still withholds the figure.
+        return False
     balance_absent_or_zero = balance_micros is None or balance_micros == 0
-    return balance_absent_or_zero and not has_subscription(subscription_status) and not bool(has_funds)
+    funds = coerce_bool(has_funds) is True
+    return balance_absent_or_zero and not has_subscription(subscription_status) and not funds
+
+
+def balance_is_confirmed(
+    *,
+    balance_micros: int | None,
+    balance_fetch_failed: bool,
+    unconfirmed: bool,
+) -> bool:
+    """Whether a balance figure may be published.
+
+    Three ways to have no publishable figure: the trust guard fired, the fetch
+    never answered, or it answered with no balance fields at all. Only an
+    actual number from a call that succeeded is confirmed.
+    """
+    if unconfirmed or balance_fetch_failed:
+        return False
+    return balance_micros is not None
 
 
 def unconfirmed_message(manage_url: str) -> str:
@@ -194,14 +313,23 @@ def _plan_slug(plan: Mapping[str, Any]) -> str | None:
 def _plan_available(plan: Mapping[str, Any]) -> bool:
     """Whether the caller can actually buy this plan.
 
-    Availability absent entirely is treated as available: the endpoint only
-    started annotating plans later, and an older backend that omits the block
-    is not saying "unavailable".
+    Absent availability information means available: the endpoint only started
+    annotating plans later, and an older backend that omits the block is not
+    saying "unavailable". That rule is applied to an unusable *value* too, not
+    just a missing key, because ``bool()`` gets both edges wrong: an explicit
+    ``{"available": null}`` would read as unavailable and, since
+    ``blocked_upgrade_reasons`` needs a reason string, the plan would then
+    vanish from both the suggestion and the blocked list with no explanation;
+    while ``{"available": "false"}`` is truthy and would recommend a plan the
+    backend explicitly marked unavailable.
     """
     availability = plan.get("availability")
     if not isinstance(availability, Mapping):
         return True
-    return bool(availability.get("available", True))
+    if "available" not in availability:
+        return True
+    decided = coerce_bool(availability.get("available"))
+    return True if decided is None else decided
 
 
 def _plan_unavailable_reason(plan: Mapping[str, Any]) -> str | None:
