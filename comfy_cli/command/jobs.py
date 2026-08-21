@@ -1887,7 +1887,7 @@ def _resolve_watch_client_id(host: str, port: int, prompt_id: str) -> str | None
     if isinstance(q, dict):
         for key in ("queue_running", "queue_pending"):
             for entry in q.get(key) or []:
-                # (number, prompt_id, prompt, extra_data, outputs_to_execute)
+                # entry layout: number, prompt_id, prompt, extra_data, outputs_to_execute
                 if isinstance(entry, list) and len(entry) > 3 and entry[1] == prompt_id:
                     cid = _client_id_from_extra_data(entry[3])
                     if cid:

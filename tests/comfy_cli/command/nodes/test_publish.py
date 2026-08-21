@@ -46,9 +46,9 @@ def test_publish_fails_on_security_violations():
     ):
         result = runner.invoke(app, ["publish"])
 
-        # TODO: re-enable exit when we disable exec and eval
-        # assert result.exit_code == 1
-        # assert "Security issues found" in result.stdout
+        # Security findings are reported as warnings and publishing continues:
+        # exec/eval are still allowed. When they become a hard failure this
+        # should assert exit_code == 1 and the "Security issues found" wording.
         assert "Security warnings found" in result.stdout
 
 

@@ -2370,10 +2370,9 @@ class TestDirectModeSlots:
     def test_extract_finds_all_widget_inputs(self, graph: Graph):
         wf = _direct_workflow()
         slots = _extract_frontend_slots(wf, graph)
-        # KSampler: seed, steps, cfg, sampler_name, scheduler, denoise (6)
-        # CLIPTextEncode: text (1)
-        # EmptyLatentImage: width, height, batch_size (3)
-        # Total: 10
+        # 10 widget slots expected - 6 from KSampler (seed, steps, cfg,
+        # sampler_name, scheduler, denoise), 1 from CLIPTextEncode (text) and
+        # 3 from EmptyLatentImage (width, height, batch_size).
         assert len(slots) == 10
         names = {s["name"] for s in slots}
         # No link inputs should appear
