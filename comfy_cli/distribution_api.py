@@ -124,6 +124,15 @@ class BuilderClient:
         r = self._post(("models", "resolve"), {"filenames": filenames})
         return r.get("results", [])
 
+    def resolve_snapshot(self, snapshot: dict) -> dict:
+        """POST /v1/snapshots/resolve — read a captured environment as a definition.
+
+        The builder's importer is the one place that knows what the Comfy Registry
+        actually publishes, which curated base image a Python fits, and how a pin
+        normalizes. Returns ``{definition, report, ...}``; the report names what
+        did not translate rather than leaving it to fail inside a build."""
+        return self._post(("snapshots", "resolve"), {"snapshot": snapshot})
+
     def _get(self, parts: tuple[str, ...], params: dict | None = None, *, max_bytes: int = _MAX_JSON) -> dict:
         url = self.target.url(*parts)
         if params:
