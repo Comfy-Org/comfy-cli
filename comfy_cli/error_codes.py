@@ -310,6 +310,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check `details.body` for the server's message",
     ),
     ErrorCode(
+        "cloud_billing_unavailable",
+        "`comfy cloud status` could not read `/api/billing/status`, so there is no tier or "
+        "subscription state to report. Distinct from `cloud_unauthorized` (a rejected "
+        "credential) and from the command's own degraded rows: the workspace, features and "
+        "plans calls each drop a single row when they fail, and only this one is fatal.",
+        "retry shortly; if it persists, contact Comfy support",
+    ),
+    ErrorCode(
         "cloud_timeout",
         "Cloud wait_for_completion exceeded `--timeout`.",
         "raise `--timeout`, or `comfy jobs watch <id> --where cloud`",

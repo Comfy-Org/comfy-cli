@@ -6,6 +6,8 @@ Comfy Cloud:
 - ``cloud login``       — Authorization Code + PKCE flow against the cloud
 - ``cloud logout``      — clear the local OAuth session
 - ``cloud whoami``      — inspect the current session + base URL + auth path
+- ``cloud status``      — cloud workspace, credit balance, subscription tier,
+                            concurrency limit and upgrade suggestion
 - ``cloud set-base-url`` — pin a non-prod env (PR preview, staging, …)
 - ``cloud set-key``     — testing path: persist a Comfy Cloud API key
                             (canonical sign-in is ``cloud login``)
@@ -263,6 +265,230 @@ def whoami_cmd():
         payload["stale_base_url"] = stale_base_url
 
     renderer.emit(payload, command="cloud whoami")
+
+
+# ---------------------------------------------------------------------------
+# status (billing / plan / concurrency)
+# ---------------------------------------------------------------------------
+
+# Billing payloads are small objects. The cap only exists to bound memory on a
+# misbehaving server, so it is generous relative to the real bodies (~1 KiB)
+# and still nowhere near enough to matter.
+_STATUS_MAX_BYTES = 1 * 1024 * 1024
+
+
+def _billing_get(url: str, target, *, timeout: float = 30.0):
+    """Authenticated GET returning the parsed body. Raises errors verbatim."""
+    from comfy_cli.http import request_json
+
+    _, body = request_json(url, target, timeout=timeout, max_bytes=_STATUS_MAX_BYTES)
+    return body
+
+
+def _billing_get_optional(url: str, target, *, timeout: float = 30.0):
+    """Same, but returns None instead of raising.
+
+    Used for every endpoint whose absence should degrade one row rather than
+    fail the command: an older backend that 404s ``/api/workspaces/current``,
+    or a features/plans call that times out, must still let the user see their
+    balance and tier. The command's whole job is answering "what do I have",
+    so partial data beats no answer.
+    """
+    import json as _json
+    import urllib.error
+
+    from comfy_cli.http import ResponseTooLarge
+
+    try:
+        return _billing_get(url, target, timeout=timeout)
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        OSError,
+        _json.JSONDecodeError,
+        ResponseTooLarge,
+    ):
+        return None
+
+
+@app.command(
+    "status",
+    help=(
+        "Show the current Comfy Cloud workspace, credit balance, subscription tier, "
+        "concurrency limit and upgrade suggestion. Read-only; spends nothing."
+    ),
+)
+@tracking.track_command("cloud")
+def status_cmd(
+    plans: Annotated[
+        bool,
+        typer.Option("--plans", help="Include the full tier table, not just the current plan and one suggestion."),
+    ] = False,
+):
+    import json as _json
+    import urllib.error
+
+    from comfy_cli.cloud import billing
+    from comfy_cli.http import ResponseTooLarge
+    from comfy_cli.target import resolve_target
+
+    renderer = get_renderer()
+    target = resolve_target(where="cloud")
+    renderer.where = target.kind
+
+    # Fail before any request when there is no credential at all: an
+    # unauthenticated GET would come back 401 and we would report "cloud
+    # rejected your token" to someone who never had one.
+    if not target.auth_token and not target.api_key:
+        renderer.error(
+            code="cloud_not_configured",
+            message="No Comfy Cloud credential found.",
+            hint="run `comfy cloud login`",
+        )
+        raise typer.Exit(code=1)
+
+    manage_url = billing.manage_url(target.base_url)
+
+    # /api/billing/status is the only required call: without it there is no
+    # tier, no status and no rail, so there is nothing meaningful to print.
+    status_url = target.url("billing", "status")
+    try:
+        status_body = _billing_get(status_url, target)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            renderer.error(
+                code="cloud_unauthorized",
+                message=f"Comfy Cloud rejected the credential (HTTP {e.code}).",
+                hint="run `comfy cloud login`",
+                details={"status": e.code, "url": status_url},
+            )
+            raise typer.Exit(code=1) from e
+        renderer.error(
+            code="cloud_billing_unavailable",
+            message=f"HTTP {e.code} from {status_url}",
+            hint="retry shortly; if it persists, contact Comfy support",
+            details={"status": e.code, "body": (e.read() or b"")[:1000].decode("utf-8", "replace")},
+        )
+        raise typer.Exit(code=1) from e
+    except (urllib.error.URLError, OSError, _json.JSONDecodeError, ResponseTooLarge) as e:
+        renderer.error(
+            code="cloud_billing_unavailable",
+            message=f"failed to fetch {status_url}: {e}",
+            hint="check your network connection and try again",
+        )
+        raise typer.Exit(code=1) from e
+
+    if not isinstance(status_body, dict):
+        renderer.error(
+            code="cloud_billing_unavailable",
+            message=f"unexpected billing status payload from {status_url}",
+            hint="retry shortly; if it persists, contact Comfy support",
+        )
+        raise typer.Exit(code=1)
+
+    # Everything below degrades independently.
+    balance_body = _billing_get_optional(target.url("billing", "balance"), target)
+    features_body = _billing_get_optional(target.url("features"), target)
+    workspace_body = _billing_get_optional(target.url("workspaces", "current"), target)
+    plans_body = _billing_get_optional(target.url("billing", "plans"), target)
+
+    balance_micros = billing.select_effective_balance_micros(balance_body if isinstance(balance_body, dict) else None)
+    balance_usd = billing.micros_to_usd(balance_micros)
+    balance_credits = billing.usd_to_credits(balance_usd)
+
+    subscription_status = status_body.get("subscription_status")
+    # `subscription_tier` is absent entirely (not null) when there is no
+    # subscription, so `.get` is the contract, not a convenience.
+    subscription_tier = status_body.get("subscription_tier")
+    billing_rail = status_body.get("billing_rail")
+    has_funds = status_body.get("has_funds")
+
+    unconfirmed = billing.is_unconfirmed(
+        balance_micros=balance_micros,
+        subscription_status=subscription_status,
+        has_funds=has_funds,
+    )
+    legacy_rail = billing.is_legacy_rail(billing_rail)
+
+    message: str | None = None
+    if unconfirmed:
+        message = billing.unconfirmed_message(manage_url)
+        if legacy_rail:
+            message = f"{message} {billing.LEGACY_RAIL_NOTE}"
+    elif legacy_rail:
+        message = billing.LEGACY_RAIL_NOTE
+
+    cloud_workspace: dict[str, object | None] | None = None
+    if isinstance(workspace_body, dict):
+        cloud_workspace = {
+            "id": workspace_body.get("id"),
+            "name": workspace_body.get("name"),
+            "type": workspace_body.get("type"),
+            "role": workspace_body.get("role"),
+        }
+
+    max_concurrent_jobs = None
+    free_tier_balance = None
+    if isinstance(features_body, dict):
+        max_concurrent_jobs = features_body.get("max_concurrent_jobs")
+        raw_free_tier = features_body.get("free_tier_balance")
+        if isinstance(raw_free_tier, dict):
+            free_tier_balance = raw_free_tier
+
+    plan_list, current_plan_slug = billing.normalize_plans(plans_body)
+    if current_plan_slug is None:
+        slug = status_body.get("plan_slug")
+        current_plan_slug = slug if isinstance(slug, str) and slug.strip() else None
+    upgrade_suggestion = billing.suggest_upgrade(plan_list, current_plan_slug)
+
+    tier_default_concurrency = None
+    if isinstance(subscription_tier, str):
+        tier_default_concurrency = billing.TIER_CONCURRENCY.get(subscription_tier.strip().upper())
+
+    payload: dict[str, object | None] = {
+        "cloud_workspace": cloud_workspace,
+        # Withhold the figure entirely when it isn't confirmed. A null here is
+        # "we don't know"; printing 0.0 would assert a balance we cannot back up.
+        "credit_balance_usd": None if unconfirmed else balance_usd,
+        "credit_balance_credits": None if unconfirmed else balance_credits,
+        "effective_balance_micros": None if unconfirmed else balance_micros,
+        "currency": "USD",
+        "balance_confirmed": not unconfirmed,
+        "subscription": {
+            "tier": subscription_tier,
+            "status": subscription_status,
+            "is_active": status_body.get("is_active"),
+            "plan_slug": current_plan_slug,
+            "renewal_date": status_body.get("renewal_date"),
+            "cancel_at": status_body.get("cancel_at"),
+        },
+        "billing_rail": billing_rail,
+        "max_concurrent_jobs": max_concurrent_jobs,
+        "tier_default_concurrent_jobs": tier_default_concurrency,
+        "free_tier_balance": free_tier_balance,
+        "upgrade_suggestion": upgrade_suggestion,
+        "blocked_upgrades": billing.blocked_upgrade_reasons(plan_list),
+        "manage_url": manage_url,
+        "message": message,
+    }
+    seats = {"max": status_body.get("max_seats"), "occupied": status_body.get("occupied_seats")}
+    if seats["max"] is not None or seats["occupied"] is not None:
+        payload["seats"] = seats
+    if plans:
+        payload["plans"] = plan_list
+
+    if renderer.is_pretty():
+        from comfy_cli.output.panels import cloud_status_panel
+
+        renderer.console().print(
+            cloud_status_panel(
+                payload=payload,
+                version=ConfigManager().get_cli_version(),
+                show_plans=plans,
+            )
+        )
+
+    renderer.emit(payload, command="cloud status")
 
 
 # ---------------------------------------------------------------------------

@@ -318,8 +318,15 @@ codes, and capabilities. Everything below flows from it.
 comfy --json env             # what's installed locally
 comfy --json which           # workspace path
 comfy --json cloud whoami    # signed_in, auth_method (oauth/api_key), base_url, api_key_source
+comfy --json cloud status    # cloud_workspace, balance, tier, max_concurrent_jobs, upgrade_suggestion
 comfy --json auth list       # all credentials (redacted)
 ```
+
+`cloud status` answers "how many credits do I have / what plan am I on /
+what's my concurrency". It is read-only and spends nothing. Two fields need
+care: when `balance_confirmed` is `false` the balance fields are `null` rather
+than `0`, so never render "$0.00" from them, and `message` carries the copy to
+show instead. Pass `message` through verbatim rather than composing your own.
 
 ## Nodes — introspect the graph
 
