@@ -1353,3 +1353,39 @@ def test_a_definition_naming_only_blobs_goes_through_update_untouched():
             "customNodes": [{"name": "priv", "blobId": "blob-1"}],
         }
     )
+
+
+def test_report_advisories_reads_the_refused_release_as_one_value():
+    """`droppedComfyVersion` is a string where its neighbours are lists. Iterated as
+    a list it renders one entry per character."""
+    (line,) = distribution.report_advisories({"droppedComfyVersion": "v9.9.9"})
+    assert "'v9.9.9'" in line and "6 " not in line
+
+
+def test_report_advisories_names_a_folder_collision():
+    (line,) = distribution.report_advisories({"collidingNodes": ["ComfyUI-Easy-Use"]})
+    assert "already claimed the folder" in line and "ComfyUI-Easy-Use" in line
+
+
+def test_create_execute_proceeds_when_a_pack_was_dropped_for_colliding(monkeypatch):
+    """The importer drops the loser of a folder collision on purpose, and what comes
+    back is the definition the cut accepts. Refusing it would help nobody."""
+    builder = _ImportingBuilder(
+        resolved={
+            "definition": {"customNodes": [{"name": "first", "id": "first", "registryVersion": "1.0.0"}]},
+            "report": {"collidingNodes": ["Second"]},
+        }
+    )
+    _execute(
+        monkeypatch,
+        builder,
+        {
+            "baseComfyVersion": "v0.30.2",
+            "models": [],
+            "customNodes": [
+                {"name": "first", "id": "first", "registryVersion": "1.0.0"},
+                {"name": "Second", "id": "Second", "registryVersion": "1.0.0"},
+            ],
+        },
+    )
+    assert [n["name"] for n in builder.created_with["customNodes"]] == ["first"]

@@ -551,6 +551,7 @@ def snapshot_from_definition(definition: dict) -> dict:
 # Each entry is (report key, what it means to the reader).
 _REPORT_ADVISORIES = (
     ("notInRegistry", "pinned to something the Comfy Registry does not publish"),
+    ("collidingNodes", "left out: another pack already claimed the folder they install into"),
     ("registryPending", "published but not yet servable; the build will wait or fail on it"),
     ("unresolvedNodes", "named nothing the builder can install from"),
     ("unverifiedPins", "left unchecked because the registry did not answer"),
@@ -568,9 +569,14 @@ def report_advisories(report: dict) -> list[str]:
             "no curated base image matches the scanned Python exactly; the build runs on the closest one, "
             "so a pin resolved against your Python may not resolve against the build's"
         )
+    # The release the importer refused, so the empty version field has a reason.
+    dropped = report.get("droppedComfyVersion")
+    if dropped:
+        lines.append(f"the ComfyUI release {str(dropped)!r} is not a ref the build can use, so none was set")
     for key, meaning in _REPORT_ADVISORIES:
         entries = report.get(key) or []
-        if entries:
+        # Every one of these is a list; a scalar would render one line per character.
+        if entries and isinstance(entries, list | tuple):
             lines.append(f"{len(entries)} {meaning}: {', '.join(str(e) for e in entries[:8])}")
     return lines
 
@@ -1147,18 +1153,24 @@ def _create_execute(
     except (urllib.error.URLError, requests.RequestException, KeyError, ValueError) as e:
         renderer.warn(f"the builder could not read the definition's pins ({e}); they go to the cut unchecked")
     else:
-        for line in report_advisories(imported.get("report") or {}):
+        imported_report = imported.get("report") or {}
+        for line in report_advisories(imported_report):
             renderer.warn(line)
         checked = (imported.get("definition") or {}).get("customNodes")
         if checked is not None:
             # A pack it could not vouch for is absent from what it returns, and
             # an image quietly missing a pack is worse than a refused create.
             kept = {n.get("name") for n in checked}
-            dropped = [n for n in declared if n not in kept]
-            if dropped:
+            # A collision is the importer resolving a conflict the cut would refuse
+            # outright, so its definition is the buildable one and stopping would
+            # help nobody. Every other absence means the user asked for something
+            # that does not exist, which only they can fix.
+            colliding = set(imported_report.get("collidingNodes") or [])
+            missing = [n for n in declared if n not in kept and n not in colliding]
+            if missing:
                 renderer.error(
                     code="distribution_registry_pin_missing",
-                    message="the builder could not resolve these custom nodes: " + ", ".join(sorted(dropped)),
+                    message="the builder could not resolve these custom nodes: " + ", ".join(sorted(missing)),
                     hint="see the advisories above; edit the definition to name a published version, or remove the pack",
                 )
                 raise typer.Exit(code=1)
