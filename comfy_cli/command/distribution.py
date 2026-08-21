@@ -654,7 +654,11 @@ def plan_create(definition: dict, resolver=resolve_model_source) -> dict:
         if m.get("sha256"):
             entry["sha256"] = m["sha256"]
         uri = resolver(m)
-        if uri:
+        # A blob the caller already holds is a source, so it is neither resolved
+        # nor uploaded again: re-uploading would orphan the bytes it replaced.
+        if m.get("blobId"):
+            entry["blobId"] = m["blobId"]
+        elif uri:
             entry["sourceUri"] = uri
         else:
             # `slot` points at the builder-definition entry this upload fills, so
@@ -1505,6 +1509,59 @@ def update_cmd(
     if renderer.is_pretty():
         renderer.success(f"Updated distribution {distribution_id}")
     renderer.emit(dist, command="distribution update", changed=True)
+
+
+@app.command("blob-upload", help="Upload a private file and print the blobId a definition can reference.")
+@tracking.track_command("distribution")
+def blob_upload_cmd(
+    path: Annotated[str, typer.Argument(help="File to upload.")],
+    kind: Annotated[str, typer.Option("--kind", help="What the file is: model or node_zip.")] = "model",
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
+    renderer = get_renderer()
+    if kind not in ("model", "node_zip"):
+        renderer.error(
+            code="distribution_definition_invalid",
+            message=f"unknown blob kind {kind!r}",
+            hint="use --kind model or --kind node_zip",
+        )
+        raise typer.Exit(code=1)
+    file_path = Path(path).expanduser()
+    if not file_path.is_file():
+        renderer.error(
+            code="distribution_models_dir_missing",
+            message=f"no file at {file_path}",
+            details={"path": str(file_path)},
+        )
+        raise typer.Exit(code=1)
+
+    client = _builder_client(renderer, builder_url)
+    size_bytes = file_path.stat().st_size
+    sha256 = _sha256_file(file_path)
+    blob_id, upload_url = _builder_call(renderer, lambda: client.create_blob(kind, file_path.name, sha256, size_bytes))
+    _builder_call(renderer, lambda: client.upload_blob(upload_url, file_path))
+    if renderer.is_pretty():
+        renderer.success(f"Uploaded {file_path.name} as {blob_id}")
+        renderer.info(f'reference it in a definition as "blobId": "{blob_id}", then `comfy distribution update`')
+    renderer.emit(
+        {"blobId": blob_id, "kind": kind, "filename": file_path.name, "sha256": sha256, "sizeBytes": size_bytes},
+        command="distribution blob-upload",
+        changed=True,
+    )
+
+
+@app.command("blobs", help="List the workspace's uploaded private files.")
+@tracking.track_command("distribution")
+def blobs_cmd(
+    kind: Annotated[str | None, typer.Option("--kind", help="Filter by kind: model or node_zip.")] = None,
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
+    renderer = get_renderer()
+    client = _builder_client(renderer, builder_url)
+    blobs = _builder_call(renderer, lambda: client.list_blobs(kind))
+    if renderer.is_pretty():
+        renderer.console().print_json(json.dumps(blobs))
+    renderer.emit({"blobs": blobs}, command="distribution blobs")
 
 
 @app.command("resolve", help="Resolve model filenames to public download candidates (HF/CivitAI).")

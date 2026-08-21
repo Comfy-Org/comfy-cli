@@ -1329,3 +1329,27 @@ def test_update_refuses_what_it_cannot_upload(monkeypatch):
     with pytest.raises(typer.Exit) as e:
         distribution.update_cmd("d1", from_="ignored.json")
     assert e.value.exit_code == 1
+
+
+# --- blobs: a private file is uploaded once and referenced by id ---------------
+
+
+def test_plan_create_keeps_a_model_blob_reference():
+    """A model the caller already uploaded names its blob. Re-uploading it would
+    orphan the bytes it replaced and spend the transfer twice."""
+    plan = distribution.plan_create(
+        {"models": [{"type": "vae", "filename": "ae.safetensors", "sha256": "def", "blobId": "blob-9"}]}
+    )
+    assert plan["definition"]["models"][0]["blobId"] == "blob-9"
+    assert plan["upload_count"] == 0
+
+
+def test_a_definition_naming_only_blobs_goes_through_update_untouched():
+    """Every member names a builder source, so update has nothing to map and sends
+    the file as written."""
+    assert not distribution._is_scan_shaped(
+        {
+            "models": [{"type": "vae", "filename": "ae.safetensors", "blobId": "blob-9"}],
+            "customNodes": [{"name": "priv", "blobId": "blob-1"}],
+        }
+    )
