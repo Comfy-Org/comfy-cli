@@ -59,7 +59,7 @@ Three rules:
    and use the successor.
 2. **Verify before denying.** A missing `knowledge` key or a `nudge` means
    nothing is curated for that query, not that it is unsupported. Check the
-   unfiltered live list (`templates ls`, `nodes search`, `generate list`)
+   live list (`templates ls`, `nodes search <term>`, `generate list`)
    before telling the user something cannot be done.
 3. **Live beats knowledge.** Schemas, enums, and template contents in `data`
    are authoritative. When a `pitfalls` or `corrections` entry disagrees with

@@ -43,6 +43,7 @@ MAX_MODELS_BRIEF = 20
 MAX_PICKS = 8
 MAX_LIST_ITEMS = 8
 MAX_BLOCK_BYTES = 8192
+MAX_QUERY_CHARS = 200  # CLI text is unbounded; the clip bounds the prefix walk and the nudge echo
 
 REASON_ENV_FILE = "COMFY_KNOWLEDGE_FILE is set but could not be loaded"
 REASON_NO_URL = "no cache and COMFY_KNOWLEDGE_URL is not set"
@@ -105,14 +106,16 @@ def load_bundle(*, force_fetch: bool = False, cache_only: bool = False) -> Bundl
     Memoized per process; ``force_fetch=True`` re-runs the load and skips the
     cache TTL gate so a fetch happens whenever ``COMFY_KNOWLEDGE_URL`` is set.
     ``cache_only=True`` never touches the network: env file, then any cache
-    (fresh or stale), else ``None``. The memo is shared either way.
+    (fresh or stale), else ``None``. The memo is shared, except that a
+    cache-only miss is not memoized so a later full load can still fetch.
     """
     global _MEMO, _LAST_REASON
     if _MEMO is not None and not force_fetch:
         return _MEMO[0]
     bundle, reason = _load(force_fetch=force_fetch, cache_only=cache_only)
-    _MEMO = (bundle,)
-    _LAST_REASON = reason
+    if bundle is not None or not cache_only:
+        _MEMO = (bundle,)
+        _LAST_REASON = reason
     return bundle
 
 
@@ -127,6 +130,8 @@ def _normalized_map(keys: dict[str, str]) -> dict[str, str]:
     ambiguous: set[str] = set()
     for key, target in keys.items():
         norm = _normalize(key)
+        if not norm:
+            continue
         if out.setdefault(norm, target) != target:
             ambiguous.add(norm)
     for norm in ambiguous:
@@ -401,9 +406,9 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
             if isinstance(p, dict) and isinstance(p.get("template"), str) and isinstance(p.get("model"), str):
                 _append_unique(templates, p["template"], p["model"])
 
-    capability_keys: dict[str, str] = {}
+    capability_keys: dict[str, str] = {cid: cid for cid in capabilities}
     for cid, cap in capabilities.items():
-        for alias in (cid, *_str_list(cap.get("aliases"))):
+        for alias in _str_list(cap.get("aliases")):
             if alias:
                 capability_keys.setdefault(alias, cid)
 
@@ -446,9 +451,9 @@ def _lookup(bundle: Bundle, queries: Iterable[str]) -> tuple[list[tuple[str, str
     seen: set[str] = set()
     caps: list[str] = []
     for q in queries:
-        q_key = _normalize(q)
-        matched = q_key
-        mid = bundle.aliases.get(q.strip().lower())
+        exact = q.strip().lower()
+        matched = exact
+        mid = bundle.aliases.get(exact)
         if mid is None:
             for prefix in _model_keys(q):
                 mid = bundle.normalized_aliases.get(prefix)
@@ -458,7 +463,7 @@ def _lookup(bundle: Bundle, queries: Iterable[str]) -> tuple[list[tuple[str, str
         if mid is not None and mid not in seen:
             seen.add(mid)
             models.append((mid, matched))
-        cid = bundle.normalized_capabilities.get(q_key) if q_key else None
+        cid = exact if exact in bundle.capabilities else bundle.normalized_capabilities.get(_normalize(q))
         if cid is not None and cid not in caps:
             caps.append(cid)
     return models, caps
@@ -486,12 +491,12 @@ def _model_entry(bundle: Bundle, model_id: str, row: dict, *, matched_on: str, b
         entry["superseded_by"] = superseded_by
     if isinstance(dep.get("deprecated_on"), str) and dep["deprecated_on"]:
         entry["deprecated_on"] = dep["deprecated_on"]
-    if best_for := _str_list(row.get("best_for")):
+    if best_for := _str_list(row.get("best_for"))[:MAX_LIST_ITEMS]:
         entry["best_for"] = best_for
     if brief:
         return entry
     for key in ("not_for", "never_confuse_with"):
-        if values := _str_list(row.get(key)):
+        if values := _str_list(row.get(key))[:MAX_LIST_ITEMS]:
             entry[key] = values
     routing_raw = row.get("routing")
     routing = (
@@ -596,7 +601,7 @@ def attach(
         bundle = load_bundle(cache_only=True)
         if bundle is None:
             return
-        query_list = [q for q in queries if isinstance(q, str) and q.strip()]
+        query_list = [q.strip()[:MAX_QUERY_CHARS] for q in queries if isinstance(q, str) and q.strip()]
         model_hits, cap_hits = _lookup(bundle, query_list)
         seen = {mid for mid, _ in model_hits}
         for ids, index in ((templates, bundle.templates), (nodes, bundle.nodes)):
@@ -630,9 +635,10 @@ def attach(
             "hit_ids": [],
             "zero_hit": False,
         }
+        had_hits = bool(entries or picks)
         _fit(block)
         if not block["models"] and not block["picks"]:
-            if not (thin and query_list):
+            if had_hits or not (thin and query_list):
                 return
             block["zero_hit"] = True
             block["nudge"] = (

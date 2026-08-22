@@ -87,6 +87,6 @@
       "type": "object",
       "description": "Full verbatim Asset object from the server (show)."
     },
-    "knowledge": { "$ref": "knowledge_block.json", "description": "Curated model knowledge matching this call; absent when no bundle is loaded or nothing matched." }
+    "knowledge": { "$ref": "knowledge_block.json", "description": "Curated model knowledge matching this call; absent when no bundle is loaded or nothing matched, except that an empty result with no match carries zero_hit and a nudge." }
   }
 }

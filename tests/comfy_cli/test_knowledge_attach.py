@@ -114,6 +114,12 @@ class TestLookup:
         assert p["knowledge"]["models"][0]["id"] == "kling"
         assert p["knowledge"]["models"][0]["matched_on"] == "KlingImage2VideoNode"
 
+    def test_capability_id_beats_a_foreign_alias(self):
+        data = {"models": {}, "capabilities": {"lipsync": {"aliases": ["upscale", "---"]}, "upscale": {}}}
+        b = knowledge._index(data, None, source="env", stale=False, path="x", mtime=0.0)
+        assert knowledge._lookup(b, ["upscale"]) == ([], ["upscale"])
+        assert knowledge._lookup(b, ["!!!"]) == ([], [])
+
     def test_direct_alias_hit_keeps_its_matched_on_over_reverse_hit(self):
         p = _attach(queries=["kling"], nodes=["KlingImage2VideoNode"])
         models = p["knowledge"]["models"]
@@ -127,7 +133,8 @@ class TestLookup:
         assert k["hit_ids"] == ["kling", "cap:lipsync"]
 
     def test_deprecation_fields_come_from_the_deprecations_list(self):
-        entry = _attach(queries=["kling-avatar-2"])["knowledge"]["models"][0]
+        entry = _attach(queries=["Kling Avatar 2.0"])["knowledge"]["models"][0]
+        assert entry["matched_on"] == "kling avatar 2.0"
         assert entry["status"] == "deprecated"
         assert entry["superseded_by"] == "sync-3"
         assert entry["deprecated_on"] == "2026-08-05"
@@ -202,6 +209,7 @@ class TestCaps:
     def test_byte_ceiling_can_empty_the_block(self, monkeypatch):
         monkeypatch.setattr(knowledge, "MAX_BLOCK_BYTES", 10)
         assert "knowledge" not in _attach(queries=["kling"])
+        assert "knowledge" not in _attach(queries=["kling"], thin=True)
 
     def test_max_list_items(self, monkeypatch):
         monkeypatch.setattr(knowledge, "MAX_LIST_ITEMS", 2)
@@ -209,6 +217,8 @@ class TestCaps:
         assert len(entry["pitfalls"]) <= 2
         entry = _attach(queries=["ace-step-1-5"])["knowledge"]["models"][0]
         assert len(entry["routing"]) <= 2
+        entry = _attach(queries=["minimax-h3"])["knowledge"]["models"][0]
+        assert len(entry["best_for"]) == 2
 
     def test_max_picks(self, monkeypatch):
         monkeypatch.setattr(knowledge, "MAX_PICKS", 2)
@@ -240,6 +250,12 @@ class TestNudge:
     def test_nudge_uses_first_non_blank_query(self):
         k = _attach(queries=["  ", "faceswap", "other"], thin=True)["knowledge"]
         assert "'faceswap'" in k["nudge"]
+
+    def test_nudge_stays_under_byte_ceiling_for_a_huge_query(self):
+        k = _attach(queries=["x-" * 4500], thin=True)["knowledge"]
+        assert k["zero_hit"] is True
+        assert len(json.dumps(k)) <= knowledge.MAX_BLOCK_BYTES
+        assert "lipsync" in k["nudge"]
 
     def test_not_thin_means_no_key(self):
         assert "knowledge" not in _attach(queries=["faceswap"], thin=False)
@@ -287,6 +303,12 @@ class TestCacheOnly:
         assert p["knowledge"]["models"][0]["id"] == "kling"
 
     def test_default_load_still_fetches(self, http_calls):
+        knowledge.load_bundle()
+        assert http_calls == ["https://example.invalid/knowledge.json"]
+
+    def test_cache_only_miss_does_not_poison_a_later_full_load(self, http_calls):
+        assert knowledge.load_bundle(cache_only=True) is None
+        assert http_calls == []
         knowledge.load_bundle()
         assert http_calls == ["https://example.invalid/knowledge.json"]
 
