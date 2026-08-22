@@ -99,16 +99,18 @@ def ttl_seconds() -> float:
     return max(ttl, 0.0) if math.isfinite(ttl) else DEFAULT_TTL_SECONDS
 
 
-def load_bundle(*, force_fetch: bool = False) -> Bundle | None:
+def load_bundle(*, force_fetch: bool = False, cache_only: bool = False) -> Bundle | None:
     """Return the indexed bundle, or ``None`` when no usable bundle exists.
 
     Memoized per process; ``force_fetch=True`` re-runs the load and skips the
     cache TTL gate so a fetch happens whenever ``COMFY_KNOWLEDGE_URL`` is set.
+    ``cache_only=True`` never touches the network: env file, then any cache
+    (fresh or stale), else ``None``. The memo is shared either way.
     """
     global _MEMO, _LAST_REASON
     if _MEMO is not None and not force_fetch:
         return _MEMO[0]
-    bundle, reason = _load(force_fetch=force_fetch)
+    bundle, reason = _load(force_fetch=force_fetch, cache_only=cache_only)
     _MEMO = (bundle,)
     _LAST_REASON = reason
     return bundle
@@ -178,7 +180,7 @@ def _rank_key(p: dict) -> tuple[int, float]:
 # ---------------------------------------------------------------------------
 
 
-def _load(*, force_fetch: bool) -> tuple[Bundle | None, str | None]:
+def _load(*, force_fetch: bool, cache_only: bool = False) -> tuple[Bundle | None, str | None]:
     env_file = os.environ.get(ENV_FILE, "").strip()
     if env_file:
         path = Path(env_file)
@@ -193,7 +195,7 @@ def _load(*, force_fetch: bool) -> tuple[Bundle | None, str | None]:
             return bundle, None
 
     url = os.environ.get(ENV_URL, "").strip()
-    if url:
+    if url and not cache_only:
         bundle = _fetch(url, knowledge_path, manifest_path)
         if bundle is not None:
             return bundle, None
@@ -560,7 +562,7 @@ def _fit(block: dict) -> None:
             if p["capability"] not in caps:
                 caps.append(p["capability"])
         block["hit_ids"] = [m["id"] for m in block["models"]] + [f"cap:{c}" for c in caps]
-        if len(json.dumps(block, separators=(",", ":"))) <= MAX_BLOCK_BYTES:
+        if len(json.dumps(block)) <= MAX_BLOCK_BYTES:
             return
         if block["models"]:
             block["models"].pop()
@@ -591,7 +593,7 @@ def attach(
     exactly as it was.
     """
     try:
-        bundle = load_bundle()
+        bundle = load_bundle(cache_only=True)
         if bundle is None:
             return
         query_list = [q for q in queries if isinstance(q, str) and q.strip()]

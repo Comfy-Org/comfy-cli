@@ -193,7 +193,7 @@ class TestCaps:
         assert full["models"] and full["picks"]
         monkeypatch.setattr(knowledge, "MAX_BLOCK_BYTES", 600)
         k = _attach(queries=["kling", "Lip Sync"])["knowledge"]
-        assert len(json.dumps(k, separators=(",", ":"))) <= 600
+        assert len(json.dumps(k)) <= 600
         assert k["models"] == []
         assert 0 < len(k["picks"]) < len(full["picks"])
         assert k["hit_ids"] == ["cap:lipsync"]
@@ -247,6 +247,48 @@ class TestNudge:
     def test_thin_without_queries_means_no_key(self):
         assert "knowledge" not in _attach(queries=[], thin=True)
         assert "knowledge" not in _attach(templates=["nope"], thin=True)
+
+
+class TestCacheOnly:
+    @pytest.fixture
+    def http_calls(self, monkeypatch):
+        calls: list[str] = []
+
+        def _record(url: str) -> bytes:
+            calls.append(url)
+            raise AssertionError(f"network touched: {url}")
+
+        monkeypatch.delenv(knowledge.ENV_FILE)
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.invalid/knowledge.json")
+        monkeypatch.setattr(knowledge, "_http_get", _record)
+        knowledge._reset_for_testing()
+        return calls
+
+    def test_url_and_empty_cache_never_fetches(self, http_calls):
+        p: dict = {"count": 0}
+        knowledge.attach(p, queries=["kling"], thin=True)
+        assert http_calls == []
+        assert p == {"count": 0}
+
+    def test_stale_cache_still_enriches_without_fetching(self, http_calls, monkeypatch):
+        import os
+        import shutil
+        import time
+
+        k_path, m_path = knowledge.cache_paths()
+        k_path.parent.mkdir(parents=True)
+        shutil.copy(FIXTURE_KNOWLEDGE, k_path)
+        shutil.copy(FIXTURE_KNOWLEDGE.parent / "manifest.json", m_path)
+        old = time.time() - 2 * knowledge.DEFAULT_TTL_SECONDS
+        os.utime(k_path, (old, old))
+        p = _attach(queries=["kling"])
+        assert http_calls == []
+        assert p["knowledge"]["stale"] is True
+        assert p["knowledge"]["models"][0]["id"] == "kling"
+
+    def test_default_load_still_fetches(self, http_calls):
+        knowledge.load_bundle()
+        assert http_calls == ["https://example.invalid/knowledge.json"]
 
 
 class TestFailOpen:

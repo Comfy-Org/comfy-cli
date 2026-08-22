@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/models.json",
   "title": "comfy models *",
   "description": "Output shape for model discovery commands (search, show, list-folders, list-folder). All subcommands share this schema; each field is optional because the payload varies per subcommand.",
   "type": "object",

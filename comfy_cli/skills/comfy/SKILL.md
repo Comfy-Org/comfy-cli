@@ -50,6 +50,7 @@ Discovery commands (`generate schema|list`, `templates ls|show|get`,
 `data`: `models[]` (per-model `status`, `tier`, `route`, `best_for`,
 `pitfalls`, `routing`, `warnings`, `superseded_by`), `picks[]` (ranked
 models per capability, rank 1 first), and on an empty result a `nudge`.
+Enrichment reads the cached bundle only; `comfy knowledge status` refreshes it.
 Three rules:
 
 1. **Which model is a data question.** Read `knowledge.picks` and
