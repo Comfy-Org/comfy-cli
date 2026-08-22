@@ -48,7 +48,7 @@
         "type": "object",
         "properties": {
           "capability": { "type": "string" },
-          "rank": { "type": ["integer", "null"] },
+          "rank": { "type": ["number", "null"], "description": "Rank as `comfy knowledge pick` reports it; 1 is the current recommendation." },
           "model": { "type": ["string", "null"] },
           "route": { "type": ["string", "null"] },
           "template": { "type": ["string", "null"] },
