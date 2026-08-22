@@ -22,8 +22,8 @@ jobs:
   hygiene:
     permissions:
       contents: read
-    uses: Comfy-Org/github-workflows/.github/workflows/public-repo-hygiene.yml@aad06972e20732d6a9167552c5b3247c4f5bac58 # github-workflows main (aad0697)
+    uses: Comfy-Org/github-workflows/.github/workflows/public-repo-hygiene.yml@4df9bf684ee45d5baf2a49d2068685ce780a8609 # github-workflows main (4df9bf6)
     with:
       # REQUIRED, and must equal the `uses:` SHA above — the reusable asserts
       # they match, which is what pins the checker to the reviewed commit.
-      workflows_ref: aad06972e20732d6a9167552c5b3247c4f5bac58
+      workflows_ref: 4df9bf684ee45d5baf2a49d2068685ce780a8609
