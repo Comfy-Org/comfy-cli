@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://comfy.org/schemas/knowledge_block.json",
   "title": "knowledge block",
-  "description": "Curated model knowledge attached as `data.knowledge` by discovery commands (generate schema|list, templates ls|show|get, nodes search|ls, models search). Absent when no bundle is loaded or nothing matched. Every field is optional; readers must ignore unknown fields.",
+  "description": "Curated model knowledge attached as `data.knowledge` by discovery commands (generate schema|list, templates ls|show|get, nodes search|ls, models search). Absent when no bundle is loaded or nothing matched, except that an empty result with no match carries zero_hit and a nudge. Every field is optional; readers must ignore unknown fields.",
   "type": "object",
   "properties": {
     "bundle_version": { "type": "string", "description": "Version of the comfy-knowledge bundle the block came from." },
