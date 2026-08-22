@@ -198,7 +198,7 @@
         }
       ],
       "status": "recommended",
-      "tier": "recommendation",
+      "tier": "canon",
       "verified_at": "2026-08-05",
       "visibility": "internal"
     },
@@ -289,7 +289,7 @@
       "route": "partner",
       "status": "deprecated",
       "superseded_by": "sync-3",
-      "tier": "recommendation",
+      "tier": "canon",
       "verified_at": "2026-08-05",
       "visibility": "internal"
     },
@@ -497,7 +497,7 @@
         }
       ],
       "status": "recommended",
-      "tier": "recommendation",
+      "tier": "canon",
       "verified_at": "2026-08-05",
       "visibility": "internal",
       "warnings": [
