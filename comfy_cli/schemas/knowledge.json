@@ -10,10 +10,10 @@
     "stale": { "type": "boolean", "description": "True when served from an expired cache after a failed fetch." },
     "version": { "type": "string", "description": "Bundle version from manifest.json, or 'unknown' (status)." },
     "schema_version": { "type": "integer", "description": "Bundle schema version the loader accepts (status)." },
-    "as_of": { "type": "string", "description": "ISO-8601 UTC timestamp: file mtime (status) or the capability's as_of (pick)." },
+    "as_of": { "type": ["string", "null"], "description": "ISO-8601 UTC timestamp: file mtime (status) or the capability's as_of, null when the capability has none (pick)." },
     "path": { "type": "string", "description": "File the bundle bytes were read from (status)." },
     "env_file": { "type": ["string", "null"], "description": "Value of COMFY_KNOWLEDGE_FILE (status)." },
-    "url": { "type": ["string", "null"], "description": "Value of COMFY_KNOWLEDGE_URL (status)." },
+    "url": { "type": ["string", "null"], "description": "Value of COMFY_KNOWLEDGE_URL with userinfo, query and fragment removed (status)." },
     "ttl_seconds": { "type": "number", "description": "Cache TTL in effect (status)." },
     "cache_path": { "type": "string", "description": "Where a fetched bundle is cached (status)." },
     "counts": {
@@ -27,15 +27,15 @@
     "deprecation": { "type": ["object", "null"], "description": "Matching deprecations entry, if any (resolve)." },
     "bundle_version": { "type": "string", "description": "Bundle version the answer came from (resolve, pick)." },
     "capability": { "type": "string", "description": "Capability id (pick)." },
-    "description": { "type": "string", "description": "Capability description (pick)." },
+    "description": { "type": ["string", "null"], "description": "Capability description, null when the capability has none (pick)." },
     "picks": {
       "type": "array",
       "description": "Ranked picks, rank ascending (pick).",
       "items": {
         "type": "object",
         "properties": {
-          "rank": { "type": ["integer", "null"] },
-          "model": { "type": "string" },
+          "rank": { "type": ["number", "null"] },
+          "model": { "type": ["string", "null"] },
           "route": { "type": ["string", "null"] },
           "template": { "type": ["string", "null"] },
           "caveat": { "type": ["string", "null"] },

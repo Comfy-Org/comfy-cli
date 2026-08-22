@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -87,7 +88,7 @@ def ttl_seconds() -> float:
         ttl = float(raw)
     except ValueError:
         return DEFAULT_TTL_SECONDS
-    return max(ttl, 0.0)
+    return max(ttl, 0.0) if math.isfinite(ttl) else DEFAULT_TTL_SECONDS
 
 
 def load_bundle(*, force_fetch: bool = False) -> Bundle | None:
@@ -123,12 +124,18 @@ def _normalized_map(keys: dict[str, str]) -> dict[str, str]:
     return out
 
 
-def resolve(bundle: Bundle, query: str) -> dict | None:
+def resolve_id(bundle: Bundle, query: str) -> str | None:
+    """Model id for an alias or id; ``None`` unless that id has a row."""
     q = query.strip().lower()
     model_id = bundle.aliases.get(q)
     if model_id is None:
         model_id = bundle.normalized_aliases.get(_normalize(q))
-    return bundle.models.get(model_id) if model_id is not None else None
+    return model_id if model_id in bundle.models else None
+
+
+def resolve(bundle: Bundle, query: str) -> dict | None:
+    model_id = resolve_id(bundle, query)
+    return bundle.models[model_id] if model_id is not None else None
 
 
 def pick(bundle: Bundle, capability: str) -> dict | None:
@@ -145,11 +152,17 @@ def pick(bundle: Bundle, capability: str) -> dict | None:
     return out
 
 
-def _rank_key(p: dict) -> tuple[int, float]:
+def pick_rank(p: dict) -> int | float | None:
+    """The pick's numeric ``rank``; ``None`` when missing or not a number."""
     rank = p.get("rank")
-    if isinstance(rank, int | float) and not isinstance(rank, bool):
-        return (0, rank)
-    return (1, 0.0)
+    if isinstance(rank, bool) or not isinstance(rank, int | float) or not math.isfinite(rank):
+        return None
+    return rank
+
+
+def _rank_key(p: dict) -> tuple[int, float]:
+    rank = pick_rank(p)
+    return (0, rank) if rank is not None else (1, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -165,16 +178,11 @@ def _load(*, force_fetch: bool) -> tuple[Bundle | None, str | None]:
         return bundle, (None if bundle else REASON_ENV_FILE)
 
     knowledge_path, manifest_path = cache_paths()
-    ttl = ttl_seconds()
-    if not force_fetch and ttl > 0:
-        try:
-            age = time.time() - knowledge_path.stat().st_mtime
-        except OSError:
-            age = None
-        if age is not None and 0 <= age < ttl:
-            bundle = _load_file(knowledge_path, manifest_path, source="cache")
-            if bundle is not None:
-                return bundle, None
+    fresh = _cache_is_fresh(knowledge_path)
+    if fresh and not force_fetch:
+        bundle = _load_file(knowledge_path, manifest_path, source="cache")
+        if bundle is not None:
+            return bundle, None
 
     url = os.environ.get(ENV_URL, "").strip()
     if url:
@@ -182,10 +190,22 @@ def _load(*, force_fetch: bool) -> tuple[Bundle | None, str | None]:
         if bundle is not None:
             return bundle, None
 
-    bundle = _load_file(knowledge_path, manifest_path, source="stale-cache", stale=True)
+    source = "cache" if fresh else "stale-cache"
+    bundle = _load_file(knowledge_path, manifest_path, source=source, stale=not fresh)
     if bundle is not None:
         return bundle, None
     return None, (REASON_FETCH_FAILED if url else REASON_NO_URL)
+
+
+def _cache_is_fresh(path: Path) -> bool:
+    ttl = ttl_seconds()
+    if ttl <= 0:
+        return False
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        return False
+    return 0 <= age < ttl
 
 
 def _load_file(path: Path, manifest_path: Path, *, source: str, stale: bool = False) -> Bundle | None:
@@ -219,13 +239,13 @@ def _fetch(url: str, knowledge_path: Path, manifest_path: Path) -> Bundle | None
     if data is None:
         return None
     try:
+        # The old manifest's sha256 would reject the new bytes if the manifest
+        # write below fails or a reader lands between the two writes; an absent
+        # manifest only skips the check.
+        manifest_path.unlink(missing_ok=True)
         atomic_write_bytes(knowledge_path, raw)
         if manifest_raw is not None:
             atomic_write_bytes(manifest_path, manifest_raw)
-        else:
-            # A leftover manifest from an earlier fetch would fail the sha check
-            # against the new bytes and make the cache unreadable until the next fetch.
-            manifest_path.unlink(missing_ok=True)
     except OSError:
         pass
     return _index(data, manifest, source="fetch", stale=False, path=str(knowledge_path), mtime=time.time())
@@ -244,6 +264,8 @@ def _http_get(url: str) -> bytes:
         req = urllib.request.Request(url, headers={"User-Agent": "comfy-cli"})
         opened = plain_urlopen(req, timeout=FETCH_TIMEOUT_SECONDS)
     with opened as resp:
+        # plain_urlopen follows redirects; the final hop must stay https too.
+        assert_safe_url(resp.url)
         if resp.status != 200:
             raise RuntimeError(f"knowledge fetch failed: HTTP {resp.status}")
         return read_capped(resp, url, max_bytes=MAX_BUNDLE_BYTES)
@@ -298,14 +320,17 @@ def _append_unique(index: dict[str, list[str]], key: str, model_id: str) -> None
 def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path: str, mtime: float) -> Bundle:
     models = {mid: row for mid, row in data["models"].items() if isinstance(mid, str) and isinstance(row, dict)}
 
+    # Exact ids first so no alias can shadow a model's own id; then the compiled
+    # alias map, which wins over row-level aliases.
     aliases: dict[str, str] = {}
+    for mid in models:
+        aliases.setdefault(mid.lower(), mid)
     compiled = data.get("aliases")
     if isinstance(compiled, dict):
         for alias, mid in compiled.items():
             if isinstance(alias, str) and isinstance(mid, str):
                 aliases.setdefault(alias.lower(), mid)
     for mid, row in models.items():
-        aliases.setdefault(mid.lower(), mid)
         for alias in _str_list(row.get("aliases")):
             aliases.setdefault(alias.lower(), mid)
 

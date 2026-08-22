@@ -24,12 +24,22 @@ app = typer.Typer(no_args_is_help=True, help="Inspect the curated model-knowledg
 
 
 def _env_context() -> dict[str, Any]:
+    url = os.environ.get(knowledge.ENV_URL, "").strip()
     return {
         "env_file": os.environ.get(knowledge.ENV_FILE, "").strip() or None,
-        "url": os.environ.get(knowledge.ENV_URL, "").strip() or None,
+        # Userinfo, query and fragment can carry a token; the path still shows which bundle is configured.
+        "url": tracking._scrub_value(url) if url else None,
         "ttl_seconds": knowledge.ttl_seconds(),
         "cache_path": str(knowledge.cache_paths()[0]),
     }
+
+
+def _items(value: Any) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _text(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _require_bundle(renderer) -> knowledge.Bundle:
@@ -93,9 +103,9 @@ def resolve_cmd(
 ):
     renderer = get_renderer()
     bundle = _require_bundle(renderer)
-    q = query.strip().lower()
-    row = knowledge.resolve(bundle, query)
-    if row is None:
+    model_id = knowledge.resolve_id(bundle, query)
+    if model_id is None:
+        q = query.strip().lower()
         renderer.error(
             code="knowledge_unknown_model",
             message=f"no knowledge row matches {query!r}",
@@ -106,7 +116,7 @@ def resolve_cmd(
             },
         )
         raise typer.Exit(code=1)
-    model_id = row.get("id") or bundle.aliases.get(q) or bundle.normalized_aliases[knowledge._normalize(q)]
+    row = bundle.models[model_id]
     payload = {
         "query": query,
         "id": model_id,
@@ -118,9 +128,9 @@ def resolve_cmd(
     if renderer.is_pretty():
         status, route = sanitize_markup(row.get("status")), sanitize_markup(row.get("route"))
         rprint(f"[bold]{sanitize_markup(model_id)}[/bold]  status={status}  route={route}")
-        for line in row.get("best_for") or []:
+        for line in _items(row.get("best_for")):
             rprint(f"  [green]+[/green] {sanitize_markup(line)}")
-        for pitfall in row.get("pitfalls") or []:
+        for pitfall in _items(row.get("pitfalls")):
             text = pitfall.get("text") if isinstance(pitfall, dict) else pitfall
             rprint(f"  [yellow]![/yellow] {sanitize_markup(text)}")
     renderer.emit(payload, command="knowledge resolve")
@@ -145,10 +155,11 @@ def pick_cmd(
     picks = []
     for p in cap["picks"]:
         model_id = p.get("model")
-        row = bundle.models.get(model_id, {}) if isinstance(model_id, str) else {}
+        model_id = model_id if isinstance(model_id, str) else None
+        row = bundle.models.get(model_id) or {}
         picks.append(
             {
-                "rank": p.get("rank"),
+                "rank": knowledge.pick_rank(p),
                 "model": model_id,
                 "route": p.get("route"),
                 "template": p.get("template"),
@@ -158,9 +169,9 @@ def pick_cmd(
             }
         )
     payload = {
-        "capability": cap.get("id") or capability.strip().lower(),
-        "description": cap.get("description"),
-        "as_of": cap.get("as_of"),
+        "capability": _text(cap.get("id")) or capability.strip().lower(),
+        "description": _text(cap.get("description")),
+        "as_of": _text(cap.get("as_of")),
         "picks": picks,
         "bundle_version": bundle.version,
         "stale": bundle.stale,

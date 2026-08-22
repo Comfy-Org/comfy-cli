@@ -15,6 +15,7 @@ with a guard that fails the test if reached.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -30,6 +31,7 @@ from typer.testing import CliRunner
 from comfy_cli import knowledge
 from comfy_cli.caller import Caller
 from comfy_cli.command import knowledge as knowledge_cmd
+from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output.renderer import OutputMode, Renderer, set_renderer
 
 FIXTURES = Path(__file__).parent / "fixtures" / "knowledge"
@@ -240,6 +242,45 @@ class TestLoadOrder:
         assert knowledge.ttl_seconds() == 0.0
         monkeypatch.setenv(knowledge.ENV_TTL, "90")
         assert knowledge.ttl_seconds() == 90.0
+        for raw in ("nan", "inf", "-inf", "1e400"):
+            monkeypatch.setenv(knowledge.ENV_TTL, raw)
+            assert knowledge.ttl_seconds() == knowledge.DEFAULT_TTL_SECONDS
+
+    def test_force_fetch_without_a_fetch_keeps_fresh_cache_unstale(self, monkeypatch):
+        _seed_cache()
+        b = knowledge.load_bundle(force_fetch=True)
+        assert b.source == "cache"
+        assert b.stale is False
+        knowledge._reset_for_testing()
+        _fake_http(monkeypatch, knowledge_bytes=None)
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
+        b = knowledge.load_bundle(force_fetch=True)
+        assert b.source == "cache"
+        assert b.stale is False
+
+    def test_cache_survives_failed_manifest_write(self, monkeypatch):
+        _k_path, m_path = _seed_cache(age_seconds=2 * 24 * 3600)
+        new_raw = FIXTURE_KNOWLEDGE.read_bytes() + b"\n"
+        manifest = json.loads(FIXTURE_MANIFEST.read_text())
+        manifest["files"]["knowledge.json"]["sha256"] = hashlib.sha256(new_raw).hexdigest()
+        _fake_http(monkeypatch, knowledge_bytes=new_raw, manifest_bytes=json.dumps(manifest).encode())
+        real_write = knowledge.atomic_write_bytes
+
+        def flaky_write(path, data, **kw):
+            if path.name == "manifest.json":
+                raise OSError("disk full")
+            real_write(path, data, **kw)
+
+        monkeypatch.setattr(knowledge, "atomic_write_bytes", flaky_write)
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
+        assert knowledge.load_bundle().source == "fetch"
+        assert not m_path.exists()
+        knowledge._reset_for_testing()
+        monkeypatch.delenv(knowledge.ENV_URL)
+        b = knowledge.load_bundle()
+        assert b is not None
+        assert b.source == "cache"
+        assert b.version == "unknown"
 
     def test_memo_and_force_fetch(self, monkeypatch):
         _seed_cache()
@@ -257,9 +298,10 @@ class TestLoadOrder:
 
 class TestAuthRouting:
     @staticmethod
-    def _fake_resp(body: bytes):
+    def _fake_resp(body: bytes, final_url: str = "https://example.com/knowledge.json"):
         class _Resp:
             status = 200
+            url = final_url
 
             def __enter__(self):
                 return self
@@ -323,7 +365,14 @@ class TestAuthRouting:
             knowledge._http_get("https://example.com/knowledge.json")
         monkeypatch.setattr(knowledge, "MAX_BUNDLE_BYTES", 4)
         monkeypatch.setattr(knowledge, "plain_urlopen", lambda req, **kw: self._fake_resp(b"x" * 10))
-        with pytest.raises(Exception):
+        with pytest.raises(ResponseTooLarge):
+            knowledge._http_get("https://example.com/knowledge.json")
+
+    def test_plain_fetch_rejects_redirect_to_http(self, monkeypatch):
+        monkeypatch.setattr(knowledge, "_http_get", _REAL_HTTP_GET)
+        resp = self._fake_resp(b"{}", final_url="http://mirror.example/knowledge.json")
+        monkeypatch.setattr(knowledge, "plain_urlopen", lambda req, **kw: resp)
+        with pytest.raises(ValueError):
             knowledge._http_get("https://example.com/knowledge.json")
 
 
@@ -391,11 +440,34 @@ class TestIndex:
         assert knowledge.resolve(bundle, "Kling-Avatar-2")["id"] == "kling-avatar-2"
         assert knowledge.resolve(bundle, "nope-xyz") is None
 
-    def test_resolve_accepts_spelling_variants(self, bundle):
-        for query in ("Hailuo 3", "hailuo3", "HAILUO-03", "Mini Max H3", "sync.3"):
-            assert knowledge.resolve(bundle, query)["id"] == "minimax-h3" if "sync" not in query else True
-        assert knowledge.resolve(bundle, "sync.3")["id"] == "sync-3"
-        assert knowledge.resolve(bundle, "klingg") is None
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            ("Hailuo 3", "minimax-h3"),
+            ("hailuo3", "minimax-h3"),
+            ("HAILUO-03", "minimax-h3"),
+            ("Mini Max H3", "minimax-h3"),
+            ("sync.3", "sync-3"),
+            ("klingg", None),
+        ],
+    )
+    def test_resolve_accepts_spelling_variants(self, bundle, query, expected):
+        row = knowledge.resolve(bundle, query)
+        assert (row["id"] if row else None) == expected
+        assert knowledge.resolve_id(bundle, query) == expected
+
+    def test_model_id_beats_colliding_alias(self):
+        data = {"models": {"kling": {"id": "kling"}, "kling-3": {"id": "kling-3"}}, "aliases": {"Kling": "kling-3"}}
+        b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
+        assert b.aliases["kling"] == "kling"
+        assert knowledge.resolve(b, "KLING")["id"] == "kling"
+
+    def test_resolve_id_requires_a_row(self):
+        data = {"models": {"a": {"id": "a"}}, "aliases": {"ghost": "missing"}}
+        b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
+        assert knowledge.resolve_id(b, "ghost") is None
+        assert knowledge.resolve(b, "ghost") is None
+        assert knowledge.resolve_id(b, " A ") == "a"
 
     def test_normalize(self):
         assert knowledge._normalize("Hailuo 03") == "hailuo3"
@@ -507,6 +579,12 @@ class TestCli:
         assert data["cache_path"].endswith(os.path.join("knowledge", "knowledge.json"))
         _validate(data)
 
+    def test_status_redacts_url_credentials(self, monkeypatch, capsys):
+        monkeypatch.setenv(knowledge.ENV_URL, "https://user:secret@cdn.example/k/knowledge.json?token=abc#frag")
+        _rc, env = _run(["status"], capsys)
+        assert env["data"]["url"] == "https://cdn.example/k/knowledge.json"
+        _validate(env["data"])
+
     def test_status_refresh_forces_fetch(self, monkeypatch, capsys):
         _seed_cache()
         calls = _fake_http(monkeypatch, knowledge_bytes=FIXTURE_KNOWLEDGE.read_bytes(), manifest_bytes=None)
@@ -596,6 +674,30 @@ class TestCli:
         assert env["error"]["code"] == "knowledge_unknown_capability"
         assert env["error"]["details"]["known"] == ["audio-generation", "lipsync"]
 
+    def test_pick_payload_normalizes_rank_and_model(self, tmp_path, monkeypatch, capsys):
+        # Written as text so the bundle can carry 1e400, which json.loads turns into inf.
+        raw = (
+            '{"models": {}, "capabilities": {"c": {"id": "c", "description": ["not", "text"], "as_of": 7, "picks": ['
+            '{"model": "x", "rank": "1"}, {"model": 7, "rank": 2}, {"model": "y", "rank": 1.5}, {"model": "w", "rank": 1e400}'
+            "]}}}"
+        )
+        p = tmp_path / "k.json"
+        p.write_text(raw)
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+        rc, env = _run(["pick", "c"], capsys)
+        assert rc == 0
+        got = [(q["model"], q["rank"]) for q in env["data"]["picks"]]
+        assert got == [("y", 1.5), (None, 2), ("x", None), ("w", None)]
+        assert env["data"]["description"] is None and env["data"]["as_of"] is None
+        _validate(env["data"])
+
+    def test_resolve_pretty_tolerates_malformed_row_fields(self, tmp_path, monkeypatch, pretty_no_stdout):
+        p = tmp_path / "k.json"
+        p.write_text(json.dumps({"models": {"m": {"id": "m", "best_for": 5, "pitfalls": "ouch"}}}))
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+        result = CliRunner().invoke(knowledge_cmd.app, ["resolve", "m"], standalone_mode=False)
+        assert result.exception is None, result.exception
+
     def test_pick_without_bundle(self, capsys):
         rc, env = _run(["pick", "lipsync"], capsys)
         assert rc == 1
@@ -614,8 +716,6 @@ class TestCli:
             assert error_codes.is_registered(code)
 
     def test_fixture_manifest_matches_fixture(self):
-        import hashlib
-
         manifest = json.loads(FIXTURE_MANIFEST.read_text())
         raw = FIXTURE_KNOWLEDGE.read_bytes()
         assert manifest["files"]["knowledge.json"]["sha256"] == hashlib.sha256(raw).hexdigest()
