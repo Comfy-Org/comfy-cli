@@ -469,6 +469,10 @@ def _lookup(bundle: Bundle, queries: Iterable[str]) -> tuple[list[tuple[str, str
     return models, caps
 
 
+def _text(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
 def _texts(value: Any, key: str) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -482,9 +486,9 @@ def _model_entry(bundle: Bundle, model_id: str, row: dict, *, matched_on: str, b
     entry: dict[str, Any] = {
         "id": model_id,
         "matched_on": matched_on,
-        "status": row.get("status"),
-        "tier": row.get("tier"),
-        "route": row.get("route"),
+        "status": _text(row.get("status")),
+        "tier": _text(row.get("tier")),
+        "route": _text(row.get("route")),
     }
     superseded_by = dep.get("superseded_by") or row.get("superseded_by")
     if isinstance(superseded_by, str) and superseded_by:
@@ -529,13 +533,13 @@ def _pick_entries(bundle: Bundle, capability_id: str, *, catalog_templates: Coll
         out.append(
             {
                 "capability": capability_id,
-                "rank": p.get("rank"),
-                "model": model_id,
-                "route": p.get("route"),
+                "rank": pick_rank(p),
+                "model": _text(model_id),
+                "route": _text(p.get("route")),
                 "template": template,
-                "caveat": p.get("caveat"),
-                "status": row.get("status"),
-                "superseded_by": dep.get("superseded_by") or row.get("superseded_by"),
+                "caveat": _text(p.get("caveat")),
+                "status": _text(row.get("status")),
+                "superseded_by": _text(dep.get("superseded_by") or row.get("superseded_by")),
             }
         )
         if len(out) >= MAX_PICKS:
@@ -625,6 +629,7 @@ def attach(
         picks: list[dict] = []
         for cid in cap_hits:
             picks.extend(_pick_entries(bundle, cid, catalog_templates=catalog_templates))
+        picks = picks[:MAX_PICKS]
 
         block: dict[str, Any] = {
             "bundle_version": bundle.version,
@@ -641,10 +646,10 @@ def attach(
             if had_hits or not (thin and query_list):
                 return
             block["zero_hit"] = True
-            block["nudge"] = (
-                f"no curated knowledge for {query_list[0]!r}; "
-                f"covered capabilities: {', '.join(sorted(bundle.capabilities))}"
-            )
+            head = f"no curated knowledge for {query_list[0]!r}"
+            block["nudge"] = f"{head}; covered capabilities: {', '.join(sorted(bundle.capabilities))}"
+            if len(json.dumps(block)) > MAX_BLOCK_BYTES:
+                block["nudge"] = head
         payload["knowledge"] = block
     except Exception:  # noqa: BLE001 — knowledge is additive; the payload ships unchanged on any failure
         return

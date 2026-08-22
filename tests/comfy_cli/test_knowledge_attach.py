@@ -220,6 +220,10 @@ class TestCaps:
         entry = _attach(queries=["minimax-h3"])["knowledge"]["models"][0]
         assert len(entry["best_for"]) == 2
 
+    def test_max_picks_bounds_the_whole_block_not_one_capability(self):
+        k = _attach(queries=["lipsync", "audio-generation"])["knowledge"]
+        assert len(k["picks"]) == knowledge.MAX_PICKS
+
     def test_max_picks(self, monkeypatch):
         monkeypatch.setattr(knowledge, "MAX_PICKS", 2)
         k = _attach(queries=["lipsync"])["knowledge"]
@@ -256,6 +260,12 @@ class TestNudge:
         assert k["zero_hit"] is True
         assert len(json.dumps(k)) <= knowledge.MAX_BLOCK_BYTES
         assert "lipsync" in k["nudge"]
+
+    def test_nudge_drops_the_capability_list_rather_than_overrun(self, monkeypatch):
+        monkeypatch.setattr(knowledge, "MAX_BLOCK_BYTES", 220)
+        k = _attach(queries=["faceswap"], thin=True)["knowledge"]
+        assert k["nudge"] == "no curated knowledge for 'faceswap'"
+        assert len(json.dumps(k)) <= 220
 
     def test_not_thin_means_no_key(self):
         assert "knowledge" not in _attach(queries=["faceswap"], thin=False)
