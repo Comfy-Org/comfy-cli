@@ -84,7 +84,12 @@ def status_cmd(
 @app.command("resolve", help="Resolve a model alias or id (e.g. 'Kling 3.0', minimax-h3) to its knowledge row.")
 @tracking.track_command("knowledge")
 def resolve_cmd(
-    query: Annotated[str, typer.Argument(help="Model alias or id; case- and whitespace-insensitive.")],
+    query: Annotated[
+        str,
+        typer.Argument(
+            help="Model alias or id. Case, spacing, punctuation, and leading zeros are ignored ('Hailuo 3' == 'hailuo-03')."
+        ),
+    ],
 ):
     renderer = get_renderer()
     bundle = _require_bundle(renderer)
@@ -101,7 +106,7 @@ def resolve_cmd(
             },
         )
         raise typer.Exit(code=1)
-    model_id = bundle.aliases[q]
+    model_id = row.get("id") or bundle.aliases.get(q) or bundle.normalized_aliases[knowledge._normalize(q)]
     payload = {
         "query": query,
         "id": model_id,
@@ -153,7 +158,7 @@ def pick_cmd(
             }
         )
     payload = {
-        "capability": capability.strip().lower(),
+        "capability": cap.get("id") or capability.strip().lower(),
         "description": cap.get("description"),
         "as_of": cap.get("as_of"),
         "picks": picks,

@@ -13,10 +13,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,9 @@ class Bundle:
     aliases: dict[str, str]  # lowercased alias or model id -> model id
     templates: dict[str, list[str]]  # template id -> model ids
     nodes: dict[str, list[str]]  # node class -> model ids
+    # _normalize(alias) -> id; a key two ids would share is left out, so only the exact path decides it.
+    normalized_aliases: dict[str, str] = field(default_factory=dict)
+    normalized_capabilities: dict[str, str] = field(default_factory=dict)
 
 
 # One-element tuple so a memoized ``None`` is distinguishable from "not loaded yet".
@@ -101,13 +105,37 @@ def load_bundle(*, force_fetch: bool = False) -> Bundle | None:
     return bundle
 
 
+def _normalize(s: str) -> str:
+    """Spelling-variant key: "Hailuo 3", "hailuo-03" and "HAILUO 03" all become "hailuo3"."""
+    s = re.sub(r"(?<!\d)0+(?=\d)", "", s.lower())
+    return re.sub(r"[^a-z0-9]", "", s)
+
+
+def _normalized_map(keys: dict[str, str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for key, target in keys.items():
+        norm = _normalize(key)
+        if out.setdefault(norm, target) != target:
+            ambiguous.add(norm)
+    for norm in ambiguous:
+        del out[norm]
+    return out
+
+
 def resolve(bundle: Bundle, query: str) -> dict | None:
-    model_id = bundle.aliases.get(query.strip().lower())
+    q = query.strip().lower()
+    model_id = bundle.aliases.get(q)
+    if model_id is None:
+        model_id = bundle.normalized_aliases.get(_normalize(q))
     return bundle.models.get(model_id) if model_id is not None else None
 
 
 def pick(bundle: Bundle, capability: str) -> dict | None:
-    cap = bundle.capabilities.get(capability.strip().lower())
+    cap_id = capability.strip().lower()
+    if cap_id not in bundle.capabilities:
+        cap_id = bundle.normalized_capabilities.get(_normalize(cap_id), cap_id)
+    cap = bundle.capabilities.get(cap_id)
     if cap is None:
         return None
     raw_picks = cap.get("picks")
@@ -329,4 +357,6 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         aliases=aliases,
         templates=templates,
         nodes=nodes,
+        normalized_aliases=_normalized_map(aliases),
+        normalized_capabilities=_normalized_map({cid: cid for cid in capabilities}),
     )

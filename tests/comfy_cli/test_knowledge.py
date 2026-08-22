@@ -391,12 +391,37 @@ class TestIndex:
         assert knowledge.resolve(bundle, "Kling-Avatar-2")["id"] == "kling-avatar-2"
         assert knowledge.resolve(bundle, "nope-xyz") is None
 
+    def test_resolve_accepts_spelling_variants(self, bundle):
+        for query in ("Hailuo 3", "hailuo3", "HAILUO-03", "Mini Max H3", "sync.3"):
+            assert knowledge.resolve(bundle, query)["id"] == "minimax-h3" if "sync" not in query else True
+        assert knowledge.resolve(bundle, "sync.3")["id"] == "sync-3"
+        assert knowledge.resolve(bundle, "klingg") is None
+
+    def test_normalize(self):
+        assert knowledge._normalize("Hailuo 03") == "hailuo3"
+        assert knowledge._normalize("image to video") == "imagetovideo"
+        assert knowledge._normalize("Flux 1.10") == "flux110"
+        assert knowledge._normalize("v2.0") == "v20"
+
+    def test_normalized_collision_falls_back_to_exact_only(self):
+        data = {
+            "models": {"a": {"id": "a", "aliases": ["Model 01"]}, "b": {"id": "b", "aliases": ["model-1"]}},
+        }
+        b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
+        assert "model1" not in b.normalized_aliases
+        assert knowledge.resolve(b, "model 1") is None
+        assert knowledge.resolve(b, "Model 01")["id"] == "a"
+        assert knowledge.resolve(b, "model-1")["id"] == "b"
+        assert knowledge.resolve(b, "A")["id"] == "a"
+
     def test_pick(self, bundle):
         cap = knowledge.pick(bundle, " LIPSYNC ")
         assert cap is not None
         assert [p["rank"] for p in cap["picks"]] == [1, 2, 3, 4, 5, 6, 7]
         assert cap is not bundle.capabilities["lipsync"]
         assert knowledge.pick(bundle, "nope") is None
+        assert knowledge.pick(bundle, "Lip Sync")["id"] == "lipsync"
+        assert knowledge.pick(bundle, "audio generation")["id"] == "audio-generation"
 
     def test_pick_sorts_missing_rank_last(self):
         b = knowledge._index(
@@ -521,11 +546,19 @@ class TestCli:
         assert isinstance(env["error"]["details"]["close_matches"], list)
         assert env["error"]["details"]["query"] == "nope-xyz"
 
+    def test_resolve_spelling_variant_is_a_hit(self, tmp_path, monkeypatch, capsys):
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["resolve", "Hailuo 3"], capsys)
+        assert rc == 0
+        assert env["data"]["id"] == "minimax-h3"
+        assert env["data"]["query"] == "Hailuo 3"
+        _validate(env["data"])
+
     def test_resolve_close_matches(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
-        _rc, env = _run(["resolve", "Hailuo 3"], capsys)
+        _rc, env = _run(["resolve", "klingg"], capsys)
         assert env["error"]["code"] == "knowledge_unknown_model"
-        assert "hailuo 03" in env["error"]["details"]["close_matches"]
+        assert "kling" in env["error"]["details"]["close_matches"]
 
     def test_resolve_without_bundle(self, capsys):
         rc, env = _run(["resolve", "x"], capsys)
@@ -548,6 +581,13 @@ class TestCli:
         assert by_model["ltx"]["template"] == "video_ltx2_3_ia2v"
         assert by_model["kling"]["template"] is None
         _validate(data)
+
+    def test_pick_spelling_variant(self, tmp_path, monkeypatch, capsys):
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick", "Audio Generation"], capsys)
+        assert rc == 0
+        assert env["data"]["capability"] == "audio-generation"
+        _validate(env["data"])
 
     def test_pick_miss(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
