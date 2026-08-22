@@ -58,6 +58,10 @@
       "verified_at": "2026-08-05"
     },
     "lipsync": {
+      "aliases": [
+        "Lip Sync",
+        "talking head"
+      ],
       "as_of": "2026-08-05",
       "description": "Three distinct jobs: a still plus audio becomes a talking clip, dubbing existing footage, or generating a clip that talks with no source audio (which is not a lipsync graph at all).",
       "id": "lipsync",

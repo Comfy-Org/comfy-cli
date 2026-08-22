@@ -71,6 +71,7 @@
     "workflow": {
       "type": "object",
       "description": "The full fetched workflow JSON, included only when no --out file was given (fetch)."
-    }
+    },
+    "knowledge": { "$ref": "knowledge_block.json", "description": "Curated model knowledge matching this call; absent when no bundle is loaded or nothing matched." }
   }
 }

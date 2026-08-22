@@ -90,6 +90,7 @@
     "example": {
       "type": "string",
       "description": "Copy-pasteable invocation filling every required parameter."
-    }
+    },
+    "knowledge": { "$ref": "knowledge_block.json", "description": "Curated model knowledge matching this call; absent when no bundle is loaded or nothing matched." }
   }
 }
