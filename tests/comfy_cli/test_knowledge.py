@@ -154,6 +154,15 @@ class TestLoadOrder:
         assert b is not None
         assert b.version == "unknown"
 
+    def test_bundle_with_a_non_finite_constant_is_rejected(self, tmp_path, monkeypatch):
+        p = tmp_path / "k.json"
+        p.write_text('{"models": {"a": {"id": "a", "score": NaN}}}')
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+        assert knowledge.load_bundle() is None
+        knowledge._reset_for_testing()
+        p.write_text('{"models": {"a": {"id": "a", "score": 1e400}}}')
+        assert knowledge.load_bundle() is None
+
     def test_env_file_not_a_bundle_returns_none(self, tmp_path, monkeypatch):
         p = tmp_path / "k.json"
         p.write_text(json.dumps({"hello": "world"}))
@@ -675,19 +684,15 @@ class TestCli:
         assert env["error"]["details"]["known"] == ["audio-generation", "lipsync"]
 
     def test_pick_payload_normalizes_rank_and_model(self, tmp_path, monkeypatch, capsys):
-        # Written as text so the bundle can carry 1e400, which json.loads turns into inf.
-        raw = (
-            '{"models": {}, "capabilities": {"c": {"id": "c", "description": ["not", "text"], "as_of": 7, "picks": ['
-            '{"model": "x", "rank": "1"}, {"model": 7, "rank": 2}, {"model": "y", "rank": 1.5}, {"model": "w", "rank": 1e400}'
-            "]}}}"
-        )
+        picks = [{"model": "x", "rank": "1"}, {"model": 7, "rank": 2}, {"model": "y", "rank": 1.5}]
+        cap = {"id": "c", "description": ["not", "text"], "as_of": 7, "picks": picks}
         p = tmp_path / "k.json"
-        p.write_text(raw)
+        p.write_text(json.dumps({"models": {}, "capabilities": {"c": cap}}))
         monkeypatch.setenv(knowledge.ENV_FILE, str(p))
         rc, env = _run(["pick", "c"], capsys)
         assert rc == 0
         got = [(q["model"], q["rank"]) for q in env["data"]["picks"]]
-        assert got == [("y", 1.5), (None, 2), ("x", None), ("w", None)]
+        assert got == [("y", 1.5), (None, 2), ("x", None)]
         assert env["data"]["description"] is None and env["data"]["as_of"] is None
         _validate(env["data"])
 

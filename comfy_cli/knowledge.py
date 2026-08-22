@@ -276,9 +276,31 @@ def _http_get(url: str) -> bytes:
 # ---------------------------------------------------------------------------
 
 
+def _reject_constant(token: str) -> float:
+    raise ValueError(f"non-finite JSON constant: {token}")
+
+
+def _finite_float(token: str) -> float:
+    value = float(token)
+    if not math.isfinite(value):
+        raise ValueError(f"non-finite JSON number: {token}")
+    return value
+
+
+def _loads(raw: bytes) -> Any:
+    """``json.loads``, refusing the values that cannot round-trip back out as JSON.
+
+    ``NaN``/``Infinity`` are literals json accepts, and an overflowing exponent
+    like ``1e400`` becomes ``inf``. Either one re-emitted into an envelope is a
+    bare ``NaN``/``Infinity`` token that a strict consumer refuses, so a bundle
+    carrying one is rejected whole.
+    """
+    return json.loads(raw, parse_constant=_reject_constant, parse_float=_finite_float)
+
+
 def _parse_manifest(raw: bytes) -> dict | None:
     try:
-        manifest = json.loads(raw)
+        manifest = _loads(raw)
     except (ValueError, RecursionError):
         return None
     return manifest if isinstance(manifest, dict) else None
@@ -286,7 +308,7 @@ def _parse_manifest(raw: bytes) -> dict | None:
 
 def _parse(raw: bytes, manifest: dict | None) -> dict | None:
     try:
-        data = json.loads(raw)
+        data = _loads(raw)
     except (ValueError, RecursionError):
         return None
     if not isinstance(data, dict) or not isinstance(data.get("models"), dict):
