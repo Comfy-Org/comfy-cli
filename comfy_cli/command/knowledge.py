@@ -161,11 +161,11 @@ def pick_cmd(
             {
                 "rank": knowledge.pick_rank(p),
                 "model": model_id,
-                "route": p.get("route"),
-                "template": p.get("template"),
-                "caveat": p.get("caveat"),
-                "status": row.get("status"),
-                "superseded_by": row.get("superseded_by"),
+                "route": _text(p.get("route")),
+                "template": _text(p.get("template")),
+                "caveat": _text(p.get("caveat")),
+                "status": _text(row.get("status")),
+                "superseded_by": _text(row.get("superseded_by")),
             }
         )
     payload = {

@@ -684,16 +684,23 @@ class TestCli:
         assert env["error"]["details"]["known"] == ["audio-generation", "lipsync"]
 
     def test_pick_payload_normalizes_rank_and_model(self, tmp_path, monkeypatch, capsys):
-        picks = [{"model": "x", "rank": "1"}, {"model": 7, "rank": 2}, {"model": "y", "rank": 1.5}]
+        picks = [
+            {"model": "x", "rank": "1"},
+            {"model": 7, "rank": 2},
+            {"model": "y", "rank": 1.5, "route": 7, "template": [], "caveat": {}},
+        ]
         cap = {"id": "c", "description": ["not", "text"], "as_of": 7, "picks": picks}
+        models = {"y": {"id": "y", "status": 1, "superseded_by": ["z"]}}
         p = tmp_path / "k.json"
-        p.write_text(json.dumps({"models": {}, "capabilities": {"c": cap}}))
+        p.write_text(json.dumps({"models": models, "capabilities": {"c": cap}}))
         monkeypatch.setenv(knowledge.ENV_FILE, str(p))
         rc, env = _run(["pick", "c"], capsys)
         assert rc == 0
         got = [(q["model"], q["rank"]) for q in env["data"]["picks"]]
         assert got == [("y", 1.5), (None, 2), ("x", None)]
         assert env["data"]["description"] is None and env["data"]["as_of"] is None
+        top = env["data"]["picks"][0]
+        assert [top[k] for k in ("route", "template", "caveat", "status", "superseded_by")] == [None] * 5
         _validate(env["data"])
 
     def test_resolve_pretty_tolerates_malformed_row_fields(self, tmp_path, monkeypatch, pretty_no_stdout):
