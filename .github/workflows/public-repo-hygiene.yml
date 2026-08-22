@@ -1,0 +1,29 @@
+# Description: Thin caller for the shared public-repo-hygiene reusable workflow
+# in Comfy-Org/github-workflows, which owns the checker AND its known-public
+# allowlist. This replaces the in-tree copy this repo used to carry.
+#
+# Why the checker is not in this repo any more: the old job ran
+# the checker straight out of the PR's own checkout, so a PR could widen the
+# allowlist — or disable the scan — and go green. The reusable loads the
+# checker from the pinned `workflows_ref` commit instead, so a PR here cannot
+# reach it through this workflow's inputs. The allowlist is deliberately NOT
+# an input, for the same reason.
+#
+# The pin is kept fresh by bump-public-repo-hygiene-callers.yml once this repo
+# is enrolled in the PUBLIC_REPO_HYGIENE_CALLERS roster.
+name: Public Repo Hygiene
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  hygiene:
+    permissions:
+      contents: read
+    uses: Comfy-Org/github-workflows/.github/workflows/public-repo-hygiene.yml@aad06972e20732d6a9167552c5b3247c4f5bac58 # github-workflows main (aad0697)
+    with:
+      # REQUIRED, and must equal the `uses:` SHA above — the reusable asserts
+      # they match, which is what pins the checker to the reviewed commit.
+      workflows_ref: aad06972e20732d6a9167552c5b3247c4f5bac58
