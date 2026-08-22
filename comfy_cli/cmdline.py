@@ -25,6 +25,7 @@ from comfy_cli.command import install as install_inner
 from comfy_cli.command import (
     jobs as jobs_command,
 )
+from comfy_cli.command import knowledge as knowledge_command
 from comfy_cli.command import (
     nodes as nodes_command,
 )
@@ -2001,6 +2002,11 @@ app.add_typer(
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(nodes_command.app, name="nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories).")
 app.add_typer(templates_command.app, name="templates", help="Browse the Comfy workflow-template gallery.")
+app.add_typer(
+    knowledge_command.app,
+    name="knowledge",
+    help="Inspect the curated model-knowledge bundle: status, resolve an alias, ranked picks per capability.",
+)
 app.command(
     "run-template",
     help=(

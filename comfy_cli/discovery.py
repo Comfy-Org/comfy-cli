@@ -133,6 +133,10 @@ COMMAND_SCHEMAS: dict[str, str] = {
     # the help tree; agents resolve them through `command_schemas`).
     "comfy generate list": "generate_list",
     "comfy generate schema": "generate_schema",
+    # curated model-knowledge bundle
+    "comfy knowledge status": "knowledge",
+    "comfy knowledge resolve": "knowledge",
+    "comfy knowledge pick": "knowledge",
     # template gallery
     "comfy templates ls": "templates",
     "comfy templates show": "templates",

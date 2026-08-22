@@ -1105,6 +1105,22 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "or a pipe) where there is no TTY to confirm on. Delete is refused rather than blocking on a prompt.",
         "pass `--yes` to confirm the delete when running non-interactively",
     ),
+    # --- knowledge -----------------------------------------------------------
+    ErrorCode(
+        "knowledge_unavailable",
+        "No knowledge bundle could be loaded (no COMFY_KNOWLEDGE_FILE, no cache, no reachable COMFY_KNOWLEDGE_URL).",
+        "set COMFY_KNOWLEDGE_FILE to a knowledge.json or COMFY_KNOWLEDGE_URL to fetch one; run `comfy knowledge status`",
+    ),
+    ErrorCode(
+        "knowledge_unknown_model",
+        "`comfy knowledge resolve` found no row for the alias or id. `details.close_matches` lists near names.",
+        "try one of `details.close_matches`",
+    ),
+    ErrorCode(
+        "knowledge_unknown_capability",
+        "`comfy knowledge pick` found no capability with that id. `details.known` lists them all.",
+        "pick one of `details.known`",
+    ),
 )
 
 
