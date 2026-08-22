@@ -60,6 +60,7 @@ def _validator_for(name: str) -> jsonschema.Validator:
         # degrades one row per unavailable endpoint. Worth pinning so a typo in
         # one of those unions can't ship.
         "cloud_status.json",
+        "knowledge.json",
     ],
 )
 def test_schemas_are_well_formed(schema_name):
