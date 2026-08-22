@@ -30,7 +30,7 @@ from typing import Annotated, Any
 
 import typer
 
-from comfy_cli import tracking, workflow_ops
+from comfy_cli import knowledge, tracking, workflow_ops
 from comfy_cli.file_utils import atomic_write_bytes
 from comfy_cli.http import ResponseTooLarge, plain_urlopen, read_capped
 from comfy_cli.output import get_renderer, rprint
@@ -595,6 +595,7 @@ def ls_cmd(
 
     rows = _flatten_templates(cats)
     total = len(rows)
+    all_names = {r["name"] for r in rows}
     rows = [
         r
         for r in rows
@@ -665,6 +666,13 @@ def ls_cmd(
             renderer.console().print(tbl)
             tail = f" (of {matched} matched, {total} in gallery)" if (matched != len(rows) or matched != total) else ""
             rprint(f"[dim]{len(rows)} template(s){tail}[/dim]")
+    knowledge.attach(
+        payload,
+        queries=[x for x in (tag, name_sub, model) if x],
+        templates=[r["name"] for r in rows],
+        catalog_templates=all_names,
+        thin=(matched == 0),
+    )
     renderer.emit(payload, command="templates ls")
 
 
@@ -721,7 +729,9 @@ def show_cmd(
         if match["description"]:
             rprint("")
             rprint(match["description"])
-    renderer.emit({"template": match}, command="templates show")
+    payload = {"template": match}
+    knowledge.attach(payload, templates=[name], catalog_templates={r["name"] for r in rows})
+    renderer.emit(payload, command="templates show")
 
 
 @app.command("refresh", help="Re-download templates/index.json into the local cache.")
@@ -1184,6 +1194,7 @@ def get_cmd(
 
         sys.stdout.write(body.decode("utf-8"))
         sys.stdout.write("\n")
+    knowledge.attach(payload, templates=[name], catalog_templates={r["name"] for r in rows})
     renderer.emit(payload, command="templates get")
 
 

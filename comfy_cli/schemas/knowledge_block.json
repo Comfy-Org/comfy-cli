@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/knowledge_block.json",
+  "title": "knowledge block",
+  "description": "Curated model knowledge attached as `data.knowledge` by discovery commands (generate schema|list, templates ls|show|get, nodes search|ls, models search). Absent when no bundle is loaded or nothing matched. Every field is optional; readers must ignore unknown fields.",
+  "type": "object",
+  "properties": {
+    "bundle_version": { "type": "string", "description": "Version of the comfy-knowledge bundle the block came from." },
+    "stale": { "type": "boolean", "description": "True when the bundle was served from an expired cache." },
+    "as_of": { "type": "string", "description": "ISO-8601 UTC timestamp of the loaded bundle file." },
+    "models": {
+      "type": "array",
+      "description": "Curated rows matching the call; `tier: law` rows sort first. Brief entries (generate list) carry only id, matched_on, status, tier, route, superseded_by, deprecated_on, best_for.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": ["string", "null"] },
+          "matched_on": { "type": "string", "description": "The alias key, template id, or node class that matched this row." },
+          "status": { "type": ["string", "null"] },
+          "tier": { "type": ["string", "null"], "description": "Opaque curation tier; only the literal 'law' is special-cased (sorted first)." },
+          "route": { "type": ["string", "null"] },
+          "superseded_by": { "type": "string" },
+          "deprecated_on": { "type": "string" },
+          "best_for": { "type": "array", "items": { "type": "string" } },
+          "not_for": { "type": "array", "items": { "type": "string" } },
+          "never_confuse_with": { "type": "array", "items": { "type": "string" } },
+          "routing": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "when": { "type": ["string", "null"] },
+                "use": { "type": ["string", "null"] }
+              }
+            }
+          },
+          "pitfalls": { "type": "array", "items": { "type": "string" } },
+          "corrections": { "type": "array", "items": { "type": "string" } },
+          "warnings": { "type": "array", "items": { "type": "string" } },
+          "as_of": { "type": "string" }
+        }
+      }
+    },
+    "picks": {
+      "type": "array",
+      "description": "Ranked picks for every capability the call matched, rank ascending within a capability.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "capability": { "type": "string" },
+          "rank": { "type": ["integer", "null"] },
+          "model": { "type": ["string", "null"] },
+          "route": { "type": ["string", "null"] },
+          "template": { "type": ["string", "null"] },
+          "caveat": { "type": ["string", "null"] },
+          "status": { "type": ["string", "null"], "description": "Copied from the pick's model row when that row exists." },
+          "superseded_by": { "type": ["string", "null"], "description": "From the deprecations list or the pick's model row." }
+        }
+      }
+    },
+    "hit_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Model ids then `cap:<id>` for capabilities, in block order, after capping."
+    },
+    "zero_hit": { "type": "boolean", "description": "True when nothing curated matched and the command's own result was empty." },
+    "nudge": { "type": "string", "description": "One line present only on a zero-hit thin result: what was asked and which capabilities are covered." }
+  }
+}

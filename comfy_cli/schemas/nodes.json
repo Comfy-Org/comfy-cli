@@ -43,6 +43,7 @@
         },
         "required": ["name", "source", "bytes", "path"]
       }
-    }
+    },
+    "knowledge": { "$ref": "knowledge_block.json", "description": "Curated model knowledge matching this call; absent when no bundle is loaded or nothing matched." }
   }
 }

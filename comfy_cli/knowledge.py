@@ -5,7 +5,8 @@ The bundle (``knowledge.json`` + optional ``manifest.json``) is produced by
 tried in order: an explicit ``COMFY_KNOWLEDGE_FILE``, the per-user cache, or a
 fetch from ``COMFY_KNOWLEDGE_URL``. A missing or broken bundle is a normal
 state: every entry point here returns ``None`` rather than raising, and nothing
-is written to stdout or stderr.
+is written to stdout or stderr. :func:`attach` is how discovery commands add a
+capped ``knowledge`` block to their payload; it is fail-open for the same reason.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,6 +37,12 @@ ENV_TTL = "COMFY_KNOWLEDGE_TTL"
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
 FETCH_TIMEOUT_SECONDS = 10.0
 MAX_BUNDLE_BYTES = 16 * 1024 * 1024
+
+MAX_MODELS = 3
+MAX_MODELS_BRIEF = 20
+MAX_PICKS = 8
+MAX_LIST_ITEMS = 8
+MAX_BLOCK_BYTES = 8192
 
 REASON_ENV_FILE = "COMFY_KNOWLEDGE_FILE is set but could not be loaded"
 REASON_NO_URL = "no cache and COMFY_KNOWLEDGE_URL is not set"
@@ -391,6 +399,12 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
             if isinstance(p, dict) and isinstance(p.get("template"), str) and isinstance(p.get("model"), str):
                 _append_unique(templates, p["template"], p["model"])
 
+    capability_keys: dict[str, str] = {}
+    for cid, cap in capabilities.items():
+        for alias in (cid, *_str_list(cap.get("aliases"))):
+            if alias:
+                capability_keys.setdefault(alias, cid)
+
     version = manifest.get("version") if manifest is not None else None
     return Bundle(
         version=version if isinstance(version, str) else "unknown",
@@ -405,5 +419,224 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         templates=templates,
         nodes=nodes,
         normalized_aliases=_normalized_map(aliases),
-        normalized_capabilities=_normalized_map({cid: cid for cid in capabilities}),
+        normalized_capabilities=_normalized_map(capability_keys),
     )
+
+
+# ---------------------------------------------------------------------------
+# envelope enrichment
+# ---------------------------------------------------------------------------
+
+
+def _model_keys(q: str) -> list[str]:
+    """Keys to try for a model query, most specific first.
+
+    'kling-lipsync' -> ['klinglipsync', 'kling']; 'Hailuo 3' -> ['hailuo3', 'hailuo'].
+    A family alias ('kling-i2v', 'flux-kontext-max') falls back to its family row.
+    """
+    parts = [p for p in re.split(r"[\s_\-/]+", q.strip().lower()) if p]
+    return [_normalize("".join(parts[:i])) for i in range(len(parts), 0, -1)]
+
+
+def _lookup(bundle: Bundle, queries: Iterable[str]) -> tuple[list[tuple[str, str]], list[str]]:
+    """-> ([(model_id, matched_key), ...], [capability_id, ...]), de-duplicated, input order."""
+    models: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    caps: list[str] = []
+    for q in queries:
+        q_key = _normalize(q)
+        matched = q_key
+        mid = bundle.aliases.get(q.strip().lower())
+        if mid is None:
+            for prefix in _model_keys(q):
+                mid = bundle.normalized_aliases.get(prefix)
+                if mid is not None:
+                    matched = prefix
+                    break
+        if mid is not None and mid not in seen:
+            seen.add(mid)
+            models.append((mid, matched))
+        cid = bundle.normalized_capabilities.get(q_key) if q_key else None
+        if cid is not None and cid not in caps:
+            caps.append(cid)
+    return models, caps
+
+
+def _texts(value: Any, key: str) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out = [item[key] for item in value if isinstance(item, dict) and isinstance(item.get(key), str)]
+    return out[:MAX_LIST_ITEMS]
+
+
+def _model_entry(bundle: Bundle, model_id: str, row: dict, *, matched_on: str, brief: bool) -> dict:
+    dep = bundle.deprecations.get(model_id)
+    dep = dep if isinstance(dep, dict) else {}
+    entry: dict[str, Any] = {
+        "id": model_id,
+        "matched_on": matched_on,
+        "status": row.get("status"),
+        "tier": row.get("tier"),
+        "route": row.get("route"),
+    }
+    superseded_by = dep.get("superseded_by") or row.get("superseded_by")
+    if isinstance(superseded_by, str) and superseded_by:
+        entry["superseded_by"] = superseded_by
+    if isinstance(dep.get("deprecated_on"), str) and dep["deprecated_on"]:
+        entry["deprecated_on"] = dep["deprecated_on"]
+    if best_for := _str_list(row.get("best_for")):
+        entry["best_for"] = best_for
+    if brief:
+        return entry
+    for key in ("not_for", "never_confuse_with"):
+        if values := _str_list(row.get(key)):
+            entry[key] = values
+    routing_raw = row.get("routing")
+    routing = (
+        [{"when": r.get("when"), "use": r.get("use")} for r in routing_raw if isinstance(r, dict)][:MAX_LIST_ITEMS]
+        if isinstance(routing_raw, list)
+        else []
+    )
+    if routing:
+        entry["routing"] = routing
+    for key, text_key in (("pitfalls", "text"), ("corrections", "claim"), ("warnings", "text")):
+        if texts := _texts(row.get(key), text_key):
+            entry[key] = texts
+    if isinstance(row.get("as_of"), str) and row["as_of"]:
+        entry["as_of"] = row["as_of"]
+    return entry
+
+
+def _pick_entries(bundle: Bundle, capability_id: str, *, catalog_templates: Collection[str] | None) -> list[dict]:
+    cap = pick(bundle, capability_id)
+    if cap is None:
+        return []
+    out: list[dict] = []
+    for p in cap["picks"]:
+        template = p.get("template") if isinstance(p.get("template"), str) else None
+        if catalog_templates is not None and template is not None and template not in catalog_templates:
+            continue
+        model_id = p.get("model")
+        row = bundle.models.get(model_id, {}) if isinstance(model_id, str) else {}
+        dep = bundle.deprecations.get(model_id, {}) if isinstance(model_id, str) else {}
+        out.append(
+            {
+                "capability": capability_id,
+                "rank": p.get("rank"),
+                "model": model_id,
+                "route": p.get("route"),
+                "template": template,
+                "caveat": p.get("caveat"),
+                "status": row.get("status"),
+                "superseded_by": dep.get("superseded_by") or row.get("superseded_by"),
+            }
+        )
+        if len(out) >= MAX_PICKS:
+            break
+    return out
+
+
+def _resolves_locally(
+    row: dict, *, catalog_templates: Collection[str] | None, catalog_nodes: Collection[str] | None
+) -> bool:
+    """Version-skew filter: a row whose every known id is absent from the live catalog is dropped."""
+    resolves = row.get("resolves")
+    if not isinstance(resolves, dict):
+        return True
+    for catalog, key in ((catalog_templates, "templates"), (catalog_nodes, "nodes")):
+        if catalog is None:
+            continue
+        ids = _str_list(resolves.get(key))
+        if ids and not any(i in catalog for i in ids):
+            return False
+    return True
+
+
+def _fit(block: dict) -> None:
+    """Drop whole entries (models first, then picks) until the block fits MAX_BLOCK_BYTES."""
+    while True:
+        caps: list[str] = []
+        for p in block["picks"]:
+            if p["capability"] not in caps:
+                caps.append(p["capability"])
+        block["hit_ids"] = [m["id"] for m in block["models"]] + [f"cap:{c}" for c in caps]
+        if len(json.dumps(block, separators=(",", ":"))) <= MAX_BLOCK_BYTES:
+            return
+        if block["models"]:
+            block["models"].pop()
+        elif block["picks"]:
+            block["picks"].pop()
+        else:
+            return
+
+
+def attach(
+    payload: dict,
+    *,
+    queries: Iterable[str] = (),
+    templates: Iterable[str] = (),
+    nodes: Iterable[str] = (),
+    catalog_templates: Collection[str] | None = None,
+    catalog_nodes: Collection[str] | None = None,
+    brief: bool = False,
+    thin: bool = False,
+) -> None:
+    """Append a capped ``knowledge`` block to ``payload`` for what the command was asked about.
+
+    ``queries`` are resolved as model aliases or capability names; ``templates``
+    and ``nodes`` go through the reverse index. ``catalog_*`` are the ids the
+    command actually loaded, used to drop rows and picks that do not resolve
+    locally. ``thin`` marks a command whose own result was empty, which is the
+    only case that earns a nudge. Fail-open: any exception leaves ``payload``
+    exactly as it was.
+    """
+    try:
+        bundle = load_bundle()
+        if bundle is None:
+            return
+        query_list = [q for q in queries if isinstance(q, str) and q.strip()]
+        model_hits, cap_hits = _lookup(bundle, query_list)
+        seen = {mid for mid, _ in model_hits}
+        for ids, index in ((templates, bundle.templates), (nodes, bundle.nodes)):
+            for ident in ids:
+                for mid in index.get(ident, ()):
+                    if mid not in seen:
+                        seen.add(mid)
+                        model_hits.append((mid, ident))
+
+        entries: list[dict] = []
+        for mid, matched_on in model_hits:
+            row = bundle.models.get(mid)
+            if not isinstance(row, dict):
+                continue
+            if not _resolves_locally(row, catalog_templates=catalog_templates, catalog_nodes=catalog_nodes):
+                continue
+            entries.append(_model_entry(bundle, mid, row, matched_on=matched_on, brief=brief))
+        entries.sort(key=lambda e: e.get("tier") != "law")
+        entries = entries[: MAX_MODELS_BRIEF if brief else MAX_MODELS]
+
+        picks: list[dict] = []
+        for cid in cap_hits:
+            picks.extend(_pick_entries(bundle, cid, catalog_templates=catalog_templates))
+
+        block: dict[str, Any] = {
+            "bundle_version": bundle.version,
+            "stale": bundle.stale,
+            "as_of": bundle.as_of,
+            "models": entries,
+            "picks": picks,
+            "hit_ids": [],
+            "zero_hit": False,
+        }
+        _fit(block)
+        if not block["models"] and not block["picks"]:
+            if not (thin and query_list):
+                return
+            block["zero_hit"] = True
+            block["nudge"] = (
+                f"no curated knowledge for {query_list[0]!r}; "
+                f"covered capabilities: {', '.join(sorted(bundle.capabilities))}"
+            )
+        payload["knowledge"] = block
+    except Exception:  # noqa: BLE001 — knowledge is additive; the payload ships unchanged on any failure
+        return
