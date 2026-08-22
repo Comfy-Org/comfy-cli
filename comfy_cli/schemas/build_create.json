@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://comfy.org/schemas/distribution_create.json",
-  "title": "comfy distribution create --json data payload",
+  "$id": "https://comfy.org/schemas/build_create.json",
+  "title": "comfy build create --json data payload",
   "description": "Two shapes: preview (executed=false) carries `plan`; the live run (executed=true) carries the created ids.",
   "type": "object",
   "required": ["name", "executed"],

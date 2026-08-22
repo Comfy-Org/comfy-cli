@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://comfy.org/schemas/distribution_base_images.json",
-  "title": "comfy distribution base-images --json data payload",
+  "$id": "https://comfy.org/schemas/build_base_images.json",
+  "title": "comfy build base-images --json data payload",
   "type": "object",
   "required": ["baseImages"],
   "additionalProperties": true,

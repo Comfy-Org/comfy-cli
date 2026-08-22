@@ -1041,67 +1041,67 @@ REGISTRY: tuple[ErrorCode, ...] = (
         'API cannot distinguish "declares nothing" from "field absent". Surfaced in `data.warnings[]`.',
         "the pack publisher must publish a version declaring its dependencies; nothing to fix locally",
     ),
-    # --- distribution (serverless build) -------------------------------------
+    # --- build (the serverless builder) --------------------------------------
     ErrorCode(
-        "distribution_models_dir_missing",
-        "`comfy distribution scan` could not find a models/ directory to scan. `details.path` carries the "
+        "build_models_dir_missing",
+        "`comfy build scan` could not find a models/ directory to scan. `details.path` carries the "
         "resolved path. Either no workspace is selected or the given `--models-dir` doesn't exist.",
         "run from a ComfyUI workspace, or pass `--models-dir <path>` pointing at your models/ folder",
     ),
     ErrorCode(
-        "distribution_output_write_error",
-        "`comfy distribution scan --output <path>` could not write the definition file. `details` carries the "
+        "build_output_write_error",
+        "`comfy build scan --output <path>` could not write the definition file. `details` carries the "
         "path and the underlying OS error.",
         "check the directory exists and is writable",
     ),
     ErrorCode(
-        "distribution_definition_invalid",
-        "`comfy distribution create --from <path>` could not read the definition file, or it isn't a "
+        "build_definition_invalid",
+        "`comfy build create --from <path>` could not read the definition file, or it isn't a "
         "distribution definition (missing/invalid JSON or no `models` key). `details.path` carries the path.",
-        "pass a file produced by `comfy distribution scan -o <path>`",
+        "pass a file produced by `comfy build scan -o <path>`",
     ),
     ErrorCode(
-        "distribution_not_signed_in",
-        "`comfy distribution create --execute` found no usable Cloud JWT — the builder authenticates with the "
+        "build_not_signed_in",
+        "`comfy build create --execute` found no usable Cloud JWT — the builder authenticates with the "
         "OAuth session token, and there isn't a valid one.",
         "run `comfy cloud login` first",
     ),
     ErrorCode(
-        "distribution_upload_unavailable",
-        "`comfy distribution create --execute` couldn't produce a private-blob upload: the model bytes weren't "
+        "build_upload_unavailable",
+        "`comfy build create --execute` couldn't produce a private-blob upload: the model bytes weren't "
         "found (pass `--models-dir`), or a local (non-git) custom node needs packaging, which isn't supported yet.",
         "pass `--models-dir <path>` so model bytes can be located; use git-based custom nodes for now",
     ),
     ErrorCode(
-        "distribution_builder_error",
-        "A `comfy distribution` builder call got an error from the builder API (HTTP error, network failure, or "
+        "build_builder_error",
+        "A `comfy build` builder call got an error from the builder API (HTTP error, network failure, or "
         "an unexpected response shape). `details`/message carry the underlying error.",
         "check the builder URL and your access; retry, and inspect the message for the specific failure",
     ),
     ErrorCode(
-        "distribution_not_enabled",
+        "build_not_enabled",
         "The builder returned 403 FEATURE_NOT_ENABLED: the developer platform is in limited beta and the "
         "signed-in account is not enabled for it yet.",
         "the developer platform is in limited beta; request access, then sign in with an enabled account",
     ),
     ErrorCode(
-        "distribution_missing_comfy_version",
-        "`comfy distribution create` was given a definition with no `baseComfyVersion`. The builder can create "
+        "build_missing_comfy_version",
+        "`comfy build create` was given a definition with no `baseComfyVersion`. The builder can create "
         "the distribution but cannot cut a build without a pinned ComfyUI version, so create fails fast here "
         "instead of surfacing a raw builder 400 after doing work. `details.path` carries the definition path.",
         "re-scan with `--comfy-version <ref>` (a tag, branch, or commit), or add a `baseComfyVersion` to the definition JSON",
     ),
     ErrorCode(
-        "distribution_registry_pin_missing",
-        "`comfy distribution create --execute` sent the definition to the builder's snapshot importer, which "
+        "build_registry_pin_missing",
+        "`comfy build create --execute` sent the definition to the builder's snapshot importer, which "
         "could not vouch for one or more custom node pins and returned a definition without them. Creating "
         "anyway would build an image quietly missing what the user asked for, so create stops. The advisories "
         "printed above name why each pack could not be carried.",
         "edit the definition to name a published registry version, or remove the pack",
     ),
     ErrorCode(
-        "distribution_delete_needs_confirm",
-        "`comfy distribution delete` was run without `--yes` in a non-interactive context (JSON output, an agent, "
+        "build_delete_needs_confirm",
+        "`comfy build delete` was run without `--yes` in a non-interactive context (JSON output, an agent, "
         "or a pipe) where there is no TTY to confirm on. Delete is refused rather than blocking on a prompt.",
         "pass `--yes` to confirm the delete when running non-interactively",
     ),

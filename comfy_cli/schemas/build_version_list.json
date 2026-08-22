@@ -1,19 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://comfy.org/schemas/distribution_list.json",
-  "title": "comfy distribution list --json data payload",
+  "$id": "https://comfy.org/schemas/build_version_list.json",
+  "title": "comfy build version list --json data payload",
   "type": "object",
-  "required": ["distributions"],
+  "required": ["versions"],
   "additionalProperties": true,
   "properties": {
-    "distributions": {
+    "versions": {
       "type": "array",
       "items": {
         "type": "object",
         "additionalProperties": true,
         "properties": {
           "id": {"type": "string"},
-          "name": {"type": "string"}
+          "status": {"type": "string"}
         }
       }
     }

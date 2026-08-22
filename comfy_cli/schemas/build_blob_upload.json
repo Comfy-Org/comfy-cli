@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://comfy.org/schemas/distribution_blob_upload.json",
-  "title": "comfy distribution blob upload --json data payload",
+  "$id": "https://comfy.org/schemas/build_blob_upload.json",
+  "title": "comfy build blob upload --json data payload",
   "type": "object",
   "required": ["blobId", "kind", "filename", "sha256", "sizeBytes"],
   "additionalProperties": true,

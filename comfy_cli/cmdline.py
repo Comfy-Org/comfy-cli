@@ -2026,9 +2026,33 @@ app.add_typer(auth_command.app, name="auth", help="Manage API tokens for model h
 app.add_typer(jobs_command.app, name="jobs", help="List, inspect, and live-watch ComfyUI prompts.")
 app.add_typer(
     distribution_command.app,
-    name="distribution",
-    help="Package a local ComfyUI environment into a serverless distribution.",
+    name="build",
+    help="Package a local ComfyUI environment into a serverless build.",
 )
+
+
+def _add_deprecated_alias(root: typer.Typer, group: typer.Typer, *, old_name: str, new_name: str) -> None:
+    """Register ``group`` a second time under its retired name: hidden from help,
+    same command tree, one deprecation warning per invocation on stderr (the
+    envelopes still carry the canonical ``new_name`` labels). Self-contained on
+    purpose so it can fold into a shared add_deprecated_alias helper later."""
+
+    def _warn_deprecated() -> None:
+        renderer = get_renderer()
+        renderer.stderr_console().print(
+            f"[yellow]`comfy {old_name}` is deprecated; use `comfy {new_name}` instead.[/yellow]"
+        )
+        # The root callback stamped the envelope `command` with the invoked
+        # (old) group name; re-stamp it so alias envelopes are byte-identical
+        # to the canonical spelling's.
+        renderer.command = new_name
+
+    root.add_typer(group, name=old_name, hidden=True, callback=_warn_deprecated)
+
+
+# `comfy distribution` was the group's name before the builder's public API
+# renamed distributions to builds; kept as a warning alias for old scripts.
+_add_deprecated_alias(app, distribution_command.app, old_name="distribution", new_name="build")
 app.add_typer(project_command.app, name="project", help="Project conventions: init and status.")
 app.add_typer(
     project_command.assets_app,

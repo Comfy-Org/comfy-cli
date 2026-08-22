@@ -1,4 +1,4 @@
-"""``comfy distribution scan`` — unit tests for the pure scan/hash logic and a
+"""``comfy build scan`` — unit tests for the pure scan/hash logic and a
 subprocess check of the JSON envelope (same pattern as test_project_command)."""
 
 from __future__ import annotations
@@ -231,7 +231,7 @@ def test_scan_command_json_envelope(models_tree, custom_nodes_tree, tmp_path):
     out = tmp_path / "definition.json"
     env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
     proc = subprocess.run(
-        [sys.executable, "-m", "comfy_cli", "distribution", "scan", "--models-dir", str(models_tree), "-o", str(out)],
+        [sys.executable, "-m", "comfy_cli", "build", "scan", "--models-dir", str(models_tree), "-o", str(out)],
         capture_output=True,
         text=True,
         env=env,
@@ -239,7 +239,7 @@ def test_scan_command_json_envelope(models_tree, custom_nodes_tree, tmp_path):
     assert proc.returncode == 0, proc.stderr
     envelope = json.loads(proc.stdout.strip().splitlines()[-1])
     assert envelope["ok"] is True
-    assert envelope["command"] == "distribution scan"
+    assert envelope["command"] == "build scan"
     assert envelope["data"]["count"] == 3
     assert envelope["data"]["custom_node_count"] == 3  # auto-found the sibling custom_nodes/
     # the written file round-trips to the same definition
@@ -251,7 +251,7 @@ def test_scan_command_json_envelope(models_tree, custom_nodes_tree, tmp_path):
 def test_scan_command_missing_dir_errors(tmp_path):
     env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
     proc = subprocess.run(
-        [sys.executable, "-m", "comfy_cli", "distribution", "scan", "--models-dir", str(tmp_path / "nope")],
+        [sys.executable, "-m", "comfy_cli", "build", "scan", "--models-dir", str(tmp_path / "nope")],
         capture_output=True,
         text=True,
         env=env,
@@ -259,7 +259,7 @@ def test_scan_command_missing_dir_errors(tmp_path):
     assert proc.returncode == 1
     envelope = json.loads(proc.stdout.strip().splitlines()[-1])
     assert envelope["ok"] is False
-    assert envelope["error"]["code"] == "distribution_models_dir_missing"
+    assert envelope["error"]["code"] == "build_models_dir_missing"
 
 
 # --- create: plan_create mapping + command ------------------------------------
@@ -331,7 +331,7 @@ def test_create_command_preview(tmp_path):
     def_path.write_text(json.dumps(SCAN_DEF))
     env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
     proc = subprocess.run(
-        [sys.executable, "-m", "comfy_cli", "distribution", "create", "--from", str(def_path), "--name", "demo"],
+        [sys.executable, "-m", "comfy_cli", "build", "create", "--from", str(def_path), "--name", "demo"],
         capture_output=True,
         text=True,
         env=env,
@@ -357,14 +357,14 @@ def test_create_command_execute_requires_login(tmp_path):
         "CONDA_PREFIX": "",
     }
     proc = subprocess.run(
-        [sys.executable, "-m", "comfy_cli", "distribution", "create", "--from", str(def_path), "--execute"],
+        [sys.executable, "-m", "comfy_cli", "build", "create", "--from", str(def_path), "--execute"],
         capture_output=True,
         text=True,
         env=env,
     )
     assert proc.returncode == 1
     envelope = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert envelope["error"]["code"] == "distribution_not_signed_in"
+    assert envelope["error"]["code"] == "build_not_signed_in"
 
 
 class _FakeBuilder:
@@ -516,10 +516,10 @@ def test_builder_client_endpoints_and_parsing(monkeypatch):
         calls.append((method, url))
         if url.endswith("/v1/blobs"):
             return 200, {"blobId": "b1", "uploadUrl": "https://put", "expiresAt": "t"}
-        if url.endswith("/v1/distributions"):
+        if url.endswith("/v1/builds"):
             return 201, {"id": "d1", "name": "n"}
         if url.endswith("/versions"):
-            return 202, {"distributionVersionId": "v1", "statusUrl": "https://s"}
+            return 202, {"buildVersionId": "v1", "statusUrl": "https://s"}
         if url.endswith("/v1/models/resolve"):
             return 200, {
                 "results": [{"filename": "a.safetensors", "candidates": [{"sourceUri": "https://u", "sha256": "h"}]}]
@@ -546,13 +546,13 @@ def test_builder_client_read_endpoints(monkeypatch):
 
     def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
         calls.append((method, url))
-        if url.endswith("/v1/distributions"):
-            return 200, {"distributions": [{"id": "d1", "name": "n"}]}
-        if url.endswith("/v1/distributions/d1"):
+        if url.endswith("/v1/builds"):
+            return 200, {"builds": [{"id": "d1", "name": "n"}]}
+        if url.endswith("/v1/builds/d1"):
             return 200, {"id": "d1", "name": "n", "definition": {"models": []}}
-        if url.endswith("/v1/distributions/d1/versions"):
+        if url.endswith("/v1/builds/d1/versions"):
             return 200, {"versions": [{"id": "v1", "status": "complete"}]}
-        if "/v1/distribution-versions/v1/logs" in url:
+        if "/v1/build-versions/v1/logs" in url:
             return 200, {"versionId": "v1", "os": "linux", "gpu": "nvidia", "log": "hello", "truncated": False}
         return 200, {}
 
@@ -566,7 +566,7 @@ def test_builder_client_read_endpoints(monkeypatch):
     logs = c.get_version_logs("v1", os="linux", gpu="nvidia")
     assert logs["log"] == "hello" and logs["truncated"] is False
     # reads are GETs under /v1, and the log target selector rides as query params
-    assert ("GET", "https://builder.test/v1/distributions") in calls
+    assert ("GET", "https://builder.test/v1/builds") in calls
     assert any("/logs?" in u and "os=linux" in u and "gpu=nvidia" in u for _, u in calls)
 
 
@@ -584,9 +584,9 @@ def test_builder_client_delete_and_validate(monkeypatch):
 
     c = BuilderClient("https://builder.test/", "jwt")
     c.delete_distribution("d1")
-    assert ("DELETE", "https://builder.test/v1/distributions/d1") in calls
+    assert ("DELETE", "https://builder.test/v1/builds/d1") in calls
     assert c.validate_distribution("d1") == {"resolvable": True}
-    assert ("POST", "https://builder.test/v1/distributions/d1/validate") in calls
+    assert ("POST", "https://builder.test/v1/builds/d1/validate") in calls
 
 
 def test_builder_client_reference_and_update_endpoints(monkeypatch):
@@ -602,7 +602,7 @@ def test_builder_client_reference_and_update_endpoints(monkeypatch):
             return 200, {"directories": ["checkpoints", "vae"]}
         if url.endswith("/v1/blobs"):
             return 200, {"blobs": [{"blobId": "b1", "filename": "m.safetensors"}]}
-        if url.endswith("/v1/distributions/d1"):
+        if url.endswith("/v1/builds/d1"):
             return 200, {"id": "d1", "definition": {"models": []}}
         if url.endswith("/manifest"):
             return 200, {"models": [{"filename": "ae"}]}
@@ -625,28 +625,28 @@ def test_builder_client_reference_and_update_endpoints(monkeypatch):
     # builder requires (a missing one 409s STALE); the rest are GETs under /v1
     assert (
         "PATCH",
-        "https://builder.test/v1/distributions/d1",
+        "https://builder.test/v1/builds/d1",
         {"definition": {"models": []}, "expectedUpdatedAt": "2026-08-01T00:00:00Z"},
     ) in calls
     assert ("GET", "https://builder.test/v1/base-images", None) in calls
     assert ("GET", "https://builder.test/v1/build-targets", None) in calls
     assert ("GET", "https://builder.test/v1/model-directories", None) in calls
     assert ("GET", "https://builder.test/v1/blobs", None) in calls
-    assert ("GET", "https://builder.test/v1/distribution-versions/v1/manifest", None) in calls
+    assert ("GET", "https://builder.test/v1/build-versions/v1/manifest", None) in calls
     assert ("GET", "https://builder.test/v1/build-artifacts/a1/download", None) in calls
 
 
 def test_delete_command_needs_confirm_non_interactive():
     env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
     proc = subprocess.run(
-        [sys.executable, "-m", "comfy_cli", "distribution", "delete", "some-id"],
+        [sys.executable, "-m", "comfy_cli", "build", "delete", "some-id"],
         capture_output=True,
         text=True,
         env=env,
     )
     assert proc.returncode == 1
     envelope = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert envelope["error"]["code"] == "distribution_delete_needs_confirm"
+    assert envelope["error"]["code"] == "build_delete_needs_confirm"
 
 
 class _RecordingRenderer:
@@ -697,7 +697,7 @@ def test_update_command_reads_updated_at_before_patch(monkeypatch, tmp_path):
 
     def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
         calls.append((method, url, body))
-        if method == "GET" and url.endswith("/v1/distributions/d1"):
+        if method == "GET" and url.endswith("/v1/builds/d1"):
             return 200, {"id": "d1", "updatedAt": "2026-08-01T12:00:00Z"}
         if method == "PATCH":
             return 200, {"id": "d1"}
@@ -728,7 +728,7 @@ def test_update_command_reads_updated_at_before_patch(monkeypatch, tmp_path):
     r = _RecordingRenderer()
     with pytest.raises(typer.Exit):
         _builder_call(r, raise_403)
-    assert r.codes == ["distribution_not_enabled"]
+    assert r.codes == ["build_not_enabled"]
 
 
 def test_builder_call_maps_other_errors_to_builder_error():
@@ -745,7 +745,7 @@ def test_builder_call_maps_other_errors_to_builder_error():
     r = _RecordingRenderer()
     with pytest.raises(typer.Exit):
         _builder_call(r, raise_500)
-    assert r.codes == ["distribution_builder_error"]
+    assert r.codes == ["build_builder_error"]
 
 
 def test_upload_blob_sends_generation_match_header(monkeypatch, tmp_path):
@@ -802,7 +802,7 @@ def test_builder_call_catches_response_too_large():
     r = _RecordingRenderer()
     with pytest.raises(typer.Exit):
         _builder_call(r, raise_too_large)
-    assert r.codes == ["distribution_builder_error"]
+    assert r.codes == ["build_builder_error"]
 
 
 def test_create_command_missing_comfy_version(tmp_path):
@@ -810,14 +810,14 @@ def test_create_command_missing_comfy_version(tmp_path):
     d.write_text(json.dumps({"schema": "distribution-definition/0", "models": [], "customNodes": []}))
     env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
     proc = subprocess.run(
-        [sys.executable, "-m", "comfy_cli", "distribution", "create", "--from", str(d)],
+        [sys.executable, "-m", "comfy_cli", "build", "create", "--from", str(d)],
         capture_output=True,
         text=True,
         env=env,
     )
     assert proc.returncode == 1
     envelope = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert envelope["error"]["code"] == "distribution_missing_comfy_version"
+    assert envelope["error"]["code"] == "build_missing_comfy_version"
 
 
 def test_create_command_bad_definition(tmp_path):
@@ -825,14 +825,14 @@ def test_create_command_bad_definition(tmp_path):
     bad.write_text("{not json")
     env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
     proc = subprocess.run(
-        [sys.executable, "-m", "comfy_cli", "distribution", "create", "--from", str(bad)],
+        [sys.executable, "-m", "comfy_cli", "build", "create", "--from", str(bad)],
         capture_output=True,
         text=True,
         env=env,
     )
     assert proc.returncode == 1
     envelope = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert envelope["error"]["code"] == "distribution_definition_invalid"
+    assert envelope["error"]["code"] == "build_definition_invalid"
 
 
 # --- create: the definition survives the trip ---------------------------------
@@ -998,7 +998,7 @@ def test_scan_command_writes_a_resolvable_comfy_ref(models_tree, tmp_path):
             sys.executable,
             "-m",
             "comfy_cli",
-            "distribution",
+            "build",
             "scan",
             "--models-dir",
             str(models_tree),
@@ -1395,13 +1395,13 @@ def test_create_execute_proceeds_when_a_pack_was_dropped_for_colliding(monkeypat
 
 
 def test_from_snapshot_reads_the_created_id_and_report_from_their_own_keys(monkeypatch, tmp_path, capsys):
-    """The endpoint answers {distribution, report}, not a distribution carrying its
+    """The endpoint answers {build, report}, not a build carrying its
     report. Reading the id off the envelope prints `None` and loses every advisory."""
 
     class FakeClient:
         def create_distribution_from_snapshot(self, name, snapshot, *, description=None, base_image_id=None):
             return {
-                "distribution": {"id": "dist-7", "name": name},
+                "build": {"id": "dist-7", "name": name},
                 "report": {"notInRegistry": ["was-node-suite-comfyui"]},
             }
 
@@ -1457,3 +1457,56 @@ def test_create_execute_does_not_read_a_renamed_pack_as_a_dropped_one(monkeypatc
         },
     )
     assert builder.created_with is not None
+
+
+# --- deprecated alias: `comfy distribution` = hidden `comfy build` + warning --
+
+
+def _run_builder_group(group: str, tmp_path) -> subprocess.CompletedProcess:
+    env = {
+        **os.environ,
+        "NO_COLOR": "1",
+        "COMFY_OUTPUT": "json",
+        "COMFY_SECRETS_PATH": str(tmp_path / "secrets.json"),  # empty -> no session
+        "VIRTUAL_ENV": "",
+        "CONDA_PREFIX": "",
+    }
+    return subprocess.run(
+        [sys.executable, "-m", "comfy_cli", group, "list"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+
+def test_distribution_alias_warns_and_matches_build(tmp_path):
+    """`comfy distribution list` is the deprecated spelling of `comfy build list`:
+    one stderr warning per invocation, and the identical envelope: the alias
+    still emits the canonical `build` labels, so one schema set serves both."""
+    canonical = _run_builder_group("build", tmp_path)
+    alias = _run_builder_group("distribution", tmp_path)
+    # Isolated secrets -> both spellings fail the same way, before any network.
+    assert canonical.returncode == 1 and alias.returncode == 1
+    assert "`comfy distribution` is deprecated" in alias.stderr
+    assert alias.stderr.count("is deprecated") == 1
+    assert "deprecated" not in canonical.stderr
+    canonical_env = json.loads(canonical.stdout.strip().splitlines()[-1])
+    alias_env = json.loads(alias.stdout.strip().splitlines()[-1])
+    assert alias_env == canonical_env
+    # The pre-command error envelope carries the group name the root callback
+    # stamped; the alias re-stamps it to the canonical spelling.
+    assert alias_env["command"] == "build"
+    assert alias_env["error"]["code"] == "build_not_signed_in"
+
+
+def test_distribution_alias_hidden_from_root_help():
+    env = {**os.environ, "NO_COLOR": "1"}
+    proc = subprocess.run(
+        [sys.executable, "-m", "comfy_cli", "--help"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert proc.returncode == 0
+    assert "build" in proc.stdout
+    assert "distribution" not in proc.stdout
