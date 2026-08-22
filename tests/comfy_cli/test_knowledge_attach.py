@@ -144,7 +144,7 @@ class TestLookup:
 
     def test_tier_is_opaque(self):
         entry = _attach(queries=["sync-3"])["knowledge"]["models"][0]
-        assert entry["tier"] == "guidance"
+        assert entry["tier"] == "recommendation"
 
 
 class TestSkewFilter:
@@ -184,8 +184,8 @@ class TestCaps:
         k = _attach(queries=["sync-3", "ace-step-1-5", "kling"])["knowledge"]
         assert [(m["id"], m["tier"]) for m in k["models"]] == [
             ("kling", "law"),
-            ("sync-3", "guidance"),
-            ("ace-step-1-5", "guidance"),
+            ("sync-3", "recommendation"),
+            ("ace-step-1-5", "recommendation"),
         ]
 
     def test_byte_ceiling_drops_whole_entries(self, monkeypatch):
