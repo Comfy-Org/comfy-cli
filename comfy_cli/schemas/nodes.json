@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/nodes.json",
   "title": "comfy nodes *",
   "description": "Output shape for node introspection commands (ls, show, search, upstream, downstream, path, types, categories) and the annotation-cache refresh (refresh).",
   "type": "object",

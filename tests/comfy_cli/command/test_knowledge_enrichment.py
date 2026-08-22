@@ -229,6 +229,21 @@ class TestTemplates:
         assert k["models"][0]["matched_on"] == "video_minimax_h3_i2v"
         assert k["hit_ids"] == ["minimax-h3", "cap:lipsync"]
 
+    def test_enriched_payload_validates_from_discover_schemas_by_id(self, bundle, gallery_file, capsys):
+        """A consumer holding only `comfy discover`'s inlined schemas resolves the
+        `knowledge_block.json` $ref through `$id`, with no file system behind it."""
+        from comfy_cli.discovery import load_all_schemas
+
+        schemas = {entry["name"]: entry["schema"] for entry in load_all_schemas().values()}
+        store = {s["$id"]: s for s in schemas.values() if "$id" in s}
+        for name in ("templates.json", "nodes.json", "models.json", "generate_list.json", "generate_schema.json"):
+            assert schemas[name].get("$id") == f"https://comfy.org/schemas/{name}"
+        env = _invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--tag", "Lip Sync"], capsys)
+        assert env["data"]["knowledge"]["picks"]
+        schema = schemas["templates.json"]
+        resolver = jsonschema.RefResolver(base_uri=schema["$id"], referrer=schema, store=store)
+        jsonschema.Draft202012Validator(schema, resolver=resolver).validate(env["data"])
+
     def test_ls_model_filter_hits_the_alias(self, bundle, gallery_file, capsys):
         env = _invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--model", "Kling"], capsys)
         data = env["data"]
