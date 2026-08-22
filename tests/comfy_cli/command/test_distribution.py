@@ -1510,3 +1510,43 @@ def test_distribution_alias_hidden_from_root_help():
     assert proc.returncode == 0
     assert "build" in proc.stdout
     assert "distribution" not in proc.stdout
+# --- review follow-ups --------------------------------------------------------
+
+
+def test_plan_create_reads_a_registry_pin_that_names_the_pack_once():
+    """A hand-written node often gives the name and the version and no separate id.
+    `update` read that as a builder source while `create` routed it to an upload it
+    then refused, so the two commands disagreed about the same file."""
+    plan = distribution.plan_create({"customNodes": [{"name": "comfyui-kjnodes", "registryVersion": "1.4.9"}]})
+    assert plan["definition"]["customNodes"][0] == {
+        "name": "comfyui-kjnodes",
+        "id": "comfyui-kjnodes",
+        "registryVersion": "1.4.9",
+    }
+    assert plan["upload_count"] == 0
+
+
+@pytest.mark.parametrize("payload", ["null", "[]", '"a string"', "42"])
+def test_from_snapshot_refuses_json_that_is_not_an_object(tmp_path, capsys, payload):
+    """`json.loads` accepts all of these, and the wrapper would raise AttributeError
+    instead of the error envelope a caller can read. The code is the contract, so
+    assert it rather than the exit."""
+    f = tmp_path / "export.json"
+    f.write_text(payload, encoding="utf-8")
+    with pytest.raises(typer.Exit):
+        distribution.from_snapshot_cmd(from_=str(f), name="demo")
+    assert "build_definition_invalid" in capsys.readouterr().out
+
+
+def test_the_from_path_is_not_shipped_as_telemetry():
+    """`--from` is a local path naming the user's home directory and install layout.
+    Redacting must keep the key, since whether the option was supplied is the part
+    analytics is entitled to."""
+    from comfy_cli.tracking import filter_command_kwargs
+
+    out = filter_command_kwargs({"from_": "/Users/someone/ComfyUI-Installs/private/definition.json"})
+    assert out["from_"] == "<redacted>"
+
+    # Supplied but empty is still supplied; absent is absent.
+    assert filter_command_kwargs({"from_": None})["from_"] is None
+    assert "from_" not in filter_command_kwargs({"name": "demo"})
