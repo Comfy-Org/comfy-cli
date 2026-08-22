@@ -20,6 +20,7 @@ import os
 import shutil
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import jsonschema
@@ -272,9 +273,12 @@ class TestAuthRouting:
         return _Resp()
 
     def test_cloud_url_uses_authed_opener(self, monkeypatch):
+        import comfy_cli.target
         from comfy_cli.cloud import get_base_url
 
         monkeypatch.setattr(knowledge, "_http_get", _REAL_HTTP_GET)
+        # The real resolve_target can refresh an OAuth token; keep credential code out of the test.
+        monkeypatch.setattr(comfy_cli.target, "resolve_target", lambda **kw: SimpleNamespace(kind="cloud", **kw))
         seen: dict[str, Any] = {}
 
         def fake_authed(url, target, **kw):

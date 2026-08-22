@@ -119,7 +119,7 @@ def pick(bundle: Bundle, capability: str) -> dict | None:
 
 def _rank_key(p: dict) -> tuple[int, float]:
     rank = p.get("rank")
-    if isinstance(rank, (int, float)) and not isinstance(rank, bool):
+    if isinstance(rank, int | float) and not isinstance(rank, bool):
         return (0, rank)
     return (1, 0.0)
 
