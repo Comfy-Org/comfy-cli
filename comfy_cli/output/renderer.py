@@ -425,27 +425,20 @@ class Renderer:
 def _json_default(obj: Any) -> Any:
     """Coerce one unserializable value to a JSON-native one.
 
-    Every return here must be a value ``json`` can already encode. json feeds
-    anything else straight back in, so a hook that returns another opaque
-    object recurses once per hop and one that keeps producing new objects
-    never terminates at all.
+    json feeds anything this returns straight back in when it still cannot
+    encode it, so a hook that returns another opaque object re-enters once per
+    hop and one that keeps producing new objects never terminates at all. The
+    single tail coercion is what holds that off, and it holds for any branch
+    added above it.
     """
-    from pathlib import Path
-
-    if isinstance(obj, Path):
-        return str(obj)
     if isinstance(obj, Enum):
-        value = obj.value
-        return value if value is None or isinstance(value, str | int | float) else str(value)
+        obj = obj.value
     if hasattr(obj, "isoformat"):
         try:
-            stamp = obj.isoformat()
+            obj = obj.isoformat()
         except Exception:  # noqa: BLE001
             pass
-        else:
-            if isinstance(stamp, str):
-                return stamp
-    return str(obj)
+    return obj if isinstance(obj, str | int | float | None) else str(obj)
 
 
 # ----- process-wide singleton ----------------------------------------------

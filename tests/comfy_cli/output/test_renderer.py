@@ -586,6 +586,9 @@ class TestJsonDefault:
     def test_a_real_isoformat_is_still_used(self):
         assert _json_default(datetime(2026, 8, 23, tzinfo=timezone.utc)) == "2026-08-23T00:00:00+00:00"
 
+    def test_a_path_becomes_its_string(self):
+        assert _json_default(Path("/tmp/x")) == "/tmp/x"
+
     def test_an_enum_wrapping_an_opaque_value_is_coerced(self):
         class Wrapping(Enum):
             OPAQUE = object()
