@@ -423,18 +423,28 @@ class Renderer:
 
 
 def _json_default(obj: Any) -> Any:
-    # Best-effort JSON coercion for common non-serializable types.
+    """Coerce one unserializable value to a JSON-native one.
+
+    Every return here must be a value ``json`` can already encode. json feeds
+    anything else straight back in, so a hook that returns another opaque
+    object recurses once per hop and one that keeps producing new objects
+    never terminates at all.
+    """
     from pathlib import Path
 
     if isinstance(obj, Path):
         return str(obj)
     if isinstance(obj, Enum):
-        return obj.value
+        value = obj.value
+        return value if value is None or isinstance(value, str | int | float) else str(value)
     if hasattr(obj, "isoformat"):
         try:
-            return obj.isoformat()
+            stamp = obj.isoformat()
         except Exception:  # noqa: BLE001
             pass
+        else:
+            if isinstance(stamp, str):
+                return stamp
     return str(obj)
 
 
