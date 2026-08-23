@@ -563,6 +563,11 @@ def _resolves_locally(
     return True
 
 
+def _block_bytes(block: dict) -> int:
+    """Size of the block as the renderer will actually emit it (UTF-8, unescaped)."""
+    return len(json.dumps(block, ensure_ascii=False).encode())
+
+
 def _fit(block: dict) -> None:
     """Drop whole entries (models first, then picks) until the block fits MAX_BLOCK_BYTES."""
     while True:
@@ -571,7 +576,7 @@ def _fit(block: dict) -> None:
             if p["capability"] not in caps:
                 caps.append(p["capability"])
         block["hit_ids"] = [m["id"] for m in block["models"]] + [f"cap:{c}" for c in caps]
-        if len(json.dumps(block)) <= MAX_BLOCK_BYTES:
+        if _block_bytes(block) <= MAX_BLOCK_BYTES:
             return
         if block["models"]:
             block["models"].pop()
@@ -648,7 +653,7 @@ def attach(
             block["zero_hit"] = True
             head = f"no curated knowledge for {query_list[0]!r}"
             block["nudge"] = f"{head}; covered capabilities: {', '.join(sorted(bundle.capabilities))}"
-            if len(json.dumps(block)) > MAX_BLOCK_BYTES:
+            if _block_bytes(block) > MAX_BLOCK_BYTES:
                 block["nudge"] = head
         payload["knowledge"] = block
     except Exception:  # noqa: BLE001 — knowledge is additive; the payload ships unchanged on any failure
