@@ -365,7 +365,9 @@ class TestNodes:
         _validate(env["data"], "nodes.json")
         assert [m["id"] for m in k["models"]] == ["testvid"]
         assert k["models"][0]["available_locally"] is False
-        assert k["hit_ids"] == ["testvid"]
+        # The row cannot run here, so its capability's ranked picks come along.
+        assert {p["capability"] for p in k["picks"]} == {"lipsync"}
+        assert k["hit_ids"] == ["testvid", "cap:lipsync"]
         assert k["zero_hit"] is False
         assert "nudge" not in k
 

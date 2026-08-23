@@ -241,12 +241,36 @@ class TestSkewFilter:
         k = _attach(queries=["testvid"], catalog_nodes={"KSampler"}, thin=True)["knowledge"]
         assert k["zero_hit"] is False
         assert "nudge" not in k
-        assert k["hit_ids"] == ["testvid"]
+        # The borrowed capability counts as returned, so the miss log sees it too.
+        assert k["hit_ids"] == ["testvid", "cap:lipsync"]
 
     def test_unavailable_rows_sort_after_available_ones_in_their_tier(self):
         k = _attach(queries=["acme-h3", "testvid"], catalog_nodes={"AcmeH3ImageToVideo"})["knowledge"]
         assert [m["id"] for m in k["models"]] == ["acme-h3", "testvid"]
         assert k["models"][1]["available_locally"] is False
+
+    def test_an_unavailable_row_borrows_its_capability_picks(self):
+        """Matched by model name, so no capability matched and picks would be empty.
+        The row alone is a dead end: curated, unrunnable, nothing to reach for."""
+        k = _attach(queries=["testvid"], catalog_nodes={"KSampler"}, thin=True)["knowledge"]
+        assert k["models"][0]["available_locally"] is False
+        assert {p["capability"] for p in k["picks"]} == {"lipsync"}
+        assert "cap:lipsync" in k["hit_ids"]
+
+    def test_an_available_row_borrows_nothing(self):
+        k = _attach(queries=["testvid"], catalog_nodes={"TestvidImage2VideoNode"})["knowledge"]
+        assert "available_locally" not in k["models"][0]
+        assert k["picks"] == []
+
+    def test_borrowed_picks_still_respect_a_template_catalog(self):
+        k = _attach(
+            queries=["testvid"],
+            catalog_nodes={"KSampler"},
+            catalog_templates={"api_lipco_lip_sync_video"},
+        )["knowledge"]
+        by_model = {p["model"]: p for p in k["picks"]}
+        assert "available_locally" not in by_model["lipco-3"]
+        assert by_model["testlx"]["available_locally"] is False
 
     def test_picks_are_annotated_in_rank_order(self):
         k = _attach(queries=["lipsync"], catalog_templates={"api_lipco_lip_sync_video"})["knowledge"]

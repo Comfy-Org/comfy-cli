@@ -62,8 +62,9 @@ rather than an answer to anything. Four rules:
    and use the successor.
 2. **`available_locally: false` means "not here", not "not curated".** The row
    or pick is still the right answer; this install lacks the templates or nodes
-   it resolves to. Say which, and name something runnable instead — in
-   `picks[]` that is the next ranked entry without the flag.
+   it resolves to. A row flagged this way also pulls in `picks[]` for the
+   capabilities that rank it, so the highest-ranked entry *without* the flag is
+   the runnable alternative. Say what is missing, then name that alternative.
 3. **Verify before denying.** A missing `knowledge` key or a `nudge` means
    nothing is curated for that query, not that it is unsupported. A `nudge` on
    a block that still carries rows means your search term matched nothing

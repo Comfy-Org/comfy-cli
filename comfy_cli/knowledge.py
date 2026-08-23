@@ -69,6 +69,7 @@ class Bundle:
     aliases: dict[str, str]  # lowercased alias or model id -> model id
     templates: dict[str, list[str]]  # template id -> model ids
     nodes: dict[str, list[str]]  # node class -> model ids
+    model_capabilities: dict[str, list[str]]  # model id -> capability ids that rank it
     # _normalize(alias) -> id. A key two ids would share is left out, so only the
     # exact path decides it; a real id always keeps its own key.
     normalized_aliases: dict[str, str] = field(default_factory=dict)
@@ -433,6 +434,15 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
             if isinstance(p, dict) and isinstance(p.get("template"), str) and isinstance(p.get("model"), str):
                 _append_unique(templates, p["template"], p["model"])
 
+    model_capabilities: dict[str, list[str]] = {}
+    for cid, cap in capabilities.items():
+        cap_picks = cap.get("picks")
+        if not isinstance(cap_picks, list):
+            continue
+        for p in cap_picks:
+            if isinstance(p, dict) and isinstance(p.get("model"), str):
+                _append_unique(model_capabilities, p["model"], cid)
+
     capability_keys: dict[str, str] = {cid: cid for cid in capabilities}
     for cid, cap in capabilities.items():
         for alias in _str_list(cap.get("aliases")):
@@ -452,6 +462,7 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         aliases=aliases,
         templates=templates,
         nodes=nodes,
+        model_capabilities=model_capabilities,
         normalized_aliases=_normalized_map(aliases, ids=models),
         normalized_capabilities=_normalized_map(capability_keys, ids=capabilities),
     )
@@ -611,6 +622,18 @@ def _fit(block: dict) -> None:
             return
 
 
+def _capabilities_for(bundle: Bundle, entries: list[dict]) -> list[str]:
+    """Capability ids ranking any entry the local catalog cannot resolve, in block order."""
+    out: list[str] = []
+    for entry in entries:
+        if entry.get("available_locally") is not False:
+            continue
+        for cid in bundle.model_capabilities.get(entry["id"], ()):
+            if cid not in out:
+                out.append(cid)
+    return out
+
+
 def _set_nudge(block: dict, query: str, bundle: Bundle) -> None:
     """One line naming the miss and what the bundle does cover.
 
@@ -662,7 +685,9 @@ def attach(
     ``queries`` are resolved as model aliases or capability names; ``templates``
     and ``nodes`` go through the reverse index. ``catalog_*`` are the ids the
     command actually loaded; a row or pick they do not resolve is marked
-    ``available_locally: false`` rather than hidden. ``thin`` marks a command
+    ``available_locally: false`` rather than hidden, and a row marked that way
+    pulls in the ranked picks for its capabilities so the caller still sees
+    something runnable. ``thin`` marks a command
     whose own result was empty, which is the only case that earns ``zero_hit``;
     a query that resolved to nothing earns a nudge on its own.
 
@@ -719,6 +744,13 @@ def attach(
         picks: list[dict] = []
         for cid in cap_hits:
             picks.extend(_pick_entries(bundle, cid, catalog_templates=catalog_templates))
+        if not picks:
+            # A row matched by model name rather than by capability, which this
+            # install cannot run, would otherwise ship as a dead end: curated,
+            # unavailable, and next to nothing the caller could reach for. Its
+            # capabilities carry the ranked answer, so borrow them.
+            for cid in _capabilities_for(bundle, entries):
+                picks.extend(_pick_entries(bundle, cid, catalog_templates=catalog_templates))
         picks = picks[:MAX_PICKS]
 
         block: dict[str, Any] = {
