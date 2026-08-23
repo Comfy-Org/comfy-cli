@@ -5,11 +5,21 @@ from __future__ import annotations
 import io
 import json
 import re
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
 
 import pytest
 
 from comfy_cli.caller import Caller
-from comfy_cli.output.renderer import OutputMode, Renderer, get_renderer, reset_renderer_for_testing, set_renderer
+from comfy_cli.output.renderer import (
+    OutputMode,
+    Renderer,
+    _json_default,
+    get_renderer,
+    reset_renderer_for_testing,
+    set_renderer,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -563,3 +573,42 @@ class TestWritesTolerateADeadMachineStream:
         r = self._dead_stdout_renderer(monkeypatch, Fussy())
         with pytest.raises(TypeError):
             r.emit({"hello": "world"})
+
+
+class TestJsonDefault:
+    def test_a_non_string_isoformat_does_not_loop(self):
+        class FakeStamp:
+            def isoformat(self):
+                return self  # a Mock or a bad stub does exactly this
+
+        assert json.dumps({"when": FakeStamp()}, default=_json_default)
+
+    def test_a_real_isoformat_is_still_used(self):
+        assert _json_default(datetime(2026, 8, 23, tzinfo=timezone.utc)) == "2026-08-23T00:00:00+00:00"
+
+    def test_an_enum_wrapping_an_opaque_value_is_coerced(self):
+        class Wrapping(Enum):
+            OPAQUE = object()
+
+        assert _json_default(Wrapping.OPAQUE).startswith("<object object")
+
+    def test_the_hook_runs_once_per_value(self):
+        """Single-pass is the whole guarantee: json re-enters the hook for
+        anything it still cannot encode, so one re-entry per value is the same
+        defect as an endless one, caught earlier."""
+
+        class Wrapping(Enum):
+            OPAQUE = object()
+
+        class BadStamp:
+            def isoformat(self):
+                return self
+
+        seen = []
+
+        def counted(obj):
+            seen.append(obj)
+            return _json_default(obj)
+
+        json.dumps({"e": Wrapping.OPAQUE, "s": BadStamp(), "p": Path("/tmp/x")}, default=counted)
+        assert len(seen) == 3
