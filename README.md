@@ -627,6 +627,43 @@ custom_nodes:
     ...
 ```
 
+## Curated model knowledge
+
+Discovery commands can attach a `knowledge` block to their `--json` output: which
+model a name refers to, whether it is deprecated, ranked picks per capability,
+and known pitfalls. It is **off unless you point the CLI at a bundle**, so a
+default install never emits the block.
+
+Turn it on with either of:
+
+```
+export COMFY_KNOWLEDGE_URL=https://.../knowledge.json   # fetched and cached
+export COMFY_KNOWLEDGE_FILE=/path/to/knowledge.json     # read directly, never cached
+```
+
+Check what is loaded:
+
+```
+comfy knowledge status
+comfy knowledge resolve "Kling 3.0"
+comfy knowledge pick lipsync
+```
+
+Turn it off again:
+
+```
+export COMFY_KNOWLEDGE_DISABLE=1
+```
+
+Clearing `COMFY_KNOWLEDGE_URL` is *not* an off switch. Once a bundle is cached it
+keeps being served, stale or not. `COMFY_KNOWLEDGE_DISABLE` suppresses envelope
+enrichment outright; the `comfy knowledge` verbs keep working under it, since
+those are you asking for the bundle directly.
+
+Enrichment only ever reads the cache, so no command waits on a fetch. The cache
+refreshes during `comfy skills install` and in the background during
+`comfy launch`, or on demand with `comfy knowledge status --refresh`.
+
 ## Analytics
 
 Analytics are **opt-in and off by default**. The first time you run the CLI in an
