@@ -58,12 +58,17 @@
         }
       }
     },
+    "capabilities_available": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Every capability id the bundle covers, sorted. These are the search terms that reach a ranked table. Dropped only when the block would otherwise overrun its byte ceiling."
+    },
     "hit_ids": {
       "type": "array",
       "items": { "type": "string" },
       "description": "Model ids then `cap:<id>` for capabilities, in block order, after capping."
     },
     "zero_hit": { "type": "boolean", "description": "True when nothing curated matched and the command's own result was empty." },
-    "nudge": { "type": "string", "description": "One line naming what was asked and which capabilities are covered. Present on a zero-hit thin result, and on a non-empty block whose query matched no model or capability directly." }
+    "nudge": { "type": "string", "description": "One line naming what was asked, pointing at `capabilities_available` for what is covered. Present on a zero-hit thin result, and on a non-empty block whose query matched no model or capability directly." }
   }
 }

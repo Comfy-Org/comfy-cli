@@ -568,8 +568,20 @@ def _block_bytes(block: dict) -> int:
     return len(json.dumps(block, ensure_ascii=False).encode())
 
 
+def _nudge_text(block: dict, head: str) -> str:
+    """Point at ``capabilities_available`` rather than repeating the id list."""
+    if "capabilities_available" not in block:
+        return head
+    return f"{head}; see capabilities_available"
+
+
 def _fit(block: dict) -> None:
-    """Drop whole entries (models first, then picks) until the block fits MAX_BLOCK_BYTES."""
+    """Drop whole entries until the block fits MAX_BLOCK_BYTES.
+
+    Models first, then picks, and ``capabilities_available`` last: it is the
+    only thing that tells an agent which search terms reach a ranked table, so
+    it outlives the answers to the current query.
+    """
     while True:
         caps: list[str] = []
         for p in block["picks"]:
@@ -582,6 +594,8 @@ def _fit(block: dict) -> None:
             block["models"].pop()
         elif block["picks"]:
             block["picks"].pop()
+        elif "capabilities_available" in block:
+            del block["capabilities_available"]
         else:
             return
 
@@ -644,6 +658,7 @@ def attach(
             "as_of": bundle.as_of,
             "models": entries,
             "picks": picks,
+            "capabilities_available": sorted(bundle.capabilities),
             "hit_ids": [],
             "zero_hit": False,
         }
@@ -654,15 +669,17 @@ def attach(
                 return
             block["zero_hit"] = True
             head = f"no curated knowledge for {query_list[0]!r}"
-            block["nudge"] = f"{head}; covered capabilities: {', '.join(sorted(bundle.capabilities))}"
+            block["nudge"] = _nudge_text(block, head)
             if _block_bytes(block) > MAX_BLOCK_BYTES:
                 block["nudge"] = head
+            if _block_bytes(block) > MAX_BLOCK_BYTES:
+                block.pop("capabilities_available", None)
         elif query_list and not query_resolved:
             # A browse that returns rows the reverse index enriched, while the
             # query itself matched neither a model nor a capability. Not a
             # zero_hit: that feeds the miss log and means an empty block.
             head = f"no curated knowledge for {query_list[0]!r}"
-            block["nudge"] = f"{head}; covered capabilities: {', '.join(sorted(bundle.capabilities))}"
+            block["nudge"] = _nudge_text(block, head)
             if _block_bytes(block) > MAX_BLOCK_BYTES:
                 block["nudge"] = head
             if _block_bytes(block) > MAX_BLOCK_BYTES:
