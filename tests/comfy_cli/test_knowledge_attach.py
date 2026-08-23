@@ -22,6 +22,10 @@ from comfy_cli import knowledge
 
 FIXTURE_KNOWLEDGE = Path(__file__).parent / "fixtures" / "knowledge" / "knowledge.json"
 
+# A fixture template id the reverse index maps to a model row, so a block can
+# carry rows while the query strings themselves resolve to nothing.
+_REVERSE_TEMPLATE = "api_sync_so_lip_sync_video"
+
 
 def _network_guard(url: str) -> bytes:
     raise AssertionError(f"network touched: {url}")
@@ -279,6 +283,42 @@ class TestNudge:
         k = _attach(queries=["faceswap"], thin=True)["knowledge"]
         assert k["nudge"] == "no curated knowledge for 'faceswap'"
         assert knowledge._block_bytes(k) <= 220
+
+    def test_unresolved_query_on_a_non_empty_block_gets_a_nudge(self):
+        k = _attach(queries=["FLF2V"], templates=[_REVERSE_TEMPLATE])["knowledge"]
+        assert k["models"]
+        assert k["zero_hit"] is False
+        assert "'FLF2V'" in k["nudge"]
+        assert "lipsync" in k["nudge"]
+
+    def test_query_resolving_to_a_model_gets_no_nudge(self):
+        k = _attach(queries=["kling"], templates=[_REVERSE_TEMPLATE])["knowledge"]
+        assert k["models"]
+        assert "nudge" not in k
+
+    def test_query_resolving_to_a_capability_gets_no_nudge(self):
+        k = _attach(queries=["lipsync"])["knowledge"]
+        assert k["picks"]
+        assert "nudge" not in k
+
+    def test_unresolved_query_nudge_degrades_then_disappears(self, monkeypatch):
+        args = {"queries": ["FLF2V"], "templates": [_REVERSE_TEMPLATE]}
+        full = _attach(**args)["knowledge"]
+        head = "no curated knowledge for 'FLF2V'"
+        head_only = dict(full, nudge=head)
+        bare = {key: value for key, value in full.items() if key != "nudge"}
+
+        monkeypatch.setattr(knowledge, "MAX_BLOCK_BYTES", knowledge._block_bytes(head_only))
+        k = _attach(**args)["knowledge"]
+        assert k["nudge"] == head
+        assert k["models"]
+        assert knowledge._block_bytes(k) <= knowledge.MAX_BLOCK_BYTES
+
+        monkeypatch.setattr(knowledge, "MAX_BLOCK_BYTES", knowledge._block_bytes(bare))
+        k = _attach(**args)["knowledge"]
+        assert "nudge" not in k
+        assert k["models"]
+        assert knowledge._block_bytes(k) <= knowledge.MAX_BLOCK_BYTES
 
     def test_not_thin_means_no_key(self):
         assert "knowledge" not in _attach(queries=["faceswap"], thin=False)

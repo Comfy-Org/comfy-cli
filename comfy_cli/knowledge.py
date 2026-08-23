@@ -603,8 +603,9 @@ def attach(
     and ``nodes`` go through the reverse index. ``catalog_*`` are the ids the
     command actually loaded, used to drop rows and picks that do not resolve
     locally. ``thin`` marks a command whose own result was empty, which is the
-    only case that earns a nudge. Fail-open: any exception leaves ``payload``
-    exactly as it was.
+    only case that earns ``zero_hit``; a query that resolved to nothing earns a
+    nudge on its own. Fail-open: any exception leaves ``payload`` exactly as it
+    was.
     """
     try:
         bundle = load_bundle(cache_only=True)
@@ -612,6 +613,7 @@ def attach(
             return
         query_list = [q.strip()[:MAX_QUERY_CHARS] for q in queries if isinstance(q, str) and q.strip()]
         model_hits, cap_hits = _lookup(bundle, query_list)
+        query_resolved = bool(model_hits or cap_hits)
         seen = {mid for mid, _ in model_hits}
         for ids, index in ((templates, bundle.templates), (nodes, bundle.nodes)):
             for ident in ids:
@@ -655,6 +657,16 @@ def attach(
             block["nudge"] = f"{head}; covered capabilities: {', '.join(sorted(bundle.capabilities))}"
             if _block_bytes(block) > MAX_BLOCK_BYTES:
                 block["nudge"] = head
+        elif query_list and not query_resolved:
+            # A browse that returns rows the reverse index enriched, while the
+            # query itself matched neither a model nor a capability. Not a
+            # zero_hit: that feeds the miss log and means an empty block.
+            head = f"no curated knowledge for {query_list[0]!r}"
+            block["nudge"] = f"{head}; covered capabilities: {', '.join(sorted(bundle.capabilities))}"
+            if _block_bytes(block) > MAX_BLOCK_BYTES:
+                block["nudge"] = head
+            if _block_bytes(block) > MAX_BLOCK_BYTES:
+                del block["nudge"]
         payload["knowledge"] = block
     except Exception:  # noqa: BLE001 — knowledge is additive; the payload ships unchanged on any failure
         return

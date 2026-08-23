@@ -58,9 +58,11 @@ Three rules:
    recommendation; `status: deprecated` plus `superseded_by` means say so
    and use the successor.
 2. **Verify before denying.** A missing `knowledge` key or a `nudge` means
-   nothing is curated for that query, not that it is unsupported. Check the
-   live list (`templates ls`, `nodes search <term>`, `generate list`)
-   before telling the user something cannot be done.
+   nothing is curated for that query, not that it is unsupported. A `nudge` on
+   a block that still carries rows means your search term matched nothing
+   curated, and the ids it names are what is covered. Check the live list
+   (`templates ls`, `nodes search <term>`, `generate list`) before telling the
+   user something cannot be done.
 3. **Live beats knowledge.** Schemas, enums, and template contents in `data`
    are authoritative. When a `pitfalls` or `corrections` entry disagrees with
    live data, follow the live data and tell the user the two disagree.
