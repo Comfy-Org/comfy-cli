@@ -7,6 +7,8 @@ fetch from ``COMFY_KNOWLEDGE_URL``. A missing or broken bundle is a normal
 state: every entry point here returns ``None`` rather than raising, and nothing
 is written to stdout or stderr. :func:`attach` is how discovery commands add a
 capped ``knowledge`` block to their payload; it is fail-open for the same reason.
+Setting ``COMFY_KNOWLEDGE_DISABLE`` turns that enrichment off without
+disturbing the explicit ``comfy knowledge`` verbs.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ SCHEMA_VERSION = 1
 ENV_FILE = "COMFY_KNOWLEDGE_FILE"
 ENV_URL = "COMFY_KNOWLEDGE_URL"
 ENV_TTL = "COMFY_KNOWLEDGE_TTL"
+ENV_DISABLE = "COMFY_KNOWLEDGE_DISABLE"
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
 FETCH_TIMEOUT_SECONDS = 10.0
 MAX_BUNDLE_BYTES = 16 * 1024 * 1024
@@ -651,8 +654,16 @@ def attach(
     is attached there: a curated row picked out of 3655 listed nodes reads as the
     answer to a question nobody asked. Fail-open: any exception leaves ``payload``
     exactly as it was.
+
+    ``COMFY_KNOWLEDGE_DISABLE`` suppresses the block entirely. A cached bundle
+    keeps being read once it exists, stale or not, so clearing
+    ``COMFY_KNOWLEDGE_URL`` is not an off switch and this is. Following
+    ``DO_NOT_TRACK``, any value but empty or ``"0"`` disables.
     """
     try:
+        disable = os.environ.get(ENV_DISABLE, "")
+        if disable and disable != "0":
+            return
         if not qualified:
             return
         bundle = load_bundle(cache_only=True)

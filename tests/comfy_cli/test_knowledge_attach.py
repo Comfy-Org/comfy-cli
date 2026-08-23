@@ -35,7 +35,7 @@ def _network_guard(url: str) -> bytes:
 def _isolate(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     monkeypatch.setenv(knowledge.ENV_FILE, str(FIXTURE_KNOWLEDGE))
-    for var in (knowledge.ENV_URL, knowledge.ENV_TTL):
+    for var in (knowledge.ENV_URL, knowledge.ENV_TTL, knowledge.ENV_DISABLE):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(knowledge, "_http_get", _network_guard)
     knowledge._reset_for_testing()
@@ -438,6 +438,41 @@ class TestCacheOnly:
         assert http_calls == []
         knowledge.load_bundle()
         assert http_calls == ["https://example.invalid/knowledge.json"]
+
+
+class TestDisableSwitch:
+    """``COMFY_KNOWLEDGE_DISABLE`` is the only off switch.
+
+    Clearing ``COMFY_KNOWLEDGE_URL`` does not stop enrichment: once a bundle is
+    cached, ``_load`` keeps reading it whether or not it is stale.
+    """
+
+    def test_a_set_flag_suppresses_the_block(self, monkeypatch, capsys):
+        assert "knowledge" in _attach(queries=["testvid"])
+
+        monkeypatch.setenv(knowledge.ENV_DISABLE, "1")
+        p = {"rows": [], "count": 0}
+        knowledge.attach(p, queries=["testvid"], thin=True)
+        assert p == {"rows": [], "count": 0}
+        assert capsys.readouterr() == ("", "")
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "please", "0.0"])
+    def test_any_value_but_empty_or_zero_disables(self, monkeypatch, value):
+        monkeypatch.setenv(knowledge.ENV_DISABLE, value)
+        assert "knowledge" not in _attach(queries=["testvid"])
+
+    @pytest.mark.parametrize("value", ["", "0"])
+    def test_empty_and_zero_leave_it_on(self, monkeypatch, value):
+        monkeypatch.setenv(knowledge.ENV_DISABLE, value)
+        assert "knowledge" in _attach(queries=["testvid"])
+
+    def test_the_explicit_verbs_still_resolve(self, monkeypatch):
+        """The flag governs envelope enrichment, not the bundle itself, so
+        ``comfy knowledge resolve|pick|status`` keep working under it."""
+        monkeypatch.setenv(knowledge.ENV_DISABLE, "1")
+        bundle = knowledge.load_bundle()
+        assert bundle is not None
+        assert "testvid" in bundle.models
 
 
 class TestFailOpen:
