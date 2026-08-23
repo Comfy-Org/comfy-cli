@@ -64,6 +64,6 @@
       "description": "Model ids then `cap:<id>` for capabilities, in block order, after capping."
     },
     "zero_hit": { "type": "boolean", "description": "True when nothing curated matched and the command's own result was empty." },
-    "nudge": { "type": "string", "description": "One line present only on a zero-hit thin result: what was asked and which capabilities are covered." }
+    "nudge": { "type": "string", "description": "One line naming what was asked and which capabilities are covered. Present on a zero-hit thin result, and on a non-empty block whose query matched no model or capability directly." }
   }
 }
