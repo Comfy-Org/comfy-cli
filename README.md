@@ -629,17 +629,30 @@ custom_nodes:
 
 ## Analytics
 
-We track analytics using Mixpanel to help us understand usage patterns and know where to prioritize our efforts. When you first download the cli, it will ask you to give consent. If at any point you wish to opt out:
+Analytics are **opt-in and off by default**. The first time you run the CLI in an
+interactive terminal it asks whether to enable tracking, and that prompt defaults
+to no. Nothing is sent unless you answer yes. A non-interactive run (a pipe, CI,
+an agent) never enables it on its own. Setting `DO_NOT_TRACK` or
+`COMFY_NO_TELEMETRY` in the environment overrides the setting and suppresses
+everything.
+
+Change your mind at any time:
 
 ```
+comfy tracking enable
 comfy tracking disable
 ```
 
-The discovery commands — `comfy nodes search`, `comfy templates ls`,
-`comfy generate schema`, `comfy generate list` and `comfy models search` — also
-send the search term you typed and which curated knowledge entries it matched,
-so we can see what people look for and fail to find. Opting out stops this along
-with everything else.
+When tracking is on, we use Mixpanel to understand usage patterns and know where
+to prioritize our efforts.
+
+**One event carries text you typed.** If a curated knowledge bundle is configured
+— it is not by default, and needs `COMFY_KNOWLEDGE_URL` or `COMFY_KNOWLEDGE_FILE`
+— then `comfy nodes search`, `comfy templates ls`, `comfy generate schema`,
+`comfy generate list` and `comfy models search` send the search term you typed
+and which curated entries it matched. This tells us what people look for and fail
+to find. It needs both the bundle and your tracking consent, so with either one
+absent nothing is sent.
 
 Check out the usage here: [Mixpanel Board](https://mixpanel.com/p/13hGfPfEPdRkjPtNaS7BYQ)
 
