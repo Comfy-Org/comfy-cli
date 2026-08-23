@@ -428,17 +428,23 @@ def _json_default(obj: Any) -> Any:
     json feeds anything this returns straight back in when it still cannot
     encode it, so a hook that returns another opaque object re-enters once per
     hop and one that keeps producing new objects never terminates at all. The
-    single tail coercion is what holds that off, and it holds for any branch
-    added above it.
+    tail coercion is what holds that off: every return is either a scalar json
+    encodes directly or a container it walks itself. A container's members are
+    values of their own, so each costs at most one further hook call, and a
+    container that contains itself trips json's own circular-reference check.
     """
-    if isinstance(obj, Enum):
+    seen: set[int] = set()
+    while isinstance(obj, Enum) and id(obj) not in seen:
+        seen.add(id(obj))
         obj = obj.value
     if hasattr(obj, "isoformat"):
         try:
             obj = obj.isoformat()
         except Exception:  # noqa: BLE001
             pass
-    return obj if isinstance(obj, str | int | float | None) else str(obj)
+    if isinstance(obj, str | int | float | None | list | dict | tuple):
+        return obj
+    return str(obj)
 
 
 # ----- process-wide singleton ----------------------------------------------

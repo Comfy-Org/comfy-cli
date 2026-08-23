@@ -615,3 +615,29 @@ class TestJsonDefault:
 
         json.dumps({"e": Wrapping.OPAQUE, "s": BadStamp(), "p": Path("/tmp/x")}, default=counted)
         assert len(seen) == 3
+
+    def test_a_container_value_stays_a_container(self):
+        class Shaped(Enum):
+            LIST = [1, 2]
+            DICT = {"a": 1}
+            TUPLE = (1, 2)
+
+        assert json.dumps(Shaped.LIST, default=_json_default) == "[1, 2]"
+        assert json.dumps(Shaped.DICT, default=_json_default) == '{"a": 1}'
+        assert json.dumps(Shaped.TUPLE, default=_json_default) == "[1, 2]"
+
+    def test_a_nested_enum_unwraps_to_its_innermost_value(self):
+        class Inner(Enum):
+            MEMBER = "leaf"
+
+        class Outer(Enum):
+            MEMBER = Inner.MEMBER
+
+        assert _json_default(Outer.MEMBER) == "leaf"
+
+    def test_a_self_referencing_enum_does_not_loop(self):
+        class Looped(Enum):
+            MEMBER = "placeholder"
+
+        Looped.MEMBER._value_ = Looped.MEMBER
+        assert _json_default(Looped.MEMBER) == str(Looped.MEMBER)
