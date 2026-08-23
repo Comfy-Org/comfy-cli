@@ -18,13 +18,13 @@ from pathlib import Path
 
 import pytest
 
-from comfy_cli import knowledge
+from comfy_cli import knowledge, tracking
 
 FIXTURE_KNOWLEDGE = Path(__file__).parent / "fixtures" / "knowledge" / "knowledge.json"
 
 # A fixture template id the reverse index maps to a model row, so a block can
 # carry rows while the query strings themselves resolve to nothing.
-_REVERSE_TEMPLATE = "api_sync_so_lip_sync_video"
+_REVERSE_TEMPLATE = "api_lipco_lip_sync_video"
 
 
 def _network_guard(url: str) -> bytes:
@@ -62,26 +62,44 @@ class TestNormalization:
         assert knowledge._normalize("Lip Sync") == "lipsync"
         assert knowledge._normalize("Image to Video") == "imagetovideo"
 
-    def test_model_keys_most_specific_first(self):
-        assert knowledge._model_keys("kling-lipsync") == ["klinglipsync", "kling"]
-        assert knowledge._model_keys("Hailuo 3") == ["hailuo3", "hailuo"]
-        assert knowledge._model_keys("flux-kontext-max") == ["fluxkontextmax", "fluxkontext", "flux"]
-
 
 class TestLookup:
-    def test_family_alias_hits_family_row(self):
-        p = _attach(queries=["kling-lipsync"])
+    def test_keyed_alias_hits_its_row(self):
+        p = _attach(queries=["Testvid 3.0"])
         k = p["knowledge"]
         entry = k["models"][0]
-        assert entry["id"] == "kling"
-        assert entry["matched_on"] == "kling"
+        assert entry["id"] == "testvid"
+        assert entry["matched_on"] == "testvid 3.0"
         assert entry["tier"] == "law"
         assert isinstance(entry["pitfalls"], list) and all(isinstance(t, str) for t in entry["pitfalls"])
         assert not _walk(k, "source")
-        assert k["hit_ids"] == ["kling"]
+        assert k["hit_ids"] == ["testvid"]
         assert k["zero_hit"] is False
         assert k["bundle_version"] == "0.1.0-fixture"
         assert k["stale"] is False
+
+    def test_unkeyed_variant_gets_no_family_row(self):
+        """A prefix walk used to hand 'testvid-lipsync' the whole 'testvid' row: a
+        green-light law-tier answer for a variant the bundle never keyed, while
+        `comfy knowledge resolve` called the same string unknown."""
+        bundle = knowledge.load_bundle()
+        for q in ("testvid-lipsync", "testvid-avatar", "Testvid Avatar", "flux-kontext-max"):
+            assert knowledge.resolve_id(bundle, q) is None, q
+            assert "knowledge" not in _attach(queries=[q]), q
+
+    def test_lookup_agrees_with_the_resolve_verb(self):
+        bundle = knowledge.load_bundle()
+        for q in ("testvid", "Testvid 3.0", "HALO-03", "Acme H3", "testvid-lipsync", "zzz"):
+            hits, _ = knowledge._lookup(bundle, [q])
+            resolved = knowledge.resolve_id(bundle, q)
+            assert [mid for mid, _ in hits] == ([resolved] if resolved else []), q
+
+    def test_deprecated_variant_keeps_its_own_row(self):
+        k = _attach(queries=["Testvid Avatar 2"])["knowledge"]
+        entry = k["models"][0]
+        assert entry["id"] == "testvid-avatar-2"
+        assert entry["status"] == "deprecated"
+        assert entry["superseded_by"] == "lipco-3"
 
     def test_capability_by_id_alias_and_gallery_tag(self):
         for q in ("lipsync", "Lip Sync", "talking head"):
@@ -95,7 +113,7 @@ class TestLookup:
     def test_pick_entry_shape(self):
         k = _attach(queries=["lipsync"])["knowledge"]
         by_model = {p["model"]: p for p in k["picks"]}
-        assert set(by_model["kling"]) == {
+        assert set(by_model["testvid"]) == {
             "capability",
             "rank",
             "model",
@@ -105,18 +123,18 @@ class TestLookup:
             "status",
             "superseded_by",
         }
-        assert by_model["kling"]["status"] == "available"
-        assert by_model["kling"]["template"] is None
+        assert by_model["testvid"]["status"] == "available"
+        assert by_model["testvid"]["template"] is None
         # A pick naming a model the trimmed fixture lacks still ships, with nulls.
-        assert by_model["ltx"]["status"] is None
+        assert by_model["testlx"]["status"] is None
 
     def test_reverse_index_templates_and_nodes(self):
-        p = _attach(templates=["video_minimax_h3_i2v"])
-        assert p["knowledge"]["models"][0]["id"] == "minimax-h3"
-        assert p["knowledge"]["models"][0]["matched_on"] == "video_minimax_h3_i2v"
-        p = _attach(nodes=["KlingImage2VideoNode"])
-        assert p["knowledge"]["models"][0]["id"] == "kling"
-        assert p["knowledge"]["models"][0]["matched_on"] == "KlingImage2VideoNode"
+        p = _attach(templates=["video_acme_h3_i2v"])
+        assert p["knowledge"]["models"][0]["id"] == "acme-h3"
+        assert p["knowledge"]["models"][0]["matched_on"] == "video_acme_h3_i2v"
+        p = _attach(nodes=["TestvidImage2VideoNode"])
+        assert p["knowledge"]["models"][0]["id"] == "testvid"
+        assert p["knowledge"]["models"][0]["matched_on"] == "TestvidImage2VideoNode"
 
     def test_capability_id_beats_a_foreign_alias(self):
         data = {"models": {}, "capabilities": {"lipsync": {"aliases": ["upscale", "---"]}, "upscale": {}}}
@@ -125,26 +143,26 @@ class TestLookup:
         assert knowledge._lookup(b, ["!!!"]) == ([], [])
 
     def test_direct_alias_hit_keeps_its_matched_on_over_reverse_hit(self):
-        p = _attach(queries=["kling"], nodes=["KlingImage2VideoNode"])
+        p = _attach(queries=["testvid"], nodes=["TestvidImage2VideoNode"])
         models = p["knowledge"]["models"]
-        assert [m["id"] for m in models] == ["kling"]
-        assert models[0]["matched_on"] == "kling"
+        assert [m["id"] for m in models] == ["testvid"]
+        assert models[0]["matched_on"] == "testvid"
 
     def test_a_query_can_hit_model_and_capability_and_both_dedupe(self):
-        k = _attach(queries=["kling", "Kling 3.0", "lipsync", "Lip Sync"])["knowledge"]
-        assert [m["id"] for m in k["models"]] == ["kling"]
+        k = _attach(queries=["testvid", "Testvid 3.0", "lipsync", "Lip Sync"])["knowledge"]
+        assert [m["id"] for m in k["models"]] == ["testvid"]
         assert [p["capability"] for p in k["picks"]].count("lipsync") == len(k["picks"])
-        assert k["hit_ids"] == ["kling", "cap:lipsync"]
+        assert k["hit_ids"] == ["testvid", "cap:lipsync"]
 
     def test_deprecation_fields_come_from_the_deprecations_list(self):
-        entry = _attach(queries=["Kling Avatar 2.0"])["knowledge"]["models"][0]
-        assert entry["matched_on"] == "kling avatar 2.0"
+        entry = _attach(queries=["Testvid Avatar 2.0"])["knowledge"]["models"][0]
+        assert entry["matched_on"] == "testvid avatar 2.0"
         assert entry["status"] == "deprecated"
-        assert entry["superseded_by"] == "sync-3"
-        assert entry["deprecated_on"] == "2026-08-05"
+        assert entry["superseded_by"] == "lipco-3"
+        assert entry["deprecated_on"] == "2031-01-09"
 
     def test_full_entry_shape_and_list_reshaping(self):
-        entry = _attach(queries=["sync-3"])["knowledge"]["models"][0]
+        entry = _attach(queries=["lipco-3"])["knowledge"]["models"][0]
         assert list(entry)[:5] == ["id", "matched_on", "status", "tier", "route"]
         assert all(set(r) == {"when", "use"} for r in entry["routing"])
         for key in ("pitfalls", "corrections", "warnings"):
@@ -154,56 +172,95 @@ class TestLookup:
         assert "owner" not in entry
 
     def test_tier_is_opaque(self):
-        entry = _attach(queries=["sync-3"])["knowledge"]["models"][0]
+        entry = _attach(queries=["lipco-3"])["knowledge"]["models"][0]
         assert entry["tier"] == "canon"
 
 
 class TestSkewFilter:
-    def test_row_with_templates_needs_one_present(self):
-        p = _attach(templates=["video_minimax_h3_i2v"], catalog_templates={"something_else"})
-        assert "knowledge" not in p
-        p = _attach(templates=["video_minimax_h3_i2v"], catalog_templates={"video_minimax_h3_i2v"})
-        assert p["knowledge"]["models"][0]["id"] == "minimax-h3"
+    """A row this install cannot run is annotated, never hidden. Dropping it made
+    a curated answer look like no answer, which is the confusion the bundle exists
+    to remove."""
+
+    def test_row_with_templates_is_annotated_not_dropped(self):
+        k = _attach(templates=["video_acme_h3_i2v"], catalog_templates={"something_else"})["knowledge"]
+        entry = k["models"][0]
+        assert entry["id"] == "acme-h3"
+        assert entry["available_locally"] is False
+        assert entry["unavailable_reason"] == knowledge.UNAVAILABLE_LOCALLY
+        k = _attach(templates=["video_acme_h3_i2v"], catalog_templates={"video_acme_h3_i2v"})["knowledge"]
+        assert k["models"][0]["id"] == "acme-h3"
+        assert "available_locally" not in k["models"][0]
 
     def test_row_without_templates_survives_a_template_catalog(self):
-        p = _attach(queries=["kling"], catalog_templates={"x"})
-        assert p["knowledge"]["models"][0]["id"] == "kling"
+        entry = _attach(queries=["testvid"], catalog_templates={"x"})["knowledge"]["models"][0]
+        assert entry["id"] == "testvid"
+        assert "available_locally" not in entry
 
-    def test_row_with_nodes_needs_one_present(self):
-        assert "knowledge" not in _attach(queries=["kling"], catalog_nodes={"KSampler"})
-        p = _attach(queries=["kling"], catalog_nodes={"KSampler", "KlingLipSyncTextToVideoNode"})
-        assert p["knowledge"]["models"][0]["id"] == "kling"
+    def test_row_with_nodes_is_annotated_not_dropped(self):
+        entry = _attach(queries=["testvid"], catalog_nodes={"KSampler"})["knowledge"]["models"][0]
+        assert entry["id"] == "testvid"
+        assert entry["available_locally"] is False
+        p = _attach(queries=["testvid"], catalog_nodes={"KSampler", "TestvidLipSyncTextToVideoNode"})
+        assert p["knowledge"]["models"][0]["id"] == "testvid"
+        assert "available_locally" not in p["knowledge"]["models"][0]
+
+    def test_either_catalog_resolving_the_row_is_enough(self):
+        """acme-h3 names both templates and nodes; one catalog carrying it settles it."""
+        k = _attach(
+            queries=["acme-h3"],
+            catalog_templates={"video_acme_h3_i2v"},
+            catalog_nodes={"KSampler"},
+        )["knowledge"]
+        assert "available_locally" not in k["models"][0]
 
     def test_none_catalog_is_not_consulted(self):
-        assert _attach(queries=["kling"], catalog_templates=None, catalog_nodes=None)["knowledge"]["models"]
+        entry = _attach(queries=["testvid"], catalog_templates=None, catalog_nodes=None)["knowledge"]["models"][0]
+        assert "available_locally" not in entry
 
-    def test_picks_follow_the_template_catalog(self):
-        k = _attach(queries=["lipsync"], catalog_templates={"x"})["knowledge"]
-        assert [p["model"] for p in k["picks"]] == ["kling"]  # the only pick without a template
-        k = _attach(queries=["lipsync"], catalog_templates={"api_sync_so_lip_sync_video"})["knowledge"]
-        assert [p["model"] for p in k["picks"]] == ["sync-3", "kling"]
+    def test_skew_is_not_reported_as_a_miss(self):
+        """`nodes search testvid` on an install without the classes used to answer
+        `zero_hit: true, no curated knowledge for 'testvid'` — the opposite of true."""
+        k = _attach(queries=["testvid"], catalog_nodes={"KSampler"}, thin=True)["knowledge"]
+        assert k["zero_hit"] is False
+        assert "nudge" not in k
+        assert k["hit_ids"] == ["testvid"]
+
+    def test_unavailable_rows_sort_after_available_ones_in_their_tier(self):
+        k = _attach(queries=["acme-h3", "testvid"], catalog_nodes={"AcmeH3ImageToVideo"})["knowledge"]
+        assert [m["id"] for m in k["models"]] == ["acme-h3", "testvid"]
+        assert k["models"][1]["available_locally"] is False
+
+    def test_picks_are_annotated_in_rank_order(self):
+        k = _attach(queries=["lipsync"], catalog_templates={"api_lipco_lip_sync_video"})["knowledge"]
+        ranks = [p["rank"] for p in k["picks"]]
+        assert ranks == sorted(ranks)
+        by_model = {p["model"]: p for p in k["picks"]}
+        assert "available_locally" not in by_model["lipco-3"]
+        assert "available_locally" not in by_model["testvid"]  # rank 6 names no template
+        assert by_model["testlx"]["available_locally"] is False
+        assert by_model["testlx"]["unavailable_reason"] == knowledge.UNAVAILABLE_LOCALLY
 
 
 class TestCaps:
     def test_max_models_keeps_law_first(self, monkeypatch):
         monkeypatch.setattr(knowledge, "MAX_MODELS", 1)
-        k = _attach(queries=["sync-3", "ace-step-1-5", "kling"])["knowledge"]
-        assert [m["id"] for m in k["models"]] == ["kling"]
-        assert k["hit_ids"] == ["kling"]
+        k = _attach(queries=["lipco-3", "test-audio-1-5", "testvid"])["knowledge"]
+        assert [m["id"] for m in k["models"]] == ["testvid"]
+        assert k["hit_ids"] == ["testvid"]
 
     def test_law_rows_sort_first_then_input_order(self):
-        k = _attach(queries=["sync-3", "ace-step-1-5", "kling"])["knowledge"]
+        k = _attach(queries=["lipco-3", "test-audio-1-5", "testvid"])["knowledge"]
         assert [(m["id"], m["tier"]) for m in k["models"]] == [
-            ("kling", "law"),
-            ("sync-3", "canon"),
-            ("ace-step-1-5", "canon"),
+            ("testvid", "law"),
+            ("lipco-3", "canon"),
+            ("test-audio-1-5", "canon"),
         ]
 
     def test_byte_ceiling_drops_whole_entries(self, monkeypatch):
-        full = _attach(queries=["kling", "Lip Sync"])["knowledge"]
+        full = _attach(queries=["testvid", "Lip Sync"])["knowledge"]
         assert full["models"] and full["picks"]
         monkeypatch.setattr(knowledge, "MAX_BLOCK_BYTES", 600)
-        k = _attach(queries=["kling", "Lip Sync"])["knowledge"]
+        k = _attach(queries=["testvid", "Lip Sync"])["knowledge"]
         assert knowledge._block_bytes(k) <= 600
         assert k["models"] == []
         assert 0 < len(k["picks"]) < len(full["picks"])
@@ -212,8 +269,8 @@ class TestCaps:
 
     def test_byte_ceiling_can_empty_the_block(self, monkeypatch):
         monkeypatch.setattr(knowledge, "MAX_BLOCK_BYTES", 10)
-        assert "knowledge" not in _attach(queries=["kling"])
-        assert "knowledge" not in _attach(queries=["kling"], thin=True)
+        assert "knowledge" not in _attach(queries=["testvid"])
+        assert "knowledge" not in _attach(queries=["testvid"], thin=True)
 
     def test_the_ceiling_counts_wire_bytes_not_escaped_characters(self, monkeypatch):
         """The renderer emits with ``ensure_ascii=False``, so a curly quote costs
@@ -230,11 +287,11 @@ class TestCaps:
 
     def test_max_list_items(self, monkeypatch):
         monkeypatch.setattr(knowledge, "MAX_LIST_ITEMS", 2)
-        entry = _attach(queries=["kling"])["knowledge"]["models"][0]
+        entry = _attach(queries=["testvid"])["knowledge"]["models"][0]
         assert len(entry["pitfalls"]) <= 2
-        entry = _attach(queries=["ace-step-1-5"])["knowledge"]["models"][0]
+        entry = _attach(queries=["test-audio-1-5"])["knowledge"]["models"][0]
         assert len(entry["routing"]) <= 2
-        entry = _attach(queries=["minimax-h3"])["knowledge"]["models"][0]
+        entry = _attach(queries=["acme-h3"])["knowledge"]["models"][0]
         assert len(entry["best_for"]) == 2
 
     def test_max_picks_bounds_the_whole_block_not_one_capability(self):
@@ -247,7 +304,7 @@ class TestCaps:
         assert [p["rank"] for p in k["picks"]] == [1, 2]
 
     def test_brief_entries(self):
-        entry = _attach(queries=["kling"], brief=True)["knowledge"]["models"][0]
+        entry = _attach(queries=["testvid"], brief=True)["knowledge"]["models"][0]
         assert "pitfalls" not in entry
         assert "warnings" not in entry
         assert entry["best_for"]
@@ -255,7 +312,7 @@ class TestCaps:
 
     def test_brief_uses_its_own_row_cap(self, monkeypatch):
         monkeypatch.setattr(knowledge, "MAX_MODELS", 1)
-        k = _attach(queries=["sync-3", "ace-step-1-5", "kling"], brief=True)["knowledge"]
+        k = _attach(queries=["lipco-3", "test-audio-1-5", "testvid"], brief=True)["knowledge"]
         assert len(k["models"]) == 3
 
 
@@ -292,7 +349,7 @@ class TestNudge:
         assert "lipsync" in k["nudge"]
 
     def test_query_resolving_to_a_model_gets_no_nudge(self):
-        k = _attach(queries=["kling"], templates=[_REVERSE_TEMPLATE])["knowledge"]
+        k = _attach(queries=["testvid"], templates=[_REVERSE_TEMPLATE])["knowledge"]
         assert k["models"]
         assert "nudge" not in k
 
@@ -352,7 +409,7 @@ class TestCacheOnly:
 
     def test_url_and_empty_cache_never_fetches(self, http_calls):
         p: dict = {"count": 0}
-        knowledge.attach(p, queries=["kling"], thin=True)
+        knowledge.attach(p, queries=["testvid"], thin=True)
         assert http_calls == []
         assert p == {"count": 0}
 
@@ -367,10 +424,10 @@ class TestCacheOnly:
         shutil.copy(FIXTURE_KNOWLEDGE.parent / "manifest.json", m_path)
         old = time.time() - 2 * knowledge.DEFAULT_TTL_SECONDS
         os.utime(k_path, (old, old))
-        p = _attach(queries=["kling"])
+        p = _attach(queries=["testvid"])
         assert http_calls == []
         assert p["knowledge"]["stale"] is True
-        assert p["knowledge"]["models"][0]["id"] == "kling"
+        assert p["knowledge"]["models"][0]["id"] == "testvid"
 
     def test_default_load_still_fetches(self, http_calls):
         knowledge.load_bundle()
@@ -388,7 +445,7 @@ class TestFailOpen:
         monkeypatch.delenv(knowledge.ENV_FILE)
         knowledge._reset_for_testing()
         p = {"rows": [], "count": 0}
-        knowledge.attach(p, queries=["kling"], thin=True)
+        knowledge.attach(p, queries=["testvid"], thin=True)
         assert p == {"rows": [], "count": 0}
         assert capsys.readouterr() == ("", "")
 
@@ -398,21 +455,21 @@ class TestFailOpen:
 
         monkeypatch.setattr(knowledge, "_lookup", _boom)
         p = {"rows": [{"name": "x"}], "count": 1}
-        knowledge.attach(p, queries=["kling"])
+        knowledge.attach(p, queries=["testvid"])
         assert p == {"rows": [{"name": "x"}], "count": 1}
         assert capsys.readouterr() == ("", "")
 
     def test_bad_inputs_are_swallowed(self, capsys):
         p = {"count": 1}
-        knowledge.attach(p, queries=[None, 3, "kling"], templates=[None], nodes=[7])  # type: ignore[list-item]
-        assert p["knowledge"]["models"][0]["id"] == "kling"
+        knowledge.attach(p, queries=[None, 3, "testvid"], templates=[None], nodes=[7])  # type: ignore[list-item]
+        assert p["knowledge"]["models"][0]["id"] == "testvid"
         knowledge.attach(p, queries=object())  # type: ignore[arg-type]
         assert capsys.readouterr() == ("", "")
 
     def test_existing_keys_untouched_and_knowledge_is_last(self):
         p = {"rows": [{"name": "a"}], "count": 1}
         before = json.dumps(p)
-        knowledge.attach(p, queries=["kling"])
+        knowledge.attach(p, queries=["testvid"])
         assert list(p) == ["rows", "count", "knowledge"]
         del p["knowledge"]
         assert json.dumps(p) == before
@@ -421,8 +478,8 @@ class TestFailOpen:
 class TestIndex:
     def test_bundle_carries_normalized_maps(self):
         b = knowledge.load_bundle()
-        assert b.normalized_aliases["kling30"] == "kling"
-        assert b.normalized_aliases["hailuo3"] == "minimax-h3"
+        assert b.normalized_aliases["testvid30"] == "testvid"
+        assert b.normalized_aliases["halo3"] == "acme-h3"
         assert b.normalized_capabilities["lipsync"] == "lipsync"
         assert b.normalized_capabilities["talkinghead"] == "lipsync"
         assert b.normalized_capabilities["audiogeneration"] == "audio-generation"
@@ -451,3 +508,49 @@ class TestIndex:
             mtime=0.0,
         )
         assert b.normalized_capabilities == {"c": "c", "d": "d"}
+
+
+class TestQueryLog:
+    """One event per query, hit or miss. Without it the capture loop has no feed
+    from local installs, and what gets curated stays a matter of intuition."""
+
+    @pytest.fixture
+    def events(self, monkeypatch):
+        seen: list[tuple[str, dict]] = []
+        monkeypatch.setattr(tracking, "track_event", lambda name, props=None, **kw: seen.append((name, props)))
+        return seen
+
+    def test_a_hit_is_logged_with_its_ids(self, events):
+        _attach(command="nodes search", queries=["testvid"])
+        assert [name for name, _ in events] == ["knowledge_query"]
+        props = events[0][1]
+        assert props["command"] == "nodes search"
+        assert props["query"] == "testvid"
+        assert props["hit_ids"] == ["testvid"]
+        assert props["zero_hit"] is False
+        assert props["bundle_version"] == "0.1.0-fixture"
+
+    def test_a_miss_is_logged_even_though_nothing_attaches(self, events):
+        assert "knowledge" not in _attach(command="nodes search", queries=["zzzz"])
+        assert [name for name, _ in events] == ["knowledge_query"]
+        assert events[0][1]["hit_ids"] == []
+        assert events[0][1]["query"] == "zzzz"
+
+    def test_a_zero_hit_is_logged_as_one(self, events):
+        _attach(command="nodes search", queries=["zzzz"], thin=True)
+        assert events[0][1]["zero_hit"] is True
+
+    def test_a_call_with_no_query_logs_nothing(self, events):
+        _attach(command="templates show", templates=["video_acme_h3_i2v"])
+        assert events == []
+
+    def test_an_unqualified_listing_logs_nothing(self, events):
+        _attach(command="nodes ls", queries=["testvid"], qualified=False)
+        assert events == []
+
+    def test_a_telemetry_failure_never_breaks_the_payload(self, monkeypatch):
+        def boom(*a, **kw):
+            raise RuntimeError("posthog down")
+
+        monkeypatch.setattr(tracking, "track_event", boom)
+        assert _attach(command="nodes search", queries=["testvid"])["knowledge"]["models"]

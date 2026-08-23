@@ -43,7 +43,10 @@ MAX_MODELS_BRIEF = 20
 MAX_PICKS = 8
 MAX_LIST_ITEMS = 8
 MAX_BLOCK_BYTES = 8192
-MAX_QUERY_CHARS = 200  # CLI text is unbounded; the clip bounds the prefix walk and the nudge echo
+MAX_QUERY_CHARS = 200  # CLI text is unbounded; the clip bounds the lookup key and the nudge echo
+MAX_VERSION_CHARS = 64
+
+UNAVAILABLE_LOCALLY = "the templates or nodes this row resolves to are absent from this install"
 
 REASON_ENV_FILE = "COMFY_KNOWLEDGE_FILE is set but could not be loaded"
 REASON_NO_URL = "no cache and COMFY_KNOWLEDGE_URL is not set"
@@ -63,7 +66,8 @@ class Bundle:
     aliases: dict[str, str]  # lowercased alias or model id -> model id
     templates: dict[str, list[str]]  # template id -> model ids
     nodes: dict[str, list[str]]  # node class -> model ids
-    # _normalize(alias) -> id; a key two ids would share is left out, so only the exact path decides it.
+    # _normalize(alias) -> id. A key two ids would share is left out, so only the
+    # exact path decides it; a real id always keeps its own key.
     normalized_aliases: dict[str, str] = field(default_factory=dict)
     normalized_capabilities: dict[str, str] = field(default_factory=dict)
 
@@ -125,7 +129,9 @@ def _normalize(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s)
 
 
-def _normalized_map(keys: dict[str, str]) -> dict[str, str]:
+def _normalized_map(keys: dict[str, str], *, ids: Collection[str] = ()) -> dict[str, str]:
+    """``_normalize(key) -> target``. A spelling two targets share is dropped, then
+    every id in ``ids`` reclaims its own key, so no alias can delete a real id."""
     out: dict[str, str] = {}
     ambiguous: set[str] = set()
     for key, target in keys.items():
@@ -136,6 +142,9 @@ def _normalized_map(keys: dict[str, str]) -> dict[str, str]:
             ambiguous.add(norm)
     for norm in ambiguous:
         del out[norm]
+    for identifier in ids:
+        if norm := _normalize(identifier):
+            out[norm] = identifier
     return out
 
 
@@ -414,7 +423,7 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
 
     version = manifest.get("version") if manifest is not None else None
     return Bundle(
-        version=version if isinstance(version, str) else "unknown",
+        version=version[:MAX_VERSION_CHARS] if isinstance(version, str) else "unknown",
         source=source,
         stale=stale,
         as_of=datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -425,8 +434,8 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         aliases=aliases,
         templates=templates,
         nodes=nodes,
-        normalized_aliases=_normalized_map(aliases),
-        normalized_capabilities=_normalized_map(capability_keys),
+        normalized_aliases=_normalized_map(aliases, ids=models),
+        normalized_capabilities=_normalized_map(capability_keys, ids=capabilities),
     )
 
 
@@ -435,34 +444,21 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
 # ---------------------------------------------------------------------------
 
 
-def _model_keys(q: str) -> list[str]:
-    """Keys to try for a model query, most specific first.
-
-    'kling-lipsync' -> ['klinglipsync', 'kling']; 'Hailuo 3' -> ['hailuo3', 'hailuo'].
-    A family alias ('kling-i2v', 'flux-kontext-max') falls back to its family row.
-    """
-    parts = [p for p in re.split(r"[\s_\-/]+", q.strip().lower()) if p]
-    return [_normalize("".join(parts[:i])) for i in range(len(parts), 0, -1)]
-
-
 def _lookup(bundle: Bundle, queries: Iterable[str]) -> tuple[list[tuple[str, str]], list[str]]:
-    """-> ([(model_id, matched_key), ...], [capability_id, ...]), de-duplicated, input order."""
+    """-> ([(model_id, matched_key), ...], [capability_id, ...]), de-duplicated, input order.
+
+    Keyed only, through the same :func:`resolve_id` the ``comfy knowledge resolve``
+    verb uses, so a string the verb calls unknown never gets a row attached here.
+    """
     models: list[tuple[str, str]] = []
     seen: set[str] = set()
     caps: list[str] = []
     for q in queries:
         exact = q.strip().lower()
-        matched = exact
-        mid = bundle.aliases.get(exact)
-        if mid is None:
-            for prefix in _model_keys(q):
-                mid = bundle.normalized_aliases.get(prefix)
-                if mid is not None:
-                    matched = prefix
-                    break
+        mid = resolve_id(bundle, q)
         if mid is not None and mid not in seen:
             seen.add(mid)
-            models.append((mid, matched))
+            models.append((mid, exact))
         cid = exact if exact in bundle.capabilities else bundle.normalized_capabilities.get(_normalize(q))
         if cid is not None and cid not in caps:
             caps.append(cid)
@@ -525,23 +521,23 @@ def _pick_entries(bundle: Bundle, capability_id: str, *, catalog_templates: Coll
     out: list[dict] = []
     for p in cap["picks"]:
         template = p.get("template") if isinstance(p.get("template"), str) else None
-        if catalog_templates is not None and template is not None and template not in catalog_templates:
-            continue
         model_id = p.get("model")
         row = bundle.models.get(model_id, {}) if isinstance(model_id, str) else {}
         dep = bundle.deprecations.get(model_id, {}) if isinstance(model_id, str) else {}
-        out.append(
-            {
-                "capability": capability_id,
-                "rank": pick_rank(p),
-                "model": _text(model_id),
-                "route": _text(p.get("route")),
-                "template": template,
-                "caveat": _text(p.get("caveat")),
-                "status": _text(row.get("status")),
-                "superseded_by": _text(dep.get("superseded_by") or row.get("superseded_by")),
-            }
-        )
+        entry = {
+            "capability": capability_id,
+            "rank": pick_rank(p),
+            "model": _text(model_id),
+            "route": _text(p.get("route")),
+            "template": template,
+            "caveat": _text(p.get("caveat")),
+            "status": _text(row.get("status")),
+            "superseded_by": _text(dep.get("superseded_by") or row.get("superseded_by")),
+        }
+        if catalog_templates is not None and template is not None and template not in catalog_templates:
+            entry["available_locally"] = False
+            entry["unavailable_reason"] = UNAVAILABLE_LOCALLY
+        out.append(entry)
         if len(out) >= MAX_PICKS:
             break
     return out
@@ -550,17 +546,26 @@ def _pick_entries(bundle: Bundle, capability_id: str, *, catalog_templates: Coll
 def _resolves_locally(
     row: dict, *, catalog_templates: Collection[str] | None, catalog_nodes: Collection[str] | None
 ) -> bool:
-    """Version-skew filter: a row whose every known id is absent from the live catalog is dropped."""
+    """Version-skew check: False only when the row names ids for the catalogs on
+    hand and not one of them is there. Either catalog resolving the row is enough.
+
+    A False row is annotated, never dropped — a curated answer the install cannot
+    run today is still the answer, and hiding it reads as "nothing is curated".
+    """
     resolves = row.get("resolves")
     if not isinstance(resolves, dict):
         return True
+    checked = False
     for catalog, key in ((catalog_templates, "templates"), (catalog_nodes, "nodes")):
         if catalog is None:
             continue
         ids = _str_list(resolves.get(key))
-        if ids and not any(i in catalog for i in ids):
-            return False
-    return True
+        if not ids:
+            continue
+        checked = True
+        if any(i in catalog for i in ids):
+            return True
+    return not checked
 
 
 def _block_bytes(block: dict) -> int:
@@ -586,9 +591,43 @@ def _fit(block: dict) -> None:
             return
 
 
+def _set_nudge(block: dict, query: str, bundle: Bundle) -> None:
+    """One line naming the miss and what the bundle does cover.
+
+    The capability list goes first if the block is over the cap, then the whole
+    nudge — a block that ships without its nudge still beats one nothing reads.
+    """
+    head = f"no curated knowledge for {query!r}"
+    block["nudge"] = f"{head}; covered capabilities: {', '.join(sorted(bundle.capabilities))}"
+    if _block_bytes(block) > MAX_BLOCK_BYTES:
+        block["nudge"] = head
+    if _block_bytes(block) > MAX_BLOCK_BYTES:
+        del block["nudge"]
+
+
+def _log_query(command: str, query: str, block: dict, bundle: Bundle) -> None:
+    """Feed the curation miss log. Consent-gated and best-effort, like every other event."""
+    try:
+        from comfy_cli import tracking
+
+        tracking.track_event(
+            "knowledge_query",
+            {
+                "command": command,
+                "query": query,
+                "hit_ids": block.get("hit_ids", []),
+                "zero_hit": block.get("zero_hit", False),
+                "bundle_version": bundle.version,
+            },
+        )
+    except Exception:  # noqa: BLE001 — telemetry never decides whether a payload ships
+        return
+
+
 def attach(
     payload: dict,
     *,
+    command: str = "",
     queries: Iterable[str] = (),
     templates: Iterable[str] = (),
     nodes: Iterable[str] = (),
@@ -596,18 +635,26 @@ def attach(
     catalog_nodes: Collection[str] | None = None,
     brief: bool = False,
     thin: bool = False,
+    qualified: bool = True,
 ) -> None:
     """Append a capped ``knowledge`` block to ``payload`` for what the command was asked about.
 
     ``queries`` are resolved as model aliases or capability names; ``templates``
     and ``nodes`` go through the reverse index. ``catalog_*`` are the ids the
-    command actually loaded, used to drop rows and picks that do not resolve
-    locally. ``thin`` marks a command whose own result was empty, which is the
-    only case that earns ``zero_hit``; a query that resolved to nothing earns a
-    nudge on its own. Fail-open: any exception leaves ``payload`` exactly as it
-    was.
+    command actually loaded; a row or pick they do not resolve is marked
+    ``available_locally: false`` rather than hidden. ``thin`` marks a command
+    whose own result was empty, which is the only case that earns ``zero_hit``;
+    a query that resolved to nothing earns a nudge on its own.
+
+    ``qualified=False`` says the call named no subject — an unfiltered listing,
+    whose rows are the whole catalog rather than an answer to anything. Nothing
+    is attached there: a curated row picked out of 3655 listed nodes reads as the
+    answer to a question nobody asked. Fail-open: any exception leaves ``payload``
+    exactly as it was.
     """
     try:
+        if not qualified:
+            return
         bundle = load_bundle(cache_only=True)
         if bundle is None:
             return
@@ -627,10 +674,12 @@ def attach(
             row = bundle.models.get(mid)
             if not isinstance(row, dict):
                 continue
+            entry = _model_entry(bundle, mid, row, matched_on=matched_on, brief=brief)
             if not _resolves_locally(row, catalog_templates=catalog_templates, catalog_nodes=catalog_nodes):
-                continue
-            entries.append(_model_entry(bundle, mid, row, matched_on=matched_on, brief=brief))
-        entries.sort(key=lambda e: e.get("tier") != "law")
+                entry["available_locally"] = False
+                entry["unavailable_reason"] = UNAVAILABLE_LOCALLY
+            entries.append(entry)
+        entries.sort(key=lambda e: (e.get("tier") != "law", e.get("available_locally") is False))
         entries = entries[: MAX_MODELS_BRIEF if brief else MAX_MODELS]
         if not query_resolved:
             # A node class or template id passed as both a query and a reverse-index
@@ -655,24 +704,39 @@ def attach(
         }
         had_hits = bool(entries or picks)
         _fit(block)
+        attached = True
         if not block["models"] and not block["picks"]:
             if had_hits or not (thin and query_list):
-                return
-            block["zero_hit"] = True
-            head = f"no curated knowledge for {query_list[0]!r}"
-            block["nudge"] = f"{head}; covered capabilities: {', '.join(sorted(bundle.capabilities))}"
-            if _block_bytes(block) > MAX_BLOCK_BYTES:
-                block["nudge"] = head
+                attached = False
+            else:
+                block["zero_hit"] = True
+                _set_nudge(block, query_list[0], bundle)
         elif query_list and not query_resolved:
             # A browse that returns rows the reverse index enriched, while the
             # query itself matched neither a model nor a capability. Not a
             # zero_hit: that feeds the miss log and means an empty block.
-            head = f"no curated knowledge for {query_list[0]!r}"
-            block["nudge"] = f"{head}; covered capabilities: {', '.join(sorted(bundle.capabilities))}"
-            if _block_bytes(block) > MAX_BLOCK_BYTES:
-                block["nudge"] = head
-            if _block_bytes(block) > MAX_BLOCK_BYTES:
-                del block["nudge"]
-        payload["knowledge"] = block
+            _set_nudge(block, query_list[0], bundle)
+        if query_list:
+            _log_query(command, query_list[0], block, bundle)
+        if attached:
+            payload["knowledge"] = block
     except Exception:  # noqa: BLE001 — knowledge is additive; the payload ships unchanged on any failure
+        return
+
+
+def refresh_if_stale() -> None:
+    """Re-fetch the bundle when the cache has expired.
+
+    For warm paths only — commands already doing slower work, or holding a
+    process open long enough for a fetch to land. :func:`attach` never calls
+    this: a discovery turn must not wait on the network.
+    """
+    try:
+        if os.environ.get(ENV_FILE, "").strip():
+            return
+        knowledge_path, _ = cache_paths()
+        if _cache_is_fresh(knowledge_path):
+            return
+        load_bundle(force_fetch=True)
+    except Exception:  # noqa: BLE001 — a refresh that fails leaves the cache exactly as it was
         return

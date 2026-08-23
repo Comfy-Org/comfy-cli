@@ -325,8 +325,10 @@ def ls_cmd(
             rprint(f"[dim]{len(nodes)} node(s)[/dim]")
     knowledge.attach(
         payload,
+        command="nodes ls",
         nodes=[r["name"] for r in payload["rows"]],
         catalog_nodes={m.id for m in graph.all_nodes()},
+        qualified=any(payload["filter"].values()),
     )
     renderer.emit(payload, command="nodes ls")
 
@@ -687,6 +689,7 @@ def search_cmd(
             rprint(f"[dim]{len(matched)} node(s)[/dim]")
     knowledge.attach(
         payload,
+        command="nodes search",
         queries=[query],
         nodes=[r["name"] for r in payload["rows"]],
         catalog_nodes={m.id for m in graph.all_nodes()},

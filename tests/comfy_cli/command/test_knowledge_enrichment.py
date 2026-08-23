@@ -62,26 +62,26 @@ GALLERY = [
         "type": "video",
         "templates": [
             {
-                "name": "video_kling_i2v",
-                "title": "Kling Image to Video",
-                "description": "Image-to-video via Kling.",
+                "name": "video_testvid_i2v",
+                "title": "Testvid Image to Video",
+                "description": "Image-to-video via Testvid.",
                 "mediaType": "video",
                 "mediaSubtype": "mp4",
                 "tags": ["API", "Image to Video"],
-                "models": ["Kling 2.5"],
-                "logos": [{"provider": ["Kling"]}],
+                "models": ["Testvid 2.5"],
+                "logos": [{"provider": ["Testvid"]}],
                 "openSource": False,
                 "usage": 75,
             },
             {
-                "name": "video_minimax_h3_i2v",
-                "title": "MiniMax Hailuo 03 Image to Video",
-                "description": "Image-to-video via MiniMax H3.",
+                "name": "video_acme_h3_i2v",
+                "title": "Acme Halo 03 Image to Video",
+                "description": "Image-to-video via Acme H3.",
                 "mediaType": "video",
                 "mediaSubtype": "mp4",
                 "tags": ["API", "Image to Video", "Lip Sync"],
-                "models": ["MiniMax H3"],
-                "logos": [{"provider": ["MiniMax"]}],
+                "models": ["Acme H3"],
+                "logos": [{"provider": ["Acme"]}],
                 "openSource": False,
                 "usage": 60,
             },
@@ -114,16 +114,16 @@ def _object_info() -> dict[str, Any]:
             "output_node": False,
             "python_module": "nodes",
         },
-        "KlingImage2VideoNode": {
+        "TestvidImage2VideoNode": {
             "input": {"required": {"start_frame": ["IMAGE"], "prompt": ["STRING", {"multiline": True}]}},
             "input_order": {"required": ["start_frame", "prompt"]},
             "output": ["VIDEO"],
             "output_name": ["VIDEO"],
-            "category": "api node/video/Kling",
-            "display_name": "Kling Image to Video",
-            "description": "Kling image-to-video via the partner API.",
+            "category": "api node/video/Testvid",
+            "display_name": "Testvid Image to Video",
+            "description": "Testvid image-to-video via the partner API.",
             "output_node": False,
-            "python_module": "comfy_api_nodes.nodes_kling",
+            "python_module": "comfy_api_nodes.nodes_testvid",
         },
     }
 
@@ -222,12 +222,16 @@ class TestTemplates:
         _validate(data, "templates.json")
         k = data["knowledge"]
         assert k["picks"][0]["capability"] == "lipsync"
-        # Picks whose template is not in this gallery are dropped; kling's pick has none.
-        assert [p["model"] for p in k["picks"]] == ["kling"]
+        # Every pick ships, ranked. The ones whose template this gallery does not
+        # carry say so; testvid's rank-6 pick names no template, so it stays clean.
+        unavailable = {p["model"] for p in k["picks"] if p.get("available_locally") is False}
+        assert "lipco-3" in unavailable
+        assert "testvid" not in unavailable
+        assert [p["rank"] for p in k["picks"]] == sorted(p["rank"] for p in k["picks"])
         # The matching row's template id reverse-resolves to its row.
-        assert [m["id"] for m in k["models"]] == ["minimax-h3"]
-        assert k["models"][0]["matched_on"] == "video_minimax_h3_i2v"
-        assert k["hit_ids"] == ["minimax-h3", "cap:lipsync"]
+        assert [m["id"] for m in k["models"]] == ["acme-h3"]
+        assert k["models"][0]["matched_on"] == "video_acme_h3_i2v"
+        assert k["hit_ids"] == ["acme-h3", "cap:lipsync"]
 
     def test_enriched_payload_validates_from_discover_schemas_by_id(self, bundle, gallery_file, capsys):
         """A consumer holding only `comfy discover`'s inlined schemas resolves the
@@ -245,11 +249,11 @@ class TestTemplates:
         jsonschema.Draft202012Validator(schema, resolver=resolver).validate(env["data"])
 
     def test_ls_model_filter_hits_the_alias(self, bundle, gallery_file, capsys):
-        env = _invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--model", "Kling"], capsys)
+        env = _invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--model", "Testvid"], capsys)
         data = env["data"]
         _validate(data, "templates.json")
-        assert data["knowledge"]["models"][0]["id"] == "kling"
-        assert data["knowledge"]["models"][0]["matched_on"] == "kling"
+        assert data["knowledge"]["models"][0]["id"] == "testvid"
+        assert data["knowledge"]["models"][0]["matched_on"] == "testvid"
 
     def test_ls_zero_hit_gets_a_nudge(self, bundle, gallery_file, capsys):
         env = _invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--name", "faceswap"], capsys)
@@ -276,14 +280,14 @@ class TestTemplates:
         assert "knowledge" not in json.dumps(env)
 
     def test_show_reverse_resolves_the_template(self, bundle, gallery_file, capsys):
-        env = _invoke(templates_cmd.app, ["show", "--gallery", gallery_file, "video_minimax_h3_i2v"], capsys)
+        env = _invoke(templates_cmd.app, ["show", "--gallery", gallery_file, "video_acme_h3_i2v"], capsys)
         data = env["data"]
         _validate(data, "templates.json")
-        assert data["template"]["name"] == "video_minimax_h3_i2v"
-        assert data["knowledge"]["models"][0]["id"] == "minimax-h3"
+        assert data["template"]["name"] == "video_acme_h3_i2v"
+        assert data["knowledge"]["models"][0]["id"] == "acme-h3"
 
     def test_show_unknown_template_error_is_not_enriched(self, bundle, gallery_file, capsys):
-        env = _invoke(templates_cmd.app, ["show", "--gallery", gallery_file, "video_minimax_h3_t2v"], capsys)
+        env = _invoke(templates_cmd.app, ["show", "--gallery", gallery_file, "video_acme_h3_t2v"], capsys)
         assert env["ok"] is False
         assert env["error"]["code"] == "template_not_found"
         assert "knowledge" not in json.dumps(env)
@@ -293,20 +297,20 @@ class TestTemplates:
         monkeypatch.setattr(templates_cmd, "_fetch_template_workflow", lambda name, timeout=15.0: body)
         env = _invoke(
             templates_cmd.app,
-            ["get", "--gallery", gallery_file, "--where", "name=video_minimax_h3_i2v"],
+            ["get", "--gallery", gallery_file, "--where", "name=video_acme_h3_i2v"],
             capsys,
         )
         assert env["ok"] is True
         data = env["data"]
         _validate(data, "templates.json")
         assert data["workflow"] == {"9": {"class_type": "KSampler", "inputs": {}}}
-        assert data["knowledge"]["models"][0]["id"] == "minimax-h3"
+        assert data["knowledge"]["models"][0]["id"] == "acme-h3"
 
     def test_get_error_paths_are_not_enriched(self, bundle, gallery_file, monkeypatch, capsys):
         monkeypatch.setattr(
             templates_cmd, "_fetch_template_workflow", lambda name, timeout=15.0: (_ for _ in ()).throw(OSError("x"))
         )
-        env = _invoke(templates_cmd.app, ["get", "--gallery", gallery_file, "--where", "name=video_minimax"], capsys)
+        env = _invoke(templates_cmd.app, ["get", "--gallery", gallery_file, "--where", "name=video_acme"], capsys)
         assert env["ok"] is False
         assert "knowledge" not in json.dumps(env)
 
@@ -314,9 +318,9 @@ class TestTemplates:
         "args",
         [
             ["ls", "--tag", "Lip Sync"],
-            ["ls", "--model", "Kling"],
+            ["ls", "--model", "Testvid"],
             ["ls", "--name", "faceswap"],
-            ["show", "video_minimax_h3_i2v"],
+            ["show", "video_acme_h3_i2v"],
         ],
     )
     def test_without_a_bundle_nothing_changes(self, gallery_file, args, capsys):
@@ -333,12 +337,12 @@ class TestTemplates:
 
 class TestNodes:
     def test_search_query_hits_the_alias(self, bundle, object_info_file, capsys):
-        env = _invoke(nodes_cmd.app, ["search", "--input", object_info_file, "kling"], capsys)
+        env = _invoke(nodes_cmd.app, ["search", "--input", object_info_file, "testvid"], capsys)
         data = env["data"]
         _validate(data, "nodes.json")
-        assert data["rows"][0]["name"] == "KlingImage2VideoNode"
-        assert data["knowledge"]["models"][0]["id"] == "kling"
-        assert data["knowledge"]["models"][0]["matched_on"] == "kling"
+        assert data["rows"][0]["name"] == "TestvidImage2VideoNode"
+        assert data["knowledge"]["models"][0]["id"] == "testvid"
+        assert data["knowledge"]["models"][0]["matched_on"] == "testvid"
 
     def test_search_zero_hit_gets_a_nudge(self, bundle, object_info_file, capsys):
         env = _invoke(nodes_cmd.app, ["search", "--input", object_info_file, "zzzz"], capsys)
@@ -348,33 +352,51 @@ class TestNodes:
         assert data["knowledge"]["zero_hit"] is True
         assert "'zzzz'" in data["knowledge"]["nudge"]
 
-    def test_search_row_without_its_nodes_locally_is_dropped(self, bundle, tmp_path, capsys):
-        # A catalog without any Kling class: the alias still hits, but the row's
-        # resolves.nodes do not exist here, so the skew filter drops it. The
-        # search itself is empty too, so what ships is the zero-hit nudge.
-        oi = {k: v for k, v in _object_info().items() if k != "KlingImage2VideoNode"}
+    def test_search_row_without_its_nodes_locally_is_annotated(self, bundle, tmp_path, capsys):
+        # A catalog without any Testvid class: the alias hits, but the row's
+        # resolves.nodes are absent here. The row still ships, marked unavailable —
+        # reporting a miss would tell the caller nothing is curated, which is false.
+        oi = {k: v for k, v in _object_info().items() if k != "TestvidImage2VideoNode"}
         path = tmp_path / "oi.json"
         path.write_text(json.dumps(oi))
-        env = _invoke(nodes_cmd.app, ["search", "--input", str(path), "kling"], capsys)
+        env = _invoke(nodes_cmd.app, ["search", "--input", str(path), "testvid"], capsys)
         assert env["ok"] is True
         k = env["data"]["knowledge"]
-        assert k["models"] == [] and k["hit_ids"] == []
-        assert k["zero_hit"] is True
+        _validate(env["data"], "nodes.json")
+        assert [m["id"] for m in k["models"]] == ["testvid"]
+        assert k["models"][0]["available_locally"] is False
+        assert k["hit_ids"] == ["testvid"]
+        assert k["zero_hit"] is False
+        assert "nudge" not in k
 
     def test_ls_reverse_resolves_listed_classes(self, bundle, object_info_file, capsys):
-        env = _invoke(nodes_cmd.app, ["ls", "--input", object_info_file], capsys)
+        env = _invoke(
+            nodes_cmd.app,
+            ["ls", "--input", object_info_file, "--category", "api node/video/Testvid"],
+            capsys,
+        )
         data = env["data"]
         _validate(data, "nodes.json")
-        assert any(r["name"] == "KlingImage2VideoNode" for r in data["rows"])
-        assert [m["id"] for m in data["knowledge"]["models"]] == ["kling"]
-        assert data["knowledge"]["models"][0]["matched_on"] == "KlingImage2VideoNode"
+        assert any(r["name"] == "TestvidImage2VideoNode" for r in data["rows"])
+        assert [m["id"] for m in data["knowledge"]["models"]] == ["testvid"]
+        assert data["knowledge"]["models"][0]["matched_on"] == "TestvidImage2VideoNode"
+
+    def test_unfiltered_ls_is_never_enriched(self, bundle, object_info_file, capsys):
+        """An unfiltered listing asked about nothing, so its rows are the catalog
+        rather than an answer. Enriching it picked a curated row out of the pile
+        and presented it as the reply to a question nobody put."""
+        env = _invoke(nodes_cmd.app, ["ls", "--input", object_info_file], capsys)
+        assert env["ok"] is True
+        assert any(r["name"] == "TestvidImage2VideoNode" for r in env["data"]["rows"])
+        assert "knowledge" not in env["data"]
+        _validate(env["data"], "nodes.json")
 
     def test_ls_without_a_known_class_has_no_key(self, bundle, object_info_file, capsys):
         env = _invoke(nodes_cmd.app, ["ls", "--input", object_info_file, "--category", "sampling"], capsys)
         assert env["ok"] is True
         assert "knowledge" not in env["data"]
 
-    @pytest.mark.parametrize("args", [["search", "kling"], ["search", "zzzz"], ["ls"]])
+    @pytest.mark.parametrize("args", [["search", "testvid"], ["search", "zzzz"], ["ls"]])
     def test_without_a_bundle_nothing_changes(self, object_info_file, args, capsys):
         env = _invoke(nodes_cmd.app, [args[0], "--input", object_info_file, *args[1:]], capsys)
         assert env["ok"] is True
@@ -388,8 +410,8 @@ class TestNodes:
 
 
 ROW = {
-    "name": "kling_lora.safetensors",
-    "display_name": "kling_lora.safetensors",
+    "name": "testvid_lora.safetensors",
+    "display_name": "testvid_lora.safetensors",
     "type": "loras",
     "tags": ["loras"],
     "base_model": None,
@@ -429,11 +451,11 @@ class TestModelsSearch:
 
     def test_text_hits_the_alias(self, bundle, local_target, monkeypatch, capsys):
         monkeypatch.setattr(models_search_cmd, "_local_search", lambda *a, **kw: ([ROW], 1))
-        env = _invoke(models_search_cmd.app, ["search", "--text", "kling", "--where", "local"], capsys)
+        env = _invoke(models_search_cmd.app, ["search", "--text", "testvid", "--where", "local"], capsys)
         data = env["data"]
         _validate(data, "models.json")
         assert data["rows"] == [ROW]
-        assert data["knowledge"]["models"][0]["id"] == "kling"
+        assert data["knowledge"]["models"][0]["id"] == "testvid"
 
     def test_no_text_means_no_key(self, bundle, local_target, monkeypatch, capsys):
         monkeypatch.setattr(models_search_cmd, "_local_search", lambda *a, **kw: ([], 0))
@@ -443,7 +465,7 @@ class TestModelsSearch:
 
     def test_without_a_bundle_nothing_changes(self, local_target, monkeypatch, capsys):
         monkeypatch.setattr(models_search_cmd, "_local_search", lambda *a, **kw: ([ROW], 1))
-        env = _invoke(models_search_cmd.app, ["search", "--text", "kling", "--where", "local"], capsys)
+        env = _invoke(models_search_cmd.app, ["search", "--text", "testvid", "--where", "local"], capsys)
         assert env["ok"] is True
         assert "knowledge" not in env["data"]
         _validate(env["data"], "models.json")
@@ -479,28 +501,43 @@ def _run_generate(args: list[str], *, tmp_path: Path, with_bundle: bool) -> dict
 
 class TestGenerate:
     def test_schema_carries_the_model_row_and_params_are_unchanged(self, tmp_path):
+        # "kling" is a real generate alias the fixture keys to the synthetic row.
         enriched = _run_generate(["schema", "kling"], tmp_path=tmp_path, with_bundle=True)
         baseline = _run_generate(["schema", "kling"], tmp_path=tmp_path, with_bundle=False)
         assert enriched["ok"] is True and baseline["ok"] is True
         data = enriched["data"]
         _validate(data, "generate_schema.json")
-        assert data["knowledge"]["models"][0]["id"] == "kling"
+        assert data["knowledge"]["models"][0]["id"] == "testvid"
         assert data["knowledge"]["models"][0]["tier"] == "law"
         assert "knowledge" not in baseline["data"]
         assert {k: v for k, v in data.items() if k != "knowledge"} == baseline["data"]
         assert data["params"] == baseline["data"]["params"]
 
+    def test_schema_for_an_unkeyed_variant_gets_no_family_row(self, tmp_path):
+        """`generate schema kling-lipsync` used to attach the whole `kling` row,
+        available and green, while the bundle keyed no such variant."""
+        env = _run_generate(["schema", "kling-lipsync"], tmp_path=tmp_path, with_bundle=True)
+        assert env["ok"] is True
+        assert "knowledge" not in env["data"]
+
     def test_list_is_brief_and_byte_identical_without_a_bundle(self, tmp_path):
-        enriched = _run_generate(["list"], tmp_path=tmp_path, with_bundle=True)
-        baseline = _run_generate(["list"], tmp_path=tmp_path, with_bundle=False)
+        enriched = _run_generate(["list", "--query", "kling"], tmp_path=tmp_path, with_bundle=True)
+        baseline = _run_generate(["list", "--query", "kling"], tmp_path=tmp_path, with_bundle=False)
         data = enriched["data"]
         _validate(data, "generate_list.json")
         models = data["knowledge"]["models"]
         assert models and all("pitfalls" not in m for m in models)
-        assert any(m["id"] == "kling" for m in models)
+        assert any(m["id"] == "testvid" for m in models)
         assert "knowledge" not in baseline["data"]
         assert {k: v for k, v in data.items() if k != "knowledge"} == baseline["data"]
         _validate(baseline["data"], "generate_list.json")
+
+    def test_unfiltered_list_is_never_enriched(self, tmp_path):
+        """52 endpoints is the whole catalog, not an answer; enriching it attached
+        rows for models the caller never named."""
+        env = _run_generate(["list"], tmp_path=tmp_path, with_bundle=True)
+        assert env["ok"] is True and env["data"]["count"] > 1
+        assert "knowledge" not in env["data"]
 
     def test_list_zero_match_with_query_gets_a_nudge(self, tmp_path):
         env = _run_generate(["list", "--query", "faceswapzzz"], tmp_path=tmp_path, with_bundle=True)

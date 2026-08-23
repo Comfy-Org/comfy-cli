@@ -1,515 +1,509 @@
 {
   "aliases": {
-    "ACE-Step": "ace-step-1-5",
-    "ACE-Step 1.5": "ace-step-1-5",
-    "ACE-Step 1.5XL Turbo": "ace-step-1-5",
-    "AceStep": "ace-step-1-5",
-    "H3": "minimax-h3",
-    "Hailuo 03": "minimax-h3",
-    "Hailuo H3": "minimax-h3",
-    "Kling": "kling",
-    "Kling 3.0": "kling",
-    "Kling Avatar 2": "kling-avatar-2",
-    "Kling Avatar 2.0": "kling-avatar-2",
-    "Kuaishou Kling": "kling",
-    "MiniMax H3": "minimax-h3",
-    "MiniMax Hailuo 03": "minimax-h3",
-    "Sync 3": "sync-3",
-    "Sync Talking Image": "sync-3",
-    "Sync Video Lip-Sync": "sync-3",
-    "Sync.so": "sync-3"
+    "Acme H3": "acme-h3",
+    "Acme Halo 03": "acme-h3",
+    "Acme Testvid": "testvid",
+    "H3": "acme-h3",
+    "Halo 03": "acme-h3",
+    "Halo H3": "acme-h3",
+    "Lipco 3": "lipco-3",
+    "Lipco Talking Image": "lipco-3",
+    "Lipco Video Lip-Sync": "lipco-3",
+    "Lipco.co": "lipco-3",
+    "Test-Audio": "test-audio-1-5",
+    "Test-Audio 1.5": "test-audio-1-5",
+    "Test-Audio 1.5XL Turbo": "test-audio-1-5",
+    "TestAudio": "test-audio-1-5",
+    "Testvid": "testvid",
+    "Testvid 3.0": "testvid",
+    "Testvid Avatar 2": "testvid-avatar-2",
+    "Testvid Avatar 2.0": "testvid-avatar-2",
+    "kling": "testvid"
   },
   "capabilities": {
     "audio-generation": {
-      "as_of": "2026-08-05",
-      "description": "Music, text-to-speech and sound effects. Music and TTS are different fetches; neither is the native audio track that H3 or Seedance emit with a clip.",
+      "as_of": "2031-01-09",
+      "description": "Music, speech and sound effects. Music and speech are different fetches.",
       "id": "audio-generation",
-      "owner": "kishore",
       "picks": [
         {
-          "caveat": "The doc's No.1 OSS music pick: full songs with tags plus lyrics, 50+ languages. Docs AIO twin is audio_ace_step_1_5_checkpoint.",
-          "model": "ace-step-1-5",
+          "caveat": "The fixture's No.1 free music pick. All-in-one twin is audio_test_a_checkpoint.",
+          "model": "test-audio-1-5",
           "rank": 1,
           "route": "oss",
-          "template": "audio_ace_step1_5_xl_turbo"
+          "template": "audio_test_a_turbo"
         },
         {
-          "caveat": "The doc's API music pick and cheap (0.5275 credits/sec). Video soundtrack twin: api_sonilo_v2m.",
-          "model": "sonilo",
+          "caveat": "The fixture's paid music pick and cheap.",
+          "model": "testtone",
           "rank": 2,
           "route": "partner",
-          "template": "api_sonilo_t2m"
+          "template": "api_testtone_t2m"
         },
         {
-          "caveat": "The doc's OSS TTS pick. Do not fetch TTS-Audio-Suite as the default - it has no official template.",
-          "model": "chatterbox",
+          "caveat": "The fixture's free speech pick.",
+          "model": "testvoice",
           "rank": 3,
           "route": "oss",
-          "template": "audio-chatterbox_tts"
+          "template": "audio-testvoice_tts"
         },
         {
-          "caveat": "The doc's API TTS pick; sound effects twin api_elevenlabs_text_to_sound_effects.",
-          "model": "elevenlabs",
+          "caveat": "The fixture's paid speech pick.",
+          "model": "testvoice-api",
           "rank": 4,
           "route": "partner",
-          "template": "api_elevenlabs_text_to_speech"
+          "template": "api_testvoice_text_to_speech"
         }
       ],
-      "verified_at": "2026-08-05"
+      "verified_at": "2031-01-09"
     },
     "lipsync": {
       "aliases": [
         "Lip Sync",
         "talking head"
       ],
-      "as_of": "2026-08-05",
-      "description": "Three distinct jobs: a still plus audio becomes a talking clip, dubbing existing footage, or generating a clip that talks with no source audio (which is not a lipsync graph at all).",
+      "as_of": "2031-01-09",
+      "description": "Three distinct jobs: a still plus audio, dubbing existing footage, or a clip that talks with no source audio.",
       "id": "lipsync",
-      "owner": "kishore",
       "picks": [
         {
-          "caveat": "The doc's No.1 OSS pick for still-plus-audio and the hottest official Lip Sync template.",
-          "model": "ltx",
+          "caveat": "The fixture's No.1 free pick for still-plus-audio.",
+          "model": "testlx",
           "rank": 1,
           "route": "oss",
-          "template": "video_ltx2_3_ia2v"
+          "template": "video_testlx_ia2v"
         },
         {
-          "caveat": "The doc's No.1 for dubbing existing video. Talking-image twin is api_sync_so_talking_image. About 40 credits/sec - warn before long audio.",
-          "model": "sync-3",
+          "caveat": "The fixture's No.1 for dubbing existing video. Talking-image twin is api_lipco_talking_image.",
+          "model": "lipco-3",
           "rank": 2,
           "route": "partner",
-          "template": "api_sync_so_lip_sync_video"
+          "template": "api_lipco_lip_sync_video"
         },
         {
-          "caveat": "Wan 2.1 full-body dubbing where identity and background hold. Not Wan 2.2.",
-          "model": "infinitetalk",
+          "caveat": "Full-body dubbing where identity and background hold.",
+          "model": "testwan1-talk",
           "rank": 3,
           "route": "oss",
-          "template": "video_wan2_1_infinitetalk"
+          "template": "video_testwan1_talk"
         },
         {
-          "caveat": "Wan 2.2 audio-driven from a still plus a wav; sampler 10 / CFG 6 / uni_pc / simple.",
-          "model": "wan",
+          "caveat": "Audio-driven from a still plus a wav.",
+          "model": "testwan2",
           "rank": 4,
           "route": "oss",
-          "template": "video_wan2_2_14B_s2v"
+          "template": "video_testwan2_s2v"
         },
         {
-          "caveat": "Listed as a candidate, not a default. 15.09 credits/sec.",
-          "model": "heygen-talking-photo",
+          "caveat": "Listed as a candidate, not a default.",
+          "model": "testface",
           "rank": 5,
           "route": "partner",
-          "template": "api_heygen_talking_photo"
+          "template": "api_testface_talking_photo"
         },
         {
-          "caveat": "Only with a photoreal human subject - Kling lip-sync rejects cartoons, robots and mascots, and rejects any input over 1920px (its own 16:9 i2v emits 1924px).",
-          "model": "kling",
+          "caveat": "Only with a photoreal human subject. No template: this pick is the node route.",
+          "model": "testvid",
           "rank": 6,
           "route": "partner"
         },
         {
-          "caveat": "Not a lipsync model - the required first stage when the user has no audio. ElevenLabs (api_elevenlabs_text_to_speech) is the API twin.",
-          "model": "chatterbox",
+          "caveat": "Not a lipsync model - the required first stage when the caller has no audio.",
+          "model": "testvoice",
           "rank": 7,
           "route": "oss",
-          "template": "audio-chatterbox_tts"
+          "template": "audio-testvoice_tts"
         }
       ],
-      "verified_at": "2026-08-05"
+      "verified_at": "2031-01-09"
     }
   },
   "deprecations": [
     {
-      "deprecated_on": "2026-08-05",
-      "id": "kling-avatar-2",
-      "reason": "End-of-life: the source says do not fetch api_kling_avatar2 for new work and use Sync 3 or HeyGen instead. The source gives no EOL date, so the doc's curation date (2026-08-05) is recorded. Source: notion:canvas-craft \u00a73.3 and \u00a74 Lipsync / talking head.",
-      "superseded_by": "sync-3"
+      "deprecated_on": "2031-01-09",
+      "id": "testvid-avatar-2",
+      "reason": "End-of-life: do not fetch its template for new work; use lipco-3 instead.",
+      "superseded_by": "lipco-3"
     },
     {
-      "deprecated_on": "2026-04-26",
-      "id": "sora-2",
-      "reason": "Deprecated 2026-04-26 with the API shutting down 2026-09-24; the source states the agent must never build new workflows on it. Source: notion:canvas-craft \u00a73.3."
+      "deprecated_on": "2030-04-26",
+      "id": "retired-model-2",
+      "reason": "Deprecated with the paid route shutting down. No row and no replacement: the deprecation stands alone."
     }
   ],
   "future_plane": {
     "x": 1
   },
   "models": {
-    "ace-step-1-5": {
+    "acme-h3": {
       "aliases": [
-        "ACE-Step",
-        "ACE-Step 1.5",
-        "ACE-Step 1.5XL Turbo",
-        "AceStep"
-      ],
-      "as_of": "2026-08-05",
-      "best_for": [
-        "full songs from tags plus lyrics, 50+ languages, on the OSS route"
-      ],
-      "corrections": [
-        {
-          "claim": "The template index 'vram' field is fake for the audio templates - do not quote it.",
-          "source": "notion:canvas-craft \u00a74 Audio / music"
-        }
-      ],
-      "id": "ace-step-1-5",
-      "modality": "audio",
-      "not_for": [
-        "talking-head audio unless the user asked for a song",
-        "voice/TTS - use Chatterbox or ElevenLabs"
-      ],
-      "owner": "kishore",
-      "pitfalls": [
-        {
-          "source": "notion:canvas-craft \u00a74 Audio / music",
-          "text": "Do not fetch ACE-Step v1 templates as the 1.5 default."
-        },
-        {
-          "source": "notion:canvas-craft \u00a74 Audio / music",
-          "text": "DualCLIP type ace (qwen_0.6b_ace15 plus qwen_4b_ace15) and VAE ace_1.5_vae only - do not put CLIP type ace on a Qwen, Krea or Flux graph, and do not use Seedance to write a song."
-        },
-        {
-          "source": "notion:canvas-craft \u00a74 Lipsync / talking head",
-          "text": "ACE-Step music is not a talking-head audio source unless the user asked for a song."
-        }
-      ],
-      "resolves": {
-        "templates": [
-          "audio_ace_step1_5_xl_turbo",
-          "audio_ace_step_1_5_checkpoint",
-          "audio_ace_step1_5_xl_sft",
-          "audio_minimax_music_3"
-        ]
-      },
-      "route": "oss",
-      "routing": [
-        {
-          "use": "audio_ace_step1_5_xl_turbo",
-          "when": "Everyday OSS music generation"
-        },
-        {
-          "use": "audio_ace_step_1_5_checkpoint",
-          "when": "All-in-one checkpoint twin from the docs"
-        },
-        {
-          "use": "audio_ace_step1_5_xl_sft",
-          "when": "User wants CFG control on the music graph"
-        },
-        {
-          "use": "audio_minimax_music_3",
-          "when": "User named MiniMax Music 3"
-        }
-      ],
-      "status": "recommended",
-      "tier": "canon",
-      "verified_at": "2026-08-05",
-      "visibility": "internal"
-    },
-    "kling": {
-      "aliases": [
-        "Kling",
-        "Kling 3.0",
-        "Kuaishou Kling"
-      ],
-      "as_of": "2026-08-05",
-      "best_for": [
-        "value at scale, motion control, human performance, native 4K (Kling 3.0)"
-      ],
-      "future_field": true,
-      "id": "kling",
-      "modality": "video",
-      "never_confuse_with": [
-        "kling-avatar-2"
-      ],
-      "not_for": [
-        "lip-sync on any subject that is not a photoreal human",
-        "chaining straight from Kling 16:9 image-to-video into Kling lip-sync without a resize"
-      ],
-      "owner": "kishore",
-      "pitfalls": [
-        {
-          "source": "cloud:services/agent/internal/loop/skills/comfy-cloud/SKILL.md",
-          "text": "Lip-sync needs a real human face. Kling's lip-sync rejects cartoons, robots, mascots and stylized characters with \"The model did not detect a human\". If the subject is not photoreal-human, do not build a lip-sync stage: either make the presenter human, or lay the voice over the clip and say the mouths will not be synced."
-        },
-        {
-          "source": "cloud:services/agent/internal/loop/skills/comfy-cloud/SKILL.md",
-          "text": "A partner model can violate its own sibling's limit: Kling's 16:9 image-to-video returns 1924px and Kling's lip-sync rejects anything over 1920px, so chaining them fails unless you insert a resize. When chaining two partner nodes, probe_media the intermediate against the consumer's documented limits instead of assuming vendor self-consistency."
-        },
-        {
-          "source": "cloud:services/agent/internal/loop/skills/comfy-cloud/SKILL.md",
-          "text": "Required text is required: an empty prompt widget on a partner node (e.g. a first/last-frame video node) passes local validation and is rejected by the vendor at run time, after the credits are spent. Fill every required text field."
-        },
-        {
-          "source": "cloud:services/agent/internal/loop/skills/building/SKILL.md",
-          "text": "Take the node class name from the catalog, not memory - the real class is KlingImage2VideoNode, not the remembered KlingImageToVideoNode."
-        },
-        {
-          "source": "notion:canvas-craft \u00a73.3",
-          "text": "Kling V1.5 / V1.6 / V2.1 / V2.1-Master retire 2026-09-15. Do not build new work on them."
-        },
-        {
-          "source": "notion:canvas-craft \u00a73.3",
-          "text": "Kling Avatar 2.0 is EOL: do not fetch the api_kling_avatar2 template for new work. Use Sync 3 or HeyGen instead."
-        }
-      ],
-      "resolves": {
-        "nodes": [
-          "KlingImage2VideoNode",
-          "KlingLipSyncAudioToVideoNode",
-          "KlingLipSyncTextToVideoNode"
-        ]
-      },
-      "route": "partner",
-      "status": "available",
-      "tier": "law",
-      "verified_at": "2026-08-05",
-      "visibility": "internal",
-      "warnings": [
-        {
-          "source": "notion:canvas-craft \u00a73.3",
-          "text": "The \u00a73.3 partner video tier ordering is drawn from secondary aggregators (the doc marks it with a warning sign) - treat the ranking as soft, not measured."
-        }
-      ]
-    },
-    "kling-avatar-2": {
-      "aliases": [
-        "Kling Avatar 2.0",
-        "Kling Avatar 2"
-      ],
-      "as_of": "2026-08-05",
-      "id": "kling-avatar-2",
-      "modality": "video",
-      "not_for": [
-        "any new work - it is end-of-life"
-      ],
-      "owner": "kishore",
-      "pitfalls": [
-        {
-          "source": "notion:canvas-craft \u00a73.3",
-          "text": "Kling Avatar 2.0 is EOL. Do not fetch the api_kling_avatar2 template for new work - use Sync 3 (api_sync_so_talking_image / api_sync_so_lip_sync_video) or HeyGen."
-        }
-      ],
-      "route": "partner",
-      "status": "deprecated",
-      "superseded_by": "sync-3",
-      "tier": "canon",
-      "verified_at": "2026-08-05",
-      "visibility": "internal"
-    },
-    "minimax-h3": {
-      "aliases": [
-        "MiniMax H3",
-        "Hailuo 03",
-        "Hailuo H3",
+        "Acme H3",
+        "Halo 03",
+        "Halo H3",
         "H3",
-        "MiniMax Hailuo 03"
+        "Acme Halo 03"
       ],
-      "as_of": "2026-08-05",
+      "as_of": "2031-01-09",
       "best_for": [
-        "the best OSS video model when the user names none",
-        "video that needs native audio (32 kHz stereo, dialogue/SFX/music, 11 languages)",
+        "the default free video model when the caller names none",
+        "video that needs native audio",
         "2K, up to 15 s, t2v / i2v / FLF / r2v in one family",
-        "character consistency in video via the R2V route"
+        "character consistency in video via the r2v route"
       ],
       "corrections": [
         {
-          "claim": "The four MiniMax H3 open weights return nothing in search_models even though they load fine via template - absence from model search is not absence from cloud. Verify against templates before declaring the model absent.",
-          "source": "notion:canvas-craft \u00a71.1 Cloud"
+          "claim": "The four Acme H3 open weights return nothing in model search even though they load fine via template - absence from search is not absence.",
+          "source": "fixture:cloud"
         }
       ],
-      "id": "minimax-h3",
+      "id": "acme-h3",
       "modality": "video",
       "never_confuse_with": [
-        "hailuo-02"
+        "halo-02"
       ],
       "not_for": [
-        "silent photoreal on a ~24 GB card where Wan 2.2 is the OSS workhorse",
-        "1080p/4K paid delivery, which is the Seedance 2.0 path"
+        "silent photoreal on a small card, where testwan2 is the free workhorse",
+        "1080p paid delivery"
       ],
-      "owner": "kishore",
       "pitfalls": [
         {
-          "source": "notion:canvas-craft \u00a71.0 Shared",
-          "text": "H3 ships in two routes, always both: OSS weights (video_minimax_h3_*) and paid partner nodes (api_minimax_h3_*). Never claim only the API path exists or that there is no free version."
+          "source": "fixture:shared",
+          "text": "H3 ships in two routes, always both: free weights (video_acme_h3_*) and paid nodes (api_acme_h3_*). Never claim only the paid path exists."
         },
         {
-          "source": "notion:canvas-craft \u00a74 MiniMax H3",
-          "text": "Both routes' templates share display titles (\"MiniMax H3: Text to Video\"). Disambiguate by internal name, and pass exclude_api=True when the user wants local-only."
+          "source": "fixture:h3",
+          "text": "Both routes' templates share display titles. Disambiguate by internal name."
         },
         {
-          "source": "notion:canvas-craft \u00a74 MiniMax H3",
-          "text": "OSS i2v is also FLF: last_frame on MiniMaxH3ImageToVideo is optional and unwired on purpose. Leave it empty for i2v; wire a second LoadImage for first-last-frame."
+          "source": "fixture:h3",
+          "text": "Free i2v is also first-last-frame: last_frame on AcmeH3ImageToVideo is optional and unwired on purpose."
         },
         {
-          "source": "notion:canvas-craft \u00a74 First-last-frame",
-          "text": "There is no OSS video_minimax_h3_flf2v file. That filename is API-only (api_minimax_h3_flf2v); searching the OSS index for it is a known dead end."
+          "source": "fixture:flf",
+          "text": "There is no free video_acme_h3_flf2v file. That name is paid-only."
         },
         {
-          "source": "notion:canvas-craft \u00a71.0 Shared",
-          "text": "partner_generate has NO H3 entry - its registry only carries the older minimax/video_generation Hailuo-02 proxy."
+          "source": "fixture:shared",
+          "text": "The partner registry carries no H3 entry, only the older Halo proxy."
         },
         {
-          "source": "notion:canvas-craft \u00a74 MiniMax H3",
-          "text": "The partner_generate alias 'hailuo' is the older Hailuo family, never H3. Do not mix its params with H3's. But \"Hailuo 03\" does mean H3."
+          "source": "fixture:h3",
+          "text": "The alias 'halo' is the older family, never H3. But \"Halo 03\" does mean H3."
         },
         {
-          "source": "notion:canvas-craft \u00a74 MiniMax H3",
-          "text": "The API node's enums are NOT the model's limits. OSS accepts any resolution in multiples of 32 up to ~2K and ~15 s on a 17k+5-frame grid at 24fps. A request outside the API presets (e.g. 1000x1000) means offer OSS, not declare it impossible."
+          "source": "fixture:h3",
+          "text": "The paid node's enums are not the model's limits. A request outside the presets means offer the free route, not declare it impossible."
         },
         {
-          "source": "notion:canvas-craft \u00a74 MiniMax H3",
-          "text": "Generation time scales exponentially with pixel count, not linearly. Re-estimate per resolution; never extrapolate linearly."
+          "source": "fixture:h3",
+          "text": "Generation time scales with pixel count faster than linearly."
         },
         {
-          "source": "notion:canvas-craft \u00a74 MiniMax H3",
-          "text": "Recommend the int8 base model on all GPUs (including 50-series) and the NVFP4 text encoder on all GPUs; the shipped template is the best choice for almost all cards."
+          "source": "fixture:h3",
+          "text": "Recommend the int8 base model and the low-precision text encoder."
         },
         {
-          "source": "notion:canvas-craft \u00a74 MiniMax H3",
-          "text": "For production work generate at the native ~768p canvas and upscale later rather than sampling large in one pass."
+          "source": "fixture:h3",
+          "text": "Generate at the native canvas and upscale later."
         },
         {
-          "source": "notion:canvas-craft \u00a73.2",
-          "text": "Needs ComfyUI >= 0.30.0. Community license. Six official templates: three local, three API."
+          "source": "fixture:video",
+          "text": "Needs a recent server. Six templates: three local, three paid."
         },
         {
-          "source": "notion:canvas-craft \u00a74 MiniMax H3",
-          "text": "A successful local run this session, or the weights already on disk, is proof the free route works. Never subsequently claim it does not exist."
+          "source": "fixture:h3",
+          "text": "A successful local run is proof the free route works."
         }
       ],
       "resolves": {
         "nodes": [
-          "MiniMaxH3ImageToVideo",
-          "MiniMaxH3ReferenceToVideo",
-          "MinimaxHailuo03TextToVideoNode"
+          "AcmeH3ImageToVideo",
+          "AcmeH3ReferenceToVideo",
+          "AcmeHalo03TextToVideoNode"
         ],
         "templates": [
-          "video_minimax_h3_t2v",
-          "video_minimax_h3_i2v",
-          "video_minimax_h3_r2v",
-          "api_minimax_h3_t2v",
-          "api_minimax_h3_flf2v",
-          "api_minimax_h3_r2v"
+          "video_acme_h3_t2v",
+          "video_acme_h3_i2v",
+          "video_acme_h3_r2v",
+          "api_acme_h3_t2v",
+          "api_acme_h3_flf2v",
+          "api_acme_h3_r2v"
         ]
       },
       "route": "both",
       "routing": [
         {
-          "use": "video_minimax_h3_t2v",
-          "when": "Best OSS video, no model named, text to video"
+          "use": "video_acme_h3_t2v",
+          "when": "Best free video, no model named, text to video"
         },
         {
-          "use": "video_minimax_h3_i2v",
-          "when": "Image to video on the OSS route"
+          "use": "video_acme_h3_i2v",
+          "when": "Image to video on the free route"
         },
         {
-          "use": "video_minimax_h3_i2v",
-          "when": "First-last-frame on the OSS route: fetch the i2v graph and wire a second LoadImage to last_frame"
+          "use": "video_acme_h3_i2v",
+          "when": "First-last-frame on the free route: wire a second image to last_frame"
         },
         {
-          "use": "video_minimax_h3_r2v",
-          "when": "Character consistency in video (reference to video) on the OSS route"
+          "use": "video_acme_h3_r2v",
+          "when": "Character consistency in video on the free route"
         },
         {
-          "use": "api_minimax_h3_t2v",
-          "when": "Paid/API route, text to video"
+          "use": "api_acme_h3_t2v",
+          "when": "Paid route, text to video"
         },
         {
-          "use": "api_minimax_h3_flf2v",
-          "when": "Paid/API route, first-last-frame (the flf2v filename is API-only)"
+          "use": "api_acme_h3_flf2v",
+          "when": "Paid route, first-last-frame"
         },
         {
-          "use": "api_minimax_h3_r2v",
-          "when": "Paid/API route, reference to video"
+          "use": "api_acme_h3_r2v",
+          "when": "Paid route, reference to video"
         }
       ],
       "status": "recommended",
       "tier": "law",
-      "verified_at": "2026-08-05",
-      "visibility": "internal",
+      "verified_at": "2031-01-09",
+      "visibility": "public",
       "warnings": [
         {
-          "source": "notion:canvas-craft \u00a74 MiniMax H3",
-          "text": "Pre-spend: the API route bills 27.16 credits/sec at 768P and 39.22 at 2K (5 s at 768P is about 136 credits). Local is free per run. Rates verified 2026-08-05."
+          "source": "fixture:h3",
+          "text": "Pre-spend: the paid route bills per second. Local is free per run."
         },
         {
-          "source": "notion:canvas-craft \u00a74 MiniMax H3",
-          "text": "On local, speed is the constraint, not feasibility: 5 s at 480p is about 9 min on a 3060, about 15 min for 5 s at 16 GB. Quote the estimate so the user chooses informed; do not present slow-local as impossible."
+          "source": "fixture:h3",
+          "text": "On local, speed is the constraint, not feasibility. Quote the estimate."
         }
       ]
     },
-    "sync-3": {
+    "lipco-3": {
       "aliases": [
-        "Sync 3",
-        "Sync.so",
-        "Sync Talking Image",
-        "Sync Video Lip-Sync"
+        "Lipco 3",
+        "Lipco.co",
+        "Lipco Talking Image",
+        "Lipco Video Lip-Sync"
       ],
-      "as_of": "2026-08-05",
+      "as_of": "2031-01-09",
       "best_for": [
-        "API talking image: a portrait plus a voiceover, hands and product held still",
+        "paid talking image: a portrait plus a voiceover",
         "dubbing or language-swapping existing footage"
       ],
-      "id": "sync-3",
+      "id": "lipco-3",
       "modality": "video",
       "not_for": [
-        "jobs with no source audio - run TTS first, or use H3/Seedance quoted dialogue instead"
+        "jobs with no source audio - run text-to-speech first"
       ],
-      "owner": "kishore",
       "pitfalls": [
         {
-          "source": "notion:canvas-craft \u00a74 Lipsync / talking head",
-          "text": "Feeding Sync when the user has no audio is a hard fail - run TTS first (Chatterbox locally, ElevenLabs on API), then the lipsync graph."
+          "source": "fixture:lipsync",
+          "text": "Feeding lipco-3 with no audio is a hard fail - run text-to-speech first, then the lipsync graph."
         },
         {
-          "source": "notion:canvas-craft \u00a74 Lipsync / talking head",
-          "text": "For a clip that talks with no source audio, use H3 or Seedance with the spoken lines in double quotes - not a Sync graph."
+          "source": "fixture:lipsync",
+          "text": "For a clip that talks with no source audio, use acme-h3 with the lines in double quotes."
         },
         {
-          "source": "notion:canvas-craft \u00a74 Lipsync / talking head",
-          "text": "Sync seed is cache-only; execute does not put it on the request. Randomize to re-run."
+          "source": "fixture:lipsync",
+          "text": "The seed is cache-only; randomize to re-run."
         },
         {
-          "source": "notion:canvas-craft \u00a74 Lipsync / talking head",
-          "text": "Talking Image output length equals the audio length and the face may be up to 4K. Lip Sync video is max 4K with audio up to 600 s, and sync_mode defaults to bounce."
+          "source": "fixture:lipsync",
+          "text": "Talking-image output length equals the audio length."
         },
         {
-          "source": "notion:canvas-craft \u00a73 Lipsync / talking head",
-          "text": "There is no official LatentSync template. Do not invent one."
+          "source": "fixture:lipsync",
+          "text": "There is no official second lipsync template. Do not invent one."
         }
       ],
       "resolves": {
         "nodes": [
-          "SyncTalkingImageNode",
-          "SyncLipSyncNode"
+          "LipcoTalkingImageNode",
+          "LipcoLipSyncNode"
         ],
         "templates": [
-          "api_sync_so_talking_image",
-          "api_sync_so_lip_sync_video"
+          "api_lipco_talking_image",
+          "api_lipco_lip_sync_video"
         ]
       },
       "route": "partner",
       "routing": [
         {
-          "use": "api_sync_so_talking_image",
-          "when": "API talking image: still portrait plus a voiceover track"
+          "use": "api_lipco_talking_image",
+          "when": "Paid talking image: still portrait plus a voiceover track"
         },
         {
-          "use": "api_sync_so_lip_sync_video",
-          "when": "Dub or language-swap an existing video - the API No.1 for this job"
+          "use": "api_lipco_lip_sync_video",
+          "when": "Dub or language-swap an existing video"
         }
       ],
       "status": "recommended",
       "tier": "canon",
-      "verified_at": "2026-08-05",
-      "visibility": "internal",
+      "verified_at": "2031-01-09",
+      "visibility": "public",
       "warnings": [
         {
-          "source": "notion:canvas-craft \u00a74 Lipsync / talking head",
-          "text": "Pre-spend: Sync Talking Image and Video Lip-Sync bill about 40.13 credits/sec (5 s is about 201 credits) - expensive versus H3 or Seedance native audio. Warn before long audio. Rates verified 2026-08-05."
+          "source": "fixture:lipsync",
+          "text": "Pre-spend: lipco-3 bills per second. Warn before long audio."
         }
       ]
+    },
+    "test-audio-1-5": {
+      "aliases": [
+        "Test-Audio",
+        "Test-Audio 1.5",
+        "Test-Audio 1.5XL Turbo",
+        "TestAudio"
+      ],
+      "as_of": "2031-01-09",
+      "best_for": [
+        "invented songs from tags plus lyrics on the free route"
+      ],
+      "corrections": [
+        {
+          "claim": "The fixture index 'vram' field is made up for audio rows - do not quote it.",
+          "source": "fixture:audio"
+        }
+      ],
+      "id": "test-audio-1-5",
+      "modality": "audio",
+      "not_for": [
+        "talking-head audio unless a song was asked for",
+        "speech - use testvoice instead"
+      ],
+      "pitfalls": [
+        {
+          "source": "fixture:audio",
+          "text": "Do not fetch the v1 audio templates as the 1.5 default."
+        },
+        {
+          "source": "fixture:audio",
+          "text": "Pair the ace-typed encoder with the ace VAE only."
+        },
+        {
+          "source": "fixture:lipsync",
+          "text": "Fixture music is not a talking-head audio source."
+        }
+      ],
+      "resolves": {
+        "templates": [
+          "audio_test_a_turbo",
+          "audio_test_a_checkpoint",
+          "audio_test_a_sft",
+          "audio_test_music_3"
+        ]
+      },
+      "route": "oss",
+      "routing": [
+        {
+          "use": "audio_test_a_turbo",
+          "when": "Everyday free music generation"
+        },
+        {
+          "use": "audio_test_a_checkpoint",
+          "when": "All-in-one checkpoint twin"
+        },
+        {
+          "use": "audio_test_a_sft",
+          "when": "Caller wants CFG control on the music graph"
+        },
+        {
+          "use": "audio_test_music_3",
+          "when": "Caller named Test Music 3"
+        }
+      ],
+      "status": "recommended",
+      "tier": "canon",
+      "verified_at": "2031-01-09",
+      "visibility": "public"
+    },
+    "testvid": {
+      "aliases": [
+        "Testvid",
+        "Testvid 3.0",
+        "Acme Testvid"
+      ],
+      "as_of": "2031-01-09",
+      "best_for": [
+        "invented value at scale, motion control, native 4K (Testvid 3.0)"
+      ],
+      "future_field": true,
+      "id": "testvid",
+      "modality": "video",
+      "never_confuse_with": [
+        "testvid-avatar-2"
+      ],
+      "not_for": [
+        "lip-sync on any subject that is not a photoreal human",
+        "chaining 16:9 image-to-video straight into lip-sync without a resize"
+      ],
+      "pitfalls": [
+        {
+          "source": "fixture:video",
+          "text": "Lip-sync needs a real human face; the fixture model rejects drawn characters."
+        },
+        {
+          "source": "fixture:video",
+          "text": "The 16:9 image-to-video route emits 1924px and the lip-sync route caps at 1920px, so chaining them needs a resize."
+        },
+        {
+          "source": "fixture:video",
+          "text": "Fill every required text widget; an empty one fails at run time."
+        },
+        {
+          "source": "fixture:building",
+          "text": "Take the node class name from the catalog: TestvidImage2VideoNode, not TestvidImageToVideoNode."
+        },
+        {
+          "source": "fixture:video",
+          "text": "Testvid 1.5 and 2.1 retire 2031-09-15. Do not build new work on them."
+        },
+        {
+          "source": "fixture:video",
+          "text": "Testvid Avatar 2.0 is end-of-life: do not fetch its template for new work. Use lipco-3 instead."
+        }
+      ],
+      "resolves": {
+        "nodes": [
+          "TestvidImage2VideoNode",
+          "TestvidLipSyncAudioToVideoNode",
+          "TestvidLipSyncTextToVideoNode"
+        ]
+      },
+      "route": "partner",
+      "status": "available",
+      "tier": "law",
+      "verified_at": "2031-01-09",
+      "visibility": "public",
+      "warnings": [
+        {
+          "source": "fixture:video",
+          "text": "The fixture tier ordering is invented - treat the ranking as soft."
+        }
+      ]
+    },
+    "testvid-avatar-2": {
+      "aliases": [
+        "Testvid Avatar 2.0",
+        "Testvid Avatar 2"
+      ],
+      "as_of": "2031-01-09",
+      "id": "testvid-avatar-2",
+      "modality": "video",
+      "not_for": [
+        "any new work - it is end-of-life"
+      ],
+      "pitfalls": [
+        {
+          "source": "fixture:video",
+          "text": "Testvid Avatar 2.0 is end-of-life. Use lipco-3 for talking-image and dubbing work."
+        }
+      ],
+      "route": "partner",
+      "status": "deprecated",
+      "superseded_by": "lipco-3",
+      "tier": "canon",
+      "verified_at": "2031-01-09",
+      "visibility": "public"
     }
   }
 }

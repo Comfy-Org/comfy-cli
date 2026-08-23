@@ -857,9 +857,11 @@ def _list_models(extra_args: list[str]) -> None:
         return emit_selected(renderer, payload, select_expr, command="generate list")
     knowledge.attach(
         payload,
+        command="generate list",
         queries=[m["alias"] for m in payload["models"]] + ([query] if query else []),
         brief=True,
         thin=(not eps and bool(query)),
+        qualified=any(payload["filters"].values()),
     )
     if renderer.is_pretty():
         if not eps:
@@ -936,7 +938,7 @@ def _schema(extra_args: list[str]) -> None:
         "params": [_param_record(f) for f in flags],
         "example": schema.example_invocation(ep, flags, display_name=name),
     }
-    knowledge.attach(payload, queries=[clean[0], name])
+    knowledge.attach(payload, command="generate schema", queries=[clean[0], name])
     renderer.emit(payload, command="generate schema")
 
 

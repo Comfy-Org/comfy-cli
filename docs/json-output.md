@@ -710,6 +710,46 @@ Exit code: `1`.
 
 Exit code: `130`.
 
+## Validating `data` against the shipped schemas
+
+The per-command schemas live in `comfy_cli/schemas/`. Most are self-contained,
+but the five discovery schemas — `templates.json`, `nodes.json`, `models.json`,
+`generate_list.json`, `generate_schema.json` — reference a shared one:
+
+```json
+"knowledge": { "$ref": "knowledge_block.json" }
+```
+
+Each schema carries an `$id` under `https://comfy.org/schemas/`. That namespace
+is an identifier, not a location; nothing is served there. A validator built on
+one schema file alone therefore cannot resolve the reference, and validating a
+`templates ls` payload that carries a `knowledge` block fails with
+`Unresolvable: knowledge_block.json` rather than a validation error.
+
+Build a registry from the whole directory first:
+
+```python
+import json
+from pathlib import Path
+
+import jsonschema
+from referencing import Registry, Resource
+
+SCHEMAS = Path("comfy_cli/schemas")  # or wherever you vendored them
+registry = Registry().with_resources(
+    (s["$id"], Resource.from_contents(s))
+    for s in (json.loads(p.read_text()) for p in SCHEMAS.glob("*.json"))
+    if "$id" in s
+)
+
+schema = json.loads((SCHEMAS / "templates.json").read_text())
+jsonschema.Draft202012Validator(schema, registry=registry).validate(envelope["data"])
+```
+
+Any validator works the same way: load every `*.json` in the directory into
+whatever the library calls its store, keyed by `$id`. Ship the directory as a
+unit — a single schema file copied out on its own is not self-sufficient.
+
 ## Stability
 
 ### What is stable

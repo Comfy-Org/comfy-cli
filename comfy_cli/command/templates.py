@@ -668,10 +668,12 @@ def ls_cmd(
             rprint(f"[dim]{len(rows)} template(s){tail}[/dim]")
     knowledge.attach(
         payload,
+        command="templates ls",
         queries=[x for x in (tag, name_sub, model) if x],
         templates=[r["name"] for r in rows],
         catalog_templates=all_names,
         thin=(matched == 0),
+        qualified=any(payload["filters"].values()),
     )
     renderer.emit(payload, command="templates ls")
 
@@ -730,7 +732,7 @@ def show_cmd(
             rprint("")
             rprint(match["description"])
     payload = {"template": match}
-    knowledge.attach(payload, templates=[name], catalog_templates={r["name"] for r in rows})
+    knowledge.attach(payload, command="templates show", templates=[name], catalog_templates={r["name"] for r in rows})
     renderer.emit(payload, command="templates show")
 
 
@@ -1194,7 +1196,7 @@ def get_cmd(
 
         sys.stdout.write(body.decode("utf-8"))
         sys.stdout.write("\n")
-    knowledge.attach(payload, templates=[name], catalog_templates={r["name"] for r in rows})
+    knowledge.attach(payload, command="templates get", templates=[name], catalog_templates={r["name"] for r in rows})
     renderer.emit(payload, command="templates get")
 
 

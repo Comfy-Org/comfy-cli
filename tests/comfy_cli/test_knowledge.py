@@ -385,6 +385,44 @@ class TestAuthRouting:
             knowledge._http_get("https://example.com/knowledge.json")
 
 
+class TestRefreshIfStale:
+    """The warm-path refresh. `attach` never calls it: a discovery turn must not
+    wait on the network, which left the TTL decorative on a local install."""
+
+    def test_stale_cache_is_refetched(self, tmp_path, monkeypatch):
+        _seed_cache(age_seconds=10 * 24 * 60 * 60)
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
+        calls = _fake_http(
+            monkeypatch,
+            knowledge_bytes=FIXTURE_KNOWLEDGE.read_bytes(),
+            manifest_bytes=FIXTURE_MANIFEST.read_bytes(),
+        )
+        knowledge.refresh_if_stale()
+        assert "https://example.com/knowledge.json" in calls
+
+    def test_fresh_cache_is_left_alone(self, monkeypatch):
+        _seed_cache()
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
+        calls = _fake_http(monkeypatch, knowledge_bytes=FIXTURE_KNOWLEDGE.read_bytes())
+        knowledge.refresh_if_stale()
+        assert calls == []
+
+    def test_env_file_is_authoritative_and_never_refetched(self, tmp_path, monkeypatch):
+        _env_bundle(tmp_path, monkeypatch)
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
+        calls = _fake_http(monkeypatch, knowledge_bytes=FIXTURE_KNOWLEDGE.read_bytes())
+        knowledge.refresh_if_stale()
+        assert calls == []
+
+    def test_a_failed_refresh_is_silent(self, monkeypatch, capsys):
+        _seed_cache(age_seconds=10 * 24 * 60 * 60)
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
+        _fake_http(monkeypatch)  # every body None: the fetch raises
+        knowledge.refresh_if_stale()
+        out = capsys.readouterr()
+        assert out.out == "" and out.err == ""
+
+
 class TestIndex:
     @pytest.fixture
     def bundle(self, tmp_path, monkeypatch) -> knowledge.Bundle:
@@ -394,7 +432,7 @@ class TestIndex:
         return b
 
     def test_tolerant_reader(self, bundle, tmp_path, monkeypatch):
-        assert "future_field" in bundle.models["kling"]
+        assert "future_field" in bundle.models["testvid"]
         assert len(bundle.models) == 5
         knowledge._reset_for_testing()
         p = tmp_path / "min.json"
@@ -426,38 +464,38 @@ class TestIndex:
         assert b.templates == {} and b.nodes == {}
 
     def test_alias_index(self, bundle):
-        assert bundle.aliases["hailuo 03"] == "minimax-h3"
-        assert bundle.aliases["minimax h3"] == "minimax-h3"
-        assert bundle.aliases["minimax-h3"] == "minimax-h3"
-        assert bundle.aliases["kling"] == "kling"
-        assert bundle.aliases["h3"] == "minimax-h3"
+        assert bundle.aliases["halo 03"] == "acme-h3"
+        assert bundle.aliases["acme h3"] == "acme-h3"
+        assert bundle.aliases["acme-h3"] == "acme-h3"
+        assert bundle.aliases["testvid"] == "testvid"
+        assert bundle.aliases["h3"] == "acme-h3"
 
     def test_template_and_node_index(self, bundle):
-        assert bundle.templates["video_minimax_h3_t2v"] == ["minimax-h3"]
-        assert bundle.templates["api_sync_so_lip_sync_video"] == ["sync-3"]
+        assert bundle.templates["video_acme_h3_t2v"] == ["acme-h3"]
+        assert bundle.templates["api_lipco_lip_sync_video"] == ["lipco-3"]
         # Capability pick template for a model outside the trimmed set still maps.
-        assert bundle.templates["video_ltx2_3_ia2v"] == ["ltx"]
-        assert bundle.nodes["KlingLipSyncAudioToVideoNode"] == ["kling"]
+        assert bundle.templates["video_testlx_ia2v"] == ["testlx"]
+        assert bundle.nodes["TestvidLipSyncAudioToVideoNode"] == ["testvid"]
         assert all(len(v) == len(set(v)) for v in bundle.templates.values())
 
     def test_deprecations_keyed_by_id(self, bundle):
-        assert bundle.deprecations["kling-avatar-2"]["superseded_by"] == "sync-3"
-        assert set(bundle.deprecations) == {"kling-avatar-2", "sora-2"}
+        assert bundle.deprecations["testvid-avatar-2"]["superseded_by"] == "lipco-3"
+        assert set(bundle.deprecations) == {"testvid-avatar-2", "retired-model-2"}
 
     def test_resolve(self, bundle):
-        assert knowledge.resolve(bundle, "  HAILUO 03 ")["id"] == "minimax-h3"
-        assert knowledge.resolve(bundle, "Kling-Avatar-2")["id"] == "kling-avatar-2"
+        assert knowledge.resolve(bundle, "  HALO 03 ")["id"] == "acme-h3"
+        assert knowledge.resolve(bundle, "Testvid-Avatar-2")["id"] == "testvid-avatar-2"
         assert knowledge.resolve(bundle, "nope-xyz") is None
 
     @pytest.mark.parametrize(
         ("query", "expected"),
         [
-            ("Hailuo 3", "minimax-h3"),
-            ("hailuo3", "minimax-h3"),
-            ("HAILUO-03", "minimax-h3"),
-            ("Mini Max H3", "minimax-h3"),
-            ("sync.3", "sync-3"),
-            ("klingg", None),
+            ("Halo 3", "acme-h3"),
+            ("halo3", "acme-h3"),
+            ("HALO-03", "acme-h3"),
+            ("Ac Me H3", "acme-h3"),
+            ("lipco.3", "lipco-3"),
+            ("testvidg", None),
         ],
     )
     def test_resolve_accepts_spelling_variants(self, bundle, query, expected):
@@ -465,11 +503,40 @@ class TestIndex:
         assert (row["id"] if row else None) == expected
         assert knowledge.resolve_id(bundle, query) == expected
 
-    def test_model_id_beats_colliding_alias(self):
-        data = {"models": {"kling": {"id": "kling"}, "kling-3": {"id": "kling-3"}}, "aliases": {"Kling": "kling-3"}}
+    def test_capability_id_beats_a_colliding_alias(self):
+        """One capability's alias spelled like another capability's id used to
+        delete both normalized keys, so `pick` stopped resolving either."""
+        data = {
+            "models": {},
+            "capabilities": {
+                "text-to-video": {"id": "text-to-video", "picks": []},
+                "lipsync": {"id": "lipsync", "aliases": ["Text to Video"], "picks": []},
+            },
+        }
         b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
-        assert b.aliases["kling"] == "kling"
-        assert knowledge.resolve(b, "KLING")["id"] == "kling"
+        for spelling in ("text-to-video", "text to video", "Text To Video"):
+            assert knowledge.pick(b, spelling)["id"] == "text-to-video", spelling
+        assert knowledge.pick(b, "lipsync")["id"] == "lipsync"
+
+    def test_manifest_version_is_bounded(self):
+        b = knowledge._index(
+            {"models": {}},
+            {"schema_version": 1, "version": "v" * 5000},
+            source="env",
+            stale=False,
+            path="p",
+            mtime=0.0,
+        )
+        assert len(b.version) == knowledge.MAX_VERSION_CHARS
+
+    def test_model_id_beats_colliding_alias(self):
+        data = {
+            "models": {"testvid": {"id": "testvid"}, "testvid-3": {"id": "testvid-3"}},
+            "aliases": {"Testvid": "testvid-3"},
+        }
+        b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
+        assert b.aliases["testvid"] == "testvid"
+        assert knowledge.resolve(b, "TESTVID")["id"] == "testvid"
 
     def test_resolve_id_requires_a_row(self):
         data = {"models": {"a": {"id": "a"}}, "aliases": {"ghost": "missing"}}
@@ -479,7 +546,7 @@ class TestIndex:
         assert knowledge.resolve_id(b, " A ") == "a"
 
     def test_normalize(self):
-        assert knowledge._normalize("Hailuo 03") == "hailuo3"
+        assert knowledge._normalize("Halo 03") == "halo3"
         assert knowledge._normalize("image to video") == "imagetovideo"
         assert knowledge._normalize("Flux 1.10") == "flux110"
         assert knowledge._normalize("v2.0") == "v20"
@@ -575,7 +642,7 @@ class TestCli:
         assert data["env_file"] == str(path)
         assert data["url"] is None
         assert data["ttl_seconds"] == knowledge.DEFAULT_TTL_SECONDS
-        assert data["counts"] == {"models": 5, "capabilities": 2, "aliases": 22, "deprecations": 2}
+        assert data["counts"] == {"models": 5, "capabilities": 2, "aliases": 23, "deprecations": 2}
         _validate(data)
 
     def test_status_with_nothing(self, capsys):
@@ -605,13 +672,13 @@ class TestCli:
 
     def test_resolve_hit(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
-        rc, env = _run(["resolve", "Hailuo 03"], capsys)
+        rc, env = _run(["resolve", "Halo 03"], capsys)
         assert rc == 0
         assert env["command"] == "knowledge resolve"
         data = env["data"]
-        assert data["query"] == "Hailuo 03"
-        assert data["id"] == "minimax-h3"
-        assert data["model"]["id"] == "minimax-h3"
+        assert data["query"] == "Halo 03"
+        assert data["id"] == "acme-h3"
+        assert data["model"]["id"] == "acme-h3"
         assert data["deprecation"] is None
         assert data["bundle_version"] == "0.1.0-fixture"
         assert data["stale"] is False
@@ -619,9 +686,9 @@ class TestCli:
 
     def test_resolve_deprecated(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
-        _rc, env = _run(["resolve", "kling-avatar-2"], capsys)
+        _rc, env = _run(["resolve", "testvid-avatar-2"], capsys)
         data = env["data"]
-        assert data["deprecation"]["superseded_by"] == "sync-3"
+        assert data["deprecation"]["superseded_by"] == "lipco-3"
         _validate(data)
 
     def test_resolve_miss(self, tmp_path, monkeypatch, capsys):
@@ -635,17 +702,17 @@ class TestCli:
 
     def test_resolve_spelling_variant_is_a_hit(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
-        rc, env = _run(["resolve", "Hailuo 3"], capsys)
+        rc, env = _run(["resolve", "Halo 3"], capsys)
         assert rc == 0
-        assert env["data"]["id"] == "minimax-h3"
-        assert env["data"]["query"] == "Hailuo 3"
+        assert env["data"]["id"] == "acme-h3"
+        assert env["data"]["query"] == "Halo 3"
         _validate(env["data"])
 
     def test_resolve_close_matches(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
-        _rc, env = _run(["resolve", "klingg"], capsys)
+        _rc, env = _run(["resolve", "testvidg"], capsys)
         assert env["error"]["code"] == "knowledge_unknown_model"
-        assert "kling" in env["error"]["details"]["close_matches"]
+        assert "testvid" in env["error"]["details"]["close_matches"]
 
     def test_resolve_without_bundle(self, capsys):
         rc, env = _run(["resolve", "x"], capsys)
@@ -663,10 +730,10 @@ class TestCli:
         assert ranks == sorted(ranks) and len(ranks) == 7
         assert all("status" in p and "superseded_by" in p for p in data["picks"])
         by_model = {p["model"]: p for p in data["picks"]}
-        assert by_model["kling"]["status"] == "available"
-        assert by_model["ltx"]["status"] is None
-        assert by_model["ltx"]["template"] == "video_ltx2_3_ia2v"
-        assert by_model["kling"]["template"] is None
+        assert by_model["testvid"]["status"] == "available"
+        assert by_model["testlx"]["status"] is None
+        assert by_model["testlx"]["template"] == "video_testlx_ia2v"
+        assert by_model["testvid"]["template"] is None
         _validate(data)
 
     def test_pick_spelling_variant(self, tmp_path, monkeypatch, capsys):
@@ -717,7 +784,7 @@ class TestCli:
 
     def test_pretty_mode_writes_nothing_to_stdout(self, tmp_path, monkeypatch, pretty_no_stdout):
         _env_bundle(tmp_path, monkeypatch)
-        for args in (["status"], ["resolve", "kling"], ["pick", "lipsync"]):
+        for args in (["status"], ["resolve", "testvid"], ["pick", "lipsync"]):
             result = CliRunner().invoke(knowledge_cmd.app, args, standalone_mode=False)
             assert result.exception is None, result.exception
 

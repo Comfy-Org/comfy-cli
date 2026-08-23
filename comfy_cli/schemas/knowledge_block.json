@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://comfy.org/schemas/knowledge_block.json",
   "title": "knowledge block",
-  "description": "Curated model knowledge attached as `data.knowledge` by discovery commands (generate schema|list, templates ls|show|get, nodes search|ls, models search). Absent when no bundle is loaded or nothing matched, except that an empty result with no match carries zero_hit and a nudge. Every field is optional; readers must ignore unknown fields.",
+  "description": "Curated model knowledge attached as `data.knowledge` by discovery commands (generate schema|list, templates ls|show|get, nodes search|ls, models search). Absent when no bundle is loaded, when nothing matched, or when the call named no subject at all (an unfiltered listing) — except that an empty result with no match carries zero_hit and a nudge. Every field is optional; readers must ignore unknown fields.",
   "type": "object",
   "properties": {
     "bundle_version": { "type": "string", "description": "Version of the comfy-knowledge bundle the block came from." },
@@ -37,7 +37,9 @@
           "pitfalls": { "type": "array", "items": { "type": "string" } },
           "corrections": { "type": "array", "items": { "type": "string" } },
           "warnings": { "type": "array", "items": { "type": "string" } },
-          "as_of": { "type": "string" }
+          "as_of": { "type": "string" },
+          "available_locally": { "type": "boolean", "description": "Present and false when the ids this row resolves to are absent from the catalog the command loaded. The row is still curated and still correct; this install cannot run it as-is. Rows sort after available ones within their tier." },
+          "unavailable_reason": { "type": "string", "description": "Why available_locally is false." }
         }
       }
     },
@@ -54,7 +56,9 @@
           "template": { "type": ["string", "null"] },
           "caveat": { "type": ["string", "null"] },
           "status": { "type": ["string", "null"], "description": "Copied from the pick's model row when that row exists." },
-          "superseded_by": { "type": ["string", "null"], "description": "From the deprecations list or the pick's model row." }
+          "superseded_by": { "type": ["string", "null"], "description": "From the deprecations list or the pick's model row." },
+          "available_locally": { "type": "boolean", "description": "Present and false when the pick's template is absent from the catalog the command loaded. Ranked picks keep rank order, so a lower-ranked pick without this field is the runnable-now alternative." },
+          "unavailable_reason": { "type": "string", "description": "Why available_locally is false." }
         }
       }
     },
