@@ -635,6 +635,12 @@ We track analytics using Mixpanel to help us understand usage patterns and know 
 comfy tracking disable
 ```
 
+The discovery commands — `comfy nodes search`, `comfy templates ls`,
+`comfy generate schema`, `comfy generate list` and `comfy models search` — also
+send the search term you typed and which curated knowledge entries it matched,
+so we can see what people look for and fail to find. Opting out stops this along
+with everything else.
+
 Check out the usage here: [Mixpanel Board](https://mixpanel.com/p/13hGfPfEPdRkjPtNaS7BYQ)
 
 ## Contributing

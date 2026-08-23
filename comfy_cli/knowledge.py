@@ -133,8 +133,12 @@ def _normalize(s: str) -> str:
 
 
 def _normalized_map(keys: dict[str, str], *, ids: Collection[str] = ()) -> dict[str, str]:
-    """``_normalize(key) -> target``. A spelling two targets share is dropped, then
-    every id in ``ids`` reclaims its own key, so no alias can delete a real id."""
+    """``_normalize(key) -> target``, with every spelling two targets share left out.
+
+    Ids in ``ids`` are resolved after the aliases and override them, so no alias
+    can delete a real id. Two ids sharing one key cancel each other the same way
+    two aliases do: the tie stays untied, and only the exact spelling resolves it.
+    """
     out: dict[str, str] = {}
     ambiguous: set[str] = set()
     for key, target in keys.items():
@@ -145,8 +149,19 @@ def _normalized_map(keys: dict[str, str], *, ids: Collection[str] = ()) -> dict[
             ambiguous.add(norm)
     for norm in ambiguous:
         del out[norm]
+
+    owners: dict[str, str] = {}
+    contested: set[str] = set()
     for identifier in ids:
-        if norm := _normalize(identifier):
+        norm = _normalize(identifier)
+        if not norm:
+            continue
+        if owners.setdefault(norm, identifier) != identifier:
+            contested.add(norm)
+    for norm, identifier in owners.items():
+        if norm in contested:
+            out.pop(norm, None)
+        else:
             out[norm] = identifier
     return out
 
@@ -503,7 +518,9 @@ def _model_entry(bundle: Bundle, model_id: str, row: dict, *, matched_on: str, b
             entry[key] = values
     routing_raw = row.get("routing")
     routing = (
-        [{"when": r.get("when"), "use": r.get("use")} for r in routing_raw if isinstance(r, dict)][:MAX_LIST_ITEMS]
+        [{"when": _text(r.get("when")), "use": _text(r.get("use"))} for r in routing_raw if isinstance(r, dict)][
+            :MAX_LIST_ITEMS
+        ]
         if isinstance(routing_raw, list)
         else []
     )

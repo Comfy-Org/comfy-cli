@@ -176,6 +176,24 @@ class TestLookup:
         assert entry["tier"] == "canon"
 
 
+class TestScalarGuards:
+    def test_non_string_routing_values_are_emitted_as_null(self):
+        """Routing is copied straight out of the bundle, and the block schema allows
+        only string or null there. A number reaching the wire fails a consumer's
+        validation on data we chose to forward."""
+        data = {
+            "models": {
+                "m": {
+                    "id": "m",
+                    "routing": [{"when": 1, "use": ["not", "a", "string"]}, {"when": "ok", "use": "t"}],
+                }
+            }
+        }
+        b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
+        entry = knowledge._model_entry(b, "m", b.models["m"], matched_on="m", brief=False)
+        assert entry["routing"] == [{"when": None, "use": None}, {"when": "ok", "use": "t"}]
+
+
 class TestSkewFilter:
     """A row this install cannot run is annotated, never hidden. Dropping it made
     a curated answer look like no answer, which is the confusion the bundle exists

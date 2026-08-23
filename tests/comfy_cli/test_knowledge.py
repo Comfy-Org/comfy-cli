@@ -503,6 +503,15 @@ class TestIndex:
         assert (row["id"] if row else None) == expected
         assert knowledge.resolve_id(bundle, query) == expected
 
+    def test_two_ids_sharing_a_normalized_key_cancel(self):
+        """`model-1` and `model01` both normalize to `model1`. Letting the last one
+        win would answer a spelling neither id owns; the exact spellings still work."""
+        data = {"models": {"model-1": {"id": "model-1"}, "model01": {"id": "model01"}}}
+        b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
+        assert knowledge.resolve_id(b, "model 1") is None
+        assert knowledge.resolve_id(b, "model-1") == "model-1"
+        assert knowledge.resolve_id(b, "model01") == "model01"
+
     def test_capability_id_beats_a_colliding_alias(self):
         """One capability's alias spelled like another capability's id used to
         delete both normalized keys, so `pick` stopped resolving either."""
