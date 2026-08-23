@@ -358,14 +358,67 @@ class TestCaps:
         assert len(k["models"]) == 3
 
 
+class TestCapabilitiesAvailable:
+    def test_every_enriched_block_carries_the_vocabulary(self):
+        for kwargs in (
+            {"queries": ["kling"]},
+            {"queries": ["lipsync"]},
+            {"templates": [_REVERSE_TEMPLATE]},
+            {"queries": ["faceswap"], "thin": True},
+        ):
+            k = _attach(**kwargs)["knowledge"]
+            assert k["capabilities_available"] == ["audio-generation", "lipsync"]
+
+    def test_the_vocabulary_is_the_bundle_capability_keys_sorted(self):
+        bundle = knowledge.load_bundle(cache_only=True)
+        k = _attach(queries=["kling"])["knowledge"]
+        assert k["capabilities_available"] == sorted(bundle.capabilities)
+
+    def test_the_vocabulary_outlives_models_and_picks_under_pressure(self, monkeypatch):
+        monkeypatch.setattr(knowledge, "MAX_BLOCK_BYTES", 600)
+        k = _attach(queries=["kling", "Lip Sync"])["knowledge"]
+        assert k["models"] == [] and 0 < len(k["picks"])
+        assert k["capabilities_available"] == ["audio-generation", "lipsync"]
+
+    def test_fit_drops_the_vocabulary_only_after_models_and_picks(self, monkeypatch):
+        def block() -> dict:
+            return {
+                "models": [{"id": "kling"}],
+                "picks": [{"capability": "lipsync"}],
+                "capabilities_available": ["audio-generation", "lipsync"],
+                "hit_ids": [],
+            }
+
+        emptied = block()
+        emptied["models"] = []
+        emptied["picks"] = []
+        monkeypatch.setattr(knowledge, "MAX_BLOCK_BYTES", knowledge._block_bytes(emptied))
+        k = block()
+        knowledge._fit(k)
+        assert k["models"] == [] and k["picks"] == []
+        assert k["capabilities_available"] == ["audio-generation", "lipsync"]
+
+        bare = dict(emptied)
+        del bare["capabilities_available"]
+        monkeypatch.setattr(knowledge, "MAX_BLOCK_BYTES", knowledge._block_bytes(bare))
+        k = block()
+        knowledge._fit(k)
+        assert "capabilities_available" not in k
+        assert knowledge._block_bytes(k) <= knowledge.MAX_BLOCK_BYTES
+
+    def test_no_bundle_still_adds_no_key(self, monkeypatch):
+        monkeypatch.setattr(knowledge, "load_bundle", lambda **_: None)
+        assert "knowledge" not in _attach(queries=["kling"])
+
+
 class TestNudge:
     def test_thin_zero_hit_gets_a_nudge(self):
         k = _attach(queries=["faceswap"], thin=True)["knowledge"]
         assert k["zero_hit"] is True
         assert k["models"] == [] and k["picks"] == [] and k["hit_ids"] == []
         assert "'faceswap'" in k["nudge"]
-        assert "lipsync" in k["nudge"]
-        assert "audio-generation" in k["nudge"]
+        assert "see capabilities_available" in k["nudge"]
+        assert k["capabilities_available"] == ["audio-generation", "lipsync"]
 
     def test_nudge_uses_first_non_blank_query(self):
         k = _attach(queries=["  ", "faceswap", "other"], thin=True)["knowledge"]
@@ -375,12 +428,13 @@ class TestNudge:
         k = _attach(queries=["x-" * 4500], thin=True)["knowledge"]
         assert k["zero_hit"] is True
         assert knowledge._block_bytes(k) <= knowledge.MAX_BLOCK_BYTES
-        assert "lipsync" in k["nudge"]
+        assert "see capabilities_available" in k["nudge"]
 
-    def test_nudge_drops_the_capability_list_rather_than_overrun(self, monkeypatch):
+    def test_zero_hit_nudge_sheds_the_pointer_then_the_vocabulary(self, monkeypatch):
         monkeypatch.setattr(knowledge, "MAX_BLOCK_BYTES", 220)
         k = _attach(queries=["faceswap"], thin=True)["knowledge"]
         assert k["nudge"] == "no curated knowledge for 'faceswap'"
+        assert "capabilities_available" not in k
         assert knowledge._block_bytes(k) <= 220
 
     def test_unresolved_query_on_a_non_empty_block_gets_a_nudge(self):
@@ -388,7 +442,7 @@ class TestNudge:
         assert k["models"]
         assert k["zero_hit"] is False
         assert "'FLF2V'" in k["nudge"]
-        assert "lipsync" in k["nudge"]
+        assert "see capabilities_available" in k["nudge"]
 
     def test_query_resolving_to_a_model_gets_no_nudge(self):
         k = _attach(queries=["testvid"], templates=[_REVERSE_TEMPLATE])["knowledge"]
