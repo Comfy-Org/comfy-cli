@@ -200,7 +200,7 @@ class TestCaps:
         assert full["models"] and full["picks"]
         monkeypatch.setattr(knowledge, "MAX_BLOCK_BYTES", 600)
         k = _attach(queries=["kling", "Lip Sync"])["knowledge"]
-        assert len(json.dumps(k)) <= 600
+        assert knowledge._block_bytes(k) <= 600
         assert k["models"] == []
         assert 0 < len(k["picks"]) < len(full["picks"])
         assert k["hit_ids"] == ["cap:lipsync"]
@@ -210,6 +210,19 @@ class TestCaps:
         monkeypatch.setattr(knowledge, "MAX_BLOCK_BYTES", 10)
         assert "knowledge" not in _attach(queries=["kling"])
         assert "knowledge" not in _attach(queries=["kling"], thin=True)
+
+    def test_the_ceiling_counts_wire_bytes_not_escaped_characters(self, monkeypatch):
+        """The renderer emits with ``ensure_ascii=False``, so a curly quote costs
+        three bytes on the wire and six characters once escaped. Measuring the
+        escaped form trims blocks that would have fit."""
+        prose = "don\u2019t use the \u201cfast\u201d route"
+        block = {"models": [{"id": "m", "pitfalls": [prose]}], "picks": [], "hit_ids": ["m"]}
+        wire = len(json.dumps(block, ensure_ascii=False).encode())
+        assert wire < len(json.dumps(block))
+
+        monkeypatch.setattr(knowledge, "MAX_BLOCK_BYTES", wire)
+        knowledge._fit(block)
+        assert block["models"] == [{"id": "m", "pitfalls": [prose]}]
 
     def test_max_list_items(self, monkeypatch):
         monkeypatch.setattr(knowledge, "MAX_LIST_ITEMS", 2)
@@ -258,14 +271,14 @@ class TestNudge:
     def test_nudge_stays_under_byte_ceiling_for_a_huge_query(self):
         k = _attach(queries=["x-" * 4500], thin=True)["knowledge"]
         assert k["zero_hit"] is True
-        assert len(json.dumps(k)) <= knowledge.MAX_BLOCK_BYTES
+        assert knowledge._block_bytes(k) <= knowledge.MAX_BLOCK_BYTES
         assert "lipsync" in k["nudge"]
 
     def test_nudge_drops_the_capability_list_rather_than_overrun(self, monkeypatch):
         monkeypatch.setattr(knowledge, "MAX_BLOCK_BYTES", 220)
         k = _attach(queries=["faceswap"], thin=True)["knowledge"]
         assert k["nudge"] == "no curated knowledge for 'faceswap'"
-        assert len(json.dumps(k)) <= 220
+        assert knowledge._block_bytes(k) <= 220
 
     def test_not_thin_means_no_key(self):
         assert "knowledge" not in _attach(queries=["faceswap"], thin=False)

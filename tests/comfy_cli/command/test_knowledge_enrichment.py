@@ -192,7 +192,7 @@ def _validate(data: dict, schema_name: str) -> None:
     _validator_for(schema_name).validate(data)
     if "knowledge" in data:
         _validator_for("knowledge_block.json").validate(data["knowledge"])
-        assert len(json.dumps(data["knowledge"])) <= knowledge.MAX_BLOCK_BYTES
+        assert knowledge._block_bytes(data["knowledge"]) <= knowledge.MAX_BLOCK_BYTES
 
 
 def _invoke(app, args: list[str], capsys) -> dict[str, Any]:
