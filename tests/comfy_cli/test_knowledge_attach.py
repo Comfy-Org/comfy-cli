@@ -296,6 +296,13 @@ class TestNudge:
         assert k["models"]
         assert "nudge" not in k
 
+    def test_query_the_reverse_index_resolves_gets_no_nudge(self):
+        # `nodes search <ClassName>` and `templates ls --name-sub <template id>`
+        # pass the same string as a query and as a reverse-index key.
+        k = _attach(queries=[_REVERSE_TEMPLATE], templates=[_REVERSE_TEMPLATE])["knowledge"]
+        assert [e["matched_on"] for e in k["models"]] == [_REVERSE_TEMPLATE]
+        assert "nudge" not in k
+
     def test_query_resolving_to_a_capability_gets_no_nudge(self):
         k = _attach(queries=["lipsync"])["knowledge"]
         assert k["picks"]

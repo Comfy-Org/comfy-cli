@@ -632,6 +632,12 @@ def attach(
             entries.append(_model_entry(bundle, mid, row, matched_on=matched_on, brief=brief))
         entries.sort(key=lambda e: e.get("tier") != "law")
         entries = entries[: MAX_MODELS_BRIEF if brief else MAX_MODELS]
+        if not query_resolved:
+            # A node class or template id passed as both a query and a reverse-index
+            # key lands a row whose matched_on is that exact string. Nudging there
+            # would deny a term the block answers on the same line.
+            asked = set(query_list)
+            query_resolved = any(e["matched_on"] in asked for e in entries)
 
         picks: list[dict] = []
         for cid in cap_hits:
