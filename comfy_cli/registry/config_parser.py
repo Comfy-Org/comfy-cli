@@ -113,13 +113,9 @@ def create_comfynode_config():
     tool.add("comfy", comfy)
     document.add("tool", tool)
 
-    # Add the default model
-    # models = tomlkit.array()
-    # model = tomlkit.inline_table()
-    # model["location"] = "/checkpoints/model.safetensor"
-    # model["model_url"] = "https://example.com/model.zip"
-    # models.append(model)
-    # comfy["Models"] = models
+    # No default [tool.comfy].Models entry is scaffolded: a placeholder model
+    # location/URL pair is not valid for any real node, and publishing rejects
+    # it, so an empty section is a better starting point than a broken example.
 
     # Write the TOML document to a file
     try:

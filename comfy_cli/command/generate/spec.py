@@ -234,7 +234,7 @@ _ENDPOINT_ALLOWLIST: list[tuple[str, str, str | None]] = [
     # Reve
     ("reve/v1/image/create", "text-to-image", None),
     ("reve/v1/image/edit", "image-edit", None),
-    # Runway (image)
+    # Runway - image
     ("runway/text_to_image", "text-to-image", None),
     # Video — Kling
     ("kling/v1/videos/text2video", "text-to-video", "kling"),

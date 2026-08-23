@@ -196,7 +196,7 @@ def test_run_ipv6_host_port_reaches_execute(tmp_path):
         )
     assert result.exit_code == 0, result.output
     args, _ = mock_execute.call_args
-    # execute(workflow, host, port, ...)
+    # positional args of execute - workflow, host, port, ...
     assert args[1] == "[::1]"
     assert args[2] == 8188
 
@@ -256,7 +256,7 @@ def test_run_explicit_port_wins_over_embedded_host_port(tmp_path, monkeypatch):
         )
     assert result.exit_code == 0, result.output
     args, _ = mock_execute.call_args
-    # execute(workflow, host, port, ...)
+    # positional args of execute - workflow, host, port, ...
     assert args[1] == "127.0.0.1"
     assert args[2] == 9200
 
