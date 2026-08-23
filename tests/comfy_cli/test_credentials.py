@@ -260,7 +260,7 @@ class TestGetSession:
 class TestResolveAllowClear:
     """``resolve_cloud_credential(allow_clear=...)`` plumbs the flag through
     ``get_session`` into ``ensure_fresh_session`` so a best-effort caller (the
-    local partner-node injector, BE-3361) can REFRESH a lapsed session without
+    local partner-node injector) can REFRESH a lapsed session without
     ever CLEARING it on a fatal refresh error.
 
     Exercised against the real secret store (tmp secrets file) so the whole
@@ -316,7 +316,7 @@ class TestResolveAllowClear:
 
     def test_expired_session_is_refreshed(self, persisted, monkeypatch: pytest.MonkeyPatch):
         """Expired session + valid refresh token → a refresh happens and the
-        NEW access token is returned (the BE-3361 fix)."""
+        NEW access token is returned."""
         import time
 
         self._persist_expired()
@@ -362,7 +362,7 @@ class TestResolveAllowClear:
     ):
         """A transient (network) refresh failure returns the stale session,
         which fails its own expiry check → resolver falls through. Same as the
-        pre-BE-3361 behavior on a flake; the session is preserved."""
+        earlier behavior on a flake; the session is preserved."""
         self._persist_expired()
         monkeypatch.setenv("COMFY_CLOUD_API_KEY", "env-key")
 

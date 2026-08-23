@@ -580,7 +580,7 @@ def extract_output_entries(record: dict) -> list[dict]:
     outputs. This deliberately covers keys beyond the classic
     ``images/gifs/videos/audio/files`` — notably SaveGLB's ``"3d"`` key and
     the cloud worker's singular ``"video"`` key — so 3D/mesh jobs resolve
-    instead of returning ``download_no_outputs`` (BE-4417). The ``"animated"``
+    instead of returning ``download_no_outputs``. The ``"animated"``
     key is skipped explicitly to match core semantics (it emits ``(True,)``
     boolean flags, not file entries).
 

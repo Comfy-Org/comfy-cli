@@ -2039,7 +2039,7 @@ class TestMalformedRejectionPayloadStillYieldsAnEnvelope:
 
 
 # --------------------------------------------------------------------------
-# `queued` is emitted only after the job's durable state exists (BE-6072)
+# `queued` is emitted only after the job's durable state exists
 #
 # The event used to precede `jobs_state.write` on every path. That made
 # state-file-backed follow-ups (`jobs ls`, `jobs wait`, compose's item_map)
@@ -2276,7 +2276,7 @@ class TestQueueStashesWarningsWithoutEmitting:
 
 
 class TestErrorEnvelopeCarriesRoutedTarget:
-    """BE-6274: run-path *error* envelopes carry `where` (the routed target),
+    """Run-path *error* envelopes carry `where` (the routed target),
     matching the failure examples in docs/json-output.md.
 
     These go through the real CLI (`comfy run --json --where …`) rather than

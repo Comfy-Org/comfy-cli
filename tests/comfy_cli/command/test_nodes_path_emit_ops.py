@@ -1,4 +1,4 @@
-"""Tests for ``comfy nodes path --emit-ops`` (V1-019 / BE-7152).
+"""Tests for ``comfy nodes path --emit-ops`` (V1-019).
 
 ``nodes path`` reports a plan (a routed node sequence); agents then hand-build
 the apply batch from it. ``--emit-ops`` closes that gap: each returned path

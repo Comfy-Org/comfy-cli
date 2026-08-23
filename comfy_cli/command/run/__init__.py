@@ -106,16 +106,16 @@ def _stdin_is_interactive() -> bool:
     ``pythonw`` contexts ``sys.stdin`` can be ``None``, closed, or backed by a
     revoked file descriptor. Treat every such case as non-interactive so the
     spend gate falls through to the fail-closed machine-mode error instead of
-    raising an uncontrolled exception (BE-4326). Delegates to the shared
+    raising an uncontrolled exception. Delegates to the shared
     fail-safe probe so stdin and stdout are guarded identically.
     """
     return stream_is_tty(getattr(sys, "stdin", None))
 
 
 def _spend_gate(renderer, partner_nodes: list[str], allow_spend: bool, *, details: dict) -> None:
-    """Consent interlock for partner-API (paid) nodes (BE-4326).
+    """Consent interlock for partner-API (paid) nodes.
 
-    Mirrors the ``comfy run-template`` gate (BE-4113): a workflow that embeds
+    Mirrors the ``comfy run-template`` gate: a workflow that embeds
     partner-API nodes (Veo/Kling/BFL/Gemini/…) spends Comfy credits when it
     runs, so require explicit consent before submitting. A no-op when there are
     no partner nodes or ``--allow-spend`` was passed, so partner-free runs are
@@ -341,7 +341,7 @@ def execute(
         return
 
     partner_nodes = _detect_partner_nodes(workflow, object_info)
-    # Spend gate (BE-4326): partner-API nodes spend Comfy credits. Require
+    # Spend gate: partner-API nodes spend Comfy credits. Require
     # explicit consent before resolving a credential or submitting. Fires
     # BEFORE _resolve_partner_credential() below so a refusal never triggers a
     # network OAuth refresh. Detection stays fail-open (object_info == {} → no
@@ -366,7 +366,7 @@ def execute(
         # turned away are still counted: that funnel is exactly what the metric
         # is for, and `credential_present: False` marks them. class_types are
         # node names, not PII — the same data `workflow_unknown_nodes` reports.
-        # It does sit AFTER the BE-4326 spend gate, so a run refused for lack of
+        # It does sit AFTER the spend gate, so a run refused for lack of
         # `--allow-spend` emits no event: the gate deliberately precedes any
         # credential resolution (a refusal must not trigger a network OAuth
         # refresh), and `credential_present` needs that resolution. The
@@ -997,7 +997,7 @@ def execute_cloud(
             # Deliberately `_load_from_target`, not `resilient_load_object_info`:
             # the resilient loader resolves a Target to build its cache key, and
             # the spend gate below must fire before ANY cloud credential is
-            # resolved (BE-4326) — `test_cloud_partner_node_machine_mode_fails_closed`
+            # resolved — `test_cloud_partner_node_machine_mode_fails_closed`
             # pins that. Trade-off: COMFY_OBJECT_INFO_FILE is honored on the
             # UI-conversion path above but not on this API-format fallback.
             from comfy_cli.cql.engine import _load_from_target
@@ -1038,7 +1038,7 @@ def execute_cloud(
     # Pre-submit validation via pure-Python CQL engine.
     _preflight_validate(renderer, parsed_workflow, cloud_object_info, target_label="cloud", where="cloud")
 
-    # Spend gate (BE-4326): the cloud also bills partner-API nodes, so apply the
+    # Spend gate: the cloud also bills partner-API nodes, so apply the
     # same consent interlock as the local path before authenticating/submitting.
     # Fail-open on detection (empty cloud object_info → no gate), and fire before
     # Client() so a refusal never triggers cloud auth.

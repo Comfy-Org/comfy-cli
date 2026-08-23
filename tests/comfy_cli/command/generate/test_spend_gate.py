@@ -1,4 +1,4 @@
-"""Spend-gate tests for ``comfy generate`` (BE-4103).
+"""Spend-gate tests for ``comfy generate``.
 
 A generation call spends Comfy credits, so the proxy call sits behind a
 consent interlock: interactive TTY runs prompt first, ``--yes`` or the

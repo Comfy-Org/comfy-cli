@@ -189,7 +189,7 @@ def test_unknown_model_no_family_still_helpful(monkeypatch):
 
 @pytest.mark.parametrize("text", ["1e+16", "1e-07", "-2e+5"])
 def test_pointless_exponent_parses_as_float(text):
-    """Regression (BE-2982): the spec is now fetched as JSON, and `json.dumps`
+    """Regression: the spec is now fetched as JSON, and `json.dumps`
     emits exponents without a decimal point for very large/small floats. PyYAML's
     YAML 1.1 resolver leaves those as strings, which would leak into flag schemas.
     """

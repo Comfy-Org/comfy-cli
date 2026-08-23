@@ -57,7 +57,7 @@ def _resolve_partner_credential() -> tuple[str, str] | None:
     except Exception:  # noqa: BLE001 — best-effort: never abort the run on a refresh hiccup
         # refresh=False reads the store as-is (no network, no lock): an expired
         # session fails its own expiry check and the resolver returns env/stored
-        # key — exactly the pre-BE-3361 behavior on this path.
+        # key — exactly the earlier behavior on this path.
         cred = resolve_cloud_credential(purpose="cloud", refresh=False, allow_clear=False)
     if cred is None:
         return None

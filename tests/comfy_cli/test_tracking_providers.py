@@ -1,4 +1,4 @@
-"""Provider-level tests for the dual-send telemetry refactor (MAR-52).
+"""Provider-level tests for the dual-send telemetry refactor.
 
 These cover the contract each provider has to honor — Mixpanel keeps legacy
 event names via the ``mixpanel_name`` alias kwarg, PostHog stamps every event
@@ -65,7 +65,7 @@ def _mixpanel_track_kwargs(mp_provider):
     """Drain the Mixpanel worker, then return the last ``track(...)`` kwargs.
 
     ``MixpanelProvider`` dispatches through a bounded queue drained by a daemon
-    worker (BE-5868), so the send has not necessarily happened by the time
+    worker, so the send has not necessarily happened by the time
     ``track_event()`` returns. Every assertion on the mocked client goes through
     a ``flush()`` first.
     """
@@ -239,7 +239,7 @@ class TestProviderConstruction:
         assert provider.enabled is False
 
     def test_mixpanel_client_has_bounded_request_timeout(self):
-        """Regression guard for BE-3354/BE-3403: mixpanel-python's default
+        """Regression guard: mixpanel-python's default
         Consumer uses request_timeout=None → an unbounded requests.post that
         hangs the CLI forever on a blackholed endpoint. The provider must build
         its Mixpanel client with an explicit 10s consumer timeout so this can't
@@ -256,7 +256,7 @@ class TestProviderConstruction:
         assert adapter.max_retries.total == 1
 
     def test_posthog_unregisters_its_own_atexit_join(self):
-        """Regression guard for BE-3403: Posthog's constructor registers its own
+        """Regression guard: Posthog's constructor registers its own
         ``atexit.register(self.join)``, which flushes synchronously on the main
         thread at shutdown, unbounded by ``_flush_all_providers``' 5s daemon
         deadline. Against a blackholed endpoint that join can block ~21s after
@@ -298,7 +298,7 @@ def _sent_event_names(provider):
 
 
 class TestMixpanelNonBlockingDispatch:
-    """BE-5868: ``track()`` used to post inline on the calling thread, so every
+    """``track()`` used to post inline on the calling thread, so every
     consented invocation paid a synchronous HTTP round-trip (worst case ~10s
     against a blackholed endpoint) *before* the wrapped command body ran.
     Dispatch is now a bounded queue drained by a daemon worker."""
@@ -390,8 +390,8 @@ class TestMixpanelNonBlockingDispatch:
         """End to end against a blackholed endpoint: ``_flush_all_providers`` runs
         each provider's ``flush()`` in a daemon thread joined against the shared
         5s deadline, so a hung send costs the exit path that much and no more —
-        same treatment as PostHog's internally-unbounded ``client.flush()``
-        (BE-3403). (Mixpanel's ``flush()`` also self-bounds; this covers the
+        same treatment as PostHog's internally-unbounded ``client.flush()``.
+        (Mixpanel's ``flush()`` also self-bounds; this covers the
         caller-side guarantee, which is what holds for every provider.)"""
         import comfy_cli.tracking as tracking_mod
 
@@ -412,7 +412,7 @@ class TestMixpanelNonBlockingDispatch:
             release.set()
 
     def test_worker_is_a_daemon_and_the_provider_registers_no_atexit_hook(self):
-        """Design constraint (BE-3403): ``_flush_all_providers`` is the ONLY
+        """Design constraint: ``_flush_all_providers`` is the ONLY
         shutdown drain path. The worker must die with the process rather than
         join it, and the provider must not add a second, unbounded atexit hook —
         the exact mistake ``PostHogProvider`` has to actively unregister."""
@@ -609,7 +609,7 @@ class TestRedactionThroughFanOut:
         assert "sk-supersecret" not in str(ph_kwargs["properties"])
 
     def test_download_credentials_never_reach_either_provider(self, tracking_with_two_providers):
-        # BE-992 kwarg shape: before the suffix matcher and the underscore
+        # The original kwarg shape: before the suffix matcher and the underscore
         # filter, the un-redacted token still shipped to PostHog because its
         # client coerces the unserializable _ctx instead of raising the way
         # Mixpanel's does.
@@ -700,7 +700,7 @@ class TestLazyProviderConstruction:
             provider = PostHogProvider("phc_test", "https://t.comfy.org")
         assert provider.enabled is True
         kwargs = posthog_cls.call_args.kwargs
-        # main (BE-3403) replaced the branch's `flush_interval=0.2` with a
+        # main replaced the branch's `flush_interval=0.2` with a
         # tighter, more direct bound: cap the consumer's drain budget, and
         # unregister posthog's own atexit join so `_flush_all_providers` is the
         # only shutdown drain and its deadline actually governs.
@@ -754,8 +754,8 @@ class TestAtexitFlush:
         """A provider whose flush() blocks (e.g. a blackholed telemetry endpoint)
         must not wedge the atexit hook past its per-provider deadline. The hook
         runs each flush in a daemon thread and joins with a ~5s timeout, so a
-        60s-hanging provider is abandoned rather than allowed to hang the CLI
-        (BE-3354/BE-3403). Bounds the total at well under the 60s hang."""
+        60s-hanging provider is abandoned rather than allowed to hang the CLI.
+        Bounds the total at well under the 60s hang."""
         import comfy_cli.tracking as tracking_mod
 
         release = threading.Event()
@@ -787,7 +787,7 @@ def _override_warnings(caplog):
 
 
 class TestPostHogTokenResolution:
-    """BE-4931: $POSTHOG_API_KEY is also what posthog-cli calls a *personal*
+    """$POSTHOG_API_KEY is also what posthog-cli calls a *personal*
     (``phx_``) API key, which the ingestion endpoint rejects with a 401. Only a
     ``phc_`` project write key may override the committed default."""
 

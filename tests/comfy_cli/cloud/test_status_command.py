@@ -10,7 +10,7 @@ The two display rules with history behind them get the most coverage:
 
 * the zero-masking balance chain, where a present-but-zero high-priority field
   must not mask a positive component below it;
-* the trust guard (BE-1795 / BE-1798), where an all-silent backend must produce
+* the trust guard, where an all-silent backend must produce
   neutral copy instead of "$0.00 / Subscribe".
 """
 
@@ -464,7 +464,7 @@ def test_unconfirmed_payload_also_validates(monkeypatch, capsys):
 def test_pretty_mode_renders_without_asserting_a_balance(monkeypatch, capsys):
     """The panel must not print a dollar figure for an unconfirmed workspace.
 
-    This is the BE-1798 regression in its original surface: the JSON payload
+    This is the regression in its original surface: the JSON payload
     withholding the number is only half the fix if the panel prints one anyway.
     """
     _install(

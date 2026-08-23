@@ -1,6 +1,6 @@
 """Regression sweep over REAL subgraphed gallery templates.
 
-BE-3223 showed subgraph gallery templates must convert fully through
+Subgraph gallery templates must convert fully through
 ``convert_ui_to_api`` and expose their interior slots via
 ``Graph.get_template_schema``, but the existing subgraph tests only use small
 synthetic shapes. These tests pin that behavior against verbatim copies of

@@ -1993,7 +1993,7 @@ class TestDynamicComboAfterControlMarker:
         assert inputs["shape.side"] == 10.0
 
     def test_dynamic_combo_sub_seed_strips_implicit_control_marker(self):
-        # BE-3370 review: an INT ``seed``/``noise_seed`` *sub-input* of a
+        # An INT ``seed``/``noise_seed`` *sub-input* of a
         # dynamic combo relies on the frontend's implicit companion, but its
         # dotted name (``model.seed``) never matched the leaf-name check, so the
         # trailing control marker was kept as a real value and shifted every
@@ -2050,7 +2050,7 @@ class TestDynamicComboAfterControlMarker:
     def test_unresolved_selector_warns(self, caplog):
         import logging
 
-        # BE-3370 review: a selector value that matches no option key leaves the
+        # A selector value that matches no option key leaves the
         # option's sub-input slots unconsumed, silently shifting later widgets.
         # We can't recover the alignment, but the mismatch must not be silent.
         object_info = {
@@ -2087,7 +2087,7 @@ class TestDynamicComboAfterControlMarker:
         assert any("matched no option" in rec.message for rec in caplog.records)
 
     def test_deeply_nested_dynamic_combos_do_not_recurse_forever(self, caplog):
-        # BE-3370 review: an unbounded chain of nested COMFY_*COMBO* sub-inputs
+        # An unbounded chain of nested COMFY_*COMBO* sub-inputs
         # must degrade to a warning, not an uncaught RecursionError that aborts
         # the whole conversion. Build a self-referential option chain deeper
         # than _MAX_DYNAMIC_COMBO_DEPTH.

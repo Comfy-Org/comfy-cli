@@ -87,7 +87,7 @@ def _get_graph(
     # honor it), so callers that do resolve it upstream. Without this, an agent
     # discovering nodes here would read a different server's object_info than the
     # one `comfy run` submits to whenever ComfyUI was launched in the background
-    # on a non-default port (BE-6299).
+    # on a non-default port.
     if input_path is None and mode == "local":
         from comfy_cli.host_port import report_usage_error, resolve_host_port
 

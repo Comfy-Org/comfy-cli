@@ -269,7 +269,7 @@ def whoami_cmd():
 
 
 # ---------------------------------------------------------------------------
-# status (billing / plan / concurrency)
+# status commands - billing, plan, concurrency
 # ---------------------------------------------------------------------------
 
 # Billing payloads are small objects. The cap only exists to bound memory on a

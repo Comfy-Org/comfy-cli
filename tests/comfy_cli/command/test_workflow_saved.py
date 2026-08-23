@@ -673,7 +673,7 @@ class TestDelete:
 
 
 # ---------------------------------------------------------------------------
-# unparseable 200 body — must surface a loud error, not empty/success (BE-3334)
+# unparseable 200 body — must surface a loud error, not empty/success
 # ---------------------------------------------------------------------------
 
 # A non-empty 200 body the client can't decode as JSON. Four shapes, all malformed:

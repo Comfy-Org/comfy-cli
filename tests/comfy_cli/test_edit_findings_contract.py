@@ -1,4 +1,4 @@
-"""Freeze the edit-findings contract (BE-7215).
+"""Freeze the edit-findings contract.
 
 Two pins:
 

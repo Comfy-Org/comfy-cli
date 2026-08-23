@@ -1,4 +1,4 @@
-"""``comfy templates fetch --emit-ops`` (V1-038 / BE-7171).
+"""``comfy templates fetch --emit-ops`` (V1-038).
 
 ``templates fetch -o workflow.json`` is a BULK WRITER: it replaces the working
 file wholesale. Downstream (the cloud agent's document) that replacement had to

@@ -83,7 +83,7 @@ def test_list_partner_filter(runner):
 
 
 def test_list_json_emits_parseable_models(runner):
-    """--json is an `envelope/1` on stdout, never a Rich table (BE-4933).
+    """--json is an `envelope/1` on stdout, never a Rich table.
     Full envelope/schema coverage lives in test_list_schema_envelope.py."""
     import json
 
@@ -132,7 +132,7 @@ def test_list_query_filter(runner):
 
 
 def test_list_no_matches(runner):
-    # --no-json pins pretty mode: CliRunner has no TTY, and since BE-4933 a
+    # --no-json pins pretty mode: CliRunner has no TTY, and a
     # non-TTY `generate list` resolves to the JSON envelope like every other
     # renderer-backed command.
     r = runner.invoke(cli_app, ["--no-json", "generate", "list", "--partner", "nonexistent"])
@@ -507,7 +507,7 @@ def test_refresh_invalid_body_exits_and_leaves_cache_untouched(runner, monkeypat
 
 
 def test_refresh_fetches_openapi_path(runner, monkeypatch, tmp_path):
-    """Regression (BE-2982): comfy-api serves the spec at `<base_url>/openapi`
+    """Regression: comfy-api serves the spec at `<base_url>/openapi`
     (JSON), not `/openapi.yml` (which 404s). Assert `_refresh()` hits `/openapi`."""
     captured = {}
 
@@ -545,7 +545,7 @@ def test_refresh_fetches_openapi_path(runner, monkeypatch, tmp_path):
 
 
 def test_refresh_rejects_non_spec_body(runner, monkeypatch, tmp_path):
-    """Regression (BE-2982): `/openapi` is followed through redirects and cached
+    """Regression: `/openapi` is followed through redirects and cached
     for 7 days, so a non-spec 200 (HTML interstitial, redirect landing page, JSON
     array/scalar) must be refused rather than poison the cache for a week."""
     cache = tmp_path / "openapi-cache.yml"

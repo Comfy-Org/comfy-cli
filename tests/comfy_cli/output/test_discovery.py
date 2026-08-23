@@ -81,7 +81,7 @@ def test_discover_annotates_commands_with_schema():
 
 
 def test_discover_lists_run_prompt_and_set_options():
-    # BE-2535: `comfy run --prompt`/`--set` must be visible on the agent
+    # `comfy run --prompt`/`--set` must be visible on the agent
     # surface. The options are auto-introspected into the commands tree.
     envelope = _run_cli(["--json", "discover"])
     run_params = envelope["data"]["commands"]["run"]["params"]

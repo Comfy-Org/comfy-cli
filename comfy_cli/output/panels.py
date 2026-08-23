@@ -288,7 +288,7 @@ def cloud_status_panel(*, payload: Mapping[str, Any], version: str, show_plans: 
     anything, so the human surface and the JSON surface cannot disagree. In
     particular the trust guard is honored upstream: when ``balance_confirmed``
     is false the balance keys are null and this function prints no figure at
-    all, which is the whole point of BE-1798.
+    all, which is the whole point of the guard.
 
     Server-supplied strings (workspace name, plan slugs, the message) go
     through ``Text`` or ``sanitize_markup`` so a crafted name cannot inject

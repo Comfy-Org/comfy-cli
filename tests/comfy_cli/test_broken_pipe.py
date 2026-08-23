@@ -1,4 +1,4 @@
-"""BE-4795: `comfy … | head` must exit 0, not 1.
+"""`comfy … | head` must exit 0, not 1.
 
 A CLI whose stdout consumer closes early is not a failing CLI — the consumer got
 what it asked for. These cover both halves of the entrypoint guard in

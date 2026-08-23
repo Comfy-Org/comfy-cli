@@ -464,7 +464,7 @@ class TestStatusServerUpNoRecord:
 
     This is what the documented crash recovery ("relaunch, then check")
     produces: a fresh ComfyUI answers the port with an empty history, so the
-    live snapshot comes back None. Before BE-4749 that unconditionally emitted
+    live snapshot comes back None. Previously that unconditionally emitted
     `prompt_not_found` and discarded the `server_died` verdict already sitting
     on disk.
     """
@@ -886,7 +886,7 @@ def test_orphaned_flag_filters_to_watcher_crashed(monkeypatch):
 
 def test_reap_finalizes_nonterminal_record_with_dead_watcher_pid(monkeypatch):
     """A `running` record carrying a dead pid + that pid's REAL create_time —
-    what a `comfy run --wait` killed from outside now leaves behind (BE-6641)
+    what a `comfy run --wait` killed from outside now leaves behind
     — is flipped by the reap to `error`/`watcher_crashed`, surfaces under
     `--orphaned`, and the pid pair is cleared in the rewritten file."""
     import psutil
@@ -1736,7 +1736,7 @@ def test_jobs_cancel_cloud_404_surfaces_prompt_not_found(monkeypatch: pytest.Mon
 @pytest.mark.parametrize("code", [401, 403])
 def test_jobs_cancel_cloud_auth_failure_surfaces_cloud_unauthorized(monkeypatch: pytest.MonkeyPatch, code: int):
     """An expired/insufficient session cancelling a cloud job surfaces the
-    actionable ``cloud_unauthorized`` code (shared envelope handler, BE-3266) —
+    actionable ``cloud_unauthorized`` code (shared envelope handler) —
     not the generic ``cloud_http_error`` it produced before the two call sites
     were unified."""
     import io
@@ -3472,7 +3472,7 @@ def _run_local_watch(monkeypatch, capsys, *, messages, prompt_id="pid-w", argv_e
 
 
 def test_watch_streams_events_and_reports_completed_nodes(monkeypatch, capsys):
-    """The BE-6856 regression, end to end: a multi-node job must produce MORE
+    """The regression, end to end: a multi-node job must produce MORE
     THAN ONE NDJSON line during the watch, and the terminal envelope's
     `completed_nodes` must list the nodes that ran."""
     from comfy_cli import jobs_state

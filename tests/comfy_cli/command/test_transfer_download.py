@@ -285,7 +285,7 @@ GLB_RECORD = {
 
 
 class TestSaveGlb3dDownload:
-    """Regression (BE-4417): a SaveGLB job emits its output under the "3d"
+    """Regression: a SaveGLB job emits its output under the "3d"
     key. Shape-based extraction must resolve it so `comfy download` saves the
     `.glb` instead of erroring `download_no_outputs`."""
 
@@ -964,7 +964,7 @@ class TestSSRFGuardIntact:
 
 class TestDownloadHelperExtraction:
     """Direct, guard-pinning unit tests for the per-URL helpers extracted from
-    ``execute_download`` (BE-3273): ``_download_one_url`` orchestrates naming +
+    ``execute_download``: ``_download_one_url`` orchestrates naming +
     the symlink-dest refusal + branch dispatch; ``_copy_local_one`` and
     ``_stream_http_one`` carry the two download branches. The behavior-preserving
     extraction must keep every guard, envelope code, and exit intact — and the
@@ -1274,11 +1274,11 @@ class TestDefaultOutDir:
 
 class TestDownloadExtensionSanitized:
     """The download extension can be derived from an untrusted `?filename=`
-    query param (a compromised/malicious server). Unlike the `item` token, it
-    was never sanitized, so control/ANSI bytes reached the on-disk name and
-    the echoed path — a terminal-injection vector in human mode. `_sanitize_ext`
-    whitelists it to a safe charset while preserving the no-traversal guarantee
-    (BE-3326)."""
+     query param (a compromised/malicious server). Unlike the `item` token, it
+     was never sanitized, so control/ANSI bytes reached the on-disk name and
+     the echoed path — a terminal-injection vector in human mode. `_sanitize_ext`
+     whitelists it to a safe charset while preserving the no-traversal guarantee
+    ."""
 
     # A real ESC control byte, exactly as a hostile server could return it.
     _ATTACK_NAME = "out.png\x1b[31mHACK"
@@ -1349,7 +1349,7 @@ class TestDownloadExtensionSanitized:
 
     def test_local_source_control_bytes_stripped_from_ext(self, fake_target, tmp_path, capsys):
         # The local-copy branch derives `ext` from the on-disk source name and
-        # must be sanitized too (BE-3326 applies to both branches).
+        # must be sanitized too (the rule applies to both branches).
         src_dir = tmp_path / "output"
         src_dir.mkdir()
         src = src_dir / self._ATTACK_NAME
