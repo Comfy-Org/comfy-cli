@@ -1510,6 +1510,8 @@ def test_distribution_alias_hidden_from_root_help():
     assert proc.returncode == 0
     assert "build" in proc.stdout
     assert "distribution" not in proc.stdout
+
+
 # --- review follow-ups --------------------------------------------------------
 
 
