@@ -4,7 +4,7 @@ Parses ComfyUI's ``object_info.json``, builds an indexed compatibility graph,
 and exposes upstream/downstream, path-finding, validation, annotations,
 and widget-order resolution.
 
-Port of ``github.com/Comfy-Org/cql/nodegraph`` (Go).
+Port of the upstream Go ``nodegraph`` package.
 """
 
 from __future__ import annotations
