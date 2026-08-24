@@ -1,4 +1,4 @@
-"""Tests for `comfy node restore-snapshot --fast-deps` (issue #217, BE-4276).
+"""Tests for `comfy node restore-snapshot --fast-deps` (issue #217).
 
 cm_cli's `restore-snapshot` accepts `--uv-compile` but NOT `--no-deps`, so the
 DependencyCompiler-based fast path used by `install`/`reinstall` is unavailable

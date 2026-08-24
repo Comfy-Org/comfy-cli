@@ -155,7 +155,7 @@ class TestUploadMachineModeStdoutPurity:
 class TestUploadConnectionError:
     """A connection-level failure (``URLError``/``TimeoutError``) on upload must
     surface as a structured ``upload_failed`` envelope, not an unhandled
-    traceback that breaks ``--json``/NDJSON consumers (BE-2454)."""
+    traceback that breaks ``--json``/NDJSON consumers."""
 
     @pytest.fixture(autouse=True)
     def reset_renderer(self):
@@ -228,7 +228,7 @@ class TestUploadTimeout:
 
     ``--host``/``--port`` can now aim the POST at an arbitrary address, so a
     peer that completes the handshake and then stalls would hang the CLI
-    forever on urllib's no-timeout default (BE-5662).
+    forever on urllib's no-timeout default.
     """
 
     def test_upload_passes_an_explicit_timeout(self, asset, monkeypatch):
@@ -243,8 +243,7 @@ class TestUploadTimeout:
 
 
 class TestUploadHostPortRouting:
-    """``comfy upload --host/--port`` aims a LOCAL upload at a specific ComfyUI
-    (BE-5662).
+    """``comfy upload --host/--port`` aims a LOCAL upload at a specific ComfyUI.
 
     Before this the only lever was the process-wide ``COMFY_LOCAL_URL`` env
     var, so a caller wrapping the CLI (comfy-mcp's ``_with_target``) could not
@@ -491,7 +490,7 @@ class TestExecuteUploadValidatesItsOwnArgs:
     The CLI validates the flags, but comfy-mcp's ``_with_target`` calls
     ``execute_upload`` directly and ``resolve_target`` drops the host verbatim
     into ``http://{host}:{port}`` — so without this the guarantee would belong
-    to the caller, not the function (BE-5662).
+    to the caller, not the function.
     """
 
     @pytest.mark.parametrize("bad", ["attacker.tld/x?", "", "   ", "a%0d%0aX:%201", "127.0.0.1:8188"])

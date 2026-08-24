@@ -1,4 +1,4 @@
-"""Tests for ``comfy workflow delete-nodes <id...>`` (V1-020 / BE-7153).
+"""Tests for ``comfy workflow delete-nodes <id...>`` (V1-020).
 
 The measured agent loop runs ``delete-node`` once per doomed node (×22 runs) —
 N file loads, N writes, N catalog loads. ``delete-nodes`` is the batch verb:

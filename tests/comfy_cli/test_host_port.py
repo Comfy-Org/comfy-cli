@@ -217,7 +217,7 @@ def test_run_unsafe_host_exits_before_execute(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# `--port` beats the port embedded in a combined `--host h:p` (BE-6486)
+# `--port` beats the port embedded in a combined `--host h:p`
 # ---------------------------------------------------------------------------
 #
 # The combined-host sites used to merge the two with `if not port and
@@ -275,7 +275,7 @@ def test_jobs_status_out_of_range_port_is_rejected():
 
 
 # ---------------------------------------------------------------------------
-# explicit-flag validation at the shared choke point (BE-6306 review)
+# explicit-flag validation at the shared choke point
 # ---------------------------------------------------------------------------
 #
 # `resolve_local_host_port` resolves each half as `value or env or bg or
@@ -319,7 +319,7 @@ def test_boundary_ports_are_accepted(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# A host/port usage error terminates the JSON/NDJSON stream (BE-6660)
+# A host/port usage error terminates the JSON/NDJSON stream
 # ---------------------------------------------------------------------------
 #
 # `typer.BadParameter` used to escape straight to click, which prints a human

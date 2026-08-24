@@ -1,6 +1,6 @@
-"""BE-6275: `where` on the ERROR envelopes of the routed commands.
+"""`where` on the ERROR envelopes of the routed commands.
 
-BE-6274 fixed `Renderer.error()` and the `run` path. This module pins the same
+An earlier change fixed `Renderer.error()` and the `run` path. This module pins the same
 property for every other command that resolves a local/cloud target: once the
 routing decision is made, the failure envelope names the target it routed to
 instead of `where: null`.

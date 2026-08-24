@@ -256,7 +256,7 @@ class TestGitOperations:
 
         calls = mock_subprocess.call_args_list
         # git is spawned by its resolved absolute path, never the bare name
-        # Windows' CreateProcess would look up in the CWD first (BE-5358).
+        # Windows' CreateProcess would look up in the CWD first.
         for call in calls:
             argv0 = call[0][0][0]
             assert os.path.isabs(argv0), argv0

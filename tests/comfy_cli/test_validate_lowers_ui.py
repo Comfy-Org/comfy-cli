@@ -212,7 +212,7 @@ def _subgraph_ui_workflow() -> dict:
     instance (id 57), with none of its link inputs wired — so lowering expands
     it to the composite id ``57:3`` and validation flags its missing inputs.
 
-    An OUTPUT node specifically: BE-3406 prunes output-unreachable nodes before
+    An OUTPUT node specifically: validation prunes output-unreachable nodes before
     the required-input check, so a non-output interior node would produce no
     errors for this test to inspect the ids of."""
     return {
@@ -271,7 +271,7 @@ class TestValidateSubgraphIdTranslation:
     def test_api_format_input_keeps_raw_ids(self, tmp_path):
         # A caller that hands us an already-lowered API doc addresses THAT doc;
         # its ids pass through untouched (no api_node_id annotation).
-        api = {"57:3": {"class_type": "SaveImage", "inputs": {}}}  # output node: reachable (BE-3406)
+        api = {"57:3": {"class_type": "SaveImage", "inputs": {}}}  # output node: reachable
         result = _run_validate(tmp_path, api, _object_info())
         assert result.exit_code == 1
         env = _envelope(result)

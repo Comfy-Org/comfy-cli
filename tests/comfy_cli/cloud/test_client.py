@@ -738,7 +738,7 @@ class TestOutputUrls:
 
     def test_extract_resolves_saveglb_3d_key(self):
         """SaveGLB emits entries under the "3d" key, not the classic media
-        keys — shape-based detection must still resolve them (BE-4417)."""
+        keys — shape-based detection must still resolve them."""
         record = {"outputs": {"10": {"3d": [{"filename": "abc123.glb", "subfolder": "3d", "type": "output"}]}}}
         assert comfy_client.extract_output_entries(record) == [
             {"node_id": "10", "filename": "abc123.glb", "subfolder": "3d", "type": "output"}

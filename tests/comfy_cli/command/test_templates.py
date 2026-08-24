@@ -820,7 +820,7 @@ def test_check_invalid_utf8_workflow_surfaces_invalid_json(gallery_file, tmp_pat
 
 
 # ---------------------------------------------------------------------------
-# Gallery cache TTL (BE-3393): fresh-within-TTL serves the cache, expired
+# Gallery cache TTL: fresh-within-TTL serves the cache, expired
 # re-fetches, and a fetch failure on an expired cache falls back to stale.
 # ---------------------------------------------------------------------------
 
@@ -863,7 +863,7 @@ def test_expired_cache_serves_stale_immediately_and_spawns_background_refresh(
     # Backdate the cache past the TTL so a refresh is due.
     _set_mtime(cache_file, templates_cmd.GALLERY_TTL_SECONDS + 3600)
 
-    # Stale-while-revalidate (BE-3427): the foreground command must NOT block on
+    # Stale-while-revalidate: the foreground command must NOT block on
     # a network fetch when a stale cache is present — it serves the stale copy
     # immediately and revalidates in a detached background process.
     monkeypatch.setattr(templates_cmd, "_fetch_gallery", _fetch_boom)
@@ -1084,7 +1084,7 @@ def test_readonly_cache_dir_still_serves_fetched_data_on_refresh(cache_file, mon
 
 
 # ---------------------------------------------------------------------------
-# Stale-while-revalidate spawn seam (BE-3427): the foreground serves stale and
+# Stale-while-revalidate spawn seam: the foreground serves stale and
 # fires a *detached* background refresher; here we assert the spawn shape.
 # ---------------------------------------------------------------------------
 
@@ -1216,7 +1216,7 @@ def test_explicit_refresh_non_utf8_body_is_fatal_not_uncaught(cache_file, monkey
 
 # ---------------------------------------------------------------------------
 # Exact-name lookups (show/fetch) opt out of stale-while-revalidate so a
-# freshly-added template resolves on the same call (BE-3427 review).
+# freshly-added template resolves on the same call.
 # ---------------------------------------------------------------------------
 
 

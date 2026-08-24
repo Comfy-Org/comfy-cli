@@ -22,8 +22,12 @@ jobs:
   hygiene:
     permissions:
       contents: read
-    uses: Comfy-Org/github-workflows/.github/workflows/public-repo-hygiene.yml@d1acbf5b4e4f79f6447406ea27e2736a5fb7011b # github-workflows main (d1acbf5)
+    uses: Comfy-Org/github-workflows/.github/workflows/public-repo-hygiene.yml@609f9729b3df0c762118bfe64de6ab649c33be04 # github-workflows main (609f972)
     with:
       # REQUIRED, and must equal the `uses:` SHA above — the reusable asserts
       # they match, which is what pins the checker to the reviewed commit.
-      workflows_ref: d1acbf5b4e4f79f6447406ea27e2736a5fb7011b
+      workflows_ref: 609f9729b3df0c762118bfe64de6ab649c33be04
+      # `HAILUO-03` is MiniMax's Hailuo 03 model, named in the curated
+      # knowledge bundle and asserted in tests. It is a product name that
+      # happens to match the ticket-ID shape, not an internal reference.
+      ticket_allowlist: HAILUO-03

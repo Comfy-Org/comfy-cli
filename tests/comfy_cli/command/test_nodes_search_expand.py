@@ -1,4 +1,4 @@
-"""Tests for ``comfy nodes search --expand-top N`` (V1-017 / BE-7150).
+"""Tests for ``comfy nodes search --expand-top N`` (V1-017).
 
 The measured agent loop is search → show × N (the show args are ~92% a copy of
 the search hit). ``--expand-top N`` folds the show payload for the top-N hits

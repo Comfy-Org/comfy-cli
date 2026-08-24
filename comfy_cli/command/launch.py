@@ -41,7 +41,7 @@ def _hard_exit(code: int) -> None:
     so `comfy_cli.tracking`'s shutdown drain never runs here. That cost nothing
     while Mixpanel sent inline from `track()`: `@track_command` fires the
     `launch` event *before* the command body runs, so it was already delivered.
-    Now that dispatch is queue-and-drain (BE-5868) the event is still queued at
+    Now that dispatch is queue-and-drain the event is still queued at
     this point, and without an explicit drain every `comfy launch` — background
     success included — silently drops its own telemetry.
 

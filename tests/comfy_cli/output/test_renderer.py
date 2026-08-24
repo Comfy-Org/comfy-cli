@@ -293,7 +293,7 @@ def test_get_renderer_default_is_pretty():
 
 
 # ---------------------------------------------------------------------------
-# Control-sequence sanitizing at the pretty boundary (BE-4794)
+# Control-sequence sanitizing at the pretty boundary
 # ---------------------------------------------------------------------------
 
 _EVIL = "job \x1b[2Jevil"

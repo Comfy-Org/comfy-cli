@@ -55,7 +55,7 @@ def _emit_edit_error(renderer, e: ValueError, *, hint: str) -> None:
     A :class:`workflow_ops.FatalFindingError` carries the catalog finding, so
     the envelope can name the offending ``value``, ``field``, ``valid_options``
     and ``did_you_mean`` as DETAILS rather than burying them in prose a caller
-    has to regex (BE-7215). Any other ValueError keeps the previous shape.
+    has to regex. Any other ValueError keeps the previous shape.
     """
     if isinstance(e, workflow_ops.FatalFindingError):
         f = e.finding

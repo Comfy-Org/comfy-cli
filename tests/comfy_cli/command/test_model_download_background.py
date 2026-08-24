@@ -765,7 +765,7 @@ class TestSubmitFailsFast:
     def test_unknown_scheme_never_detaches(self, workspace, no_spawn, monkeypatch, capsys):
         """An unrecognized source can't resolve a filename; under skip_prompting
         `ui.prompt_input` returns "" and the empty-filename guard fires — as an
-        `envelope/1` error (BE-4217), not a raw `DownloadException`."""
+        `envelope/1` error, not a raw `DownloadException`."""
         monkeypatch.setattr(models.ui, "prompt_input", lambda *a, **k: k.get("default", ""))
 
         with pytest.raises(typer.Exit) as exc:

@@ -64,7 +64,7 @@ class TestPipInstallManager:
 
 class TestInstallManagerWithFallback:
     """The dedupe'd manager-install-and-degrade helper shared by the pip and
-    fast_deps paths of ``execute`` (BE-4356)."""
+    fast_deps paths of ``execute``."""
 
     @patch("comfy_cli.config_manager.ConfigManager")
     @patch("comfy_cli.command.install.pip_install_manager", return_value=True)

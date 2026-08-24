@@ -2048,7 +2048,7 @@ def _max_id(values) -> int:
 
 
 def complete_save_format(workflow: dict) -> dict:
-    """Fill the save-format keys a consumer is entitled to assume (BE-7215).
+    """Fill the save-format keys a consumer is entitled to assume.
 
     We emitted ``{nodes, links, last_node_id}`` and omitted ``version`` and
     ``last_link_id``. The frontend's ``validateComfyWorkflow`` zod schema
@@ -2133,7 +2133,7 @@ def _widget_index(graph, class_type: str, widget: str, widgets_values=None) -> i
 
 
 class FatalFindingError(ValueError):
-    """A catalog finding the server will reject — the edit is refused (BE-7215).
+    """A catalog finding the server will reject — the edit is refused.
 
     Carries the finding verbatim so the command layer can emit ``code``,
     ``value``, ``field`` and ``did_you_mean`` as ENVELOPE FIELDS. Previously
