@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_scale.json",
+  "title": "comfy deploy scale --json data payload",
+  "description": "The deployment record returned after its full compute configuration is patched.",
+  "type": "object",
+  "required": ["computeConfig", "id", "status"],
+  "additionalProperties": true,
+  "properties": {
+    "computeConfig": {
+      "type": "object",
+      "required": ["gpuClass", "region", "min", "max"],
+      "additionalProperties": true,
+      "properties": {
+        "gpuClass": {"type": "string", "minLength": 1},
+        "region": {"type": "string", "minLength": 1},
+        "min": {"type": "integer", "minimum": 0, "maximum": 20},
+        "max": {"type": "integer", "minimum": 1, "maximum": 20}
+      }
+    },
+    "id": {"type": "string", "minLength": 1},
+    "status": {"type": "string", "minLength": 1}
+  }
+}

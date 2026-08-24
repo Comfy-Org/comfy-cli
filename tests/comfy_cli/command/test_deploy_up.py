@@ -1,0 +1,311 @@
+from __future__ import annotations
+
+import importlib
+import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from types import ModuleType
+
+import pytest
+from deploy_up_support import FakeBuilder, FakeDeploy, deployment, write_spec
+from typer.testing import CliRunner
+
+from comfy_cli.caller import Caller
+from comfy_cli.cmdline import app
+from comfy_cli.command.deploy_runtime import DEPLOY_POLL_SECONDS
+from comfy_cli.deploy_api_errors import DeployAPIError
+
+
+def _deploy() -> ModuleType:
+    return importlib.import_module("comfy_cli.command.deploy")
+
+
+def _request(module: ModuleType, **changes):
+    values = {
+        "release": {"id": "release-5", "buildId": "build-1", "version": 5, "deployable": True},
+        "build_id": "build-1",
+        "gpu": "l4",
+        "region": "US-MO-2",
+        "minimum": 0,
+        "maximum": 1,
+    }
+    values.update(changes)
+    return module.UpRequest(**values)
+
+
+def _json_envelope(result) -> dict:
+    return json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
+
+
+def test_deploy_up_is_a_registered_real_command() -> None:
+    # Given / When
+    result = CliRunner().invoke(app, ["deploy", "up", "--help"])
+
+    # Then
+    assert result.exit_code == 0
+    assert "--gpu" in result.stdout
+    assert "--region" in result.stdout
+
+
+def test_idempotency_key_is_pinned_for_a_known_generation() -> None:
+    # Given
+    module = _deploy()
+
+    # When
+    key = module._idempotency_key("build-1", "release-2", 3)
+
+    # Then
+    assert str(module._IDEMPOTENCY_NAMESPACE) == "86e81377-21c8-5a10-9db8-33797ad495f1"
+    assert key == "a7f98f5d-9168-5357-840b-bf42b8677e85"
+    assert (
+        module._soft_deleted_generation(
+            [deployment("dep-failed", status="failed"), deployment("dep-stopped", status="stopped")],
+            "release-5",
+        )
+        == 0
+    )
+
+
+def test_second_identical_up_reconciles_without_a_second_post() -> None:
+    # Given
+    module = _deploy()
+    builder = FakeBuilder()
+    client = FakeDeploy()
+    request = _request(module)
+
+    # When
+    first = module.reconcile_up(builder, client, request)
+    second = module.reconcile_up(builder, client, request)
+
+    # Then
+    assert first.created is True
+    assert second.created is False
+    assert first.deployment["id"] == second.deployment["id"]
+    assert len(client.create_keys) == 1
+    assert second.supersedes == []
+
+
+def test_two_concurrent_identical_calls_use_one_generation_and_one_row() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy(generation_barrier=threading.Barrier(2))
+    builder = FakeBuilder()
+    request = _request(module)
+
+    # When
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: module.reconcile_up(builder, client, request), range(2)))
+
+    # Then
+    assert {result.deployment["id"] for result in results} == {"dep-1"}
+    assert len(client.rows) == 1
+    assert client.create_keys == [module._idempotency_key("build-1", "release-5", 0)] * 2
+    assert client.generation_deleted_counts == [0, 0]
+
+
+def test_delete_then_up_creates_a_distinct_generation() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy()
+    request = _request(module)
+    first = module.reconcile_up(FakeBuilder(), client, request)
+    client.soft_delete(first.deployment["id"])
+
+    # When
+    second = module.reconcile_up(FakeBuilder(), client, request)
+
+    # Then
+    assert second.deployment["id"] != first.deployment["id"]
+    assert client.create_keys == [
+        module._idempotency_key("build-1", "release-5", 0),
+        module._idempotency_key("build-1", "release-5", 1),
+    ]
+
+
+def test_tombstone_race_recomputes_generation_and_retries_to_a_live_row() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy(tombstone_first_create=True)
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module))
+
+    # Then
+    assert result.deployment["deletedAt"] is None
+    assert client.create_keys == [
+        module._idempotency_key("build-1", "release-5", 0),
+        module._idempotency_key("build-1", "release-5", 1),
+    ]
+    assert client.generation_deleted_counts[-2:] == [0, 1]
+
+
+def test_three_concurrent_delete_invalidations_fail_with_deploy_conflict() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy(tombstone_all_creates=True)
+
+    # When / Then
+    with pytest.raises(DeployAPIError) as raised:
+        module.reconcile_up(FakeBuilder(), client, _request(module))
+    assert raised.value.code == "deploy_conflict"
+    assert raised.value.details["attempts"] == 3
+    assert len(client.create_keys) == 3
+
+
+def test_failed_deployment_is_started_and_never_recreated() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-failed", status="failed")])
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module))
+
+    # Then
+    assert result.created is False
+    assert client.start_calls == ["dep-failed"]
+    assert client.create_keys == []
+
+
+def test_reconcile_patches_only_mutable_worker_bounds() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", minimum=1, maximum=2)])
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module, minimum=0, maximum=4))
+
+    # Then
+    assert result.created is False
+    assert result.changed is True
+    assert client.update_calls == ["dep-live"]
+    assert result.compute_config == {"gpuClass": "l4", "region": "US-MO-2", "min": 0, "max": 4}
+
+
+def test_reconcile_rejects_an_immutable_gpu_change() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live")])
+
+    # When / Then
+    with pytest.raises(DeployAPIError) as raised:
+        module.reconcile_up(FakeBuilder(), client, _request(module, gpu="a100"))
+    assert raised.value.code == "deploy_immutable_compute"
+    assert client.update_calls == []
+    assert client.create_keys == []
+
+
+def test_supersedes_uses_only_the_server_committed_worker_statuses() -> None:
+    # Given
+    module = _deploy()
+    releases = [
+        {"id": "release-5", "buildId": "build-1", "version": 5, "deployable": True},
+        {"id": "release-3", "buildId": "build-1", "version": 3, "deployable": True},
+    ]
+    statuses = [
+        "queued",
+        "provisioning",
+        "starting",
+        "ready",
+        "unhealthy",
+        "stopping",
+        "stop_failed",
+        "stopped",
+        "failed",
+    ]
+    rows = [deployment(f"dep-{index}", release_id="release-3", status=status) for index, status in enumerate(statuses)]
+    rows.append(deployment("dep-deleted", release_id="release-3", status="ready", deleted_at="2026-08-23T13:00:00Z"))
+
+    # When
+    result = module.reconcile_up(FakeBuilder(releases), FakeDeploy(rows), _request(module))
+
+    # Then
+    assert {row["status"] for row in result.supersedes} == {
+        "queued",
+        "provisioning",
+        "starting",
+        "ready",
+        "unhealthy",
+    }
+    assert "dep-deleted" not in {row["id"] for row in result.supersedes}
+
+
+def test_agentic_create_names_both_missing_compute_options(tmp_path, monkeypatch) -> None:
+    # Given
+    module = _deploy()
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), FakeDeploy()))
+
+    # When
+    result = CliRunner(mix_stderr=False).invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path))])
+
+    # Then
+    assert result.exit_code == 1
+    envelope = _json_envelope(result)
+    assert envelope["error"]["code"] == "deploy_missing_input"
+    assert envelope["error"]["details"]["missing"] == ["--gpu", "--region"]
+
+
+def test_tty_create_prompts_with_compute_catalog_choices(tmp_path, monkeypatch) -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy()
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+    monkeypatch.setattr("comfy_cli.interaction.detect_caller", lambda: Caller("user", agentic=False, source_env=None))
+    monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: False)
+    selected = iter(["l4", "US-MO-2"])
+    questions: list[str] = []
+
+    def choose(question, choices, default="", force_prompting=False):
+        questions.append(question)
+        assert choices
+        return next(selected)
+
+    monkeypatch.setattr("comfy_cli.ui.prompt_select", choose)
+
+    # When
+    result = CliRunner().invoke(app, ["deploy", "up", str(write_spec(tmp_path))])
+
+    # Then
+    assert result.exit_code == 0
+    assert questions == ["GPU class", "Region"]
+    assert client.catalog_calls == 2
+
+
+def test_watch_exits_immediately_on_stop_failed_with_stop_remedy(tmp_path, monkeypatch) -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy(get_statuses=["queued", "stop_failed"])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+    sleeps: list[float] = []
+    monkeypatch.setattr(module, "_sleep", sleeps.append)
+
+    # When
+    result = CliRunner(mix_stderr=False).invoke(
+        app,
+        ["--json", "deploy", "up", str(write_spec(tmp_path)), "--gpu", "l4", "--region", "US-MO-2", "--watch"],
+    )
+
+    # Then
+    assert result.exit_code == 1
+    assert _json_envelope(result)["data"]["deployment"]["status"] == "stop_failed"
+    assert "comfy deploy stop" in result.stderr
+    assert sleeps == []
+
+
+def test_watch_continues_through_unhealthy_until_ready(tmp_path, monkeypatch) -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy(get_statuses=["queued", "unhealthy", "ready"])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+    sleeps: list[float] = []
+    monkeypatch.setattr(module, "_sleep", sleeps.append)
+
+    # When
+    result = CliRunner(mix_stderr=False).invoke(
+        app,
+        ["--json", "deploy", "up", str(write_spec(tmp_path)), "--gpu", "l4", "--region", "US-MO-2", "--watch"],
+    )
+
+    # Then
+    assert result.exit_code == 0
+    assert _json_envelope(result)["data"]["deployment"]["status"] == "ready"
+    assert sleeps == [DEPLOY_POLL_SECONDS]

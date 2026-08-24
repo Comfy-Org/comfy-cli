@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_status.json",
+  "title": "comfy deploy status --json data payload",
+  "type": "object",
+  "required": ["build", "deployment", "release", "serving"],
+  "additionalProperties": false,
+  "properties": {
+    "build": {
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1}
+      }
+    },
+    "deployment": {
+      "type": ["object", "null"],
+      "required": ["id", "status", "endpointUrl", "computeConfig", "stopReason", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "status": {
+          "enum": ["queued", "provisioning", "starting", "ready", "unhealthy", "stopping", "stop_failed", "stopped", "failed"]
+        },
+        "endpointUrl": {"type": ["string", "null"], "minLength": 1},
+        "computeConfig": {
+          "type": "object",
+          "required": ["gpuClass", "region", "min", "max"],
+          "additionalProperties": false,
+          "properties": {
+            "gpuClass": {"type": "string", "minLength": 1},
+            "region": {"type": "string", "minLength": 1},
+            "min": {"type": "integer", "minimum": 0},
+            "max": {"type": "integer", "minimum": 1}
+          }
+        },
+        "stopReason": {"enum": [null, "user", "credits", "policy"]},
+        "error": {"type": ["string", "null"], "minLength": 1}
+      }
+    },
+    "release": {
+      "type": ["object", "null"],
+      "required": ["id", "version", "behind", "latestDeployable"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "integer", "minimum": 1},
+        "behind": {"type": "boolean"},
+        "latestDeployable": {
+          "type": ["object", "null"],
+          "required": ["id", "version"],
+          "additionalProperties": false,
+          "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "version": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
+    "serving": {
+      "type": ["object", "null"],
+      "required": ["workers", "jobsInQueue", "sampledAt"],
+      "additionalProperties": false,
+      "properties": {
+        "workers": {
+          "type": "object",
+          "required": ["idle", "initializing", "ready", "running", "throttled", "unhealthy"],
+          "additionalProperties": false,
+          "properties": {
+            "idle": {"type": "integer", "minimum": 0},
+            "initializing": {"type": "integer", "minimum": 0},
+            "ready": {"type": "integer", "minimum": 0},
+            "running": {"type": "integer", "minimum": 0},
+            "throttled": {"type": "integer", "minimum": 0},
+            "unhealthy": {"type": "integer", "minimum": 0}
+          }
+        },
+        "jobsInQueue": {"type": "integer", "minimum": 0},
+        "sampledAt": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

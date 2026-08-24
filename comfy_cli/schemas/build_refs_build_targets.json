@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_refs_build_targets.json",
+  "title": "comfy build refs build-targets --json data payload",
+  "type": "object",
+  "required": ["targets"],
+  "additionalProperties": true,
+  "properties": {"targets": {"type": "array", "items": {"type": "object", "additionalProperties": true}}}
+}

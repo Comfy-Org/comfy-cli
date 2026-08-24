@@ -44,8 +44,17 @@ def _iter_python_files(root: Path):
         yield p
 
 
+#: ``code=`` is ``renderer.error``'s own kwarg. ``error_code=`` is how
+#: ``comfy_cli.interaction``'s ``require_option`` / ``confirm`` take the code:
+#: that helper deliberately hardcodes none, so each command names its own code
+#: at its own call site (the register-with-first-call-site rule). A command
+#: whose only refusal goes through those helpers would otherwise look like it
+#: registered an orphan.
+_CODE_KWARGS = frozenset({"code", "error_code"})
+
+
 def _extract_codes_from_call(call: ast.Call) -> list[str]:
-    """Return any string literal passed as ``code=...`` whose shape matches a code.
+    """Return any string literal passed as a code kwarg whose shape matches a code.
 
     Conservative on what counts as a code (must match the snake_case pattern)
     so we don't accept random ``code=1`` ints (e.g. ``typer.Exit(code=1)``) or
@@ -53,7 +62,7 @@ def _extract_codes_from_call(call: ast.Call) -> list[str]:
     """
     out: list[str] = []
     for kw in call.keywords:
-        if kw.arg != "code":
+        if kw.arg not in _CODE_KWARGS:
             continue
         if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
             value = kw.value.value
@@ -195,6 +204,83 @@ def test_every_registered_code_is_raised(raised_codes):
     assert not dead, (
         f"Registered but never raised:\n{dead}\nEither delete these from comfy_cli/error_codes.REGISTRY or use them."
     )
+
+
+def test_every_build_code_has_a_first_call_site(raised_codes):
+    """The ``build_*`` family is filled in one code at a time, under this rule:
+
+        Each error code is registered in the same change that introduces its
+        first call site. No change pre-registers codes for later ones.
+
+    Pre-registering is not a harmless head start. ``comfy discover`` publishes the
+    registry verbatim, so a code with no call site advertises a branch to agents
+    that nothing can ever take — a documented promise the CLI cannot keep.
+
+    :func:`test_every_registered_code_is_raised` already rejects an orphan anywhere
+    in the registry; this narrows that direction to the build family so the failure
+    names the rule that was broken instead of dropping a bare code into a flat list
+    shared with every other subsystem.
+
+    If this fails: move the registration into the change that raises the code.
+    """
+    BUILD_PREFIX = "build_"
+    build_codes = [c for c in error_codes.all_codes() if c.startswith(BUILD_PREFIX)]
+    # Guards the orphan check below against a silently empty enumeration.
+    assert build_codes, f"no {BUILD_PREFIX}* codes found in the registry — this guard would pass vacuously"
+
+    orphans = sorted(c for c in build_codes if c not in raised_codes)
+    assert not orphans, (
+        f"Registered with no call site under comfy_cli/: {orphans}\n"
+        "Each error code is registered in the same change that introduces its first call site. "
+        "Move the registration into the change that raises it, or wire up the call site now."
+    )
+
+
+def test_every_deferred_build_code_landed_with_a_call_site(raised_codes):
+    """The build design deferred seven codes to the commands that would raise them.
+
+    The two generic guards above cannot see a deferral that was simply forgotten:
+    a code that was never added, together with the call site that never landed,
+    leaves both of them green. Naming the seven is what turns "we meant to add
+    this" into a red test.
+
+    If this fails: the command that owes this code was never finished, or its
+    only call site was deleted. Wire it up — do not delete the name from here.
+    """
+    deferred = {
+        "build_spec_exists",
+        "build_missing_input",
+        "build_update_needs_confirm",
+        "build_spec_stale",
+        "build_pull_needs_confirm",
+        "build_id_unknown",
+        "build_release_not_found",
+    }
+
+    unregistered = sorted(code for code in deferred if not error_codes.is_registered(code))
+    assert not unregistered, f"deferred build codes missing from comfy_cli/error_codes.REGISTRY: {unregistered}"
+
+    unraised = sorted(code for code in deferred if code not in raised_codes)
+    assert not unraised, f"deferred build codes registered but raised nowhere under comfy_cli/: {unraised}"
+
+
+def test_deploy_error_codes_are_the_exact_final_twenty_seven() -> None:
+    # Given
+    expected = set(
+        """deploy_not_signed_in deploy_not_found deploy_build_not_pushed deploy_no_deployable_release
+        deploy_missing_input deploy_compute_unavailable deploy_forbidden deploy_conflict deploy_immutable_compute
+        deploy_deleted deploy_payment_required deploy_quota_exceeded deploy_delete_needs_confirm deploy_endpoint_unknown
+        deploy_not_ready deploy_workflow_invalid deploy_asset_missing deploy_asset_upload_failed deploy_job_failed
+        deploy_job_canceled deploy_rate_limited deploy_ambiguous_deployment deploy_job_submit_unknown deploy_bad_request
+        deploy_server_error deploy_idempotency_reuse deploy_workflow_format_ui""".split()
+    )
+
+    # When
+    actual = {code for code in error_codes.all_codes() if code.startswith("deploy_")}
+
+    # Then
+    assert len(actual) == 27
+    assert actual == expected
 
 
 def test_codes_match_pattern():

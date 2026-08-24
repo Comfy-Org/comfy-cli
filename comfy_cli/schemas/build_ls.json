@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_ls.json",
+  "title": "comfy build ls --json data payload",
+  "type": "object",
+  "required": ["distributions"],
+  "additionalProperties": true,
+  "properties": {
+    "distributions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"}
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_release_create.json",
+  "title": "comfy build release create --json data payload",
+  "description": "The release cut from the current Build. `release` is present only with --watch, and then carries the polled terminal detail.",
+  "type": "object",
+  "required": ["buildId", "releaseId", "statusUrl", "targets", "watched"],
+  "additionalProperties": true,
+  "properties": {
+    "buildId": {"type": "string"},
+    "releaseId": {"type": "string"},
+    "statusUrl": {"type": "string"},
+    "targets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "os": {"type": "string"},
+          "gpu": {"type": "string"}
+        }
+      }
+    },
+    "watched": {"type": "boolean"},
+    "release": {"type": "object", "additionalProperties": true}
+  }
+}

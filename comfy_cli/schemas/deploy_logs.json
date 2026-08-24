@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_logs.json",
+  "title": "comfy deploy logs --json data payload",
+  "description": "The latest ComfyUI log snapshot captured by a deployment health probe.",
+  "type": "object",
+  "required": ["capturedAt", "comfyuiLog", "deploymentId"],
+  "additionalProperties": true,
+  "properties": {
+    "capturedAt": {"type": ["string", "null"], "format": "date-time"},
+    "comfyuiLog": {"type": "string"},
+    "deploymentId": {"type": "string", "minLength": 1}
+  }
+}
