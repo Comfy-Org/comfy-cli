@@ -423,18 +423,27 @@ class Renderer:
 
 
 def _json_default(obj: Any) -> Any:
-    # Best-effort JSON coercion for common non-serializable types.
-    from pathlib import Path
+    """Coerce one unserializable value to a JSON-native one.
 
-    if isinstance(obj, Path):
-        return str(obj)
-    if isinstance(obj, Enum):
-        return obj.value
+    json feeds anything this returns straight back in when it still cannot
+    encode it, so a hook that returns another opaque object re-enters once per
+    hop and one that keeps producing new objects never terminates at all. The
+    tail coercion is what holds that off: every return is either a scalar json
+    encodes directly or a container it walks itself. A container's members are
+    values of their own, so each costs at most one further hook call, and a
+    container that contains itself trips json's own circular-reference check.
+    """
+    seen: set[int] = set()
+    while isinstance(obj, Enum) and id(obj) not in seen:
+        seen.add(id(obj))
+        obj = obj.value
     if hasattr(obj, "isoformat"):
         try:
-            return obj.isoformat()
+            obj = obj.isoformat()
         except Exception:  # noqa: BLE001
             pass
+    if isinstance(obj, str | int | float | None | list | dict | tuple):
+        return obj
     return str(obj)
 
 
