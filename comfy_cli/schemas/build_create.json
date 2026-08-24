@@ -29,11 +29,12 @@
     },
     "distributionId": {"type": "string"},
     "versionId": {"type": "string"},
+    "releaseId": {"type": "string"},
     "statusUrl": {"type": "string"},
     "uploaded": {"type": "integer"}
   },
   "oneOf": [
     {"properties": {"executed": {"const": false}}, "required": ["plan"]},
-    {"properties": {"executed": {"const": true}}, "required": ["distributionId", "versionId", "statusUrl"]}
+    {"properties": {"executed": {"const": true}}, "required": ["distributionId", "versionId", "releaseId", "statusUrl"]}
   ]
 }

@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://comfy.org/schemas/build_version_get.json",
-  "title": "comfy build version get --json data payload",
-  "description": "A version's build status, as returned by GET /v1/build-versions/{id}.",
+  "title": "comfy build release get --json data payload",
+  "description": "A release's build status, as returned by GET /v1/releases/{id}.",
   "type": "object",
   "additionalProperties": true,
   "properties": {

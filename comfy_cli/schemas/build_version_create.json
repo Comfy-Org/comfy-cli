@@ -1,13 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://comfy.org/schemas/build_version_create.json",
-  "title": "comfy build version create --json data payload",
+  "title": "comfy build release create --json data payload",
+  "description": "releaseId is the canonical id of the cut; versionId carries the same value and stays because user scripts pin it.",
   "type": "object",
-  "required": ["distributionId", "versionId", "statusUrl"],
+  "required": ["distributionId", "versionId", "releaseId", "statusUrl"],
   "additionalProperties": true,
   "properties": {
     "distributionId": {"type": "string"},
     "versionId": {"type": "string"},
+    "releaseId": {"type": "string"},
     "statusUrl": {"type": "string"}
   }
 }
