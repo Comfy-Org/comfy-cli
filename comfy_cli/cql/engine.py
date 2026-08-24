@@ -251,7 +251,7 @@ class Port:
     def validate_catalog(self, value: Any) -> list[dict]:
         """Catalog findings for ``value``. Returns a list of finding dicts.
 
-        Every finding carries ``code``, ``severity`` and ``value`` (BE-7215):
+        Every finding carries ``code``, ``severity`` and ``value``:
         ``severity`` so a caller never infers fatality from prose, and ``value``
         so the offending operand is a field rather than something to regex back
         out of ``message``. Fatal codes are :data:`FATAL_FINDING_CODES`.
@@ -408,7 +408,7 @@ _WILDCARD_TYPE_PREFIX = "COMFY_MATCHTYPE"
 _WILDCARD_TYPES = frozenset({"*"})
 
 
-# Finding severity — BE-7215. Every catalog finding carries an explicit
+# Finding severity. Every catalog finding carries an explicit
 # ``severity`` so a consumer never has to infer fatality from prose. The rule the
 # codes below encode: a finding is an ERROR when the value cannot resolve at run
 # time, which is precisely when `Graph.validate_workflow` already refuses it
@@ -882,7 +882,7 @@ class Graph:
     def node(self, name: str) -> Morphism | None:
         # A malformed workflow can supply an unhashable class_type (list/dict);
         # dict.get on an unhashable key raises TypeError, so screen it out here
-        # rather than crash the reachability walk / lookups (BE-3406 hardening).
+        # rather than crash the reachability walk / lookups.
         if not isinstance(name, str):
             return None
         return self._nodes.get(name)
@@ -1465,7 +1465,7 @@ class Graph:
             # Required-presence checks apply only to output-reachable nodes: the
             # server prunes unreachable nodes without validating them, so
             # enforcing required inputs on a disconnected node over-rejects a
-            # prompt the server would run (BE-3406).
+            # prompt the server would run.
             if node_id in reachable:
                 errors.extend(_check_autogrow_required(node_id, autogrow_ports, autogrow_seen, node_data))
                 errors.extend(_check_required_present(node_id, m, node_data))
@@ -1737,7 +1737,7 @@ def _validate_catalog_value(
     errors (the server rejects them); every other catalog finding is a
     namespaced warning.
 
-    ``range_is_error`` gates the below_min/above_max promotion (BE-3406): the
+    ``range_is_error`` gates the below_min/above_max promotion: the
     server only range-checks nodes it actually runs, so on a pruned
     (output-unreachable) node these are demoted back to advisory warnings.
     """

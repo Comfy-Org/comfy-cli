@@ -194,7 +194,7 @@ def graph() -> Graph:
 @pytest.fixture
 def graph_sd15() -> Graph:
     """Graph built from the real captured sd15 object_info fixture — the same
-    catalog the BE-3349 repro / BE-3357 acceptance criterion runs against."""
+    catalog the repro and the acceptance criterion run against."""
     import json
     from pathlib import Path
 
@@ -207,7 +207,7 @@ def graph_path() -> Graph:
     """Graph built from the captured path-search object_info fixture: the sd15
     core nodes, the audio nodes (AUDIO is consumed but never reaches IMAGE), a
     second LATENT->IMAGE decoder, and the partner-API image node whose `model`
-    widget is a COMBO of API ids rather than a MODEL input (BE-6857)."""
+    widget is a COMBO of API ids rather than a MODEL input."""
     import json
     from pathlib import Path
 
@@ -679,7 +679,7 @@ class TestTraversal:
 
 
 # ===========================================================================
-# TestPathConstraints — BE-6857
+# TestPathConstraints
 # ===========================================================================
 
 
@@ -1292,8 +1292,8 @@ class TestValidateWorkflow:
 
     def test_below_min_error(self, graph: Graph):
         """A value below the catalog min is a hard error (the server rejects it
-        with value_smaller_than_min) — was a warning before BE-3357. Node "1" is
-        wired to a SaveImage output so it is server-reachable (BE-3406); an
+        with value_smaller_than_min) — was a warning previously. Node "1" is
+        wired to a SaveImage output so it is server-reachable; an
         unreachable node would be pruned and the range demoted to a warning."""
         wf = {
             "1": {
@@ -1379,7 +1379,7 @@ class TestAutogrowInputs:
 
     def test_required_autogrow_with_no_slots_errors(self, graph: Graph):
         # BatchImagesNode "20" is wired to a SaveImage output so it is
-        # server-reachable (BE-3406) — an unreachable node would be pruned.
+        # server-reachable — an unreachable node would be pruned.
         wf = {
             "20": {"class_type": "BatchImagesNode", "inputs": {}},
             "30": {"class_type": "SaveImage", "inputs": {"images": ["20", 0], "filename_prefix": "out"}},
@@ -1412,13 +1412,13 @@ class TestAutogrowInputs:
 
 
 # ===========================================================================
-# TestValidateServerParity — BE-3357: presence, no-outputs, range = errors
+# TestValidateServerParity — presence, no-outputs, range = errors
 # ===========================================================================
 
 
 class TestValidateServerParity:
     """Validate mirrors the three server-side rejections that `validate` used to
-    pass silently (BE-3349 / BE-3357), against the captured sd15 catalog:
+    pass silently, against the captured sd15 catalog:
     required-input presence, the no-outputs check, and range violations."""
 
     def _sd15_full(self) -> dict:
@@ -1481,7 +1481,7 @@ class TestValidateServerParity:
         assert "wire" in err["hint"] and "MODEL" in err["hint"]
 
     def test_be3349_repro_only_links_wired(self, graph_sd15: Graph):
-        """The BE-3349 acceptance case: a KSampler with only its four link inputs
+        """The acceptance case: a KSampler with only its four link inputs
         wired is missing all six widget inputs → six required_input_missing errors."""
         wf = self._sd15_full()
         wf["3"]["inputs"] = {
@@ -1578,7 +1578,7 @@ class TestValidateServerParity:
 
     def test_width_below_min_is_error(self, graph_sd15: Graph):
         """EmptyLatentImage width below the catalog min is a hard error (was a
-        warning before BE-3357)."""
+        warning previously)."""
         wf = self._sd15_full()
         wf["5"]["inputs"]["width"] = 1  # sd15 min is 16
         result = graph_sd15.validate_workflow(wf)
@@ -1595,7 +1595,7 @@ class TestValidateServerParity:
         assert result["valid"] is True, result["errors"]
         assert [e for e in result["errors"] if e.get("node_id") == "_meta"] == []
 
-    # -- Output-reachability pruning (BE-3406): match the server, which only
+    # -- Output-reachability pruning: match the server, which only
     # validates output nodes and their transitive input ancestors. --
 
     def test_disconnected_node_missing_required_is_pruned(self, graph_sd15: Graph):
@@ -1682,7 +1682,7 @@ class TestValidateServerParity:
 
 class TestValidateMalformedInputs:
     """Malformed workflow JSON must yield structured output, never an unhandled
-    traceback (BE-3406 hardening) — the validator's whole contract is to catch
+    traceback — the validator's whole contract is to catch
     bad prompts, so it may not crash on the shapes it's meant to reject."""
 
     def test_non_dict_inputs_does_not_crash(self, graph: Graph):
@@ -1713,7 +1713,7 @@ class TestValidateMalformedInputs:
 class TestValidateEmptyCombo:
     """A COMBO whose option list is declared but EMPTY means the server has zero
     files installed for that field — it rejects every value against it — so it
-    must be reported, not skipped (BE-6585).
+    must be reported, not skipped.
 
     Before this, the membership check was gated on ``self.enum_values`` being
     truthy, so detection got *worse* the emptier the install: ``VAELoader``
@@ -2114,7 +2114,7 @@ class TestValidateUploadBackedCombo:
 
 class TestValidateDynamicCombo:
     """Validate expands a ``COMFY_DYNAMICCOMBO_V3`` selector's chosen option and
-    checks the dotted sub-inputs the server will actually require (BE-3777).
+    checks the dotted sub-inputs the server will actually require.
 
     object_info declares only the selector (``model``); the frontend and
     ``convert_ui_to_api`` lower the selected option's own INPUT_TYPES into
@@ -2531,7 +2531,7 @@ class TestSubgraphIsolation:
                 ]
             },
         }
-        _apply_one_slot(wf, "10/9.text", "VALUE-FOR-10", graph)
+        _apply_one_slot(wf, "10/9.text", "value-for-10", graph)
 
         # Rebuild the definitions index from the (potentially mutated) workflow
         defs = {d["id"]: d for d in wf["definitions"]["subgraphs"]}
@@ -2544,7 +2544,7 @@ class TestSubgraphIsolation:
         # Instance 10 got the new value
         inst10 = next(n for n in wf["nodes"] if n["id"] == 10)
         inst10_def = defs[inst10["type"]]
-        assert inst10_def["nodes"][0]["widgets_values"][0] == "VALUE-FOR-10"
+        assert inst10_def["nodes"][0]["widgets_values"][0] == "value-for-10"
 
     def test_second_write_to_same_instance_no_extra_fork(self, graph: Graph):
         """A second write to the same instance must not create yet another fork."""

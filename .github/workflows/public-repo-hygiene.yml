@@ -27,3 +27,7 @@ jobs:
       # REQUIRED, and must equal the `uses:` SHA above — the reusable asserts
       # they match, which is what pins the checker to the reviewed commit.
       workflows_ref: 4df9bf684ee45d5baf2a49d2068685ce780a8609
+      # `HAILUO-03` is MiniMax's Hailuo 03 model, named in the curated
+      # knowledge bundle and asserted in tests. It is a product name that
+      # happens to match the ticket-ID shape, not an internal reference.
+      ticket_allowlist: HAILUO-03

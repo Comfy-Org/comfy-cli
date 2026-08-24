@@ -1,4 +1,4 @@
-"""``comfy generate list`` / ``comfy generate schema`` emit ``envelope/1`` (BE-4933).
+"""``comfy generate list`` / ``comfy generate schema`` emit ``envelope/1``.
 
 These are the two discovery verbs an agent needs before it can run a partner
 model: one enumerates the aliases, the other gives a model's parameters. Both

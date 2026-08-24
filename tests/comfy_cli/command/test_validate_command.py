@@ -108,7 +108,7 @@ def test_api_format_unchanged(runner, tmp_path):
     """An API-format file behaves exactly as before: validated directly, no
     `converted_from_ui` key in the payload. The fixture is a complete sd15
     txt2img graph — it carries a SaveImage output node, as any real API-format
-    export does, so it clears the server-parity no-outputs check (BE-3357)."""
+    export does, so it clears the server-parity no-outputs check."""
     api = {
         "4": {
             "class_type": "CheckpointLoaderSimple",
@@ -160,7 +160,7 @@ def test_empty_dict_payload_not_converted_and_rejected(runner, tmp_path):
     """An empty dict is not UI format and is left to the existing validator
     (no conversion, no `converted_from_ui` key) — which now rejects it: the
     server refuses any prompt with zero output nodes, including a node-less
-    one, so validate mirrors that as `prompt_no_outputs` (BE-3357)."""
+    one, so validate mirrors that as `prompt_no_outputs`."""
     wf = _write(tmp_path, "empty.json", {})
 
     result = _validate(runner, wf)
@@ -172,7 +172,7 @@ def test_empty_dict_payload_not_converted_and_rejected(runner, tmp_path):
     assert any(e["code"] == "prompt_no_outputs" for e in data["errors"])
 
 
-# --- partner-node (paid) visibility (BE-4328) -----------------------------------
+# --- partner-node (paid) visibility -----------------------------------
 #
 # `comfy validate` now previews credit spend: it reports `partner_nodes` (the
 # partner-API nodes a workflow uses) and `spends_credits` in its payload, using
@@ -311,14 +311,14 @@ def test_partner_node_name_with_markup_does_not_crash_pretty(runner, tmp_path):
     assert name in result.stdout
 
 
-# --- object_info target resolution (BE-6306) ------------------------------------
+# --- object_info target resolution ------------------------------------
 #
 # `validate` used to resolve its local object_info server as
 # `--host`/`--port` > COMFY_LOCAL_URL > 127.0.0.1:8188, skipping the
 # `config.background` step `comfy run` honors via `host_port.resolve_host_port`.
 # With ComfyUI running as a comfy-cli background server on a non-8188 port, that
 # made validate consult a DIFFERENT server than the one `run` submits to, so its
-# verdict was meaningless (BE-6299: validate passed a workflow `run` rejected for
+# verdict was meaningless (validate passed a workflow `run` rejected for
 # a missing node class). It now resolves through the same chain, and reports the
 # resolved target in the payload as `object_info_source`.
 
@@ -498,7 +498,7 @@ def test_pretty_mode_prints_resolved_source(runner, tmp_path, monkeypatch, captu
     assert f"object_info from http://127.0.0.1:{BACKGROUND_PORT}" in result.stdout
 
 
-# --- review follow-ups on the BE-6306 resolution block ---------------------------
+# --- review follow-ups on the resolution block ---------------------------
 
 
 def test_wildcard_background_host_is_canonicalized(runner, tmp_path, monkeypatch, captured_target):

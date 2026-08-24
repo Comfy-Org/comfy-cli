@@ -1,7 +1,7 @@
-"""Execution lifecycle tests for ``comfy run`` (MAR-52).
+"""Execution lifecycle tests for ``comfy run``.
 
 The CLI's ``run`` command historically emitted a single ``run`` event via the
-``@track_command()`` decorator. Post-MAR-52 it manually emits
+``@track_command()`` decorator. It now manually emits
 ``execution_start`` / ``execution_success`` / ``execution_error`` against the
 canonical PRD §5.1 schema, with ``mixpanel_name="run"`` on the start event to
 preserve Mixpanel-side continuity for the 219K/week legacy stream.

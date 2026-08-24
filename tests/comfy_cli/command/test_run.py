@@ -497,12 +497,12 @@ class TestExecuteErrorHandling:
             mock_exec.connect.assert_called_once()
             mock_exec.queue.assert_called_once()
             mock_exec.watch_execution.assert_called_once()
-            # The run WebSocket must be closed on the success path (BE-3404) —
+            # The run WebSocket must be closed on the success path —
             # the finally-block _safe_close, not left open until teardown.
             mock_exec.ws.close.assert_called_once()
 
     def test_websocket_closed_on_watch_failure(self, workflow_file):
-        # BE-3404: the finally-block close also fires when watch_execution
+        # The finally-block close also fires when watch_execution
         # raises, so a mid-run error doesn't linger the server-side session.
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
@@ -590,7 +590,7 @@ class TestExecuteErrorHandling:
 
 class TestWaitStateFile:
     """`comfy run --wait` writes the jobs state file at SUBMIT time, not only
-    on success (BE-4750) — so a server that dies mid-run still leaves an
+    on success — so a server that dies mid-run still leaves an
     on-disk record of the prompt that was in flight, and the emitted error
     names it."""
 
@@ -667,7 +667,7 @@ class TestWaitStateFile:
 
     def test_submit_time_record_carries_watcher_identity(self, workflow_file):
         """The foreground --wait process IS the watcher, and the submit-time
-        record says so (BE-6641): pid + create_time stamped exactly like the
+        record says so: pid + create_time stamped exactly like the
         detached watcher's, so a --wait process killed from outside leaves a
         record the stale-watcher reap can finalize instead of a permanent
         phantom `running`."""
@@ -1006,7 +1006,7 @@ class TestWaitStateFile:
 
 class TestCloudWaitWatcherStamp:
     """Cloud `--wait` polls from the foreground with no watcher subprocess, so
-    the submit-time record stamps THIS process as the watcher (BE-6641) — an
+    the submit-time record stamps THIS process as the watcher — an
     external kill then leaves a non-terminal record with a dead pid, which
     `jobs ls`'s stale-watcher reap finalizes as `watcher_crashed`. Every
     in-process exit writes a terminal record the reap ignores."""
@@ -1334,7 +1334,7 @@ class TestResolvePartnerCredential:
 
     def test_refreshes_and_uses_oauth_token(self, monkeypatch: pytest.MonkeyPatch):
         """A signed-in user whose access token lapsed gets a REFRESHED token
-        here — the whole point of BE-3361 — rather than being skipped and
+        here — the whole point of the refresh fix — rather than being skipped and
         hitting ``partner_node_requires_credential``."""
         monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
         from comfy_cli.auth import store as auth_store
@@ -1379,7 +1379,7 @@ class TestResolvePartnerCredential:
     def test_stale_session_from_transient_failure_falls_through(self, monkeypatch: pytest.MonkeyPatch):
         """A transient refresh failure returns the STALE (expired) session; it
         fails its own expiry check and the resolver falls through — unchanged
-        from the pre-BE-3361 behavior on a network flake."""
+        from the earlier behavior on a network flake."""
         monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
         from comfy_cli.auth import store as auth_store
         from comfy_cli.cloud import oauth
@@ -1665,7 +1665,7 @@ class TestPartnerNodesDetectedTelemetry:
         assert events[0]["partner_node_count"] == 1
 
     def test_does_not_fire_when_the_spend_gate_refuses(self, tmp_path, monkeypatch):
-        """Documents the one funnel this event does NOT cover: the BE-4326 spend
+        """Documents the one funnel this event does NOT cover: the spend
         gate refuses before any credential resolution (so a refusal never
         triggers a network OAuth refresh), and ``credential_present`` depends on
         that resolution — so a run declined for lack of ``--allow-spend`` emits
@@ -1868,8 +1868,8 @@ class TestPartnerNodesDetectedTelemetry:
 
 
 class TestExecuteSpendGate:
-    """`comfy run` gates partner-API (paid) workflows on `--allow-spend`
-    (BE-4326), mirroring `comfy run-template`'s spend gate. A partner-node
+    """`comfy run` gates partner-API (paid) workflows on `--allow-spend`,
+    mirroring `comfy run-template`'s spend gate. A partner-node
     workflow must not silently spend Comfy credits: machine mode fails closed
     with `spend_consent_required`; a TTY prompts; consent (flag or "yes") lets
     the run proceed to the credential path unchanged. Partner-free workflows
@@ -2027,7 +2027,7 @@ class TestExecuteSpendGate:
 
 
 class TestSpendGateStdinAndMarkup:
-    """Robustness of the interactive spend prompt (BE-4326): a missing/closed
+    """Robustness of the interactive spend prompt: a missing/closed
     stdin must fall through to the fail-closed machine-mode error rather than
     crash, and partner class_type names must not be interpreted as Rich markup."""
 
@@ -2438,8 +2438,8 @@ class TestExecuteCloudAutoConvert:
 
 
 class TestExecuteCloudSpendGate:
-    """The cloud submit also bills partner-API nodes server-side, so BE-4326
-    applies the same consent gate there. Detection is fail-open (empty cloud
+    """The cloud submit also bills partner-API nodes server-side, so the same
+    consent gate applies there. Detection is fail-open (empty cloud
     object_info → no gate), and the gate fires before cloud auth/submit."""
 
     PARTNER_WF = {"1": {"class_type": "Veo3VideoGenerationNode", "inputs": {"prompt": "x"}}}

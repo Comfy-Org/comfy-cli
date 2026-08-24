@@ -467,7 +467,7 @@ op log exists to keep.
   `DEFERRED_OPS` / `BATCHABLE_OPS`, the dispatch tables, and this document in
   one commit — `tests/comfy_cli/test_op_vocabulary_contract.py` fails otherwise.
 
-## 10. Amendment v1.1 — 2026-08-12 (V1-038 / BE-7171)
+## 10. Amendment v1.1 — 2026-08-12 (V1-038)
 
 **`reset_doc` is un-deferred.** `DEFERRED_OPS` is now empty; `apply_op`
 dispatches `reset_doc` and `apply_specs` rejects it as standalone-only with its

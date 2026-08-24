@@ -124,7 +124,7 @@ def _load_gallery(
     its own filtering on top.
 
     A cache older than ``GALLERY_TTL_SECONDS`` is served immediately and
-    revalidated in the background (stale-while-revalidate, BE-3427): a stale
+    revalidated in the background (stale-while-revalidate): a stale
     cache is returned right away and a detached subprocess re-fetches it for
     the *next* invocation, so an offline/firewalled machine never blocks on the
     15s fetch timeout on every call. An explicit ``--refresh`` (or a genuinely
@@ -325,7 +325,7 @@ def _refresh_cwd() -> str | None:
 def _spawn_background_refresh() -> bool:
     """Kick off a detached subprocess that re-fetches the gallery index.
 
-    Serve-stale-while-revalidate (BE-3427): the caller has already returned the
+    Serve-stale-while-revalidate: the caller has already returned the
     stale cache, so this revalidation must never block or delay process exit —
     a firewalled machine would otherwise hang on the 15s fetch timeout on every
     invocation past the TTL. We spawn a fully detached ``comfy templates
@@ -1670,7 +1670,7 @@ def _enforce_spend_gate(
 
     Returns None when the run may proceed (no paid signals, --allow-spend, or
     an interactive yes); raises typer.Exit(1) otherwise. Behavior is the
-    BE-4113 gate moved verbatim out of run_template_cmd.
+    spend gate moved verbatim out of run_template_cmd.
     """
     import sys
 
@@ -1999,7 +1999,7 @@ def run_template_cmd(
             for w in warnings:
                 rprint(f"  [yellow]warning:[/yellow] {w}")
 
-    # -- Spend gate (BE-4113): partner-API nodes spend Comfy credits. Require
+    # -- Spend gate: partner-API nodes spend Comfy credits. Require
     # explicit consent before submitting anything that would burn them.
     _enforce_spend_gate(
         renderer,
@@ -2027,7 +2027,7 @@ def run_template_cmd(
             api_key=api_key,
             # run-template's own spend gate (above) has already consented (or
             # found no paid nodes), so forward consent to avoid a second gate in
-            # execute() (BE-4326). run-template's gate is strictly stronger — it
+            # execute(). run-template's gate is strictly stronger — it
             # also inspects gallery signals — and has already run.
             allow_spend=True,
         )

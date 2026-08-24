@@ -1,4 +1,4 @@
-"""Tests for ``comfy templates get --where k=v`` (V1-018 / BE-7151).
+"""Tests for ``comfy templates get --where k=v`` (V1-018).
 
 The measured agent loop is ``templates ls`` (to find the name) → ``templates
 fetch`` (copying that name back, 100% verbatim). ``get`` fuses the two: the

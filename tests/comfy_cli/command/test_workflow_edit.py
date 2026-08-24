@@ -623,7 +623,7 @@ class TestAddNode:
 
 
 # ---------------------------------------------------------------------------
-# set-widget (name-addressed)
+# set-widget addressed by name
 # ---------------------------------------------------------------------------
 
 
@@ -1555,7 +1555,7 @@ class TestCapture:
 
 
 # ---------------------------------------------------------------------------
-# capture ↔ apply agreement on UI-only nodes (PR-511 review, Finding 1):
+# capture ↔ apply agreement on UI-only nodes (review finding 1):
 # capture must not emit ops apply refuses — one MarkdownNote in the source
 # used to discard the whole atomic batch (114/306 official templates).
 # ---------------------------------------------------------------------------
@@ -1709,7 +1709,7 @@ class TestCaptureUiOnlyNodes:
 
 
 # ---------------------------------------------------------------------------
-# --stdout envelope contract (PR-511 review, Finding 2): same rules set-slot
+# --stdout envelope contract (review finding 2): same rules set-slot
 # pins — JSON mode puts ONE envelope on stdout with the document riding in
 # data.workflow_json; human mode puts exactly the raw workflow on stdout (the
 # ✓ line used to land inside `> new.json` redirects and corrupt them).
@@ -2246,7 +2246,7 @@ class TestSetWidgetModelNormalization:
         assert not any(w.get("code") == "normalized_value" for w in op.get("warnings", []))
 
     def test_unknown_value_is_refused_not_written(self):
-        """BE-7215: an unknown COMBO value on a non-upload-backed port is FATAL.
+        """An unknown COMBO value on a non-upload-backed port is FATAL.
 
         It used to be applied and reported as a soft warning on an ``ok:true``
         envelope, so the bad value reached the canvas and only failed at run

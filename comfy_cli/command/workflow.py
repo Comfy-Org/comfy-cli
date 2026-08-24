@@ -895,7 +895,7 @@ def _http_request(
 def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
     """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``.
 
-    Thin wrapper over the shared cloud-error mapper (BE-3266) that supplies the
+    Thin wrapper over the shared cloud-error mapper that supplies the
     ``workflow``-specific 404 envelope and the oversize/unparseable-response
     checks; everything else is shared with ``jobs``.
     """
@@ -1570,7 +1570,7 @@ def validate_api_workflow(
     # `config.background` step validate would consult whatever answers on the
     # default port while `run` submits to the background server comfy-cli
     # launched on another one, making the verdict meaningless for the server
-    # that will actually execute the workflow (BE-6299). `resolve_target` does
+    # that will actually execute the workflow. `resolve_target` does
     # not consult `config.background` on purpose (other callers, e.g. transfer
     # and system, must not), so — as its docstring says — the callers that do
     # honor it resolve upstream, here.

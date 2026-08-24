@@ -11,8 +11,8 @@ The rules encoded here are not arbitrary. Two of them are scar tissue:
   to mask a positive component underneath it, reporting "$0.00" to users who
   had credits.
 * The trust guard exists because "$0.00 / Subscribe" was shown to paying
-  customers whose billing rows were mid-migration (BE-1795 / BE-1798). When we
-  cannot confirm state, we say so instead of asserting a balance.
+  customers whose billing rows were mid-migration. When we cannot confirm
+  state, we say so instead of asserting a balance.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ BALANCE_FIELDS = (
 
 # Shown when we cannot confirm a subscription OR a balance. Never paired with a
 # "$0.00" figure: asserting zero to a customer who is mid-migration is the
-# exact BE-1798 failure this replaces.
+# exact failure this replaces.
 UNCONFIRMED_MESSAGE = (
     "Couldn't confirm an active subscription or balance for this workspace. "
     "If you already subscribe, your account may be mid-migration; contact Comfy support. "

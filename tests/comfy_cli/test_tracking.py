@@ -630,7 +630,7 @@ class TestSensitiveNameMatcher:
 
 
 class TestCliParamNameDriftGate:
-    """BE-992 happened because credential flags were added after the redaction
+    """The leak happened because credential flags were added after the redaction
     set was written. Walk the real CLI tree so the next one cannot land
     unredacted."""
 
@@ -671,7 +671,7 @@ class TestCliParamNameDriftGate:
 class TestTrackCommandRealTyperWiring:
     def test_model_download_kwargs_are_filtered_and_redacted(self, tracking_module):
         # `model download` is the command whose `_ctx` + credential kwarg
-        # combination motivated BE-992; invoke it through Typer for real so
+        # combination motivated the redaction fix; invoke it through Typer for real so
         # the Click context actually lands in the tracked kwargs.
         from typer.testing import CliRunner
 

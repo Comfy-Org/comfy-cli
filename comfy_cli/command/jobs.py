@@ -2541,7 +2541,7 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     # `execution_error` left on a retried-then-succeeded job would otherwise
     # fabricate an `error` row on a green one. `canceled` is spelled out
     # alongside `_ERROR_STATUSES` because the state map above deliberately
-    # leaves cloud's one-l spelling unmapped (BE-6612).
+    # leaves cloud's one-l spelling unmapped.
     failed = state in _ERROR_STATUSES or state == "canceled"
     # The structured record wins over `error_message` when the server sent
     # one: a deployment that fills `error_message` with a short generic string

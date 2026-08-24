@@ -1,4 +1,4 @@
-"""Envelope emission for the ``launch`` / ``stop`` lifecycle commands (BE-4273).
+"""Envelope emission for the ``launch`` / ``stop`` lifecycle commands.
 
 Unlike other subcommands, ``comfy launch`` / ``comfy stop`` historically emitted
 no ``envelope/1`` on stdout under ``--json``, so programmatic callers (e.g.

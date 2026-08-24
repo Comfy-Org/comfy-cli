@@ -1,4 +1,4 @@
-"""Shared cloud HTTP/URL error → structured-envelope mapping (BE-3266).
+"""Shared cloud HTTP/URL error → structured-envelope mapping.
 
 ``comfy workflow`` and ``comfy jobs`` both talk to Comfy Cloud over ``urllib``
 and must turn transport failures into the same structured error envelopes. This

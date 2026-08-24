@@ -1,4 +1,4 @@
-"""Execution lifecycle + sub-action event tests for ``comfy generate`` (MAR-52)."""
+"""Execution lifecycle + sub-action event tests for ``comfy generate``."""
 
 import httpx
 import pytest

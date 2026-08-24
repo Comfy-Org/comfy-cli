@@ -1,4 +1,4 @@
-"""``reset_doc`` — the guarded, standalone-only document reset (V1-038 / BE-7171).
+"""``reset_doc`` — the guarded, standalone-only document reset (V1-038).
 
 ``reset_doc`` was frozen in ``docs/op-vocabulary-v1.md`` §1.6 but left deferred:
 ``apply_op`` rejected it and ``DEFERRED_OPS`` pinned that rejection. This ticket
