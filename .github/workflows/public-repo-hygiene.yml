@@ -31,3 +31,13 @@ jobs:
       # knowledge bundle and asserted in tests. It is a product name that
       # happens to match the ticket-ID shape, not an internal reference.
       ticket_allowlist: HAILUO-03
+      # Vendored third-party data, not our prose. `fixtures/gallery/` holds
+      # gallery templates copied VERBATIM from Comfy-Org/workflow_templates,
+      # with a documented curl loop in its README that re-downloads them
+      # wholesale. Their markdown links to model weights using the weights'
+      # own `owner/name` as the LABEL, which reaches the checker as a bare
+      # `<owner>/<name>` and is rightly read as a GitHub repo path. It is not
+      # ours to reword: a refresh would silently revert any edit and break the
+      # verbatim contract the fixtures exist to keep.
+      # The exclusion is reported with its skipped-file count in the run log.
+      exclude_paths: tests/comfy_cli/fixtures/gallery/
