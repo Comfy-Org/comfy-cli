@@ -696,7 +696,11 @@ def plan_create(definition: dict, resolver=resolve_model_source) -> dict:
             for key in ("gitRef", "commit"):
                 if n.get(key):
                     entry[key] = n[key]
-        elif n.get("registryVersion") and n.get("id"):
+        elif n.get("registryVersion"):
+            # A hand-written node often names the pack once. scan writes id and
+            # name the same for a registry pack, and the builder prefers id then
+            # name, so the name is the id when no other is given.
+            entry["id"] = n.get("id") or n["name"]
             entry["registryVersion"] = n["registryVersion"]
         elif n.get("blobId"):
             entry["blobId"] = n["blobId"]
@@ -1127,7 +1131,6 @@ def _create_execute(
     name: str,
     builder_url: str | None,
     models_dir: str | None,
-    repair: bool = False,
 ) -> None:
     """The live --execute path: auth, resolve, upload, create, cut. Maps every
     failure class to a single error envelope + exit(1)."""
@@ -1556,7 +1559,11 @@ def from_snapshot_cmd(
     path = Path(from_).expanduser()
     try:
         snapshot = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        # `null`, a list and a bare scalar all parse. Caught here so the caller
+        # gets the error envelope rather than an AttributeError from the wrapper.
+        if not isinstance(snapshot, dict):
+            raise ValueError(f"expected a JSON object, got {type(snapshot).__name__}")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
         renderer.error(
             code="build_definition_invalid",
             message=f"could not read {path}: {e}",
@@ -1599,7 +1606,7 @@ def blob_upload_cmd(
     file_path = Path(path).expanduser()
     if not file_path.is_file():
         renderer.error(
-            code="build_models_dir_missing",
+            code="build_definition_invalid",
             message=f"no file at {file_path}",
             details={"path": str(file_path)},
         )

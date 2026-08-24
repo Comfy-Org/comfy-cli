@@ -86,7 +86,12 @@ _SENSITIVE_SUFFIXES = ("_token", "_api_key", "_secret", "_password")
 # are verbatim user content — like `changelog`, we keep the presence but never
 # ship the text. Sensitive values become "<redacted>" (the key is kept so we can
 # still tell the option was supplied).
-_SENSITIVE_EXACT = frozenset({"api_key", "key", "token", "password", "secret", "changelog", "prompt", "set_overrides"})
+# `from_` is the `--from` path: a local filesystem path naming the user's home
+# directory and their install layout, with no analytics value beyond having been
+# supplied.
+_SENSITIVE_EXACT = frozenset(
+    {"api_key", "key", "token", "password", "secret", "changelog", "prompt", "set_overrides", "from_"}
+)
 
 
 def _is_sensitive(name: str) -> bool:
