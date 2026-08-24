@@ -604,8 +604,20 @@ def _block_bytes(block: dict) -> int:
     return len(json.dumps(block, ensure_ascii=False).encode())
 
 
+def _nudge_text(block: dict, head: str) -> str:
+    """Point at ``capabilities_available`` rather than repeating the id list."""
+    if "capabilities_available" not in block:
+        return head
+    return f"{head}; see capabilities_available"
+
+
 def _fit(block: dict) -> None:
-    """Drop whole entries (models first, then picks) until the block fits MAX_BLOCK_BYTES."""
+    """Drop whole entries until the block fits MAX_BLOCK_BYTES.
+
+    Models first, then picks, and ``capabilities_available`` last: it is the
+    only thing that tells an agent which search terms reach a ranked table, so
+    it outlives the answers to the current query.
+    """
     while True:
         caps: list[str] = []
         for p in block["picks"]:
@@ -618,6 +630,8 @@ def _fit(block: dict) -> None:
             block["models"].pop()
         elif block["picks"]:
             block["picks"].pop()
+        elif "capabilities_available" in block:
+            del block["capabilities_available"]
         else:
             return
 
@@ -634,16 +648,20 @@ def _capabilities_for(bundle: Bundle, entries: list[dict]) -> list[str]:
     return out
 
 
-def _set_nudge(block: dict, query: str, bundle: Bundle) -> None:
-    """One line naming the miss and what the bundle does cover.
+def _set_nudge(block: dict, query: str, *, shed_vocabulary: bool = False) -> None:
+    """One line naming the miss and pointing at the ids the bundle does cover.
 
-    The capability list goes first if the block is over the cap, then the whole
-    nudge — a block that ships without its nudge still beats one nothing reads.
+    The pointer goes first if the block is over the cap, then the whole nudge —
+    a block that ships without its nudge still beats one nothing reads.
+    ``shed_vocabulary`` drops ``capabilities_available`` ahead of the nudge, for
+    an otherwise empty block where the nudge is the only thing left to read.
     """
     head = f"no curated knowledge for {query!r}"
-    block["nudge"] = f"{head}; covered capabilities: {', '.join(sorted(bundle.capabilities))}"
+    block["nudge"] = _nudge_text(block, head)
     if _block_bytes(block) > MAX_BLOCK_BYTES:
         block["nudge"] = head
+    if shed_vocabulary and _block_bytes(block) > MAX_BLOCK_BYTES:
+        block.pop("capabilities_available", None)
     if _block_bytes(block) > MAX_BLOCK_BYTES:
         del block["nudge"]
 
@@ -769,6 +787,7 @@ def attach(
             "as_of": bundle.as_of,
             "models": entries,
             "picks": picks,
+            "capabilities_available": sorted(bundle.capabilities),
             "hit_ids": [],
             "zero_hit": False,
         }
@@ -780,12 +799,12 @@ def attach(
                 attached = False
             else:
                 block["zero_hit"] = True
-                _set_nudge(block, query_list[0], bundle)
+                _set_nudge(block, query_list[0], shed_vocabulary=True)
         elif query_list and not query_resolved:
             # A browse that returns rows the reverse index enriched, while the
             # query itself matched neither a model nor a capability. Not a
             # zero_hit: that feeds the miss log and means an empty block.
-            _set_nudge(block, query_list[0], bundle)
+            _set_nudge(block, query_list[0])
         if query_list:
             _log_query(command, query_list, block, bundle)
         if attached:

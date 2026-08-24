@@ -262,7 +262,7 @@ class TestTemplates:
         assert data["matched"] == 0
         assert data["knowledge"]["zero_hit"] is True
         assert "'faceswap'" in data["knowledge"]["nudge"]
-        assert "lipsync" in data["knowledge"]["nudge"]
+        assert "lipsync" in data["knowledge"]["capabilities_available"]
 
     def test_ls_no_filter_no_match_no_key(self, bundle, gallery_file, capsys):
         # image_flux_dev is not in the trimmed fixture, and no query was given.
