@@ -28,7 +28,7 @@ from typing import Annotated, Literal
 
 import typer
 
-from comfy_cli import tracking
+from comfy_cli import knowledge, tracking
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.skills import (
     BUNDLED_SKILLS,
@@ -165,6 +165,10 @@ def install_cmd(
         r for r in _prune_retired(scope=s, targets=kinds, dry_run=dry_run, project_root=cwd) if r.action != "absent"
     ]
     results = prune_results + _install(scope=s, targets=kinds, skills=skills, dry_run=dry_run, project_root=cwd)
+    if not dry_run:
+        # The skills being written are what reads the bundle; this is the one
+        # command whose whole job is setting that up, so it pays for the fetch.
+        knowledge.refresh_if_stale()
 
     if renderer.is_pretty():
         from rich.console import Group

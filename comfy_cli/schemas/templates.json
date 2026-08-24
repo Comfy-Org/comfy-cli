@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/templates.json",
   "title": "comfy templates *",
   "description": "Output shape for template gallery commands (ls, show, fetch). All subcommands share this schema; each field is optional because the payload varies per subcommand.",
   "type": "object",
@@ -71,6 +72,7 @@
     "workflow": {
       "type": "object",
       "description": "The full fetched workflow JSON, included only when no --out file was given (fetch)."
-    }
+    },
+    "knowledge": { "$ref": "knowledge_block.json", "description": "Curated model knowledge matching this call; absent when no bundle is loaded or nothing matched, except that an empty result with no match carries zero_hit and a nudge." }
   }
 }

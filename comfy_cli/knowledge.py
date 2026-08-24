@@ -5,7 +5,10 @@ The bundle (``knowledge.json`` + optional ``manifest.json``) is produced by
 tried in order: an explicit ``COMFY_KNOWLEDGE_FILE``, the per-user cache, or a
 fetch from ``COMFY_KNOWLEDGE_URL``. A missing or broken bundle is a normal
 state: every entry point here returns ``None`` rather than raising, and nothing
-is written to stdout or stderr.
+is written to stdout or stderr. :func:`attach` is how discovery commands add a
+capped ``knowledge`` block to their payload; it is fail-open for the same reason.
+Setting ``COMFY_KNOWLEDGE_DISABLE`` turns that enrichment off without
+disturbing the explicit ``comfy knowledge`` verbs.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,9 +36,20 @@ SCHEMA_VERSION = 1
 ENV_FILE = "COMFY_KNOWLEDGE_FILE"
 ENV_URL = "COMFY_KNOWLEDGE_URL"
 ENV_TTL = "COMFY_KNOWLEDGE_TTL"
+ENV_DISABLE = "COMFY_KNOWLEDGE_DISABLE"
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
 FETCH_TIMEOUT_SECONDS = 10.0
 MAX_BUNDLE_BYTES = 16 * 1024 * 1024
+
+MAX_MODELS = 3
+MAX_MODELS_BRIEF = 20
+MAX_PICKS = 8
+MAX_LIST_ITEMS = 8
+MAX_BLOCK_BYTES = 8192
+MAX_QUERY_CHARS = 200  # CLI text is unbounded; the clip bounds the lookup key and the nudge echo
+MAX_VERSION_CHARS = 64
+
+UNAVAILABLE_LOCALLY = "the templates or nodes this row resolves to are absent from this install"
 
 REASON_ENV_FILE = "COMFY_KNOWLEDGE_FILE is set but could not be loaded"
 REASON_NO_URL = "no cache and COMFY_KNOWLEDGE_URL is not set"
@@ -54,7 +69,9 @@ class Bundle:
     aliases: dict[str, str]  # lowercased alias or model id -> model id
     templates: dict[str, list[str]]  # template id -> model ids
     nodes: dict[str, list[str]]  # node class -> model ids
-    # _normalize(alias) -> id; a key two ids would share is left out, so only the exact path decides it.
+    model_capabilities: dict[str, list[str]]  # model id -> capability ids that rank it
+    # _normalize(alias) -> id. A key two ids would share is left out, so only the
+    # exact path decides it; a real id always keeps its own key.
     normalized_aliases: dict[str, str] = field(default_factory=dict)
     normalized_capabilities: dict[str, str] = field(default_factory=dict)
 
@@ -91,18 +108,22 @@ def ttl_seconds() -> float:
     return max(ttl, 0.0) if math.isfinite(ttl) else DEFAULT_TTL_SECONDS
 
 
-def load_bundle(*, force_fetch: bool = False) -> Bundle | None:
+def load_bundle(*, force_fetch: bool = False, cache_only: bool = False) -> Bundle | None:
     """Return the indexed bundle, or ``None`` when no usable bundle exists.
 
     Memoized per process; ``force_fetch=True`` re-runs the load and skips the
     cache TTL gate so a fetch happens whenever ``COMFY_KNOWLEDGE_URL`` is set.
+    ``cache_only=True`` never touches the network: env file, then any cache
+    (fresh or stale), else ``None``. The memo is shared, except that a
+    cache-only miss is not memoized so a later full load can still fetch.
     """
     global _MEMO, _LAST_REASON
     if _MEMO is not None and not force_fetch:
         return _MEMO[0]
-    bundle, reason = _load(force_fetch=force_fetch)
-    _MEMO = (bundle,)
-    _LAST_REASON = reason
+    bundle, reason = _load(force_fetch=force_fetch, cache_only=cache_only)
+    if bundle is not None or not cache_only:
+        _MEMO = (bundle,)
+        _LAST_REASON = reason
     return bundle
 
 
@@ -112,15 +133,37 @@ def _normalize(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s)
 
 
-def _normalized_map(keys: dict[str, str]) -> dict[str, str]:
+def _normalized_map(keys: dict[str, str], *, ids: Collection[str] = ()) -> dict[str, str]:
+    """``_normalize(key) -> target``, with every spelling two targets share left out.
+
+    Ids in ``ids`` are resolved after the aliases and override them, so no alias
+    can delete a real id. Two ids sharing one key cancel each other the same way
+    two aliases do: the tie stays untied, and only the exact spelling resolves it.
+    """
     out: dict[str, str] = {}
     ambiguous: set[str] = set()
     for key, target in keys.items():
         norm = _normalize(key)
+        if not norm:
+            continue
         if out.setdefault(norm, target) != target:
             ambiguous.add(norm)
     for norm in ambiguous:
         del out[norm]
+
+    owners: dict[str, str] = {}
+    contested: set[str] = set()
+    for identifier in ids:
+        norm = _normalize(identifier)
+        if not norm:
+            continue
+        if owners.setdefault(norm, identifier) != identifier:
+            contested.add(norm)
+    for norm, identifier in owners.items():
+        if norm in contested:
+            out.pop(norm, None)
+        else:
+            out[norm] = identifier
     return out
 
 
@@ -170,7 +213,7 @@ def _rank_key(p: dict) -> tuple[int, float]:
 # ---------------------------------------------------------------------------
 
 
-def _load(*, force_fetch: bool) -> tuple[Bundle | None, str | None]:
+def _load(*, force_fetch: bool, cache_only: bool = False) -> tuple[Bundle | None, str | None]:
     env_file = os.environ.get(ENV_FILE, "").strip()
     if env_file:
         path = Path(env_file)
@@ -185,7 +228,7 @@ def _load(*, force_fetch: bool) -> tuple[Bundle | None, str | None]:
             return bundle, None
 
     url = os.environ.get(ENV_URL, "").strip()
-    if url:
+    if url and not cache_only:
         bundle = _fetch(url, knowledge_path, manifest_path)
         if bundle is not None:
             return bundle, None
@@ -391,9 +434,24 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
             if isinstance(p, dict) and isinstance(p.get("template"), str) and isinstance(p.get("model"), str):
                 _append_unique(templates, p["template"], p["model"])
 
+    model_capabilities: dict[str, list[str]] = {}
+    for cid, cap in capabilities.items():
+        cap_picks = cap.get("picks")
+        if not isinstance(cap_picks, list):
+            continue
+        for p in cap_picks:
+            if isinstance(p, dict) and isinstance(p.get("model"), str):
+                _append_unique(model_capabilities, p["model"], cid)
+
+    capability_keys: dict[str, str] = {cid: cid for cid in capabilities}
+    for cid, cap in capabilities.items():
+        for alias in _str_list(cap.get("aliases")):
+            if alias:
+                capability_keys.setdefault(alias, cid)
+
     version = manifest.get("version") if manifest is not None else None
     return Bundle(
-        version=version if isinstance(version, str) else "unknown",
+        version=version[:MAX_VERSION_CHARS] if isinstance(version, str) else "unknown",
         source=source,
         stale=stale,
         as_of=datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -404,6 +462,351 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         aliases=aliases,
         templates=templates,
         nodes=nodes,
-        normalized_aliases=_normalized_map(aliases),
-        normalized_capabilities=_normalized_map({cid: cid for cid in capabilities}),
+        model_capabilities=model_capabilities,
+        normalized_aliases=_normalized_map(aliases, ids=models),
+        normalized_capabilities=_normalized_map(capability_keys, ids=capabilities),
     )
+
+
+# ---------------------------------------------------------------------------
+# envelope enrichment
+# ---------------------------------------------------------------------------
+
+
+def _lookup(bundle: Bundle, queries: Iterable[str]) -> tuple[list[tuple[str, str]], list[str]]:
+    """-> ([(model_id, matched_key), ...], [capability_id, ...]), de-duplicated, input order.
+
+    Keyed only, through the same :func:`resolve_id` the ``comfy knowledge resolve``
+    verb uses, so a string the verb calls unknown never gets a row attached here.
+    """
+    models: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    caps: list[str] = []
+    for q in queries:
+        exact = q.strip().lower()
+        mid = resolve_id(bundle, q)
+        if mid is not None and mid not in seen:
+            seen.add(mid)
+            models.append((mid, exact))
+        cid = exact if exact in bundle.capabilities else bundle.normalized_capabilities.get(_normalize(q))
+        if cid is not None and cid not in caps:
+            caps.append(cid)
+    return models, caps
+
+
+def _text(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _texts(value: Any, key: str) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out = [item[key] for item in value if isinstance(item, dict) and isinstance(item.get(key), str)]
+    return out[:MAX_LIST_ITEMS]
+
+
+def _model_entry(bundle: Bundle, model_id: str, row: dict, *, matched_on: str, brief: bool) -> dict:
+    dep = bundle.deprecations.get(model_id)
+    dep = dep if isinstance(dep, dict) else {}
+    entry: dict[str, Any] = {
+        "id": model_id,
+        "matched_on": matched_on,
+        "status": _text(row.get("status")),
+        "tier": _text(row.get("tier")),
+        "route": _text(row.get("route")),
+    }
+    superseded_by = dep.get("superseded_by") or row.get("superseded_by")
+    if isinstance(superseded_by, str) and superseded_by:
+        entry["superseded_by"] = superseded_by
+    if isinstance(dep.get("deprecated_on"), str) and dep["deprecated_on"]:
+        entry["deprecated_on"] = dep["deprecated_on"]
+    if best_for := _str_list(row.get("best_for"))[:MAX_LIST_ITEMS]:
+        entry["best_for"] = best_for
+    if brief:
+        return entry
+    for key in ("not_for", "never_confuse_with"):
+        if values := _str_list(row.get(key))[:MAX_LIST_ITEMS]:
+            entry[key] = values
+    routing_raw = row.get("routing")
+    routing = (
+        [{"when": _text(r.get("when")), "use": _text(r.get("use"))} for r in routing_raw if isinstance(r, dict)][
+            :MAX_LIST_ITEMS
+        ]
+        if isinstance(routing_raw, list)
+        else []
+    )
+    if routing:
+        entry["routing"] = routing
+    for key, text_key in (("pitfalls", "text"), ("corrections", "claim"), ("warnings", "text")):
+        if texts := _texts(row.get(key), text_key):
+            entry[key] = texts
+    if isinstance(row.get("as_of"), str) and row["as_of"]:
+        entry["as_of"] = row["as_of"]
+    return entry
+
+
+def _pick_entries(bundle: Bundle, capability_id: str, *, catalog_templates: Collection[str] | None) -> list[dict]:
+    cap = pick(bundle, capability_id)
+    if cap is None:
+        return []
+    out: list[dict] = []
+    for p in cap["picks"]:
+        template = p.get("template") if isinstance(p.get("template"), str) else None
+        model_id = p.get("model")
+        row = bundle.models.get(model_id, {}) if isinstance(model_id, str) else {}
+        dep = bundle.deprecations.get(model_id, {}) if isinstance(model_id, str) else {}
+        entry = {
+            "capability": capability_id,
+            "rank": pick_rank(p),
+            "model": _text(model_id),
+            "route": _text(p.get("route")),
+            "template": template,
+            "caveat": _text(p.get("caveat")),
+            "status": _text(row.get("status")),
+            "superseded_by": _text(dep.get("superseded_by") or row.get("superseded_by")),
+        }
+        if catalog_templates is not None and template is not None and template not in catalog_templates:
+            entry["available_locally"] = False
+            entry["unavailable_reason"] = UNAVAILABLE_LOCALLY
+        out.append(entry)
+        if len(out) >= MAX_PICKS:
+            break
+    return out
+
+
+def _resolves_locally(
+    row: dict, *, catalog_templates: Collection[str] | None, catalog_nodes: Collection[str] | None
+) -> bool:
+    """Version-skew check: False only when the row names ids for the catalogs on
+    hand and not one of them is there. Either catalog resolving the row is enough.
+
+    A False row is annotated, never dropped — a curated answer the install cannot
+    run today is still the answer, and hiding it reads as "nothing is curated".
+    """
+    resolves = row.get("resolves")
+    if not isinstance(resolves, dict):
+        return True
+    checked = False
+    for catalog, key in ((catalog_templates, "templates"), (catalog_nodes, "nodes")):
+        if catalog is None:
+            continue
+        ids = _str_list(resolves.get(key))
+        if not ids:
+            continue
+        checked = True
+        if any(i in catalog for i in ids):
+            return True
+    return not checked
+
+
+def _block_bytes(block: dict) -> int:
+    """Size of the block as the renderer will actually emit it (UTF-8, unescaped)."""
+    return len(json.dumps(block, ensure_ascii=False).encode())
+
+
+def _fit(block: dict) -> None:
+    """Drop whole entries (models first, then picks) until the block fits MAX_BLOCK_BYTES."""
+    while True:
+        caps: list[str] = []
+        for p in block["picks"]:
+            if p["capability"] not in caps:
+                caps.append(p["capability"])
+        block["hit_ids"] = [m["id"] for m in block["models"]] + [f"cap:{c}" for c in caps]
+        if _block_bytes(block) <= MAX_BLOCK_BYTES:
+            return
+        if block["models"]:
+            block["models"].pop()
+        elif block["picks"]:
+            block["picks"].pop()
+        else:
+            return
+
+
+def _capabilities_for(bundle: Bundle, entries: list[dict]) -> list[str]:
+    """Capability ids ranking any entry the local catalog cannot resolve, in block order."""
+    out: list[str] = []
+    for entry in entries:
+        if entry.get("available_locally") is not False:
+            continue
+        for cid in bundle.model_capabilities.get(entry["id"], ()):
+            if cid not in out:
+                out.append(cid)
+    return out
+
+
+def _set_nudge(block: dict, query: str, bundle: Bundle) -> None:
+    """One line naming the miss and what the bundle does cover.
+
+    The capability list goes first if the block is over the cap, then the whole
+    nudge — a block that ships without its nudge still beats one nothing reads.
+    """
+    head = f"no curated knowledge for {query!r}"
+    block["nudge"] = f"{head}; covered capabilities: {', '.join(sorted(bundle.capabilities))}"
+    if _block_bytes(block) > MAX_BLOCK_BYTES:
+        block["nudge"] = head
+    if _block_bytes(block) > MAX_BLOCK_BYTES:
+        del block["nudge"]
+
+
+def _log_query(command: str, queries: list[str], block: dict, bundle: Bundle) -> None:
+    """Feed the curation miss log. Consent-gated and best-effort, like every other event."""
+    try:
+        from comfy_cli import tracking
+
+        tracking.track_event(
+            "knowledge_query",
+            {
+                "command": command,
+                "queries": queries,
+                "hit_ids": block.get("hit_ids", []),
+                "zero_hit": block.get("zero_hit", False),
+                "bundle_version": bundle.version,
+            },
+        )
+    except Exception:  # noqa: BLE001 — telemetry never decides whether a payload ships
+        return
+
+
+def attach(
+    payload: dict,
+    *,
+    command: str = "",
+    queries: Iterable[str] = (),
+    models: Iterable[str] = (),
+    templates: Iterable[str] = (),
+    nodes: Iterable[str] = (),
+    catalog_templates: Collection[str] | None = None,
+    catalog_nodes: Collection[str] | None = None,
+    brief: bool = False,
+    thin: bool = False,
+    qualified: bool = True,
+) -> None:
+    """Append a capped ``knowledge`` block to ``payload`` for what the command was asked about.
+
+    ``queries`` is the subject the caller was asked about, resolved as model
+    aliases or capability names. ``models`` are aliases the command listed on its
+    own, resolved the same way but never treated as the subject, so a listing's
+    rows cannot satisfy the nudge or enter the miss log as a typed query.
+    ``templates`` and ``nodes`` go through the reverse index. ``catalog_*`` are the ids the
+    command actually loaded; a row or pick they do not resolve is marked
+    ``available_locally: false`` rather than hidden, and a row marked that way
+    pulls in the ranked picks for its capabilities so the caller still sees
+    something runnable. ``thin`` marks a command
+    whose own result was empty, which is the only case that earns ``zero_hit``;
+    a query that resolved to nothing earns a nudge on its own.
+
+    ``qualified=False`` says the call named no subject — an unfiltered listing,
+    whose rows are the whole catalog rather than an answer to anything. Nothing
+    is attached there: a curated row picked out of 3655 listed nodes reads as the
+    answer to a question nobody asked. Fail-open: any exception leaves ``payload``
+    exactly as it was.
+
+    ``COMFY_KNOWLEDGE_DISABLE`` suppresses the block entirely. A cached bundle
+    keeps being read once it exists, stale or not, so clearing
+    ``COMFY_KNOWLEDGE_URL`` is not an off switch and this is. Following
+    ``DO_NOT_TRACK``, any value but empty or ``"0"`` disables.
+    """
+    try:
+        disable = os.environ.get(ENV_DISABLE, "")
+        if disable and disable != "0":
+            return
+        if not qualified:
+            return
+        bundle = load_bundle(cache_only=True)
+        if bundle is None:
+            return
+        query_list = [q.strip()[:MAX_QUERY_CHARS] for q in queries if isinstance(q, str) and q.strip()]
+        model_hits, cap_hits = _lookup(bundle, query_list)
+        query_resolved = bool(model_hits or cap_hits)
+        listed_hits, listed_caps = _lookup(bundle, [m for m in models if isinstance(m, str) and m.strip()])
+        seen = {mid for mid, _ in model_hits}
+        for mid, matched_on in listed_hits:
+            if mid not in seen:
+                seen.add(mid)
+                model_hits.append((mid, matched_on))
+        cap_hits.extend(cid for cid in listed_caps if cid not in cap_hits)
+        for ids, index in ((templates, bundle.templates), (nodes, bundle.nodes)):
+            for ident in ids:
+                for mid in index.get(ident, ()):
+                    if mid not in seen:
+                        seen.add(mid)
+                        model_hits.append((mid, ident))
+
+        entries: list[dict] = []
+        for mid, matched_on in model_hits:
+            row = bundle.models.get(mid)
+            if not isinstance(row, dict):
+                continue
+            entry = _model_entry(bundle, mid, row, matched_on=matched_on, brief=brief)
+            if not _resolves_locally(row, catalog_templates=catalog_templates, catalog_nodes=catalog_nodes):
+                entry["available_locally"] = False
+                entry["unavailable_reason"] = UNAVAILABLE_LOCALLY
+            entries.append(entry)
+        entries.sort(key=lambda e: (e.get("tier") != "law", e.get("available_locally") is False))
+        entries = entries[: MAX_MODELS_BRIEF if brief else MAX_MODELS]
+        if not query_resolved:
+            # A node class or template id passed as both a query and a reverse-index
+            # key lands a row whose matched_on is that exact string. Nudging there
+            # would deny a term the block answers on the same line.
+            asked = set(query_list)
+            query_resolved = any(e["matched_on"] in asked for e in entries)
+
+        picks: list[dict] = []
+        for cid in cap_hits:
+            picks.extend(_pick_entries(bundle, cid, catalog_templates=catalog_templates))
+        if not picks:
+            # A row matched by model name rather than by capability, which this
+            # install cannot run, would otherwise ship as a dead end: curated,
+            # unavailable, and next to nothing the caller could reach for. Its
+            # capabilities carry the ranked answer, so borrow them.
+            for cid in _capabilities_for(bundle, entries):
+                picks.extend(_pick_entries(bundle, cid, catalog_templates=catalog_templates))
+        picks = picks[:MAX_PICKS]
+
+        block: dict[str, Any] = {
+            "bundle_version": bundle.version,
+            "stale": bundle.stale,
+            "as_of": bundle.as_of,
+            "models": entries,
+            "picks": picks,
+            "hit_ids": [],
+            "zero_hit": False,
+        }
+        had_hits = bool(entries or picks)
+        _fit(block)
+        attached = True
+        if not block["models"] and not block["picks"]:
+            if had_hits or not (thin and query_list):
+                attached = False
+            else:
+                block["zero_hit"] = True
+                _set_nudge(block, query_list[0], bundle)
+        elif query_list and not query_resolved:
+            # A browse that returns rows the reverse index enriched, while the
+            # query itself matched neither a model nor a capability. Not a
+            # zero_hit: that feeds the miss log and means an empty block.
+            _set_nudge(block, query_list[0], bundle)
+        if query_list:
+            _log_query(command, query_list, block, bundle)
+        if attached:
+            payload["knowledge"] = block
+    except Exception:  # noqa: BLE001 — knowledge is additive; the payload ships unchanged on any failure
+        return
+
+
+def refresh_if_stale() -> None:
+    """Re-fetch the bundle when the cache has expired.
+
+    For warm paths only — commands already doing slower work, or holding a
+    process open long enough for a fetch to land. :func:`attach` never calls
+    this: a discovery turn must not wait on the network.
+    """
+    try:
+        if os.environ.get(ENV_FILE, "").strip():
+            return
+        knowledge_path, _ = cache_paths()
+        if _cache_is_fresh(knowledge_path):
+            return
+        load_bundle(force_fetch=True)
+    except Exception:  # noqa: BLE001 — a refresh that fails leaves the cache exactly as it was
+        return

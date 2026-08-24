@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/models.json",
   "title": "comfy models *",
   "description": "Output shape for model discovery commands (search, show, list-folders, list-folder). All subcommands share this schema; each field is optional because the payload varies per subcommand.",
   "type": "object",
@@ -85,6 +86,7 @@
     "asset": {
       "type": "object",
       "description": "Full verbatim Asset object from the server (show)."
-    }
+    },
+    "knowledge": { "$ref": "knowledge_block.json", "description": "Curated model knowledge matching this call; absent when no bundle is loaded or nothing matched, except that an empty result with no match carries zero_hit and a nudge." }
   }
 }

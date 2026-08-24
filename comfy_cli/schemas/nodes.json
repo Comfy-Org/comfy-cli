@@ -1,5 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/nodes.json",
   "title": "comfy nodes *",
   "description": "Output shape for node introspection commands (ls, show, search, upstream, downstream, path, types, categories) and the annotation-cache refresh (refresh).",
   "type": "object",
@@ -43,6 +44,7 @@
         },
         "required": ["name", "source", "bytes", "path"]
       }
-    }
+    },
+    "knowledge": { "$ref": "knowledge_block.json", "description": "Curated model knowledge matching this call; absent when no bundle is loaded or nothing matched, except that an empty result with no match carries zero_hit and a nudge." }
   }
 }
