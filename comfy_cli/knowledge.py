@@ -648,7 +648,7 @@ def _set_nudge(block: dict, query: str, bundle: Bundle) -> None:
         del block["nudge"]
 
 
-def _log_query(command: str, query: str, block: dict, bundle: Bundle) -> None:
+def _log_query(command: str, queries: list[str], block: dict, bundle: Bundle) -> None:
     """Feed the curation miss log. Consent-gated and best-effort, like every other event."""
     try:
         from comfy_cli import tracking
@@ -657,7 +657,7 @@ def _log_query(command: str, query: str, block: dict, bundle: Bundle) -> None:
             "knowledge_query",
             {
                 "command": command,
-                "query": query,
+                "queries": queries,
                 "hit_ids": block.get("hit_ids", []),
                 "zero_hit": block.get("zero_hit", False),
                 "bundle_version": bundle.version,
@@ -672,6 +672,7 @@ def attach(
     *,
     command: str = "",
     queries: Iterable[str] = (),
+    models: Iterable[str] = (),
     templates: Iterable[str] = (),
     nodes: Iterable[str] = (),
     catalog_templates: Collection[str] | None = None,
@@ -682,8 +683,11 @@ def attach(
 ) -> None:
     """Append a capped ``knowledge`` block to ``payload`` for what the command was asked about.
 
-    ``queries`` are resolved as model aliases or capability names; ``templates``
-    and ``nodes`` go through the reverse index. ``catalog_*`` are the ids the
+    ``queries`` is the subject the caller was asked about, resolved as model
+    aliases or capability names. ``models`` are aliases the command listed on its
+    own, resolved the same way but never treated as the subject, so a listing's
+    rows cannot satisfy the nudge or enter the miss log as a typed query.
+    ``templates`` and ``nodes`` go through the reverse index. ``catalog_*`` are the ids the
     command actually loaded; a row or pick they do not resolve is marked
     ``available_locally: false`` rather than hidden, and a row marked that way
     pulls in the ranked picks for its capabilities so the caller still sees
@@ -714,7 +718,13 @@ def attach(
         query_list = [q.strip()[:MAX_QUERY_CHARS] for q in queries if isinstance(q, str) and q.strip()]
         model_hits, cap_hits = _lookup(bundle, query_list)
         query_resolved = bool(model_hits or cap_hits)
+        listed_hits, listed_caps = _lookup(bundle, [m for m in models if isinstance(m, str) and m.strip()])
         seen = {mid for mid, _ in model_hits}
+        for mid, matched_on in listed_hits:
+            if mid not in seen:
+                seen.add(mid)
+                model_hits.append((mid, matched_on))
+        cap_hits.extend(cid for cid in listed_caps if cid not in cap_hits)
         for ids, index in ((templates, bundle.templates), (nodes, bundle.nodes)):
             for ident in ids:
                 for mid in index.get(ident, ()):
@@ -777,7 +787,7 @@ def attach(
             # zero_hit: that feeds the miss log and means an empty block.
             _set_nudge(block, query_list[0], bundle)
         if query_list:
-            _log_query(command, query_list[0], block, bundle)
+            _log_query(command, query_list, block, bundle)
         if attached:
             payload["knowledge"] = block
     except Exception:  # noqa: BLE001 — knowledge is additive; the payload ships unchanged on any failure

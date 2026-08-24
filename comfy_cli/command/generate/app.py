@@ -858,7 +858,8 @@ def _list_models(extra_args: list[str]) -> None:
     knowledge.attach(
         payload,
         command="generate list",
-        queries=[m["alias"] for m in payload["models"]] + ([query] if query else []),
+        queries=[query] if query else [],
+        models=[m["alias"] for m in payload["models"]],
         brief=True,
         thin=(not eps and bool(query)),
         qualified=any(payload["filters"].values()),

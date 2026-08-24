@@ -407,6 +407,13 @@ class TestNudge:
         assert k["picks"]
         assert "nudge" not in k
 
+    def test_listed_rows_enrich_but_do_not_answer_the_query(self):
+        # `generate list --query FLF2V` passes its own result rows. They belong in
+        # the block, and they must not make an unanswered query look answered.
+        k = _attach(queries=["FLF2V"], models=["testvid"])["knowledge"]
+        assert [e["id"] for e in k["models"]] == ["testvid"]
+        assert "'FLF2V'" in k["nudge"]
+
     def test_unresolved_query_nudge_degrades_then_disappears(self, monkeypatch):
         args = {"queries": ["FLF2V"], "templates": [_REVERSE_TEMPLATE]}
         full = _attach(**args)["knowledge"]
@@ -588,8 +595,9 @@ class TestIndex:
 
 
 class TestQueryLog:
-    """One event per query, hit or miss. Without it the capture loop has no feed
-    from local installs, and what gets curated stays a matter of intuition."""
+    """One event per enriched command, carrying every subject it was asked about.
+    Without it the capture loop has no feed from local installs, and what gets
+    curated stays a matter of intuition."""
 
     @pytest.fixture
     def events(self, monkeypatch):
@@ -602,7 +610,7 @@ class TestQueryLog:
         assert [name for name, _ in events] == ["knowledge_query"]
         props = events[0][1]
         assert props["command"] == "nodes search"
-        assert props["query"] == "testvid"
+        assert props["queries"] == ["testvid"]
         assert props["hit_ids"] == ["testvid"]
         assert props["zero_hit"] is False
         assert props["bundle_version"] == "0.1.0-fixture"
@@ -611,7 +619,19 @@ class TestQueryLog:
         assert "knowledge" not in _attach(command="nodes search", queries=["zzzz"])
         assert [name for name, _ in events] == ["knowledge_query"]
         assert events[0][1]["hit_ids"] == []
-        assert events[0][1]["query"] == "zzzz"
+        assert events[0][1]["queries"] == ["zzzz"]
+
+    def test_every_query_is_logged_not_just_the_first(self, events):
+        _attach(command="templates ls", queries=["testvid", "zzzz", "lipsync"])
+        assert events[0][1]["queries"] == ["testvid", "zzzz", "lipsync"]
+
+    def test_rows_the_command_listed_never_enter_the_log(self, events):
+        _attach(command="generate list", queries=["zzzz"], models=["testvid", "acme-h3"])
+        assert events[0][1]["queries"] == ["zzzz"]
+
+    def test_a_listing_with_no_query_logs_nothing(self, events):
+        _attach(command="generate list", models=["testvid"])
+        assert events == []
 
     def test_a_zero_hit_is_logged_as_one(self, events):
         _attach(command="nodes search", queries=["zzzz"], thin=True)

@@ -686,8 +686,8 @@ to prioritize our efforts.
 **One event carries text you typed.** If a curated knowledge bundle is configured
 — it is not by default, and needs `COMFY_KNOWLEDGE_URL` or `COMFY_KNOWLEDGE_FILE`
 — then `comfy nodes search`, `comfy templates ls`, `comfy generate schema`,
-`comfy generate list` and `comfy models search` send the search term you typed
-and which curated entries it matched. This tells us what people look for and fail
+`comfy generate list` and `comfy models search` send the search terms you typed
+and which curated entries they matched. This tells us what people look for and fail
 to find. It needs both the bundle and your tracking consent, so with either one
 absent nothing is sent.
 
