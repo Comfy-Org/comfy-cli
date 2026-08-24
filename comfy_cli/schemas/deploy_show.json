@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_show.json",
+  "title": "comfy deploy show --json data payload",
+  "description": "The raw deployment record returned by GET /v1/deployments/{id}.",
+  "type": "object",
+  "required": ["id", "status"],
+  "additionalProperties": true,
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "status": {"type": "string", "minLength": 1},
+    "buildVersionId": {"type": "string", "minLength": 1},
+    "distributionVersionId": {"type": "string", "minLength": 1},
+    "computeConfig": {"type": ["object", "null"]},
+    "endpointUrl": {"type": ["string", "null"]},
+    "error": {"type": ["string", "null"]},
+    "stopReason": {"type": ["string", "null"]},
+    "serving": {"type": ["object", "null"]},
+    "createdAt": {"type": "string", "format": "date-time"},
+    "updatedAt": {"type": "string", "format": "date-time"}
+  }
+}

@@ -10,6 +10,7 @@ fails there rather than shipping unproven.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -20,6 +21,16 @@ import pytest
 from build_auth_support import BUILD_ID, RecordingTransport, write_snapshot
 from build_push_support import make_workspace, write_spec
 from build_tree_support import leaf_commands
+from deploy_auth_support import (
+    DEPLOY_AUTH_CASES,
+    DeployAuthCase,
+    DeployRecordingTransport,
+    JobRecordingTransport,
+    deploy_leaf_commands,
+    invoke_deploy,
+    prepare_deploy,
+    session,
+)
 from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app as cli_app
@@ -252,3 +263,42 @@ def test_auth_matrix_covers_every_build_command() -> None:
 
     # Then
     assert covered == leaf_commands()
+
+
+@pytest.mark.parametrize("case", DEPLOY_AUTH_CASES, ids=lambda case: case.fixture.value)
+def test_deploy_auth_contract(case: DeployAuthCase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    control = DeployRecordingTransport()
+    jobs = JobRecordingTransport()
+    builder = RecordingTransport()
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", control)
+    monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", jobs)
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", builder)
+    monkeypatch.setattr("comfy_cli.credentials.find_api_key", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "comfy_cli.credentials.get_session",
+        lambda *args, **kwargs: session(os.environ.get("COMFY_DEPLOY_TOKEN")),
+    )
+
+    # When
+    signed_out = invoke_deploy(prepare_deploy(case.fixture, tmp_path / "signed-out"), None)
+
+    # Then
+    assert signed_out.exit_code == 1
+    assert _error_code(signed_out) == "deploy_not_signed_in"
+    assert control.calls == []
+
+    # When
+    signed_in = invoke_deploy(prepare_deploy(case.fixture, tmp_path / "signed-in"), "tok_test")
+
+    # Then
+    assert signed_in.exit_code == 0, signed_in.stderr
+    assert len(control.calls) >= 1
+
+
+def test_auth_matrix_covers_every_deploy_command() -> None:
+    # Given / When
+    covered = {case.command for case in DEPLOY_AUTH_CASES}
+
+    # Then
+    assert covered == deploy_leaf_commands()

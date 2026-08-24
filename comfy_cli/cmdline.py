@@ -20,6 +20,7 @@ from comfy_cli.command import (
     custom_nodes,
     pr_command,
 )
+from comfy_cli.command import deploy as deploy_command
 from comfy_cli.command import generate as generate_command
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import (
@@ -2034,6 +2035,11 @@ app.add_typer(
     build_command.app,
     name="build",
     help="Package a local ComfyUI environment into a serverless build.",
+)
+app.add_typer(
+    deploy_command.app,
+    name="deploy",
+    help="Create and manage serverless deployments.",
 )
 app.add_typer(project_command.app, name="project", help="Project conventions: init and status.")
 app.add_typer(

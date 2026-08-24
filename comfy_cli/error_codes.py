@@ -1150,6 +1150,157 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "absolute path probed. `init` is the only build command that proceeds without a spec.",
         "run `comfy build init --name <name> [PATH]` to create one, or pass the PATH that holds the spec",
     ),
+    # --- deploy control plane ------------------------------------------------
+    ErrorCode(
+        "deploy_build_not_pushed",
+        "A deploy command needed the local Build, but the spec has no `id`, so it has not been pushed to the "
+        "Builder yet.",
+        "run `comfy build push`",
+    ),
+    ErrorCode(
+        "deploy_no_deployable_release",
+        "Release resolution exhausted the Build's releases without finding one whose Builder summary has "
+        "`deployable: true`. The error distinguishes an empty release list from releases that lack a "
+        "`linux/nvidia` artifact.",
+        "run `comfy build release create --target linux/nvidia` to cut a release with a `linux/nvidia` artifact",
+    ),
+    ErrorCode(
+        "deploy_ambiguous_deployment",
+        "Deployment resolution found multiple rows tied at the highest status rank and newest creation time. "
+        "`details.candidateIds` lists every indistinguishable deployment id.",
+        "pass `--deployment <id>` to select one deployment explicitly",
+    ),
+    ErrorCode(
+        "deploy_missing_input",
+        "A deploy command is missing required interactive input. `comfy deploy up` uses this for immutable compute "
+        "choices and `comfy deploy run` uses it for `--workflow`; `details.missing` lists every required option.",
+        "pass every option named in `details.missing`, then retry",
+    ),
+    ErrorCode(
+        "deploy_bad_request",
+        "The deploy control plane rejected structurally invalid input. The message names the invalid field or query parameter.",
+        "fix the field or parameter named in the message, then retry",
+    ),
+    ErrorCode(
+        "deploy_server_error",
+        "A deploy control-plane request failed in transport or returned an HTTP 5xx. Mutating requests are not retried because their outcome may be unknown.",
+        "check network access and COMFY_DEPLOY_URL; retry only after confirming the deployment state",
+    ),
+    ErrorCode(
+        "deploy_not_signed_in",
+        "A deploy control-plane request found no usable Cloud JWT, or the server rejected it with HTTP 401.",
+        "run `comfy cloud login`, then retry",
+    ),
+    ErrorCode(
+        "deploy_not_found",
+        "The deployment id does not exist or is outside the signed-in workspace.",
+        "check the deployment id with `comfy deploy ls --workspace`",
+    ),
+    ErrorCode(
+        "deploy_forbidden",
+        "The signed-in workspace is not allowed to perform the requested deployment operation.",
+        "verify the deployment belongs to this workspace and that the account has deploy access",
+    ),
+    ErrorCode(
+        "deploy_conflict",
+        "The deployment's current state conflicts with the requested operation; the server message names the state or conflict.",
+        "wait for the named state to settle, inspect `comfy deploy status`, then retry",
+    ),
+    ErrorCode(
+        "deploy_payment_required",
+        "The deployment operation requires an active subscription or available credit.",
+        "restore billing eligibility or credits, then retry",
+    ),
+    ErrorCode(
+        "deploy_quota_exceeded",
+        "The workspace reached its active-deployment or concurrent-worker limit.",
+        "stop or scale down another deployment, or raise the workspace limit, then retry",
+    ),
+    ErrorCode(
+        "deploy_compute_unavailable",
+        "The requested GPU and region cannot currently provision the deployment.",
+        "choose another pair from `comfy deploy refs compute`, or retry when capacity changes",
+    ),
+    ErrorCode(
+        "deploy_immutable_compute",
+        "A ready deployment cannot change its GPU class or region in place.",
+        "run `comfy deploy stop`, then `comfy deploy scale --gpu <class> --region <region>`, then `comfy deploy start`",
+    ),
+    ErrorCode(
+        "deploy_deleted",
+        "A deleted deployment is an audit record and cannot be started again.",
+        "create a new deployment with `comfy deploy up`",
+    ),
+    ErrorCode(
+        "deploy_delete_needs_confirm",
+        "`comfy deploy delete` was run without `--yes` in a non-interactive context. The irreversible "
+        "teardown and soft-delete are refused without explicit consent; `details.question` carries the "
+        "confirmation nothing could answer.",
+        "pass `--yes` to confirm the deployment teardown and soft-delete",
+    ),
+    ErrorCode(
+        "deploy_endpoint_unknown",
+        "The control plane returned a null or untrusted deployment `endpointUrl`, or a data-plane follow-up/output "
+        "link named an origin outside the configured exact-origin allowlists. No data-plane credential is attached.",
+        "check COMFY_DEPLOY_HOST_SUFFIXES or COMFY_DEPLOY_STORAGE_ORIGINS, then retry with a trusted platform origin",
+    ),
+    # --- deploy data plane ---------------------------------------------------
+    ErrorCode(
+        "deploy_not_ready",
+        "The deployment data plane cannot accept a job yet. `details.status` comes from a fresh control-plane read.",
+        "wait if the status is transitional; inspect or repair the deployment if it is terminal",
+    ),
+    ErrorCode(
+        "deploy_workflow_invalid",
+        "The data plane rejected the API-format workflow. `details.node_errors` preserves structured per-node failures.",
+        "fix the nodes named in `details.node_errors`, then submit again with a new idempotency key",
+    ),
+    ErrorCode(
+        "deploy_workflow_format_ui",
+        "`comfy deploy run` received a UI-format workflow carrying `nodes` and `links`. Deployment releases expose "
+        "no node-schema endpoint, so the CLI cannot convert that graph safely and refuses it before any request.",
+        "use ComfyUI's 'File > Export (API)' to save as API format, or convert locally with `comfy run` against a "
+        "running ComfyUI instance",
+    ),
+    ErrorCode(
+        "deploy_rate_limited",
+        "The deployment job queue is full or the data plane refused the request rate.",
+        "wait for queue capacity before submitting again",
+    ),
+    ErrorCode(
+        "deploy_idempotency_reuse",
+        "The v2 data plane rejected a previously used single-use idempotency key and did not execute the duplicate request.",
+        "do not retry the duplicate invocation automatically",
+    ),
+    ErrorCode(
+        "deploy_job_submit_unknown",
+        "A job submission timed out, lost its connection, or returned HTTP 5xx, so the job may exist. The v2 API has no job-list endpoint, idempotency-key lookup, or client-supplied job id with which to find it.",
+        "do not resubmit automatically because the possibly-created job cannot be found through the v2 API",
+    ),
+    ErrorCode(
+        "deploy_job_failed",
+        "The final authoritative GET for a v2 data-plane job reported `status: failed`. "
+        "`details.job` carries that complete terminal snapshot, including its server error and metrics.",
+        "inspect `details.job.error`, fix the workflow or inputs it names, then submit a new job",
+    ),
+    ErrorCode(
+        "deploy_job_canceled",
+        "The final authoritative GET for a v2 data-plane job reported `status: canceled`. `details.job` carries "
+        "the complete terminal snapshot.",
+        "submit a new `comfy deploy run` invocation if the workflow should execute again",
+    ),
+    ErrorCode(
+        "deploy_asset_missing",
+        "A v2 asset hash probe found no blob the caller may mint from while uploads were disabled. "
+        "`details.file_path` and `details.hash` identify the unresolved input.",
+        "remove `--no-upload` to permit a streamed upload, or upload the input before retrying",
+    ),
+    ErrorCode(
+        "deploy_asset_upload_failed",
+        "A v2 multipart asset upload failed or the server rejected its `expected_hash`. A hash mismatch "
+        "mints no asset and reports `hash_mismatch` in `details.server_code`.",
+        "verify the local file is stable and readable, then retry the upload",
+    ),
     # --- knowledge -----------------------------------------------------------
     ErrorCode(
         "knowledge_unavailable",

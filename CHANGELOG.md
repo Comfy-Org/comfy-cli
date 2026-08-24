@@ -18,6 +18,9 @@ history.
 ### Added
 
 - `CONTRIBUTING.md` (renamed from `DEV_README.md`) and this changelog.
+- `comfy deploy` — run a Build release as a serverless endpoint: `up`, `status`,
+  `ls`, `show`, `logs`, `events`, `scale`, `stop`, `start`, `delete`, `run`, and
+  `refs compute`.
 
 ### Changed
 

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_ls.json",
+  "title": "comfy deploy ls --json data payload",
+  "type": "object",
+  "required": ["deployments"],
+  "additionalProperties": false,
+  "properties": {
+    "deployments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "buildVersionId",
+          "computeConfig",
+          "createdAt",
+          "deletedAt",
+          "deletedBy",
+          "distributionVersionId",
+          "endpointUrl",
+          "id",
+          "status",
+          "updatedAt"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "buildVersionId": {"type": "string", "minLength": 1},
+          "computeConfig": {"type": ["object", "null"]},
+          "createdAt": {"type": "string", "format": "date-time"},
+          "deletedAt": {"type": ["string", "null"], "format": "date-time"},
+          "deletedBy": {"type": ["string", "null"]},
+          "distributionVersionId": {"type": "string", "minLength": 1},
+          "endpointUrl": {"type": ["string", "null"]},
+          "id": {"type": "string", "minLength": 1},
+          "status": {
+            "enum": ["queued", "provisioning", "starting", "ready", "unhealthy", "stopping", "stop_failed", "stopped", "failed"]
+          },
+          "updatedAt": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  }
+}
