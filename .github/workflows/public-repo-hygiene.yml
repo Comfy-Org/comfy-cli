@@ -22,22 +22,12 @@ jobs:
   hygiene:
     permissions:
       contents: read
-    uses: Comfy-Org/github-workflows/.github/workflows/public-repo-hygiene.yml@609f9729b3df0c762118bfe64de6ab649c33be04 # github-workflows main (609f972)
+    uses: Comfy-Org/github-workflows/.github/workflows/public-repo-hygiene.yml@3b2c8ca1f52056b54453a659fdb4473cfc88aa0e # github-workflows main (3b2c8ca)
     with:
       # REQUIRED, and must equal the `uses:` SHA above — the reusable asserts
       # they match, which is what pins the checker to the reviewed commit.
-      workflows_ref: 609f9729b3df0c762118bfe64de6ab649c33be04
+      workflows_ref: 3b2c8ca1f52056b54453a659fdb4473cfc88aa0e
       # `HAILUO-03` is MiniMax's Hailuo 03 model, named in the curated
       # knowledge bundle and asserted in tests. It is a product name that
       # happens to match the ticket-ID shape, not an internal reference.
       ticket_allowlist: HAILUO-03
-      # Vendored third-party data, not our prose. `fixtures/gallery/` holds
-      # gallery templates copied VERBATIM from Comfy-Org/workflow_templates,
-      # with a documented curl loop in its README that re-downloads them
-      # wholesale. Their markdown links to model weights using the weights'
-      # own `owner/name` as the LABEL, which reaches the checker as a bare
-      # `<owner>/<name>` and is rightly read as a GitHub repo path. It is not
-      # ours to reword: a refresh would silently revert any edit and break the
-      # verbatim contract the fixtures exist to keep.
-      # The exclusion is reported with its skipped-file count in the run log.
-      exclude_paths: tests/comfy_cli/fixtures/gallery/
