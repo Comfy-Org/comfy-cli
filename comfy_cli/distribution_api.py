@@ -9,8 +9,8 @@ URL and never transit the builder.
 Field names match services/comfy-builder/openapi.yaml exactly:
   POST /v1/blobs {kind, filename, sizeBytes, sha256}     -> {blobId, uploadUrl, expiresAt}
   POST /v1/builds {name, definition}              -> {id, ...}
-  POST /v1/builds/{id}/versions {targets?}        -> {buildVersionId, statusUrl}
-  GET  /v1/build-versions/{id}                    -> {status, ...}
+  POST /v1/builds/{id}/releases {targets?}        -> {releaseId, statusUrl}
+  GET  /v1/releases/{id}                          -> {status, ...}
 """
 
 from __future__ import annotations
@@ -103,17 +103,20 @@ class BuilderClient:
         return self._post(("builds",), body)["id"]
 
     def cut_version(self, distribution_id: str, targets: list[dict] | None = None) -> tuple[str, str]:
-        """Freeze the definition and enqueue a build. Returns (versionId, statusUrl)."""
+        """POST /v1/builds/{id}/releases: freeze the definition and enqueue a
+        build. Returns (releaseId, statusUrl). A server that predates the
+        version-to-release rename still answers with ``buildVersionId``, so
+        that key is the fallback and the CLI works against either generation."""
         body: dict = {}
         if targets:
             body["targets"] = targets
-        r = self._post(("builds", distribution_id, "versions"), body)
-        return r["buildVersionId"], r["statusUrl"]
+        r = self._post(("builds", distribution_id, "releases"), body)
+        return r.get("releaseId") or r["buildVersionId"], r["statusUrl"]
 
     def get_version(self, version_id: str) -> dict:
-        """Poll a version's build status."""
+        """GET /v1/releases/{id}: poll a release's build status."""
         _, parsed = request_json(
-            self.target.url("build-versions", version_id), self.target, method="GET", max_bytes=_MAX_JSON
+            self.target.url("releases", version_id), self.target, method="GET", max_bytes=_MAX_JSON
         )
         return parsed or {}
 
@@ -163,15 +166,18 @@ class BuilderClient:
         return self._get(("builds", distribution_id))
 
     def list_distribution_versions(self, distribution_id: str) -> list[dict]:
-        """GET /v1/builds/{id}/versions -> the distribution's versions."""
-        return self._get(("builds", distribution_id, "versions")).get("versions", [])
+        """GET /v1/builds/{id}/releases -> the distribution's releases. A server
+        that predates the version-to-release rename keys the list ``versions``,
+        so both spellings parse."""
+        body = self._get(("builds", distribution_id, "releases"))
+        return body.get("releases") or body.get("versions") or []
 
     def get_version_logs(self, version_id: str, *, os: str | None = None, gpu: str | None = None) -> dict:
-        """GET /v1/build-versions/{id}/logs -> the build log for one target
+        """GET /v1/releases/{id}/logs -> the build log for one target
         (``os``/``gpu`` select which; the builder picks a target when omitted).
         Returns ``{versionId, os?, gpu?, log, truncated}``. Uses a larger response
         cap than other reads because a build log can be several MiB."""
-        return self._get(("build-versions", version_id, "logs"), {"os": os, "gpu": gpu}, max_bytes=_MAX_LOG_JSON)
+        return self._get(("releases", version_id, "logs"), {"os": os, "gpu": gpu}, max_bytes=_MAX_LOG_JSON)
 
     def delete_distribution(self, distribution_id: str) -> None:
         """DELETE /v1/builds/{id} -> soft-delete. Idempotent (204 even when
@@ -207,9 +213,9 @@ class BuilderClient:
         return parsed or {}
 
     def get_version_manifest(self, version_id: str) -> dict:
-        """GET /v1/build-versions/{id}/manifest -> the version's models and
+        """GET /v1/releases/{id}/manifest -> the release's models and
         runtime policies."""
-        return self._get(("build-versions", version_id, "manifest"))
+        return self._get(("releases", version_id, "manifest"))
 
     def get_artifact_download(self, artifact_id: str) -> dict:
         """GET /v1/build-artifacts/{id}/download -> ``{downloadUrl, expiresAt?}``."""

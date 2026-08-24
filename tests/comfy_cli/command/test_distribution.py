@@ -8,6 +8,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -406,6 +408,7 @@ def test_execute_create_uploads_stitches_and_cuts():
     assert result == {
         "distributionId": "dist-123",
         "versionId": "ver-456",
+        "releaseId": "ver-456",
         "statusUrl": "https://status.example/ver-456",
         "uploaded": 1,
     }
@@ -518,8 +521,8 @@ def test_builder_client_endpoints_and_parsing(monkeypatch):
             return 200, {"blobId": "b1", "uploadUrl": "https://put", "expiresAt": "t"}
         if url.endswith("/v1/builds"):
             return 201, {"id": "d1", "name": "n"}
-        if url.endswith("/versions"):
-            return 202, {"buildVersionId": "v1", "statusUrl": "https://s"}
+        if url.endswith("/releases"):
+            return 202, {"releaseId": "v1", "statusUrl": "https://s"}
         if url.endswith("/v1/models/resolve"):
             return 200, {
                 "results": [{"filename": "a.safetensors", "candidates": [{"sourceUri": "https://u", "sha256": "h"}]}]
@@ -537,6 +540,7 @@ def test_builder_client_endpoints_and_parsing(monkeypatch):
     assert results[0]["candidates"][0]["sourceUri"] == "https://u"
     # URLs carry the /v1 prefix, and the JWT rides on the cloud target
     assert ("POST", "https://builder.test/v1/blobs") in calls
+    assert ("POST", "https://builder.test/v1/builds/d1/releases") in calls
     assert ("POST", "https://builder.test/v1/models/resolve") in calls
     assert c.target.auth_token == "jwt-token" and c.target.is_cloud
 
@@ -550,9 +554,11 @@ def test_builder_client_read_endpoints(monkeypatch):
             return 200, {"builds": [{"id": "d1", "name": "n"}]}
         if url.endswith("/v1/builds/d1"):
             return 200, {"id": "d1", "name": "n", "definition": {"models": []}}
-        if url.endswith("/v1/builds/d1/versions"):
+        if url.endswith("/v1/builds/d1/releases"):
+            # A not-yet-upgraded builder still keys the list `versions`; the
+            # client parses that spelling as well as `releases`.
             return 200, {"versions": [{"id": "v1", "status": "complete"}]}
-        if "/v1/build-versions/v1/logs" in url:
+        if "/v1/releases/v1/logs" in url:
             return 200, {"versionId": "v1", "os": "linux", "gpu": "nvidia", "log": "hello", "truncated": False}
         return 200, {}
 
@@ -632,7 +638,7 @@ def test_builder_client_reference_and_update_endpoints(monkeypatch):
     assert ("GET", "https://builder.test/v1/build-targets", None) in calls
     assert ("GET", "https://builder.test/v1/model-directories", None) in calls
     assert ("GET", "https://builder.test/v1/blobs", None) in calls
-    assert ("GET", "https://builder.test/v1/build-versions/v1/manifest", None) in calls
+    assert ("GET", "https://builder.test/v1/releases/v1/manifest", None) in calls
     assert ("GET", "https://builder.test/v1/build-artifacts/a1/download", None) in calls
 
 
@@ -1510,6 +1516,131 @@ def test_distribution_alias_hidden_from_root_help():
     assert proc.returncode == 0
     assert "build" in proc.stdout
     assert "distribution" not in proc.stdout
+
+
+# --- release subgroup: `comfy build release` is canonical, `comfy build version`
+# --- is its hidden deprecated alias -------------------------------------------
+
+
+class _FakeCutHandler(BaseHTTPRequestHandler):
+    """Answers the cut endpoint the way an upgraded builder does, so the CLI
+    subprocess exercises the real release surface without a network."""
+
+    def do_POST(self):  # noqa: N802 (BaseHTTPRequestHandler's spelling)
+        if self.path == "/v1/builds/dist-1/releases":
+            body = json.dumps({"releaseId": "rel-9", "statusUrl": "https://status.example/rel-9"}).encode()
+            self.send_response(202)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_error(404)
+
+    def log_message(self, *args):  # keep test output quiet
+        pass
+
+
+def _run_cut(spelling: list[str], tmp_path) -> subprocess.CompletedProcess:
+    server = HTTPServer(("127.0.0.1", 0), _FakeCutHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        env = {
+            **os.environ,
+            "NO_COLOR": "1",
+            "COMFY_OUTPUT": "json",
+            "COMFY_BUILDER_TOKEN": "test-jwt",  # skips the OAuth session
+            "COMFY_SECRETS_PATH": str(tmp_path / "secrets.json"),
+            "VIRTUAL_ENV": "",
+            "CONDA_PREFIX": "",
+        }
+        return subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "comfy_cli",
+                *spelling,
+                "create",
+                "dist-1",
+                "--builder-url",
+                f"http://127.0.0.1:{server.server_address[1]}",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    finally:
+        server.shutdown()
+
+
+def test_release_create_json_validates_against_extended_schema(tmp_path):
+    """`comfy build release create --json` emits releaseId next to versionId
+    (equal values, statusUrl kept) and the payload satisfies the extended
+    build_version_create.json contract."""
+    jsonschema = pytest.importorskip("jsonschema")
+    proc = _run_cut(["build", "release"], tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "deprecated" not in proc.stderr
+    envelope = json.loads(proc.stdout.strip().splitlines()[-1])
+    assert envelope["command"] == "build release create"
+    data = envelope["data"]
+    assert data["releaseId"] == data["versionId"] == "rel-9"
+    assert data["statusUrl"] == "https://status.example/rel-9"
+    schema_path = Path(distribution.__file__).parents[1] / "schemas" / "build_version_create.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    jsonschema.validate(instance=data, schema=schema)
+
+
+def test_build_version_alias_warns_and_matches_release(tmp_path):
+    """`comfy build version create` still works: one deprecation warning on
+    stderr, and the envelope is identical to the canonical spelling's, canonical
+    `build release create` label included."""
+    canonical = _run_cut(["build", "release"], tmp_path)
+    alias = _run_cut(["build", "version"], tmp_path)
+    assert canonical.returncode == 0 and alias.returncode == 0, alias.stderr
+    assert "`comfy build version` is deprecated; use `comfy build release` instead." in alias.stderr
+    assert alias.stderr.count("is deprecated") == 1
+    assert "deprecated" not in canonical.stderr
+    canonical_env = json.loads(canonical.stdout.strip().splitlines()[-1])
+    alias_env = json.loads(alias.stdout.strip().splitlines()[-1])
+    assert alias_env == canonical_env
+    assert alias_env["command"] == "build release create"
+
+
+def test_build_version_alias_hidden_from_build_help():
+    env = {**os.environ, "NO_COLOR": "1"}
+    proc = subprocess.run(
+        [sys.executable, "-m", "comfy_cli", "build", "--help"],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert proc.returncode == 0
+    assert "release" in proc.stdout
+    # The alias must not be listed as a subcommand row; "version" may still
+    # appear inside prose, so assert against the command column specifically.
+    listed = {
+        line.strip().split()[1]
+        for line in proc.stdout.splitlines()
+        if line.strip().startswith("│") and len(line.strip().split()) > 1
+    }
+    assert "version" not in listed
+
+
+def test_cut_version_falls_back_to_buildversionid(monkeypatch):
+    """A not-yet-upgraded builder answers the cut with buildVersionId; the
+    client still parses the id so the CLI works against either generation."""
+
+    def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
+        assert url == "https://builder.test/v1/builds/d1/releases"
+        return 202, {"buildVersionId": "v1", "statusUrl": "https://s"}
+
+    monkeypatch.setattr("comfy_cli.distribution_api.request_json", fake_request_json)
+    from comfy_cli.distribution_api import BuilderClient
+
+    c = BuilderClient("https://builder.test/", "jwt")
+    assert c.cut_version("d1") == ("v1", "https://s")
 
 
 # --- review follow-ups --------------------------------------------------------

@@ -1,13 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://comfy.org/schemas/build_version_logs.json",
-  "title": "comfy build version logs --json data payload",
-  "description": "One build target's captured log, as returned by GET /v1/build-versions/{id}/logs.",
+  "title": "comfy build release logs --json data payload",
+  "description": "One build target's captured log, as returned by GET /v1/releases/{id}/logs. releaseId is the canonical id; versionId carries the same value and stays because user scripts pin it.",
   "type": "object",
-  "required": ["versionId", "log", "truncated"],
+  "required": ["versionId", "releaseId", "log", "truncated"],
   "additionalProperties": true,
   "properties": {
     "versionId": {"type": "string"},
+    "releaseId": {"type": "string"},
     "os": {"type": "string", "enum": ["linux", "windows", "mac"]},
     "gpu": {"type": "string", "enum": ["nvidia", "amd", "cpu", "mps"]},
     "log": {"type": "string"},
