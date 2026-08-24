@@ -81,7 +81,7 @@ def test_discover_annotates_commands_with_schema():
 
 
 def test_discover_lists_run_prompt_and_set_options():
-    # BE-2535: `comfy run --prompt`/`--set` must be visible on the agent
+    # `comfy run --prompt`/`--set` must be visible on the agent
     # surface. The options are auto-introspected into the commands tree.
     envelope = _run_cli(["--json", "discover"])
     run_params = envelope["data"]["commands"]["run"]["params"]
@@ -253,3 +253,17 @@ def test_discover_pretty_mode_shows_counts():
     assert "Capabilities" in result.stdout
     with pytest.raises(json.JSONDecodeError):
         json.loads(result.stdout)
+
+
+def test_every_registered_schema_names_a_shipped_file():
+    """Every ``COMMAND_SCHEMAS`` / ``STREAM_EVENT_SCHEMAS`` value must name a
+    file in comfy_cli/schemas/; a schema-file rename that leaves a stale
+    mapping would make every envelope for that command unvalidatable."""
+    from comfy_cli.discovery import COMMAND_SCHEMAS, STREAM_EVENT_SCHEMAS
+
+    missing = sorted(
+        name
+        for name in {*COMMAND_SCHEMAS.values(), *STREAM_EVENT_SCHEMAS.values()}
+        if not (SCHEMAS_DIR / f"{name}.json").is_file()
+    )
+    assert not missing, f"registered schemas with no shipped file: {missing}"

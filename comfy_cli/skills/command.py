@@ -4,16 +4,21 @@ The unlock: instead of running an MCP server, this command teaches every
 agent on the machine how to call ``comfy`` natively. One file per skill,
 three targets, zero protocol.
 
-Bundled skills (5 total) — see ``comfy skills list`` for descriptions:
+Bundled skills (4 total) — see ``comfy skills list`` for descriptions:
 
   - ``comfy``           — the consolidated driver skill (command surface,
                           output contract, routing, discovery, execution,
                           image, video, audio, cloud, edit, condition, pipeline)
-  - ``comfy-fragments`` — typed reusable workflow fragments + YAML blueprint composition
   - ``comfy-debug``     — debugging when workflows fail or jobs hang
   - ``comfy-relay``     — what to put in chat while driving the CLI
   - ``comfy-director``  — narrative multi-shot video production (screenplay,
                           continuity, audio design, conform discipline)
+
+Fetched at install time, not bundled (see ``REMOTE_SKILLS``):
+
+  - ``comfy-build``     — building a ComfyUI distribution on the developer
+                          platform. It lives in Comfy-Org/comfy-skills so its
+                          judgment can be revised without a CLI release.
 """
 
 from __future__ import annotations
@@ -27,9 +32,12 @@ from comfy_cli import tracking
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.skills import (
     BUNDLED_SKILLS,
+    REMOTE_SKILLS,
     TargetKind,
     _compute_skill_state,
-    bundled_skill_names,
+    _looks_like_path,
+    default_skill_names,
+    frontmatter_description,
     load_skill_source,
     plan_install,
     read_manifest,
@@ -74,14 +82,10 @@ def _kinds(targets: list[str] | None) -> list[TargetKind] | None:
 def _validate_skills(skills: list[str] | None) -> list[str] | None:
     if not skills:
         return None
-    import os
-
     renderer = get_renderer()
-    known = bundled_skill_names()
+    known = default_skill_names()
     for s in skills:
-        p = Path(s).expanduser()
-        looks_like_path = os.sep in s or s.startswith((".", "~")) or p.exists()
-        if looks_like_path:
+        if _looks_like_path(s):
             # Path-based token: validate it eagerly so we fail fast before any writes.
             try:
                 load_skill_source(s)
@@ -139,7 +143,8 @@ def install_cmd(
         list[str] | None,
         typer.Option(
             "--skill",
-            help=f"Install only the named skill(s). Repeatable. Default: all {len(BUNDLED_SKILLS)} bundled skills (see `comfy skills list`).",
+            help=f"Install only the named skill(s). Repeatable. Default: all {len(default_skill_names())} "
+            f"({len(BUNDLED_SKILLS)} bundled, {len(REMOTE_SKILLS)} fetched — see `comfy skills list`).",
         ),
     ] = None,
     dry_run: Annotated[
@@ -191,6 +196,11 @@ def install_cmd(
 
         header = Text(f"{title_word} · {s} scope", style="dim")
         body = Group(header, Text(""), tbl)
+        # One line per skipped skill, not one per target — the reason is the same
+        # three times, and the table has nowhere to put it.
+        skipped = {r.skill: r.reason for r in results if r.action == "skipped" and r.reason}
+        for name, reason in skipped.items():
+            body = Group(body, Text(f"{name} skipped: {reason}", style="yellow"))
         if not dry_run and any(r.action == "wrote" for r in results):
             body = Group(
                 body,
@@ -267,26 +277,21 @@ def uninstall_cmd(
     )
 
 
-_LIST_HELP = "List the bundled skills (" + ", ".join(name for name, _ in BUNDLED_SKILLS) + ")."
+_LIST_HELP = "List the skills `comfy skills install` writes (" + ", ".join(default_skill_names()) + ")."
 
 
 @app.command("list", help=_LIST_HELP)
 @tracking.track_command("skill")
 def list_cmd():
     renderer = get_renderer()
-    rows = []
-    for name, _subdir in BUNDLED_SKILLS:
-        # Pull the description out of the SKILL.md frontmatter, if any.
-        text = skill_content(name)
-        desc = ""
-        if text.startswith("---\n"):
-            _, _, rest = text.partition("---\n")
-            front, _, _ = rest.partition("---\n")
-            for line in front.splitlines():
-                if line.startswith("description:"):
-                    desc = line.split(":", 1)[1].strip()
-                    break
-        rows.append({"name": name, "description": desc})
+    rows = [{"name": name, "description": frontmatter_description(skill_content(name))} for name, _ in BUNDLED_SKILLS]
+    # A remote skill's description lives in the repository it is fetched from, so
+    # listing it offline would mean a stale copy here. Say where it comes from
+    # instead — omitting it would hide a skill that `install` does write.
+    rows += [
+        {"name": r.name, "description": f"Fetched from {r.repo} ({r.ref}) by `comfy skills install`."}
+        for r in REMOTE_SKILLS
+    ]
 
     if renderer.is_pretty():
         from rich.table import Table

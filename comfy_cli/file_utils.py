@@ -11,10 +11,11 @@ from collections.abc import Callable
 from http import HTTPStatus
 
 import httpx
-import requests
 from pathspec import PathSpec
 
 from comfy_cli import constants, ui
+from comfy_cli._safe_exec import BinaryNotFoundError, resolve_required_binary
+from comfy_cli.http import DEFAULT_HTTP_TIMEOUT, DOWNLOAD_TIMEOUT
 from comfy_cli.output.sanitize import sanitize_value
 
 logger = logging.getLogger(__name__)
@@ -294,9 +295,15 @@ def check_unauthorized(url: str, headers: dict | None = None) -> bool:
     Returns:
         bool: True if the response status code is 401, False otherwise.
     """
+    # Imported lazily: requests costs ~30ms to import and this module is on
+    # the import path of every CLI invocation.
+    import requests
+
     try:
-        response = requests.get(url, headers=headers, allow_redirects=True, stream=True)
-        return response.status_code == 401
+        with requests.get(
+            url, headers=headers, allow_redirects=True, stream=True, timeout=DEFAULT_HTTP_TIMEOUT
+        ) as response:
+            return response.status_code == 401
     except requests.RequestException:
         # If there's an error making the request, we can't determine if it's unauthorized
         return False
@@ -314,6 +321,14 @@ def _poll_aria2_download(download, progress_callback: ProgressCallback | None = 
     removed before the exception propagates: with aria2 the bytes move inside the
     aria2c process, not this one, so simply walking away would leave it happily
     finishing a download the user just cancelled.
+
+    A :class:`KeyboardInterrupt` gets the same treatment, and needs it more.
+    Ctrl-C is what `comfy model download` tells a user to press to stop a
+    foreground transfer — and it lands here, in the poll loop's sleep, not in a
+    progress callback, so `DownloadCancelled` never fires. Without this the
+    interrupted CLI would tear down its destination *claim* on the way out while
+    the aria2c daemon carried on writing to that same destination: the exact
+    unguarded interleaving the claim exists to prevent.
     """
     import time
 
@@ -360,7 +375,7 @@ def _poll_aria2_download(download, progress_callback: ProgressCallback | None = 
                     raise DownloadException("aria2 download was removed before completion")
 
                 time.sleep(0.5)
-        except DownloadCancelled:
+        except (DownloadCancelled, KeyboardInterrupt):
             _remove_aria2_download(download)
             raise
 
@@ -890,9 +905,27 @@ def _load_comfyignore_spec(ignore_filename: str = ".comfyignore") -> PathSpec | 
 
 
 def list_git_tracked_files(base_path: str | os.PathLike = ".") -> list[str]:
+    """Git-tracked files under ``base_path``, or ``[]`` when git can't tell us.
+
+    ``[]`` means "no git answer" and callers (see :func:`zip_files`) treat it as
+    "not a git repository". An *absent* git has always produced that, so it still
+    does. A git that was found and then **refused** must not: the caller would
+    silently fall back to walking the whole directory, so the refusal is raised
+    rather than flattened into the same empty list.
+    """
+    # Resolved outside the tolerant handler below so the two cases stay
+    # distinguishable — ``BinaryNotFoundError`` subclasses ``FileNotFoundError``,
+    # which that handler swallows.
+    try:
+        git_bin = resolve_required_binary("git")
+    except BinaryNotFoundError as exc:
+        if not exc.is_absent:
+            raise
+        return []
+
     try:
         result = subprocess.check_output(
-            ["git", "-C", os.fspath(base_path), "ls-files"],
+            [git_bin, "-C", os.fspath(base_path), "ls-files"],
             text=True,
         )
     except (subprocess.SubprocessError, FileNotFoundError):
@@ -913,7 +946,14 @@ def _is_force_included(rel_path: str, include_prefixes: list[str]) -> bool:
 
 
 def zip_files(zip_filename, includes=None):
-    """Zip git-tracked files respecting optional .comfyignore patterns."""
+    """Zip git-tracked files respecting optional .comfyignore patterns.
+
+    :raises BinaryNotFoundError: ``git`` was found but refused (see
+        :func:`comfy_cli._safe_exec.resolve_required_binary`). The walk-everything
+        fallback below is safe for "this isn't a git repo", but not for "we can't
+        trust git": it would package untracked and gitignored files — ``.env``,
+        keys, venvs — into an archive that ``comfy node publish`` uploads.
+    """
     includes = includes or []
     include_prefixes: list[str] = [_normalize_path(os.path.normpath(include.lstrip("/"))) for include in includes]
 
@@ -1010,9 +1050,11 @@ def zip_files(zip_filename, includes=None):
 
 
 def upload_file_to_signed_url(signed_url: str, file_path: str):
+    import requests  # deferred; see check_unauthorized
+
     with open(file_path, "rb") as f:
         headers = {"Content-Type": "application/zip"}
-        response = requests.put(signed_url, data=f, headers=headers)
+        response = requests.put(signed_url, data=f, headers=headers, timeout=DOWNLOAD_TIMEOUT)
 
         if response.status_code == 200:
             print("Upload successful.")

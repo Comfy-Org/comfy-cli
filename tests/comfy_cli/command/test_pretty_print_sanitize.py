@@ -1,5 +1,5 @@
 """Server-supplied text must not reach the terminal live from *direct*
-``rich.print`` sites (BE-4794).
+``rich.print`` sites.
 
 ``comfy_cli.output.sanitize`` covers everything routed through ``Renderer``,
 but ``Renderer`` is not the only path to the terminal: command modules print
@@ -363,7 +363,7 @@ def test_models_list_folders_table_cells_are_inert(pretty, cloud_catalog):
 
 
 # ---------------------------------------------------------------------------
-# models/models.py — the download-server error text (BE-5023)
+# models/models.py — the download-server error text
 # ---------------------------------------------------------------------------
 #
 # `comfy model download --url <host>` renders whatever the host put in a failed
@@ -500,7 +500,7 @@ def test_download_status_row_error_with_unbalanced_markup_does_not_crash(pretty)
 
 
 # ---------------------------------------------------------------------------
-# jobs.py / system.py / workflow.py — `Table.add_row` cells (BE-6037)
+# jobs.py / system.py / workflow.py — `Table.add_row` cells
 # ---------------------------------------------------------------------------
 #
 # `sanitize.py` names `Table.add_row` as a markup-interpreting sink, and the

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_version_manifest.json",
+  "title": "comfy build version manifest --json data payload",
+  "description": "A cut version's models and runtime policies (DistributionManifest).",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {"models": {"type": "array"}}
+}

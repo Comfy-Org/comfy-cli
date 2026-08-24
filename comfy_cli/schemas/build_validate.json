@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_validate.json",
+  "title": "comfy build validate --json data payload",
+  "description": "The builder's dry-run resolve result (ValidateResult) for a distribution's stored definition.",
+  "type": "object",
+  "additionalProperties": true
+}

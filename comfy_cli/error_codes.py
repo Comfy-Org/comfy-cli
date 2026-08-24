@@ -310,6 +310,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check `details.body` for the server's message",
     ),
     ErrorCode(
+        "cloud_billing_unavailable",
+        "`comfy cloud status` could not read `/api/billing/status`, so there is no tier or "
+        "subscription state to report. Distinct from `cloud_unauthorized` (a rejected "
+        "credential) and from the command's own degraded rows: the workspace, features and "
+        "plans calls each drop a single row when they fail, and only this one is fatal.",
+        "retry shortly; if it persists, contact Comfy support",
+    ),
+    ErrorCode(
         "cloud_timeout",
         "Cloud wait_for_completion exceeded `--timeout`.",
         "raise `--timeout`, or `comfy jobs watch <id> --where cloud`",
@@ -349,6 +357,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "for local filename listing use `comfy models list-folder <folder>`",
     ),
     ErrorCode(
+        "cloud_only_command",
+        "The command requires Comfy Cloud (e.g. `comfy assets library`); there is no local equivalent.",
+        "sign in with `comfy cloud login` and re-run with `--where cloud`",
+    ),
+    ErrorCode(
         "template_fetch_failed",
         "Fetching the per-template workflow JSON from `Comfy-Org/workflow_templates` failed.",
         "check network; if 404, the gallery and templates dir are out of sync — report upstream",
@@ -357,6 +370,20 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "template_workflow_invalid_json",
         "Upstream `templates/<name>.json` was not parseable JSON.",
         "report at https://github.com/Comfy-Org/workflow_templates/issues",
+    ),
+    ErrorCode(
+        "template_ambiguous",
+        "`comfy templates get --where …` matched more than one template; `get` resolves exactly one. "
+        "`details.candidates` carries up to 10 matches (name + title/type/tags/models) and "
+        "`details.matched` the full count.",
+        "add another --where filter (e.g. name=<substring>) to narrow to a single template",
+    ),
+    ErrorCode(
+        "template_filter_invalid",
+        "A `comfy templates get --where` filter was malformed (not key=value), used an unknown key, "
+        "or no filter was given at all. Valid keys: type, category, tag, model, provider, name — "
+        "identical semantics to the `templates ls` flags.",
+        "pass repeatable `--where key=value` pairs, e.g. `--where type=video --where tag=API`",
     ),
     ErrorCode(
         "cancel_failed",
@@ -489,6 +516,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "Requested feature is not available in JSON output mode.",
         "drop `--json` (or pass `--no-json`) for this command",
     ),
+    ErrorCode(
+        "select_no_match",
+        "A `--select <expr>` projection was malformed or matched nothing in the payload. The command "
+        "fails open — `ok` stays true and exit code stays 0 — and `data` carries a bounded key "
+        "inventory of the full payload (`data.inventory`: top-level keys, value types, sizes, one "
+        "nested level of keys) plus this advisory in `data.warnings[]`.",
+        "read `data.inventory` for the payload's real keys, then re-run with a corrected --select; "
+        "grammar: dot path `a.b.c`, array index `a.0.b`, wildcard `items.#.name`, comma multi-select "
+        "`name,inputs`",
+    ),
     # --- skills --------------------------------------------------------------
     ErrorCode(
         "unknown_skill",
@@ -511,6 +548,58 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "workflow_slot_invalid",
         "A slot override failed validation (bad shape, unknown address, etc.).",
         "see `details` — addresses follow `<instance_id>.<input_name>`",
+    ),
+    ErrorCode(
+        "workflow_edit_invalid",
+        "A structured edit (add-node/connect/set-widget/delete-node) failed: "
+        "unknown class_type, missing node, bad slot/widget name, or malformed address.",
+        "run `comfy workflow slots <file>` for widget addresses or `comfy nodes types` for class_types",
+    ),
+    ErrorCode(
+        "workflow_clear_not_batchable",
+        "A batch (`workflow apply` / `workflow foreach`) contained a `clear` op. `clear` wipes the whole "
+        "graph and is standalone-only (docs/op-vocabulary-v1.md: batchable = no), so the batch was "
+        "rejected atomically — nothing was applied.",
+        "run the standalone `comfy workflow clear <file>` first, then apply the remaining ops as a batch",
+    ),
+    ErrorCode(
+        "workflow_reset_doc_not_batchable",
+        "A batch (`workflow apply` / `workflow foreach`) contained a `reset_doc` op. `reset_doc` resets the "
+        "whole document to the empty baseline and erases its replay history, so it is standalone-only "
+        "(docs/op-vocabulary-v1.md: batchable = no) and the batch was rejected atomically — nothing was applied.",
+        "run the standalone `comfy workflow reset-doc <file> --confirm` first, then apply the remaining ops as a batch",
+    ),
+    ErrorCode(
+        "workflow_reset_doc_unconfirmed",
+        "`comfy workflow reset-doc` was called without `--confirm`. The command fails closed: it erases every "
+        "node AND the document's replay history, which no later op can undo.",
+        "re-run with `--confirm` if that is really what you want — otherwise `comfy workflow clear <file>` "
+        "empties the graph while keeping the document's history",
+    ),
+    ErrorCode(
+        "normalized_value",
+        "Warning (not fatal): a set-widget value wasn't an exact COMBO option, so "
+        "the nearest matching option was used. Surfaced in the op's `warnings`.",
+        "see the warning's `from`/`to`; pass an exact option to avoid the fuzzy match",
+    ),
+    ErrorCode(
+        "ui_only_node_skipped",
+        "Warning (not fatal): `workflow capture` skipped a UI-only node (Note/MarkdownNote/"
+        "Reroute/GetNode/SetNode/PrimitiveNode) — those never reach the API and `apply` "
+        "refuses to mint them. Data flow through the node was spliced to the real source.",
+        "expected for annotated workflows; the recipe rebuilds the executable graph, not canvas decoration",
+    ),
+    ErrorCode(
+        "ui_only_link_dropped",
+        "Warning (not fatal): a captured link traced back through UI-only nodes to no real "
+        "source (e.g. a dangling Reroute), so `workflow capture` dropped it.",
+        "check the named node/input; wire it to a real source before capturing if the link matters",
+    ),
+    ErrorCode(
+        "primitive_feed_unrepresentable",
+        "Warning (not fatal): a PrimitiveNode feeds an input that is not a widget on the "
+        "target node, so `workflow capture` could not express its value as a set_widget.",
+        "set the target input from a real node or widget before capturing",
     ),
     # --- workflow fragments / compose ---------------------------------------
     ErrorCode(
@@ -574,6 +663,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "install ffmpeg (e.g. `brew install ffmpeg` / `apt install ffmpeg`)",
     ),
     ErrorCode(
+        "ffmpeg_untrusted",
+        "ffmpeg/ffprobe were found, but only inside the directory you ran from, "
+        "so they were refused rather than executed — the shape of a planted binary.",
+        "run `comfy preview` from a directory that does not contain an ffmpeg/ffprobe binary",
+    ),
+    ErrorCode(
         "preview_unsupported_media",
         "The file has no image/video/audio stream to preview.",
         "pass an image, video, or audio file",
@@ -620,6 +715,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "as a proof that no route exists.",
         "use `--max-depth 6 --max-paths 10` (or any bound >= 1)",
     ),
+    ErrorCode(
+        "expand_miss",
+        "`comfy nodes search --expand-top N` matched a node class but could not resolve its full schema "
+        "from the catalog. Surfaced as a per-hit error entry inside `data.expanded[]` (not as an error "
+        "envelope) — the search itself still succeeds and the other hits still expand.",
+        "the hit itself is still valid; inspect it directly with `comfy nodes show <class_type>`",
+    ),
     # --- file transfer (upload / download) -----------------------------------
     ErrorCode(
         "upload_failed",
@@ -640,6 +742,30 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "(`details.path`). The download was NOT performed — the command fails rather than "
         "exiting 0, so a caller can't mistake the skip for a completed download.",
         "pass `--filename` to save under a different name, or remove the existing file",
+    ),
+    ErrorCode(
+        "model_download_in_flight",
+        "`comfy model download` refused to start because a live download is already writing to "
+        "the same destination (`details.path`). `details.download_id` names that download, "
+        "`details.status` is its current status, and `details.kind` is `background` (a detached "
+        "worker) or `foreground` (a `comfy model download` running in another terminal). The httpx "
+        "downloader streams into a `.part` sibling, so the destination stays absent until the "
+        "transfer completes — without this check two submissions would both run and the later one "
+        "would silently overwrite the earlier; under `--downloader aria2`, which writes straight to "
+        "the destination, they would interleave into the same file.",
+        "track it with `comfy model download-status <id>`; a background download can be stopped "
+        "with `comfy model download-cancel <id>`, a foreground one with Ctrl-C in its own terminal",
+    ),
+    ErrorCode(
+        "model_download_foreground_cancel",
+        "`comfy model download-cancel` refused to cancel a download that is running in the "
+        "foreground of another terminal (`details.id`, `details.pid`). A background download runs in "
+        "its own session, so cancelling it signals only the worker's process group; a foreground "
+        "download's recorded pid is the user's own CLI process, which shares the terminal's "
+        "foreground process group — signalling that group would kill the surrounding shell job "
+        "rather than just the transfer. Once the foreground process is gone its record reconciles "
+        "to `failed` and `download-cancel` will sweep the partial file as usual.",
+        "interrupt it with Ctrl-C in the terminal running it",
     ),
     ErrorCode(
         "hf_unauthorized",
@@ -666,7 +792,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     # --- background model downloads (`model download --background`) ----------
     ErrorCode(
         "download_not_found",
-        "No background download state file matches the given download id.",
+        "No download state file matches the given download id. Both `--background` submissions and plain "
+        "foreground `comfy model download` runs write one, so an id that resolves to neither was never "
+        "written, or its record has already been pruned.",
         "list the known downloads with `comfy model downloads`",
     ),
     ErrorCode(
@@ -773,6 +901,21 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`generate --emit-workflow` could not build the partner-node workflow.",
         "check the model name and that all required inputs are provided",
     ),
+    # --- custom node registry ------------------------------------------------
+    ErrorCode(
+        "node_publish_failed",
+        "Publishing a custom-node version to the registry failed: either a "
+        "client-side validation gap (missing publisher id / project name in "
+        "pyproject.toml) or a non-2xx from the registry. `details.status` and "
+        "`details.body` carry the response when it was an HTTP failure.",
+        "check `details.body`; ensure `[tool.comfy] publisher_id` and `[project] name` are set, and the token is valid",
+    ),
+    ErrorCode(
+        "registry_install_failed",
+        "`comfy node registry-install` fetching a custom node from the registry failed with a non-2xx. "
+        "`details.status` and `details.body` carry the response.",
+        "check the node id and version exist in the registry (`comfy node registry-list`); check `details.body`",
+    ),
     ErrorCode(
         "spend_consent_required",
         "A credit-spending command hit its spend gate with no consent, so it failed closed — "
@@ -803,6 +946,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "version_switch_unknown_version",
         "`comfy update comfy --version X` could not resolve X to a ComfyUI tag; the workspace was left untouched.",
         "run `git tag --list 'v*'` in your ComfyUI workspace to see every available version",
+    ),
+    ErrorCode(
+        "version_switch_git_unavailable",
+        "`comfy update comfy --version X` could not use git at all — it is absent from PATH, or the "
+        "only match resolved into the directory you ran from and was refused. Reported separately so "
+        "it isn't misread as the requested version not existing.",
+        "a version switch needs a usable git — install it, or run from a directory that has no git binary in it",
     ),
     ErrorCode(
         "version_switch_dirty_tree",
@@ -890,6 +1040,86 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "for that pack's latest version, so the row carries `declared: null` rather than an empty list — the "
         'API cannot distinguish "declares nothing" from "field absent". Surfaced in `data.warnings[]`.',
         "the pack publisher must publish a version declaring its dependencies; nothing to fix locally",
+    ),
+    # --- build (the serverless builder) --------------------------------------
+    ErrorCode(
+        "build_models_dir_missing",
+        "`comfy build scan` could not find a models/ directory to scan. `details.path` carries the "
+        "resolved path. Either no workspace is selected or the given `--models-dir` doesn't exist.",
+        "run from a ComfyUI workspace, or pass `--models-dir <path>` pointing at your models/ folder",
+    ),
+    ErrorCode(
+        "build_output_write_error",
+        "`comfy build scan --output <path>` could not write the definition file. `details` carries the "
+        "path and the underlying OS error.",
+        "check the directory exists and is writable",
+    ),
+    ErrorCode(
+        "build_definition_invalid",
+        "`comfy build create --from <path>` could not read the definition file, or it isn't a "
+        "distribution definition (missing/invalid JSON or no `models` key). `details.path` carries the path.",
+        "pass a file produced by `comfy build scan -o <path>`",
+    ),
+    ErrorCode(
+        "build_not_signed_in",
+        "`comfy build create --execute` found no usable Cloud JWT — the builder authenticates with the "
+        "OAuth session token, and there isn't a valid one.",
+        "run `comfy cloud login` first",
+    ),
+    ErrorCode(
+        "build_upload_unavailable",
+        "`comfy build create --execute` couldn't produce a private-blob upload: the model bytes weren't "
+        "found (pass `--models-dir`), or a local (non-git) custom node needs packaging, which isn't supported yet.",
+        "pass `--models-dir <path>` so model bytes can be located; use git-based custom nodes for now",
+    ),
+    ErrorCode(
+        "build_builder_error",
+        "A `comfy build` builder call got an error from the builder API (HTTP error, network failure, or "
+        "an unexpected response shape). `details`/message carry the underlying error.",
+        "check the builder URL and your access; retry, and inspect the message for the specific failure",
+    ),
+    ErrorCode(
+        "build_not_enabled",
+        "The builder returned 403 FEATURE_NOT_ENABLED: the developer platform is in limited beta and the "
+        "signed-in account is not enabled for it yet.",
+        "the developer platform is in limited beta; request access, then sign in with an enabled account",
+    ),
+    ErrorCode(
+        "build_missing_comfy_version",
+        "`comfy build create` was given a definition with no `baseComfyVersion`. The builder can create "
+        "the distribution but cannot cut a build without a pinned ComfyUI version, so create fails fast here "
+        "instead of surfacing a raw builder 400 after doing work. `details.path` carries the definition path.",
+        "re-scan with `--comfy-version <ref>` (a tag, branch, or commit), or add a `baseComfyVersion` to the definition JSON",
+    ),
+    ErrorCode(
+        "build_registry_pin_missing",
+        "`comfy build create --execute` sent the definition to the builder's snapshot importer, which "
+        "could not vouch for one or more custom node pins and returned a definition without them. Creating "
+        "anyway would build an image quietly missing what the user asked for, so create stops. The advisories "
+        "printed above name why each pack could not be carried.",
+        "edit the definition to name a published registry version, or remove the pack",
+    ),
+    ErrorCode(
+        "build_delete_needs_confirm",
+        "`comfy build delete` was run without `--yes` in a non-interactive context (JSON output, an agent, "
+        "or a pipe) where there is no TTY to confirm on. Delete is refused rather than blocking on a prompt.",
+        "pass `--yes` to confirm the delete when running non-interactively",
+    ),
+    # --- knowledge -----------------------------------------------------------
+    ErrorCode(
+        "knowledge_unavailable",
+        "No knowledge bundle could be loaded (no COMFY_KNOWLEDGE_FILE, no cache, no reachable COMFY_KNOWLEDGE_URL).",
+        "set COMFY_KNOWLEDGE_FILE to a knowledge.json or COMFY_KNOWLEDGE_URL to fetch one; run `comfy knowledge status`",
+    ),
+    ErrorCode(
+        "knowledge_unknown_model",
+        "`comfy knowledge resolve` found no row for the alias or id. `details.close_matches` lists near names.",
+        "try one of `details.close_matches`",
+    ),
+    ErrorCode(
+        "knowledge_unknown_capability",
+        "`comfy knowledge pick` found no capability with that id. `details.known` lists them all.",
+        "pick one of `details.known`",
     ),
 )
 

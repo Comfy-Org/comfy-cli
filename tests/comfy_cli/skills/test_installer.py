@@ -2,23 +2,56 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
+from comfy_cli import skills as skills_pkg
 from comfy_cli.caller import Caller
 from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
 from comfy_cli.skills import (
+    REMOTE_SKILLS,
     RETIRED_SKILLS,
+    RemoteSkillUnavailable,
+    SkillSource,
     bundled_skill_names,
+    default_skill_names,
+    frontmatter_description,
     install,
     plan_install,
     prune_retired,
+    remote_skill_names,
     skill_content,
     uninstall,
 )
 from comfy_cli.skills.command import app
+
+REMOTE_SKILL_MD = """---
+name: comfy-build
+description: A test double for the fetched builder skill.
+---
+
+# comfy-build
+
+Body.
+"""
+
+
+@pytest.fixture(autouse=True)
+def stub_remote_fetch(monkeypatch: pytest.MonkeyPatch):
+    """No test in this module reaches the network.
+
+    Autouse rather than opt-in because an argument-free ``install()`` now writes
+    a remote skill too, so every existing test would otherwise depend on GitHub
+    being up. Tests that want a failing fetch re-patch this themselves.
+    """
+    monkeypatch.setattr(
+        skills_pkg,
+        "fetch_remote_skill",
+        lambda remote: SkillSource(name=remote.name, content=REMOTE_SKILL_MD, bundled=False),
+    )
 
 
 def _force_json_renderer():
@@ -42,7 +75,6 @@ def _force_json_renderer():
 def test_bundles_expected_skills():
     names = bundled_skill_names()
     assert "comfy" in names
-    assert "comfy-fragments" in names
     assert "comfy-debug" in names
     assert "comfy-relay" in names
 
@@ -77,12 +109,6 @@ def test_comfy_skill_covers_cloud_setup_and_routing():
         assert needle in text, f"comfy skill should mention {needle}"
 
 
-def test_comfy_fragments_skill_covers_composition():
-    text = skill_content("comfy-fragments")
-    for needle in ("workflow compose", "_fragment", "blueprint"):
-        assert needle in text, f"comfy-fragments skill should mention {needle}"
-
-
 def test_skill_content_rejects_unknown_name():
     with pytest.raises(ValueError) as exc:
         skill_content("not-a-real-skill")
@@ -98,7 +124,7 @@ def test_plan_install_default_covers_every_skill_and_target(tmp_path: Path, monk
     monkeypatch.setenv("HOME", str(tmp_path))
     plans = plan_install(scope="user", project_root=tmp_path / "anywhere")
     skill_target_pairs = {(p.skill, p.kind) for p in plans}
-    expected = {(name, kind) for name in bundled_skill_names() for kind in ("claude-code", "cursor", "agents-md")}
+    expected = {(name, kind) for name in default_skill_names() for kind in ("claude-code", "cursor", "agents-md")}
     assert skill_target_pairs == expected
 
 
@@ -111,8 +137,8 @@ def test_plan_install_project_scope_paths(tmp_path: Path):
 
 
 def test_plan_install_filters_by_skill(tmp_path: Path):
-    plans = plan_install(scope="project", project_root=tmp_path, skills=["comfy", "comfy-fragments"])
-    assert {p.skill for p in plans} == {"comfy", "comfy-fragments"}
+    plans = plan_install(scope="project", project_root=tmp_path, skills=["comfy", "comfy-debug"])
+    assert {p.skill for p in plans} == {"comfy", "comfy-debug"}
 
 
 # ---------------------------------------------------------------------------
@@ -144,11 +170,11 @@ def test_install_one_skill_only(tmp_path: Path):
     install(scope="project", project_root=tmp_path, skills=["comfy-debug"])
     assert (tmp_path / ".claude/skills/comfy-debug/SKILL.md").exists()
     assert not (tmp_path / ".claude/skills/comfy/SKILL.md").exists()
-    assert not (tmp_path / ".claude/skills/comfy-fragments/SKILL.md").exists()
+    assert not (tmp_path / ".claude/skills/comfy-relay/SKILL.md").exists()
     agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "<!-- comfy-debug:start -->" in agents
     assert "<!-- comfy:start -->" not in agents
-    assert "<!-- comfy-fragments:start -->" not in agents
+    assert "<!-- comfy-relay:start -->" not in agents
 
 
 def test_install_is_idempotent_across_skills(tmp_path: Path):
@@ -565,3 +591,323 @@ def test_status_reports_stale_and_modified(tmp_path: Path, monkeypatch: pytest.M
         assert debug_row3["state"] == "stale"
     finally:
         reset_renderer_for_testing()
+
+
+# ---------------------------------------------------------------------------
+# Remote skills — fetched from their own repository at install time
+# ---------------------------------------------------------------------------
+
+
+def test_remote_skills_are_not_also_bundled():
+    assert set(remote_skill_names()).isdisjoint(set(bundled_skill_names()))
+    assert set(default_skill_names()) == set(bundled_skill_names()) | set(remote_skill_names())
+
+
+def test_remote_skill_url_is_built_from_repo_ref_and_path():
+    remote = REMOTE_SKILLS[0]
+    assert remote.url == f"https://raw.githubusercontent.com/{remote.repo}/{remote.ref}/{remote.path}"
+
+
+def test_install_writes_the_fetched_skill_to_every_target(tmp_path: Path):
+    results = install(scope="project", project_root=tmp_path)
+    assert all(r.action == "wrote" for r in results), [r for r in results if r.action != "wrote"]
+
+    name = REMOTE_SKILLS[0].name
+    assert (tmp_path / f".claude/skills/{name}/SKILL.md").read_text(encoding="utf-8") == REMOTE_SKILL_MD
+    assert (tmp_path / f".cursor/rules/{name}.mdc").exists()
+    assert f"<!-- {name}:start -->" in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_failed_fetch_skips_only_that_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """An offline machine gets the bundled skills and is told which one it missed."""
+
+    def offline(remote):
+        raise RemoteSkillUnavailable(f"could not fetch {remote.url}: [Errno 8] nodename nor servname provided")
+
+    monkeypatch.setattr(skills_pkg, "fetch_remote_skill", offline)
+
+    results = install(scope="project", project_root=tmp_path)
+    name = REMOTE_SKILLS[0].name
+
+    by_skill: dict[str, set[str]] = {}
+    for r in results:
+        by_skill.setdefault(r.skill, set()).add(r.action)
+    for bundled in bundled_skill_names():
+        assert by_skill[bundled] == {"wrote"}, f"{bundled} should still install"
+    assert by_skill[name] == {"skipped"}
+
+    skipped = [r for r in results if r.skill == name]
+    assert len(skipped) == 3, "one skipped result per target"
+    assert all("could not fetch" in (r.reason or "") for r in skipped)
+
+    assert not (tmp_path / f".claude/skills/{name}/SKILL.md").exists()
+    assert f"<!-- {name}:start -->" not in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_uninstall_removes_the_fetched_skill(tmp_path: Path):
+    name = REMOTE_SKILLS[0].name
+    install(scope="project", project_root=tmp_path)
+    assert (tmp_path / f".claude/skills/{name}/SKILL.md").exists()
+
+    uninstall(scope="project", project_root=tmp_path)
+    assert not (tmp_path / f".claude/skills/{name}/SKILL.md").exists()
+    assert not (tmp_path / f".cursor/rules/{name}.mdc").exists()
+    assert f"<!-- {name}:start -->" not in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_manifest_records_where_the_skill_was_fetched_from(tmp_path: Path):
+    from comfy_cli.skills import read_manifest
+
+    remote = REMOTE_SKILLS[0]
+    install(scope="project", project_root=tmp_path, skills=[remote.name], targets=["claude-code"])
+
+    entry = read_manifest()[str(tmp_path / ".claude" / "skills" / remote.name / "SKILL.md")]
+    assert entry["source"] == {"repo": remote.repo, "ref": remote.ref, "path": remote.path}
+
+    # A bundled skill has no source — it came from this package.
+    install(scope="project", project_root=tmp_path, skills=["comfy-debug"], targets=["claude-code"])
+    bundled_entry = read_manifest()[str(tmp_path / ".claude" / "skills" / "comfy-debug" / "SKILL.md")]
+    assert "source" not in bundled_entry
+
+
+def test_status_reports_the_fetched_skill_missing_then_current(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A machine that never fetched shows the skill as missing, not as absent from the list."""
+    import json as _json
+
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    name = REMOTE_SKILLS[0].name
+
+    def _status_row():
+        _force_json_renderer()
+        try:
+            result = runner.invoke(app, ["status", "--scope", "project"])
+        finally:
+            reset_renderer_for_testing()
+        assert result.exit_code == 0, result.output
+        rows = _json.loads([ln for ln in result.output.splitlines() if ln.strip()][-1])["data"]["targets"]
+        return next(r for r in rows if r["skill"] == name and r["kind"] == "claude-code")
+
+    assert _status_row()["state"] == "missing"
+    install(scope="project", project_root=tmp_path, skills=[name], targets=["claude-code"])
+    # No local copy to compare against, so matching the manifest is what "current" means.
+    assert _status_row()["state"] == "current"
+
+
+def test_status_does_not_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Planning is names-only, so `status` works offline and never hangs on a fetch."""
+
+    def boom(remote):
+        raise AssertionError("status must not fetch")
+
+    monkeypatch.setattr(skills_pkg, "fetch_remote_skill", boom)
+    plans = plan_install(scope="project", project_root=tmp_path)
+    assert REMOTE_SKILLS[0].name in {p.skill for p in plans}
+
+
+# ---------------------------------------------------------------------------
+# The fetch itself — one HTTP read, then the path-install contract
+# ---------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self, n: int = -1) -> bytes:
+        return self._body if n < 0 else self._body[:n]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _real_fetch(monkeypatch: pytest.MonkeyPatch, body: bytes | Exception):
+    """Drop the autouse stub and return the real fetch, wired to a fake socket.
+
+    Order matters: the stub has to come off before the name is looked up, or
+    the test drives the double it was trying to bypass.
+    """
+    monkeypatch.undo()
+
+    def fake_urlopen(url, timeout=None):
+        if isinstance(body, Exception):
+            raise body
+        return _FakeResponse(body)
+
+    monkeypatch.setattr("comfy_cli.http.plain_urlopen", fake_urlopen)
+    return skills_pkg.fetch_remote_skill
+
+
+def test_fetch_returns_the_downloaded_skill(monkeypatch: pytest.MonkeyPatch):
+    src = _real_fetch(monkeypatch, REMOTE_SKILL_MD.encode("utf-8"))(REMOTE_SKILLS[0])
+    assert src.name == "comfy-build"
+    assert src.bundled is False
+    assert src.content == REMOTE_SKILL_MD
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (b"no frontmatter here\n", "missing frontmatter"),
+        (b"---\nname: something-else\ndescription: d.\n---\nBody.\n", "must match directory name"),
+        (b"---\nname: comfy-build\n---\nBody.\n", "non-empty `description:`"),
+        (b"\xff\xfe not utf-8", "not UTF-8 text"),
+    ],
+)
+def test_fetch_rejects_a_body_that_is_not_a_valid_skill(monkeypatch: pytest.MonkeyPatch, body: bytes, expected: str):
+    """The fetch reuses path-install validation, so a renamed or malformed skill
+    is refused rather than written under a directory it does not own."""
+    fetch = _real_fetch(monkeypatch, body)
+    with pytest.raises(RemoteSkillUnavailable, match=expected):
+        fetch(REMOTE_SKILLS[0])
+
+
+def test_fetch_turns_a_transport_error_into_unavailable(monkeypatch: pytest.MonkeyPatch):
+    fetch = _real_fetch(monkeypatch, OSError("connection refused"))
+    with pytest.raises(RemoteSkillUnavailable, match="could not fetch"):
+        fetch(REMOTE_SKILLS[0])
+
+
+def test_fetch_refuses_an_oversize_body(monkeypatch: pytest.MonkeyPatch):
+    from comfy_cli.skills import _REMOTE_SKILL_MAX_BYTES
+
+    fetch = _real_fetch(monkeypatch, b"x" * (_REMOTE_SKILL_MAX_BYTES + 1))
+    with pytest.raises(RemoteSkillUnavailable, match="byte cap"):
+        fetch(REMOTE_SKILLS[0])
+
+
+# ---------------------------------------------------------------------------
+# Cursor rules carry the skill's own description
+# ---------------------------------------------------------------------------
+
+
+def test_cursor_rule_uses_the_skill_frontmatter_description(tmp_path: Path):
+    """Cursor decides whether to surface a rule from this line, so it has to be
+    the skill's real description rather than a generic label."""
+    install(scope="project", project_root=tmp_path, targets=["cursor"])
+
+    def _described(name: str) -> str:
+        rule = (tmp_path / f".cursor/rules/{name}.mdc").read_text(encoding="utf-8")
+        return json.loads(next(ln for ln in rule.splitlines() if ln.startswith("description:"))[len("description: ") :])
+
+    assert _described(REMOTE_SKILLS[0].name) == "A test double for the fetched builder skill."
+    for name in bundled_skill_names():
+        assert _described(name) == frontmatter_description(skill_content(name))
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Build: a distribution, then deploy it.",
+        "#1 way to break YAML",
+        'Say "hello" to the parser',
+        "Costs 50% @ {runtime}: careful",
+    ],
+)
+def test_cursor_rule_frontmatter_parses_for_any_description(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, description: str
+):
+    """A skill's description is its own text, and a remote skill's is not ours to
+    constrain, so the rule has to stay loadable whatever it contains."""
+    yaml = pytest.importorskip("yaml")
+
+    monkeypatch.setattr(
+        skills_pkg,
+        "fetch_remote_skill",
+        lambda remote: SkillSource(
+            name=remote.name,
+            content=f"---\nname: {remote.name}\ndescription: {description}\n---\n\nBody.\n",
+            bundled=False,
+        ),
+    )
+    install(scope="project", project_root=tmp_path, skills=[REMOTE_SKILLS[0].name], targets=["cursor"])
+
+    rule = (tmp_path / f".cursor/rules/{REMOTE_SKILLS[0].name}.mdc").read_text(encoding="utf-8")
+    front = rule.split("---\n")[1]
+    assert yaml.safe_load(front)["description"] == description
+
+
+def test_cursor_description_falls_back_when_frontmatter_has_none(tmp_path: Path):
+    from comfy_cli.skills import _cursor_description_for
+
+    assert _cursor_description_for("x", "# no frontmatter\n") == "comfy CLI skill: x"
+
+
+# ---------------------------------------------------------------------------
+# Token resolution — the default set is names, never paths
+# ---------------------------------------------------------------------------
+
+
+def test_cwd_directory_named_like_a_skill_does_not_shadow_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Every ComfyUI checkout has a `comfy/` directory, and `comfy` is a skill.
+
+    Resolving the default set by path would make a plain install crash there, or
+    quietly install whatever that directory contained into the user's agent config.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "comfy").mkdir()
+    (tmp_path / "comfy" / "SKILL.md").write_text(
+        "---\nname: comfy\ndescription: Impostor.\n---\n\nNot the bundled skill.\n", encoding="utf-8"
+    )
+    target = tmp_path / "target"
+    target.mkdir()
+
+    results = install(scope="project", project_root=target, targets=["claude-code"])
+
+    assert all(r.action == "wrote" for r in results), [r for r in results if r.action != "wrote"]
+    installed = (target / ".claude/skills/comfy/SKILL.md").read_text(encoding="utf-8")
+    assert installed == skill_content("comfy")
+    assert "Impostor" not in installed
+
+
+def test_plan_and_install_agree_on_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Both go through one resolution, so a name can never appear in one and not the other."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "comfy").mkdir()
+    planned = {p.skill for p in plan_install(scope="project", project_root=tmp_path / "t")}
+    installed = {r.skill for r in install(scope="project", project_root=tmp_path / "t", dry_run=True)}
+    assert planned == installed == set(default_skill_names())
+
+
+def test_path_installed_skill_gets_no_remote_source(tmp_path: Path):
+    """A local skill that happens to share the remote one's name did not come from the repository."""
+    from comfy_cli.skills import read_manifest
+
+    name = REMOTE_SKILLS[0].name
+    skill_dir = tmp_path / name
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Local.\n---\n\nLocal.\n", "utf-8")
+    target = tmp_path / "target"
+    target.mkdir()
+
+    install(scope="project", project_root=target, skills=[str(skill_dir)], targets=["claude-code"])
+
+    entry = read_manifest()[str(target / ".claude" / "skills" / name / "SKILL.md")]
+    assert "source" not in entry
+
+
+def test_staging_failure_skips_rather_than_aborting(monkeypatch: pytest.MonkeyPatch):
+    """A full disk or unwritable TMPDIR must not take the whole install down with it."""
+    fetch = _real_fetch(monkeypatch, REMOTE_SKILL_MD.encode("utf-8"))
+
+    def no_tmp(*a, **kw):
+        raise OSError("[Errno 28] No space left on device")
+
+    monkeypatch.setattr(skills_pkg.tempfile, "TemporaryDirectory", no_tmp)
+    with pytest.raises(RemoteSkillUnavailable, match="could not stage"):
+        fetch(REMOTE_SKILLS[0])
+
+
+def test_description_is_read_from_frontmatter_only():
+    """A `description:` line in the body documents something else."""
+    body_only = "# No frontmatter\n\ndescription: not mine\n"
+    assert frontmatter_description(body_only) == ""
+
+    with_example = (
+        "---\nname: x\ndescription: The real one.\n---\n\n"
+        "Example config:\n\n```yaml\ndescription: an example, not this skill\n```\n"
+    )
+    assert frontmatter_description(with_example) == "The real one."

@@ -251,6 +251,7 @@ class Renderer:
         where: str | None = None,
         changed: bool | None = None,
         ok: bool = True,
+        extra: Mapping[str, Any] | None = None,
     ) -> None:
         """Emit the final envelope. In pretty mode this is a no-op (data was
         already shown by ``print``/``success``/etc).
@@ -260,6 +261,12 @@ class Renderer:
         on an invalid workflow, which still emits its error/warning payload as
         data) pass ``ok=False`` so the envelope's ``ok`` agrees with the
         process exit code.
+
+        ``extra`` merges additional top-level fields into the envelope
+        (additive-optional under envelope/1, e.g. ``--select``'s
+        ``selected_bytes``/``total_bytes``). Core envelope keys are never
+        overridden; when ``extra`` is absent the envelope is byte-identical to
+        an emit without it.
         """
         if self.is_pretty():
             return
@@ -274,6 +281,9 @@ class Renderer:
             changed=changed,
             error=None,
         )
+        if extra:
+            for key, value in extra.items():
+                envelope.setdefault(key, value)
         self._write_json_line(envelope)
         self._envelope_emitted = True
 
@@ -286,6 +296,7 @@ class Renderer:
         details: Mapping[str, Any] | None = None,
         exit_code: int = 1,
         command: str | None = None,
+        where: str | None = None,
     ) -> None:
         """Emit a structured error. In pretty mode, prints red message + yellow
         hint. In JSON mode, emits an envelope with ``ok=false`` and the error
@@ -316,7 +327,7 @@ class Renderer:
             ok=False,
             command=command or self.command,
             data=None,
-            where=self.where,
+            where=where or self.where,
             changed=None,
             error={
                 "code": code,

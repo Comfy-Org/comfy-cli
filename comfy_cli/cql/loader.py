@@ -1,19 +1,21 @@
-"""Build a CQL-shaped graph dict from sources.
+"""Shape and load CQL ``object_info`` graphs.
 
-Sources, in priority order:
+This module contains two things:
 
-1. A local file (``--input path``). May be:
-   - A raw ``object_info`` JSON dump (the response from ``/object_info``).
-   - An API-format workflow JSON.
-   - An already-shaped CQL graph (``{"nodes": [...], "inputs": [...]}``).
-2. A local ComfyUI server's ``/object_info`` endpoint (``--host`` / ``--port``).
+- ``normalize`` — turn any supported input (a raw ``object_info`` dump, an
+  API-format workflow, or an already-shaped CQL graph) into the uniform
+  ``{"nodes": [...], "inputs": [...], "categories": [...]}`` dict the engine
+  runs on. It is intentionally permissive: anything dict-shaped that looks
+  like one of those formats is accepted.
+- ``resilient_load_object_info`` — a cache + refresh-retry + stale-fallback
+  wrapper over the engine's loaders (``comfy_cli.cql.engine._load_from_file``
+  / ``_load_from_target``). It auto-caches every successful fetch per host,
+  retries once after a token refresh on failure, and falls back to the cached
+  dump (with a stderr warning) when the retry still fails.
 
-The loader is intentionally permissive: anything dict-shaped that looks like
-one of those formats is normalized into ``{"nodes": [...], "inputs": [...],
-"categories": [...]}`` so the engine can run uniformly.
-
-This module performs only local I/O. Network calls hit ``http://host:port``
-and are short-circuited when no host is provided.
+The live network fetch and its security guards (loopback check, no-redirect
+opener, byte cap, cloud HTTPS+auth) live in ``comfy_cli.cql.engine`` — this
+module never opens a socket itself.
 """
 
 from __future__ import annotations
@@ -22,96 +24,12 @@ import hashlib
 import json
 import os
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
+import time
 from pathlib import Path
 from typing import Any
 
-from comfy_cli.cql._net import is_loopback_host
 from comfy_cli.cql.errors import CQLRuntimeError
 from comfy_cli.file_utils import atomic_write_text
-from comfy_cli.http import NoRedirectHandler, build_http_only_opener
-
-# Cap raw bytes read from disk or the network. Real `object_info` dumps are a
-# few MB; anything past 256 MiB is almost certainly a wrong path or a hostile
-# server and would just OOM the CLI before json.loads even fails.
-MAX_INPUT_BYTES = 256 * 1024 * 1024
-
-
-_LOADER_OPENER = build_http_only_opener(NoRedirectHandler())
-
-
-def load_graph(
-    *,
-    input_path: str | None = None,
-    host: str | None = None,
-    port: int | None = None,
-    timeout: float = 5.0,
-) -> dict[str, Any]:
-    if input_path:
-        return _load_from_file(input_path)
-    if host and port:
-        return _load_from_server(host, int(port), timeout=timeout)
-    raise CQLRuntimeError(
-        "no graph source available",
-        details={"hint": "pass --input <path> or --host/--port pointing at a ComfyUI server"},
-    )
-
-
-def _load_from_file(path: str) -> dict[str, Any]:
-    p = Path(path).expanduser()
-    try:
-        size = p.stat().st_size
-    except OSError as e:
-        raise CQLRuntimeError(f"cannot stat {p}: {e}") from e
-    if size > MAX_INPUT_BYTES:
-        raise CQLRuntimeError(
-            f"{p} is {size} bytes, exceeds MAX_INPUT_BYTES={MAX_INPUT_BYTES}",
-            details={"hint": "shrink the input or raise MAX_INPUT_BYTES in cql.loader"},
-        )
-    try:
-        raw = p.read_text(encoding="utf-8")
-    except OSError as e:
-        raise CQLRuntimeError(f"cannot read {p}: {e}") from e
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise CQLRuntimeError(f"{p} is not valid JSON: {e}") from e
-    return normalize(data)
-
-
-def _load_from_server(host: str, port: int, *, timeout: float) -> dict[str, Any]:
-    url = f"http://{host}:{port}/object_info"
-    # Refuse anything that isn't a localhost-ish target — we don't want CQL
-    # silently sending traffic to a remote box. (Cloud CQL goes through its
-    # own path; this loader is local-only by design.)
-    parsed = urllib.parse.urlsplit(url)
-    hostname = (parsed.hostname or "").strip().lower()
-    if not is_loopback_host(hostname):
-        raise CQLRuntimeError(
-            f"refusing non-loopback CQL server target: {host}",
-            details={"hint": "pass --input <path> for remote object_info dumps"},
-        )
-    try:
-        with _LOADER_OPENER.open(url, timeout=timeout) as resp:
-            # Bounded read so a misbehaving server can't OOM us.
-            raw = resp.read(MAX_INPUT_BYTES + 1)
-            if len(raw) > MAX_INPUT_BYTES:
-                raise CQLRuntimeError(
-                    f"server response exceeds MAX_INPUT_BYTES={MAX_INPUT_BYTES}",
-                    details={"host": host, "port": port},
-                )
-            data = json.loads(raw)
-    except urllib.error.URLError as e:
-        raise CQLRuntimeError(
-            f"failed to reach {url}: {e.reason if hasattr(e, 'reason') else e}",
-            details={"host": host, "port": port},
-        ) from e
-    except (json.JSONDecodeError, OSError) as e:
-        raise CQLRuntimeError(f"server returned invalid object_info: {e}") from e
-    return normalize(data)
-
 
 # ---- normalization --------------------------------------------------------
 
@@ -267,9 +185,12 @@ def _from_api_workflow(data: dict[str, Any]) -> dict[str, Any]:
 # raw object_info path didn't leverage it, and there was no offline fallback.
 #
 # ``resilient_load_object_info`` wraps the engine's network fetch with:
-#   1. auto-cache of every successful fetch (per host),
-#   2. one refresh-and-retry on failure, and
-#   3. a stale-cache fallback (with a clear stderr warning) when the retry
+#   1. a cache-first TTL gate: a cache entry younger than the TTL (default
+#      10 minutes, ``COMFY_OBJECT_INFO_TTL`` seconds to override, ``0`` to
+#      always fetch) is served without any network call,
+#   2. auto-cache of every successful fetch (per host),
+#   3. one refresh-and-retry on failure, and
+#   4. a stale-cache fallback (with a clear stderr warning) when the retry
 #      still fails — only raising the original error when no cache exists.
 #
 # An explicit ``--input <object_info.json>`` always wins and is never cached.
@@ -336,6 +257,51 @@ def read_object_info_cache(host_key: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+# Cache-first TTL policy. A cache entry younger than this is served without a
+# network call; the entry's age is its file mtime (``write_object_info_cache``
+# writes via tmp + ``os.replace``, so mtime == fetch time).
+DEFAULT_OBJECT_INFO_TTL_SECONDS = 600.0
+OBJECT_INFO_TTL_ENV = "COMFY_OBJECT_INFO_TTL"
+
+
+def object_info_cache_ttl() -> float:
+    """TTL (seconds) for the cache-first object_info gate.
+
+    Reads ``COMFY_OBJECT_INFO_TTL``; unset/blank/unparseable values fall back
+    to the 10-minute default. ``0`` (or any value <= 0) disables the
+    cache-first gate entirely — every call fetches live, restoring the
+    pre-TTL behavior (the stale-cache *failure* fallback still applies).
+    """
+    raw = os.environ.get(OBJECT_INFO_TTL_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_OBJECT_INFO_TTL_SECONDS
+    try:
+        ttl = float(raw)
+    except ValueError:
+        return DEFAULT_OBJECT_INFO_TTL_SECONDS
+    return max(ttl, 0.0)
+
+
+def read_fresh_object_info_cache(host_key: str, ttl: float) -> dict[str, Any] | None:
+    """Return the cached dump for ``host_key`` iff it is younger than ``ttl``.
+
+    Freshness is judged by the cache file's mtime. Returns ``None`` when the
+    TTL gate is disabled (``ttl <= 0``), the file is missing/unreadable, the
+    entry has expired, or the mtime is in the future (clock skew — treat as
+    expired rather than trusting a timestamp we can't reason about).
+    """
+    if ttl <= 0:
+        return None
+    path = object_info_cache_path(host_key)
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        return None
+    if age < 0 or age >= ttl:
+        return None
+    return read_object_info_cache(host_key)
+
+
 def _resolve_host_key(mode: str, host: str | None, port: int | None) -> str:
     """Resolve the cache key (the target base URL) without doing any I/O.
 
@@ -361,18 +327,24 @@ def resilient_load_object_info(
     _warn=None,
     on_stale=None,
 ) -> dict[str, Any]:
-    """Fetch ``object_info`` with cache + refresh-retry + stale fallback.
+    """Fetch ``object_info`` cache-first, with refresh-retry + stale fallback.
 
     Resolution order:
 
     1. ``input_path`` — explicit offline dump always wins; never cached.
-    2. Live fetch via the engine. On success, write the per-host cache.
-    3. On failure: attempt ``ensure_fresh_session`` and retry the fetch ONCE.
+    2. Cache-first TTL gate: a per-host cache entry younger than the TTL
+       (default 10 minutes; ``COMFY_OBJECT_INFO_TTL`` seconds to override,
+       ``0`` to always fetch live) is returned with NO network call.
+    3. Live fetch via the engine. On success, write the per-host cache.
+    4. On failure: attempt ``ensure_fresh_session`` and retry the fetch ONCE.
        On success, write the cache.
-    4. Still failing: fall back to the cached dump (if any) with a clear
-       stderr WARNING that it may be stale.
-    5. No cache: re-raise the original ``LoadError`` (callers map it to the
+    5. Still failing: fall back to the cached dump (if any, regardless of
+       age) with a clear stderr WARNING that it may be stale.
+    6. No cache: re-raise the original ``LoadError`` (callers map it to the
        ``cql_no_graph`` envelope with their existing hint).
+
+    The cache key is the resolved target base URL, so local vs cloud — and
+    distinct base URLs — never share an entry.
 
     ``_warn`` is an injectable sink for the stale-cache warning (defaults to
     stderr); tests pass their own to assert on it.
@@ -384,7 +356,30 @@ def resilient_load_object_info(
         # already pinning a known-good file.
         return _load_from_file(input_path)
 
+    # Offline default catalog: COMFY_OBJECT_INFO_FILE is honored exactly like an
+    # explicit --input dump, so EVERY object_info consumer routed through this
+    # loader — workflow edits, `nodes show`/`find`, `validate`, fragments —
+    # resolves the node schema from a pre-warmed / baked file with no network
+    # fetch and no cloud credential. A host (e.g. a server-side agent) sets it
+    # once instead of threading --input through each command.
+    env_dump = os.environ.get("COMFY_OBJECT_INFO_FILE")
+    if env_dump:
+        return _load_from_file(env_dump)
+
     host_key = _resolve_host_key(mode, host, port)
+
+    # Cache-first TTL is CLOUD-only. The cloud catalog is stable and its remote
+    # /object_info fetch is slow (multi-MB over the network), so a fresh cache hit
+    # is a real win. Local is the opposite: the localhost fetch is cheap, and a
+    # user installs custom nodes into their OWN server — serving a cached local
+    # catalog would hide a just-added node for the whole TTL. So local always
+    # fetches live. (The stale-cache *failure* fallback below still applies to
+    # both: a cache is still written on a successful local fetch so a later
+    # unreachable-server call can fall back to it.)
+    if mode == "cloud":
+        fresh = read_fresh_object_info_cache(host_key, object_info_cache_ttl())
+        if fresh is not None:
+            return fresh
 
     try:
         data = _load_from_target(mode=mode, host=host, port=port)

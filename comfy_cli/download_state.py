@@ -24,9 +24,24 @@ State-file contract (``download-state/1``)::
       "started_at": "<iso8601>",
       "updated_at": "<iso8601>",
       "downloader": "httpx" | "aria2",
+      "kind": "background" | "foreground",
       "needs_civitai_auth": <bool>,
       "needs_hf_auth": <bool>
     }
+
+``kind`` distinguishes a detached worker from a plain ``comfy model download``
+running in the caller's own terminal. Both write records — a foreground transfer
+that claimed no destination was invisible to every other invocation, so two of
+them raced into the same file — but they are not interchangeable: a background
+worker gets its own session (:func:`kill_worker` may ``killpg`` it), whereas a
+foreground record's pid is the *user's CLI process*, sharing the terminal's
+foreground process group. Signalling that group would kill the user's shell job,
+so ``download-cancel`` refuses a live foreground record instead. The field is
+additive within ``download-state/1``: readers drop unknown keys, and a record
+written before it existed reads back as ``"background"``, which is what it was.
+A record carrying an *unrecognized* ``kind`` is a different case — see
+``_TOLERANT_FALLBACKS`` — and reads back as ``"foreground"``, the side that
+refuses to be signalled.
 
 ``pid`` is only ever written by the worker itself, together with
 ``pid_create_time`` — the pair identifies the process, so a recycled pid can
@@ -177,8 +192,21 @@ class DownloadState:
     started_at: str = ""
     updated_at: str = ""
     downloader: str = "httpx"
+    kind: str = "background"
     needs_civitai_auth: bool = False
     needs_hf_auth: bool = False
+
+    @property
+    def is_foreground(self) -> bool:
+        """True when this record's pid is a user CLI process, not a detached worker.
+
+        The distinction is only ever load-bearing in the *refusing* direction
+        (``download-cancel`` must not signal a foreground pid's process group),
+        so an unrecognized value reads as ``foreground`` — the non-cancellable
+        side. See :data:`_TOLERANT_FALLBACKS`. Only a record with no ``kind`` at
+        all reads as ``background``, because that is what it provably was.
+        """
+        return self.kind == "foreground"
 
     @property
     def is_terminal(self) -> bool:
@@ -295,9 +323,36 @@ _FIELD_VALIDATORS: dict[str, Any] = {
     "started_at": lambda v: isinstance(v, str),
     "updated_at": lambda v: isinstance(v, str),
     "downloader": lambda v: isinstance(v, str),
+    "kind": lambda v: v in ("background", "foreground"),
     "needs_civitai_auth": lambda v: isinstance(v, bool),
     "needs_hf_auth": lambda v: isinstance(v, bool),
 }
+
+# Fields whose validator failure replaces *the field* with the value below
+# rather than rejecting the whole record.
+#
+# `kind` is in here because rejecting the record is the more dangerous outcome by
+# far. A rejected record reads as absent to every caller, including the
+# destination-claim scan — so one unrecognized `kind` on a *live* download would
+# make its claim invisible and let a second writer into the same file, which is
+# the exact corruption the claim exists to prevent. Keeping the record and
+# distrusting one field is the smaller loss.
+#
+# The substitute is `"foreground"`, *not* the dataclass default. `kind` is the
+# one field that gates a destructive action, so tolerance here has to fail
+# closed: `download-cancel` refuses a live `foreground` record and sends the user
+# to Ctrl-C, whereas a `background` one reaches `kill_worker` ->
+# `os.killpg(os.getpgid(pid), ...)`. Guessing "background" for a value we could
+# not parse would aim that killpg at a pid we have no reason to believe is a
+# detached worker — and if it is in fact a foreground record whose `kind` was
+# corrupted, at the user's own shell job. Refusing to cancel a record we cannot
+# read is recoverable (the process is Ctrl-C-able, and the record reconciles once
+# it exits); signalling the wrong process group is not.
+#
+# A record with no `kind` key at all is a different case and is *not* routed
+# here: it falls through to the dataclass default, `"background"`, because every
+# record written before this field existed really was a detached worker.
+_TOLERANT_FALLBACKS: dict[str, Any] = {"kind": "foreground"}
 
 
 def read_path(path: Path) -> DownloadState | None:
@@ -309,15 +364,39 @@ def read_path(path: Path) -> DownloadState | None:
         return None
     known = set(DownloadState.__dataclass_fields__)
     filtered = {k: v for k, v in data.items() if k in known}
-    for key, value in filtered.items():
+    for key, value in list(filtered.items()):
         validator = _FIELD_VALIDATORS.get(key)
         if validator is not None and not validator(value):
+            if key in _TOLERANT_FALLBACKS:
+                filtered[key] = _TOLERANT_FALLBACKS[key]
+                continue
             return None
     try:
         return DownloadState(**filtered)
     except TypeError:
         # Truncated/legacy file missing a required field — treat as absent.
         return None
+
+
+def delete(workspace: Path, download_id: str) -> bool:
+    """Remove one state file. Returns False if it could not be removed.
+
+    Used to *withdraw a claim*: both the background and the foreground submit
+    paths write their record and then re-scan for a competitor, and the racer
+    that loses that comparison has to take its record back off disk before it
+    exits. Leaving it behind would be worse than never having written it — an
+    abandoned ``downloading`` record with a pid that is about to disappear reads
+    as a live claim until something reconciles it, so it would refuse every later
+    submission to that destination for no reason.
+
+    Absent is success: the caller's goal is "this claim is gone", and a record
+    that was never written (or already swept) satisfies it.
+    """
+    try:
+        state_path(workspace, download_id).unlink(missing_ok=True)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def _sort_key(state: DownloadState) -> tuple[str, str]:
@@ -515,7 +594,13 @@ def worker_alive(state: DownloadState, *, pid_alive=None) -> bool:
     self-corrects on the next poll, while signalling a stranger's process group
     is not, so only the reporting side is allowed the benefit of the doubt.
     """
-    if state.pid is None:
+    if not state.pid or state.pid <= 0:
+        # Not just `is None`. The field validator accepts any non-bool int, so a
+        # corrupt or tampered record can carry a negative pid — and
+        # `psutil.Process(-1)` raises ValueError, which `utils.is_running` does
+        # not catch. One bad state file would then traceback out of every command
+        # that reconciles, including `model download` itself. `is_worker_process`
+        # and `kill_worker` already screen the same way.
         return False
     if pid_alive is None:
         from comfy_cli.utils import is_running as pid_alive  # noqa: N813
@@ -589,10 +674,19 @@ def percent(state: DownloadState) -> float | None:
 
 
 def status_payload(state: DownloadState) -> dict[str, Any]:
-    """The ``download-status`` / ``downloads`` envelope row for one download."""
+    """The ``download-status`` / ``downloads`` envelope row for one download.
+
+    ``kind`` is reported because these rows are now the only place a foreground
+    download is visible, and the two kinds are not interchangeable to a consumer:
+    ``download-cancel`` refuses a live ``foreground`` row (its pid is a user CLI
+    process sharing a terminal's process group, so signalling it would kill the
+    surrounding shell job). Without the field the only way to learn that is to
+    try the cancel and read the refusal.
+    """
     return {
         "id": state.id,
         "status": state.status,
+        "kind": state.kind,
         "completed_bytes": state.completed_bytes,
         "total_bytes": state.total_bytes,
         "percent": percent(state),

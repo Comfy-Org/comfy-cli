@@ -196,7 +196,7 @@ def test_run_ipv6_host_port_reaches_execute(tmp_path):
         )
     assert result.exit_code == 0, result.output
     args, _ = mock_execute.call_args
-    # execute(workflow, host, port, ...)
+    # positional args of execute - workflow, host, port, ...
     assert args[1] == "[::1]"
     assert args[2] == 8188
 
@@ -217,7 +217,7 @@ def test_run_unsafe_host_exits_before_execute(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# `--port` beats the port embedded in a combined `--host h:p` (BE-6486)
+# `--port` beats the port embedded in a combined `--host h:p`
 # ---------------------------------------------------------------------------
 #
 # The combined-host sites used to merge the two with `if not port and
@@ -256,7 +256,7 @@ def test_run_explicit_port_wins_over_embedded_host_port(tmp_path, monkeypatch):
         )
     assert result.exit_code == 0, result.output
     args, _ = mock_execute.call_args
-    # execute(workflow, host, port, ...)
+    # positional args of execute - workflow, host, port, ...
     assert args[1] == "127.0.0.1"
     assert args[2] == 9200
 
@@ -275,7 +275,7 @@ def test_jobs_status_out_of_range_port_is_rejected():
 
 
 # ---------------------------------------------------------------------------
-# explicit-flag validation at the shared choke point (BE-6306 review)
+# explicit-flag validation at the shared choke point
 # ---------------------------------------------------------------------------
 #
 # `resolve_local_host_port` resolves each half as `value or env or bg or
@@ -319,7 +319,7 @@ def test_boundary_ports_are_accepted(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# A host/port usage error terminates the JSON/NDJSON stream (BE-6660)
+# A host/port usage error terminates the JSON/NDJSON stream
 # ---------------------------------------------------------------------------
 #
 # `typer.BadParameter` used to escape straight to click, which prints a human

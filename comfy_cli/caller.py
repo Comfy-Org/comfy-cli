@@ -18,6 +18,11 @@ own env var (set in every Bash subprocess it spawns). Checking it
 explicitly means analytics can distinguish "Claude Code" from "some
 other agent" without requiring Claude Code users to set AI_AGENT.
 
+This module also derives the ``comfy_usage_source`` attribution value
+(``usage_source`` below) that rides every workflow submission, so
+server-side partner-node billing can tell a human-driven CLI run apart
+from an agent-driven one.
+
 Tested in ``tests/comfy_cli/output/test_caller.py``.
 """
 
@@ -27,6 +32,7 @@ import os
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 
 
 @dataclass(frozen=True)
@@ -116,3 +122,45 @@ def detect_caller(
 
     # 5. Human at a terminal.
     return Caller(kind="user", agentic=False, source_env=None)
+
+
+# A custom COMFY_USER_AGENT is arbitrary user-supplied text, and the value
+# derived from it rides a request body the server bills against, so bound it
+# the way `tracking._sanitize_caller_kind` bounds `caller_kind` rather than
+# forwarding an unbounded label.
+_USAGE_SOURCE_MAX_LEN = 64
+
+
+def usage_source_for(caller: Caller) -> str:
+    """Map a caller to its ``comfy_usage_source`` attribution value.
+
+    A human at a terminal keeps the bare ``comfy-cli``, so dashboards and
+    margin queries that exact-match ``usage_source = 'comfy-cli'`` keep
+    working — they narrow to human-driven CLI use, which is what those
+    consumers already assume. Every agentic caller gets the slash-scoped
+    ``comfy-cli/<kind>`` (``comfy-cli/comfy-mcp``, ``comfy-cli/claude-code``,
+    ``comfy-cli/agent``, ``comfy-cli/pipe``), matching the
+    ``comfy-cloud-mcp/<tool>`` convention already in production; a
+    ``usage_source LIKE 'comfy-cli%'`` prefix query covers the whole family.
+
+    The human case keys off ``agentic``, not ``kind == "user"``: a caller that
+    self-attributes ``COMFY_USER_AGENT=user`` produces the *string* "user"
+    while being exactly the agentic case, and a kind test would let it pass
+    itself off as a human. This mirrors ``tracking._caller_kind_is_custom``.
+    """
+    if not caller.agentic:
+        return "comfy-cli"
+    return f"comfy-cli/{caller.kind[:_USAGE_SOURCE_MAX_LEN]}"
+
+
+@lru_cache(maxsize=1)
+def usage_source() -> str:
+    """The ``comfy_usage_source`` value for this process.
+
+    Computed once — ``detect_caller`` is env + isatty only, but the answer
+    cannot change within a process, matching how ``tracking`` computes
+    ``_caller_kind`` at import. Tests that vary the caller patch the name
+    where it is *used* (the call sites import it directly) and/or call
+    ``usage_source.cache_clear()``.
+    """
+    return usage_source_for(detect_caller())

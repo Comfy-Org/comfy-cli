@@ -102,7 +102,7 @@ jobs:
             echo "Fetching $f from comfy-complete@main"
             curl -fsSL "$BASE/$f" -o "comfy_cli/cql/data/$f"
             echo "Fetched $(wc -c < "comfy_cli/cql/data/$f") bytes for $f"
-            # Assert each yaml parses (BE-2966 lesson: never commit a corrupt catalog).
+            # Assert each yaml parses (lesson learned the hard way: never commit a corrupt catalog).
             python3 -c "import yaml,sys; yaml.safe_load(open('comfy_cli/cql/data/$f'))"
             echo "$f parses as valid YAML"
           done
@@ -126,7 +126,7 @@ jobs:
           gh api "repos/Comfy-Org/cloud/git/blobs/$SHA" --jq '.content' \
             | base64 -d > comfy_cli/cql/data/no_gpu_nodes.json
           echo "Fetched $(wc -c < comfy_cli/cql/data/no_gpu_nodes.json) bytes"
-          # Sanity guard (BE-2966 lesson): must parse as JSON AND carry a
+          # Sanity guard (lesson learned the hard way): must parse as JSON AND carry a
           # non-empty no_gpu_nodes *list*, so the empty-placeholder state
           # ({"no_gpu_nodes": []}, count 0) can never be re-committed silently and
           # a schema regression to a str/dict can't sneak past the count check.

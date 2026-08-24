@@ -27,6 +27,7 @@ from comfy_cli.auth import store as auth_store
 from comfy_cli.cloud import oauth
 from comfy_cli.credentials import (
     CLOUD_API_KEY_PROVIDER,
+    CLOUD_BEARER_ENV_VAR,
     Credential,
     find_api_key,
     get_session,
@@ -51,6 +52,7 @@ def clean_env(monkeypatch: pytest.MonkeyPatch):
     """No ambient credentials: no env vars, no stored key, no session."""
     monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
     monkeypatch.delenv("COMFY_API_KEY", raising=False)
+    monkeypatch.delenv("COMFY_CLOUD_AUTH_TOKEN", raising=False)
     monkeypatch.setattr(auth_store, "get", lambda _provider: None)
     monkeypatch.setattr(auth_store, "get_cloud_session", lambda: None)
     monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: None)
@@ -258,7 +260,7 @@ class TestGetSession:
 class TestResolveAllowClear:
     """``resolve_cloud_credential(allow_clear=...)`` plumbs the flag through
     ``get_session`` into ``ensure_fresh_session`` so a best-effort caller (the
-    local partner-node injector, BE-3361) can REFRESH a lapsed session without
+    local partner-node injector) can REFRESH a lapsed session without
     ever CLEARING it on a fatal refresh error.
 
     Exercised against the real secret store (tmp secrets file) so the whole
@@ -314,7 +316,7 @@ class TestResolveAllowClear:
 
     def test_expired_session_is_refreshed(self, persisted, monkeypatch: pytest.MonkeyPatch):
         """Expired session + valid refresh token → a refresh happens and the
-        NEW access token is returned (the BE-3361 fix)."""
+        NEW access token is returned."""
         import time
 
         self._persist_expired()
@@ -360,7 +362,7 @@ class TestResolveAllowClear:
     ):
         """A transient (network) refresh failure returns the stale session,
         which fails its own expiry check → resolver falls through. Same as the
-        pre-BE-3361 behavior on a flake; the session is preserved."""
+        earlier behavior on a flake; the session is preserved."""
         self._persist_expired()
         monkeypatch.setenv("COMFY_CLOUD_API_KEY", "env-key")
 
@@ -417,7 +419,7 @@ def _violations_in(path: Path) -> list[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     found: list[str] = []
     for node in ast.walk(tree):
-        # os.environ.get("COMFY_..."), os.getenv("COMFY_...")
+        # attribute reads - os.environ.get or os.getenv of a COMFY_* name
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             func = node.func
             if func.attr == "get" and _is_environ_node(func.value) and node.args:
@@ -430,7 +432,7 @@ def _violations_in(path: Path) -> list[str]:
         # bare get_cloud_session(...) / ensure_fresh_session(...)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in SESSION_FUNCS:
             found.append(f"{path}:{node.lineno}: call to {node.func.id}()")
-        # os.environ["COMFY_..."]
+        # subscript reads - os.environ indexed by a COMFY_* name
         if isinstance(node, ast.Subscript) and _is_environ_node(node.value):
             if _literal(node.slice) in ENV_VARS:
                 found.append(f"{path}:{node.lineno}: os.environ[{_literal(node.slice)!r}]")
@@ -450,3 +452,46 @@ def test_no_direct_credential_reads_outside_resolver():
         "Direct credential reads found outside comfy_cli/credentials.py — "
         "use resolve_cloud_credential / find_api_key / get_session instead:\n" + "\n".join(violations)
     )
+
+
+# ---------------------------------------------------------------------------
+# forwarded Bearer token (COMFY_CLOUD_AUTH_TOKEN — the trusted-caller path)
+# ---------------------------------------------------------------------------
+
+
+class TestForwardedBearerToken:
+    def test_bearer_env_yields_oauth_credential_for_cloud(self, clean_env):
+        clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")
+        cred = resolve_cloud_credential(purpose="cloud")
+        assert cred == Credential(kind="oauth", value="jwt-abc", source=f"env:{CLOUD_BEARER_ENV_VAR}")
+
+    def test_bearer_env_is_stripped(self, clean_env):
+        clean_env.setenv(CLOUD_BEARER_ENV_VAR, "  jwt-abc \n")
+        cred = resolve_cloud_credential(purpose="cloud")
+        assert cred is not None and cred.value == "jwt-abc"
+
+    def test_blank_bearer_env_is_ignored(self, clean_env):
+        clean_env.setenv(CLOUD_BEARER_ENV_VAR, "   \n\t")
+        assert resolve_cloud_credential(purpose="cloud") is None
+
+    def test_live_session_outranks_bearer_env(self, clean_env):
+        clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")
+        clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(token="live-token"))
+        cred = resolve_cloud_credential(purpose="cloud")
+        assert cred == Credential(kind="oauth", value="live-token", source="session")
+
+    def test_expired_session_falls_through_to_bearer_env(self, clean_env):
+        clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")
+        clean_env.setattr(oauth, "ensure_fresh_session", lambda **kw: _session(expired=True))
+        cred = resolve_cloud_credential(purpose="cloud")
+        assert cred == Credential(kind="oauth", value="jwt-abc", source=f"env:{CLOUD_BEARER_ENV_VAR}")
+
+    def test_bearer_env_outranks_api_key_env(self, clean_env):
+        clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")
+        clean_env.setenv("COMFY_CLOUD_API_KEY", "comfyui-key")
+        cred = resolve_cloud_credential(purpose="cloud")
+        assert cred == Credential(kind="oauth", value="jwt-abc", source=f"env:{CLOUD_BEARER_ENV_VAR}")
+
+    def test_bearer_env_ignored_for_partner_purpose(self, clean_env):
+        clean_env.setenv(CLOUD_BEARER_ENV_VAR, "jwt-abc")
+        assert resolve_cloud_credential(purpose="partner") is None

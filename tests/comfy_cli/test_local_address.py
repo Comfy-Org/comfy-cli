@@ -292,7 +292,7 @@ def test_job_watcher_state_beats_env(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# wildcard bind-address canonicalization (BE-6306 review)
+# wildcard bind-address canonicalization
 # ---------------------------------------------------------------------------
 #
 # `config.background` records the raw `--listen` value `comfy launch` passed to

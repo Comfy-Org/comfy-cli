@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_delete.json",
+  "title": "comfy build delete --json data payload",
+  "type": "object",
+  "required": ["distributionId", "deleted"],
+  "additionalProperties": true,
+  "properties": {
+    "distributionId": {"type": "string"},
+    "deleted": {"type": "boolean"}
+  }
+}

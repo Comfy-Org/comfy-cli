@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_blob_list.json",
+  "title": "comfy build blob list --json data payload",
+  "type": "object",
+  "required": ["blobs"],
+  "additionalProperties": true,
+  "properties": {"blobs": {"type": "array", "items": {"type": "object", "additionalProperties": true}}}
+}

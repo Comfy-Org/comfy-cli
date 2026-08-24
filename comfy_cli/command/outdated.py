@@ -6,8 +6,13 @@ silently degrades agents. Nothing here mutates the workspace — it only reads
 git metadata / ``pyproject.toml`` and queries public APIs.
 
 Sources of "latest":
-- **Core**: the GitHub ``releases/latest`` tag (reusing
-  :func:`comfy_cli.command.install.get_latest_release`).
+- **Core**: the highest stable semver tag found locally (mirroring
+  :func:`comfy_cli.command.install._resolve_latest_tag_from_local`), falling
+  back to the GitHub ``releases/latest`` tag (reusing
+  :func:`comfy_cli.command.install.get_latest_release`) only when the local
+  checkout has no usable tags. The local-first order matters: GitHub's
+  ``releases/latest`` is a maintainer-set mutable flag and can point at a tag
+  that isn't actually the highest semver release.
 - **Registry packs** (a pack whose ``pyproject.toml`` carries a registry node
   id + version): the Comfy registry API (reusing
   :class:`comfy_cli.registry.RegistryAPI`).
@@ -34,6 +39,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import semver
+
+from comfy_cli._safe_exec import resolve_required_binary
 from comfy_cli.command.pack_scan import iter_pack_dirs as _iter_pack_dirs
 from comfy_cli.command.pack_scan import read_pyproject as _read_pyproject
 from comfy_cli.file_utils import atomic_write_text
@@ -197,8 +205,11 @@ def _git_output(args: list[str], cwd: str) -> str | None:
     ``_GIT_HARDENING`` / ``_GIT_SAFE_ENV``.
     """
     try:
+        # ``resolve_required_binary`` raises ``BinaryNotFoundError`` (a
+        # ``FileNotFoundError``), which the ``OSError`` arm below already turns
+        # into the same ``None`` a missing ``git`` produced before.
         out = subprocess.run(
-            ["git", *_GIT_HARDENING, *args],
+            [resolve_required_binary("git"), *_GIT_HARDENING, *args],
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -247,12 +258,58 @@ def _core_installed(comfy_path: str) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _core_latest(cache: dict[str, Any], refresh: bool, warn: Callable[[str], None]) -> str | None:
+def _core_latest_from_local_tags(comfy_path: str) -> str | None:
+    """Highest stable semver git tag already known to the core checkout.
+
+    Mirrors :func:`comfy_cli.command.install._resolve_latest_tag_from_local`:
+    ``git fetch --tags`` (best-effort — a stale/offline tag list is still
+    useful) then pick the highest non-prerelease semver tag. Uses this
+    module's hardened :func:`_git_output` rather than install.py's own
+    subprocess calls, since ``comfy_path`` is already run through it by
+    :func:`_core_installed`.
+
+    Returns ``None`` when *comfy_path* isn't a git checkout or has no stable
+    semver tags, so the caller can fall back to the GitHub API.
+    """
+    if not _is_git_checkout(comfy_path):
+        return None
+    _git_output(["fetch", "--tags", "--quiet"], comfy_path)
+    tags = _git_output(["tag", "--list"], comfy_path)
+    if not tags:
+        return None
+
+    best: tuple[semver.VersionInfo, str] | None = None
+    for line in tags.splitlines():
+        tag = line.strip()
+        if not tag:
+            continue
+        try:
+            parsed = semver.VersionInfo.parse(tag.lstrip("vV"))
+        except ValueError:
+            continue
+        if parsed.prerelease:
+            continue
+        if best is None or parsed > best[0]:
+            best = (parsed, tag)
+    return best[1] if best else None
+
+
+def _core_latest(comfy_path: str, cache: dict[str, Any], refresh: bool, warn: Callable[[str], None]) -> str | None:
     if not refresh:
         cached = _cache_get(cache, "core")
         if cached is not None:
             return cached
-    # Reuse install.py's rate-limit-aware fetcher (GITHUB_TOKEN, forks, 403/429).
+
+    # Prefer the highest local semver tag over GitHub's `releases/latest` —
+    # see `_core_latest_from_local_tags` / module docstring for why.
+    local_tag = _core_latest_from_local_tags(comfy_path)
+    if local_tag is not None:
+        _cache_set(cache, "core", local_tag)
+        return local_tag
+
+    # No usable local tags (e.g. not a git checkout, or a shallow/tagless
+    # clone) — fall back to install.py's rate-limit-aware fetcher
+    # (GITHUB_TOKEN, forks, 403/429).
     from comfy_cli.command.install import get_latest_release
 
     try:
@@ -413,7 +470,7 @@ def build_report(
 
     if comfy_path and os.path.isdir(comfy_path):
         core_installed, core_commit = _core_installed(comfy_path)
-        core_latest = _core_latest(cache, refresh, warn)
+        core_latest = _core_latest(comfy_path, cache, refresh, warn)
         packs = [
             _pack_info(p, cache, refresh, registry_api, warn)
             for p in _iter_pack_dirs(Path(comfy_path) / "custom_nodes")

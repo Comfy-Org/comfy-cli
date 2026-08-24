@@ -87,6 +87,11 @@ def _assets_callback():
     """
 
 
+from comfy_cli.command.assets_library import app as _assets_library_app  # noqa: E402
+
+assets_app.add_typer(_assets_library_app, name="library")
+
+
 # The marker `comfy project init` writes — deliberately literal and minimal.
 # The where default is resolved at init time (flag, else auto-detect) so a
 # local-only machine never gets a project that routes every command to cloud.
@@ -219,6 +224,10 @@ def assets_push_cmd(
         renderer.error(code="invalid_argument", message=str(e))
         raise typer.Exit(code=1) from e
     where_kind = target.kind
+    # Routing resolved — stamp it so the upload failures below name the backend
+    # this push targeted. The `project_not_found` and `invalid_argument` errors
+    # above precede the decision and stay `where: null`.
+    renderer.where = where_kind
 
     assets_dir = project.root / "assets"
     lock_path = project.root / ".comfy" / "assets.lock.json"

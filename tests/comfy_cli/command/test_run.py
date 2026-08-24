@@ -9,6 +9,7 @@ import pytest
 import typer
 from websocket import WebSocketException, WebSocketTimeoutException
 
+from comfy_cli.caller import Caller, usage_source_for
 from comfy_cli.command.run import (
     _TELEMETRY_NODE_NAME_MAX_LEN,
     WorkflowExecution,
@@ -17,10 +18,20 @@ from comfy_cli.command.run import (
     _resolve_partner_credential,
     _returned_output_node_count,
     execute,
+    execution,
     fetch_object_info,
     is_ui_workflow,
     preflight,
 )
+
+
+def _mcp_usage_source() -> str:
+    """What ``usage_source()`` returns under ``COMFY_USER_AGENT=comfy-mcp``.
+
+    Built through the real mapper so these tests pin the wiring, not a
+    hand-copied string; only the environment probe is stubbed out.
+    """
+    return usage_source_for(Caller(kind="comfy-mcp", agentic=True, source_env="COMFY_USER_AGENT"))
 
 
 @pytest.fixture
@@ -172,7 +183,7 @@ class TestFetchObjectInfo:
 class TestWorkflowExecutionAuth:
     """X-API-Key is the credential the ComfyUI server forwards to Partner Nodes."""
 
-    def _make_exec(self, workflow, api_key=None):
+    def _make_exec(self, workflow, api_key=None, extra_data=None):
         progress = MagicMock()
         progress.add_task.return_value = 0
         return WorkflowExecution(
@@ -184,6 +195,7 @@ class TestWorkflowExecutionAuth:
             progress=progress,
             timeout=30,
             api_key=api_key,
+            extra_data=extra_data,
         )
 
     def test_queue_embeds_api_key_in_extra_data(self, workflow):
@@ -215,6 +227,30 @@ class TestWorkflowExecutionAuth:
             "client_id": ex.client_id,
             "extra_data": {"comfy_usage_source": "comfy-cli"},
         }
+
+    def test_queue_derives_usage_source_from_the_caller(self, workflow, monkeypatch):
+        """An agentic caller is attributed as ``comfy-cli/<kind>`` in the
+        ``/prompt`` payload so partner-node billing can tell MCP-driven runs
+        from human ones. (The assertions above pin the human case, via the
+        conftest fixture.)"""
+        monkeypatch.setattr(execution, "usage_source", _mcp_usage_source)
+        ex = self._make_exec(workflow)
+        with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
+            ex.queue()
+        body = json.loads(mock_open.call_args[0][0].data)
+        assert body["extra_data"] == {"comfy_usage_source": "comfy-cli/comfy-mcp"}
+
+    def test_queue_lets_explicit_extra_data_override_the_usage_source(self, workflow, monkeypatch):
+        """``self.extra_data`` is applied with ``update()`` after the derived
+        default, so an explicit value still wins — ordering unchanged."""
+        monkeypatch.setattr(execution, "usage_source", _mcp_usage_source)
+        ex = self._make_exec(workflow, extra_data={"comfy_usage_source": "some-other-surface"})
+        with patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open:
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "abc"}).encode()
+            ex.queue()
+        body = json.loads(mock_open.call_args[0][0].data)
+        assert body["extra_data"] == {"comfy_usage_source": "some-other-surface"}
 
     def test_queue_sends_usage_source_header(self, workflow):
         ex = self._make_exec(workflow)
@@ -461,12 +497,12 @@ class TestExecuteErrorHandling:
             mock_exec.connect.assert_called_once()
             mock_exec.queue.assert_called_once()
             mock_exec.watch_execution.assert_called_once()
-            # The run WebSocket must be closed on the success path (BE-3404) —
+            # The run WebSocket must be closed on the success path —
             # the finally-block _safe_close, not left open until teardown.
             mock_exec.ws.close.assert_called_once()
 
     def test_websocket_closed_on_watch_failure(self, workflow_file):
-        # BE-3404: the finally-block close also fires when watch_execution
+        # The finally-block close also fires when watch_execution
         # raises, so a mid-run error doesn't linger the server-side session.
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
@@ -554,7 +590,7 @@ class TestExecuteErrorHandling:
 
 class TestWaitStateFile:
     """`comfy run --wait` writes the jobs state file at SUBMIT time, not only
-    on success (BE-4750) — so a server that dies mid-run still leaves an
+    on success — so a server that dies mid-run still leaves an
     on-disk record of the prompt that was in flight, and the emitted error
     names it."""
 
@@ -631,7 +667,7 @@ class TestWaitStateFile:
 
     def test_submit_time_record_carries_watcher_identity(self, workflow_file):
         """The foreground --wait process IS the watcher, and the submit-time
-        record says so (BE-6641): pid + create_time stamped exactly like the
+        record says so: pid + create_time stamped exactly like the
         detached watcher's, so a --wait process killed from outside leaves a
         record the stale-watcher reap can finalize instead of a permanent
         phantom `running`."""
@@ -970,7 +1006,7 @@ class TestWaitStateFile:
 
 class TestCloudWaitWatcherStamp:
     """Cloud `--wait` polls from the foreground with no watcher subprocess, so
-    the submit-time record stamps THIS process as the watcher (BE-6641) — an
+    the submit-time record stamps THIS process as the watcher — an
     external kill then leaves a non-terminal record with a dead pid, which
     `jobs ls`'s stale-watcher reap finalizes as `watcher_crashed`. Every
     in-process exit writes a terminal record the reap ignores."""
@@ -1298,7 +1334,7 @@ class TestResolvePartnerCredential:
 
     def test_refreshes_and_uses_oauth_token(self, monkeypatch: pytest.MonkeyPatch):
         """A signed-in user whose access token lapsed gets a REFRESHED token
-        here — the whole point of BE-3361 — rather than being skipped and
+        here — the whole point of the refresh fix — rather than being skipped and
         hitting ``partner_node_requires_credential``."""
         monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
         from comfy_cli.auth import store as auth_store
@@ -1343,7 +1379,7 @@ class TestResolvePartnerCredential:
     def test_stale_session_from_transient_failure_falls_through(self, monkeypatch: pytest.MonkeyPatch):
         """A transient refresh failure returns the STALE (expired) session; it
         fails its own expiry check and the resolver falls through — unchanged
-        from the pre-BE-3361 behavior on a network flake."""
+        from the earlier behavior on a network flake."""
         monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
         from comfy_cli.auth import store as auth_store
         from comfy_cli.cloud import oauth
@@ -1629,7 +1665,7 @@ class TestPartnerNodesDetectedTelemetry:
         assert events[0]["partner_node_count"] == 1
 
     def test_does_not_fire_when_the_spend_gate_refuses(self, tmp_path, monkeypatch):
-        """Documents the one funnel this event does NOT cover: the BE-4326 spend
+        """Documents the one funnel this event does NOT cover: the spend
         gate refuses before any credential resolution (so a refusal never
         triggers a network OAuth refresh), and ``credential_present`` depends on
         that resolution — so a run declined for lack of ``--allow-spend`` emits
@@ -1832,8 +1868,8 @@ class TestPartnerNodesDetectedTelemetry:
 
 
 class TestExecuteSpendGate:
-    """`comfy run` gates partner-API (paid) workflows on `--allow-spend`
-    (BE-4326), mirroring `comfy run-template`'s spend gate. A partner-node
+    """`comfy run` gates partner-API (paid) workflows on `--allow-spend`,
+    mirroring `comfy run-template`'s spend gate. A partner-node
     workflow must not silently spend Comfy credits: machine mode fails closed
     with `spend_consent_required`; a TTY prompts; consent (flag or "yes") lets
     the run proceed to the credential path unchanged. Partner-free workflows
@@ -1991,7 +2027,7 @@ class TestExecuteSpendGate:
 
 
 class TestSpendGateStdinAndMarkup:
-    """Robustness of the interactive spend prompt (BE-4326): a missing/closed
+    """Robustness of the interactive spend prompt: a missing/closed
     stdin must fall through to the fail-closed machine-mode error rather than
     crash, and partner class_type names must not be interpreted as Rich markup."""
 
@@ -2331,6 +2367,42 @@ class TestExecuteCloudAutoConvert:
         submitted_args, _ = mock_client.submit_prompt.call_args
         assert submitted_args[0] == self.CONVERTED
 
+    def test_ui_workflow_conversion_honors_object_info_file_env(
+        self, ui_workflow_file, fake_target, tmp_path, monkeypatch
+    ):
+        """Both cloud object_info loads on this path (UI→API conversion, then
+        preflight-validate) are routed through resilient_load_object_info, so
+        COMFY_OBJECT_INFO_FILE — a pre-warmed/baked catalog an agent host
+        provides — must be read with NO live /object_info fetch at all."""
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+
+        dump_path = tmp_path / "object_info.json"
+        # `output_node: True`: preflight now rejects a prompt with zero output
+        # nodes (prompt_no_outputs), and this fixture is about the catalog SOURCE,
+        # not about validation — so give the catalog an output node.
+        dump_path.write_text(json.dumps({"KSampler": {"output_node": True}}))
+        monkeypatch.setenv("COMFY_OBJECT_INFO_FILE", str(dump_path))
+
+        mock_client = MagicMock()
+        mock_client.submit_prompt.return_value = SubmitResult(prompt_id="prompt-env", number=1, node_errors={})
+
+        def _network_fetch_should_not_run(**_kwargs):
+            raise AssertionError("network object_info fetch should not run with COMFY_OBJECT_INFO_FILE set")
+
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch("comfy_cli.command.run.convert_ui_to_api", return_value=self.CONVERTED) as mock_convert,
+            patch("comfy_cli.cql.engine._load_from_target", side_effect=_network_fetch_should_not_run),
+            patch("comfy_cli.comfy_client.Client", return_value=mock_client),
+            patch("comfy_cli.command.run._spawn_watcher"),
+        ):
+            execute_cloud(ui_workflow_file, wait=False)
+
+        assert mock_convert.called
+        submitted_args, _ = mock_client.submit_prompt.call_args
+        assert submitted_args[0] == self.CONVERTED
+
     def test_ui_workflow_conversion_failure_surfaces_conversion_error(self, ui_workflow_file, fake_target):
         from comfy_cli.command.run import execute_cloud
         from comfy_cli.workflow_to_api import WorkflowConversionError
@@ -2366,8 +2438,8 @@ class TestExecuteCloudAutoConvert:
 
 
 class TestExecuteCloudSpendGate:
-    """The cloud submit also bills partner-API nodes server-side, so BE-4326
-    applies the same consent gate there. Detection is fail-open (empty cloud
+    """The cloud submit also bills partner-API nodes server-side, so the same
+    consent gate applies there. Detection is fail-open (empty cloud
     object_info → no gate), and the gate fires before cloud auth/submit."""
 
     PARTNER_WF = {"1": {"class_type": "Veo3VideoGenerationNode", "inputs": {"prompt": "x"}}}
@@ -2940,6 +3012,14 @@ class TestRunJournal:
         with (
             patch("comfy_cli.target.resolve_target", return_value=fake_target),
             patch("comfy_cli.cql.engine._load_from_target", return_value={}),
+            # `execute_cloud` reaches object_info through the RESILIENT loader,
+            # not `engine._load_from_target` directly. Patching only the latter
+            # left the loader's own cache/refresh/stale-fallback path live, so
+            # this test performed a real cloud fetch — ~9s in isolation, and an
+            # indefinite hang once an earlier test in the file had populated the
+            # credential/cache state it depends on. Stub the loader itself so the
+            # test is hermetic regardless of which path the implementation picks.
+            patch("comfy_cli.cql.loader.resilient_load_object_info", return_value={}),
             patch("comfy_cli.comfy_client.Client", return_value=mock_client),
             patch("comfy_cli.command.run._spawn_watcher"),
         ):

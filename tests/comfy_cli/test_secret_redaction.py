@@ -1,4 +1,4 @@
-"""Regression guard: no command may echo an *unredacted* secret (BE-3363).
+"""Regression guard: no command may echo an *unredacted* secret.
 
 A 2026-07-16 dogfooding transcript reported ``comfy cloud login`` printing an
 API key in plaintext. On current ``main`` that is no longer reproducible —

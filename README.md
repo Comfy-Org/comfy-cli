@@ -52,7 +52,7 @@ comfy download <prompt_id> --where cloud -o ./outputs    # save the results loca
 
 `comfy run` submits asynchronously and prints the `prompt_id` you feed to `jobs`/`download`; add `--wait` to block inline instead. Check your sign-in anytime with `comfy cloud whoami`. Export the workflow JSON from ComfyUI via **File → Export (API)** (UI-format JSON is auto-converted). Set cloud as your default target so you can drop the flag: `comfy set-default --where cloud`.
 
-**Credits:** cloud generation (`comfy run --where cloud`, `comfy generate`) consumes Comfy Cloud credits and needs an active subscription. Discovery and inspection commands — `comfy cloud whoami`, `comfy jobs status/ls`, `comfy templates ls`, `comfy generate list` — don't.
+**Credits:** cloud generation (`comfy run --where cloud`, `comfy generate`) consumes Comfy Cloud credits and needs an active subscription. Discovery and inspection commands — `comfy cloud whoami`, `comfy cloud status`, `comfy jobs status/ls`, `comfy templates ls`, `comfy generate list` — don't. Check your balance and tier with `comfy cloud status`.
 
 ## Installation
 
@@ -449,6 +449,7 @@ Prerequisites — a Comfy account with a credit balance ([add credits](https://d
 ```bash
 comfy cloud login                   # opens your browser (OAuth + PKCE), stores a session
 comfy cloud whoami                  # confirm who you're signed in as
+comfy cloud status                  # workspace, credit balance, tier, concurrency limit
 ```
 
 Then submit, watch, and collect:
@@ -642,7 +643,8 @@ We welcome contributions to comfy-cli! For ideas, suggestions, or bug reports,
 open an issue at [Comfy-Org/comfy-cli](https://github.com/Comfy-Org/comfy-cli/issues).
 For code changes, fork the repo and open a pull request.
 
-See the [Dev Guide](/DEV_README.md) for setup details.
+See [CONTRIBUTING.md](/CONTRIBUTING.md) for setup, the checks CI enforces,
+and PR conventions. Notable changes are recorded in [CHANGELOG.md](/CHANGELOG.md).
 
 ## License
 

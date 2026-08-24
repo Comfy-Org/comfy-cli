@@ -5,12 +5,12 @@ import sys
 import webbrowser
 from typing import Annotated
 
-import questionary
 import typer
 from rich.console import Console
 
 from comfy_cli import cancellation, constants, env_checker, logging, tracking, ui, utils
 from comfy_cli import where as where_module
+from comfy_cli._safe_exec import resolve_required_binary
 from comfy_cli.auth import command as auth_command
 from comfy_cli.caller import stream_is_tty
 from comfy_cli.cloud import command as cloud_command
@@ -19,11 +19,13 @@ from comfy_cli.command import (
     custom_nodes,
     pr_command,
 )
+from comfy_cli.command import distribution as distribution_command
 from comfy_cli.command import generate as generate_command
 from comfy_cli.command import install as install_inner
 from comfy_cli.command import (
     jobs as jobs_command,
 )
+from comfy_cli.command import knowledge as knowledge_command
 from comfy_cli.command import (
     nodes as nodes_command,
 )
@@ -50,7 +52,7 @@ from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION, CUDAVersion, ROCmVersion
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, resolve_cuda_wheel
 from comfy_cli.discovery import build_discovery
-from comfy_cli.env_checker import EnvChecker, _bracket_host, _unbracket_host
+from comfy_cli.env_checker import EnvChecker
 from comfy_cli.help_json import build_help_json
 from comfy_cli.host_port import report_usage_error, validate_host
 from comfy_cli.output import Renderer, get_renderer, rprint, set_renderer
@@ -797,8 +799,11 @@ def update(
         if version is not None:
             _switch_comfy_version(comfy_path, version, stash=not no_stash)
         else:
+            # Resolved before the chdir so a ``git`` planted in ``comfy_path``
+            # can neither be picked up nor shadow the real one.
+            git_bin = resolve_required_binary("git")
             os.chdir(comfy_path)
-            subprocess.run(["git", "pull"], check=True)
+            subprocess.run([git_bin, "pull"], check=True)
             python = resolve_workspace_python(comfy_path)
             # A uv-managed venv may have no pip — bootstrap it first so the install
             # below doesn't crash with `No module named pip` (no-op if pip exists).
@@ -958,6 +963,27 @@ def run(
             ),
         ),
     ] = False,
+    workflow_id: Annotated[
+        str | None,
+        typer.Option(
+            "--workflow-id",
+            show_default=False,
+            help="Cloud workflow entity id to associate this run with (enables draft auto-save on run).",
+        ),
+    ] = None,
+    no_watch: Annotated[
+        bool,
+        typer.Option(
+            "--no-watch",
+            show_default=False,
+            help=(
+                "Suppress the detached background watcher subprocess for non-blocking "
+                "runs (equivalent to setting COMFY_NO_WATCH=1). Agentic callers with "
+                "their own job-wait loop don't need a second process polling in the "
+                "background; it just holds onto credentials after the parent exits."
+            ),
+        ),
+    ] = False,
     allow_spend: Annotated[
         bool,
         typer.Option(
@@ -973,12 +999,22 @@ def run(
     _track_props = tracking.filter_command_kwargs(dict(locals()))
     tracking.track_event("execution_start", _track_props, mixpanel_name="run")
 
+    # Resolved outside the try so `renderer` is always bound by the time the
+    # `finally` below unstamps `where`, however early the body dies.
+    renderer = get_renderer()
+    # `Renderer` is a process-wide singleton, so a routed target stamped by an
+    # earlier in-process invocation would otherwise still be sitting here and
+    # would mislabel any envelope emitted before *this* run routes (e.g.
+    # `where_invalid`). Start every invocation unrouted.
+    renderer.where = None
+    if no_watch:
+        os.environ["COMFY_NO_WATCH"] = "1"
+
     try:
         if api_key:
             api_key = api_key.strip() or None
 
         config = ConfigManager()
-        renderer = get_renderer()
 
         # Command-local --json means "stream the run": upgrade the renderer
         # (resolved once in the entry callback) into NDJSON mode so every
@@ -992,6 +1028,16 @@ def run(
         except ValueError as e:
             renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
             raise typer.Exit(code=1)
+
+        # The routing target is now known, so every downstream error envelope
+        # can carry it. Explicit ``emit(..., where=...)`` calls still win; this
+        # only fills the fallback (``where or self.where``) that error() and
+        # emit() resolve against.
+        renderer.where = decision.target.value
+        # Record the RESOLVED routing target so submission analytics can tell a
+        # cloud run from a local one even when --where was defaulted (the raw
+        # `where` kwarg is None then). Rides on the execution_success/_error events.
+        _track_props["target"] = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
 
         # Default for --notify: on when a human is at the terminal, off for
         # agents (they shouldn't get surprise side-channel processes they didn't
@@ -1038,6 +1084,10 @@ def run(
         if decision.target is where_module.WhereTarget.CLOUD:
             where_module.cloud_preflight_or_exit()
             # Cloud path uses HTTPS + Bearer auth; host/port aren't applicable.
+            # NOTE: do NOT `return` here — falling through to the try's `else`
+            # is what fires `execution_success`. An early return skipped it, so
+            # successful cloud submissions emitted `execution_start` but never
+            # `execution_success` (local runs were unaffected).
             run_inner.execute_cloud(
                 workflow,
                 wait=wait,
@@ -1045,43 +1095,48 @@ def run(
                 timeout=timeout,
                 notify=effective_notify,
                 print_prompt=print_prompt,
+                workflow_id=workflow_id,
                 preloaded=preloaded,
                 allow_spend=allow_spend,
             )
-            return
+        else:
+            # Both targets must fall off the END of this try suite: Python skips
+            # a try's `else:` clause when the suite leaves via `return`, so an
+            # early return here would silently drop the `execution_success`
+            # tracking below (it only ever fired on the cloud branch by way of
+            # the `except typer.Exit` handler).
+            from comfy_cli.host_port import parse_host_port_arg, report_usage_error, resolve_host_port
 
-        from comfy_cli.host_port import parse_host_port_arg, report_usage_error, resolve_host_port
+            # ``report_usage_error``: a bad ``--host``/``--port`` is a
+            # ``typer.BadParameter``, which click turns into a stderr usage panel +
+            # exit 2 — leaving stdout empty in JSON/NDJSON mode while every other
+            # failure here ends with an envelope. Emit the terminating envelope
+            # first; the exception still propagates, so exit 2 is unchanged.
+            with report_usage_error(renderer):
+                if host:
+                    host, parsed_port = parse_host_port_arg(host)
+                    # ``port is None``, not ``not port``: a typed ``--port`` always wins
+                    # over one embedded in ``--host h:p``, including ``--port 0``, which
+                    # ``resolve_host_port`` then rejects as out of range instead of
+                    # silently running against the embedded port.
+                    if port is None and parsed_port is not None:
+                        port = parsed_port
 
-        # ``report_usage_error``: a bad ``--host``/``--port`` is a
-        # ``typer.BadParameter``, which click turns into a stderr usage panel +
-        # exit 2 — leaving stdout empty in JSON/NDJSON mode while every other
-        # failure here ends with an envelope. Emit the terminating envelope
-        # first; the exception still propagates, so exit 2 is unchanged.
-        with report_usage_error(renderer):
-            if host:
-                host, parsed_port = parse_host_port_arg(host)
-                # ``port is None``, not ``not port``: a typed ``--port`` always wins
-                # over one embedded in ``--host h:p``, including ``--port 0``, which
-                # ``resolve_host_port`` then rejects as out of range instead of
-                # silently running against the embedded port.
-                if port is None and parsed_port is not None:
-                    port = parsed_port
+                host, port = resolve_host_port(host, port)
 
-            host, port = resolve_host_port(host, port)
-
-        run_inner.execute(
-            workflow,
-            host,
-            port,
-            wait=wait,
-            verbose=verbose,
-            timeout=timeout,
-            notify=effective_notify,
-            api_key=api_key,
-            print_prompt=print_prompt,
-            preloaded=preloaded,
-            allow_spend=allow_spend,
-        )
+            run_inner.execute(
+                workflow,
+                host,
+                port,
+                wait=wait,
+                verbose=verbose,
+                timeout=timeout,
+                notify=effective_notify,
+                api_key=api_key,
+                print_prompt=print_prompt,
+                preloaded=preloaded,
+                allow_spend=allow_spend,
+            )
     except typer.Exit as e:
         if (e.exit_code or 0) == 0:
             tracking.track_event("execution_success", _track_props)
@@ -1099,20 +1154,27 @@ def run(
         raise
     else:
         tracking.track_event("execution_success", _track_props)
+    finally:
+        # Every envelope this invocation emits has already been written by now
+        # (renderer.error/emit flush inline), so unstamp the singleton rather
+        # than leaving `run`'s routed target visible to whatever emits next in
+        # this process — an atexit/tracking path, or a second invocation.
+        renderer.where = None
 
 
 @app.command(
+    hidden=True,
     help=(
-        "Validate a workflow without submitting (UI exports are converted to API format first). "
-        "Checks class_types, input shapes, enum values, edge wiring, and the dotted sub-inputs a "
-        "dynamic combo's selected option requires."
-    )
+        "[DEPRECATED — use 'comfy workflow validate'] Validate a workflow without submitting "
+        "(UI exports are converted to API format first). Checks class_types, input shapes, enum "
+        "values, edge wiring, and the dotted sub-inputs a dynamic combo's selected option requires."
+    ),
 )
 @tracking.track_command()
 def validate(
     workflow: Annotated[
         str,
-        typer.Option(help="Path to the API-format workflow JSON file."),
+        typer.Option(help="Path to the workflow JSON file (API format or a frontend/canvas graph)."),
     ],
     where: Annotated[
         str | None,
@@ -1135,199 +1197,14 @@ def validate(
         typer.Option("--input", show_default=False, help="Path to a saved object_info JSON (offline mode)."),
     ] = None,
 ):
-    from pathlib import Path
+    # Deprecated alias for `comfy workflow validate` (its canonical home). Kept
+    # functional for backward compatibility; warns and delegates to the shared
+    # implementation. The warning routes to stderr in JSON modes, so structured
+    # output stays clean.
+    from comfy_cli.command.workflow import validate_api_workflow
 
-    from comfy_cli.command.run import is_ui_workflow
-    from comfy_cli.command.run.preflight import _detect_partner_nodes
-    from comfy_cli.cql.engine import Graph, LoadError
-    from comfy_cli.workflow_to_api import WorkflowConversionError, convert_ui_to_api
-
-    renderer = get_renderer()
-
-    # Load workflow
-    wf_path = Path(workflow).expanduser()
-    if not wf_path.is_file():
-        renderer.error(code="workflow_not_found", message=f"Workflow file not found: {workflow}", hint="check the path")
-        raise typer.Exit(code=1)
-    try:
-        wf_data = json.loads(wf_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        renderer.error(code="workflow_invalid_json", message=f"Invalid JSON: {e}", hint="re-export from ComfyUI")
-        raise typer.Exit(code=1) from e
-    if not isinstance(wf_data, dict):
-        renderer.error(
-            code="workflow_not_api_format", message="Workflow must be a JSON object", hint="use File > Export (API)"
-        )
-        raise typer.Exit(code=1)
-
-    # Load graph. Route through the shared resolver rather than trusting the raw
-    # `--where` string: it normalizes case/whitespace (`--where LOCAL` is the
-    # same target as `local`) and emits a `where_invalid` envelope instead of
-    # letting an unknown value escape as a bare ValueError traceback. Everything
-    # below then branches on the resolved enum, so no routing decision is ever
-    # made by string-comparing user input.
-    decision = where_module.resolve_default_or_exit(flag=where)
-    mode = decision.target.value
-
-    # Resolve the local object_info server the same way `comfy run` does —
-    # flag > COMFY_LOCAL_URL > config.background > 127.0.0.1:8188. Without the
-    # `config.background` step validate would consult whatever answers on the
-    # default port while `run` submits to the background server comfy-cli
-    # launched on another one, making the verdict meaningless for the server
-    # that will actually execute the workflow (BE-6299). `resolve_target` does
-    # not consult `config.background` on purpose (other callers, e.g. transfer
-    # and system, must not), so — as its docstring says — the callers that do
-    # honor it resolve upstream, here.
-    is_local_fetch = input_path is None and decision.target is where_module.WhereTarget.LOCAL
-    if is_local_fetch:
-        from comfy_cli.host_port import parse_host_port_arg, report_usage_error, resolve_host_port
-
-        # `host is not None` (not `if host:`): `--host ""` must reach the parser
-        # and be rejected, not be read as "no --host given". Likewise the port
-        # merge tests `is None`, so an explicit `--port 0` isn't silently
-        # overridden by a port embedded in the combined `--host h:p` form —
-        # `resolve_host_port` rejects it as out of range instead.
-        # `report_usage_error` gives JSON/NDJSON consumers a terminating
-        # envelope for that rejection instead of an empty stdout (exit stays 2).
-        with report_usage_error(renderer):
-            if host is not None:
-                host, parsed_port = parse_host_port_arg(host)
-                if port is None and parsed_port is not None:
-                    port = parsed_port
-            host, port = resolve_host_port(host, port)
-
-    try:
-        graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)
-    except LoadError as e:
-        renderer.error(
-            code="cql_no_graph",
-            message=str(e),
-            hint=e.details.get("hint", "pass --input <object_info.json>, or start the server"),
-            details=e.details,
-        )
-        raise typer.Exit(code=1) from e
-
-    # Detect a UI-export (frontend/canvas) workflow and lower it to API format
-    # before validating — exactly as `comfy run` does. Without this the wrapper
-    # keys (`nodes`, `links`, `groups`, `config`, …) each emit a `non_node_key`
-    # warning, zero nodes are checked, and the result is a vacuous `valid:true`.
-    # The converter reuses the object_info the graph was already built from
-    # (`graph.object_info`), so offline `--input` works and no second fetch happens.
-    converted_from_ui = False
-    if is_ui_workflow(wf_data):
-        if renderer.is_pretty():
-            rprint("[yellow]Detected UI-format workflow, converting to API format...[/yellow]")
-        try:
-            converted = convert_ui_to_api(wf_data, graph.object_info)
-        except WorkflowConversionError as e:
-            renderer.error(
-                code="workflow_not_api_format",
-                message=f"Workflow is a UI export that could not be converted to API format: {e}",
-                hint="use ComfyUI's 'File > Export (API)' to save as API format",
-            )
-            raise typer.Exit(code=1) from e
-        except Exception as e:  # noqa: BLE001 — never leak a raw traceback to the agent flow
-            renderer.error(
-                code="conversion_crash",
-                message=f"Workflow conversion crashed unexpectedly: {type(e).__name__}: {e}",
-                hint="report this at https://github.com/Comfy-Org/comfy-cli/issues",
-                details={"exception_type": type(e).__name__},
-            )
-            raise typer.Exit(code=1) from e
-        if not converted:
-            renderer.error(
-                code="workflow_not_api_format",
-                message="Workflow is a UI export that converted to no executable nodes",
-                hint="use ComfyUI's 'File > Export (API)' to save as API format",
-            )
-            raise typer.Exit(code=1)
-        wf_data = converted
-        converted_from_ui = True
-
-    result = graph.validate_workflow(wf_data)
-
-    # Preview credit spend: partner-API (paid) nodes spend Comfy credits when the
-    # workflow is run. This is the same detection `comfy run` uses (authoritative
-    # `api_node: true`, `partner/...` category fallback), surfaced here read-only
-    # so agents can answer "will this spend credits?" without running. `wf_data`
-    # is API format at this point (any UI export already converted above), which
-    # is the format the detector reads. Purely informational — no exit-code gate.
-    partner_nodes = _detect_partner_nodes(wf_data, graph.object_info)
-
-    payload = {
-        "workflow": str(wf_path),
-        "valid": result["valid"],
-        "error_count": len(result["errors"]),
-        "warning_count": len(result["warnings"]),
-        "errors": result["errors"],
-        "warnings": result["warnings"],
-        "partner_nodes": partner_nodes,
-        "spends_credits": bool(partner_nodes),
-        # Name the server (or file) the verdict was computed against, so an
-        # agent comparing `validate` with `run` can see whether they consulted
-        # the same object_info. Populated from the values resolved above, so a
-        # local run reports the concrete host/port actually queried. `host` is
-        # reported unbracketed, matching `Target.host` — brackets belong to the
-        # URL composed for display, not to the address itself.
-        "object_info_source": (
-            {"mode": "file", "path": str(input_path)}
-            if input_path is not None
-            else {"mode": mode, "host": _unbracket_host(host), "port": port}
-            if is_local_fetch
-            else {"mode": mode}
-        ),
-    }
-    if converted_from_ui:
-        # Signal that validation ran against the converted graph, not the file's
-        # literal bytes, and report how many nodes the conversion produced.
-        payload["converted_from_ui"] = True
-        payload["converted_node_count"] = len(wf_data)
-
-    if renderer.is_pretty():
-        # Name the object_info source in one dim line. A file path (and, in
-        # principle, a hostname) can contain Rich-markup metacharacters, so
-        # escape it — same reason the partner-node line below does.
-        from rich.markup import escape as _escape
-
-        # Branch on the same flags that built the payload, not on its "mode"
-        # string: "file" is an offline sentinel that shares a key with the
-        # routing targets, so a mode-string branch couples display to a value
-        # the routing layer also owns.
-        source = payload["object_info_source"]
-        if input_path is not None:
-            where_oi = _escape(source["path"])
-        elif is_local_fetch:
-            where_oi = _escape(f"http://{_bracket_host(source['host'])}:{source['port']}")
-        else:
-            where_oi = _escape(source["mode"])
-        rprint(f"[dim]object_info from {where_oi}[/dim]")
-        if result["valid"]:
-            rprint(f"[bold green]✓[/bold green] workflow is valid ({len(wf_data)} nodes)")
-            for w in result["warnings"]:
-                rprint(f"  [yellow]⚠[/yellow] {w.get('message', '')}")
-        else:
-            rprint(f"[bold red]✗[/bold red] {len(result['errors'])} error(s)")
-            for e in result["errors"]:
-                msg = e.get("message", "")
-                suggestions = e.get("suggestions", [])
-                if suggestions:
-                    msg += f" (did you mean: {', '.join(suggestions[:3])}?)"
-                rprint(f"  [red]•[/red] node {e.get('node_id') or '?'}: {msg}")
-            for w in result["warnings"]:
-                rprint(f"  [yellow]⚠[/yellow] {w.get('message', '')}")
-        if partner_nodes:
-            # class_type strings come from the workflow / object_info and can
-            # contain Rich-markup metacharacters (e.g. `[/yellow]`); escape each
-            # so an odd node name can't raise MarkupError and crash the command.
-            from rich.markup import escape as _escape
-
-            rprint(
-                f"[yellow]⚠ uses partner-API (paid) nodes that spend Comfy credits: {', '.join(_escape(n) for n in partner_nodes)}[/yellow]"
-            )
-    renderer.emit(payload, command="validate", ok=result["valid"])
-
-    if not result["valid"]:
-        raise typer.Exit(code=1)
+    get_renderer().warn("`comfy validate` is deprecated — use `comfy workflow validate` instead.")
+    validate_api_workflow(workflow, where=where, host=host, port=port, input_path=input_path, command="validate")
 
 
 # How a `cloud` routing decision was reached, in words, for the --host/--port
@@ -1383,6 +1260,11 @@ def upload(
         raise typer.Exit(code=1)
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+    # Routing is decided, so every error envelope from here down can name the
+    # target — including the `host_flag_cloud` rejection immediately below,
+    # which never reaches `execute_upload`. The `where_invalid` above stays
+    # `where: null`: it failed before there was a decision to report.
+    renderer.where = effective_where
     # --host/--port address a local ComfyUI; the cloud target's address comes
     # from the signed-in account's base URL and ignores them entirely
     # (``Target.host``/``Target.port`` are documented local-only). Rejecting
@@ -1444,6 +1326,10 @@ def download(
         raise typer.Exit(code=1)
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+    # As in `upload`: stamped once routing resolves, so the preflight failure
+    # below and `execute_download`'s stdin-parsing errors (which run before it
+    # resolves its own target) all name the backend this invocation routed to.
+    renderer.where = effective_where
     if effective_where == "cloud":
         where_module.cloud_preflight_or_exit()
 
@@ -1997,6 +1883,10 @@ def feedback(
             else str(usability_satisfaction_score),
         },
     )
+    # Imported lazily: questionary pulls in prompt_toolkit (~50ms) and is only
+    # needed on this interactive feedback path.
+    import questionary
+
     if (
         sent
         and questionary.confirm("Do you want to provide additional feature-specific feedback on our GitHub page?").ask()
@@ -2112,6 +2002,11 @@ app.add_typer(
 app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
 app.add_typer(nodes_command.app, name="nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories).")
 app.add_typer(templates_command.app, name="templates", help="Browse the Comfy workflow-template gallery.")
+app.add_typer(
+    knowledge_command.app,
+    name="knowledge",
+    help="Inspect the curated model-knowledge bundle: status, resolve an alias, ranked picks per capability.",
+)
 app.command(
     "run-template",
     help=(
@@ -2135,6 +2030,35 @@ app.add_typer(tracking.app, name="tracking", help="Manage analytics tracking set
 app.add_typer(cloud_command.app, name="cloud", help="Comfy Cloud — sign in, route commands, inspect session.")
 app.add_typer(auth_command.app, name="auth", help="Manage API tokens for model hosts (Civitai, Hugging Face).")
 app.add_typer(jobs_command.app, name="jobs", help="List, inspect, and live-watch ComfyUI prompts.")
+app.add_typer(
+    distribution_command.app,
+    name="build",
+    help="Package a local ComfyUI environment into a serverless build.",
+)
+
+
+def _add_deprecated_alias(root: typer.Typer, group: typer.Typer, *, old_name: str, new_name: str) -> None:
+    """Register ``group`` a second time under its retired name: hidden from help,
+    same command tree, one deprecation warning per invocation on stderr (the
+    envelopes still carry the canonical ``new_name`` labels). Self-contained on
+    purpose so it can fold into a shared add_deprecated_alias helper later."""
+
+    def _warn_deprecated() -> None:
+        renderer = get_renderer()
+        renderer.stderr_console().print(
+            f"[yellow]`comfy {old_name}` is deprecated; use `comfy {new_name}` instead.[/yellow]"
+        )
+        # The root callback stamped the envelope `command` with the invoked
+        # (old) group name; re-stamp it so alias envelopes are byte-identical
+        # to the canonical spelling's.
+        renderer.command = new_name
+
+    root.add_typer(group, name=old_name, hidden=True, callback=_warn_deprecated)
+
+
+# `comfy distribution` was the group's name before the builder's public API
+# renamed distributions to builds; kept as a warning alias for old scripts.
+_add_deprecated_alias(app, distribution_command.app, old_name="distribution", new_name="build")
 app.add_typer(project_command.app, name="project", help="Project conventions: init and status.")
 app.add_typer(
     project_command.assets_app,
@@ -2144,7 +2068,7 @@ app.add_typer(
 app.add_typer(
     skill_command.app,
     name="skills",
-    help="Install the bundled comfy agent skills into Claude Code, Cursor, Aider, and any AGENTS.md-aware tool.",
+    help="Install the comfy agent skills into Claude Code, Cursor, Aider, and any AGENTS.md-aware tool.",
 )
 # Keep the singular alias for backward compat
 app.add_typer(skill_command.app, name="skill", hidden=True)

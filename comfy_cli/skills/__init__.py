@@ -12,16 +12,15 @@ The point: instead of running an MCP server, one command teaches every agent
 on the box how to drive ``comfy`` directly. This is the productized form of
 the agent-first CLI.
 
-Bundled skills (4 total):
+Two kinds of skill, written and installed identically:
 
-- ``comfy``          — the primary driver skill (command surface, output
-                       contract, routing, discovery, execution, and all
-                       domain patterns: image, video, audio, cloud, edit,
-                       condition, pipeline)
-- ``comfy-fragments``— typed reusable workflow fragments + YAML blueprint
-                       composition (build large pipelines from small pieces)
-- ``comfy-debug``    — debugging skill for when workflows fail or jobs hang
-- ``comfy-relay``    — what to put in chat while driving the CLI
+- **Bundled** — shipped in this package's tree. See ``BUNDLED_SKILLS``.
+- **Remote** — fetched from its own repository at install time. See
+  ``REMOTE_SKILLS``. Living elsewhere is what lets a remote skill's judgment be
+  revised without a CLI release; the cost is that a machine without network
+  gets every other skill and is told which one it missed.
+
+``comfy skills list`` names both kinds.
 """
 
 from __future__ import annotations
@@ -30,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib import resources
@@ -51,7 +51,6 @@ _SKILL_FILE = "SKILL.md"
 # name). The bundled skills must satisfy their own convention.
 BUNDLED_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy", "comfy"),
-    ("comfy-fragments", "comfy-fragments"),
     ("comfy-debug", "comfy-debug"),
     ("comfy-relay", "comfy-relay"),
     ("comfy-director", "comfy-director"),
@@ -180,6 +179,102 @@ def load_skill_source(token: str) -> SkillSource:
 
 
 # ---------------------------------------------------------------------------
+# Remote skills — fetched from their own repository at install time
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RemoteSkill:
+    """A skill that lives in another repository and is fetched at install time.
+
+    Bundling one of these would re-couple every revision of its wording to a
+    CLI release, which is the whole reason it lives elsewhere. ``ref`` is the
+    channel *that* repository moves; the CLI never pins a commit of its own.
+    """
+
+    name: str
+    repo: str  # "owner/name" on GitHub
+    ref: str
+    path: str  # path to SKILL.md within the repo
+
+    @property
+    def url(self) -> str:
+        return f"https://raw.githubusercontent.com/{self.repo}/{self.ref}/{self.path}"
+
+
+REMOTE_SKILLS: tuple[RemoteSkill, ...] = (
+    RemoteSkill(
+        name="comfy-build",
+        repo="Comfy-Org/comfy-skills",
+        ref="main",
+        path="comfy-cli/comfy-build/SKILL.md",
+    ),
+)
+
+# A skill is one small markdown file; anything near this cap is not one.
+_REMOTE_SKILL_MAX_BYTES = 512 * 1024
+_REMOTE_FETCH_TIMEOUT = 10.0
+
+
+class RemoteSkillUnavailable(Exception):
+    """A remote skill could not be fetched or did not pass the skill contract.
+
+    Never fatal: an install that hits this writes every other skill and reports
+    the remote one as skipped, because a machine without network is a normal
+    case rather than an error case.
+    """
+
+
+def remote_skill_names() -> tuple[str, ...]:
+    return tuple(r.name for r in REMOTE_SKILLS)
+
+
+def _resolve_remote(skill_name: str) -> RemoteSkill | None:
+    for remote in REMOTE_SKILLS:
+        if remote.name == skill_name:
+            return remote
+    return None
+
+
+def fetch_remote_skill(remote: RemoteSkill) -> SkillSource:
+    """Download a remote skill and put it through the path-install contract.
+
+    The download is staged as ``<name>/SKILL.md`` and handed to
+    ``load_skill_source`` rather than validated separately, so a remote skill
+    and a ``--skill ./some/dir`` install answer to exactly the same rules —
+    including directory-name equals frontmatter ``name:``, which is what stops
+    a renamed skill from landing under someone else's directory.
+    """
+    from comfy_cli.http import ResponseTooLarge, plain_urlopen, read_capped
+
+    try:
+        with plain_urlopen(remote.url, timeout=_REMOTE_FETCH_TIMEOUT) as resp:
+            raw = read_capped(resp, remote.url, max_bytes=_REMOTE_SKILL_MAX_BYTES)
+    except ResponseTooLarge as e:
+        raise RemoteSkillUnavailable(str(e)) from e
+    except Exception as e:  # urllib raises URLError, socket.timeout, ssl errors, OSError
+        raise RemoteSkillUnavailable(f"could not fetch {remote.url}: {e}") from e
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise RemoteSkillUnavailable(f"{remote.url} is not UTF-8 text") from e
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = Path(tmp) / remote.name
+            staged.mkdir()
+            (staged / _SKILL_FILE).write_text(text, encoding="utf-8")
+            return load_skill_source(str(staged))
+    except ValueError as e:
+        raise RemoteSkillUnavailable(f"{remote.url} is not a valid skill: {e}") from e
+    except OSError as e:
+        # A full disk or an unwritable TMPDIR skips this skill; it must not abort
+        # the install of every other one.
+        raise RemoteSkillUnavailable(f"could not stage {remote.url}: {e}") from e
+
+
+# ---------------------------------------------------------------------------
 # Install manifest — provenance and staleness tracking
 # ---------------------------------------------------------------------------
 
@@ -208,8 +303,13 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _record_installed(target_path: Path, skill_name: str, content: str) -> None:
-    """Add or update the manifest entry for a successfully installed skill file."""
+def _record_installed(target_path: Path, skill_name: str, content: str, source: dict | None = None) -> None:
+    """Add or update the manifest entry for a successfully installed skill file.
+
+    ``source`` names where a remote skill was fetched from, so an install can be
+    reproduced after the fact: the sha256 already recorded says which bytes
+    landed, and the source says which repository and channel produced them.
+    """
     from comfy_cli.config_manager import ConfigManager
 
     try:
@@ -218,11 +318,14 @@ def _record_installed(target_path: Path, skill_name: str, content: str) -> None:
         cli_version = "0.0.0"
 
     manifest = read_manifest()
-    manifest[str(target_path)] = {
+    entry = {
         "skill": skill_name,
         "sha256": _sha256(content),
         "cli_version": cli_version,
     }
+    if source is not None:
+        entry["source"] = source
+    manifest[str(target_path)] = entry
     write_manifest(manifest)
 
 
@@ -276,8 +379,11 @@ def _compute_skill_state(path: Path, skill_name: str, manifest: dict) -> SkillSt
 
     manifest_sha = entry.get("sha256", "")
     if file_sha == manifest_sha:
-        # File matches what was installed (user hasn't edited), but bundled moved on.
-        return "stale"
+        # Matches what was installed, so the user hasn't edited it. For a bundled
+        # skill that means the bundle moved on; for one with no local copy to
+        # compare against — remote or path-installed — it is simply current, and
+        # calling it stale would leave it permanently stale.
+        return "stale" if bundled_sha is not None else "current"
 
     # File differs from both manifest and bundled — user edited it.
     return "modified"
@@ -307,26 +413,65 @@ def _resolve_paths(*, skill_name: str, scope: Scope, project_root: Path) -> dict
     }
 
 
-def _normalize_skills(skills: Sequence[str] | None) -> list[SkillSource]:
-    """Resolve a sequence of skill tokens into SkillSource objects.
+def default_skill_names() -> tuple[str, ...]:
+    """Every skill an argument-free install writes: the bundled set plus the remote ones."""
+    return bundled_skill_names() + remote_skill_names()
 
-    Tokens that look like paths are resolved via ``load_skill_source``; plain
-    names are validated against the bundled set.  ``None`` / empty defaults to
-    all bundled skills.
+
+def _looks_like_path(token: str) -> bool:
+    return os.sep in token or token.startswith((".", "~")) or Path(token).expanduser().exists()
+
+
+@dataclass(frozen=True)
+class _ResolvedSkill:
+    """One skill to install, resolved from a token."""
+
+    name: str
+    content: str | None = None  # None when not fetched, or when the fetch failed
+    origin: dict | None = None  # where a fetch got it, for the manifest
+    unavailable: str | None = None  # why a remote skill has no content
+
+
+def _resolve(skills: Sequence[str] | None, *, fetch: bool) -> list[_ResolvedSkill]:
+    """Resolve skill tokens once, so planning and installing cannot disagree.
+
+    With ``fetch=False`` nothing is downloaded and ``content`` stays None. That
+    is all planning and ``status`` need, and it is why ``status`` works on a
+    machine that has never fetched anything.
+
+    The default set is resolved by name and never as a path. A directory in the
+    working directory can share a skill's name, which every ComfyUI checkout
+    does, and it must not shadow the bundled skill or abort the install.
     """
     if not skills:
-        return [SkillSource(name=name, content=skill_content(name), bundled=True) for name, _ in BUNDLED_SKILLS]
-    out: list[SkillSource] = []
-    for s in skills:
-        p = Path(s).expanduser()
-        looks_like_path = os.sep in s or s.startswith((".", "~")) or p.exists()
-        if looks_like_path:
+        return [_resolve_named(name, fetch=fetch) for name in default_skill_names()]
+    out: list[_ResolvedSkill] = []
+    for token in skills:
+        if _looks_like_path(token):
             # Raises ValueError on invalid path skills — caller handles.
-            out.append(load_skill_source(s))
+            src = load_skill_source(token)
+            out.append(_ResolvedSkill(name=src.name, content=src.content if fetch else None))
         else:
-            _resolve_subdir(s)  # validates bundled name; raises ValueError on unknown
-            out.append(SkillSource(name=s, content=skill_content(s), bundled=True))
+            out.append(_resolve_named(token, fetch=fetch))
     return out
+
+
+def _resolve_named(name: str, *, fetch: bool) -> _ResolvedSkill:
+    remote = _resolve_remote(name)
+    if remote is None:
+        _resolve_subdir(name)  # validates bundled name; raises ValueError on unknown
+        return _ResolvedSkill(name=name, content=skill_content(name) if fetch else None)
+    if not fetch:
+        return _ResolvedSkill(name=name)
+    try:
+        source = fetch_remote_skill(remote)
+    except RemoteSkillUnavailable as e:
+        return _ResolvedSkill(name=name, unavailable=str(e))
+    return _ResolvedSkill(
+        name=name,
+        content=source.content,
+        origin={"repo": remote.repo, "ref": remote.ref, "path": remote.path},
+    )
 
 
 def plan_install(
@@ -338,16 +483,18 @@ def plan_install(
 ) -> list[TargetPlan]:
     """Return a TargetPlan per (skill, target) pair.
 
-    Default skills: all bundled. Default targets: all three. Default scope: user.
+    Default skills: every one an install writes, bundled and remote. Default
+    targets: all three. Default scope: user.
     """
     root = project_root or Path.cwd()
     plans: list[TargetPlan] = []
-    for source in _normalize_skills(skills):
-        all_paths = _resolve_paths(skill_name=source.name, scope=scope, project_root=root)
+    for resolved in _resolve(skills, fetch=False):
+        name = resolved.name
+        all_paths = _resolve_paths(skill_name=name, scope=scope, project_root=root)
         kinds: list[TargetKind] = list(targets) if targets else list(all_paths.keys())
         for kind in kinds:
             path = all_paths[kind]
-            plans.append(TargetPlan(skill=source.name, kind=kind, scope=scope, path=path, exists=path.exists()))
+            plans.append(TargetPlan(skill=name, kind=kind, scope=scope, path=path, exists=path.exists()))
     return plans
 
 
@@ -363,49 +510,53 @@ def install(
 
     AGENTS.md gets one fenced block per skill (idempotent re-installs replace
     the block). Other targets are full file writes per skill.
+
+    A remote skill that cannot be fetched is reported as ``skipped`` and every
+    other skill still lands — a machine without network gets the bundled set
+    and is told what it missed. ``dry_run`` still fetches, since a preview that
+    promised a skill the real install would skip is worse than a slow preview.
     """
     root = project_root or Path.cwd()
     results: list[TargetResult] = []
-    sources = _normalize_skills(skills)
-    # Build a per-name content map so path-based skills carry their own content.
-    content_map: dict[str, str] = {src.name: src.content for src in sources}
-    plans = plan_install(scope=scope, targets=targets, skills=skills, project_root=root)
-    for plan in plans:
-        if dry_run:
-            results.append(
-                TargetResult(
-                    skill=plan.skill,
-                    kind=plan.kind,
-                    scope=plan.scope,
-                    path=plan.path,
-                    action="would_write",
+    for resolved in _resolve(skills, fetch=True):
+        all_paths = _resolve_paths(skill_name=resolved.name, scope=scope, project_root=root)
+        kinds: list[TargetKind] = list(targets) if targets else list(all_paths.keys())
+        for kind in kinds:
+            path = all_paths[kind]
+            if resolved.unavailable is not None:
+                results.append(
+                    TargetResult(
+                        skill=resolved.name,
+                        kind=kind,
+                        scope=scope,
+                        path=path,
+                        action="skipped",
+                        reason=resolved.unavailable,
+                    )
                 )
-            )
-            continue
-        try:
-            content = content_map[plan.skill]
-            if plan.kind == "claude-code":
-                _write_claude_skill(plan.path, content)
-                _record_installed(plan.path, plan.skill, content)
-            elif plan.kind == "cursor":
-                _write_cursor_rule(plan.path, content, skill_name=plan.skill)
-                _record_installed(plan.path, plan.skill, content)
-            elif plan.kind == "agents-md":
-                _upsert_agents_md_block(plan.path, content, skill_name=plan.skill)
-            results.append(
-                TargetResult(skill=plan.skill, kind=plan.kind, scope=plan.scope, path=plan.path, action="wrote")
-            )
-        except OSError as e:
-            results.append(
-                TargetResult(
-                    skill=plan.skill,
-                    kind=plan.kind,
-                    scope=plan.scope,
-                    path=plan.path,
-                    action="skipped",
-                    reason=str(e),
+                continue
+            if dry_run:
+                results.append(
+                    TargetResult(skill=resolved.name, kind=kind, scope=scope, path=path, action="would_write")
                 )
-            )
+                continue
+            content = resolved.content or ""
+            try:
+                if kind == "claude-code":
+                    _write_claude_skill(path, content)
+                    _record_installed(path, resolved.name, content, source=resolved.origin)
+                elif kind == "cursor":
+                    _write_cursor_rule(path, content, skill_name=resolved.name)
+                    _record_installed(path, resolved.name, content, source=resolved.origin)
+                elif kind == "agents-md":
+                    _upsert_agents_md_block(path, content, skill_name=resolved.name)
+                results.append(TargetResult(skill=resolved.name, kind=kind, scope=scope, path=path, action="wrote"))
+            except OSError as e:
+                results.append(
+                    TargetResult(
+                        skill=resolved.name, kind=kind, scope=scope, path=path, action="skipped", reason=str(e)
+                    )
+                )
     return results
 
 
@@ -580,18 +731,41 @@ def _write_claude_skill(path: Path, content: str) -> None:
     atomic_write_text(path, content)
 
 
-def _cursor_description_for(skill_name: str) -> str:
-    return {
-        "comfy": "comfy CLI for ComfyUI workflows, models, node-graph queries, image/video/audio generation, cloud, and pipeline orchestration.",
-        "comfy-fragments": "Typed reusable workflow fragments + YAML blueprint composition: build large pipelines from small tested pieces via comfy CLI.",
-        "comfy-debug": "Debugging skill for the comfy CLI: failed workflows, hung jobs, error envelopes.",
-        "comfy-relay": "What to put in chat while driving the comfy CLI: show artifacts, surface results, truncation rules.",
-    }.get(skill_name, f"comfy CLI skill: {skill_name}")
+def frontmatter_description(content: str) -> str:
+    """The skill's ``description:`` from its frontmatter, whitespace-collapsed, or "".
+
+    Searches the frontmatter block alone. A ``description:`` line in the body,
+    inside a YAML example say, documents something else.
+    """
+    if not content.startswith("---\n"):
+        return ""
+    _, _, rest = content.partition("---\n")
+    front, _, _ = rest.partition("---\n")
+    m = _FRONTMATTER_DESC_RE.search(front)
+    return " ".join(m.group(1).split()) if m and m.group(1).strip() else ""
+
+
+def _cursor_description_for(skill_name: str, content: str) -> str:
+    """The Cursor rule's description, taken from the skill's own frontmatter.
+
+    Cursor decides whether to surface a rule from this line, so it has to say
+    what the skill is for. Reading it from the skill means one description per
+    skill rather than a second copy here that goes stale — which the copy this
+    replaced had already done, having never gained an entry for a skill added
+    after it was written.
+    """
+    return frontmatter_description(content) or f"comfy CLI skill: {skill_name}"
 
 
 def _write_cursor_rule(path: Path, content: str, *, skill_name: str) -> None:
     body = _strip_frontmatter(content)
-    rule = f'---\ndescription: {_cursor_description_for(skill_name)}\nglobs: "**/*"\nalwaysApply: false\n---\n\n{body}'
+    # Quote the description: it is now the skill's own text, and a remote skill's
+    # text is not ours to constrain. An unquoted `Build: a thing` or a leading `#`
+    # is a YAML parse error, so Cursor drops a rule that installed fine. A JSON
+    # string is a valid YAML double-quoted scalar, and the description is already
+    # whitespace-collapsed to one line.
+    description = json.dumps(_cursor_description_for(skill_name, content), ensure_ascii=False)
+    rule = f'---\ndescription: {description}\nglobs: "**/*"\nalwaysApply: false\n---\n\n{body}'
     _backup_if_user_edited(path, rule)
     atomic_write_text(path, rule)
 

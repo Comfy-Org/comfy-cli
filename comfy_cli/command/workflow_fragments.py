@@ -344,6 +344,11 @@ def _load_object_info(renderer, *, input_path: str | None, host: str | None, por
         # handler below is for object_info failures, not routing ones).
         decision = where_module.resolve_default_or_exit()
         mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+        # Routing resolved — stamp it so the `object_info_unavailable` envelope
+        # below names the catalog this conversion routed to, the same way
+        # `nodes` and `workflow`'s own `_get_graph` do. The `where_invalid` that
+        # `_or_exit` raises above stays `where: null`: it *is* the failed decision.
+        renderer.where = mode
         return resilient_load_object_info(mode=mode, host=host, port=port)
     except (OSError, json.JSONDecodeError, LoadError) as e:
         renderer.error(
@@ -464,7 +469,7 @@ def fragment_show_cmd(
     renderer.emit(payload, command="workflow fragment show")
 
 
-@fragment_app.command("validate", help="Validate that a fragment file is well-formed.")
+@fragment_app.command("validate", help="Validate that a workflow-fragment file is well-formed")
 @tracking.track_command("workflow")
 def fragment_validate_cmd(
     fragment: Annotated[str, typer.Argument(help="Fragment name (looked up in --lib) or path to .json.")],

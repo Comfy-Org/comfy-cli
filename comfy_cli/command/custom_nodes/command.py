@@ -13,6 +13,7 @@ import typer
 from rich.console import Console
 
 from comfy_cli import constants, logging, tracking, ui, utils
+from comfy_cli._safe_exec import BinaryNotFoundError
 from comfy_cli.command.custom_nodes.bisect_custom_nodes import bisect_app
 from comfy_cli.command.custom_nodes.cm_cli_util import (
     execute_cm_cli,
@@ -28,10 +29,11 @@ from comfy_cli.file_utils import (
     upload_file_to_signed_url,
     zip_files,
 )
+from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
-from comfy_cli.output.renderer import get_renderer
 from comfy_cli.registry import (
     RegistryAPI,
+    RegistryAPIError,
     extract_node_configuration,
     initialize_project_config,
 )
@@ -120,14 +122,12 @@ def get_installed_packages():
 
 def try_install_script(repo_path, install_cmd, instant_execution=False):
     startup_script_path = os.path.join(workspace_manager.workspace_path, "startup-scripts")
+    # Windows always defers to the startup script. ComfyUI-Manager additionally
+    # gated this on the ComfyUI checkout being newer than a required commit;
+    # that comparison was deliberately dropped (Yoland) because comfy-cli tracks
+    # no required-commit datetime to compare against.
     if not instant_execution and (
-        (len(install_cmd) > 0 and install_cmd[0].startswith("#"))
-        or (
-            platform.system() == "Windows"
-            # From Yoland: disable commit compare
-            # and comfy_ui_commit_datetime.date()
-            # >= comfy_ui_required_commit_datetime.date()
-        )
+        (len(install_cmd) > 0 and install_cmd[0].startswith("#")) or platform.system() == "Windows"
     ):
         if not os.path.exists(startup_script_path):
             os.makedirs(startup_script_path)
@@ -139,26 +139,15 @@ def try_install_script(repo_path, install_cmd, instant_execution=False):
 
         return True
     else:
-        # From Yoland: Disable blacklisting
-        # if len(install_cmd) == 5 and install_cmd[2:4] == ['pip', 'install']:
-        #     if is_blacklisted(install_cmd[4]):
-        #         print(f"[ComfyUI-Manager] skip black listed pip installation: '{install_cmd[4]}'")
-        #         return True
-
+        # ComfyUI-Manager screened pip installs against a package blacklist here.
+        # Deliberately not carried over (Yoland): comfy-cli ships no blacklist,
+        # so every install command runs as given.
         print(f"\n## ComfyUI-Manager: EXECUTE => {install_cmd}")
         code = run_script(install_cmd, cwd=repo_path)
 
-        # From Yoland: Disable warning
-        # if platform.system() != "Windows":
-        #     try:
-        #         if comfy_ui_commit_datetime.date() < comfy_ui_required_commit_datetime.date():
-        #             print("\n\n###################################################################")
-        #             print(f"[WARN] ComfyUI-Manager: Your ComfyUI version ({comfy_ui_revision})[{comfy_ui_commit_datetime.date()}] is too old. Please update to the latest version.")
-        #             print(f"[WARN] The extension installation feature may not work properly in the current installed ComfyUI version on Windows environment.")
-        #             print("###################################################################\n\n")
-        #     except:
-        #         pass
-
+        # ComfyUI-Manager also warned on non-Windows when the ComfyUI checkout
+        # was older than the required commit. Dropped for the same reason as
+        # above — there is no required-commit datetime here.
         if code != 0:
             print("install script failed")
             return False
@@ -168,12 +157,10 @@ def execute_install_script(repo_path):
     install_script_path = os.path.join(repo_path, "install.py")
     requirements_path = os.path.join(repo_path, "requirements.txt")
 
-    # From Yoland: disable lazy mode
-    # if lazy_mode:
-    #     install_cmd = ["#LAZY-INSTALL-SCRIPT",  sys.executable]
-    #     try_install_script(repo_path, install_cmd)
-    # else:
-
+    # ComfyUI-Manager's "lazy mode" — queueing a #LAZY-INSTALL-SCRIPT marker for
+    # the next startup instead of installing now — was deliberately not carried
+    # over (Yoland). comfy-cli installs eagerly so failures surface in the
+    # command that caused them rather than on some later launch.
     if os.path.exists(requirements_path):
         print("Install: pip packages")
         python = resolve_workspace_python(workspace_manager.workspace_path)
@@ -1157,14 +1144,13 @@ def validate_node_for_publishing():
     return config
 
 
-@app.command("validate", help="Run validation checks for publishing")
+@app.command("validate", help="Validate this custom node for registry publishing")
 @tracking.track_command("publish")
 def validate():
     """
     Run validation checks that would be performed during publishing.
     """
     validate_node_for_publishing()
-    # print("[green]✓ All validation checks passed successfully[/green]")
 
 
 def resolve_publish_changelog(changelog: str | None, changelog_file: str | None) -> str:
@@ -1263,8 +1249,15 @@ def publish(
         # Upload the zip file to the signed URL
         typer.echo("Uploading zip file...")
         upload_file_to_signed_url(signed_url, zip_filename)
+    except RegistryAPIError as e:
+        get_renderer().error(
+            code="node_publish_failed",
+            message=str(e),
+            details={"status": e.status, "body": e.body},
+        )
+        raise typer.Exit(code=1) from e
     except Exception as e:
-        ui.display_error_message({str(e)})
+        ui.display_error_message(str(e))
         raise typer.Exit(code=1)
 
 
@@ -1354,15 +1347,33 @@ def registry_install(
     try:
         # Call the API to install the node
         node_version = registry_api.install_node(node_id, version)
-        if not node_version.download_url:
-            logging.error("Download URL not provided from the registry.")
-            ui.display_error_message(f"Failed to download the custom node {node_id}.")
-            return
-
+    except RegistryAPIError as e:
+        logging.error(f"Encountered an error while installing the node. error: {str(e)}")
+        get_renderer().error(
+            code="registry_install_failed",
+            message=f"Failed to download the custom node {node_id}.",
+            details={"node_id": node_id, "status": e.status, "body": e.body},
+        )
+        raise typer.Exit(code=1) from e
     except Exception as e:
         logging.error(f"Encountered an error while installing the node. error: {str(e)}")
-        ui.display_error_message(f"Failed to download the custom node {node_id}.")
-        return
+        get_renderer().error(
+            code="registry_install_failed",
+            message=f"Failed to download the custom node {node_id}.",
+            details={"node_id": node_id},
+        )
+        raise typer.Exit(code=1) from e
+
+    # Checked outside the try: typer.Exit subclasses Exception, so raising it
+    # above would be swallowed by the broad handler and emit a second envelope.
+    if not node_version.download_url:
+        logging.error("Download URL not provided from the registry.")
+        get_renderer().error(
+            code="registry_install_failed",
+            message=f"Failed to download the custom node {node_id}.",
+            details={"node_id": node_id},
+        )
+        raise typer.Exit(code=1)
 
     # Download the node archive
     custom_nodes_path = pathlib.Path(workspace_manager.workspace_path) / "custom_nodes"
@@ -1420,7 +1431,13 @@ def pack():
     if includes:
         typer.echo(f"Including additional directories: {', '.join(includes)}")
 
-    zip_files(zip_filename, includes=includes)
+    try:
+        zip_files(zip_filename, includes=includes)
+    except BinaryNotFoundError as e:
+        # git was found and refused; packing anyway would sweep in untracked and
+        # gitignored files. Abort with the reason rather than a traceback.
+        ui.display_error_message(str(e))
+        raise typer.Exit(code=1) from None
 
     typer.echo(f"Created zip file: {NODE_ZIP_FILENAME}")
     logging.info("Node has been packed successfully.")

@@ -119,6 +119,45 @@ def test_envelope_shape_on_error():
     assert r.exit_code == 1
 
 
+def test_error_where_override_lands_on_envelope():
+    """`where=` on error() stamps the routed target, mirroring emit()."""
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.JSON
+    r.machine_stream = stream
+    r.command = "run"
+    r.error("workflow_unknown_nodes", "bad graph", where="cloud")
+    env = json.loads(stream.getvalue().strip())
+    assert env["ok"] is False
+    assert env["where"] == "cloud"
+
+
+def test_error_falls_back_to_renderer_where():
+    """With no override, error() inherits the renderer's routed target — this
+    is what the run path assigns once `--where` resolves."""
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.JSON
+    r.machine_stream = stream
+    r.command = "run"
+    r.where = "local"
+    r.error("server_not_running", "no server")
+    env = json.loads(stream.getvalue().strip())
+    assert env["where"] == "local"
+
+
+def test_error_explicit_where_beats_renderer_where():
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.JSON
+    r.machine_stream = stream
+    r.command = "run"
+    r.where = "local"
+    r.error("workflow_unknown_nodes", "bad graph", where="cloud")
+    env = json.loads(stream.getvalue().strip())
+    assert env["where"] == "cloud"
+
+
 def test_error_hint_falls_back_to_registry():
     """An error emitted without an explicit hint inherits its code's REGISTERED
     navigation hint — so every error points toward correctness, never a dead end."""
@@ -254,7 +293,7 @@ def test_get_renderer_default_is_pretty():
 
 
 # ---------------------------------------------------------------------------
-# Control-sequence sanitizing at the pretty boundary (BE-4794)
+# Control-sequence sanitizing at the pretty boundary
 # ---------------------------------------------------------------------------
 
 _EVIL = "job \x1b[2Jevil"

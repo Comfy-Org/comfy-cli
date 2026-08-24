@@ -30,6 +30,7 @@ from comfy_cli.command.run.credentials import _resolve_partner_credential as _re
 from comfy_cli.command.run.execution import ExecutionProgress as ExecutionProgress
 from comfy_cli.command.run.execution import WorkflowExecution as WorkflowExecution
 from comfy_cli.command.run.execution import _safe_close as _safe_close
+from comfy_cli.command.run.execution import workflow_manifest as workflow_manifest
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW as _MAX_BODY_PREVIEW
 from comfy_cli.command.run.loader import WorkflowLoadError as WorkflowLoadError
 from comfy_cli.command.run.loader import _classify_api_workflow as _classify_api_workflow
@@ -105,16 +106,16 @@ def _stdin_is_interactive() -> bool:
     ``pythonw`` contexts ``sys.stdin`` can be ``None``, closed, or backed by a
     revoked file descriptor. Treat every such case as non-interactive so the
     spend gate falls through to the fail-closed machine-mode error instead of
-    raising an uncontrolled exception (BE-4326). Delegates to the shared
+    raising an uncontrolled exception. Delegates to the shared
     fail-safe probe so stdin and stdout are guarded identically.
     """
     return stream_is_tty(getattr(sys, "stdin", None))
 
 
 def _spend_gate(renderer, partner_nodes: list[str], allow_spend: bool, *, details: dict) -> None:
-    """Consent interlock for partner-API (paid) nodes (BE-4326).
+    """Consent interlock for partner-API (paid) nodes.
 
-    Mirrors the ``comfy run-template`` gate (BE-4113): a workflow that embeds
+    Mirrors the ``comfy run-template`` gate: a workflow that embeds
     partner-API nodes (Veo/Kling/BFL/Gemini/…) spends Comfy credits when it
     runs, so require explicit consent before submitting. A no-op when there are
     no partner nodes or ``--allow-spend`` was passed, so partner-free runs are
@@ -231,8 +232,8 @@ def execute(
     renderer = get_renderer()
 
     # `preloaded` short-circuits file loading: an in-memory API-format graph
-    # (e.g. the `comfy run --prompt` injected default) is handed straight in as
-    # (workflow_dict, display_name, is_ui, checkpoint_user_set). Everything
+    # (e.g. the `comfy run --prompt` injected default) is handed straight in as a
+    # workflow_dict / display_name / is_ui / checkpoint_user_set tuple. Everything
     # downstream is unchanged; `checkpoint_user_set` gates runtime checkpoint
     # resolution for the bundled default (skip it when the user pinned one).
     if preloaded is not None:
@@ -340,7 +341,7 @@ def execute(
         return
 
     partner_nodes = _detect_partner_nodes(workflow, object_info)
-    # Spend gate (BE-4326): partner-API nodes spend Comfy credits. Require
+    # Spend gate: partner-API nodes spend Comfy credits. Require
     # explicit consent before resolving a credential or submitting. Fires
     # BEFORE _resolve_partner_credential() below so a refusal never triggers a
     # network OAuth refresh. Detection stays fail-open (object_info == {} → no
@@ -365,7 +366,7 @@ def execute(
         # turned away are still counted: that funnel is exactly what the metric
         # is for, and `credential_present: False` marks them. class_types are
         # node names, not PII — the same data `workflow_unknown_nodes` reports.
-        # It does sit AFTER the BE-4326 spend gate, so a run refused for lack of
+        # It does sit AFTER the spend gate, so a run refused for lack of
         # `--allow-spend` emits no event: the gate deliberately precedes any
         # credential resolution (a refusal must not trigger a network OAuth
         # refresh), and `credential_present` needs that resolution. The
@@ -418,7 +419,7 @@ def execute(
             extra_data = {cred[0]: cred[1]}
 
     # Pre-submit validation via pure-Python CQL engine (checks class_types + input shapes).
-    _preflight_validate(renderer, workflow, object_info, target_label="server")
+    _preflight_validate(renderer, workflow, object_info, target_label="server", where="local")
 
     progress = None
     start = time.time()
@@ -503,6 +504,12 @@ def execute(
             jobs_state.stamp_watcher_identity(wait_state)
             _write_state(wait_state)
 
+            # Only now, with the durable record on disk, announce the queue.
+            # The event-order contract (docs/json-output.md) is
+            # `prompt_preview → queued → node events`, so this must also
+            # precede `watch_execution`'s WebSocket stream.
+            _emit_queued(renderer, execution)
+
             # `watch_execution` reports a terminal server event by rendering
             # the error and raising `typer.Exit` (1 for `execution_error`, 130
             # for `execution_interrupted`) — the ordinary failure path, not an
@@ -578,6 +585,10 @@ def execute(
             state.item_map = (compose_meta or {}).get("items")
             state_file = jobs_state.write(state)
             watcher_spawned = _spawn_watcher(execution.prompt_id, where="local", host=host, port=port, notify=notify)
+
+            # Emitted after the state file and the watcher spawn attempt, so a
+            # consumer reading this line can already `comfy jobs status` it.
+            _emit_queued(renderer, execution)
 
             if renderer.is_pretty():
                 from comfy_cli.output.glyphs import status_glyph
@@ -671,6 +682,12 @@ def execute(
         )
         raise typer.Exit(code=1)
     except (WebSocketException, ConnectionError, OSError) as e:
+        if isinstance(e, BrokenPipeError):
+            # A closed stdout is the consumer leaving, not the server dying —
+            # let click/__main__ turn it into the documented silent exit 0 and
+            # leave the just-written state record untouched. Same principle as
+            # `completed_payload` being emitted outside this try.
+            raise
         # If we closed the WebSocket ourselves in response to Ctrl-C, the recv
         # loop exits with a WebSocketException that *looks* like the server
         # vanished. Check the cancellation token first so we emit the right
@@ -736,6 +753,24 @@ def execute(
             elapsed = timedelta(seconds=completed_payload["elapsed_seconds"])
             pprint(f"[bold green]\nWorkflow execution completed ({elapsed})[/bold green]")
         renderer.emit(completed_payload, command="run", where="local")
+
+
+def _emit_queued(renderer, execution) -> None:
+    """Emit the contractual local `queued` event (docs/json-output.md#queued).
+
+    Lives in the caller rather than ``WorkflowExecution.queue()`` so it can be
+    emitted *after* the job's state file is persisted — a consumer that sees
+    this line can immediately `comfy jobs status <prompt_id>` / see the job in
+    `jobs ls`, and a `BrokenPipeError` here can no longer abort setup before
+    the durable record exists. The field set is unchanged.
+    """
+    renderer.event(
+        "queued",
+        prompt_id=execution.prompt_id,
+        client_id=execution.client_id,
+        validation_warnings=execution.validation_warnings,
+        nodes=execution.workflow_manifest(),
+    )
 
 
 def _write_state(state):
@@ -860,6 +895,7 @@ def execute_cloud(
     timeout: int = 600,
     notify: bool = False,
     print_prompt: bool = False,
+    workflow_id: str | None = None,
     preloaded: tuple[dict, str, bool, bool] | None = None,
     allow_spend: bool = False,
 ):
@@ -897,12 +933,15 @@ def execute_cloud(
         # exporter and `comfy templates fetch`) have to be lowered to the API
         # shape before submit. We do it client-side using the cloud snapshot
         # of object_info — the cloud server has no /workflow/convert endpoint.
-        from comfy_cli.cql.engine import _load_from_target
+        # Routed through resilient_load_object_info so COMFY_OBJECT_INFO_FILE
+        # (a pre-warmed/baked catalog, e.g. from an agent host) is honored
+        # before falling back to a live multi-MB /object_info fetch.
+        from comfy_cli.cql.loader import resilient_load_object_info
 
         if renderer.is_pretty():
             pprint("[yellow]Detected UI-format workflow, converting to API format…[/yellow]")
         try:
-            object_info = cloud_object_info = _load_from_target(mode="cloud")
+            object_info = cloud_object_info = resilient_load_object_info(mode="cloud")
         except Exception as e:  # noqa: BLE001
             renderer.error(
                 code="cql_no_graph",
@@ -932,6 +971,9 @@ def execute_cloud(
                 message="Workflow conversion produced no executable nodes",
             )
             raise typer.Exit(code=1)
+        # Same signal the local path emits at this point (docs/json-output.md
+        # "converted"): the input was a UI export and was lowered client-side.
+        renderer.event("converted", node_count=len(raw_workflow))
 
     kind, parsed_workflow = _classify_api_workflow(raw_workflow)
     if kind != "ok":
@@ -952,6 +994,12 @@ def execute_cloud(
     # Already fetched above when the workflow arrived in UI format.
     if cloud_object_info is None:
         try:
+            # Deliberately `_load_from_target`, not `resilient_load_object_info`:
+            # the resilient loader resolves a Target to build its cache key, and
+            # the spend gate below must fire before ANY cloud credential is
+            # resolved — `test_cloud_partner_node_machine_mode_fails_closed`
+            # pins that. Trade-off: COMFY_OBJECT_INFO_FILE is honored on the
+            # UI-conversion path above but not on this API-format fallback.
             from comfy_cli.cql.engine import _load_from_target
 
             cloud_object_info = _load_from_target(mode="cloud")
@@ -965,24 +1013,32 @@ def execute_cloud(
     if preloaded is not None and workflow_name == "default_text2img" and not checkpoint_user_set:
         _resolve_default_checkpoint_or_exit(renderer, parsed_workflow, cloud_object_info, where="cloud")
 
+    # Stream mode: emit the workflow graph so agents have a complete audit
+    # trail of what the CLI is about to submit (no-op otherwise). Emitted
+    # unconditionally, like the local path — docs/json-output.md documents
+    # `prompt_preview` in every stream except the pre-flight-failure archetype,
+    # so gating it behind --print-prompt made the cloud stream undocumented.
+    renderer.event("prompt_preview", prompt=parsed_workflow)
+
     if print_prompt:
         # Documented dry-run: show the API-format graph that WOULD be sent and
-        # exit WITHOUT POSTing. Mirrors local execute()'s print_prompt branch.
+        # exit WITHOUT POSTing. Mirrors local execute()'s print_prompt branch,
+        # including returning (rather than raising `typer.Exit(0)`) so both
+        # targets end this stream the same way.
         if renderer.is_pretty():
             print(json.dumps(parsed_workflow, indent=2, ensure_ascii=False))
         else:
-            renderer.event("prompt_preview", prompt=parsed_workflow)
             renderer.emit(
                 {"workflow": workflow_name, "status": "preview", "prompt": parsed_workflow},
                 command="run",
                 where="cloud",
             )
-        raise typer.Exit(code=0)
+        return
 
     # Pre-submit validation via pure-Python CQL engine.
-    _preflight_validate(renderer, parsed_workflow, cloud_object_info, target_label="cloud")
+    _preflight_validate(renderer, parsed_workflow, cloud_object_info, target_label="cloud", where="cloud")
 
-    # Spend gate (BE-4326): the cloud also bills partner-API nodes, so apply the
+    # Spend gate: the cloud also bills partner-API nodes, so apply the
     # same consent interlock as the local path before authenticating/submitting.
     # Fail-open on detection (empty cloud object_info → no gate), and fire before
     # Client() so a refusal never triggers cloud auth.
@@ -1004,21 +1060,23 @@ def execute_cloud(
     client_id = str(uuid.uuid4())
     start = time.time()
 
-    if wait:
-        if renderer.is_pretty():
-            pprint(f"[dim]▸[/dim] Executing [cyan]{workflow_name}[/cyan] on Comfy Cloud")
-            pprint(f"[dim]  base_url: {target.base_url}[/dim]")
-        else:
-            renderer.event("executing", workflow=workflow_name, base_url=target.base_url)
-    elif not renderer.is_pretty():
-        renderer.event("queued", workflow=workflow_name, base_url=target.base_url)
+    if wait and renderer.is_pretty():
+        pprint(f"[dim]▸[/dim] Executing [cyan]{workflow_name}[/cyan] on Comfy Cloud")
+        pprint(f"[dim]  base_url: {target.base_url}[/dim]")
+
+    # NOTE: no machine event is emitted here. This used to announce the submit
+    # with `queued` (async) / `executing` (--wait) carrying {workflow, base_url}
+    # — both wrong per docs/json-output.md: `queued` means "the server accepted
+    # the prompt" (so it cannot precede the POST), and `executing` is a per-node
+    # event. The contractual `queued` is emitted after submit *and* after the
+    # job state file is written, below.
 
     try:
         if not wait and renderer.is_pretty():
             with renderer.console().status("[cyan]Submitting to Comfy Cloud…", spinner="dots"):
-                submit = client.submit_prompt(parsed_workflow, client_id)
+                submit = client.submit_prompt(parsed_workflow, client_id, workflow_id=workflow_id)
         else:
-            submit = client.submit_prompt(parsed_workflow, client_id)
+            submit = client.submit_prompt(parsed_workflow, client_id, workflow_id=workflow_id)
     except Unauthenticated as e:
         renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e
@@ -1032,22 +1090,61 @@ def execute_cloud(
         raise typer.Exit(code=1) from e
 
     if submit.node_errors:
-        # Parse per-node errors into readable hint lines
+        # Parse per-node errors into readable hint lines. Every field here is
+        # server-supplied and only documented by convention, so each level is
+        # shape-checked rather than duck-typed: an AttributeError escaping this
+        # loop would abort the process with a traceback and no envelope at all,
+        # breaking the "exactly one terminal envelope" guarantee this contract
+        # rests on. A record that isn't the documented dict still gets a line,
+        # since it is preserved in `details.node_errors` too.
         hint_lines = []
         for nid, record in submit.node_errors.items():
             if not isinstance(record, dict):
+                hint_lines.append(f"node {nid}: {record}")
                 continue
             ct = record.get("class_type", "unknown")
-            for err in record.get("errors") or []:
-                detail = err.get("details", "") or err.get("message", "")
+            errors = record.get("errors") or []
+            if not isinstance(errors, list):
+                errors = [errors]
+            for err in errors:
+                if isinstance(err, dict):
+                    detail = err.get("details", "") or err.get("message", "")
+                else:
+                    detail = err
                 hint_lines.append(f"node {nid} ({ct}): {detail}")
         renderer.error(
             code="prompt_rejected",
             message=f"Cloud server rejected {len(submit.node_errors)} node(s)",
             hint="\n".join(hint_lines) if hint_lines else "inspect node_errors in details",
-            details={"node_errors": submit.node_errors},
+            # Documented shape (docs/json-output.md#node_errors-shape): an array
+            # of self-contained records carrying `node_id`, not the server's
+            # id-keyed dict. Same transform the local path applies.
+            details={"node_errors": _node_errors_to_list(submit.node_errors)},
         )
         raise typer.Exit(code=1)
+
+    # The contractual `queued`: the server has the prompt. Same shape the local
+    # path emits (docs/json-output.md#queued), plus `base_url` so a cloud
+    # consumer still learns the target. `validation_warnings` is always empty
+    # here — unlike local, the cloud treats any `node_errors` on an accepted
+    # submit as a hard `prompt_rejected` above, so a partially-valid graph
+    # never reaches this line.
+    #
+    # Deliberately NOT emitted at this point: both branches below emit it only
+    # once the job's state file (and, on the async branch, the watcher) exist.
+    # A `BrokenPipeError` here — `comfy run --where cloud --json-stream … |
+    # head -n1`, where the NDJSON renderer flushes every line — used to abort
+    # setup before `jobs_state.write` ran while `__main__` still exited 0,
+    # leaving a billable cloud job with no journal entry, state file or watcher.
+    def _emit_queued_cloud() -> None:
+        renderer.event(
+            "queued",
+            prompt_id=submit.prompt_id,
+            client_id=client_id,
+            validation_warnings=[],
+            nodes=workflow_manifest(parsed_workflow),
+            base_url=target.base_url,
+        )
 
     if not wait:
         state = jobs_state.new(
@@ -1061,6 +1158,9 @@ def execute_cloud(
         state_file = jobs_state.write(state)
         _journal_run(workflow_name, submit.prompt_id, "cloud")
         watcher_spawned = _spawn_watcher(submit.prompt_id, where="cloud", notify=notify)
+
+        # Durable record + watcher exist: safe to announce.
+        _emit_queued_cloud()
 
         if renderer.is_pretty():
             from comfy_cli.output.glyphs import status_glyph
@@ -1083,6 +1183,11 @@ def execute_cloud(
                 "elapsed_seconds": None,
                 "base_url": target.base_url,
                 "state_file": str(state_file) if state_file else None,
+                # Same async-envelope field the local path carries: whether the
+                # detached watcher that keeps the state file fresh actually
+                # started. Consumers poll `comfy jobs status` themselves when
+                # it is false.
+                "watcher_spawned": watcher_spawned,
             },
             command="run",
             where="cloud",
@@ -1111,6 +1216,12 @@ def execute_cloud(
     jobs_state.stamp_watcher_identity(state)
     state_file = jobs_state.write(state)
     _journal_run(workflow_name, submit.prompt_id, "cloud")
+
+    # Announced once the record is durable, and *outside* the polling try below
+    # — none of its handlers should ever see (and rewrite state for) a
+    # BrokenPipeError raised by this emit. It propagates to click/`__main__`,
+    # which exits 0 silently, with the job already recorded.
+    _emit_queued_cloud()
 
     # Guard every exit from here on. `Client._request` only converts
     # `urllib.error.HTTPError`, so a DNS failure, a connection reset, a TLS
