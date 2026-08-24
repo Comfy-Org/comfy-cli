@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_release_ls.json",
+  "title": "comfy build release ls --json data payload",
+  "description": "Every release of one Build, read from every cursor page of GET /v1/builds/{id}/versions.",
+  "type": "object",
+  "required": ["buildId", "releases"],
+  "additionalProperties": true,
+  "properties": {
+    "buildId": {"type": "string"},
+    "releases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "id": {"type": "string"},
+          "status": {"type": "string"}
+        }
+      }
+    }
+  }
+}

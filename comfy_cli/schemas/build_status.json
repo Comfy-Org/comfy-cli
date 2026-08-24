@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_status.json",
+  "title": "comfy build status --json data payload",
+  "type": "object",
+  "required": ["build", "spec", "remote", "local", "hint"],
+  "additionalProperties": false,
+  "$defs": {
+    "counts": {
+      "type": "object",
+      "required": ["added", "removed", "changed"],
+      "additionalProperties": false,
+      "properties": {
+        "added": {"type": "integer", "minimum": 0},
+        "removed": {"type": "integer", "minimum": 0},
+        "changed": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "properties": {
+    "build": {
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "name": {"type": ["string", "null"]}
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["path", "syncedRevision"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {"type": "string"},
+        "syncedRevision": {"type": ["string", "null"]}
+      }
+    },
+    "remote": {
+      "type": "object",
+      "required": ["revision", "behind"],
+      "additionalProperties": false,
+      "properties": {
+        "revision": {"type": ["string", "null"]},
+        "behind": {"type": "boolean"}
+      }
+    },
+    "local": {
+      "type": "object",
+      "required": ["drift"],
+      "additionalProperties": false,
+      "properties": {
+        "drift": {
+          "type": "object",
+          "required": ["models", "customNodes"],
+          "properties": {
+            "models": {"$ref": "#/$defs/counts"},
+            "customNodes": {"$ref": "#/$defs/counts"}
+          },
+          "additionalProperties": {"enum": ["changed", "unchanged"]}
+        }
+      }
+    },
+    "hint": {"type": ["string", "null"]}
+  }
+}

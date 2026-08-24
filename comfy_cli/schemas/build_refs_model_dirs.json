@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_refs_model_dirs.json",
+  "title": "comfy build refs model-dirs --json data payload",
+  "type": "object",
+  "required": ["directories"],
+  "additionalProperties": true,
+  "properties": {"directories": {"type": "array", "items": {"type": "string"}}}
+}

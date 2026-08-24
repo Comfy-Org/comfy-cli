@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_pull.json",
+  "title": "comfy build pull --json data payload",
+  "type": "object",
+  "required": ["spec_file", "id", "syncedRevision", "written", "definition"],
+  "additionalProperties": false,
+  "properties": {
+    "spec_file": {"type": "string"},
+    "id": {"type": "string", "minLength": 1},
+    "syncedRevision": {"type": "string", "minLength": 1},
+    "written": {"type": "boolean"},
+    "definition": {"type": "object"}
+  }
+}

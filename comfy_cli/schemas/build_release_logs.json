@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_release_logs.json",
+  "title": "comfy build release logs --json data payload",
+  "description": "One build target's captured log, forwarded verbatim from GET /v1/build-versions/{id}/logs — hence the builder's own `versionId` field name.",
+  "type": "object",
+  "required": ["versionId", "log", "truncated"],
+  "additionalProperties": true,
+  "properties": {
+    "versionId": {"type": "string"},
+    "os": {"type": "string", "enum": ["linux", "windows", "mac"]},
+    "gpu": {"type": "string", "enum": ["nvidia", "amd", "cpu", "mps"]},
+    "log": {"type": "string"},
+    "truncated": {"type": "boolean"}
+  }
+}

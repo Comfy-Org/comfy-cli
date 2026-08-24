@@ -19,6 +19,14 @@ history.
 
 - `CONTRIBUTING.md` (renamed from `DEV_README.md`) and this changelog.
 
+### Changed
+
+- **Breaking:** `comfy build` is restructured around a local `comfy-build.yaml`
+  spec — `init`, `push`, `pull`, `status`, `validate`, `update`, `delete`, plus
+  `release`, `refs`, and `blob` subgroups. The `comfy distribution` alias and the
+  `scan` / `create` / `version` / `artifact download` / `from-snapshot` commands
+  it fronted are removed.
+
 ## [1.16.0] - 2026-08-10
 
 [Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.16.0) · 16 commits since v1.15.0. No breaking changes.

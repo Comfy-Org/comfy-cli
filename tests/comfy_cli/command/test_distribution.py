@@ -1,6 +1,3 @@
-"""``comfy build scan`` — unit tests for the pure scan/hash logic and a
-subprocess check of the JSON envelope (same pattern as test_project_command)."""
-
 from __future__ import annotations
 
 import hashlib
@@ -14,7 +11,8 @@ import pytest
 import requests
 import typer
 
-from comfy_cli.command import distribution
+from comfy_cli.command import build as distribution
+from comfy_cli.command.build_spec import read_build_spec
 from comfy_cli.output import get_renderer
 
 
@@ -50,6 +48,21 @@ def test_scan_classifies_by_folder_and_hashes(models_tree):
 
     assert by_name["base.safetensors"]["sha256"] == hashlib.sha256(b"CKPT").hexdigest()
     assert by_name["base.safetensors"]["sizeBytes"] == 4
+
+
+def test_scan_models_records_scan_root_relative_posix_paths(models_tree):
+    # Given / When
+    models = {model["filename"]: model for model in distribution.scan_models(models_tree)}
+
+    # Then
+    assert models["base.safetensors"]["localPath"] == "checkpoints/base.safetensors"
+    assert models["face.pt"]["localPath"] == "ultralytics/bbox/face.pt"
+    assert models["ae.safetensors"]["localPath"] == "vae/ae.safetensors"
+    for model in models.values():
+        local_path = Path(model["localPath"])
+        assert not local_path.is_absolute()
+        assert ".." not in local_path.parts
+        assert (models_tree / local_path).read_bytes()
 
 
 def test_scan_skips_non_models_and_dotfiles_and_root_files(models_tree):
@@ -105,7 +118,7 @@ def test_detect_comfy_version_from_server(monkeypatch):
         def json(self):
             return {"system": {"comfyui_version": "0.3.55"}}
 
-    monkeypatch.setattr("comfy_cli.command.distribution.requests.get", lambda url, timeout: _Resp())
+    monkeypatch.setattr("comfy_cli.command.build.requests.get", lambda url, timeout: _Resp())
     assert distribution.detect_comfy_version_from_server("http://127.0.0.1:8188") == "0.3.55"
 
 
@@ -115,7 +128,7 @@ def test_detect_comfy_version_from_server_none_when_down(monkeypatch):
     def boom(url, timeout):
         raise requests.ConnectionError("refused")
 
-    monkeypatch.setattr("comfy_cli.command.distribution.requests.get", boom)
+    monkeypatch.setattr("comfy_cli.command.build.requests.get", boom)
     assert distribution.detect_comfy_version_from_server("http://127.0.0.1:8188") is None
 
 
@@ -209,6 +222,81 @@ def test_scan_custom_nodes_records_repo_and_ref(custom_nodes_tree):
     assert len(essentials["gitRef"]) == 40  # full commit sha
 
 
+def test_scan_custom_nodes_records_scan_root_relative_posix_paths(custom_nodes_tree):
+    # Given / When
+    nodes = {node["name"]: node for node in distribution.scan_custom_nodes(custom_nodes_tree)}
+
+    # Then
+    assert {name: node["localPath"] for name, node in nodes.items()} == {
+        "comfyui_essentials": "comfyui_essentials",
+        "hand_dropped": "hand_dropped",
+        "local_only_node": "local_only_node",
+    }
+    for node in nodes.values():
+        local_path = Path(node["localPath"])
+        assert not local_path.is_absolute()
+        assert ".." not in local_path.parts
+        assert (custom_nodes_tree / local_path).is_dir()
+
+
+@pytest.mark.parametrize(
+    ("origin", "expected"),
+    [
+        ("git@github.com:org/repo.git", "https://github.com/org/repo"),
+        ("ssh://git@github.com/org/repo/", "https://github.com/org/repo"),
+        ("https://github.com/org/repo.git/", "https://github.com/org/repo"),
+    ],
+)
+def test_scan_canonicalizes_valid_github_origins(tmp_path, monkeypatch, origin, expected):
+    # Given
+    node_dir = _write_pack(tmp_path, "pack", git=True)
+    monkeypatch.setattr(
+        distribution,
+        "_git_output",
+        lambda path, *args: origin if args[0] == "remote" else "cafebabe",
+    )
+
+    # When
+    (node,) = distribution.scan_custom_nodes(node_dir.parent)
+
+    # Then
+    assert node["source"] == "git"
+    assert node["repository"] == expected
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://gitlab.com/o/r",
+        "http://github.com/o/r",
+        "https://github.com:8443/o/r",
+        "https://user@github.com/o/r",
+        "https://github.com/o/r/sub",
+        "https://github.com/o",
+        "https://github.com/o/r?x=1",
+        "https://github.com/o/r#frag",
+        "https://github.com/-bad/r",
+        "https://github.com/o/../r",
+        f"https://github.com/{'o' * 101}/r",
+    ],
+)
+def test_scan_keeps_origins_outside_builder_contract_local(tmp_path, monkeypatch, origin):
+    # Given
+    node_dir = _write_pack(tmp_path, "pack", git=True)
+    monkeypatch.setattr(
+        distribution,
+        "_git_output",
+        lambda path, *args: origin if args[0] == "remote" else "cafebabe",
+    )
+
+    # When
+    (node,) = distribution.scan_custom_nodes(node_dir.parent)
+
+    # Then
+    assert node["source"] == "local"
+    assert not node.get("repository")
+
+
 def test_scan_custom_nodes_marks_unfetchable_as_local(custom_nodes_tree):
     nodes = {n["name"]: n for n in distribution.scan_custom_nodes(custom_nodes_tree)}
     # git repo but no origin -> can't fetch repo@ref -> must be uploaded
@@ -223,35 +311,64 @@ def test_scan_custom_nodes_missing_dir_is_empty(tmp_path):
     assert distribution.scan_custom_nodes(tmp_path / "nope") == []
 
 
-def test_scan_command_json_envelope(models_tree, custom_nodes_tree, tmp_path):
+def test_init_command_json_envelope(models_tree, custom_nodes_tree, tmp_path):
     """End-to-end: the command emits an ok envelope carrying the definition.
 
     models_tree (tmp_path/models) and custom_nodes_tree (tmp_path/custom_nodes)
     are siblings, so the command auto-discovers the nodes from --models-dir."""
-    out = tmp_path / "definition.json"
+    out = tmp_path / "comfy-build.yaml"
     env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
     proc = subprocess.run(
-        [sys.executable, "-m", "comfy_cli", "build", "scan", "--models-dir", str(models_tree), "-o", str(out)],
+        [
+            sys.executable,
+            "-m",
+            "comfy_cli",
+            "build",
+            "init",
+            "--name",
+            "Fixture",
+            "--models-dir",
+            str(models_tree),
+            "--python",
+            sys.executable,
+            "--comfy-version",
+            "master",
+            "-o",
+            str(out),
+        ],
         capture_output=True,
         text=True,
         env=env,
     )
     assert proc.returncode == 0, proc.stderr
-    envelope = json.loads(proc.stdout.strip().splitlines()[-1])
+    stdout_lines = proc.stdout.strip().splitlines()
+    assert len(stdout_lines) == 1
+    envelope = json.loads(stdout_lines[0])
     assert envelope["ok"] is True
-    assert envelope["command"] == "build scan"
+    assert envelope["command"] == "build init"
     assert envelope["data"]["count"] == 3
     assert envelope["data"]["custom_node_count"] == 3  # auto-found the sibling custom_nodes/
     # the written file round-trips to the same definition
-    written = json.loads(out.read_text())
+    written = read_build_spec(out)["definition"]
+    assert isinstance(written, dict)
     assert written["models"] == envelope["data"]["definition"]["models"]
     assert written["customNodes"] == envelope["data"]["definition"]["customNodes"]
 
 
-def test_scan_command_missing_dir_errors(tmp_path):
+def test_init_command_missing_dir_errors(tmp_path):
     env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
     proc = subprocess.run(
-        [sys.executable, "-m", "comfy_cli", "build", "scan", "--models-dir", str(tmp_path / "nope")],
+        [
+            sys.executable,
+            "-m",
+            "comfy_cli",
+            "build",
+            "init",
+            "--name",
+            "Fixture",
+            "--models-dir",
+            str(tmp_path / "nope"),
+        ],
         capture_output=True,
         text=True,
         env=env,
@@ -326,47 +443,6 @@ def test_plan_create_resolver_turns_model_into_sourceuri():
     assert {u.get("filename") for u in plan["uploads"] if u["kind"] == "model"} == {"ae.safetensors"}
 
 
-def test_create_command_preview(tmp_path):
-    def_path = tmp_path / "def.json"
-    def_path.write_text(json.dumps(SCAN_DEF))
-    env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
-    proc = subprocess.run(
-        [sys.executable, "-m", "comfy_cli", "build", "create", "--from", str(def_path), "--name", "demo"],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    assert proc.returncode == 0, proc.stderr
-    envelope = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert envelope["ok"] is True
-    assert envelope["data"]["executed"] is False
-    assert envelope["data"]["name"] == "demo"
-    assert envelope["data"]["plan"]["upload_count"] == 3
-
-
-def test_create_command_execute_requires_login(tmp_path):
-    """--execute with no OAuth session (isolated secrets) → clean not-signed-in error."""
-    def_path = tmp_path / "def.json"
-    def_path.write_text(json.dumps(SCAN_DEF))
-    env = {
-        **os.environ,
-        "NO_COLOR": "1",
-        "COMFY_OUTPUT": "json",
-        "COMFY_SECRETS_PATH": str(tmp_path / "secrets.json"),  # empty → no session
-        "VIRTUAL_ENV": "",
-        "CONDA_PREFIX": "",
-    }
-    proc = subprocess.run(
-        [sys.executable, "-m", "comfy_cli", "build", "create", "--from", str(def_path), "--execute"],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    assert proc.returncode == 1
-    envelope = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert envelope["error"]["code"] == "build_not_signed_in"
-
-
 class _FakeBuilder:
     """Stand-in BuilderClient recording calls, for execute_create orchestration tests."""
 
@@ -383,11 +459,11 @@ class _FakeBuilder:
     def upload_blob(self, upload_url, path):
         self.uploaded.append((upload_url, str(path)))
 
-    def create_distribution(self, name, definition, description=None):
+    def create_build(self, name, definition, description=None):
         self.created = (name, definition)
         return "dist-123"
 
-    def cut_version(self, distribution_id, targets=None):
+    def create_release(self, distribution_id, targets=None):
         self.cut = (distribution_id, targets)
         return "ver-456", "https://status.example/ver-456"
 
@@ -526,13 +602,13 @@ def test_builder_client_endpoints_and_parsing(monkeypatch):
             }
         return 200, {}
 
-    monkeypatch.setattr("comfy_cli.distribution_api.request_json", fake_request_json)
-    from comfy_cli.distribution_api import BuilderClient
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", fake_request_json)
+    from comfy_cli.builder_api import BuilderClient
 
     c = BuilderClient("https://builder.test/", "jwt-token")
     assert c.create_blob("model", "f.safetensors", "hash", 5) == ("b1", "https://put")
-    assert c.create_distribution("n", {"models": [], "customNodes": []}) == "d1"
-    assert c.cut_version("d1") == ("v1", "https://s")
+    assert c.create_build("n", {"models": [], "customNodes": []}) == "d1"
+    assert c.create_release("d1", [{"os": "linux", "gpu": "nvidia"}]) == ("v1", "https://s")
     results = c.resolve_models(["a.safetensors"])
     assert results[0]["candidates"][0]["sourceUri"] == "https://u"
     # URLs carry the /v1 prefix, and the JWT rides on the cloud target
@@ -556,14 +632,14 @@ def test_builder_client_read_endpoints(monkeypatch):
             return 200, {"versionId": "v1", "os": "linux", "gpu": "nvidia", "log": "hello", "truncated": False}
         return 200, {}
 
-    monkeypatch.setattr("comfy_cli.distribution_api.request_json", fake_request_json)
-    from comfy_cli.distribution_api import BuilderClient
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", fake_request_json)
+    from comfy_cli.builder_api import BuilderClient
 
     c = BuilderClient("https://builder.test/", "jwt")
-    assert c.list_distributions() == [{"id": "d1", "name": "n"}]
-    assert c.get_distribution("d1")["definition"] == {"models": []}
-    assert c.list_distribution_versions("d1") == [{"id": "v1", "status": "complete"}]
-    logs = c.get_version_logs("v1", os="linux", gpu="nvidia")
+    assert c.list_builds() == [{"id": "d1", "name": "n"}]
+    assert c.get_build("d1")["definition"] == {"models": []}
+    assert c.list_releases("d1") == [{"id": "v1", "status": "complete"}]
+    logs = c.get_release_logs("v1", os="linux", gpu="nvidia")
     assert logs["log"] == "hello" and logs["truncated"] is False
     # reads are GETs under /v1, and the log target selector rides as query params
     assert ("GET", "https://builder.test/v1/builds") in calls
@@ -579,13 +655,13 @@ def test_builder_client_delete_and_validate(monkeypatch):
             return 200, {"resolvable": True}
         return 204, None
 
-    monkeypatch.setattr("comfy_cli.distribution_api.request_json", fake_request_json)
-    from comfy_cli.distribution_api import BuilderClient
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", fake_request_json)
+    from comfy_cli.builder_api import BuilderClient
 
     c = BuilderClient("https://builder.test/", "jwt")
-    c.delete_distribution("d1")
+    c.delete_build("d1")
     assert ("DELETE", "https://builder.test/v1/builds/d1") in calls
-    assert c.validate_distribution("d1") == {"resolvable": True}
+    assert c.validate_build("d1") == {"resolvable": True}
     assert ("POST", "https://builder.test/v1/builds/d1/validate") in calls
 
 
@@ -610,16 +686,16 @@ def test_builder_client_reference_and_update_endpoints(monkeypatch):
             return 200, {"downloadUrl": "https://dl", "expiresAt": "t"}
         return 200, {}
 
-    monkeypatch.setattr("comfy_cli.distribution_api.request_json", fake_request_json)
-    from comfy_cli.distribution_api import BuilderClient
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", fake_request_json)
+    from comfy_cli.builder_api import BuilderClient
 
     c = BuilderClient("https://builder.test/", "jwt")
     assert c.list_base_images() == [{"id": "cuda"}]
     assert c.list_build_targets() == [{"os": "linux", "gpu": "nvidia"}]
     assert c.list_model_directories() == ["checkpoints", "vae"]
     assert c.list_blobs() == [{"blobId": "b1", "filename": "m.safetensors"}]
-    assert c.update_distribution("d1", {"models": []}, "2026-08-01T00:00:00Z")["id"] == "d1"
-    assert c.get_version_manifest("v1")["models"][0]["filename"] == "ae"
+    assert c.update_build("d1", {"models": []}, "2026-08-01T00:00:00Z")["id"] == "d1"
+    assert c.get_release_manifest("v1")["models"][0]["filename"] == "ae"
     assert c.get_artifact_download("a1")["downloadUrl"] == "https://dl"
     # update is a PATCH carrying the definition AND the expectedUpdatedAt guard the
     # builder requires (a missing one 409s STALE); the rest are GETs under /v1
@@ -637,9 +713,9 @@ def test_builder_client_reference_and_update_endpoints(monkeypatch):
 
 
 def test_delete_command_needs_confirm_non_interactive():
-    env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
+    env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json", "COMFY_BUILDER_TOKEN": "test-token"}
     proc = subprocess.run(
-        [sys.executable, "-m", "comfy_cli", "build", "delete", "some-id"],
+        [sys.executable, "-m", "comfy_cli", "build", "delete", "--id", "some-id"],
         capture_output=True,
         text=True,
         env=env,
@@ -669,8 +745,8 @@ def test_builder_client_uses_injected_token(monkeypatch):
         called["from_session"] = True
         raise AssertionError("from_session should not be called when a token is injected")
 
-    monkeypatch.setattr("comfy_cli.distribution_api.BuilderClient.from_session", classmethod(fake_from_session))
-    from comfy_cli.command.distribution import _builder_client
+    monkeypatch.setattr("comfy_cli.builder_api.BuilderClient.from_session", classmethod(fake_from_session))
+    from comfy_cli.command.build import _builder_client
 
     client = _builder_client(_RecordingRenderer(), "https://builder.test/")
     assert client.target.auth_token == "injected-jwt"
@@ -680,45 +756,19 @@ def test_builder_client_uses_injected_token(monkeypatch):
 def test_builder_client_falls_back_to_session(monkeypatch):
     monkeypatch.delenv("COMFY_BUILDER_TOKEN", raising=False)
     sentinel = object()
-    monkeypatch.setattr(
-        "comfy_cli.distribution_api.BuilderClient.from_session", classmethod(lambda cls, base: sentinel)
-    )
-    from comfy_cli.command.distribution import _builder_client
+    monkeypatch.setattr("comfy_cli.builder_api.BuilderClient.from_session", classmethod(lambda cls, base: sentinel))
+    from comfy_cli.command.build import _builder_client
 
     assert _builder_client(_RecordingRenderer(), None) is sentinel
 
 
-def test_update_command_reads_updated_at_before_patch(monkeypatch, tmp_path):
-    # Regression guard for "update always 409s": the command must GET the current
-    # updatedAt and echo it back as expectedUpdatedAt in the PATCH. Also exercises a
-    # nodes-only definition (no `models` key), which `update` must accept.
-    monkeypatch.setenv("COMFY_BUILDER_TOKEN", "jwt")
-    calls = []
-
-    def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
-        calls.append((method, url, body))
-        if method == "GET" and url.endswith("/v1/builds/d1"):
-            return 200, {"id": "d1", "updatedAt": "2026-08-01T12:00:00Z"}
-        if method == "PATCH":
-            return 200, {"id": "d1"}
-        return 200, {}
-
-    monkeypatch.setattr("comfy_cli.distribution_api.request_json", fake_request_json)
-    from comfy_cli.command import distribution
-
-    d = tmp_path / "def.json"  # nodes-only, no `models` key
-    d.write_text(json.dumps({"customNodes": [{"name": "x", "repository": "https://g/x", "gitRef": "a"}]}))
-    distribution.update_cmd(distribution_id="d1", from_=str(d), builder_url="https://builder.test/")
-
-    assert [c[0] for c in calls] == ["GET", "PATCH"]  # read-modify-write order
-    patch = next(c for c in calls if c[0] == "PATCH")
-    assert patch[2]["expectedUpdatedAt"] == "2026-08-01T12:00:00Z"
+def test_builder_call_maps_the_limited_beta_403_to_build_not_enabled():
     import io
     import urllib.error
 
     import typer
 
-    from comfy_cli.command.distribution import _builder_call
+    from comfy_cli.command.build import _builder_call
 
     def raise_403():
         raise urllib.error.HTTPError(
@@ -737,7 +787,7 @@ def test_builder_call_maps_other_errors_to_builder_error():
 
     import typer
 
-    from comfy_cli.command.distribution import _builder_call
+    from comfy_cli.command.build import _builder_call
 
     def raise_500():
         raise urllib.error.HTTPError("https://x", 500, "Server Error", None, io.BytesIO(b"boom"))
@@ -763,8 +813,8 @@ def test_upload_blob_sends_generation_match_header(monkeypatch, tmp_path):
         captured["allow_redirects"] = allow_redirects
         return _Resp()
 
-    monkeypatch.setattr("comfy_cli.distribution_api.requests.put", fake_put)
-    from comfy_cli.distribution_api import BuilderClient
+    monkeypatch.setattr("comfy_cli.builder_api.requests.put", fake_put)
+    from comfy_cli.builder_api import BuilderClient
 
     f = tmp_path / "m.safetensors"
     f.write_bytes(b"x")
@@ -775,17 +825,17 @@ def test_upload_blob_sends_generation_match_header(monkeypatch, tmp_path):
     assert captured["allow_redirects"] is False
 
 
-def test_get_version_logs_uses_large_cap(monkeypatch):
+def test_get_release_logs_uses_large_cap(monkeypatch):
     seen = {}
 
     def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
         seen["max_bytes"] = max_bytes
         return 200, {"versionId": "v1", "log": "x", "truncated": False}
 
-    monkeypatch.setattr("comfy_cli.distribution_api.request_json", fake_request_json)
-    from comfy_cli.distribution_api import BuilderClient
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", fake_request_json)
+    from comfy_cli.builder_api import BuilderClient
 
-    BuilderClient("https://builder.test/", "jwt").get_version_logs("v1")
+    BuilderClient("https://builder.test/", "jwt").get_release_logs("v1")
     # the builder caps a served log at 8 MiB; the client cap must sit above that
     assert seen["max_bytes"] > 8 * 1024 * 1024
 
@@ -793,7 +843,7 @@ def test_get_version_logs_uses_large_cap(monkeypatch):
 def test_builder_call_catches_response_too_large():
     import typer
 
-    from comfy_cli.command.distribution import _builder_call
+    from comfy_cli.command.build import _builder_call
     from comfy_cli.http import ResponseTooLarge
 
     def raise_too_large():
@@ -803,36 +853,6 @@ def test_builder_call_catches_response_too_large():
     with pytest.raises(typer.Exit):
         _builder_call(r, raise_too_large)
     assert r.codes == ["build_builder_error"]
-
-
-def test_create_command_missing_comfy_version(tmp_path):
-    d = tmp_path / "def.json"
-    d.write_text(json.dumps({"schema": "distribution-definition/0", "models": [], "customNodes": []}))
-    env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
-    proc = subprocess.run(
-        [sys.executable, "-m", "comfy_cli", "build", "create", "--from", str(d)],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    assert proc.returncode == 1
-    envelope = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert envelope["error"]["code"] == "build_missing_comfy_version"
-
-
-def test_create_command_bad_definition(tmp_path):
-    bad = tmp_path / "bad.json"
-    bad.write_text("{not json")
-    env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
-    proc = subprocess.run(
-        [sys.executable, "-m", "comfy_cli", "build", "create", "--from", str(bad)],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    assert proc.returncode == 1
-    envelope = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert envelope["error"]["code"] == "build_definition_invalid"
 
 
 # --- create: the definition survives the trip ---------------------------------
@@ -987,11 +1007,11 @@ def test_as_comfy_git_ref(detected, expected):
     assert distribution.as_comfy_git_ref(detected) == expected
 
 
-def test_scan_command_writes_a_resolvable_comfy_ref(models_tree, tmp_path):
+def test_init_command_writes_a_resolvable_comfy_ref(models_tree, tmp_path):
     """End-to-end: a bare `--comfy-version` reaches the definition as a tag. The
     builder resolves this field with git ls-remote, so the bare number it used to
     record could only ever be discovered by a failed build."""
-    out = tmp_path / "definition.json"
+    out = tmp_path / "comfy-build.yaml"
     env = {**os.environ, "NO_COLOR": "1", "COMFY_OUTPUT": "json"}
     proc = subprocess.run(
         [
@@ -999,11 +1019,15 @@ def test_scan_command_writes_a_resolvable_comfy_ref(models_tree, tmp_path):
             "-m",
             "comfy_cli",
             "build",
-            "scan",
+            "init",
+            "--name",
+            "Fixture",
             "--models-dir",
             str(models_tree),
             "--comfy-version",
             "0.30.2",
+            "--python",
+            sys.executable,
             "-o",
             str(out),
         ],
@@ -1012,50 +1036,9 @@ def test_scan_command_writes_a_resolvable_comfy_ref(models_tree, tmp_path):
         env=env,
     )
     assert proc.returncode == 0, proc.stderr
-    assert json.loads(out.read_text())["baseComfyVersion"] == "v0.30.2"
-
-
-# --- validate: say what was checked, and surface the warnings -----------------
-
-
-def _run_validate(monkeypatch, capsys, result):
-    """Drive validate_cmd against a stand-in builder, in pretty mode."""
-
-    class FakeClient:
-        def validate_distribution(self, distribution_id):
-            return result
-
-    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: FakeClient())
-    distribution.validate_cmd("d1")
-    return capsys.readouterr().out
-
-
-def test_validate_prints_the_warnings_beside_the_verdict(monkeypatch, capsys):
-    """A ref the builder cannot find rides alongside `ok: true`. It was reachable
-    only by reading the JSON dump, under a line that said the definition resolved,
-    so the one thing that will fail the cut was the easiest thing to miss."""
-    out = _run_validate(
-        monkeypatch,
-        capsys,
-        {
-            "ok": True,
-            "warnings": [{"field": "baseComfyVersion", "reason": "ref not found in remote advertisement"}],
-        },
-    )
-    # Assert on the text BEFORE the JSON dump: the dump repeats every one of these
-    # strings, so a whole-output assertion passes even with the warn lines deleted.
-    head = out.split("{", 1)[0]
-    assert "1 reference(s)" in head
-    assert "the build will fail on these" in head
-    assert "baseComfyVersion: ref not found in remote advertisement" in head
-
-
-def test_validate_does_not_claim_the_definition_resolves(monkeypatch, capsys):
-    """The endpoint checks shape and pin existence; whether the set installs
-    together is only answered by a build."""
-    out = _run_validate(monkeypatch, capsys, {"ok": True})
-    assert "not a full resolve" in out
-    assert "Definition resolves." not in out
+    definition = read_build_spec(out)["definition"]
+    assert isinstance(definition, dict)
+    assert definition["baseComfyVersion"] == "v0.30.2"
 
 
 # --- create: the builder reads the pins, not us -------------------------------
@@ -1157,11 +1140,11 @@ class _ImportingBuilder:
     def resolve_models(self, filenames):
         return []
 
-    def create_distribution(self, name, definition, description=None):
+    def create_build(self, name, definition, description=None):
         self.created_with = definition
         return "dist-1"
 
-    def cut_version(self, distribution_id, targets=None):
+    def create_release(self, distribution_id, targets=None):
         return ("ver-1", "status-url")
 
 
@@ -1274,63 +1257,6 @@ def test_freeze_ignores_the_callers_pythonpath(tmp_path, monkeypatch):
     assert "PYTHONPATH" not in seen["env"]
 
 
-# --- update: the same file works through either command -----------------------
-
-
-def test_update_maps_a_scan_definition_instead_of_sending_it_raw(monkeypatch):
-    """`update --from` sent the file verbatim, so a scan definition's models
-    arrived with neither sourceUri nor blobId and the builder rejected every one.
-    The same file must work through create and update alike."""
-    sent = {}
-
-    class FakeClient:
-        def get_distribution(self, did):
-            return {"updatedAt": "t0"}
-
-        def update_distribution(self, did, definition, updated_at):
-            sent.update(definition)
-            return {"id": did}
-
-    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: FakeClient())
-    monkeypatch.setattr(
-        distribution,
-        "resolve_models_via_builder",
-        lambda models, client: [m.__setitem__("sourceUri", "https://hf.co/x") for m in models] and len(models),
-    )
-    defn = {
-        "models": [{"type": "vae", "filename": "a.safetensors", "sha256": "d", "sizeBytes": 1, "source": "local"}],
-        "customNodes": [{"name": "kj", "id": "kj", "registryVersion": "1.4.9", "source": "registry"}],
-        "baseComfyVersion": "0.30.2",
-    }
-    monkeypatch.setattr(distribution, "_load_definition", lambda p, require_models=False: defn)
-    distribution.update_cmd("d1", from_="ignored.json")
-
-    assert sent["models"][0]["sourceUri"] == "https://hf.co/x"
-    assert "sizeBytes" not in sent["models"][0] and "source" not in sent["models"][0]
-    assert sent["customNodes"][0] == {"name": "kj", "id": "kj", "registryVersion": "1.4.9"}
-    assert sent["baseComfyVersion"] == "v0.30.2"
-
-
-def test_update_refuses_what_it_cannot_upload(monkeypatch):
-    """update has no upload step, so a model with no public source is a clear
-    refusal naming the command that can, not a builder 400."""
-
-    class FakeClient:
-        def get_distribution(self, did):
-            return {"updatedAt": "t0"}
-
-    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: FakeClient())
-    monkeypatch.setattr(distribution, "resolve_models_via_builder", lambda models, client: 0)
-    defn = {
-        "models": [{"type": "vae", "filename": "private.safetensors", "sha256": "d", "source": "local"}],
-        "customNodes": [],
-    }
-    monkeypatch.setattr(distribution, "_load_definition", lambda p, require_models=False: defn)
-    with pytest.raises(typer.Exit) as e:
-        distribution.update_cmd("d1", from_="ignored.json")
-    assert e.value.exit_code == 1
-
-
 # --- blobs: a private file is uploaded once and referenced by id ---------------
 
 
@@ -1342,17 +1268,6 @@ def test_plan_create_keeps_a_model_blob_reference():
     )
     assert plan["definition"]["models"][0]["blobId"] == "blob-9"
     assert plan["upload_count"] == 0
-
-
-def test_a_definition_naming_only_blobs_goes_through_update_untouched():
-    """Every member names a builder source, so update has nothing to map and sends
-    the file as written."""
-    assert not distribution._is_scan_shaped(
-        {
-            "models": [{"type": "vae", "filename": "ae.safetensors", "blobId": "blob-9"}],
-            "customNodes": [{"name": "priv", "blobId": "blob-1"}],
-        }
-    )
 
 
 def test_report_advisories_reads_the_refused_release_as_one_value():
@@ -1391,36 +1306,6 @@ def test_create_execute_proceeds_when_a_pack_was_dropped_for_colliding(monkeypat
     assert [n["name"] for n in builder.created_with["customNodes"]] == ["first"]
 
 
-# --- from-snapshot: a Desktop export becomes a distribution in one call -------
-
-
-def test_from_snapshot_reads_the_created_id_and_report_from_their_own_keys(monkeypatch, tmp_path, capsys):
-    """The endpoint answers {build, report}, not a build carrying its
-    report. Reading the id off the envelope prints `None` and loses every advisory."""
-
-    class FakeClient:
-        def create_distribution_from_snapshot(self, name, snapshot, *, description=None, base_image_id=None):
-            return {
-                "build": {"id": "dist-7", "name": name},
-                "report": {"notInRegistry": ["was-node-suite-comfyui"]},
-            }
-
-    snap = tmp_path / "export.json"
-    snap.write_text(json.dumps({"type": "comfyui-desktop-2-snapshot", "snapshots": [{}]}), encoding="utf-8")
-    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: FakeClient())
-    distribution.from_snapshot_cmd(from_=str(snap), name="demo")
-    out = capsys.readouterr().out
-    assert "dist-7" in out and "None" not in out
-    assert "was-node-suite-comfyui" in out
-
-
-def test_from_snapshot_refuses_a_file_that_is_not_json(tmp_path, capsys):
-    bad = tmp_path / "export.json"
-    bad.write_text("not json at all", encoding="utf-8")
-    with pytest.raises(typer.Exit):
-        distribution.from_snapshot_cmd(from_=str(bad), name="demo")
-
-
 def test_as_snapshot_envelope_wraps_the_file_desktop_actually_writes():
     """Desktop stores one bare snapshot per file under `.launcher/snapshots/` and
     only its export action wraps them, so the file a user has is refused."""
@@ -1457,56 +1342,3 @@ def test_create_execute_does_not_read_a_renamed_pack_as_a_dropped_one(monkeypatc
         },
     )
     assert builder.created_with is not None
-
-
-# --- deprecated alias: `comfy distribution` = hidden `comfy build` + warning --
-
-
-def _run_builder_group(group: str, tmp_path) -> subprocess.CompletedProcess:
-    env = {
-        **os.environ,
-        "NO_COLOR": "1",
-        "COMFY_OUTPUT": "json",
-        "COMFY_SECRETS_PATH": str(tmp_path / "secrets.json"),  # empty -> no session
-        "VIRTUAL_ENV": "",
-        "CONDA_PREFIX": "",
-    }
-    return subprocess.run(
-        [sys.executable, "-m", "comfy_cli", group, "list"],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-
-
-def test_distribution_alias_warns_and_matches_build(tmp_path):
-    """`comfy distribution list` is the deprecated spelling of `comfy build list`:
-    one stderr warning per invocation, and the identical envelope: the alias
-    still emits the canonical `build` labels, so one schema set serves both."""
-    canonical = _run_builder_group("build", tmp_path)
-    alias = _run_builder_group("distribution", tmp_path)
-    # Isolated secrets -> both spellings fail the same way, before any network.
-    assert canonical.returncode == 1 and alias.returncode == 1
-    assert "`comfy distribution` is deprecated" in alias.stderr
-    assert alias.stderr.count("is deprecated") == 1
-    assert "deprecated" not in canonical.stderr
-    canonical_env = json.loads(canonical.stdout.strip().splitlines()[-1])
-    alias_env = json.loads(alias.stdout.strip().splitlines()[-1])
-    assert alias_env == canonical_env
-    # The pre-command error envelope carries the group name the root callback
-    # stamped; the alias re-stamps it to the canonical spelling.
-    assert alias_env["command"] == "build"
-    assert alias_env["error"]["code"] == "build_not_signed_in"
-
-
-def test_distribution_alias_hidden_from_root_help():
-    env = {**os.environ, "NO_COLOR": "1"}
-    proc = subprocess.run(
-        [sys.executable, "-m", "comfy_cli", "--help"],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    assert proc.returncode == 0
-    assert "build" in proc.stdout
-    assert "distribution" not in proc.stdout

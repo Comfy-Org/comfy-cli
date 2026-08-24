@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_push.json",
+  "title": "comfy build push --json data payload",
+  "type": "object",
+  "required": [
+    "spec_file",
+    "id",
+    "syncedRevision",
+    "created",
+    "dry_run",
+    "upload_count",
+    "upload_bytes",
+    "uploaded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "spec_file": {"type": "string"},
+    "id": {"type": ["string", "null"]},
+    "syncedRevision": {"type": ["string", "null"]},
+    "created": {"type": "boolean"},
+    "dry_run": {"type": "boolean"},
+    "upload_count": {"type": "integer", "minimum": 0},
+    "upload_bytes": {"type": "integer", "minimum": 0},
+    "uploaded": {"type": "integer", "minimum": 0},
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["os", "gpu"],
+        "additionalProperties": false,
+        "properties": {
+          "os": {"type": "string", "minLength": 1},
+          "gpu": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "release": {
+      "type": "object",
+      "required": ["versionId", "statusUrl"],
+      "additionalProperties": false,
+      "properties": {
+        "versionId": {"type": "string"},
+        "statusUrl": {"type": "string"}
+      }
+    }
+  },
+  "dependentRequired": {
+    "release": ["targets"],
+    "targets": ["release"]
+  }
+}
