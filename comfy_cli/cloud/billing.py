@@ -11,8 +11,8 @@ The rules encoded here are not arbitrary. Two of them are scar tissue:
   to mask a positive component underneath it, reporting "$0.00" to users who
   had credits.
 * The trust guard exists because "$0.00 / Subscribe" was shown to paying
-  customers whose billing rows were mid-migration. When we
-  cannot confirm state, we say so instead of asserting a balance.
+  customers whose billing rows were mid-migration. When we cannot confirm
+  state, we say so instead of asserting a balance.
 """
 
 from __future__ import annotations

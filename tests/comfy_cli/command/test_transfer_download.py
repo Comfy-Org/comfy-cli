@@ -1274,11 +1274,10 @@ class TestDefaultOutDir:
 
 class TestDownloadExtensionSanitized:
     """The download extension can be derived from an untrusted `?filename=`
-     query param (a compromised/malicious server). Unlike the `item` token, it
-     was never sanitized, so control/ANSI bytes reached the on-disk name and
-     the echoed path — a terminal-injection vector in human mode. `_sanitize_ext`
-     whitelists it to a safe charset while preserving the no-traversal guarantee
-    ."""
+    query param (a compromised/malicious server). Unlike the `item` token, it
+    was never sanitized, so control/ANSI bytes reached the on-disk name and
+    the echoed path — a terminal-injection vector in human mode. `_sanitize_ext`
+    whitelists it to a safe charset while preserving the no-traversal guarantee."""
 
     # A real ESC control byte, exactly as a hostile server could return it.
     _ATTACK_NAME = "out.png\x1b[31mHACK"

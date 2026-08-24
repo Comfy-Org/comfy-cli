@@ -49,8 +49,8 @@ def test_importing_tracking_does_not_load_telemetry_sdks():
 
 
 def test_importing_the_cli_entrypoint_does_not_load_telemetry_sdks():
-    # cmdline is what `comfy` actually runs, and it is the import chain in the
-    # The original traceback (cmdline -> tracking -> mixpanel -> pydantic).
+    # cmdline is what `comfy` actually runs, and it heads the import chain from
+    # the original traceback: cmdline -> tracking -> mixpanel -> pydantic.
     loaded = _modules_after("import comfy_cli.cmdline")
     assert not loaded & set(_FORBIDDEN), (
         f"comfy_cli.cmdline imported {sorted(loaded & set(_FORBIDDEN))} at module scope; "
