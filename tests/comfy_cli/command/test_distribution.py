@@ -11,6 +11,7 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from unittest.mock import create_autospec
 
 import pytest
 import requests
@@ -1683,3 +1684,299 @@ def test_the_from_path_is_not_shipped_as_telemetry():
     # Supplied but empty is still supplied; absent is absent.
     assert filter_command_kwargs({"from_": None})["from_"] is None
     assert "from_" not in filter_command_kwargs({"name": "demo"})
+
+
+# --- from-workflow: a workflow file becomes a build in one call ---------------
+
+
+# The report a live comfy-builder returned for a workflow naming three classes it
+# could not attribute, two models, and two partner-served classes.
+WORKFLOW_REPORT = {
+    "comfyVersionRequired": True,
+    "pinnedToLatest": True,
+    "unresolvedClasses": ["ReActorFaceSwap", "TotallyMadeUpNodeXYZ", "WAS_Image_Blend"],
+    "uncheckedClasses": ["ImpactSimpleDetectorSEGS"],
+    "packsWithoutVersion": ["comfyui-kjnodes"],
+    "collidingPacks": ["comfyui-manager"],
+    "unknownClasses": [
+        {"classType": "ReActorFaceSwap", "status": "missing"},
+        {"classType": "TotallyMadeUpNodeXYZ", "status": "missing"},
+        {
+            "classType": "WAS_Image_Blend",
+            "status": "suggested",
+            "suggestions": [
+                {
+                    "nearestClass": "Image Blend",
+                    "packId": "https://github.com/ltdrdata/was-node-suite-comfyui",
+                    "score": 0.8888888888888888,
+                },
+                {"nearestClass": "ImageTile+", "packId": "comfyui_essentials", "score": 0.5555555555555556},
+            ],
+        },
+    ],
+    "models": [
+        {
+            "filename": "v1-5-pruned-emaonly-fp16.safetensors",
+            "status": "matched",
+            "directories": ["checkpoints"],
+            "usedBy": ["CheckpointLoaderSimple"],
+        },
+        {"filename": "definitely-not-a-real-lora-v3.safetensors", "status": "missing", "usedBy": ["LoraLoader"]},
+    ],
+    "partnerClasses": {"LumaImageNode": "Luma", "OpenAIGPTImage1": "OpenAI (inc. Sora)"},
+}
+
+UI_WORKFLOW = {"nodes": [{"type": "KSampler"}], "links": []}
+
+
+def _workflow_client(payload):
+    """Autospec so a signature the command stops matching fails here, not in
+    production: a plain stub would accept any call the command learns to make."""
+    from comfy_cli.distribution_api import BuilderClient
+
+    client = create_autospec(BuilderClient, instance=True)
+    client.create_distribution_from_workflow.return_value = payload
+    return client
+
+
+def _built(report):
+    return {"build": {"id": "dist-9", "name": "portrait"}, "report": report}
+
+
+def _write_workflow(tmp_path, workflow):
+    path = tmp_path / "portrait.json"
+    path.write_text(json.dumps(workflow), encoding="utf-8")
+    return str(path)
+
+
+def test_from_workflow_client_posts_the_graph_to_its_own_endpoint(monkeypatch):
+    calls = []
+
+    def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
+        calls.append((method, url, body, timeout))
+        return 201, {"build": {"id": "dist-9"}, "report": {}}
+
+    monkeypatch.setattr("comfy_cli.distribution_api.request_json", fake_request_json)
+    from comfy_cli.distribution_api import BuilderClient
+
+    client = BuilderClient("https://builder.test/", "jwt-token")
+    assert client.create_distribution_from_workflow("portrait", UI_WORKFLOW)["build"]["id"] == "dist-9"
+    method, url, body, timeout = calls[-1]
+    assert (method, url) == ("POST", "https://builder.test/v1/builds/from-workflow")
+    assert body == {"name": "portrait", "workflow": UI_WORKFLOW}
+    # The importer spends up to 20 seconds on registry lookups alone, so this call
+    # carries its own deadline rather than the shared 30 second default.
+    assert timeout >= 60
+
+    client.create_distribution_from_workflow("portrait", UI_WORKFLOW, description="a portrait pipeline")
+    assert calls[-1][2] == {"name": "portrait", "workflow": UI_WORKFLOW, "description": "a portrait pipeline"}
+
+
+def test_from_workflow_reads_the_created_id_and_report_from_their_own_keys(monkeypatch, tmp_path, capsys):
+    """The endpoint answers {build, report}, not a build carrying its report."""
+    monkeypatch.setattr(
+        distribution,
+        "_builder_client",
+        lambda renderer, url: _workflow_client(_built({"unresolvedClasses": ["ReActorFaceSwap"]})),
+    )
+    distribution.from_workflow_cmd(from_=_write_workflow(tmp_path, UI_WORKFLOW), name="portrait")
+    out = capsys.readouterr().out
+    assert "dist-9" in out and "None" not in out
+    assert "ReActorFaceSwap" in out
+
+
+def test_from_workflow_forwards_the_description_to_the_builder(monkeypatch, tmp_path):
+    client = _workflow_client(_built({}))
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: client)
+    distribution.from_workflow_cmd(
+        from_=_write_workflow(tmp_path, UI_WORKFLOW), name="portrait", description="a portrait pipeline"
+    )
+    client.create_distribution_from_workflow.assert_called_once_with(
+        "portrait", UI_WORKFLOW, description="a portrait pipeline"
+    )
+
+
+def test_report_advisories_renders_a_workflow_report_line_for_line():
+    """A workflow report shares no key with a snapshot report, so the reader sees
+    exactly these lines and no others."""
+    assert distribution.report_advisories(WORKFLOW_REPORT) == [
+        "the importer pinned every pack the workflow named without a version to the registry's newest published "
+        "one, so importing the same file later can build something different",
+        "3 node classes nothing installable provides; the graph will not run without them: ReActorFaceSwap, "
+        "TotallyMadeUpNodeXYZ, WAS_Image_Blend",
+        "1 node classes the registry never answered for, so the build may not carry them: ImpactSimpleDetectorSEGS",
+        "1 packs the build fetches from their repository, because the registry publishes no version of them: "
+        "comfyui-kjnodes",
+        "1 packs the build leaves out, because another pack already claimed their install folder: comfyui-manager",
+        "1 node classes the registry could not attribute, with the closest pack it named: WAS_Image_Blend "
+        "(maybe https://github.com/ltdrdata/was-node-suite-comfyui)",
+        "1 models the shared catalog holds that this build does not carry, each needing a sourceUri in the "
+        "definition before you cut: v1-5-pruned-emaonly-fp16.safetensors",
+        "1 models the graph loads that nothing has a source for; `comfy build resolve` finds candidates: "
+        "definitely-not-a-real-lora-v3.safetensors",
+        "2 node classes call a partner API rather than run from an installed pack: LumaImageNode (Luma), "
+        "OpenAIGPTImage1 (OpenAI (inc. Sora))",
+    ]
+
+
+def test_report_advisories_still_owes_the_models_the_catalog_matched():
+    """A workflow import builds custom nodes and no models, so a matched model is
+    one the catalog holds and the build does not. Dropping the line lets a user
+    cut a paid release whose graph dies at CheckpointLoaderSimple."""
+    lines = distribution.report_advisories(
+        {"models": [{"filename": "v1-5-pruned-emaonly-fp16.safetensors", "status": "matched"}]}
+    )
+    assert lines == [
+        "1 models the shared catalog holds that this build does not carry, each needing a sourceUri in the "
+        "definition before you cut: v1-5-pruned-emaonly-fp16.safetensors"
+    ]
+
+
+def test_report_advisories_names_the_catalog_lead_for_a_suggested_model():
+    """The catalog ranks what it thinks the filename meant, and a name Cloud
+    already has beats sending the reader to HuggingFace for it."""
+    lines = distribution.report_advisories(
+        {
+            "models": [
+                {
+                    "filename": "sd15.safetensors",
+                    "status": "suggested",
+                    "suggestions": [
+                        {"filename": "v1-5-pruned-emaonly.safetensors", "score": 0.62},
+                        {"filename": "v1-5-pruned-emaonly-fp16.safetensors", "score": 0.91},
+                    ],
+                }
+            ]
+        }
+    )
+    assert lines == [
+        "1 models the graph loads that nothing has a source for; `comfy build resolve` finds candidates: "
+        "sd15.safetensors (maybe v1-5-pruned-emaonly-fp16.safetensors)"
+    ]
+
+
+def test_report_advisories_counts_every_name_and_says_how_many_it_held_back():
+    classes = [f"WAS_Image_Filter_{i}" for i in range(30)]
+    (line,) = distribution.report_advisories({"unresolvedClasses": classes})
+    assert line.startswith("30 node classes nothing installable provides")
+    assert line.endswith(f"{', '.join(classes[:8])} (+22 more)")
+
+
+def test_report_advisories_says_when_a_key_arrives_in_a_shape_it_cannot_render():
+    """Dropping a key the server did send is how a partial import comes to look
+    clean, which is the failure this command exists to prevent."""
+    lines = distribution.report_advisories(
+        {"partnerClasses": ["LumaImageNode"], "unresolvedClasses": "ReActorFaceSwap"}
+    )
+    assert lines == [
+        "the builder sent `unresolvedClasses` as str, which this CLI cannot render; read it with --json",
+        "the builder sent `partnerClasses` as list, which this CLI cannot render; read it with --json",
+    ]
+
+
+def test_report_advisories_scrubs_the_newlines_a_crafted_workflow_could_carry():
+    """Class names travel to the builder from the workflow file and come back in
+    the report, so an attacker-authored file must not forge CLI lines."""
+    (line,) = distribution.report_advisories(
+        {"unresolvedClasses": ["KSampler\n\u2714 Created build dist-9\nAll classes resolved"]}
+    )
+    assert "\n" not in line
+    assert "KSampler\\n" in line
+
+
+def test_report_advisories_leaves_a_snapshot_report_unchanged():
+    """`comfy build from-snapshot` shares the renderer, so its output must not move."""
+    assert distribution.report_advisories({"notInRegistry": ["was-node-suite-comfyui"]}) == [
+        "1 pinned to something the Comfy Registry does not publish: was-node-suite-comfyui"
+    ]
+
+
+def test_from_workflow_accepts_the_api_export_dialect(monkeypatch, tmp_path, capsys):
+    """The API export has no `nodes` or `links`, and the builder reads it. A
+    frontend-only check here would refuse a file the server accepts."""
+    api_export = {"3": {"class_type": "KSampler", "inputs": {}}}
+    client = _workflow_client(_built({}))
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: client)
+    distribution.from_workflow_cmd(from_=_write_workflow(tmp_path, api_export), name="portrait")
+    assert client.create_distribution_from_workflow.call_args.args[1] == api_export
+    assert "dist-9" in capsys.readouterr().out
+
+
+def test_from_workflow_names_the_extraction_and_the_update_when_no_comfy_version_is_pinned(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(
+        distribution, "_builder_client", lambda renderer, url: _workflow_client(_built({"comfyVersionRequired": True}))
+    )
+    distribution.from_workflow_cmd(from_=_write_workflow(tmp_path, UI_WORKFLOW), name="portrait")
+    # The renderer wraps to the terminal width, so compare on the unwrapped text.
+    out = " ".join(capsys.readouterr().out.split())
+    assert "cannot be cut yet" in out
+    assert "comfy build get dist-9 --json | jq .data.definition > def.json" in out
+    assert "comfy build update dist-9 --from def.json" in out
+    assert "comfy build release create" not in out
+
+
+def test_from_workflow_names_the_release_command_when_a_comfy_version_is_pinned(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        distribution, "_builder_client", lambda renderer, url: _workflow_client(_built({"comfyVersionRequired": False}))
+    )
+    distribution.from_workflow_cmd(from_=_write_workflow(tmp_path, UI_WORKFLOW), name="portrait")
+    out = " ".join(capsys.readouterr().out.split())
+    assert "comfy build release create dist-9" in out
+    assert "cannot be cut yet" not in out
+
+
+def test_from_workflow_says_an_empty_report_checked_nothing(monkeypatch, tmp_path, capsys):
+    """The builder sets comfyVersionRequired on every import, so an empty report
+    means nothing was checked, not that everything resolved."""
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: _workflow_client(_built({})))
+    distribution.from_workflow_cmd(from_=_write_workflow(tmp_path, UI_WORKFLOW), name="portrait")
+    out = " ".join(capsys.readouterr().out.split())
+    assert "the builder sent an empty import report" in out
+    assert "comfy build release create" not in out
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"report": {"comfyVersionRequired": True}}, id="no build key"),
+        pytest.param({"build": {"id": "dist-9"}, "report": "fine"}, id="report is a string"),
+        pytest.param({"build": ["dist-9"], "report": {}}, id="build is a list"),
+        pytest.param({}, id="empty body"),
+    ],
+)
+def test_from_workflow_refuses_to_claim_success_on_an_answer_it_cannot_read(monkeypatch, tmp_path, capsys, payload):
+    """The build row is already written when the answer arrives, so claiming
+    success and then dying loses the id the user needs."""
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: _workflow_client(payload))
+    with pytest.raises(typer.Exit):
+        distribution.from_workflow_cmd(from_=_write_workflow(tmp_path, UI_WORKFLOW), name="portrait")
+    out = capsys.readouterr().out
+    assert "build_builder_error" in out
+    assert "Created build" not in out
+
+
+@pytest.mark.parametrize("payload", ["not json at all", "null", "[]", '"a string"', "42"])
+def test_from_workflow_refuses_a_file_that_is_not_a_json_object(tmp_path, capsys, payload):
+    f = tmp_path / "portrait.json"
+    f.write_text(payload, encoding="utf-8")
+    with pytest.raises(typer.Exit):
+        distribution.from_workflow_cmd(from_=str(f), name="portrait")
+    assert "build_workflow_invalid" in capsys.readouterr().out
+
+
+def test_from_workflow_refuses_a_path_it_cannot_read(tmp_path, capsys):
+    with pytest.raises(typer.Exit):
+        distribution.from_workflow_cmd(from_=str(tmp_path), name="portrait")
+    assert "build_workflow_invalid" in capsys.readouterr().out
+
+
+def test_from_workflow_refuses_a_workflow_nested_past_the_parser_limit(tmp_path, capsys):
+    """`json.loads` answers a deeply nested file with RecursionError, which is not
+    a ValueError, so a caller reading --json would get a bare traceback."""
+    f = tmp_path / "portrait.json"
+    f.write_text('{"a":' * 20000 + "1" + "}" * 20000, encoding="utf-8")
+    with pytest.raises(typer.Exit):
+        distribution.from_workflow_cmd(from_=str(f), name="portrait")
+    assert "build_workflow_invalid" in capsys.readouterr().out
