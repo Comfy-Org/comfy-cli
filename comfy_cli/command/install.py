@@ -208,8 +208,7 @@ def execute(
             raise typer.Exit(code=1) from e
 
     elif not check_comfy_repo(repo_dir)[0]:
-        # Get actual remote URL for better error message. GitPython is imported
-        # here so `comfy` commands that never touch a repo do not pay for it.
+        # Get actual remote URL for better error message
         import git
 
         try:
