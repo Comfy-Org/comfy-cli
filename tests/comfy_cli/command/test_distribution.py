@@ -1810,20 +1810,49 @@ def test_report_advisories_renders_a_workflow_report_line_for_line():
         "1 packs the build leaves out, because another pack already claimed their install folder: comfyui-manager",
         "1 node classes the registry could not attribute, with the closest pack it named: WAS_Image_Blend "
         "(maybe https://github.com/ltdrdata/was-node-suite-comfyui)",
-        "1 models the graph loads that no definition carries; `comfy build resolve` finds download candidates: "
+        "1 models the shared catalog holds that this build does not carry, each needing a sourceUri in the "
+        "definition before you cut: v1-5-pruned-emaonly-fp16.safetensors",
+        "1 models the graph loads that nothing has a source for; `comfy build resolve` finds candidates: "
         "definitely-not-a-real-lora-v3.safetensors",
         "2 node classes call a partner API rather than run from an installed pack: LumaImageNode (Luma), "
         "OpenAIGPTImage1 (OpenAI (inc. Sora))",
     ]
 
 
-def test_report_advisories_leaves_out_the_models_the_catalog_already_matched():
-    """Telling a user to resolve a model Cloud already holds sends them after a
-    file that is not missing."""
+def test_report_advisories_still_owes_the_models_the_catalog_matched():
+    """A workflow import builds custom nodes and no models, so a matched model is
+    one the catalog holds and the build does not. Dropping the line lets a user
+    cut a paid release whose graph dies at CheckpointLoaderSimple."""
     lines = distribution.report_advisories(
         {"models": [{"filename": "v1-5-pruned-emaonly-fp16.safetensors", "status": "matched"}]}
     )
-    assert lines == []
+    assert lines == [
+        "1 models the shared catalog holds that this build does not carry, each needing a sourceUri in the "
+        "definition before you cut: v1-5-pruned-emaonly-fp16.safetensors"
+    ]
+
+
+def test_report_advisories_names_the_catalog_lead_for_a_suggested_model():
+    """The catalog ranks what it thinks the filename meant, and a name Cloud
+    already has beats sending the reader to HuggingFace for it."""
+    lines = distribution.report_advisories(
+        {
+            "models": [
+                {
+                    "filename": "sd15.safetensors",
+                    "status": "suggested",
+                    "suggestions": [
+                        {"filename": "v1-5-pruned-emaonly.safetensors", "score": 0.62},
+                        {"filename": "v1-5-pruned-emaonly-fp16.safetensors", "score": 0.91},
+                    ],
+                }
+            ]
+        }
+    )
+    assert lines == [
+        "1 models the graph loads that nothing has a source for; `comfy build resolve` finds candidates: "
+        "sd15.safetensors (maybe v1-5-pruned-emaonly-fp16.safetensors)"
+    ]
 
 
 def test_report_advisories_counts_every_name_and_says_how_many_it_held_back():

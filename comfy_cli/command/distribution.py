@@ -609,6 +609,17 @@ def _unrenderable(key: str, value) -> str:
     return f"the builder sent `{key}` as {type(value).__name__}, which this CLI cannot render; read it with --json"
 
 
+def _best_suggestion(entry: dict, field: str) -> str:
+    """The highest-scored suggestion's ``field``, or "" when none carries one.
+    The catalog ranks what it thinks the workflow meant, so the reader gets the
+    lead rather than the whole list."""
+    ranked = [s for s in (entry.get("suggestions") or []) if isinstance(s, dict) and s.get(field)]
+    if not ranked:
+        return ""
+    best = max(ranked, key=lambda s: s["score"] if isinstance(s.get("score"), int | float) else 0.0)
+    return _from_server(best[field])
+
+
 def _suggested_pack_lines(entries: list) -> list[str]:
     """`unknownClasses` is the detailed form of `unresolvedClasses`, which already
     prints the names. What it adds is the pack the registry came closest to, so
@@ -617,33 +628,49 @@ def _suggested_pack_lines(entries: list) -> list[str]:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        packs = [s for s in (entry.get("suggestions") or []) if isinstance(s, dict) and s.get("packId")]
-        if not packs:
-            continue
-        best = max(packs, key=lambda s: s["score"] if isinstance(s.get("score"), int | float) else 0.0)
-        suggested.append(f"{_from_server(entry.get('classType'))} (maybe {_from_server(best['packId'])})")
+        pack = _best_suggestion(entry, "packId")
+        if pack:
+            suggested.append(f"{_from_server(entry.get('classType'))} (maybe {pack})")
     if not suggested:
         return []
     meaning = "node classes the registry could not attribute, with the closest pack it named"
     return [_advisory_line(len(suggested), meaning, suggested)]
 
 
-def _missing_model_lines(entries: list) -> list[str]:
-    """A model the catalog matched is one the build already carries, so it is no
-    advisory; its directory rides in the JSON payload for anyone who wants it.
-    The rest are what `comfy build resolve` exists to find."""
-    missing = [e for e in entries if not (isinstance(e, dict) and e.get("status") == "matched")]
-    if not missing:
-        return []
-    names = [_from_server(e.get("filename") if isinstance(e, dict) else e) for e in missing]
-    meaning = "models the graph loads that no definition carries; `comfy build resolve` finds download candidates"
-    return [_advisory_line(len(missing), meaning, names)]
+def _model_lines(entries: list) -> list[str]:
+    """A workflow import builds custom nodes and no models, because a workflow
+    names a model without saying where it comes from. So every model the graph
+    loads is still owed, and ``status`` shapes the wording rather than deciding
+    whether a line exists: the shared catalog already holds a matched one, which
+    needs only a source pointer, while the rest have to be found first."""
+    held, owed = [], []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            owed.append(_from_server(entry))
+            continue
+        name = _from_server(entry.get("filename"))
+        if entry.get("status") == "matched":
+            held.append(name)
+            continue
+        lead = _best_suggestion(entry, "filename")
+        owed.append(f"{name} (maybe {lead})" if lead else name)
+    lines = []
+    if held:
+        meaning = (
+            "models the shared catalog holds that this build does not carry, each needing a sourceUri in the "
+            "definition before you cut"
+        )
+        lines.append(_advisory_line(len(held), meaning, held))
+    if owed:
+        meaning = "models the graph loads that nothing has a source for; `comfy build resolve` finds candidates"
+        lines.append(_advisory_line(len(owed), meaning, owed))
+    return lines
 
 
 # Each entry is (report key, what turns its entries into lines).
 _REPORT_ENTRY_ADVISORIES = (
     ("unknownClasses", _suggested_pack_lines),
-    ("models", _missing_model_lines),
+    ("models", _model_lines),
 )
 
 
@@ -1768,8 +1795,8 @@ def from_workflow_cmd(
             renderer.warn("the builder sent an empty import report, so nothing here says what the workflow mapped to")
         for line in report_advisories(report):
             renderer.warn(line)
-        # The builder sets comfyVersionRequired on every import, so a false is the
-        # only word that a version is pinned and the build can be cut.
+        # comfyVersionRequired is the builder's word on whether a version is
+        # pinned, so only an explicit false says this build can be cut.
         if report.get("comfyVersionRequired") is False:
             renderer.info(f"cut a build with `comfy build release create {distribution_id}`")
         else:
