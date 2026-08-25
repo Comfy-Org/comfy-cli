@@ -16,7 +16,7 @@ Bundled skills (4 total) — see ``comfy skills list`` for descriptions:
 
 Fetched at install time, not bundled (see ``REMOTE_SKILLS``):
 
-  - ``comfy-build``     — building a ComfyUI distribution on the developer
+  - ``comfy-build``     — building a custom ComfyUI environment on the developer
                           platform. It lives in Comfy-Org/comfy-skills so its
                           judgment can be revised without a CLI release.
 """

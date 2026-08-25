@@ -2041,12 +2041,12 @@ _RootGroup.lazy_subcommands = {
     "auth": LazySubcommand("comfy_cli.auth.command", help="Manage API tokens for model hosts (Civitai, Hugging Face)."),
     "jobs": LazySubcommand("comfy_cli.command.jobs", help="List, inspect, and live-watch ComfyUI prompts."),
     "build": LazySubcommand(
-        "comfy_cli.command.distribution", help="Package a local ComfyUI environment into a serverless build."
+        "comfy_cli.command.build", help="Package a local ComfyUI environment into a serverless build."
     ),
     # `comfy distribution` was the group's name before the builder's public API
     # renamed distributions to builds; kept as a warning alias for old scripts.
     "distribution": LazySubcommand(
-        "comfy_cli.command.distribution",
+        "comfy_cli.command.build",
         hidden=True,
         callback=_deprecated_alias_callback(old_name="distribution", new_name="build"),
     ),
