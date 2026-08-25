@@ -3,12 +3,16 @@ subprocess check of the JSON envelope (same pattern as test_project_command)."""
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
+import urllib.error
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import create_autospec
@@ -17,8 +21,11 @@ import pytest
 import requests
 import typer
 
+from comfy_cli import error_codes
 from comfy_cli.command import build
+from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output import get_renderer
+from comfy_cli.output.renderer import OutputMode, Renderer, set_renderer
 
 
 @pytest.fixture
@@ -655,13 +662,15 @@ def test_delete_command_needs_confirm_non_interactive():
 
 
 class _RecordingRenderer:
-    """Minimal renderer stand-in that records the error code emitted."""
+    """Minimal renderer stand-in that records the error code and hint emitted."""
 
     def __init__(self):
         self.codes = []
+        self.hints = []
 
-    def error(self, code, message, details=None):
+    def error(self, code, message, *, hint=None, details=None):
         self.codes.append(code)
+        self.hints.append(hint)
 
 
 def test_builder_client_uses_injected_token(monkeypatch):
@@ -749,6 +758,55 @@ def test_builder_call_maps_other_errors_to_builder_error():
     with pytest.raises(typer.Exit):
         _builder_call(r, raise_500)
     assert r.codes == ["build_builder_error"]
+
+
+def test_builder_call_maps_a_stalled_read_to_a_builder_error():
+    import typer
+
+    from comfy_cli.command.build import _builder_call
+
+    def raise_read_timeout():
+        raise TimeoutError("The read operation timed out")
+
+    r = _RecordingRenderer()
+    with pytest.raises(typer.Exit) as exit_:
+        _builder_call(r, raise_read_timeout)
+    assert r.codes == ["build_builder_error"]
+    assert exit_.value.exit_code == 1
+
+
+def _listener_that_hangs_up():
+    """A listener that accepts a connection and closes it without writing a status
+    line, which is how a proxy or a killed worker drops a call the builder already
+    committed. Returns (socket, base_url); the caller closes the socket."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen(1)
+
+    def serve():
+        with contextlib.suppress(OSError):
+            conn, _ = sock.accept()
+            conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return sock, f"http://127.0.0.1:{sock.getsockname()[1]}"
+
+
+def test_builder_call_turns_a_dropped_connection_into_an_envelope():
+    """A connection dropped mid-response raises RemoteDisconnected or
+    ConnectionResetError, neither of which is a URLError. Driven against a real
+    socket so the tuple is checked against what Python raises, not what I assumed."""
+    from comfy_cli.builder_api import BuilderClient
+
+    sock, base_url = _listener_that_hangs_up()
+    try:
+        r = _RecordingRenderer()
+        with pytest.raises(typer.Exit) as exit_:
+            build._builder_call(r, BuilderClient(base_url, "jwt").list_builds)
+    finally:
+        sock.close()
+    assert r.codes == ["build_builder_error"]
+    assert exit_.value.exit_code == 1
 
 
 def test_upload_blob_sends_generation_match_header(monkeypatch, tmp_path):
@@ -1231,6 +1289,201 @@ def test_create_execute_still_creates_when_the_builder_cannot_read_pins(monkeypa
     assert builder.created_with["customNodes"][0]["id"] == "pr-was-47064894"
 
 
+def test_create_execute_still_creates_when_reading_the_pins_stalls(monkeypatch):
+    """A stalled importer read raises a bare TimeoutError, which is no URLError.
+    Uncaught it takes the whole create down over a check the cut redoes anyway."""
+    builder = _ImportingBuilder(fail=TimeoutError("The read operation timed out"))
+    _execute(
+        monkeypatch,
+        builder,
+        {
+            "baseComfyVersion": "v0.30.2",
+            "models": [],
+            "customNodes": [{"name": "was", "id": "pr-was-47064894", "registryVersion": "1.0.1"}],
+        },
+    )
+    assert builder.created_with["customNodes"][0]["id"] == "pr-was-47064894"
+
+
+# --- a create says a build may exist only where the create call may have landed ---
+
+
+class _FailingBuilder:
+    """Builder stand-in that fails at exactly one step of the live create."""
+
+    def __init__(self, *, fail_at, error):
+        self.fail_at = fail_at
+        self.error = error
+        self.created_with = None
+
+    def _maybe_fail(self, step):
+        if step == self.fail_at:
+            raise self.error
+
+    def resolve_models(self, filenames):
+        self._maybe_fail("resolve_models")
+        return []
+
+    def resolve_snapshot(self, snapshot):
+        return {"definition": {"customNodes": []}, "report": {}}
+
+    def create_blob(self, kind, filename, sha256, size_bytes):
+        self._maybe_fail("create_blob")
+        return ("blob-1", "https://storage.test/put")
+
+    def upload_blob(self, upload_url, path):
+        self._maybe_fail("upload_blob")
+
+    def create_build(self, name, definition, description=None):
+        self._maybe_fail("create_build")
+        self.created_with = definition
+        return "dist-1"
+
+    def cut_version(self, build_id, targets=None):
+        self._maybe_fail("cut_version")
+        return ("ver-1", "status-url")
+
+
+def _uploading_definition() -> dict:
+    return {
+        "baseComfyVersion": "v0.30.2",
+        "models": [{"type": "unet", "filename": "z.safetensors", "sha256": "abc", "sizeBytes": 4}],
+        "customNodes": [],
+    }
+
+
+def _models_tree_with_the_model(tmp_path) -> Path:
+    root = tmp_path / "models"
+    (root / "unet").mkdir(parents=True)
+    (root / "unet" / "z.safetensors").write_bytes(b"BYTE")
+    return root
+
+
+def _force_json_renderer() -> Renderer:
+    r = Renderer.resolve(is_stdout_tty=False, env={}, json_flag=True)
+    r.mode = OutputMode.JSON
+    set_renderer(r)
+    return r
+
+
+def _last_envelope(capsys) -> dict:
+    out = capsys.readouterr().out.strip()
+    assert out, "expected an envelope on stdout"
+    return json.loads(out.splitlines()[-1])
+
+
+_EXPECTED_CREATE_HINT = (
+    "a build may already exist: run `comfy build list` before retrying, because a retry can create a second build"
+)
+# What renderer.error substitutes whenever a call site passes no hint.
+_REGISTERED_BUILDER_HINT = error_codes.get("build_builder_error").hint
+# A failure that already knows the build's id says what to do with that build.
+_EXPECTED_CUT_HINT = (
+    "the build exists as dist-1: cut it with `comfy build release create dist-1`, not by creating again"
+)
+
+
+@pytest.mark.parametrize(
+    ("fail_at", "error", "expected_hint", "expected_unconfirmed", "expected_dist_id"),
+    [
+        pytest.param(
+            "create_build",
+            TimeoutError("The read operation timed out"),
+            _EXPECTED_CREATE_HINT,
+            True,
+            None,
+            id="stalled_create_may_have_written_the_row",
+        ),
+        pytest.param(
+            "create_build",
+            urllib.error.HTTPError("https://x", 504, "Gateway Timeout", None, io.BytesIO(b"gateway timeout")),
+            _EXPECTED_CREATE_HINT,
+            True,
+            None,
+            id="gateway_504_may_have_written_the_row",
+        ),
+        pytest.param(
+            "create_build",
+            urllib.error.HTTPError(
+                "https://x", 400, "Bad Request", None, io.BytesIO(b'{"error":"INVALID_DEFINITION"}')
+            ),
+            _REGISTERED_BUILDER_HINT,
+            None,
+            None,
+            id="refused_definition_wrote_no_row",
+        ),
+        pytest.param(
+            "upload_blob",
+            requests.HTTPError("403 Forbidden from storage"),
+            _REGISTERED_BUILDER_HINT,
+            None,
+            None,
+            id="blob_upload_fails_before_any_create",
+        ),
+        pytest.param(
+            "create_build",
+            urllib.error.HTTPError("https://x", 408, "Request Timeout", None, io.BytesIO(b"request timeout")),
+            _EXPECTED_CREATE_HINT,
+            True,
+            None,
+            id="request_timeout_408_may_have_written_the_row",
+        ),
+        pytest.param(
+            "create_build",
+            ResponseTooLarge("response exceeds the 8 MiB cap"),
+            _EXPECTED_CREATE_HINT,
+            True,
+            None,
+            id="an_answer_past_the_cap_was_still_an_answer",
+        ),
+        pytest.param(
+            "cut_version",
+            TimeoutError("The read operation timed out"),
+            _EXPECTED_CUT_HINT,
+            None,
+            "dist-1",
+            id="cut_fails_after_the_build_exists_and_is_named",
+        ),
+    ],
+)
+def test_create_says_a_build_may_exist_only_where_the_create_call_may_have_landed(
+    monkeypatch, tmp_path, capsys, fail_at, error, expected_hint, expected_unconfirmed, expected_dist_id
+):
+    monkeypatch.setattr(build, "_builder_client", lambda renderer, url: _FailingBuilder(fail_at=fail_at, error=error))
+    renderer = _force_json_renderer()
+
+    with pytest.raises(typer.Exit):
+        build._create_execute(
+            renderer,
+            _uploading_definition(),
+            name="demo",
+            builder_url=None,
+            models_dir=str(_models_tree_with_the_model(tmp_path)),
+        )
+
+    err = _last_envelope(capsys)["error"]
+    details = err["details"] or {}
+    assert err["code"] == "build_builder_error"
+    assert err["hint"] == expected_hint
+    assert details.get("effectUnconfirmed") is expected_unconfirmed
+    assert details.get("distributionId") == expected_dist_id
+
+
+def test_create_execute_still_creates_when_model_resolution_stalls(monkeypatch, tmp_path):
+    """Resolution only saves an upload. A stall in it must cost the upload, not the
+    create, so the model uploads and the build is still made."""
+    builder = _FailingBuilder(fail_at="resolve_models", error=TimeoutError("The read operation timed out"))
+    monkeypatch.setattr(build, "_builder_client", lambda renderer, url: builder)
+    build._create_execute(
+        get_renderer(),
+        _uploading_definition(),
+        name="demo",
+        builder_url=None,
+        models_dir=str(_models_tree_with_the_model(tmp_path)),
+    )
+    assert builder.created_with["models"][0]["blobId"] == "blob-1"
+
+
 # --- the freeze describes the target env, and carries no credential -----------
 
 
@@ -1365,6 +1618,23 @@ def test_report_advisories_reads_the_refused_release_as_one_value():
     assert "'v9.9.9'" in line and "6 " not in line
 
 
+def test_report_advisories_says_when_a_suggestion_list_cannot_be_walked():
+    """`"suggestions": 5` is truthy and not iterable: the comprehension raised
+    TypeError mid-render, losing the whole report after the row already existed."""
+    lines = build.report_advisories({"unknownClasses": [{"classType": "ReActorFaceSwap", "suggestions": 5}]})
+    assert lines == ["the builder sent `suggestions` as int, which this CLI cannot render; read it with --json"]
+
+
+def test_report_advisories_still_owes_the_model_whose_suggestions_it_cannot_walk():
+    """The unreadable part is the lead, not the entry: the model is still owed, and
+    saying so beats dropping the line that says the graph needs it."""
+    lines = build.report_advisories(
+        {"models": [{"filename": "lora-v3.safetensors", "status": "missing", "suggestions": 5}]}
+    )
+    assert "lora-v3.safetensors" in lines[0]
+    assert lines[1] == "the builder sent `suggestions` as int, which this CLI cannot render; read it with --json"
+
+
 def test_report_advisories_names_a_folder_collision():
     (line,) = build.report_advisories({"collidingNodes": ["ComfyUI-Easy-Use"]})
     assert "already claimed the folder" in line and "ComfyUI-Easy-Use" in line
@@ -1427,6 +1697,52 @@ def test_from_snapshot_schema_matches_what_the_builder_serves():
     schema = json.loads(schema_path.read_text())
     payload = {"build": {"id": "dist-7", "name": "demo"}, "report": {}}
     jsonschema.Draft202012Validator(schema).validate(payload)
+
+
+def test_from_snapshot_says_a_build_may_exist_when_its_create_call_stalls(monkeypatch, tmp_path, capsys):
+    """Drives the real verb down to the transport: from-snapshot creates a build in
+    one call, so a stall there is the case the hint exists for."""
+    monkeypatch.setenv("COMFY_BUILDER_TOKEN", "jwt")
+
+    def stall(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", stall)
+    _force_json_renderer()
+    snap = tmp_path / "export.json"
+    snap.write_text(json.dumps({"type": "comfyui-desktop-2-snapshot", "snapshots": [{}]}), encoding="utf-8")
+
+    with pytest.raises(typer.Exit):
+        build.from_snapshot_cmd(from_=str(snap), name="demo")
+
+    err = _last_envelope(capsys)["error"]
+    assert err["code"] == "build_builder_error"
+    assert err["hint"] == _EXPECTED_CREATE_HINT
+    assert err["details"]["effectUnconfirmed"] is True
+
+
+def test_from_snapshot_refuses_a_build_id_it_cannot_vouch_for(monkeypatch, tmp_path, capsys):
+    """from-snapshot prints the id into a `comfy build release create <id>` line,
+    so an id outside the grammar is refused rather than pasted into that line."""
+
+    class FakeClient:
+        def create_build_from_snapshot(self, name, snapshot, *, description=None, base_image_id=None):
+            return {"build": {"id": "dist-7; rm -rf ~"}, "report": {}}
+
+    monkeypatch.setattr(build, "_builder_client", lambda renderer, url: FakeClient())
+    _force_json_renderer()
+    snap = tmp_path / "export.json"
+    snap.write_text(json.dumps({"type": "comfyui-desktop-2-snapshot", "snapshots": [{}]}), encoding="utf-8")
+
+    with pytest.raises(typer.Exit):
+        build.from_snapshot_cmd(from_=str(snap), name="demo")
+
+    captured = capsys.readouterr()
+    err = json.loads(captured.out.strip().splitlines()[-1])["error"]
+    assert err["code"] == "build_builder_error"
+    assert "comfy build list" in err["message"]
+    assert "rm -rf" not in captured.out
+    assert "rm -rf" not in captured.err
 
 
 def test_from_snapshot_refuses_a_file_that_is_not_json(tmp_path, capsys):
@@ -1976,6 +2292,81 @@ def test_from_workflow_refuses_to_claim_success_on_an_answer_it_cannot_read(monk
     out = capsys.readouterr().out
     assert "build_builder_error" in out
     assert "Created build" not in out
+
+
+# A build id is printed and interpolated unquoted into command lines the user is
+# told to run, so the grammar is the only thing standing between a bad answer and
+# a line someone pastes into a shell.
+_FORGED_LINE_ID = "dist-9\n\x1b[2KCreated build dist-0"
+
+
+@pytest.mark.parametrize(
+    ("build_id", "forbidden"),
+    [
+        pytest.param(["dist-9"], "dist-9", id="a_list_is_not_an_id"),
+        pytest.param(4815162342, "4815162342", id="a_number_is_not_an_id"),
+        pytest.param("dist-9; rm -rf ~", "rm -rf", id="shell_metacharacters_are_not_an_id"),
+        pytest.param(_FORGED_LINE_ID, "Created build dist-0", id="a_newline_forging_a_line_is_not_an_id"),
+    ],
+)
+def test_from_workflow_refuses_a_build_id_it_cannot_vouch_for(monkeypatch, tmp_path, capsys, build_id, forbidden):
+    """Printing a mangled id is worse than printing none, because the id lands in
+    `comfy build get <id>` and `comfy build update <id>` lines a user runs."""
+    monkeypatch.setattr(
+        build,
+        "_builder_client",
+        lambda renderer, url: _workflow_client({"build": {"id": build_id}, "report": {}}),
+    )
+    _force_json_renderer()
+
+    with pytest.raises(typer.Exit):
+        build.from_workflow_cmd(from_=_write_workflow(tmp_path, UI_WORKFLOW), name="portrait")
+
+    captured = capsys.readouterr()
+    err = json.loads(captured.out.strip().splitlines()[-1])["error"]
+    assert err["code"] == "build_builder_error"
+    assert "comfy build list" in err["message"]
+    assert forbidden not in captured.out
+    assert forbidden not in captured.err
+
+
+def test_from_workflow_names_the_build_when_only_the_report_is_unreadable(monkeypatch, tmp_path, capsys):
+    """The id parsed, so the build has a name to give. Sending this reader to
+    `comfy build list` to find what is already on screen would be the lie."""
+    monkeypatch.setattr(
+        build,
+        "_builder_client",
+        lambda renderer, url: _workflow_client({"build": {"id": "dist-9"}, "report": "fine"}),
+    )
+    _force_json_renderer()
+
+    with pytest.raises(typer.Exit):
+        build.from_workflow_cmd(from_=_write_workflow(tmp_path, UI_WORKFLOW), name="portrait")
+
+    err = _last_envelope(capsys)["error"]
+    assert err["details"]["distributionId"] == "dist-9"
+    assert "dist-9" in err["message"]
+    assert "comfy build list" not in err["message"]
+    assert "effectUnconfirmed" not in err["details"]
+
+
+def test_from_workflow_says_a_build_may_exist_when_its_create_call_stalls(monkeypatch, tmp_path, capsys):
+    """from-workflow creates a build in one call, so a stall there is exactly the
+    case the hint exists for."""
+    monkeypatch.setenv("COMFY_BUILDER_TOKEN", "jwt")
+
+    def stall(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", stall)
+    _force_json_renderer()
+
+    with pytest.raises(typer.Exit):
+        build.from_workflow_cmd(from_=_write_workflow(tmp_path, UI_WORKFLOW), name="portrait")
+
+    err = _last_envelope(capsys)["error"]
+    assert err["hint"] == _EXPECTED_CREATE_HINT
+    assert err["details"]["effectUnconfirmed"] is True
 
 
 @pytest.mark.parametrize("payload", ["not json at all", "null", "[]", '"a string"', "42"])

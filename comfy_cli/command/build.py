@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import http.client
 import io
 import json
 import os
 import re
 import subprocess
+import urllib.error
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated
@@ -46,6 +48,7 @@ from comfy_cli._safe_exec import BinaryNotFoundError, resolve_required_binary
 from comfy_cli.command.pack_scan import read_pyproject
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH, SUPPORTED_PT_EXTENSIONS
 from comfy_cli.file_utils import atomic_write_text
+from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output import get_renderer
 from comfy_cli.registry.api import sanitize_error_body
 from comfy_cli.workspace_manager import WorkspaceManager
@@ -609,11 +612,21 @@ def _unrenderable(key: str, value) -> str:
     return f"the builder sent `{key}` as {type(value).__name__}, which this CLI cannot render; read it with --json"
 
 
+def _suggestions(entry: dict) -> list | None:
+    """The suggestions an entry carries, or None when it sent a shape this cannot
+    walk. ``"suggestions": 5`` is truthy and not iterable, and the TypeError would
+    cost the reader the whole report after the build row already exists."""
+    ranked = entry.get("suggestions")
+    if not ranked:
+        return []
+    return list(ranked) if isinstance(ranked, list | tuple) else None
+
+
 def _best_suggestion(entry: dict, field: str) -> str:
     """The highest-scored suggestion's ``field``, or "" when none carries one.
     The catalog ranks what it thinks the workflow meant, so the reader gets the
     lead rather than the whole list."""
-    ranked = [s for s in (entry.get("suggestions") or []) if isinstance(s, dict) and s.get(field)]
+    ranked = [s for s in (_suggestions(entry) or []) if isinstance(s, dict) and s.get(field)]
     if not ranked:
         return ""
     best = max(ranked, key=lambda s: s["score"] if isinstance(s.get("score"), int | float) else 0.0)
@@ -624,17 +637,23 @@ def _suggested_pack_lines(entries: list) -> list[str]:
     """`unknownClasses` is the detailed form of `unresolvedClasses`, which already
     prints the names. What it adds is the pack the registry came closest to, so
     that is all this renders, and only for the classes that carry one."""
-    suggested = []
+    suggested, unreadable = [], None
     for entry in entries:
         if not isinstance(entry, dict):
+            continue
+        if _suggestions(entry) is None:
+            unreadable = entry["suggestions"]
             continue
         pack = _best_suggestion(entry, "packId")
         if pack:
             suggested.append(f"{_from_server(entry.get('classType'))} (maybe {pack})")
-    if not suggested:
-        return []
-    meaning = "node classes the registry could not attribute, with the closest pack it named"
-    return [_advisory_line(len(suggested), meaning, suggested)]
+    lines = []
+    if suggested:
+        meaning = "node classes the registry could not attribute, with the closest pack it named"
+        lines.append(_advisory_line(len(suggested), meaning, suggested))
+    if unreadable is not None:
+        lines.append(_unrenderable("suggestions", unreadable))
+    return lines
 
 
 def _model_lines(entries: list) -> list[str]:
@@ -643,7 +662,7 @@ def _model_lines(entries: list) -> list[str]:
     loads is still owed, and ``status`` shapes the wording rather than deciding
     whether a line exists: the shared catalog already holds a matched one, which
     needs only a source pointer, while the rest have to be found first."""
-    held, owed = [], []
+    held, owed, unreadable = [], [], None
     for entry in entries:
         if not isinstance(entry, dict):
             owed.append(_from_server(entry))
@@ -651,6 +670,10 @@ def _model_lines(entries: list) -> list[str]:
         name = _from_server(entry.get("filename"))
         if entry.get("status") == "matched":
             held.append(name)
+            continue
+        if _suggestions(entry) is None:
+            unreadable = entry["suggestions"]
+            owed.append(name)
             continue
         lead = _best_suggestion(entry, "filename")
         owed.append(f"{name} (maybe {lead})" if lead else name)
@@ -664,6 +687,8 @@ def _model_lines(entries: list) -> list[str]:
     if owed:
         meaning = "models the graph loads that nothing has a source for; `comfy build resolve` finds candidates"
         lines.append(_advisory_line(len(owed), meaning, owed))
+    if unreadable is not None:
+        lines.append(_unrenderable("suggestions", unreadable))
     return lines
 
 
@@ -900,7 +925,14 @@ def execute_create(plan: dict, *, client, name: str, locate_bytes, targets=None)
         section, idx = u["slot"]
         definition[section][idx]["blobId"] = blob_id
         uploaded += 1
-    build_id = client.create_build(name, definition)
+    try:
+        build_id = client.create_build(name, definition)
+    except Exception as e:
+        # Every step above this one is blob work that leaves no build behind, so
+        # this frame is the only one that knows a create was actually sent. The
+        # command reads the mark to decide whether a build may exist server-side.
+        e.create_attempted = True
+        raise
     try:
         version_id, status_url = client.cut_version(build_id, targets)
     except Exception as e:
@@ -1183,6 +1215,51 @@ def _load_definition(path: Path, *, require_models: bool = True) -> dict:
 # --builder-url or COMFY_BUILDER_URL (e.g. https://stagingplatformapi.comfy.org/builder).
 DEFAULT_BUILDER_URL = "https://platformapi.comfy.org/builder"
 
+# The builder writes the build row before answering, so a create whose outcome the
+# client never confirmed may still have made a build. Every verb that creates one
+# says so in these words, from here, rather than wording the warning for itself.
+_BUILD_MAY_EXIST_HINT = (
+    "a build may already exist: run `comfy build list` before retrying, because a retry can create a second build"
+)
+
+# What a build id has to look like before this CLI will show one. An id comes back
+# from the builder and is printed, put in an envelope, and interpolated unquoted
+# into command lines the user is told to run: reading it straight out of a response
+# lets a wrong or hostile answer put terminal escapes and shell metacharacters into
+# what the CLI tells a person to type.
+_BUILD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+
+
+# Every way a builder call fails without the caller reading a status line. A
+# refused/DNS/TLS failure at connect raises URLError; a read timeout raises a bare
+# TimeoutError, which is no URLError; a reset or a server hanging up mid-response
+# raises ConnectionError; a truncated body and a mangled status line raise
+# http.client.IncompleteRead and BadStatusLine (both HTTPException); a non-ASCII
+# host reaches http.client's ``host.encode("idna")`` fallback, which raises
+# UnicodeError (a ValueError, so none of the above catch it). requests raises its
+# own family for the presigned uploads, a malformed body reads as KeyError, and an
+# answer past the client cap raises ResponseTooLarge. Each is an envelope, never a
+# traceback: a bare traceback tells a --json caller nothing and, on a create, loses
+# the id of a build that already exists.
+_BUILDER_TRANSPORT_ERRORS = (
+    urllib.error.URLError,
+    TimeoutError,
+    ConnectionError,
+    http.client.HTTPException,
+    UnicodeError,
+    requests.RequestException,
+    KeyError,
+    ResponseTooLarge,
+)
+
+
+def _server_build_id(value) -> str | None:
+    """The build id a response claims, or None when what it sent is not one. A
+    list, a number and a string carrying anything outside the grammar all read as
+    absent: a mangled id in a copy-paste command line is worse than no id, because
+    the user runs the line."""
+    return value if isinstance(value, str) and _BUILD_ID_RE.match(value) else None
+
 
 @app.command(
     "create",
@@ -1280,8 +1357,6 @@ def _create_execute(
 ) -> None:
     """The live --execute path: auth, resolve, upload, create, cut. Maps every
     failure class to a single error envelope + exit(1)."""
-    import urllib.error
-
     client = _builder_client(renderer, builder_url)
 
     # Resolve models to public URLs where a hash-verified match exists. Best
@@ -1291,7 +1366,7 @@ def _create_execute(
         n = resolve_models_via_builder(definition.get("models", []), client)
         if renderer.is_pretty() and n:
             renderer.info(f"Resolved {n} model(s) to public URLs — skipping their upload")
-    except (urllib.error.URLError, requests.RequestException, KeyError) as e:
+    except _BUILDER_TRANSPORT_ERRORS as e:
         renderer.warn(f"model resolution unavailable ({e}); all models will be uploaded")
 
     # The importer is the side of the boundary that knows what the registry
@@ -1299,7 +1374,7 @@ def _create_execute(
     declared = [n.get("name") for n in definition.get("customNodes", [])]
     try:
         imported = client.resolve_snapshot(snapshot_from_definition(definition))
-    except (urllib.error.URLError, requests.RequestException, KeyError, ValueError) as e:
+    except (*_BUILDER_TRANSPORT_ERRORS, ValueError) as e:
         renderer.warn(f"the builder could not read the definition's pins ({e}); they go to the cut unchecked")
     else:
         imported_report = imported.get("report") or {}
@@ -1361,11 +1436,19 @@ def _create_execute(
     except FileNotFoundError as e:
         renderer.error(code="build_upload_unavailable", message=str(e))
         raise typer.Exit(code=1) from e
-    except (urllib.error.URLError, requests.RequestException, KeyError) as e:
+    except _BUILDER_TRANSPORT_ERRORS as e:
         # Same handler as the read verbs: surface the builder's own message (and the
         # limited-beta 403), plus the created build's id when a cut failed
         # after create, so the caller can delete or retry it rather than orphan it.
-        _report_builder_error(renderer, e, build_id=getattr(e, "build_id", None))
+        # Only a create call that was actually sent can have left a build nobody
+        # named: the blob work above it creates nothing, and a failed cut already
+        # carries the build's id, where a retry would duplicate a release instead.
+        _report_builder_error(
+            renderer,
+            e,
+            build_id=getattr(e, "build_id", None),
+            unconfirmed_effect_hint=_BUILD_MAY_EXIST_HINT if getattr(e, "create_attempted", False) else None,
+        )
         raise typer.Exit(code=1) from e
 
     if renderer.is_pretty():
@@ -1397,15 +1480,50 @@ def _builder_client(renderer, builder_url: str | None):
         raise typer.Exit(code=1) from e
 
 
-def _report_builder_error(renderer, e, *, build_id: str | None = None) -> None:
+def _report_builder_error(
+    renderer, e, *, build_id: str | None = None, unconfirmed_effect_hint: str | None = None
+) -> None:
     """Emit one error envelope for a builder failure. Prefers the limited-beta 403,
     then the builder's own error body (e.g. `INVALID_DEFINITION: …` or
     `SUBSCRIPTION_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
     generic transport error. Includes a created build's id when supplied,
-    so a cut that fails after create doesn't orphan an unnamed build."""
-    import urllib.error
+    so a cut that fails after create doesn't orphan an unnamed build.
 
-    base = {"distributionId": build_id} if build_id else {}
+    ``unconfirmed_effect_hint`` rides only where the call's effect is unknown. A
+    4xx is the builder refusing before it writes anything, so the effect is known
+    to be none; a 408, a 5xx (the gateway's 504 above all) and a dead connection
+    can each land after the write. A failure that already knows the build's id
+    supersedes it and says to cut that build, whatever the status was."""
+    # 408 sits with the 5xx range here: both say the request may have been
+    # processed, which is the only question the hint answers.
+    answered_a_refusal = isinstance(e, urllib.error.HTTPError) and e.code < 500 and e.code != 408
+    named = _server_build_id(build_id)
+
+    base = {"distributionId": named} if named else {}
+    if unconfirmed_effect_hint and not answered_a_refusal:
+        # The one machine-readable fact in the hint: an agent must not blind-retry.
+        base["effectUnconfirmed"] = True
+
+    # A known build id outranks the rest, whatever the status was: the build exists,
+    # so the next step is to cut that one. The registered hint says "retry", and the
+    # retry a person runs is another create, which builds a second one beside it.
+    if named:
+        hint = f"the build exists as {named}: cut it with `comfy build release create {named}`, not by creating again"
+    elif answered_a_refusal:
+        hint = None
+    else:
+        hint = unconfirmed_effect_hint
+
+    if isinstance(e, ResponseTooLarge):
+        # The builder answered in full and this client refused to read the answer,
+        # so a create that trips the cap has written its row and cannot name it.
+        renderer.error(
+            code="build_builder_error",
+            message=f"builder response exceeded the client size cap ({e})",
+            hint=hint,
+            details=base or None,
+        )
+        return
     if isinstance(e, urllib.error.HTTPError):
         body = ""
         try:
@@ -1423,28 +1541,26 @@ def _report_builder_error(renderer, e, *, build_id: str | None = None) -> None:
         renderer.error(
             code="build_builder_error",
             message=f"builder call failed ({e.code}): {detail}",
+            hint=hint,
             details={**base, "status": e.code, "body": body[:1000]},
         )
         return
-    renderer.error(code="build_builder_error", message=f"builder call failed: {e}", details=base or None)
+    renderer.error(
+        code="build_builder_error",
+        message=f"builder call failed: {e}",
+        hint=hint,
+        details=base or None,
+    )
 
 
-def _builder_call(renderer, fn):
+def _builder_call(renderer, fn, *, unconfirmed_effect_hint: str | None = None):
     """Run a builder API call, mapping every failure class to one error envelope
-    + exit(1) via _report_builder_error."""
-    import urllib.error
-
-    from comfy_cli.http import ResponseTooLarge
-
+    + exit(1) via _report_builder_error. ``unconfirmed_effect_hint`` reaches the
+    envelope only where the call may already have taken effect."""
     try:
         return fn()
-    except ResponseTooLarge as e:
-        # Mostly the build log outgrowing even the raised logs cap; a clear message
-        # beats an unhandled traceback.
-        renderer.error(code="build_builder_error", message=f"builder response exceeded the client size cap ({e})")
-        raise typer.Exit(code=1) from e
-    except (urllib.error.URLError, requests.RequestException, KeyError) as e:
-        _report_builder_error(renderer, e)
+    except _BUILDER_TRANSPORT_ERRORS as e:
+        _report_builder_error(renderer, e, unconfirmed_effect_hint=unconfirmed_effect_hint)
         raise typer.Exit(code=1) from e
 
 
@@ -1656,7 +1772,7 @@ def update_cmd(
         # annotation it leaves is what the default resolver in plan_create reads.
         try:
             resolve_models_via_builder(definition.get("models", []), client)
-        except (requests.RequestException, KeyError, ValueError) as e:
+        except (*_BUILDER_TRANSPORT_ERRORS, ValueError) as e:
             renderer.warn(f"model resolution unavailable ({e})")
         plan = plan_create(definition)
         if plan["uploads"]:
@@ -1730,9 +1846,23 @@ def from_snapshot_cmd(
         lambda: client.create_build_from_snapshot(
             name, as_snapshot_envelope(snapshot), description=description, base_image_id=base_image
         ),
+        unconfirmed_effect_hint=_BUILD_MAY_EXIST_HINT,
     )
-    created = result.get("build") or {}
-    build_id = created.get("id")
+    created = result.get("build") if isinstance(result, dict) else None
+    build_id = _server_build_id(created.get("id") if isinstance(created, dict) else None)
+    # The row is already written by the time the answer arrives, so an id this
+    # command cannot read means a build exists that nothing here can name.
+    if not build_id:
+        renderer.error(
+            code="build_builder_error",
+            message=(
+                "the builder answered from-snapshot with a build id this CLI cannot read, so a build may exist "
+                "that this command cannot name; list your builds with `comfy build list`"
+            ),
+            details={"received": sorted(result) if isinstance(result, dict) else type(result).__name__},
+        )
+        raise typer.Exit(code=1)
+
     if renderer.is_pretty():
         renderer.success(f"Created build {build_id} from {path.name}")
         for line in report_advisories(result.get("report") or {}):
@@ -1770,20 +1900,37 @@ def from_workflow_cmd(
         raise typer.Exit(code=1) from e
 
     client = _builder_client(renderer, builder_url)
-    result = _builder_call(renderer, lambda: client.create_build_from_workflow(name, workflow, description=description))
+    result = _builder_call(
+        renderer,
+        lambda: client.create_build_from_workflow(name, workflow, description=description),
+        unconfirmed_effect_hint=_BUILD_MAY_EXIST_HINT,
+    )
     created = result.get("build") if isinstance(result, dict) else None
     report = result.get("report") if isinstance(result, dict) else None
-    distribution_id = created.get("id") if isinstance(created, dict) else None
-    # The row is already written by the time the answer arrives, so a shape this
+    distribution_id = _server_build_id(created.get("id") if isinstance(created, dict) else None)
+    received = {"received": sorted(result) if isinstance(result, dict) else type(result).__name__}
+    # The row is already written by the time the answer arrives, so an id this
     # command cannot read means a build exists that nothing here can name.
-    if not distribution_id or not isinstance(report, dict):
+    if not distribution_id:
         renderer.error(
             code="build_builder_error",
             message=(
-                "the builder answered from-workflow with a shape this CLI cannot read, so a build may exist "
+                "the builder answered from-workflow with a build id this CLI cannot read, so a build may exist "
                 "that this command cannot name; list your builds with `comfy build list`"
             ),
-            details={"received": sorted(result) if isinstance(result, dict) else type(result).__name__},
+            details=received,
+        )
+        raise typer.Exit(code=1)
+    # The id is good, so the build has a name to give. Sending this reader to
+    # `comfy build list` to find what is already on screen would be the lie.
+    if not isinstance(report, dict):
+        renderer.error(
+            code="build_builder_error",
+            message=(
+                f"the builder created build {distribution_id}, then answered with an import report this CLI "
+                "cannot read, so nothing here says what the workflow mapped to"
+            ),
+            details={**received, "distributionId": distribution_id},
         )
         raise typer.Exit(code=1)
 
