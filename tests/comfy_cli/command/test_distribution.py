@@ -141,6 +141,26 @@ def test_find_comfy_python_prefers_colocated_venv(tmp_path):
     assert distribution.find_comfy_python(tmp_path, None) == py
 
 
+def test_find_comfy_python_finds_foreign_layout_venv(tmp_path):
+    # Under WSL a Windows install's venv is Scripts/python.exe on a POSIX host, and
+    # WSL runs it through interop — probing only the host's layout misses it entirely.
+    foreign = ("bin", "python") if os.name == "nt" else ("Scripts", "python.exe")
+    bindir = tmp_path / ".venv" / foreign[0]
+    bindir.mkdir(parents=True)
+    py = bindir / foreign[1]
+    py.write_text("")
+    assert distribution.find_comfy_python(tmp_path, None) == py
+
+
+def test_find_comfy_python_prefers_host_layout_when_both_exist(tmp_path):
+    native = ("Scripts", "python.exe") if os.name == "nt" else ("bin", "python")
+    foreign = ("bin", "python") if os.name == "nt" else ("Scripts", "python.exe")
+    for sub, name in (native, foreign):
+        (tmp_path / ".venv" / sub).mkdir(parents=True)
+        (tmp_path / ".venv" / sub / name).write_text("")
+    assert distribution.find_comfy_python(tmp_path, None) == tmp_path / ".venv" / native[0] / native[1]
+
+
 def test_find_comfy_python_none_for_data_only_dir(tmp_path):
     # a data-only ComfyUI dir (no venv) must NOT silently fall back to some python
     assert distribution.find_comfy_python(tmp_path, None) is None

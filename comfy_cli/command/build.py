@@ -553,11 +553,19 @@ def build_definition(
     return definition
 
 
-def _venv_python(venv_dir: Path) -> Path:
-    """The Python executable inside a venv dir (Windows vs POSIX layout)."""
-    if os.name == "nt":
-        return venv_dir / "Scripts" / "python.exe"
-    return venv_dir / "bin" / "python"
+def _venv_pythons(venv_dir: Path) -> tuple[Path, ...]:
+    """Both layouts' Python executable inside a venv dir, host's own first.
+
+    A venv's layout is fixed by the platform that CREATED it, not by the one
+    reading it, and the two are not always the same machine: under WSL a
+    Windows ComfyUI install's venv is a ``Scripts/python.exe`` sitting on a
+    POSIX host, which WSL still executes through interop. Probing only the
+    host's layout is what made ``--python`` mandatory for that case. The host's
+    own layout is returned first so a native venv wins if a tree somehow holds
+    both."""
+    posix = venv_dir / "bin" / "python"
+    windows = venv_dir / "Scripts" / "python.exe"
+    return (windows, posix) if os.name == "nt" else (posix, windows)
 
 
 def find_comfy_python(comfy_root: Path | None, explicit: str | None) -> Path | None:
@@ -575,9 +583,9 @@ def find_comfy_python(comfy_root: Path | None, explicit: str | None) -> Path | N
         return p if p.is_file() else None
     if comfy_root:
         for name in (".venv", "venv"):
-            py = _venv_python(comfy_root / name)
-            if py.is_file():
-                return py
+            for py in _venv_pythons(comfy_root / name):
+                if py.is_file():
+                    return py
     return None
 
 
