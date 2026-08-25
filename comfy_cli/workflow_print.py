@@ -119,26 +119,16 @@ def _sort_key(node_id: str) -> tuple[int, Any]:
         return (1, node_id)
 
 
-def _validate(
-    nodes: list[dict],
-    links: list[list],
-    defs_by_id: dict[str, dict] | None = None,
-    *,
-    check_subgraph_refs: bool = True,
-) -> list[str]:
+def _validate(nodes: list[dict], links: list[list]) -> list[str]:
     """Structural checks that must hold before any ordering/printing work starts.
     Collects every problem found (rather than stopping at the first) so the
     caller's ``PrintUnsupported`` can report them all at once.
 
-    ``check_subgraph_refs`` gates the "subgraph instance whose definition is
-    missing" check: on for the workflow's own top-level nodes (an unresolvable
-    top-level instance can't be printed at all), off when validating a
-    definition's interior (an unresolvable *nested* instance just falls
-    through to being rendered like any other not-in-catalog node — see
-    render_py's module docstring and D11 in the task brief).
+    A subgraph instance whose definition is missing is deliberately NOT a
+    refusal here (at any depth): it's printed opaquely instead — see
+    ``_render_missing_subgraph_line`` and D11 in the task brief (amended).
     """
     reasons: list[str] = []
-    defs_by_id = defs_by_id or {}
     for n in nodes:
         t = n.get("type")
         extra = n.get("extra")
@@ -147,8 +137,6 @@ def _validate(
         )
         if is_legacy_group:
             reasons.append(f"node {n.get('id')} is a legacy group node ({t})")
-        if check_subgraph_refs and is_subgraph_uuid(t) and t not in defs_by_id:
-            reasons.append(f"node {n.get('id')} is a subgraph instance whose definition {t} is missing")
 
     nodes_by_id = {str(n.get("id")): n for n in nodes}
     for link in links:
@@ -565,6 +553,52 @@ def _render_subgraph_instance_line(
     return line, prim_hits
 
 
+def _render_missing_subgraph_line(
+    node: dict, type_uuid: str, binding: str, ctx: _RenderCtx, addr: str, warnings: list[str]
+) -> str:
+    """D11 (amended): a subgraph instance whose definition is missing is never
+    a refusal, at any depth — it's printed opaquely instead. Wired link inputs
+    resolve by the instance's own input name (non-identifier names via
+    ``**{}``, same as a resolved instance); widget-backed instance inputs
+    print positionally as a single ``widgets=[...]`` (there's no definition to
+    name them against). ``addr`` is the node's address for the warning text —
+    the bare id at top level, ``<instance>/<inner>`` inside a definition."""
+    nid = str(node.get("id"))
+    args: list[str] = []
+    extra: dict[str, str] = {}
+
+    inputs = [inp for inp in node.get("inputs") or [] if isinstance(inp, dict)]
+    link_inputs = [inp for inp in inputs if "widget" not in inp]
+
+    for inp in link_inputs:
+        iname = inp.get("name") or ""
+        ref = None
+        link_id = inp.get("link")
+        if link_id is not None:
+            link = ctx.link_map.get(str(link_id))
+            if link is not None:
+                src_id, src_slot, _tgt_id, _tgt_slot = link
+                ref, _ann, warn = _resolve_edge_text(src_id, src_slot, iname, nid, ctx)
+                if warn:
+                    warnings.append(warn)
+        text = ref if ref is not None else "None"
+        if _IDENT.match(iname) and not keyword.iskeyword(iname):
+            args.append(f"{iname}={text}")
+        else:
+            extra[iname] = text
+
+    if extra:
+        inner = ", ".join(f"{json.dumps(k, ensure_ascii=False)}: {v}" for k, v in extra.items())
+        args.append(f"**{{{inner}}}")
+
+    widgets_values = node.get("widgets_values")
+    if isinstance(widgets_values, list) and widgets_values:
+        args.append(f"widgets={py_literal(widgets_values)}")
+
+    warnings.append(f"node {addr}: subgraph definition {type_uuid} missing; printed opaquely")
+    return f"{binding} = Subgraph[{json.dumps(type_uuid)}]({', '.join(args)})  # {nid} subgraph {type_uuid} definition missing"
+
+
 def _definition_header(def_id: str, sg_def: dict, state: _State) -> str:
     name = sg_def.get("name") or def_id
     instances = sorted(state.instances_by_def.get(def_id, []), key=_sort_key)
@@ -650,39 +684,47 @@ def _render_nodes(
     binding_by_id: dict[str, str],
     state: _State,
     depth: int,
+    addr_prefix: str | None = None,
 ) -> list[str]:
-    """Render one printed line per node in ``order``, branching to the
-    subgraph-instance format when the node's type resolves to a present
-    definition. Shared between the top-level workflow and a definition's
-    interior."""
+    """Render one printed line per node in ``order``: a resolved subgraph
+    instance gets the ``Subgraph[...]`` format, an instance whose definition
+    is missing gets the opaque D11 fallback (never a refusal), everything else
+    is a regular class call. Shared between the top-level workflow and a
+    definition's interior (``addr_prefix`` is that definition's first
+    instance id, used to address a missing-definition warning as
+    ``<instance>/<inner>``)."""
     lines: list[str] = []
     for n in order:
         nid = str(n.get("id"))
         t = n.get("type", "")
-        sg_def = defs_by_id.get(t) if is_subgraph_uuid(t) else None
         name = binding_by_id[nid]
-        if sg_def is not None:
-            line, prim_hits = _render_subgraph_instance_line(n, t, name, ctx, state.warnings)
-            for prim_id, reason in prim_hits:
-                state.primitive_reason.setdefault(prim_id, reason)
-            state.register_instance(t, nid, depth)
+        if is_subgraph_uuid(t):
+            sg_def = defs_by_id.get(t)
+            if sg_def is not None:
+                line, prim_hits = _render_subgraph_instance_line(n, t, name, ctx, state.warnings)
+                for prim_id, reason in prim_hits:
+                    state.primitive_reason.setdefault(prim_id, reason)
+                state.register_instance(t, nid, depth)
+            else:
+                addr = f"{addr_prefix}/{nid}" if addr_prefix else nid
+                line = _render_missing_subgraph_line(n, t, name, ctx, addr, state.warnings)
         else:
             line = _render_node_line(n, name, ctx, graph, state)
         lines.append(line)
     return lines
 
 
-def _build_bindings(order: list[dict], defs_by_id: dict[str, dict]) -> dict[str, str]:
+def _build_bindings(order: list[dict]) -> dict[str, str]:
     """Local binding names for one node list, in print order: a subgraph
-    instance binds off its own title (falling back to ``"subgraph"``);
+    instance (resolved or not — a missing definition doesn't change what it
+    fundamentally is) binds off its own title, falling back to ``"subgraph"``;
     everything else binds off its class type, as usual."""
     used: dict[str, int] = {}
     binding_by_id: dict[str, str] = {}
     for n in order:
         nid = str(n.get("id"))
         t = n.get("type", "")
-        sg_def = defs_by_id.get(t) if is_subgraph_uuid(t) else None
-        if sg_def is not None:
+        if is_subgraph_uuid(t):
             title = n.get("title") or None
             name = binding_name(title or "subgraph", used)
         else:
@@ -710,7 +752,7 @@ def _render_definition_block(
             continue
         validate_links.append([lid, oid, oslot, tid, tslot])
 
-    reasons = _validate(interior_nodes, validate_links, state.defs_by_id, check_subgraph_refs=False)
+    reasons = _validate(interior_nodes, validate_links)
     if reasons:
         raise PrintUnsupported(reasons)
 
@@ -729,7 +771,8 @@ def _render_definition_block(
     proxy_in_names = {i: inp.get("name") for i, inp in enumerate(sg_def.get("inputs") or []) if isinstance(inp, dict)}
     proxy_out_names = {i: o.get("name") for i, o in enumerate(sg_def.get("outputs") or []) if isinstance(o, dict)}
 
-    binding_by_id = _build_bindings(order, state.defs_by_id)
+    binding_by_id = _build_bindings(order)
+    first_instance = state.first_instance_by_def.get(def_id, def_id)
 
     ctx = _RenderCtx(
         graph=graph,
@@ -744,7 +787,9 @@ def _render_definition_block(
         proxy_in_names=proxy_in_names,
     )
 
-    lines = _render_nodes(order, ctx, graph, state.defs_by_id, binding_by_id, state, depth + 1)
+    lines = _render_nodes(
+        order, ctx, graph, state.defs_by_id, binding_by_id, state, depth + 1, addr_prefix=first_instance
+    )
 
     for n in sorted(notes, key=lambda n: _sort_key(str(n.get("id")))):
         lines.append(_note_comment(n))
@@ -761,7 +806,6 @@ def _render_definition_block(
             continue
         if tslot not in out_sources:
             out_sources[tslot] = (oid, oslot)
-    first_instance = state.first_instance_by_def.get(def_id, def_id)
     for slot in sorted(out_sources, key=_sort_key):
         oid, oslot = out_sources[slot]
         out_name = proxy_out_names.get(slot) or f"out{slot}"
@@ -785,7 +829,7 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         if isinstance(sg, dict) and sg.get("id")
     }
 
-    reasons = _validate(nodes, links, defs_by_id)
+    reasons = _validate(nodes, links)
     if reasons:
         raise PrintUnsupported(reasons)
 
@@ -808,7 +852,7 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
 
     # binding_name is called once per node, in topological order, so the
     # dedupe suffixes (_2, _3, ...) match print order.
-    binding_by_id = _build_bindings(order, defs_by_id)
+    binding_by_id = _build_bindings(order)
     bindings: dict[str, str] = {name: nid for nid, name in binding_by_id.items()}
 
     ctx = _RenderCtx(

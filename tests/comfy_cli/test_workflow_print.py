@@ -402,12 +402,20 @@ def test_subgraph_instance_and_definition(sd15_graph):
     assert "IN.value" in src and "OUT.IMAGE = " in src
     # inner nodes are addressable
     assert any(v.startswith("10/") or "/" in v for v in res.bindings.values())
+    # interior instance 3 of definition f2228dc9 (node 19's subgraph) is itself a
+    # subgraph instance whose own definition is missing from the fixture; it's
+    # printed opaquely with a warning rather than refusing the whole render.
+    assert (
+        "node 19/3: subgraph definition 6d92985e-3e1e-49e2-acea-91c5259d86a8 missing; printed opaquely" in res.warnings
+    )
 
 
-def test_missing_subgraph_definition_is_refused(sd15_graph):
+def test_missing_subgraph_definition_prints_opaquely(sd15_graph):
     wf = _mini([_node(10, "d33c1791-dfd2-4102-8540-aa63e4434cd2")], [])
-    with pytest.raises(PrintUnsupported) as e:
-        render_py(wf, sd15_graph)
-    assert e.value.reasons == [
-        "node 10 is a subgraph instance whose definition d33c1791-dfd2-4102-8540-aa63e4434cd2 is missing"
-    ]
+    res = render_py(wf, sd15_graph)
+    line = next(ln for ln in res.source.splitlines() if "# 10 " in ln)
+    assert line == (
+        'subgraph = Subgraph["d33c1791-dfd2-4102-8540-aa63e4434cd2"]()'
+        "  # 10 subgraph d33c1791-dfd2-4102-8540-aa63e4434cd2 definition missing"
+    )
+    assert "node 10: subgraph definition d33c1791-dfd2-4102-8540-aa63e4434cd2 missing; printed opaquely" in res.warnings
