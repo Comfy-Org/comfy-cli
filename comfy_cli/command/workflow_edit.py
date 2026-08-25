@@ -75,7 +75,8 @@ def _split_addr(addr: str, renderer) -> tuple[Any, str]:
         renderer.error(
             code="workflow_edit_invalid",
             message=f"expected `<node_id>.<name>`, got {addr!r}",
-            hint="example: `3.steps` — run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read",
+            hint="example: `3.steps` — run `comfy workflow print <file>` to see every node, edge and widget "
+            "value with its id in one read",
         )
         raise typer.Exit(code=1)
     node_str, _, name = addr.partition(".")
@@ -198,7 +199,8 @@ def add_node_cmd(
         _emit_edit_error(
             renderer,
             e,
-            hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read (`comfy workflow slots <file>` for exact widget addresses)",
+            hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one "
+            "read (`comfy workflow slots <file>` for exact widget addresses)",
         )
         raise typer.Exit(code=1) from e
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow add-node")
@@ -240,7 +242,8 @@ def set_widget_cmd(
         _emit_edit_error(
             renderer,
             e,
-            hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read (`comfy workflow slots <file>` for exact widget addresses)",
+            hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one "
+            "read (`comfy workflow slots <file>` for exact widget addresses)",
         )
         raise typer.Exit(code=1) from e
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow set-widget")
@@ -278,7 +281,8 @@ def connect_cmd(
         _emit_edit_error(
             renderer,
             e,
-            hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read (`comfy workflow slots <file>` for exact widget addresses)",
+            hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one "
+            "read (`comfy workflow slots <file>` for exact widget addresses)",
         )
         raise typer.Exit(code=1) from e
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow connect")
@@ -312,7 +316,8 @@ def delete_cmd(
         _emit_edit_error(
             renderer,
             e,
-            hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read (`comfy workflow slots <file>` for exact widget addresses)",
+            hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one "
+            "read (`comfy workflow slots <file>` for exact widget addresses)",
         )
         raise typer.Exit(code=1) from e
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow delete")
@@ -361,7 +366,8 @@ def delete_nodes_cmd(
         renderer.error(
             code="workflow_edit_invalid",
             message=f"batch failed: {workflow_ops._rehint_discarded_batch(e, pre_batch_hint)}",
-            hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read — the ids you used do not match the live graph; the file was not modified",
+            hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one "
+            "read — the ids you used do not match the live graph; the file was not modified",
         )
         raise typer.Exit(code=1) from e
 

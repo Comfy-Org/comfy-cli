@@ -239,21 +239,33 @@ def _toposort(printable: list[dict], link_map: dict[str, tuple]) -> list[dict]:
     return [node_by_id[i] for i in order]
 
 
-def _edge_ref(binding: str, src_node: dict, src_type: str, slot: int, graph: Graph | None) -> str:
-    """How to reference one output slot of an already-bound source node."""
+def _edge_ref(binding: str, src_node: dict, src_type: str, slot: int, ctx: _RenderCtx) -> tuple[str, str | None]:
+    """How to reference one output slot of an already-bound source node.
+
+    Returns ``(ref, warning)``. ``warning`` is non-None only when litegraph
+    serialized something other than a dict into ``outputs[slot]`` — the ref
+    still falls back to the ``.out[<slot>]`` index form rather than raising.
+    """
     outputs = src_node.get("outputs") or []
     if len(outputs) == 1:
-        return binding
+        return binding, None
     out_name = None
+    warning = None
     if 0 <= slot < len(outputs):
-        out_name = outputs[slot].get("name")
-    if not out_name and graph is not None:
-        m = graph.node(src_type)
+        entry = outputs[slot]
+        if isinstance(entry, dict):
+            out_name = entry.get("name")
+        else:
+            warning = (
+                f"node {ctx.qualify(src_node.get('id'))}: malformed outputs entry at slot {slot}; referenced by index"
+            )
+    if not out_name and ctx.graph is not None:
+        m = ctx.graph.node(src_type)
         if m is not None and 0 <= slot < len(m.outputs):
             out_name = m.outputs[slot].name
     if out_name and _IDENT.match(out_name) and not keyword.iskeyword(out_name):
-        return f"{binding}.{out_name}"
-    return f"{binding}.out[{slot}]"
+        return f"{binding}.{out_name}", warning
+    return f"{binding}.out[{slot}]", warning
 
 
 def _note_comment(node: dict) -> str:
@@ -476,12 +488,12 @@ def _resolve_edge_text(src_id: Any, src_slot: Any, name: str, tgt_id: str, ctx: 
         binding = ctx.binding_by_id.get(rid_s)
         if src_node is None or binding is None:
             return None, None, None
-        ref = _edge_ref(binding, src_node, src_node.get("type", ""), rslot, ctx.graph)
+        ref, edge_warning = _edge_ref(binding, src_node, src_node.get("type", ""), rslot, ctx)
         # R12 (amending D8): the link still prints as wired — the marker only
         # tells the reader the value it carries comes from a bypassed node, so
         # at runtime it is really whatever that node passes through.
         ann = f" {name} via bypassed {rid_s}" if src_node.get("mode") == 4 else None
-        return ref, ann, None
+        return ref, ann, edge_warning
     if kind == "in_proxy":
         return ctx.in_ref(outcome[1]), None, None
     if kind == "dead_reroute":
@@ -575,7 +587,10 @@ def _build_args(
                 src_node = ctx.nodes_by_id.get(rid_s)
                 binding = ctx.binding_by_id.get(rid_s)
                 if src_node is not None and binding is not None:
-                    live_link_refs[name] = _edge_ref(binding, src_node, src_node.get("type", ""), outcome[2], ctx.graph)
+                    edge_ref, edge_warning = _edge_ref(binding, src_node, src_node.get("type", ""), outcome[2], ctx)
+                    live_link_refs[name] = edge_ref
+                    if edge_warning:
+                        warnings.append(edge_warning)
                     if src_node.get("mode") == 4:  # R12, same marker as the link pass
                         annotations.append(f" {name} via bypassed {rid_s}")
         elif outcome[0] == "in_proxy":
@@ -783,7 +798,8 @@ def _render_missing_subgraph_line(
         args.append(f"widgets={py_literal(widgets_values)}")
 
     warnings.append(f"node {ctx.qualify(nid)}: subgraph definition {type_uuid} missing; printed opaquely")
-    line = f"{binding} = Subgraph[{json.dumps(type_uuid)}]({', '.join(args)})  # {nid} subgraph {type_uuid} definition missing"
+    call = f"{binding} = Subgraph[{json.dumps(type_uuid)}]({', '.join(args)})"
+    line = f"{call}  # {nid} subgraph {type_uuid} definition missing"
     for ann in annotations:
         line += ann
     return line

@@ -728,6 +728,23 @@ def test_malformed_input_entry_is_skipped_with_warning(sd15_graph):
     assert "node 2: ignoring malformed input entry 7" in res.warnings
 
 
+def test_malformed_output_entry_falls_back_to_index_ref_with_warning(sd15_graph):
+    # litegraph has been seen to serialize junk into `outputs` too, not just
+    # `inputs` (see test_malformed_input_entry_is_skipped_with_warning above).
+    # A source node not in the catalog keeps the graph-metadata fallback from
+    # masking the bug: `.out[<slot>]` is the only name left to fall back to.
+    src = _node(1, "UnknownSrcNode", widgets=[1, 1, 1])
+    src["outputs"] = ["junk", "junk2"]
+    tgt = _node(
+        2,
+        "VAEDecode",
+        inputs=[{"name": "samples", "type": "LATENT", "link": 7}, {"name": "vae", "type": "VAE", "link": None}],
+    )
+    res = render_py(_mini([src, tgt], [[7, 1, 0, 2, 0, "LATENT"]]), sd15_graph)
+    assert ".out[0]" in res.source
+    assert "node 1: malformed outputs entry at slot 0; referenced by index" in res.warnings
+
+
 def test_input_without_name_key_does_not_raise(sd15_graph):
     wf = _mini([_node(2, "VAEDecode", inputs=[{"type": "LATENT", "link": None}])], [])
     res = render_py(wf, sd15_graph)

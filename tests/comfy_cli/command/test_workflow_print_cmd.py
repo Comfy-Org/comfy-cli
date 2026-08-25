@@ -127,6 +127,29 @@ def test_print_select_in_pretty_mode_prints_only_the_selection():
     assert '"ksampler": "3"' in result.output
 
 
+def test_print_select_source_pretty_mode_strips_terminal_controls(tmp_path):
+    # A note's title/text goes straight into `source` as a comment without
+    # passing through `json.dumps` escaping, so an escape sequence in it
+    # would otherwise reach the terminal raw via `--select source` in pretty
+    # mode (the non-select pretty path already strips `res.source` itself;
+    # `--select` bypassed that stripping before this fix).
+    wf = json.loads(SD15.read_text())
+    mutated = False
+    for n in wf["nodes"]:
+        if n.get("type") == "MarkdownNote":
+            n["widgets_values"][0] = "\x1b[31mEVIL\x1b[0m rest of note"
+            mutated = True
+            break
+    assert mutated, "fixture has no MarkdownNote to mutate"
+    p = _write_workflow(tmp_path, wf)
+
+    _force_pretty_renderer()
+    result = CliRunner().invoke(workflow_cmd.app, ["print", str(p), "--input", str(SD15_OI), "--select", "source"])
+    assert result.exit_code == 0, result.output
+    assert "\x1b" not in result.output
+    assert "EVIL" in result.output
+
+
 def test_print_rejects_api_format(tmp_path, capsys):
     p = _write_workflow(tmp_path, {"3": {"class_type": "KSampler", "inputs": {}}})
     env = _run(["print", str(p), "--input", str(SD15_OI)], capsys, expect_ok=False)

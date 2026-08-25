@@ -679,7 +679,8 @@ def print_cmd(
     if select is not None:
         from comfy_cli.selector import emit_selected
 
-        return emit_selected(renderer, payload, select, command="workflow print")
+        select_payload = _sanitize_selected_strings(payload) if renderer.is_pretty() else payload
+        return emit_selected(renderer, select_payload, select, command="workflow print")
     if renderer.is_pretty():
         typer.echo(_strip_terminal_controls(res.source), nl=False)
         for w in warnings:
@@ -804,6 +805,24 @@ def _strip_terminal_controls(text: str) -> str:
         if (ch in "\t\n" or 0x20 <= ord(ch) < 0x7F)
         or (ord(ch) >= 0xA0 and unicodedata.category(ch) not in _SPOOFING_CATEGORIES)
     )
+
+
+def _sanitize_selected_strings(value: Any) -> Any:
+    """Recursively strip terminal control chars from string leaves of a ``--select`` payload.
+
+    Only needed for pretty mode: ``emit_selected`` there can write a selected
+    bare string (or a JSON-pretty-printed slice) straight to the terminal, so
+    an escape sequence buried in a node title or widget value would reach the
+    terminal unescaped. JSON mode's encoder already escapes control chars, so
+    this is a no-op there and is never called for it.
+    """
+    if isinstance(value, str):
+        return _strip_terminal_controls(value)
+    if isinstance(value, dict):
+        return {k: _sanitize_selected_strings(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_selected_strings(v) for v in value]
+    return value
 
 
 def _reject_unsafe_workflow_key(renderer, key: str) -> str:
