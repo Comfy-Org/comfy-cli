@@ -60,7 +60,7 @@ app = typer.Typer(
 )
 
 # `comfy build release <verb>`: the resource-verb surface for releases
-# (a release is an immutable build cut of a distribution; the builder's public
+# (a release is an immutable cut of a build; the builder's public
 # API renamed build versions to releases). The module keeps the version_app
 # name so internal references stay put.
 version_app = typer.Typer(
@@ -875,7 +875,7 @@ def plan_create(definition: dict, resolver=resolve_model_source) -> dict:
 
 def execute_create(plan: dict, *, client, name: str, locate_bytes, targets=None) -> dict:
     """Run the live create: upload each private blob, stitch its blobId into the
-    definition, create the distribution, and cut a build.
+    definition, create the build, and cut a release.
 
     ``client`` is a BuilderClient (or a stand-in with the same methods).
     ``locate_bytes(upload) -> Path`` finds the local file for a model upload.
@@ -900,16 +900,16 @@ def execute_create(plan: dict, *, client, name: str, locate_bytes, targets=None)
         section, idx = u["slot"]
         definition[section][idx]["blobId"] = blob_id
         uploaded += 1
-    dist_id = client.create_distribution(name, definition)
+    build_id = client.create_build(name, definition)
     try:
-        version_id, status_url = client.cut_version(dist_id, targets)
+        version_id, status_url = client.cut_version(build_id, targets)
     except Exception as e:
-        # The distribution now exists server-side; carry its id on the error so the
+        # The build now exists server-side; carry its id on the error so the
         # command can surface it (the user can then delete or retry it, not orphan it).
-        e.distribution_id = dist_id
+        e.build_id = build_id
         raise
     return {
-        "distributionId": dist_id,
+        "distributionId": build_id,
         "versionId": version_id,
         "releaseId": version_id,
         "statusUrl": status_url,
@@ -1165,7 +1165,7 @@ def _load_definition(path: Path, *, require_models: bool = True) -> dict:
     except json.JSONDecodeError as e:
         raise ValueError(f"{path} is not valid JSON: {e}") from e
     if not isinstance(data, dict) or (require_models and "models" not in data):
-        raise ValueError(f"{path} is not a distribution definition (no 'models' key)")
+        raise ValueError(f"{path} is not a build definition (no 'models' key)")
     # Guard the fields the create path indexes, so a hand-edited definition returns
     # an error envelope rather than a bare KeyError traceback downstream.
     for i, m in enumerate(data.get("models") or []):
@@ -1197,10 +1197,10 @@ def create_cmd(
     name: Annotated[
         str,
         typer.Option("--name", help="Name for the build."),
-    ] = "untitled-distribution",
+    ] = "untitled-build",
     execute: Annotated[
         bool,
-        typer.Option("--execute", help="Go live: upload blobs, create the distribution, and cut a build."),
+        typer.Option("--execute", help="Go live: upload blobs, create the build, and cut a release."),
     ] = False,
     builder_url: Annotated[
         str | None,
@@ -1363,9 +1363,9 @@ def _create_execute(
         raise typer.Exit(code=1) from e
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
         # Same handler as the read verbs: surface the builder's own message (and the
-        # limited-beta 403), plus the created distribution's id when a cut failed
+        # limited-beta 403), plus the created build's id when a cut failed
         # after create, so the caller can delete or retry it rather than orphan it.
-        _report_builder_error(renderer, e, dist_id=getattr(e, "distribution_id", None))
+        _report_builder_error(renderer, e, build_id=getattr(e, "build_id", None))
         raise typer.Exit(code=1) from e
 
     if renderer.is_pretty():
@@ -1384,7 +1384,7 @@ def _builder_client(renderer, builder_url: str | None):
     and skips the interactive OAuth session ``from_session`` uses. The env var wins
     over a stored session so an explicit token always takes precedence.
     """
-    from comfy_cli.distribution_api import BuilderAuthError, BuilderClient
+    from comfy_cli.builder_api import BuilderAuthError, BuilderClient
 
     base_url = builder_url or os.environ.get("COMFY_BUILDER_URL") or DEFAULT_BUILDER_URL
     token = os.environ.get("COMFY_BUILDER_TOKEN")
@@ -1397,15 +1397,15 @@ def _builder_client(renderer, builder_url: str | None):
         raise typer.Exit(code=1) from e
 
 
-def _report_builder_error(renderer, e, *, dist_id: str | None = None) -> None:
+def _report_builder_error(renderer, e, *, build_id: str | None = None) -> None:
     """Emit one error envelope for a builder failure. Prefers the limited-beta 403,
     then the builder's own error body (e.g. `INVALID_DEFINITION: …` or
     `SUBSCRIPTION_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
-    generic transport error. Includes a created distribution's id when supplied,
-    so a cut that fails after create doesn't orphan an unnamed distribution."""
+    generic transport error. Includes a created build's id when supplied,
+    so a cut that fails after create doesn't orphan an unnamed build."""
     import urllib.error
 
-    base = {"distributionId": dist_id} if dist_id else {}
+    base = {"distributionId": build_id} if build_id else {}
     if isinstance(e, urllib.error.HTTPError):
         body = ""
         try:
@@ -1470,7 +1470,7 @@ _BUILDER_URL_OPT = typer.Option("--builder-url", help="Builder base URL. Default
 def list_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    dists = _builder_call(renderer, client.list_distributions)
+    dists = _builder_call(renderer, client.list_builds)
     if renderer.is_pretty():
         if not dists:
             renderer.info("No builds yet.")
@@ -1482,12 +1482,12 @@ def list_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
 @app.command("get", help="Show a build and its full definition.")
 @tracking.track_command("build")
 def get_cmd(
-    distribution_id: Annotated[str, typer.Argument(help="Build id.")],
+    build_id: Annotated[str, typer.Argument(help="Build id.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    dist = _builder_call(renderer, lambda: client.get_distribution(distribution_id))
+    dist = _builder_call(renderer, lambda: client.get_build(build_id))
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(dist))
     renderer.emit(dist, command="build get")
@@ -1496,18 +1496,18 @@ def get_cmd(
 @version_app.command("create", help="Cut a new release of a build.")
 @tracking.track_command("build")
 def version_create(
-    distribution_id: Annotated[str, typer.Argument(help="Build id to cut a release of.")],
+    build_id: Annotated[str, typer.Argument(help="Build id to cut a release of.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    release_id, status_url = _builder_call(renderer, lambda: client.cut_version(distribution_id))
+    release_id, status_url = _builder_call(renderer, lambda: client.cut_version(build_id))
     if renderer.is_pretty():
         renderer.success(f"Cut release {release_id}")
         renderer.print(f"  status: {status_url}")
     # releaseId is the canonical name; versionId stays because user scripts pin it.
     renderer.emit(
-        {"distributionId": distribution_id, "versionId": release_id, "releaseId": release_id, "statusUrl": status_url},
+        {"distributionId": build_id, "versionId": release_id, "releaseId": release_id, "statusUrl": status_url},
         command="build release create",
         changed=True,
     )
@@ -1516,12 +1516,12 @@ def version_create(
 @version_app.command("list", help="List a build's releases.")
 @tracking.track_command("build")
 def version_list(
-    distribution_id: Annotated[str, typer.Argument(help="Build id.")],
+    build_id: Annotated[str, typer.Argument(help="Build id.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    versions = _builder_call(renderer, lambda: client.list_distribution_versions(distribution_id))
+    versions = _builder_call(renderer, lambda: client.list_releases(build_id))
     if renderer.is_pretty():
         if not versions:
             renderer.info("No releases yet.")
@@ -1574,7 +1574,7 @@ def version_logs(
 @app.command("validate", help="Dry-run resolve a build's definition (nothing is built).")
 @tracking.track_command("build")
 def validate_cmd(
-    distribution_id: Annotated[str, typer.Argument(help="Build id.")],
+    build_id: Annotated[str, typer.Argument(help="Build id.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
@@ -1582,7 +1582,7 @@ def validate_cmd(
     # A 400 here means "the definition has problems" — a normal validate outcome,
     # not a transport error; _builder_call surfaces the builder's issue list in the
     # message + details.body so the caller sees exactly what failed to resolve.
-    result = _builder_call(renderer, lambda: client.validate_distribution(distribution_id))
+    result = _builder_call(renderer, lambda: client.validate_build(build_id))
     if renderer.is_pretty():
         # The endpoint checks shape and pin existence. Whether the set installs
         # together is answered by a build, so the line claims only what it did.
@@ -1608,14 +1608,14 @@ def validate_cmd(
 @app.command("delete", help="Delete a build (soft-delete).")
 @tracking.track_command("build")
 def delete_cmd(
-    distribution_id: Annotated[str, typer.Argument(help="Build id.")],
+    build_id: Annotated[str, typer.Argument(help="Build id.")],
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
     if not yes:
         if renderer.is_pretty():
-            if not typer.confirm(f"Delete build {distribution_id}?"):
+            if not typer.confirm(f"Delete build {build_id}?"):
                 renderer.info("Aborted.")
                 raise typer.Exit(code=0)
         else:
@@ -1624,20 +1624,20 @@ def delete_cmd(
                 code="build_delete_needs_confirm",
                 message="refusing to delete without confirmation in non-interactive mode.",
                 hint="pass --yes to confirm the delete",
-                details={"distributionId": distribution_id},
+                details={"distributionId": build_id},
             )
             raise typer.Exit(code=1)
     client = _builder_client(renderer, builder_url)
-    _builder_call(renderer, lambda: client.delete_distribution(distribution_id))
+    _builder_call(renderer, lambda: client.delete_build(build_id))
     if renderer.is_pretty():
-        renderer.success(f"Deleted build {distribution_id}")
-    renderer.emit({"distributionId": distribution_id, "deleted": True}, command="build delete", changed=True)
+        renderer.success(f"Deleted build {build_id}")
+    renderer.emit({"distributionId": build_id, "deleted": True}, command="build delete", changed=True)
 
 
 @app.command("update", help="Replace a build's definition from a scan/edited JSON.")
 @tracking.track_command("build")
 def update_cmd(
-    distribution_id: Annotated[str, typer.Argument(help="Build id.")],
+    build_id: Annotated[str, typer.Argument(help="Build id.")],
     from_: Annotated[str, typer.Option("--from", "-f", help="Path to a definition JSON.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
@@ -1673,13 +1673,13 @@ def update_cmd(
     # concurrency, meant for the website's read-edit-save). For a CLI that's just
     # last-writer-wins: fetch the current updatedAt and echo it back, else the save
     # 409s STALE on a missing/zero timestamp.
-    current = _builder_call(renderer, lambda: client.get_distribution(distribution_id))
+    current = _builder_call(renderer, lambda: client.get_build(build_id))
     dist = _builder_call(
         renderer,
-        lambda: client.update_distribution(distribution_id, definition, current.get("updatedAt")),
+        lambda: client.update_build(build_id, definition, current.get("updatedAt")),
     )
     if renderer.is_pretty():
-        renderer.success(f"Updated build {distribution_id}")
+        renderer.success(f"Updated build {build_id}")
     renderer.emit(dist, command="build update", changed=True)
 
 
@@ -1727,17 +1727,17 @@ def from_snapshot_cmd(
     client = _builder_client(renderer, builder_url)
     result = _builder_call(
         renderer,
-        lambda: client.create_distribution_from_snapshot(
+        lambda: client.create_build_from_snapshot(
             name, as_snapshot_envelope(snapshot), description=description, base_image_id=base_image
         ),
     )
     created = result.get("build") or {}
-    distribution_id = created.get("id")
+    build_id = created.get("id")
     if renderer.is_pretty():
-        renderer.success(f"Created build {distribution_id} from {path.name}")
+        renderer.success(f"Created build {build_id} from {path.name}")
         for line in report_advisories(result.get("report") or {}):
             renderer.warn(line)
-        renderer.info(f"cut a build with `comfy build release create {distribution_id}`")
+        renderer.info(f"cut a build with `comfy build release create {build_id}`")
     renderer.emit(result, command="build from-snapshot", changed=True)
 
 
@@ -1770,9 +1770,7 @@ def from_workflow_cmd(
         raise typer.Exit(code=1) from e
 
     client = _builder_client(renderer, builder_url)
-    result = _builder_call(
-        renderer, lambda: client.create_distribution_from_workflow(name, workflow, description=description)
-    )
+    result = _builder_call(renderer, lambda: client.create_build_from_workflow(name, workflow, description=description))
     created = result.get("build") if isinstance(result, dict) else None
     report = result.get("report") if isinstance(result, dict) else None
     distribution_id = created.get("id") if isinstance(created, dict) else None

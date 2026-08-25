@@ -801,7 +801,7 @@ def test_cursor_rule_uses_the_skill_frontmatter_description(tmp_path: Path):
 @pytest.mark.parametrize(
     "description",
     [
-        "Build: a distribution, then deploy it.",
+        "Build: a build, then deploy it.",
         "#1 way to break YAML",
         'Say "hello" to the parser',
         "Costs 50% @ {runtime}: careful",
