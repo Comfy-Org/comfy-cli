@@ -1,6 +1,6 @@
-"""``comfy_cli._lazy``: the module/attribute proxies and the lazy root group.
+"""``comfy_cli._lazy``: the module proxy and the lazy root group.
 
-The proxies exist so ``cmdline.py`` can keep flat module-level names that
+``LazyModule`` exists so ``cmdline.py`` can keep flat module-level names that
 tests patch (``patch("comfy_cli.cmdline.run_inner.execute")``) while the
 import is deferred. The tests below pin exactly that: patching through a
 proxy patches the real module, and the lazy group renders help identically
@@ -10,6 +10,7 @@ to ``add_typer``.
 from __future__ import annotations
 
 import importlib
+import inspect
 import sys
 import types
 from unittest.mock import patch
@@ -18,7 +19,7 @@ import click
 import typer
 from typer.testing import CliRunner
 
-from comfy_cli._lazy import LazyCommand, LazySubcommand, LazyTyperGroup, lazy_attr, lazy_module
+from comfy_cli._lazy import LazyCommand, LazyModule, LazySubcommand, LazyTyperGroup
 
 
 def _fake_module(monkeypatch, name: str, **attrs):
@@ -45,7 +46,7 @@ def test_lazy_module_imports_on_first_attribute_only(monkeypatch):
         return original(name, package)
 
     monkeypatch.setattr(importlib, "import_module", spy)
-    proxy = lazy_module("_lazy_probe")
+    proxy = LazyModule("_lazy_probe")
     assert calls == []
     assert proxy.answer == 41
     assert calls == ["_lazy_probe"]
@@ -55,7 +56,7 @@ def test_lazy_module_imports_on_first_attribute_only(monkeypatch):
 
 def test_lazy_module_forwards_set_delete_and_dict(monkeypatch):
     real = _fake_module(monkeypatch, "_lazy_probe2", value=1)
-    proxy = lazy_module("_lazy_probe2")
+    proxy = LazyModule("_lazy_probe2")
     proxy.value = 2
     assert real.value == 2
     proxy.extra = "x"
@@ -68,7 +69,7 @@ def test_lazy_module_forwards_set_delete_and_dict(monkeypatch):
 
 def test_mock_patch_through_proxy_patches_the_real_module(monkeypatch):
     real = _fake_module(monkeypatch, "_lazy_probe3", run=lambda: "real")
-    holder = _fake_module(monkeypatch, "_lazy_holder", inner=lazy_module("_lazy_probe3"))
+    holder = _fake_module(monkeypatch, "_lazy_holder", inner=LazyModule("_lazy_probe3"))
     with patch("_lazy_holder.inner.run", return_value="patched"):
         assert real.run() == "patched"
         assert holder.inner.run() == "patched"
@@ -77,23 +78,11 @@ def test_mock_patch_through_proxy_patches_the_real_module(monkeypatch):
 
 def test_monkeypatch_setattr_on_proxy_lands_on_the_real_module(monkeypatch):
     real = _fake_module(monkeypatch, "_lazy_probe4", run=lambda: "real")
-    proxy = lazy_module("_lazy_probe4")
+    proxy = LazyModule("_lazy_probe4")
     monkeypatch.setattr(proxy, "run", lambda: "patched")
     assert real.run() == "patched"
     monkeypatch.undo()
     assert real.run() == "real"
-
-
-# --- lazy_attr --------------------------------------------------------------
-
-
-def test_lazy_attr_resolves_the_current_binding_on_each_call(monkeypatch):
-    real = _fake_module(monkeypatch, "_lazy_probe5", fn=lambda x: x + 1)
-    fn = lazy_attr("_lazy_probe5", "fn")
-    assert fn(1) == 2
-    real.fn = lambda x: x * 10  # a patch on the source module is honoured
-    assert fn(1) == 10
-    assert fn.__name__ == "<lambda>"  # attribute access forwards too
 
 
 # --- LazyTyperGroup ---------------------------------------------------------
@@ -207,3 +196,20 @@ def test_lazy_group_renders_exactly_like_add_typer(monkeypatch):
     assert result.exit_code == 0, result.output
     assert "hello from c" in result.output
     assert seen == ["cb"], "add_typer(callback=...) semantics: the group callback runs before the subcommand"
+
+
+def test_factory_kwargs_track_the_installed_typer_signature():
+    """typer 0.20 added ``suggest_commands`` as a required, defaultless keyword;
+    typer 0.12 has no such parameter. Pass exactly what this version accepts."""
+    group = typer.main.get_command(_lazy_root({}))
+    for factory in (typer.main.get_command_from_info, typer.main.get_group_from_info):
+        params = inspect.signature(factory).parameters
+        kwargs = group._factory_kwargs(factory)
+        assert set(kwargs) <= set(params), factory
+        assert ("suggest_commands" in kwargs) == ("suggest_commands" in params), factory
+
+
+def test_root_group_reads_pretty_exceptions_short_off_the_app():
+    from comfy_cli import cmdline
+
+    assert cmdline._RootGroup.pretty_exceptions_short == cmdline.app.pretty_exceptions_short

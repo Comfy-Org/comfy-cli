@@ -10,7 +10,7 @@ from rich.console import Console
 
 from comfy_cli import cancellation, constants, env_checker, logging, tracking, ui, utils
 from comfy_cli import where as where_module
-from comfy_cli._lazy import LazyCommand, LazySubcommand, LazyTyperGroup, lazy_attr, lazy_module
+from comfy_cli._lazy import LazyCommand, LazyModule, LazySubcommand, LazyTyperGroup
 from comfy_cli._safe_exec import resolve_required_binary
 from comfy_cli.caller import stream_is_tty
 from comfy_cli.command.version_validators import validate_optional_version, validate_version
@@ -31,15 +31,11 @@ from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 # proxies keep the flat module-level names so `patch("comfy_cli.cmdline.run_inner.execute")`
 # and friends keep working; see comfy_cli/_lazy.py. Subcommand *groups* are
 # deferred separately via the table at the bottom of this file.
-install_inner = lazy_module("comfy_cli.command.install")
-run_inner = lazy_module("comfy_cli.command.run")
-run_cli_inner = lazy_module("comfy_cli.command.run_cli")
-transfer_inner = lazy_module("comfy_cli.command.transfer")
-custom_nodes = lazy_module("comfy_cli.command.custom_nodes")
-launch_command = lazy_attr("comfy_cli.command.launch", "launch")
-logs_command = lazy_attr("comfy_cli.command.launch", "logs")
-normalize_cm_cli_exit_code = lazy_attr("comfy_cli.command.custom_nodes.cm_cli_util", "normalize_cm_cli_exit_code")
-StandalonePython = lazy_attr("comfy_cli.standalone", "StandalonePython")
+install_inner = LazyModule("comfy_cli.command.install")
+run_inner = LazyModule("comfy_cli.command.run")
+run_cli_inner = LazyModule("comfy_cli.command.run_cli")
+transfer_inner = LazyModule("comfy_cli.command.transfer")
+custom_nodes = LazyModule("comfy_cli.command.custom_nodes")
 
 logging.setup_logging()
 
@@ -50,6 +46,9 @@ class _RootGroup(LazyTyperGroup):
 
 
 app = typer.Typer(cls=_RootGroup)
+# The lazy builders below pass this to typer's command/group factories; read it
+# off the root app rather than assuming typer's default.
+_RootGroup.pretty_exceptions_short = app.pretty_exceptions_short
 workspace_manager = WorkspaceManager()
 
 console = Console()
@@ -768,6 +767,8 @@ def update(
             # `cm-cli update all` is non-atomic — packs that did update stayed updated — so
             # refresh the id cache exactly as the no-flag path below does before bailing out.
             _refresh_node_id_cache()
+            from comfy_cli.command.custom_nodes.cm_cli_util import normalize_cm_cli_exit_code
+
             code = normalize_cm_cli_exit_code(e.returncode)
             get_renderer().error(
                 code="update_custom_nodes_failed",
@@ -1501,6 +1502,8 @@ def launch(
         ),
     ] = None,
 ):
+    from comfy_cli.command.launch import launch as launch_command
+
     launch_command(background, extra, frontend_pr)
 
 
@@ -1526,6 +1529,8 @@ def logs(
         ),
     ] = None,
 ):
+    from comfy_cli.command.launch import logs as logs_command
+
     logs_command(tail=tail, where=where, port=port)
 
 
@@ -1960,6 +1965,8 @@ def standalone(
         ),
     ] = False,
 ):
+    from comfy_cli.standalone import StandalonePython
+
     comfy_path, _ = workspace_manager.get_workspace_path()
 
     platform = utils.get_os() if platform is None else platform

@@ -7,15 +7,12 @@ subcommand modules, of which a single invocation uses one. These helpers let
 ``comfy_cli.cmdline.run_inner`` and friends) while deferring the actual import
 to first use.
 
-Three pieces:
+Two pieces:
 
 * :class:`LazyModule` — a module proxy. Attribute reads import the module on
   first touch; reads, writes and deletes all forward to the real module, so
   ``patch("comfy_cli.cmdline.run_inner.execute")`` patches the real function
   exactly as it did when ``run_inner`` was the module itself.
-* :func:`lazy_attr` — a callable proxy for one name in a module
-  (``EnvChecker``, ``launch``). Resolved on every call, so a patch applied to
-  the source module is honoured too.
 * :class:`LazyTyperGroup` — a ``TyperGroup`` whose subgroups are declared as
   ``(module, attr)`` pairs and built on first lookup with typer's own
   ``get_group_from_info``, so help text, hidden flags and callbacks behave
@@ -27,6 +24,7 @@ Three pieces:
 from __future__ import annotations
 
 import importlib
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from types import ModuleType
@@ -79,41 +77,6 @@ class LazyModule:
         return f"<LazyModule {object.__getattribute__(self, '_lazy_path')!r}>"
 
 
-def lazy_module(path: str) -> Any:
-    """``run_inner = lazy_module("comfy_cli.command.run")``."""
-    return LazyModule(path)
-
-
-class _LazyAttr:
-    __slots__ = ("_path", "_name")
-
-    def __init__(self, path: str, name: str) -> None:
-        self._path = path
-        self._name = name
-
-    def _resolve(self) -> Any:
-        return getattr(importlib.import_module(self._path), self._name)
-
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        return self._resolve()(*args, **kwargs)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._resolve(), name)
-
-    def __repr__(self) -> str:
-        return f"<lazy_attr {self._path}.{self._name}>"
-
-
-def lazy_attr(path: str, name: str) -> Any:
-    """``EnvChecker = lazy_attr("comfy_cli.env_checker", "EnvChecker")``.
-
-    Only for names that are *called*. Do not use for typer ``callback=``
-    functions: typer inspects the callback's signature at decoration time and
-    a proxy has none.
-    """
-    return _LazyAttr(path, name)
-
-
 @dataclass(frozen=True)
 class LazySubcommand:
     """One deferred ``app.add_typer(...)``: the module holding the sub-``Typer``
@@ -137,7 +100,6 @@ class LazyCommand:
     attr: str | None = None
     register: str | None = None
     help: str | None = None
-    context_settings: dict[str, Any] | None = None
 
 
 class LazyTyperGroup(TyperGroup):
@@ -151,8 +113,13 @@ class LazyTyperGroup(TyperGroup):
     """
 
     lazy_subcommands: dict[str, LazySubcommand | LazyCommand] = {}
-    # Mirrors ``typer.Typer()``'s default; the root app in cmdline.py uses it.
-    pretty_exceptions_short: bool = True
+    # Assigned by the module that owns the root app
+    # (``_RootGroup.pretty_exceptions_short = app.pretty_exceptions_short`` in
+    # cmdline.py). The fallback is read off ``typer.Typer`` rather than
+    # restated here, so it cannot drift from typer.
+    pretty_exceptions_short: bool = (
+        inspect.signature(typer.Typer.__init__).parameters["pretty_exceptions_short"].default
+    )
 
     def __init__(self, **attrs: Any) -> None:
         super().__init__(**attrs)
@@ -174,6 +141,19 @@ class LazyTyperGroup(TyperGroup):
             self._lazy_loaded[cmd_name] = build(cmd_name, spec)
         return self._lazy_loaded[cmd_name]
 
+    def _factory_kwargs(self, factory: Callable[..., Any]) -> dict[str, Any]:
+        """The settings typer's own wiring passes to ``factory``, narrowed to the
+        keywords this typer version actually accepts. ``suggest_commands`` only
+        exists from typer 0.20 on, where it is required and has no default, while
+        pyproject still allows ``typer>=0.12.5``."""
+        candidates = {
+            "pretty_exceptions_short": self.pretty_exceptions_short,
+            "rich_markup_mode": self.rich_markup_mode,
+            "suggest_commands": getattr(self, "suggest_commands", True),
+        }
+        accepted = inspect.signature(factory).parameters
+        return {name: value for name, value in candidates.items() if name in accepted}
+
     def _build_command(self, name: str, spec: LazyCommand) -> click.Command:
         module = importlib.import_module(spec.module)
         if spec.register is not None:
@@ -184,17 +164,8 @@ class LazyTyperGroup(TyperGroup):
             info = infos[0]
         else:
             assert spec.attr, "LazyCommand needs attr or register"
-            info = CommandInfo(
-                name=name,
-                callback=getattr(module, spec.attr),
-                help=spec.help,
-                context_settings=spec.context_settings,
-            )
-        return typer.main.get_command_from_info(
-            info,
-            pretty_exceptions_short=self.pretty_exceptions_short,
-            rich_markup_mode=self.rich_markup_mode,
-        )
+            info = CommandInfo(name=name, callback=getattr(module, spec.attr), help=spec.help)
+        return typer.main.get_command_from_info(info, **self._factory_kwargs(typer.main.get_command_from_info))
 
     def _build_group(self, name: str, spec: LazySubcommand) -> click.Command:
         sub_app = getattr(importlib.import_module(spec.module), spec.attr)
@@ -208,7 +179,5 @@ class LazyTyperGroup(TyperGroup):
         if spec.callback is not None:
             kwargs["callback"] = spec.callback
         return typer.main.get_group_from_info(
-            TyperInfo(sub_app, **kwargs),
-            pretty_exceptions_short=self.pretty_exceptions_short,
-            rich_markup_mode=self.rich_markup_mode,
+            TyperInfo(sub_app, **kwargs), **self._factory_kwargs(typer.main.get_group_from_info)
         )
