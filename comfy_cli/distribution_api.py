@@ -34,6 +34,12 @@ _MAX_JSON = 5 * 1024 * 1024
 _MAX_LOG_JSON = 32 * 1024 * 1024
 # Presigned model PUTs can be many GB: generous read timeout, sane connect.
 _UPLOAD_TIMEOUT = (10, 600)
+# The shared HTTP layer's own default, named here so one call can raise it.
+_POST_TIMEOUT = 30.0
+# Importing a workflow looks every distinct node class up in the registry behind
+# a 20 second budget of the builder's own, then matches models and writes the
+# build row, so the default leaves a large graph nothing to spare.
+_WORKFLOW_IMPORT_TIMEOUT = 90.0
 
 
 class BuilderAuthError(Exception):
@@ -64,8 +70,10 @@ class BuilderClient:
             raise BuilderAuthError("not signed in — run `comfy cloud login`")
         return cls(base_url, session.access_token)
 
-    def _post(self, parts: tuple[str, ...], body: dict) -> dict:
-        _, parsed = request_json(self.target.url(*parts), self.target, method="POST", body=body, max_bytes=_MAX_JSON)
+    def _post(self, parts: tuple[str, ...], body: dict, *, timeout: float = _POST_TIMEOUT) -> dict:
+        _, parsed = request_json(
+            self.target.url(*parts), self.target, method="POST", body=body, max_bytes=_MAX_JSON, timeout=timeout
+        )
         return parsed or {}
 
     def create_blob(self, kind: str, filename: str, sha256: str, size_bytes: int) -> tuple[str, str]:
@@ -150,12 +158,12 @@ class BuilderClient:
         return self._post(("builds", "from-snapshot"), body)
 
     def create_distribution_from_workflow(self, name: str, workflow: dict, *, description: str | None = None) -> dict:
-        """POST /v1/builds/from-workflow — read a workflow and store what it
+        """POST /v1/builds/from-workflow: read a workflow and store what it
         maps to, in one call. Returns ``{build, report}``."""
         body: dict = {"name": name, "workflow": workflow}
         if description:
             body["description"] = description
-        return self._post(("builds", "from-workflow"), body)
+        return self._post(("builds", "from-workflow"), body, timeout=_WORKFLOW_IMPORT_TIMEOUT)
 
     def _get(self, parts: tuple[str, ...], params: dict | None = None, *, max_bytes: int = _MAX_JSON) -> dict:
         url = self.target.url(*parts)

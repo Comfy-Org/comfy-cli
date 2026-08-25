@@ -577,19 +577,73 @@ _REPORT_ADVISORIES = (
     ("skippedPins", "dropped: the build owns these packages"),
     ("unpinnablePins", "dropped: not a public PyPI release"),
     ("unresolvedClasses", "node classes nothing installable provides; the graph will not run without them"),
-    ("uncheckedClasses", "classes the registry never answered about, so nothing confirmed they are missing"),
-    ("packsWithoutVersion", "carried by repository: the registry publishes no installable version of them"),
-    ("collidingPacks", "left out: another pack already claimed the folder they install into"),
+    ("uncheckedClasses", "node classes the registry never answered for, so the build may not carry them"),
+    (
+        "packsWithoutVersion",
+        "packs the build fetches from their repository, because the registry publishes no version of them",
+    ),
+    ("collidingPacks", "packs the build leaves out, because another pack already claimed their install folder"),
 )
 
-# Each entry is (report key, the field that names an entry, what it means to the reader).
+# How many names an advisory line prints before it says how many it held back.
+_ADVISORY_NAMES = 8
+
+
+def _from_server(value) -> str:
+    """Scrub one builder-supplied fragment. Class names and filenames travel to
+    the builder from the workflow file and come back in the report, so a crafted
+    file could otherwise forge terminal lines that read as the CLI's own."""
+    return sanitize_error_body(str(value))
+
+
+def _advisory_line(count: int, meaning: str, names: list[str]) -> str:
+    """Count first, then the names, then how many names the line held back."""
+    shown = names[:_ADVISORY_NAMES]
+    held_back = f" (+{count - len(shown)} more)" if count > len(shown) else ""
+    return f"{count} {meaning}: {', '.join(shown)}{held_back}"
+
+
+def _unrenderable(key: str, value) -> str:
+    """The builder sent a key this renderer knows, in a shape it cannot read.
+    Say so: dropping it silently is how a partial import comes to look clean."""
+    return f"the builder sent `{key}` as {type(value).__name__}, which this CLI cannot render; read it with --json"
+
+
+def _suggested_pack_lines(entries: list) -> list[str]:
+    """`unknownClasses` is the detailed form of `unresolvedClasses`, which already
+    prints the names. What it adds is the pack the registry came closest to, so
+    that is all this renders, and only for the classes that carry one."""
+    suggested = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        packs = [s for s in (entry.get("suggestions") or []) if isinstance(s, dict) and s.get("packId")]
+        if not packs:
+            continue
+        best = max(packs, key=lambda s: s["score"] if isinstance(s.get("score"), int | float) else 0.0)
+        suggested.append(f"{_from_server(entry.get('classType'))} (maybe {_from_server(best['packId'])})")
+    if not suggested:
+        return []
+    meaning = "node classes the registry could not attribute, with the closest pack it named"
+    return [_advisory_line(len(suggested), meaning, suggested)]
+
+
+def _missing_model_lines(entries: list) -> list[str]:
+    """A model the catalog matched is one the build already carries, so it is no
+    advisory; its directory rides in the JSON payload for anyone who wants it.
+    The rest are what `comfy build resolve` exists to find."""
+    missing = [e for e in entries if not (isinstance(e, dict) and e.get("status") == "matched")]
+    if not missing:
+        return []
+    names = [_from_server(e.get("filename") if isinstance(e, dict) else e) for e in missing]
+    meaning = "models the graph loads that no definition carries; `comfy build resolve` finds download candidates"
+    return [_advisory_line(len(missing), meaning, names)]
+
+
+# Each entry is (report key, what turns its entries into lines).
 _REPORT_ENTRY_ADVISORIES = (
-    ("unknownClasses", "classType", "node classes the importer could not place in a pack"),
-    (
-        "models",
-        "filename",
-        "models the graph loads that no definition carries; `comfy build resolve` finds download candidates",
-    ),
+    ("unknownClasses", _suggested_pack_lines),
+    ("models", _missing_model_lines),
 )
 
 
@@ -608,31 +662,34 @@ def report_advisories(report: dict) -> list[str]:
         lines.append(f"the ComfyUI release {str(dropped)!r} is not a ref the build can use, so none was set")
     if report.get("pinnedToLatest") is True:
         lines.append(
-            "packs the workflow named without a version were pinned to the registry's newest published one, "
-            "so importing the same file again can produce a different build"
+            "the importer pinned every pack the workflow named without a version to the registry's newest "
+            "published one, so importing the same file later can build something different"
         )
-    if report.get("comfyVersionRequired") is True:
-        lines.append("no ComfyUI version is pinned, so the build cannot be cut until one is set")
     for key, meaning in _REPORT_ADVISORIES:
-        entries = report.get(key) or []
-        # Every one of these is a list; a scalar would render one line per character.
-        if entries and isinstance(entries, list | tuple):
-            lines.append(f"{len(entries)} {meaning}: {', '.join(str(e) for e in entries[:8])}")
-    for key, field, meaning in _REPORT_ENTRY_ADVISORIES:
-        entries = report.get(key) or []
-        if not entries or not isinstance(entries, list | tuple):
+        entries = report.get(key)
+        if not entries:
             continue
-        # An entry the server shaped differently still prints, as whatever it is.
-        names = [str(e.get(field) or e) if isinstance(e, dict) else str(e) for e in entries[:8]]
-        lines.append(f"{len(entries)} {meaning}: {', '.join(names)}")
+        # A scalar here would otherwise render one line per character.
+        if not isinstance(entries, list | tuple):
+            lines.append(_unrenderable(key, entries))
+            continue
+        lines.append(_advisory_line(len(entries), meaning, [_from_server(e) for e in entries]))
+    for key, render in _REPORT_ENTRY_ADVISORIES:
+        entries = report.get(key)
+        if not entries:
+            continue
+        if not isinstance(entries, list | tuple):
+            lines.append(_unrenderable(key, entries))
+            continue
+        lines.extend(render(entries))
     # A mapping of class name -> provider, so each name carries who serves it.
-    partners = report.get("partnerClasses") or {}
-    if partners and isinstance(partners, dict):
-        served = [f"{cls} ({provider})" for cls, provider in list(partners.items())[:8]]
-        lines.append(
-            f"{len(partners)} node classes call a partner API rather than run from an installed pack: "
-            f"{', '.join(served)}"
-        )
+    partners = report.get("partnerClasses")
+    if partners and not isinstance(partners, dict):
+        lines.append(_unrenderable("partnerClasses", partners))
+    elif partners:
+        served = [f"{_from_server(cls)} ({_from_server(provider)})" for cls, provider in partners.items()]
+        meaning = "node classes call a partner API rather than run from an installed pack"
+        lines.append(_advisory_line(len(partners), meaning, served))
     return lines
 
 
@@ -1671,12 +1728,13 @@ def from_workflow_cmd(
     path = Path(from_).expanduser()
     try:
         workflow = json.loads(path.read_text(encoding="utf-8"))
-        # The builder reads both the editing format and the API export, so the
-        # only shape the CLI insists on is a JSON object: the dialect is the
-        # server's call, and a client-side guess would refuse files it accepts.
+        # The dialect is the builder's call: it reads the editing format and the
+        # API export, so a client-side guess would refuse files it accepts.
         if not isinstance(workflow, dict):
             raise ValueError(f"expected a JSON object, got {type(workflow).__name__}")
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
+    # A deeply nested file makes json.loads recurse until the interpreter stops
+    # it, and that lands outside the ValueError family.
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as e:
         renderer.error(
             code="build_workflow_invalid",
             message=f"could not read {path}: {e}",
@@ -1688,22 +1746,38 @@ def from_workflow_cmd(
     result = _builder_call(
         renderer, lambda: client.create_distribution_from_workflow(name, workflow, description=description)
     )
-    created = result.get("build") or {}
-    distribution_id = created.get("id")
-    report = result.get("report") or {}
+    created = result.get("build") if isinstance(result, dict) else None
+    report = result.get("report") if isinstance(result, dict) else None
+    distribution_id = created.get("id") if isinstance(created, dict) else None
+    # The row is already written by the time the answer arrives, so a shape this
+    # command cannot read means a build exists that nothing here can name.
+    if not distribution_id or not isinstance(report, dict):
+        renderer.error(
+            code="build_builder_error",
+            message=(
+                "the builder answered from-workflow with a shape this CLI cannot read, so a build may exist "
+                "that this command cannot name; list your builds with `comfy build list`"
+            ),
+            details={"received": sorted(result) if isinstance(result, dict) else type(result).__name__},
+        )
+        raise typer.Exit(code=1)
+
     if renderer.is_pretty():
         renderer.success(f"Created build {distribution_id} from {path.name}")
+        if not report:
+            renderer.warn("the builder sent an empty import report, so nothing here says what the workflow mapped to")
         for line in report_advisories(report):
             renderer.warn(line)
-        # A workflow names no ComfyUI release, so a fresh import has no
-        # baseComfyVersion and a cut would fail. Name the edit, not the cut.
-        if report.get("comfyVersionRequired") is True:
-            renderer.info(
-                "no ComfyUI version is pinned, so this build cannot be cut yet: add `baseComfyVersion` to the "
-                f"definition and save it with `comfy build update {distribution_id} --from <file>`"
-            )
-        else:
+        # The builder sets comfyVersionRequired on every import, so a false is the
+        # only word that a version is pinned and the build can be cut.
+        if report.get("comfyVersionRequired") is False:
             renderer.info(f"cut a build with `comfy build release create {distribution_id}`")
+        else:
+            renderer.info(
+                "no ComfyUI version is pinned, so this build cannot be cut yet: run `comfy build get "
+                f"{distribution_id} --json | jq .data.definition > def.json`, add `baseComfyVersion` to def.json, "
+                f"then run `comfy build update {distribution_id} --from def.json`"
+            )
     renderer.emit(result, command="build from-workflow", changed=True)
 
 

@@ -17,6 +17,12 @@ history.
 
 ### Added
 
+- `comfy build from-workflow --from <workflow.json> --name <name>` creates a
+  build from a ComfyUI workflow, in the editing format or the API export.
+- A workflow import prints its full report: the node classes nothing provides,
+  the closest pack the registry named for each one, the models no definition
+  carries, the classes served by a partner API, and whether a ComfyUI version
+  still has to be pinned.
 - `CONTRIBUTING.md` (renamed from `DEV_README.md`) and this changelog.
 
 ## [1.16.0] - 2026-08-10
