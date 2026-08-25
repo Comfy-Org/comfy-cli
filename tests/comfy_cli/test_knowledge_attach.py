@@ -123,6 +123,18 @@ class TestLookup:
         assert knowledge._resolve_tokens(b, "please video upscale this") == "narrow"
         assert knowledge._resolve_tokens(b, "just a video") == "broad"
 
+    def test_non_english_input_never_resolves_by_accident(self):
+        """The agent answers in the user's language, so it searches in it too.
+        Non-ASCII is dropped by the character class (as :func:`_normalize`
+        already does), leaving whatever ASCII the query carried. That must not
+        add up to a capability on its own."""
+        bundle = knowledge.load_bundle()
+        for q in ("トーキングヘッド動画", "обработка изображения", "vídeo de una persona hablando"):
+            assert knowledge._resolve_tokens(bundle, q) is None, q
+        # A mixed query still resolves on the English term it contains, which is
+        # the common case: capability names are English whatever the user writes.
+        assert knowledge._resolve_tokens(bundle, "この動画に lip sync したい") == "lipsync"
+
     def test_a_short_single_word_key_never_matches_alone(self):
         """Guards a future alias like '3d' from joining every query that says it."""
         data = {"models": {}, "capabilities": {"cap": {"aliases": ["3d"]}}}
