@@ -1695,6 +1695,9 @@ WORKFLOW_REPORT = {
     "comfyVersionRequired": True,
     "pinnedToLatest": True,
     "unresolvedClasses": ["ReActorFaceSwap", "TotallyMadeUpNodeXYZ", "WAS_Image_Blend"],
+    "uncheckedClasses": ["ImpactSimpleDetectorSEGS"],
+    "packsWithoutVersion": ["comfyui-kjnodes"],
+    "collidingPacks": ["comfyui-manager"],
     "unknownClasses": [
         {"classType": "ReActorFaceSwap", "status": "missing"},
         {"classType": "TotallyMadeUpNodeXYZ", "status": "missing"},
@@ -1801,6 +1804,10 @@ def test_report_advisories_renders_a_workflow_report_line_for_line():
         "one, so importing the same file later can build something different",
         "3 node classes nothing installable provides; the graph will not run without them: ReActorFaceSwap, "
         "TotallyMadeUpNodeXYZ, WAS_Image_Blend",
+        "1 node classes the registry never answered for, so the build may not carry them: ImpactSimpleDetectorSEGS",
+        "1 packs the build fetches from their repository, because the registry publishes no version of them: "
+        "comfyui-kjnodes",
+        "1 packs the build leaves out, because another pack already claimed their install folder: comfyui-manager",
         "1 node classes the registry could not attribute, with the closest pack it named: WAS_Image_Blend "
         "(maybe https://github.com/ltdrdata/was-node-suite-comfyui)",
         "1 models the graph loads that no definition carries; `comfy build resolve` finds download candidates: "
