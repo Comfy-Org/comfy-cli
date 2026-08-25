@@ -1984,17 +1984,24 @@ def _watch_executing(state: _WatchState, data: dict[str, Any]) -> None:
 
 
 def _watch_execution_cached(state: _WatchState, data: dict[str, Any]) -> None:
+    # ONE event per cached node, matching what `comfy run` emits
+    # (run/execution.py `on_cached`). The two streams are documented as one
+    # dialect, so a consumer counting cached nodes per event must not have to
+    # special-case a list-shaped `nodes` here. `title`/`class_type` are omitted:
+    # watch has no workflow map to resolve them from, and both are optional in
+    # the run dialect's own emission.
     nodes = data.get("nodes") or []
     for n in nodes:
         state.completed_nodes.add(str(n))
     renderer = state.renderer
     if renderer.is_pretty():
         renderer.console().print(f"[dim]✓[/dim] cached: {len(nodes)} node(s)")
-    renderer.event(
-        "execution_cached",
-        nodes=[str(n) for n in nodes],
-        prompt_id=state.prompt_id,
-    )
+    for n in nodes:
+        renderer.event(
+            "execution_cached",
+            node=str(n),
+            prompt_id=state.prompt_id,
+        )
 
 
 def _watch_progress(state: _WatchState, data: dict[str, Any]) -> None:

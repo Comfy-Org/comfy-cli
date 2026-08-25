@@ -2007,8 +2007,26 @@ class TestEventSchemaDiscriminatesNodesShape:
             self._validator().validate(regressed)
 
     def test_execution_cached_still_accepts_bare_node_ids(self):
-        """`comfy jobs watch --where cloud` emits plain id strings here."""
+        """Legacy shape: comfy-cli 1.16.0's `comfy jobs watch` emitted one
+        `execution_cached` carrying a plain array of node ids. Nothing emits it
+        any more — watch now fans out one event per node, matching `comfy run` —
+        but a stream captured from 1.16.0 must keep validating."""
         self._validator().validate({"schema": "event/1", "type": "execution_cached", "nodes": ["1", "2"]})
+
+    def test_execution_cached_per_node_shape_validates(self):
+        """The shape BOTH streams emit today — one event, one `node`."""
+        self._validator().validate(
+            {
+                "schema": "event/1",
+                "type": "execution_cached",
+                "node": "1",
+                "title": "Latent",
+                "class_type": "EmptyLatentImage",
+                "prompt_id": "p",
+            }
+        )
+        # `comfy jobs watch` has no workflow map, so it omits title/class_type.
+        self._validator().validate({"schema": "event/1", "type": "execution_cached", "node": "1", "prompt_id": "p"})
 
 
 class TestMalformedRejectionPayloadStillYieldsAnEnvelope:

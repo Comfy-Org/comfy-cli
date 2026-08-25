@@ -19,6 +19,18 @@ history.
 
 - `CONTRIBUTING.md` (renamed from `DEV_README.md`) and this changelog.
 
+### Fixed
+
+- Stream-dialect conformance: `comfy jobs watch` now emits one
+  `execution_cached` event **per cached node** (`{"node": "<id>", …}`), the same
+  shape `comfy run` has always emitted, instead of the single list-shaped
+  `{"nodes": [...]}` event that shipped in 1.16.0. `docs/json-output.md`
+  promises the run stream and the watch stream speak one dialect, so a consumer
+  written against the documented run dialect was undercounting every cached node
+  beyond the first on a watch stream. Consumers written to the documented shape
+  are unaffected or fixed by this; the `nodes` array remains accepted by the
+  published event schema so a stream captured from 1.16.0 still validates.
+
 ## [1.16.0] - 2026-08-10
 
 [Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.16.0) · 16 commits since v1.15.0. No breaking changes.

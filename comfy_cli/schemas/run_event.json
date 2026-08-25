@@ -29,7 +29,7 @@
       ],
       "description": "`comfy run` emits converted?/prompt_preview/queued on both targets; its per-node types (executing, execution_cached, progress, executed, output, execution_error) are --where local only, because the cloud run path polls for a terminal record instead of streaming a session. `state` is emitted by `comfy jobs watch --where cloud` for each coarse status transition. This enum is ADVISORY and open-ended: it lists the types this comfy-cli version emits, and adding a type is an additive change that does NOT bump `event/1`. Agents must ignore types they do not recognise rather than treat them as a validation failure — fetch the current schema with `comfy --json discover` instead of pinning this list."
     },
-    "node": {"type": ["string", "null"]},
+    "node": {"type": ["string", "null"], "description": "The node this per-node event is about. `execution_cached` carries exactly one node id per event on BOTH the `comfy run` and the `comfy jobs watch` stream."},
     "title": {"type": ["string", "null"]},
     "class_type": {"type": ["string", "null"]},
     "completed": {"type": ["integer", "null"]},
@@ -45,7 +45,7 @@
     },
     "nodes": {
       "type": ["array", "null"],
-      "description": "queued: manifest of every node in the submitted graph, as objects (node_id, class_type, title). Also carried by `comfy jobs watch`'s execution_cached event, there as a plain array of node-id strings. The per-type `allOf` below pins which of the two shapes is legal for each event, so a `queued` that regressed to bare id strings still fails validation."
+      "description": "queued: manifest of every node in the submitted graph, as objects (node_id, class_type, title). LEGACY on execution_cached: comfy-cli 1.16.0's `comfy jobs watch` emitted a single execution_cached carrying a plain array of node-id strings; it now emits one event per node with `node` instead, matching `comfy run`. The array form stays legal so a stream captured from 1.16.0 still validates, but nothing emits it. The per-type `allOf` below pins which of the two shapes is legal for each event, so a `queued` that regressed to bare id strings still fails validation."
     },
     "base_url": {"type": ["string", "null"], "description": "queued, --where cloud only: the cloud endpoint the prompt was submitted to."},
     "url": {"type": ["string", "null"]}
