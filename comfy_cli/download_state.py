@@ -68,6 +68,7 @@ change further; agents can stop polling.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -175,6 +176,129 @@ def request_cancel(path: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+# Destination claims live in their own subdirectory of the (owner-only) state
+# dir rather than next to the user's model files: a claim is our bookkeeping,
+# not something a user should find in `models/loras`, and `list_all` globs
+# `*.json` at the top level so the subdirectory stays invisible to every verb.
+CLAIMS_DIRNAME = "claims"
+
+
+def claims_dir(workspace: Path) -> Path:
+    """Return ``<workspace>/.comfy-downloads/claims`` and ensure it exists, owner-only."""
+    base = state_dir(workspace) / CLAIMS_DIRNAME
+    base.mkdir(parents=True, exist_ok=True, mode=STATE_DIR_MODE)
+    if sys.platform != "win32":
+        # Same reason as `state_dir`: mkdir's mode is masked by the umask and
+        # the directory may predate this code.
+        with contextlib.suppress(OSError):
+            base.chmod(STATE_DIR_MODE)
+    return base
+
+
+def claim_filename(dest_key: str) -> str:
+    """The claim file name for a destination key.
+
+    Hashed rather than derived from the path: a destination is an arbitrary
+    absolute path, and a claim named after one would hit the filesystem's name
+    length limit and its separator rules. The key is expected to be already
+    canonicalized by the caller (``models._dest_key``), so two spellings of one
+    destination hash to one file.
+    """
+    return f"{hashlib.sha256(dest_key.encode('utf-8')).hexdigest()}.claim"
+
+
+def claim_path(workspace: Path, dest_key: str) -> Path:
+    """The claim path for ``dest_key`` under ``workspace``, creating ``claims/``."""
+    return claims_dir(workspace) / claim_filename(dest_key)
+
+
+def claim_marker_for(state_file: Path, dest_key: str) -> Path:
+    """The claim that pairs with a state file addressed by path.
+
+    The worker is handed ``--state <file>`` and never re-resolves a workspace
+    (same reason as :func:`cancel_marker_for`), so it derives the claim from the
+    state file's own directory. Creates nothing - the worker only ever releases.
+    """
+    return Path(state_file).parent / CLAIMS_DIRNAME / claim_filename(dest_key)
+
+
+def acquire_claim(path: Path, *, download_id: str, dest: str) -> bool:
+    """Atomically create the claim at ``path``. False when it already exists.
+
+    ``O_CREAT | O_EXCL`` is the whole point: file creation is the atomic
+    decider, so exactly one of any number of simultaneous submitters gets True
+    and there is no check-then-act window for the others to slip through.
+    ``os.open`` (not ``Path.touch``) because it is the portable spelling -
+    Windows included - that reports the collision as ``FileExistsError``.
+
+    The payload records the ``download_id`` that owns the claim (the pointer a
+    later submitter follows to decide whether the claim is still live), the
+    destination for a human reading the directory, and when it was taken. No
+    url: a presigned url is a credential-shaped thing and the claim does not
+    need one.
+
+    Raises ``OSError`` for anything other than the collision - the caller
+    decides whether that is fatal.
+    """
+    payload = json.dumps(
+        {"download_id": download_id, "dest": str(dest), "created_at": _now_iso()},
+        indent=2,
+    )
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, STATE_FILE_MODE)
+    except FileExistsError:
+        return False
+    try:
+        os.write(fd, payload.encode("utf-8"))
+    finally:
+        os.close(fd)
+    if sys.platform != "win32":
+        # `os.open`'s mode is masked by the umask, exactly as `write_path`'s is.
+        with contextlib.suppress(OSError):
+            Path(path).chmod(STATE_FILE_MODE)
+    return True
+
+
+def read_claim(path: Path) -> str | None:
+    """The ``download_id`` recorded in the claim at ``path``, or None.
+
+    None for every unreadable shape - absent, truncated mid-write, corrupt, or
+    carrying an id that could not name a state file. The caller treats all of
+    them as *stale*, which is the safe direction: a claim nobody can resolve
+    would otherwise wedge its destination forever, and the record it points at
+    (not the claim) is what actually proves a download is live.
+    """
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    download_id = payload.get("download_id")
+    if not isinstance(download_id, str) or not _SAFE_ID.match(download_id):
+        return None
+    return download_id
+
+
+def release_claim(path: Path, *, owner_id: str) -> bool:
+    """Drop the claim at ``path``, but only if ``owner_id`` still holds it.
+
+    The ownership check is what keeps a finishing worker from unlinking a claim
+    that is no longer its own: once our record goes terminal our claim reads
+    stale, so a competing submitter may clear it and create *its* own in the
+    window before we get here, and an unconditional unlink would delete a live
+    claim. Never raises - releasing is bookkeeping.
+    """
+    path = Path(path)
+    if read_claim(path) != owner_id:
+        return False
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True
 
 
 @dataclass
