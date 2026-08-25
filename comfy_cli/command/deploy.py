@@ -175,8 +175,14 @@ def up_cmd(
     ] = None,
     gpu: Annotated[str | None, typer.Option("--gpu", help="GPU class for a new deployment.")] = None,
     region: Annotated[str | None, typer.Option("--region", help="Region for a new deployment.")] = None,
-    minimum: Annotated[int, typer.Option("--min", min=0, max=20, help="Minimum warm workers.")] = 0,
-    maximum: Annotated[int, typer.Option("--max", min=1, max=20, help="Maximum workers.")] = 1,
+    minimum: Annotated[
+        int | None,
+        typer.Option("--min", min=0, max=20, help="Minimum warm workers. Default: keep the current value, or 0."),
+    ] = None,
+    maximum: Annotated[
+        int | None,
+        typer.Option("--max", min=1, max=20, help="Maximum workers. Default: keep the current value, or 1."),
+    ] = None,
     release: Annotated[str | None, typer.Option("--release", help="Deploy this release id.")] = None,
     watch: Annotated[bool, typer.Option("--watch", help="Poll until the deployment reaches a terminal state.")] = False,
 ) -> None:

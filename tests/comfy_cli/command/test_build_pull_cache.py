@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app as cli_app
 from comfy_cli.command import build
-from comfy_cli.command.build_package import node_content_identity
+from comfy_cli.command.build_package import package_node
 
 
 @pytest.fixture(autouse=True)
@@ -38,7 +38,8 @@ def remote_definition(*, models: list[dict] | None = None, nodes: list[dict] | N
 def test_pull_recomputes_node_identity_before_deciding_whether_its_blob_is_valid(
     workspace: Path, monkeypatch: pytest.MonkeyPatch, stored_digest: str | None, keeps_blob: bool
 ) -> None:
-    digest, size = node_content_identity(workspace / "custom_nodes" / "local-node")
+    package = package_node(workspace / "custom_nodes" / "local-node")
+    digest, size = package.sha256, package.size_bytes
     node: dict = {
         "name": "local-node",
         "localPath": "local-node",

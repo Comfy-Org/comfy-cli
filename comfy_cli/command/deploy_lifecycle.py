@@ -132,8 +132,13 @@ def run_delete(request: ReadRequest, *, yes: bool, ctx: typer.Context) -> None:
             f"Enqueue teardown and soft-delete deployment {deployment_id}?",
             yes=yes,
             error_code="deploy_delete_needs_confirm",
+            details={"deploymentId": deployment_id},
             ctx=ctx,
         ):
+            # Only a prompt can decline, and `interaction._may_prompt` allows one
+            # only in pretty mode, where `emit` is a no-op — so there is no
+            # envelope to write here. A machine caller is refused before this
+            # point with `deploy_delete_needs_confirm`.
             renderer.info("Aborted.")
             return
         client.delete_deployment(deployment_id)

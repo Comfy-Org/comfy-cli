@@ -2,19 +2,21 @@
 
 import uuid
 from collections.abc import Sequence
-from datetime import datetime
 from typing import Final
 
 import typer
 
 from comfy_cli.command.build_spec import JsonObject
-from comfy_cli.command.deploy_resolve import _STATUS_RANK, AmbiguousDeploymentError, BuilderReleaseClient
+from comfy_cli.command.deploy_resolve import (
+    AmbiguousDeploymentError,
+    BuilderReleaseClient,
+    deployment_selection_key,
+)
 from comfy_cli.command.deploy_types import ComputeRequiredError, DeployUpClient, UpRequest, UpResult
 from comfy_cli.command.deploy_types import compute_config as _compute_config
 from comfy_cli.command.deploy_types import release_summary as _release_summary
 from comfy_cli.command.deploy_types import required_int as _required_int
 from comfy_cli.command.deploy_types import required_string as _required_string
-from comfy_cli.command.deploy_types import server_shape_error as _server_shape_error
 from comfy_cli.deploy_api_errors import DeployAPIError
 
 # This literal is a permanent protocol constant. Regenerating it would silently
@@ -22,6 +24,8 @@ from comfy_cli.deploy_api_errors import DeployAPIError
 _IDEMPOTENCY_NAMESPACE: Final = uuid.UUID("86e81377-21c8-5a10-9db8-33797ad495f1")
 _CREATE_ATTEMPTS: Final = 3
 _HOLDS_COMPUTE: Final = frozenset({"queued", "provisioning", "starting", "ready", "unhealthy"})
+_DEFAULT_MINIMUM: Final = 0
+_DEFAULT_MAXIMUM: Final = 1
 
 
 def _idempotency_key(build_id: str, release_id: str, generation: int) -> str:
@@ -35,17 +39,6 @@ def _soft_deleted_generation(deployments: Sequence[JsonObject], release_id: str)
     )
 
 
-def _selection_key(deployment: JsonObject) -> tuple[int, datetime]:
-    status = _required_string(deployment, "status")
-    created_at = _required_string(deployment, "createdAt")
-    try:
-        rank = _STATUS_RANK[status]
-        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-    except (KeyError, ValueError) as error:
-        raise _server_shape_error("the deployment has an invalid status or createdAt", status=status) from error
-    return rank, created
-
-
 def _existing_deployment(deployments: Sequence[JsonObject], release_id: str, build_id: str) -> JsonObject | None:
     candidates = [
         deployment
@@ -54,7 +47,7 @@ def _existing_deployment(deployments: Sequence[JsonObject], release_id: str, bui
     ]
     if not candidates:
         return None
-    ranked = [(deployment, _selection_key(deployment)) for deployment in candidates]
+    ranked = [(deployment, deployment_selection_key(deployment)) for deployment in candidates]
     best = max(key for _, key in ranked)
     tied = [deployment for deployment, key in ranked if key == best]
     if len(tied) > 1:
@@ -120,6 +113,17 @@ def _create_live_deployment(client: DeployUpClient, request: UpRequest, compute:
     raise AssertionError("bounded create loop exhausted without returning or raising")
 
 
+def _dropped_bounds(request: UpRequest, compute: JsonObject) -> tuple[str, ...]:
+    """Name the bound flags that were supplied but would not change the live value.
+
+    Only the restart branches consult this: they hand back ``compute`` untouched,
+    so a bound the caller actually typed is discarded. A bound equal to what is
+    already live is not reported — nothing was lost.
+    """
+    supplied = (("--min", request.minimum, compute["min"]), ("--max", request.maximum, compute["max"]))
+    return tuple(flag for flag, value, live in supplied if value is not None and value != live)
+
+
 def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request: UpRequest) -> UpResult:
     release_id = _required_string(request.release, "id")
     releases = builder.list_releases(request.build_id)
@@ -132,8 +136,8 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         compute = {
             "gpuClass": request.gpu,
             "region": request.region,
-            "min": request.minimum,
-            "max": request.maximum,
+            "min": _DEFAULT_MINIMUM if request.minimum is None else request.minimum,
+            "max": _DEFAULT_MAXIMUM if request.maximum is None else request.maximum,
         }
         snapshot = _create_live_deployment(client, request, compute)
         return UpResult(snapshot, _release_summary(request.release), compute, supersedes, True, True)
@@ -149,12 +153,19 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         )
     deployment_id = _required_string(existing, "id")
     status = _required_string(existing, "status")
+    dropped = _dropped_bounds(request, compute)
     if status in {"stopped", "failed"}:
         started = client.start_deployment(deployment_id)
-        return UpResult(started, _release_summary(request.release), compute, supersedes, False, True)
+        return UpResult(started, _release_summary(request.release), compute, supersedes, False, True, dropped)
     if status == "stop_failed":
-        return UpResult(existing, _release_summary(request.release), compute, supersedes, False, False)
-    desired = {**compute, "min": request.minimum, "max": request.maximum}
+        return UpResult(existing, _release_summary(request.release), compute, supersedes, False, False, dropped)
+    # An omitted bound keeps the live value, exactly as `comfy deploy scale`
+    # merges: re-running `up` after a release must not silently unscale.
+    desired = {
+        **compute,
+        "min": compute["min"] if request.minimum is None else request.minimum,
+        "max": compute["max"] if request.maximum is None else request.maximum,
+    }
     if desired != compute:
         updated = client.update_deployment(deployment_id, desired)
         return UpResult(updated, _release_summary(request.release), desired, supersedes, False, True)
@@ -173,6 +184,16 @@ def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
         )
     elif watch and status in {"failed", "stopped"}:
         renderer.warn(f"Deployment {deployment_id} reached terminal status {status}.")
+    if result.dropped_bounds:
+        joined = " and ".join(result.dropped_bounds)
+        renderer.warn(
+            f"{joined} had no effect; deployment {deployment_id} kept its existing worker bounds.",
+            # `scale` is only actionable once the deployment settles: the API
+            # rejects an edit unless it is ready or stopped (`run_scale` re-wraps
+            # that as `deploy_conflict`), so a `stop_failed` deployment is sent
+            # to the stop remedy warned about just above instead.
+            hint=None if status == "stop_failed" else f"run `comfy deploy scale {deployment_id}` to change them",
+        )
     renderer.emit(
         result.payload(),
         command="deploy up",

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Final, Literal, Protocol, assert_never
 from urllib.parse import urlsplit
 
-from comfy_cli.command.build_package import NodePackageError, build_node_package, node_content_identity
+from comfy_cli.command.build_package import package_node
 from comfy_cli.command.build_paths import BuildPaths, resolve_local_path
 from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, JsonValue
 from comfy_cli.command.build_validation import project_wire_definition
@@ -41,10 +41,31 @@ class PushUpload:
 
 
 @dataclass(frozen=True, slots=True)
+class SkippedSymlink:
+    """One symlink packaging left out of a node archive, and where it lives.
+
+    ``location`` points into the **local** spec's definition, which is the order
+    `init`, `update` and `push` go on to report. It is not portable to a
+    definition assembled somewhere else: `build pull` ships the server's node
+    order and omits local nodes the server lacks, so it must renumber these rows
+    against what it actually emits (``build._relocate_skipped_symlinks``).
+    ``local_path`` needs no such fixup and identifies the node either way.
+    """
+
+    location: str
+    local_path: str
+    member: str
+
+    def as_row(self) -> JsonObject:
+        return {"location": self.location, "localPath": self.local_path, "member": self.member}
+
+
+@dataclass(frozen=True, slots=True)
 class PushPreparation:
     spec: JsonObject
     uploads: tuple[PushUpload, ...]
     stale_source_uri_models: tuple[int, ...]
+    skipped_symlinks: tuple[SkippedSymlink, ...] = ()
 
     @property
     def definition(self) -> JsonObject:
@@ -92,6 +113,7 @@ def prepare_push(spec: JsonObject, paths: BuildPaths, model_digest: ModelDigest)
         raise BuildSpecInvalidError("definition must be a mapping")
     uploads: list[PushUpload] = []
     stale_source_uris: list[int] = []
+    skipped_symlinks: list[SkippedSymlink] = []
 
     for index, model in enumerate(_entries(definition, "models")):
         if model.get("source") != "local":
@@ -120,20 +142,27 @@ def prepare_push(spec: JsonObject, paths: BuildPaths, model_digest: ModelDigest)
             continue
         location = f"definition.customNodes[{index}]"
         path = _local_path(node, paths.custom_nodes_dir, location=location)
-        try:
-            package = build_node_package(path)
-            digest, size = node_content_identity(path)
-        except NodePackageError as error:
-            raise BuildSpecInvalidError(str(error)) from error
+        # One build, one identity: packaging twice lets the directory change
+        # between calls and pairs these bytes with another archive's digest.
+        # `NodePackageError` propagates: it already names the node directory the
+        # user must fix, which a `BuildSpecInvalidError` here would relabel with
+        # the spec file's path at the call site.
+        package = package_node(path)
+        digest, size = package.sha256, package.size_bytes
+        # `_local_path` above already proved localPath is a non-empty str.
+        local_path = str(node["localPath"])
+        skipped_symlinks.extend(SkippedSymlink(location, local_path, member) for member in package.skipped_symlinks)
         if node.get("localDigest") != digest:
             node.pop("blobId", None)
         node["localDigest"] = digest
         node["localSizeBytes"] = size
         if not _has_text(node, "blobId"):
             name = str(node.get("name") or f"node-{index}")
-            uploads.append(PushUpload("node_zip", "customNodes", index, f"{name}.zip", digest, size, path, package))
+            uploads.append(
+                PushUpload("node_zip", "customNodes", index, f"{name}.zip", digest, size, path, package.payload)
+            )
 
-    return PushPreparation(prepared, tuple(uploads), tuple(stale_source_uris))
+    return PushPreparation(prepared, tuple(uploads), tuple(stale_source_uris), tuple(skipped_symlinks))
 
 
 def pending_uploads(preparation: PushPreparation) -> tuple[PushUpload, ...]:

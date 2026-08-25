@@ -79,7 +79,7 @@ def resolved_up_request(builder: BuilderReleaseClient, path: str | None, release
     resolved = resolve_release(builder, ReleaseResolveRequest(release_id=release_id, spec=spec))
     match resolved:
         case ReleaseReference(release=release, build_id=build_id) if build_id is not None:
-            return UpRequest(release, build_id, None, None, 0, 1)
+            return UpRequest(release, build_id, None, None, None, None)
         case ReleaseReference():
             raise server_shape_error("the Builder release has no buildId")
         case DeploymentReference():

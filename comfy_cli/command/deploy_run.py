@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import threading
 import time
 import urllib.error
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 import typer
 
-from comfy_cli import cancellation
 from comfy_cli.builder_api import BuilderAuthError
 from comfy_cli.command.build_paths import BuildSpecNotFoundError
 from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, JsonValue
@@ -112,7 +110,6 @@ class _RunState:
     endpoint_origin: str | None = None
     target: Target | None = None
     cancel_attempted: bool = False
-    interrupted: threading.Event = field(default_factory=threading.Event)
 
 
 class DeployJobCanceledError(DeployAPIError):
@@ -189,8 +186,6 @@ def run_deploy(ctx: typer.Context, request: DeployRunRequest) -> None:
             ctx=ctx,
         )
         plan = load_deploy_workflow(Path(workflow_file))
-        token = cancellation.get_token()
-        token.on_cancel(state.interrupted.set)
         builder, candidate = _command_clients()
         if not isinstance(candidate, RunControlClient):
             raise server_shape_error("the deploy client cannot resolve deployment jobs")

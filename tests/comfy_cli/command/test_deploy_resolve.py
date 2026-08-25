@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from comfy_cli.command.build_spec import BuildSpec, JsonObject
 from comfy_cli.command.deploy_resolve import (
     _STATUS_RANK,
@@ -12,6 +14,7 @@ from comfy_cli.command.deploy_resolve import (
     resolve_deployment,
     resolve_release,
 )
+from comfy_cli.deploy_api_errors import DeployAPIError
 
 
 class RecordingBuilder:
@@ -320,6 +323,43 @@ def test_zero_matching_deployments_returns_none() -> None:
 
     # Then
     assert resolved is None
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param(_deployment("deployment-bad", created_at="not-a-timestamp"), id="unparsable-createdAt"),
+        pytest.param(_deployment("deployment-bad", status="unheard-of"), id="unknown-status"),
+    ],
+)
+def test_a_malformed_selection_field_is_a_server_shape_error_not_a_traceback(row: JsonObject) -> None:
+    # Given
+    builder = RecordingBuilder(pages=[[{"id": "release-1"}]])
+    deployments = RecordingDeployments([[row]])
+
+    # When / Then
+    with pytest.raises(DeployAPIError) as raised:
+        resolve_deployment(builder, deployments, "build-1")
+    assert raised.value.code == "deploy_server_error"
+
+
+def test_a_naive_timestamp_never_makes_the_ranking_comparison_raise() -> None:
+    """Both rows share a status so the ranks tie and ``max`` is forced onto the
+    timestamps; mixing aware and naive there raises TypeError without the UTC
+    normalization in ``deployment_selection_key``."""
+    # Given
+    builder = RecordingBuilder(pages=[[{"id": "release-1"}]])
+    aware = _deployment("deployment-aware", status="ready", created_at="2026-08-23T11:00:00Z")
+    naive = _deployment("deployment-naive", status="ready", created_at="2026-08-23T12:00:00")
+    deployments = RecordingDeployments([[aware, naive]])
+    assert _STATUS_RANK[str(aware["status"])] == _STATUS_RANK[str(naive["status"])]
+
+    # When
+    resolved = resolve_deployment(builder, deployments, "build-1")
+
+    # Then
+    assert resolved is not None
+    assert resolved["id"] == "deployment-naive"
 
 
 def test_join_consumes_three_pages_from_each_exhaustive_collector() -> None:

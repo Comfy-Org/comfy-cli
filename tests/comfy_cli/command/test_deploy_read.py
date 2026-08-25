@@ -205,3 +205,39 @@ def test_events_render_in_server_order_without_false_complete_framing(monkeypatc
     assert result.stdout.index("provisioning") < result.stdout.index("starting") < result.stdout.index("ready")
     assert "since creation" not in result.stdout.lower()
     assert "beginning of history" not in result.stdout.lower()
+
+
+@pytest.mark.parametrize("output_flag", ["--json", "--no-json"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"deploymentId": "dep-read", "events": ["not-an-object"]}, id="non-object-event"),
+        pytest.param(
+            {"deploymentId": "dep-read", "events": [{"at": "2026-08-23T12:00:00Z", "status": "ready", "message": 7}]},
+            id="non-string-message",
+        ),
+        pytest.param({"deploymentId": "dep-read", "events": [{"status": "ready"}]}, id="missing-at"),
+        pytest.param({"deploymentId": "dep-read", "events": [{"at": "2026-08-23T12:00:00Z"}]}, id="missing-status"),
+        pytest.param({"events": []}, id="missing-deploymentId"),
+    ],
+)
+def test_both_output_modes_reject_the_same_malformed_events(payload, output_flag, monkeypatch) -> None:
+    """Validation must not sit behind an ``is_pretty()`` branch: a `--json`
+    consumer has to be refused exactly the responses a human is refused."""
+    # Given
+    client = ReadDeploy()
+    monkeypatch.setattr(ReadDeploy, "get_deployment_events", lambda self, _id: copy.deepcopy(payload))
+    _install_clients(monkeypatch, FakeBuilder(), client)
+
+    # When
+    result = CliRunner(mix_stderr=False).invoke(
+        app,
+        [output_flag, "deploy", "events", "--deployment", "dep-read"],
+        env={"COLUMNS": "400"},
+    )
+
+    # Then
+    assert result.exit_code == 1
+    assert "deploy_server_error" in result.stdout
+    if output_flag == "--json":
+        assert _envelope(result)["error"]["code"] == "deploy_server_error"

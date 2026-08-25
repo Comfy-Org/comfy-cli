@@ -212,7 +212,7 @@ def test_missing_target_prompts_a_human_from_the_build_targets_catalog(
     monkeypatch.setattr("comfy_cli.ui.prompt_multi_select", pick)
 
     # When
-    result = invoke_push(workspace, "--release")
+    result = invoke_push(workspace, "--release", agentic=False)
 
     # Then
     assert result.exit_code == 0, result.stderr
@@ -223,13 +223,19 @@ def test_missing_target_prompts_a_human_from_the_build_targets_catalog(
     assert releases[0]["targets"] == [LINUX_CPU]
 
 
-def test_an_abandoned_picker_refuses_instead_of_defaulting_a_target(
+def test_a_json_release_without_a_target_refuses_before_reaching_the_picker(
     workspace: Path, client: RecordingBuilder, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A `--json` caller is never prompted, so `--release` with no `--target`
+    is a structured refusal rather than a picker it could not answer. The
+    abandoned-picker fallthrough itself is pinned in `test_interaction.py`."""
     # Given
     write_spec(workspace, build_id="build-1", revision="revision-0", models=[], nodes=[])
     _become_human(monkeypatch)
-    monkeypatch.setattr("comfy_cli.ui.prompt_multi_select", lambda prompt, choices: [])
+    monkeypatch.setattr(
+        "comfy_cli.ui.prompt_multi_select",
+        lambda prompt, choices: pytest.fail("prompted a --json caller"),
+    )
 
     # When
     result = invoke_push(workspace, "--release")
@@ -239,6 +245,31 @@ def test_an_abandoned_picker_refuses_instead_of_defaulting_a_target(
     error = envelope(result)["error"]
     assert isinstance(error, dict)
     assert error["code"] == "build_missing_input"
+    assert _calls(client, "create_release") == []
+    assert _calls(client, "update_build") == []
+
+
+def test_a_human_abandoning_the_target_picker_refuses_instead_of_defaulting(
+    workspace: Path, client: RecordingBuilder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    write_spec(workspace, build_id="build-1", revision="revision-0", models=[], nodes=[])
+    _become_human(monkeypatch)
+    offered: list[list[str]] = []
+
+    def abandon(prompt: str, choices: list[str]) -> list[str]:
+        offered.append(list(choices))
+        return []
+
+    monkeypatch.setattr("comfy_cli.ui.prompt_multi_select", abandon)
+
+    # When
+    result = invoke_push(workspace, "--release", agentic=False)
+
+    # Then
+    assert result.exit_code != 0
+    assert offered, "the picker was never reached"
+    assert "build_missing_input" in result.stdout
     assert _calls(client, "create_release") == []
     assert _calls(client, "update_build") == []
 

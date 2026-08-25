@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Final, Protocol
 
 from comfy_cli.command.build_spec import BuildSpec, JsonObject, JsonValue
+from comfy_cli.command.deploy_types import required_string, server_shape_error
 
 # Wave 8 status formatting must import this table rather than redefine the order.
 _STATUS_RANK: Final[dict[str, int]] = {
@@ -107,10 +108,23 @@ def _required_string(value: JsonObject, key: str) -> str:
     return field
 
 
-def _deployment_selection_key(deployment: JsonObject) -> tuple[int, datetime]:
-    status = _required_string(deployment, "status")
-    created_at = _required_string(deployment, "createdAt")
-    return _STATUS_RANK[status], datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+def deployment_selection_key(deployment: JsonObject) -> tuple[int, datetime]:
+    """Rank one deployment for "which deployment did the user mean".
+
+    Every failure is a server-shape failure, never a traceback: an unknown
+    status or an unparsable ``createdAt`` surfaces as ``deploy_server_error``
+    like any other bad field. A naive timestamp is read as UTC because the wire
+    format is RFC 3339 — leaving it naive would make the ``max()`` over these
+    keys raise on a batch that mixes aware and naive values.
+    """
+    status = required_string(deployment, "status")
+    created_at = required_string(deployment, "createdAt")
+    try:
+        rank = _STATUS_RANK[status]
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except (KeyError, ValueError) as error:
+        raise server_shape_error("the deployment has an invalid status or createdAt", status=status) from error
+    return rank, created if created.tzinfo is not None else created.replace(tzinfo=timezone.utc)
 
 
 def resolve_release(
@@ -159,7 +173,7 @@ def resolve_deployment(
     if not candidates:
         return None
 
-    ranked = [(deployment, _deployment_selection_key(deployment)) for deployment in candidates]
+    ranked = [(deployment, deployment_selection_key(deployment)) for deployment in candidates]
     winning_key = max(key for _, key in ranked)
     tied = [deployment for deployment, key in ranked if key == winning_key]
     if len(tied) > 1:

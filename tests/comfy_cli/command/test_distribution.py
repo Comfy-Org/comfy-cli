@@ -10,10 +10,13 @@ from pathlib import Path
 import pytest
 import requests
 import typer
+from typer.testing import CliRunner
 
+from comfy_cli.caller import Caller
+from comfy_cli.cmdline import app as cli_app
 from comfy_cli.command import build as distribution
+from comfy_cli.command.build_push import SkippedSymlink
 from comfy_cli.command.build_spec import read_build_spec
-from comfy_cli.output import get_renderer
 
 
 @pytest.fixture
@@ -123,8 +126,6 @@ def test_detect_comfy_version_from_server(monkeypatch):
 
 
 def test_detect_comfy_version_from_server_none_when_down(monkeypatch):
-    import requests
-
     def boom(url, timeout):
         raise requests.ConnectionError("refused")
 
@@ -379,142 +380,6 @@ def test_init_command_missing_dir_errors(tmp_path):
     assert envelope["error"]["code"] == "build_models_dir_missing"
 
 
-# --- create: plan_create mapping + command ------------------------------------
-
-SCAN_DEF = {
-    "schema": "distribution-definition/0",
-    "baseComfyVersion": "master",
-    "models": [
-        {"type": "unet", "filename": "z.safetensors", "sha256": "abc", "sizeBytes": 100, "source": "local"},
-        {"type": "vae", "filename": "ae.safetensors", "sha256": "def", "sizeBytes": 50, "source": "local"},
-    ],
-    "customNodes": [
-        {"name": "essentials", "repository": "https://github.com/x/essentials", "gitRef": "deadbeef", "source": "git"},
-        {"name": "handmade", "repository": None, "gitRef": None, "source": "local"},
-    ],
-}
-
-
-def test_plan_create_maps_to_builder_schema_all_upload():
-    """With the default (no-op) resolver every model is an upload; git nodes are
-    referenced by repo@ref, local nodes are uploads."""
-    plan = distribution.plan_create(SCAN_DEF)
-    d = plan["definition"]
-
-    # models: builder shape, no scan-only fields, no source yet (pending upload)
-    assert d["models"][0] == {"type": "unet", "filename": "z.safetensors", "sha256": "abc"}
-    assert "sizeBytes" not in d["models"][0] and "source" not in d["models"][0]
-
-    # git node -> repository+gitRef; local node -> name only (upload)
-    ess = next(n for n in d["customNodes"] if n["name"] == "essentials")
-    assert ess == {"name": "essentials", "repository": "https://github.com/x/essentials", "gitRef": "deadbeef"}
-    hand = next(n for n in d["customNodes"] if n["name"] == "handmade")
-    assert hand == {"name": "handmade"}
-
-    # upload plan: 2 models + 1 local node = 3 items, 150 model bytes
-    assert plan["upload_count"] == 3
-    assert plan["upload_bytes"] == 150
-    kinds = sorted(u["kind"] for u in plan["uploads"])
-    assert kinds == ["model", "model", "node_zip"]
-
-
-def test_plan_create_carries_environment_fields():
-    """pipDependencies passes straight through; baseComfyVersion is normalized to a
-    ref the builder can resolve, here rather than only in `scan`, so a definition
-    written before that fix does not spend its cut discovering the difference."""
-    definition = {**SCAN_DEF, "baseComfyVersion": "0.3.40", "pipDependencies": "numpy==1.26.0\n"}
-    d = distribution.plan_create(definition)["definition"]
-    assert d["baseComfyVersion"] == "v0.3.40"
-    assert d["pipDependencies"] == "numpy==1.26.0\n"
-
-
-def test_plan_create_resolver_turns_model_into_sourceuri():
-    """A resolver that returns a URL makes the model a public sourceUri (no upload)."""
-
-    def resolver(m):
-        return "https://hf.co/z" if m["filename"] == "z.safetensors" else None
-
-    plan = distribution.plan_create(SCAN_DEF, resolver=resolver)
-    z = next(m for m in plan["definition"]["models"] if m["filename"] == "z.safetensors")
-    assert z["sourceUri"] == "https://hf.co/z"
-    assert "blobId" not in z
-    # only the unresolved vae model (+ local node) remain as uploads
-    assert plan["upload_count"] == 2
-    assert {u.get("filename") for u in plan["uploads"] if u["kind"] == "model"} == {"ae.safetensors"}
-
-
-class _FakeBuilder:
-    """Stand-in BuilderClient recording calls, for execute_create orchestration tests."""
-
-    def __init__(self):
-        self.uploaded = []
-        self.blobs_created = []
-        self.created = None
-        self.cut = None
-
-    def create_blob(self, kind, filename, sha256, size_bytes):
-        self.blobs_created.append(filename)
-        return f"blob-{filename}", f"https://put.example/{filename}"
-
-    def upload_blob(self, upload_url, path):
-        self.uploaded.append((upload_url, str(path)))
-
-    def create_build(self, name, definition, description=None):
-        self.created = (name, definition)
-        return "dist-123"
-
-    def create_release(self, distribution_id, targets=None):
-        self.cut = (distribution_id, targets)
-        return "ver-456", "https://status.example/ver-456"
-
-
-def test_execute_create_uploads_stitches_and_cuts():
-    scan_def = {
-        "models": [{"type": "vae", "filename": "ae.safetensors", "sha256": "h", "sizeBytes": 5, "source": "local"}],
-        "customNodes": [{"name": "ess", "repository": "https://github.com/x/ess", "gitRef": "abc", "source": "git"}],
-    }
-    plan = distribution.plan_create(scan_def)
-    fake = _FakeBuilder()
-    result = distribution.execute_create(
-        plan, client=fake, name="demo", locate_bytes=lambda u: Path("/tmp/ae.safetensors")
-    )
-
-    assert result == {
-        "distributionId": "dist-123",
-        "versionId": "ver-456",
-        "statusUrl": "https://status.example/ver-456",
-        "uploaded": 1,
-    }
-    # the uploaded model's blobId is stitched into the definition sent to create
-    assert plan["definition"]["models"][0]["blobId"] == "blob-ae.safetensors"
-    # the git node was referenced by repo@ref, not uploaded
-    assert fake.created[1]["customNodes"][0]["repository"] == "https://github.com/x/ess"
-    assert fake.cut[0] == "dist-123"
-
-
-def test_execute_create_rejects_local_node_upload():
-    scan_def = {"models": [], "customNodes": [{"name": "hand", "source": "local"}]}
-    plan = distribution.plan_create(scan_def)
-    with pytest.raises(NotImplementedError):
-        distribution.execute_create(plan, client=_FakeBuilder(), name="d", locate_bytes=lambda u: Path("/x"))
-
-
-def test_execute_create_preflights_uploads_before_moving_bytes():
-    # One model upload, then a local (non-git) node that makes the whole create
-    # unsupported. The failure must be detected before any model bytes upload,
-    # otherwise a real install uploads gigabytes only to raise and create nothing.
-    scan_def = {
-        "models": [{"type": "vae", "filename": "ae.safetensors", "sha256": "h", "sizeBytes": 5, "source": "local"}],
-        "customNodes": [{"name": "handmade", "repository": None, "gitRef": None, "source": "local"}],
-    }
-    plan = distribution.plan_create(scan_def)
-    fake = _FakeBuilder()
-    with pytest.raises(NotImplementedError):
-        distribution.execute_create(plan, client=fake, name="demo", locate_bytes=lambda u: Path("/tmp/x"))
-    assert fake.blobs_created == [], "no model should upload when a later node makes the create unsupported"
-    assert fake.created is None
-
-
 class _FakeResolver:
     def __init__(self, results):
         self._results = results
@@ -559,30 +424,139 @@ def test_resolve_models_via_builder_batches_over_32():
     assert all(len(b) <= 32 for b in resolver.batches)
 
 
-def test_resolve_model_source_reads_annotation():
-    assert distribution.resolve_model_source({"filename": "x", "sourceUri": "https://u"}) == "https://u"
-    assert distribution.resolve_model_source({"filename": "x"}) is None
-
-
-def test_plan_create_uses_resolved_sourceuri():
-    # a model the resolve step annotated with sourceUri is referenced by URL, not
-    # uploaded, under the DEFAULT resolver.
-    defn = {
-        "models": [
-            {
-                "type": "vae",
+def test_resolve_models_via_builder_skips_a_model_with_no_filename():
+    """`filename` is optional in the spec, so a model without one must be passed
+    over rather than raising a KeyError the caller would blame on the builder."""
+    models = [
+        {"type": "unet", "sha256": "AAA"},
+        {"type": "vae", "filename": "ae.safetensors", "sha256": "BBB"},
+    ]
+    resolver = _FakeResolver(
+        {
+            "ae.safetensors": {
                 "filename": "ae.safetensors",
-                "sha256": "h",
-                "sizeBytes": 5,
-                "source": "local",
-                "sourceUri": "https://hf/ae",
+                "candidates": [{"sourceUri": "https://hf/ae", "sha256": "bbb"}],
             }
-        ],
-        "customNodes": [],
-    }
-    plan = distribution.plan_create(defn)
-    assert plan["definition"]["models"][0]["sourceUri"] == "https://hf/ae"
-    assert plan["upload_count"] == 0
+        }
+    )
+    assert distribution.resolve_models_via_builder(models, resolver) == 1
+    assert resolver.batches == [["ae.safetensors"]]
+    assert "sourceUri" not in models[0]
+    assert models[1]["sourceUri"] == "https://hf/ae"
+
+
+def test_delete_declined_at_the_prompt_aborts_without_touching_the_builder(monkeypatch):
+    """A decline is only reachable in pretty mode — `--json` refuses upstream in
+    `interaction.confirm` rather than prompting."""
+    deleted = []
+
+    class _Client:
+        def delete_build(self, build_id):
+            deleted.append(build_id)
+
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: _Client())
+    monkeypatch.setattr("comfy_cli.interaction.detect_caller", lambda: Caller("user", agentic=False, source_env=None))
+    monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: False)
+    monkeypatch.setattr("comfy_cli.interaction._ask_confirm", lambda _question: False)
+
+    result = CliRunner(mix_stderr=False).invoke(
+        cli_app, ["--no-json", "build", "delete", "--id", "build-1"], env={"COLUMNS": "400"}
+    )
+
+    assert result.exit_code == 0
+    assert "Aborted." in result.stdout
+    assert deleted == []
+
+
+def test_json_delete_on_a_tty_refuses_instead_of_opening_a_prompt(monkeypatch):
+    """`comfy --json build delete` used to draw questionary on stdout and hang
+    forever; it must emit one refusal envelope and exit 1 instead."""
+    deleted = []
+
+    class _Client:
+        def delete_build(self, build_id):
+            deleted.append(build_id)
+
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: _Client())
+    monkeypatch.setattr("comfy_cli.interaction.detect_caller", lambda: Caller("user", agentic=False, source_env=None))
+    monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: False)
+    monkeypatch.setattr("comfy_cli.interaction._ask_confirm", lambda _q: pytest.fail("prompted a --json caller"))
+
+    result = CliRunner(mix_stderr=False).invoke(cli_app, ["--json", "build", "delete", "--id", "build-1"])
+
+    envelope = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
+    assert result.exit_code == 1
+    assert envelope["error"]["code"] == "build_delete_needs_confirm"
+    assert envelope["error"]["details"]["distributionId"] == "build-1"
+    assert deleted == []
+
+
+def test_json_delete_with_skip_prompt_runs_to_completion(monkeypatch):
+    """`--skip-prompt` means "run to completion without asking". The hand-rolled
+    gate this replaced never consulted the flag on the `--json` path — it saw a
+    non-pretty renderer and refused — so this combination used to exit 1."""
+    deleted: list[str] = []
+
+    class _Client:
+        def delete_build(self, build_id):
+            deleted.append(build_id)
+
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: _Client())
+    monkeypatch.setattr("comfy_cli.interaction.detect_caller", lambda: Caller("user", agentic=False, source_env=None))
+    monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: True)
+    monkeypatch.setattr("comfy_cli.interaction._ask_confirm", lambda _question: pytest.fail("prompted"))
+
+    result = CliRunner(mix_stderr=False).invoke(cli_app, ["--json", "build", "delete", "--id", "build-1"])
+
+    envelope = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
+    assert result.exit_code == 0
+    assert envelope["changed"] is True
+    assert deleted == ["build-1"]
+
+
+class _WarnRecorder:
+    """Minimal renderer stand-in that records the warnings emitted."""
+
+    def __init__(self):
+        self.messages = []
+
+    def warn(self, message, *, hint=None):
+        self.messages.append(message)
+
+
+def _skipped(count):
+    return [SkippedSymlink(f"definition.customNodes[{i}]", f"node-{i}", "vendor") for i in range(count)]
+
+
+def test_the_skipped_symlink_warning_truncates_its_preview_but_not_its_rows():
+    """The human line is capped so a pathological node cannot flood the terminal;
+    the machine payload is never truncated."""
+    renderer = _WarnRecorder()
+
+    returned = distribution._warn_skipped_symlinks(renderer, _skipped(7))
+
+    (message,) = renderer.messages
+    assert "excluded 7 symlinks" in message
+    assert message.count(": vendor") == 5
+    assert message.endswith("and 2 more")
+    assert len(returned) == 7
+
+
+def test_a_single_skipped_symlink_reads_in_the_singular():
+    renderer = _WarnRecorder()
+
+    distribution._warn_skipped_symlinks(renderer, _skipped(1))
+
+    (message,) = renderer.messages
+    assert "excluded 1 symlink from" in message
+    assert "more" not in message
+
+
+def test_no_skipped_symlinks_says_nothing_at_all():
+    renderer = _WarnRecorder()
+
+    assert distribution._warn_skipped_symlinks(renderer, []) == []
+    assert renderer.messages == []
 
 
 def test_builder_client_endpoints_and_parsing(monkeypatch):
@@ -766,8 +740,6 @@ def test_builder_call_maps_the_limited_beta_403_to_build_not_enabled():
     import io
     import urllib.error
 
-    import typer
-
     from comfy_cli.command.build import _builder_call
 
     def raise_403():
@@ -784,8 +756,6 @@ def test_builder_call_maps_the_limited_beta_403_to_build_not_enabled():
 def test_builder_call_maps_other_errors_to_builder_error():
     import io
     import urllib.error
-
-    import typer
 
     from comfy_cli.command.build import _builder_call
 
@@ -841,8 +811,6 @@ def test_get_release_logs_uses_large_cap(monkeypatch):
 
 
 def test_builder_call_catches_response_too_large():
-    import typer
-
     from comfy_cli.command.build import _builder_call
     from comfy_cli.http import ResponseTooLarge
 
@@ -856,53 +824,6 @@ def test_builder_call_catches_response_too_large():
 
 
 # --- create: the definition survives the trip ---------------------------------
-
-REGISTRY_DEF = {
-    "schema": "distribution-definition/0",
-    "baseComfyVersion": "v0.3.40",
-    "baseImage": "cuda130-py312",
-    "modelPolicy": {"mode": "allowlist", "list": ["ae.safetensors"]},
-    "partnerNodePolicy": {"mode": "blocklist", "list": []},
-    "models": [],
-    "customNodes": [
-        {"name": "comfyui-kjnodes", "id": "comfyui-kjnodes", "registryVersion": "1.4.9", "source": "registry"},
-        {"name": "priv", "blobId": "blob-1"},
-        {"name": "gitpack", "repository": "https://github.com/x/gitpack", "gitRef": "deadbeef"},
-    ],
-}
-
-
-def test_plan_create_keeps_registry_pins_out_of_the_upload_plan():
-    """A registry-pinned node is a source the builder can resolve, so it travels as
-    (id, registryVersion) rather than becoming an upload `--execute` would refuse."""
-    plan = distribution.plan_create(REGISTRY_DEF)
-    kj = next(n for n in plan["definition"]["customNodes"] if n["name"] == "comfyui-kjnodes")
-    assert kj == {"name": "comfyui-kjnodes", "id": "comfyui-kjnodes", "registryVersion": "1.4.9"}
-    assert plan["upload_count"] == 0
-
-
-def test_plan_create_keeps_a_blob_reference():
-    """An already-uploaded node names its blob; re-uploading it would orphan bytes."""
-    priv = next(n for n in distribution.plan_create(REGISTRY_DEF)["definition"]["customNodes"] if n["name"] == "priv")
-    assert priv == {"name": "priv", "blobId": "blob-1"}
-
-
-def test_plan_create_honours_a_hand_written_git_node_with_no_source_tag():
-    """`source` is the scan's own annotation. A definition written by hand names its
-    fields and nothing else, and must not be read as an upload."""
-    g = next(n for n in distribution.plan_create(REGISTRY_DEF)["definition"]["customNodes"] if n["name"] == "gitpack")
-    assert g == {"name": "gitpack", "repository": "https://github.com/x/gitpack", "gitRef": "deadbeef"}
-
-
-def test_plan_create_carries_base_image_and_policies():
-    """These reach the builder or they do not exist: an absent baseImage silently
-    becomes the catalog default, and an absent policy seals as allow-all."""
-    d = distribution.plan_create(REGISTRY_DEF)["definition"]
-    assert d["baseImage"] == "cuda130-py312"
-    assert d["modelPolicy"] == {"mode": "allowlist", "list": ["ae.safetensors"]}
-    assert d["partnerNodePolicy"] == {"mode": "blocklist", "list": []}
-    assert d["baseComfyVersion"] == "v0.3.40"
-
 
 # --- scan: a registry-installed pack has an upstream --------------------------
 
@@ -1122,95 +1043,6 @@ def test_report_advisories_says_when_no_base_image_matches_the_python():
     assert "closest one" in line
 
 
-class _ImportingBuilder:
-    """Stands in for the builder across the whole execute path."""
-
-    def __init__(self, resolved=None, fail=None):
-        self.resolved = resolved
-        self.fail = fail
-        self.created_with = None
-        self.snapshot_seen = None
-
-    def resolve_snapshot(self, snapshot):
-        self.snapshot_seen = snapshot
-        if self.fail:
-            raise self.fail
-        return self.resolved
-
-    def resolve_models(self, filenames):
-        return []
-
-    def create_build(self, name, definition, description=None):
-        self.created_with = definition
-        return "dist-1"
-
-    def create_release(self, distribution_id, targets=None):
-        return ("ver-1", "status-url")
-
-
-def _execute(monkeypatch, builder, definition):
-    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: builder)
-    distribution._create_execute(get_renderer(), definition, name="demo", builder_url=None, models_dir=None)
-
-
-def test_create_execute_sends_the_definition_for_reading_and_takes_back_what_it_says(monkeypatch):
-    """The whole point of the call: the id the builder vouched for is the id that
-    gets created, without the CLI holding its own copy of registry truth."""
-    builder = _ImportingBuilder(
-        resolved={
-            "definition": {
-                "customNodes": [{"name": "was", "id": "was-node-suite-comfyui", "registryVersion": "1.0.1"}]
-            },
-            "report": {},
-        }
-    )
-    _execute(
-        monkeypatch,
-        builder,
-        {
-            "baseComfyVersion": "v0.30.2",
-            "models": [],
-            "customNodes": [{"name": "was", "id": "pr-was-47064894", "registryVersion": "1.0.1"}],
-        },
-    )
-    assert builder.snapshot_seen["snapshots"][0]["customNodes"][0]["id"] == "pr-was-47064894"
-    (node,) = builder.created_with["customNodes"]
-    assert node["id"] == "was-node-suite-comfyui"
-
-
-def test_create_execute_refuses_when_the_builder_drops_a_pack(monkeypatch):
-    """A pack the importer could not vouch for is absent from what it returns.
-    Building an image quietly missing what the user asked for is worse than failing."""
-    builder = _ImportingBuilder(resolved={"definition": {"customNodes": []}, "report": {"notInRegistry": ["was"]}})
-    with pytest.raises(typer.Exit):
-        _execute(
-            monkeypatch,
-            builder,
-            {
-                "baseComfyVersion": "v0.30.2",
-                "models": [],
-                "customNodes": [{"name": "was", "id": "nope", "registryVersion": "1.0.1"}],
-            },
-        )
-    assert builder.created_with is None
-
-
-def test_create_execute_still_creates_when_the_builder_cannot_read_pins(monkeypatch):
-    """An older builder has no importer. The pins go to the cut unchecked, which is
-    where they were checked before this existed; refusing to create would be worse."""
-    builder = _ImportingBuilder(fail=requests.RequestException("404 no such endpoint"))
-    _execute(
-        monkeypatch,
-        builder,
-        {
-            "baseComfyVersion": "v0.30.2",
-            "models": [],
-            "customNodes": [{"name": "was", "id": "pr-was-47064894", "registryVersion": "1.0.1"}],
-        },
-    )
-    assert builder.created_with["customNodes"][0]["id"] == "pr-was-47064894"
-
-
 # --- the freeze describes the target env, and carries no credential -----------
 
 
@@ -1260,16 +1092,6 @@ def test_freeze_ignores_the_callers_pythonpath(tmp_path, monkeypatch):
 # --- blobs: a private file is uploaded once and referenced by id ---------------
 
 
-def test_plan_create_keeps_a_model_blob_reference():
-    """A model the caller already uploaded names its blob. Re-uploading it would
-    orphan the bytes it replaced and spend the transfer twice."""
-    plan = distribution.plan_create(
-        {"models": [{"type": "vae", "filename": "ae.safetensors", "sha256": "def", "blobId": "blob-9"}]}
-    )
-    assert plan["definition"]["models"][0]["blobId"] == "blob-9"
-    assert plan["upload_count"] == 0
-
-
 def test_report_advisories_reads_the_refused_release_as_one_value():
     """`droppedComfyVersion` is a string where its neighbours are lists. Iterated as
     a list it renders one entry per character."""
@@ -1280,30 +1102,6 @@ def test_report_advisories_reads_the_refused_release_as_one_value():
 def test_report_advisories_names_a_folder_collision():
     (line,) = distribution.report_advisories({"collidingNodes": ["ComfyUI-Easy-Use"]})
     assert "already claimed the folder" in line and "ComfyUI-Easy-Use" in line
-
-
-def test_create_execute_proceeds_when_a_pack_was_dropped_for_colliding(monkeypatch):
-    """The importer drops the loser of a folder collision on purpose, and what comes
-    back is the definition the cut accepts. Refusing it would help nobody."""
-    builder = _ImportingBuilder(
-        resolved={
-            "definition": {"customNodes": [{"name": "first", "id": "first", "registryVersion": "1.0.0"}]},
-            "report": {"collidingNodes": ["Second"]},
-        }
-    )
-    _execute(
-        monkeypatch,
-        builder,
-        {
-            "baseComfyVersion": "v0.30.2",
-            "models": [],
-            "customNodes": [
-                {"name": "first", "id": "first", "registryVersion": "1.0.0"},
-                {"name": "Second", "id": "Second", "registryVersion": "1.0.0"},
-            ],
-        },
-    )
-    assert [n["name"] for n in builder.created_with["customNodes"]] == ["first"]
 
 
 def test_as_snapshot_envelope_wraps_the_file_desktop_actually_writes():
@@ -1318,27 +1116,3 @@ def test_as_snapshot_envelope_wraps_the_file_desktop_actually_writes():
 def test_as_snapshot_envelope_leaves_a_real_export_alone():
     export = {"type": "comfyui-desktop-2-snapshot", "version": 2, "snapshots": [{"customNodes": []}]}
     assert distribution.as_snapshot_envelope(export) is export
-
-
-def test_create_execute_does_not_read_a_renamed_pack_as_a_dropped_one(monkeypatch):
-    """The importer derives a pack's folder by lowercasing. A name it normalises is
-    still the pack that was sent, and refusing it would stop a create the builder
-    was happy with."""
-    builder = _ImportingBuilder(
-        resolved={
-            "definition": {
-                "customNodes": [{"name": "comfyui-kjnodes", "id": "comfyui-kjnodes", "registryVersion": "1.4.9"}]
-            },
-            "report": {},
-        }
-    )
-    _execute(
-        monkeypatch,
-        builder,
-        {
-            "baseComfyVersion": "v0.30.2",
-            "models": [],
-            "customNodes": [{"name": "ComfyUI-KJNodes", "id": "comfyui-kjnodes", "registryVersion": "1.4.9"}],
-        },
-    )
-    assert builder.created_with is not None

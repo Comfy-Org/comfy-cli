@@ -188,6 +188,22 @@ class TestRequireOption:
         assert answer == "from-the-prompt"
         assert prompt.calls == 1
 
+    def test_a_json_caller_at_a_terminal_is_refused_rather_than_prompted(self, capsys):
+        """`detect_caller` never reads the requested output mode, so a human who
+        types `comfy --json …` at a terminal is `agentic=False` and would be
+        prompted — drawing a TUI on the envelope channel, then blocking forever
+        on an answer no `--json` consumer is there to give."""
+        set_renderer(Renderer.resolve(json_flag=True, caller=HUMAN, command="build create", version="test"))
+        prompt = Spy(answer="should not be reached")
+
+        with pytest.raises(typer.Exit):
+            require_option(
+                "--name", None, prompt_fn=prompt, error_code="build_missing_option", caller=HUMAN, skip_prompt=False
+            )
+
+        assert prompt.calls == 0
+        assert json.loads(capsys.readouterr().out.strip())["error"]["code"] == "build_missing_option"
+
     @pytest.mark.parametrize("caller", [HUMAN, AGENT], ids=["human", "agent"])
     def test_a_supplied_value_is_returned_without_prompting(self, caller):
         """Tenet 3, for both caller kinds — a supplied value short-circuits
@@ -292,6 +308,36 @@ class TestConfirm:
         "no answer" for a confirmation is "not confirmed"."""
         self.answer = None
         assert confirm("Delete it?", error_code="build_confirm_required", caller=HUMAN, skip_prompt=False) is False
+
+    def test_a_json_caller_at_a_terminal_is_refused_rather_than_prompted(self, capsys):
+        """The confirm half of the same rule: `--json` is a promise that stdout
+        carries one envelope, so a destructive confirmation is refused there
+        instead of opening questionary on that stream."""
+        set_renderer(Renderer.resolve(json_flag=True, caller=HUMAN, command="build delete", version="test"))
+
+        with pytest.raises(typer.Exit):
+            confirm("Delete it?", error_code="build_confirm_required", caller=HUMAN, skip_prompt=False)
+
+        assert self.asked == []
+        assert json.loads(capsys.readouterr().out.strip())["error"]["code"] == "build_confirm_required"
+
+    def test_extra_details_reach_the_refusal_payload(self, capsys):
+        """A refusal has to name the subject it refused to act on; without this
+        an agent would have to parse the id back out of the question text."""
+        set_renderer(Renderer.resolve(json_flag=True, caller=AGENT, command="build delete", version="test"))
+
+        with pytest.raises(typer.Exit):
+            confirm(
+                "Delete it?",
+                error_code="build_confirm_required",
+                details={"distributionId": "build-1"},
+                caller=AGENT,
+                skip_prompt=False,
+            )
+
+        details = json.loads(capsys.readouterr().out.strip())["error"]["details"]
+        assert details["distributionId"] == "build-1"
+        assert details["missing"] == ["--yes"]
 
     def test_an_agentic_caller_without_yes_is_refused(self, capsys):
         set_renderer(Renderer.resolve(json_flag=True, caller=AGENT, command="build delete", version="test"))

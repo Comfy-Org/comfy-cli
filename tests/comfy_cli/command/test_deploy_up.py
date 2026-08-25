@@ -181,6 +181,156 @@ def test_reconcile_patches_only_mutable_worker_bounds() -> None:
     assert result.compute_config == {"gpuClass": "l4", "region": "US-MO-2", "min": 0, "max": 4}
 
 
+def test_omitted_worker_bounds_keep_the_live_scale() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", minimum=2, maximum=8)])
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module, minimum=None, maximum=None))
+
+    # Then
+    assert result.changed is False
+    assert client.update_calls == []
+    assert result.compute_config == {"gpuClass": "l4", "region": "US-MO-2", "min": 2, "max": 8}
+
+
+def test_explicit_zero_and_one_still_unscale_a_live_deployment() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", minimum=2, maximum=8)])
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module, minimum=0, maximum=1))
+
+    # Then
+    assert result.changed is True
+    assert client.update_calls == ["dep-live"]
+    assert result.compute_config == {"gpuClass": "l4", "region": "US-MO-2", "min": 0, "max": 1}
+
+
+def test_one_omitted_bound_leaves_only_that_bound_alone() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", minimum=2, maximum=8)])
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module, minimum=None, maximum=4))
+
+    # Then
+    assert client.update_calls == ["dep-live"]
+    assert result.compute_config == {"gpuClass": "l4", "region": "US-MO-2", "min": 2, "max": 4}
+
+
+def test_a_created_deployment_falls_back_to_the_documented_bounds() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy()
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module, minimum=None, maximum=None))
+
+    # Then
+    assert result.created is True
+    assert result.compute_config == {"gpuClass": "l4", "region": "US-MO-2", "min": 0, "max": 1}
+
+
+def test_a_bare_up_after_a_scale_does_not_unscale_the_deployment(tmp_path, monkeypatch) -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", minimum=2, maximum=8)])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+
+    # When
+    result = CliRunner(mix_stderr=False).invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path))])
+
+    # Then
+    assert result.exit_code == 0
+    envelope = _json_envelope(result)
+    assert envelope["changed"] is False
+    assert envelope["data"]["computeConfig"] == {"gpuClass": "l4", "region": "US-MO-2", "min": 2, "max": 8}
+    assert client.update_calls == []
+
+
+@pytest.mark.parametrize("status", ["stopped", "failed", "stop_failed"])
+def test_bounds_supplied_to_a_restart_are_reported_rather_than_dropped(status: str) -> None:
+    """These branches hand back the live compute untouched, so a bound the caller
+    actually typed is discarded. Silently discarding explicit input is the same
+    defect as silently resetting it."""
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", status=status, minimum=2, maximum=8)])
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module, minimum=3, maximum=5))
+
+    # Then
+    assert result.dropped_bounds == ("--min", "--max")
+    assert result.compute_config == {"gpuClass": "l4", "region": "US-MO-2", "min": 2, "max": 8}
+    assert client.update_calls == []
+
+
+def test_a_restart_reports_only_the_bound_that_would_have_changed() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", status="stopped", minimum=2, maximum=8)])
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module, minimum=2, maximum=5))
+
+    # Then
+    assert result.dropped_bounds == ("--max",)
+
+
+def test_a_restart_without_bounds_reports_nothing() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", status="stopped", minimum=2, maximum=8)])
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module, minimum=None, maximum=None))
+
+    # Then
+    assert result.dropped_bounds == ()
+
+
+def test_the_dropped_bound_warning_reaches_a_json_caller_on_stderr(tmp_path, monkeypatch) -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", status="stopped", minimum=2, maximum=8)])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+
+    # When
+    result = CliRunner(mix_stderr=False).invoke(
+        app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3"]
+    )
+
+    # Then
+    assert "--min had no effect" in result.stderr
+    assert "comfy deploy scale" in result.stderr
+    assert _json_envelope(result)["data"]["computeConfig"]["min"] == 2
+
+
+def test_a_stop_failed_deployment_is_not_pointed_at_a_scale_that_would_bounce(tmp_path, monkeypatch) -> None:
+    """`deploy scale` is rejected unless the deployment is ready or stopped, so
+    offering it here would send the user into a `deploy_conflict`. The stop
+    remedy warned about just above is the actionable one."""
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", status="stop_failed", minimum=2, maximum=8)])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+
+    # When
+    result = CliRunner(mix_stderr=False).invoke(
+        app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3"]
+    )
+
+    # Then
+    assert "--min had no effect" in result.stderr
+    assert "comfy deploy scale" not in result.stderr
+    assert "comfy deploy stop" in result.stderr
+
+
 def test_reconcile_rejects_an_immutable_gpu_change() -> None:
     # Given
     module = _deploy()
@@ -262,7 +412,7 @@ def test_tty_create_prompts_with_compute_catalog_choices(tmp_path, monkeypatch) 
     monkeypatch.setattr("comfy_cli.ui.prompt_select", choose)
 
     # When
-    result = CliRunner().invoke(app, ["deploy", "up", str(write_spec(tmp_path))])
+    result = CliRunner().invoke(app, ["--no-json", "deploy", "up", str(write_spec(tmp_path))])
 
     # Then
     assert result.exit_code == 0

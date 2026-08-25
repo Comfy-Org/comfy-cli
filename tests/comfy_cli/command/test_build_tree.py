@@ -70,11 +70,15 @@ def client(monkeypatch: pytest.MonkeyPatch) -> RemoteBuilder:
     return recorder
 
 
-def invoke_build(*args: str):
+def invoke_build(*args: str, agentic: bool = True):
     return CliRunner(mix_stderr=False).invoke(
         cli_app,
         ["build", *args],
-        env={"AI_AGENT": "1", "COMFY_OUTPUT": "json", "NO_COLOR": "1"},
+        env={
+            "AI_AGENT": "1" if agentic else None,
+            "COMFY_OUTPUT": "json" if agentic else "pretty",
+            "NO_COLOR": "1",
+        },
     )
 
 
@@ -137,7 +141,7 @@ def test_build_command_resolves_id_by_explicit_spec_then_picker(
         monkeypatch.setattr("comfy_cli.ui.prompt_select", lambda *args, **kwargs: "picked-id")
 
     # When
-    result = invoke_build(command, *fixed_options, *options)
+    result = invoke_build(command, *fixed_options, *options, agentic=tier != "picker")
 
     # Then
     assert result.exit_code == 0, result.stderr
@@ -183,7 +187,7 @@ def test_release_command_resolves_id_by_explicit_spec_then_picker(
         monkeypatch.setattr("comfy_cli.ui.prompt_select", lambda *args, **kwargs: "picked-id")
 
     # When
-    result = invoke_build("release", subcommand, *fixed_options, *options)
+    result = invoke_build("release", subcommand, *fixed_options, *options, agentic=tier != "picker")
 
     # Then
     assert result.exit_code == 0, result.stderr

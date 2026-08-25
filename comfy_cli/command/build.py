@@ -33,8 +33,8 @@ import re
 import subprocess
 import time
 import urllib.error
-from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Annotated, NoReturn
 from urllib.parse import urlsplit
@@ -51,7 +51,7 @@ from comfy_cli.command.build_diff import (
     render_definition_diff,
     summarize_definition_diff,
 )
-from comfy_cli.command.build_package import NodePackageError, node_content_identity
+from comfy_cli.command.build_package import NodePackageError, package_node
 from comfy_cli.command.build_paths import (
     BuildPaths,
     BuildSpecNotFoundError,
@@ -61,6 +61,7 @@ from comfy_cli.command.build_paths import (
 )
 from comfy_cli.command.build_pull import merge_pulled_spec
 from comfy_cli.command.build_push import (
+    SkippedSymlink,
     pending_uploads,
     prepare_push,
     public_node_identities,
@@ -335,7 +336,97 @@ def _identify_node(node_dir: Path) -> dict:
     return {"name": node_dir.name, "repository": None, "gitRef": None, "source": "local"}
 
 
-def scan_custom_nodes(custom_nodes_root: Path) -> list[dict]:
+_SKIPPED_SYMLINK_PREVIEW = 5
+
+
+def _warn_skipped_symlinks(renderer, skipped: Sequence[SkippedSymlink]) -> list[dict]:
+    """Announce symlinks packaging left out, and return them as payload rows.
+
+    Node archives deliberately exclude symlinks, so a node that vendors its
+    dependencies through one packages to a near-empty archive. That archive's
+    digest becomes the node's ``localDigest`` in a spec the user commits, so
+    staying silent ships a release whose first symptom is an ImportError inside
+    a container, arbitrarily far from the symlink that caused it.
+
+    Every command that recomputes a node's ``localDigest`` renders its skips
+    through here — `init`, `update`, `push`, `pull` and `status` — so they
+    cannot drift into describing the same omission differently. The first four
+    also carry the returned rows in their payload, including on a `--dry-run`
+    that writes nothing; `status` recomputes but exposes no definition to point
+    into, so for it the stderr warning is the whole report.
+    """
+    if not skipped:
+        return []
+    listed = ", ".join(f"{item.local_path}: {item.member}" for item in skipped[:_SKIPPED_SYMLINK_PREVIEW])
+    if len(skipped) > _SKIPPED_SYMLINK_PREVIEW:
+        listed += f", and {len(skipped) - _SKIPPED_SYMLINK_PREVIEW} more"
+    plural = "s" if len(skipped) > 1 else ""
+    renderer.warn(
+        f"packaging excluded {len(skipped)} symlink{plural} from the custom nodes: {listed}",
+        hint="a symlinked dependency is never packaged; replace it with real files if the node needs it at runtime",
+    )
+    return [item.as_row() for item in skipped]
+
+
+def _raise_node_package_error(renderer, error: NodePackageError) -> NoReturn:
+    """The single rendering of a packaging failure, for every command that packages.
+
+    ``details.path`` names the *node directory* the user has to fix. Each caller
+    reporting its own path would make the same failure arrive as a node folder
+    from `init` and as an unrelated spec YAML from `push`, under one error code.
+    """
+    renderer.error(
+        code="build_spec_invalid",
+        message=str(error),
+        hint=(
+            "packaging is all-or-nothing, so anything it cannot package fails the command rather than "
+            "shipping a short archive; fix the named path, or move it out of the custom-nodes directory"
+        ),
+        details={"path": str(error.path)},
+    )
+    raise typer.Exit(code=1) from error
+
+
+def _relocate_skipped_symlinks(skipped: Sequence[SkippedSymlink], definition: object) -> list[SkippedSymlink]:
+    """Re-point rows at *definition*, dropping nodes it no longer carries.
+
+    ``prepare_push`` numbers ``location`` against the **local** spec, which is
+    the definition `push` and `init` go on to ship. `pull` ships the *server's*
+    node order and omits any local node the server does not carry, so an
+    un-relocated index would name a different node — or none at all. Dropping
+    the unmatched rows is not merely tidiness: those nodes are being deleted
+    from the spec by this pull, so their packaging is no longer the user's
+    problem and warning about them would be noise.
+    """
+    entries = definition.get("customNodes") if isinstance(definition, dict) else None
+    if not isinstance(entries, list):
+        return []
+    # Only `source: local` entries are candidates. Every row came from a local
+    # node, and an unmatched server entry is deep-copied verbatim — so matching
+    # on localPath alone would let a server-side path collision re-point a row
+    # onto an unrelated node, the exact mislabelling this function prevents.
+    #
+    # Indexes are pooled per path and consumed one per row, not looked up: a
+    # spec may legitimately point two nodes at one directory, and a plain dict
+    # would keep only the last, collapsing both rows onto it. Rows left without
+    # an index are nodes this pull removes, and are dropped.
+    available: dict[str, list[int]] = {}
+    for index, entry in enumerate(entries):
+        if isinstance(entry, dict) and isinstance(entry.get("localPath"), str) and entry.get("source") == "local":
+            available.setdefault(entry["localPath"], []).append(index)
+    relocated: list[SkippedSymlink] = []
+    for item in skipped:
+        indexes = available.get(item.local_path)
+        if indexes:
+            relocated.append(replace(item, location=f"definition.customNodes[{indexes.pop(0)}]"))
+    return relocated
+
+
+def scan_custom_nodes(
+    custom_nodes_root: Path,
+    *,
+    on_skip: Callable[[SkippedSymlink], None] | None = None,
+) -> list[dict]:
     """Return one definition entry per custom-node directory, sorted by name.
 
     Each top-level directory under ``custom_nodes/`` is one node, recorded as the
@@ -361,9 +452,15 @@ def scan_custom_nodes(custom_nodes_root: Path) -> list[dict]:
         if entry.name.startswith(".") or entry.name == "__pycache__":
             continue
         node = _identify_node(entry)
-        node["localPath"] = entry.relative_to(root).as_posix()
+        local_path = entry.relative_to(root).as_posix()
+        node["localPath"] = local_path
         if node["source"] == "local":
-            node["localDigest"], node["localSizeBytes"] = node_content_identity(entry)
+            package = package_node(entry)
+            node["localDigest"], node["localSizeBytes"] = package.sha256, package.size_bytes
+            if on_skip is not None:
+                location = f"definition.customNodes[{len(nodes)}]"
+                for member in package.skipped_symlinks:
+                    on_skip(SkippedSymlink(location, local_path, member))
         nodes.append(node)
     return nodes
 
@@ -570,23 +667,14 @@ def capture_pip_provenance(python_exe: str) -> dict | None:
     return {"environment": env, "pipDependencies": header + reqs}
 
 
-# --- create: scan definition -> builder definition + upload plan --------------
+# --- translating a scanned definition for the builder -------------------------
 #
 # The builder's definition schema (services/comfy-builder/definition/definition.go):
 #   Model = { type, filename?, sourceUri? | blobId?, sha256? }  (exactly one source)
 #   Node  = { name, repository? + gitRef? | registryVersion? | blobId? }
-# The scan already emits type/filename/sha256/name/repository/gitRef with the same
-# keys, so mapping is: decide each item's source (public URL vs upload) and drop
-# the scan-only fields (sizeBytes, source, top-level schema).
-
-
-def resolve_model_source(model: dict) -> str | None:
-    """Return the public ``sourceUri`` chosen for a model, or None if it must be
-    uploaded. This reads the annotation left by ``resolve_models_via_builder``
-    (the network resolve + hash-verify step) — on its own it makes no network
-    call, so ``plan_create`` stays offline and testable. Injectable, so tests can
-    still substitute a fake resolver."""
-    return model.get("sourceUri")
+# The scan already emits type/filename/sha256/name/repository/gitRef under the same
+# keys, so translating is a matter of dropping the scan-only fields (sizeBytes,
+# source, top-level schema) rather than remapping them.
 
 
 def snapshot_from_definition(definition: dict) -> dict:
@@ -686,18 +774,24 @@ def _chunks(items: list, n: int):
         yield items[i : i + n]
 
 
+def _model_filename(model: dict) -> str | None:
+    """``definition.models[].filename`` is optional, so it is never indexed blindly."""
+    value = model.get("filename")
+    return value if isinstance(value, str) and value else None
+
+
 def resolve_models_via_builder(models: list[dict], client) -> int:
     """Resolve each model's filename against the builder and, when a returned
     candidate's sha256 matches the local file's hash, annotate the model with
-    that candidate's ``sourceUri`` (so ``plan_create`` references it by URL
-    instead of uploading it). Returns how many were resolved.
+    that candidate's ``sourceUri`` (so ``push`` references it by URL instead of
+    uploading it). Returns how many were resolved.
 
     Only a **hash-confirmed** public match is trusted: a filename alone is a weak
     key, and a renamed local fine-tune must never be mistaken for a public model.
     Candidates the provider didn't hash are left to upload (the safe default).
     The builder re-verifies the sha256 on fetch regardless, so this is an
     optimization to avoid needless uploads — not the integrity boundary."""
-    names = sorted({m["filename"] for m in models if m.get("filename")})
+    names = sorted({name for name in map(_model_filename, models) if name is not None})
     if not names:
         return 0
     by_name: dict[str, list[dict]] = {}
@@ -708,145 +802,16 @@ def resolve_models_via_builder(models: list[dict], client) -> int:
     resolved = 0
     for m in models:
         local = (m.get("sha256") or "").lower()
-        if not local or m.get("sourceUri"):
+        filename = _model_filename(m)
+        if not local or m.get("sourceUri") or filename is None:
             continue
-        for cand in by_name.get(m["filename"], []):
+        for cand in by_name.get(filename, []):
             uri = cand.get("sourceUri")
             if uri and (cand.get("sha256") or "").lower() == local:
                 m["sourceUri"] = uri
                 resolved += 1
                 break
     return resolved
-
-
-def plan_create(definition: dict, resolver=resolve_model_source) -> dict:
-    """Turn a scan definition into a builder definition + an upload plan.
-
-    For each model: if the resolver finds a public URL → reference it as
-    ``sourceUri`` (no upload); otherwise it's a private blob → goes in the upload
-    plan and will be referenced by ``blobId`` once uploaded. For each custom node:
-    ``repository``+``gitRef``, ``id``+``registryVersion`` or ``blobId`` is carried
-    through as-is; only a node naming none of them has no upstream and is uploaded
-    as a ``node_zip`` blob. Every other definition key travels untouched, because
-    a dropped one is not an error the builder reports, just a different build.
-
-    Pure and backend-free: it decides *what* would be sent/uploaded without making
-    any network call. The ``blobId`` values are filled in later by the upload step;
-    here upload-bound items carry no source yet and are listed in ``uploads``."""
-    models_out: list[dict] = []
-    nodes_out: list[dict] = []
-    uploads: list[dict] = []
-
-    for i, m in enumerate(definition.get("models", [])):
-        entry: dict = {"type": m["type"], "filename": m["filename"]}
-        if m.get("sha256"):
-            entry["sha256"] = m["sha256"]
-        uri = resolver(m)
-        # A blob the caller already holds is a source, so it is neither resolved
-        # nor uploaded again: re-uploading would orphan the bytes it replaced.
-        if m.get("blobId"):
-            entry["blobId"] = m["blobId"]
-        elif uri:
-            entry["sourceUri"] = uri
-        else:
-            # `slot` points at the builder-definition entry this upload fills, so
-            # execute can stitch the returned blobId back after uploading.
-            uploads.append(
-                {
-                    "kind": "model",
-                    "type": m["type"],
-                    "filename": m["filename"],
-                    "sha256": m.get("sha256"),
-                    "sizeBytes": m.get("sizeBytes", 0),
-                    "slot": ["models", i],
-                }
-            )
-        models_out.append(entry)
-
-    for j, n in enumerate(definition.get("customNodes", [])):
-        entry = {"name": n["name"]}
-        # `id` is not a source: the builder uses it to name the install directory,
-        # so it rides along whatever the source turns out to be.
-        if n.get("id"):
-            entry["id"] = n["id"]
-        # Most precise first, and keyed on the fields rather than the scan's
-        # `source` tag, so a hand-written definition is read the same way.
-        if n.get("repository"):
-            entry["repository"] = n["repository"]
-            # The website emits repository+commit and no gitRef, so requiring
-            # gitRef here would send those nodes to be uploaded instead.
-            for key in ("gitRef", "commit"):
-                if n.get(key):
-                    entry[key] = n[key]
-        elif n.get("registryVersion") and n.get("id"):
-            entry["registryVersion"] = n["registryVersion"]
-        elif n.get("blobId"):
-            entry["blobId"] = n["blobId"]
-        else:
-            uploads.append({"kind": "node_zip", "name": n["name"], "sizeBytes": 0, "slot": ["customNodes", j]})
-        nodes_out.append(entry)
-
-    builder_definition: dict = {"models": models_out, "customNodes": nodes_out}
-    # Every key the builder's Definition accepts, which is an allowlist rather than
-    # a passthrough: `schema` and `environment` are the scan's own bookkeeping and
-    # stay local. Dropping one of these does not fail loudly — the builder applies
-    # its own default, so a base image silently becomes the catalog's current one.
-    for key in ("baseComfyVersion", "baseImage", "pipDependencies"):
-        if definition.get(key):
-            builder_definition[key] = definition[key]
-    # A policy is permission-bearing, so absent and empty must not be the same: an
-    # absent policy seals as allow-all, while `{}` is something the user wrote.
-    for key in ("modelPolicy", "partnerNodePolicy"):
-        if definition.get(key) is not None:
-            builder_definition[key] = definition[key]
-    # The ref the builder resolves, not the number every version source reports.
-    # Applied here rather than only in `scan` so a definition written before this
-    # existed does not spend its cut discovering the difference.
-    if builder_definition.get("baseComfyVersion"):
-        builder_definition["baseComfyVersion"] = as_comfy_git_ref(builder_definition["baseComfyVersion"])
-    return {
-        "definition": builder_definition,
-        "uploads": uploads,
-        "upload_count": len(uploads),
-        "upload_bytes": sum(u.get("sizeBytes", 0) for u in uploads),
-    }
-
-
-def execute_create(plan: dict, *, client, name: str, locate_bytes, targets=None) -> dict:
-    """Run the live create: upload each private blob, stitch its blobId into the
-    definition, create the distribution, and cut a build.
-
-    ``client`` is a BuilderClient (or a stand-in with the same methods).
-    ``locate_bytes(upload) -> Path`` finds the local file for a model upload.
-    node_zip uploads (hand-dropped local nodes) aren't packaged yet — raises
-    NotImplementedError so the caller can surface a clear message. Returns
-    ``{distributionId, versionId, statusUrl, uploaded}``."""
-    definition = plan["definition"]
-    # Preflight the whole upload list before any bytes move: an unsupported local
-    # node, or a model whose file can't be found (missing --models-dir), must fail
-    # here — not after uploading gigabytes of other models that would be orphaned
-    # when the create never happens.
-    prepared = []
-    for u in plan["uploads"]:
-        if u["kind"] != "model":
-            raise NotImplementedError(f"uploading a local custom node ({u.get('name')}) isn't supported yet")
-        prepared.append((u, locate_bytes(u)))
-    uploaded = 0
-    for u, path in prepared:
-        blob_id, upload_url = client.create_blob("model", u["filename"], u["sha256"], u["sizeBytes"])
-        client.upload_blob(upload_url, path)
-        section, idx = u["slot"]
-        definition[section][idx]["blobId"] = blob_id
-        uploaded += 1
-    dist_id = client.create_build(name, definition)
-    try:
-        version_id, status_url = client.create_release(dist_id, targets)
-    except Exception as e:
-        # The distribution now exists server-side; carry its id on the error so the
-        # command can surface it (the user can then delete or retry it, not orphan it).
-        e.distribution_id = dist_id
-        raise
-    return {"distributionId": dist_id, "versionId": version_id, "statusUrl": status_url, "uploaded": uploaded}
 
 
 def _human_size(n: int) -> str:
@@ -906,12 +871,13 @@ class ScanRequest:
 
 @dataclass(frozen=True, slots=True)
 class ScanResult:
-    """One local scan. ``definition`` is the builder-ready document; the other
-    two are the summary numbers only the pretty view needs."""
+    """One local scan. ``definition`` is the builder-ready document; the rest is
+    what the payload reports about how that document was produced."""
 
     definition: dict
     environment: dict
     total_bytes: int
+    skipped_symlinks: tuple[dict, ...] = ()
 
 
 def _scan_install(renderer, ctx, request: ScanRequest) -> ScanResult:
@@ -965,17 +931,15 @@ def _scan_install(renderer, ctx, request: ScanRequest) -> ScanResult:
     models = scan_models(paths.models_dir)
 
     nodes: list[dict] = []
+    reported_symlinks: list[dict] = []
     if paths.custom_nodes_dir.is_dir():
         renderer.info(f"Scanning custom nodes in {paths.custom_nodes_dir} …")
+        skipped: list[SkippedSymlink] = []
         try:
-            nodes = scan_custom_nodes(paths.custom_nodes_dir)
+            nodes = scan_custom_nodes(paths.custom_nodes_dir, on_skip=skipped.append)
         except NodePackageError as error:
-            renderer.error(
-                code="build_spec_invalid",
-                message=str(error),
-                details={"path": str(error.path)},
-            )
-            raise typer.Exit(code=1) from error
+            _raise_node_package_error(renderer, error)
+        reported_symlinks = _warn_skipped_symlinks(renderer, skipped)
 
     # baseComfyVersion: explicit flag → version marker at the code root → a
     # running ComfyUI's /system_stats (covers split layouts with no on-disk marker).
@@ -996,6 +960,7 @@ def _scan_install(renderer, ctx, request: ScanRequest) -> ScanResult:
         ),
         environment=provenance["environment"],
         total_bytes=sum(m["sizeBytes"] for m in models),
+        skipped_symlinks=tuple(reported_symlinks),
     )
 
 
@@ -1122,8 +1087,15 @@ def _entry_count(definition: dict, collection: str) -> int:
 
 
 def _scanned_payload(paths: BuildPaths, scan: ScanResult) -> dict:
-    """`init`'s JSON payload for the local-scan source."""
+    """`init`'s JSON payload for the local-scan source.
+
+    ``skipped_symlinks`` mirrors `push`'s key so the two commands report the same
+    omission the same way — this is the payload that mints the ``localDigest``
+    the user commits, so the incompleteness has to be machine-visible here too.
+    """
+    skipped: dict = {"skipped_symlinks": list(scan.skipped_symlinks)} if scan.skipped_symlinks else {}
     return {
+        **skipped,
         "source": "scan",
         "models_dir": str(paths.models_dir),
         "custom_nodes_dir": str(paths.custom_nodes_dir) if paths.custom_nodes_dir.is_dir() else None,
@@ -1428,13 +1400,13 @@ def update_cmd(
     # merge, diff, confirmation, metadata preservation, the canonical write — is
     # the one path, so an imported update can never drift from a rescanned one.
     imported: SnapshotImport | None = None
+    scanned: ScanResult | None = None
     if from_snapshot:
         imported = _import_snapshot(renderer, from_snapshot, comfy_version=comfy_version)
         incoming = imported.definition
     else:
-        incoming = _scan_install(
-            renderer, ctx, ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url)
-        ).definition
+        scanned = _scan_install(renderer, ctx, ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url))
+        incoming = scanned.definition
     definition = merge_definition(stored, incoming)
     diff = diff_definitions(stored, definition)
     summary = summarize_definition_diff(diff)
@@ -1455,6 +1427,10 @@ def update_cmd(
     if imported is not None:
         payload["snapshot"] = str(imported.path)
         payload["advisories"] = imported.advisories
+    # `update` rewrites the committed spec's localDigest exactly as `init` mints
+    # it, so an archive that packaging left incomplete has to be as visible here.
+    if scanned is not None and scanned.skipped_symlinks:
+        payload["skipped_symlinks"] = list(scanned.skipped_symlinks)
 
     # Before the confirmation, not after: --dry-run promises to write nothing,
     # and a prompt whose only outcome is a write it will not perform is noise.
@@ -1470,9 +1446,10 @@ def update_cmd(
         error_code="build_update_needs_confirm",
         ctx=ctx,
     ):
-        if renderer.is_pretty():
-            renderer.info("Aborted.")
-        renderer.emit({**payload, "written": False}, command="build update", changed=False)
+        # Declining needs a prompt, and a prompt needs pretty mode, where `emit`
+        # is a no-op; a machine caller is refused above with
+        # `build_update_needs_confirm` rather than reaching this branch.
+        renderer.info("Aborted.")
         return
 
     # Only `definition` is recomputed: `id`, `name`, `description` and
@@ -1488,30 +1465,6 @@ def update_cmd(
     if renderer.is_pretty():
         renderer.success(f"Updated build spec → {paths.spec_file}")
     renderer.emit({**payload, "written": True}, command="build update", changed=not diff.is_empty)
-
-
-def _load_definition(path: Path) -> dict:
-    """Read a scan definition JSON file. Raises ValueError on any problem so the
-    command can map it to one error envelope."""
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
-        raise ValueError(f"cannot read {path}: {e}") from e
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"{path} is not valid JSON: {e}") from e
-    if not isinstance(data, dict) or "models" not in data:
-        raise ValueError(f"{path} is not a distribution definition (no 'models' key)")
-    # Guard the fields the create path indexes, so a hand-edited definition returns
-    # an error envelope rather than a bare KeyError traceback downstream.
-    for i, m in enumerate(data.get("models") or []):
-        if not isinstance(m, dict) or not m.get("type") or not m.get("filename"):
-            raise ValueError(f"{path}: models[{i}] needs both 'type' and 'filename'")
-    for i, n in enumerate(data.get("customNodes") or []):
-        if not isinstance(n, dict) or not n.get("name"):
-            raise ValueError(f"{path}: customNodes[{i}] needs a 'name'")
-    return data
 
 
 # Builder base URL: the comfy-builder service behind the Developer Platform
@@ -1686,6 +1639,8 @@ def push_cmd(
     try:
         validate_local_build_spec(spec, paths)
         preparation = prepare_push(spec, paths, _sha256_file)
+    except NodePackageError as error:
+        _raise_node_package_error(renderer, error)
     except BuildSpecInvalidError as error:
         renderer.error(code=error.code, message=str(error), details={"path": str(paths.spec_file)})
         raise typer.Exit(code=1) from error
@@ -1701,6 +1656,9 @@ def push_cmd(
         "upload_bytes": sum(upload.size_bytes for upload in uploads),
         "uploaded": 0,
     }
+    reported = _warn_skipped_symlinks(renderer, preparation.skipped_symlinks)
+    if reported:
+        payload["skipped_symlinks"] = reported
     if dry_run:
         renderer.emit(payload, command="build push", changed=False)
         return
@@ -1851,6 +1809,8 @@ def pull_cmd(
     try:
         prepared = prepare_push(spec, paths, _sha256_file)
         pulled = merge_pulled_spec(prepared.spec, remote, target_id)
+    except NodePackageError as error:
+        _raise_node_package_error(renderer, error)
     except BuildSpecInvalidError as error:
         renderer.error(code=error.code, message=str(error), details={"path": str(paths.spec_file)})
         raise typer.Exit(code=1) from error
@@ -1862,15 +1822,25 @@ def pull_cmd(
         "written": False,
         "definition": pulled["definition"],
     }
+    # `pull` carries the local localDigest forward into the spec it writes
+    # (`build_pull._NODE_LOCAL_FIELDS`), so it mints the same committed identity
+    # `init`, `update` and `push` do and owes the same skip report — but only
+    # for the nodes that survive the merge, renumbered into the merged order.
+    reported = _warn_skipped_symlinks(
+        renderer, _relocate_skipped_symlinks(prepared.skipped_symlinks, pulled["definition"])
+    )
+    if reported:
+        payload["skipped_symlinks"] = reported
     if not confirm(
         f"Pull build {target_id} and overwrite the local spec at {paths.spec_file}?",
         yes=yes,
         error_code="build_pull_needs_confirm",
         ctx=ctx,
     ):
-        if renderer.is_pretty():
-            renderer.info("Aborted.")
-        renderer.emit(payload, command="build pull", changed=False)
+        # Declining needs a prompt, and a prompt needs pretty mode, where `emit`
+        # is a no-op; a machine caller is refused above with
+        # `build_pull_needs_confirm` rather than reaching this branch.
+        renderer.info("Aborted.")
         return
 
     _write_spec(renderer, paths.spec_file, pulled)
@@ -1983,121 +1953,6 @@ def status_cmd(
     renderer.emit(payload, command="build status", changed=False)
 
 
-def _create_execute(
-    renderer,
-    definition: dict,
-    *,
-    name: str,
-    builder_url: str | None,
-    models_dir: str | None,
-    repair: bool = False,
-) -> None:
-    """The live --execute path: auth, resolve, upload, create, cut. Maps every
-    failure class to a single error envelope + exit(1)."""
-    import urllib.error
-
-    client = _builder_client(renderer, builder_url)
-
-    # Resolve models to public URLs where a hash-verified match exists. Best
-    # effort: if resolution is unavailable, everything just falls through to
-    # upload rather than failing the whole create.
-    try:
-        n = resolve_models_via_builder(definition.get("models", []), client)
-        if renderer.is_pretty() and n:
-            renderer.info(f"Resolved {n} model(s) to public URLs — skipping their upload")
-    except (urllib.error.URLError, requests.RequestException, KeyError) as e:
-        renderer.warn(f"model resolution unavailable ({e}); all models will be uploaded")
-
-    # The importer is the side of the boundary that knows what the registry
-    # publishes. Best effort: a builder without it leaves the pins to the cut.
-    declared = [n.get("name") for n in definition.get("customNodes", [])]
-    try:
-        imported = client.resolve_snapshot(snapshot_from_definition(definition))
-    except (urllib.error.URLError, requests.RequestException, KeyError, ValueError) as e:
-        renderer.warn(f"the builder could not read the definition's pins ({e}); they go to the cut unchecked")
-    else:
-        imported_report = imported.get("report") or {}
-        for line in report_advisories(imported_report):
-            renderer.warn(line)
-        checked = (imported.get("definition") or {}).get("customNodes")
-        if checked is not None:
-            # A pack it could not vouch for is absent from what it returns, and
-            # an image quietly missing a pack is worse than a refused create.
-            # Matched case-insensitively: the importer derives a pack's folder by
-            # lowercasing, so a name it chose to normalise must not read as a pack
-            # it dropped, which would refuse a create the builder was happy with.
-            def _key(name):
-                return (name or "").strip().casefold()
-
-            kept = {_key(n.get("name")) for n in checked}
-            # A collision is the importer resolving a conflict the cut would refuse
-            # outright, so its definition is the buildable one and stopping would
-            # help nobody. Every other absence means the user asked for something
-            # that does not exist, which only they can fix.
-            colliding = {_key(n) for n in imported_report.get("collidingNodes") or []}
-            missing = [n for n in declared if _key(n) not in kept and _key(n) not in colliding]
-            if missing:
-                renderer.error(
-                    code="build_registry_pin_missing",
-                    message="the builder could not resolve these custom nodes: " + ", ".join(sorted(missing)),
-                    hint="see the advisories above; edit the definition to name a published version, or remove the pack",
-                )
-                raise typer.Exit(code=1)
-            definition["customNodes"] = checked
-
-    plan = plan_create(definition)
-
-    # An absent policy seals as allow-all. Said rather than written on the user's
-    # behalf, which would pin a posture nobody chose if the default ever moves.
-    missing = [k for k in ("modelPolicy", "partnerNodePolicy") if definition.get(k) is None]
-    if missing:
-        renderer.warn(
-            f"no {' or '.join(missing)} set; this version will be sealed permitting everything in those categories"
-        )
-
-    # Locate bytes for private-model uploads: models/<type>/<filename>. Only
-    # needed when something actually uploads.
-    mroot = Path(models_dir).expanduser() if models_dir else None
-
-    def locate_bytes(upload: dict) -> Path:
-        if mroot is None:
-            raise FileNotFoundError("pass --models-dir to locate model bytes for upload")
-        p = mroot / upload["type"] / upload["filename"]
-        if not p.is_file():
-            raise FileNotFoundError(f"model file not found: {p}")
-        return p
-
-    try:
-        result = execute_create(plan, client=client, name=name, locate_bytes=locate_bytes)
-    except NotImplementedError as e:
-        renderer.error(code="build_upload_unavailable", message=str(e))
-        raise typer.Exit(code=1) from e
-    except FileNotFoundError as e:
-        renderer.error(code="build_upload_unavailable", message=str(e))
-        raise typer.Exit(code=1) from e
-    except ValueError as e:
-        renderer.error(
-            code="build_missing_input",
-            message=str(e),
-            details={"distributionId": getattr(e, "distribution_id", None)}
-            if getattr(e, "distribution_id", None)
-            else None,
-        )
-        raise typer.Exit(code=1) from e
-    except (urllib.error.URLError, requests.RequestException, KeyError) as e:
-        # Same handler as the read verbs: surface the builder's own message (and the
-        # limited-beta 403), plus the created distribution's id when a cut failed
-        # after create, so the caller can delete or retry it rather than orphan it.
-        _report_builder_error(renderer, e, dist_id=getattr(e, "distribution_id", None))
-        raise typer.Exit(code=1) from e
-
-    if renderer.is_pretty():
-        renderer.success(f"Created build '{name}'")
-        renderer.print(f"  build:   {result['distributionId']}")
-        renderer.print(f"  version: {result['versionId']}  (uploaded {result['uploaded']} blob(s))")
-        renderer.print(f"  status:  {result['statusUrl']}")
-
-
 def _builder_client(renderer, builder_url: str | None):
     """Build an authed BuilderClient, or emit a not-signed-in envelope + exit(1).
 
@@ -2153,7 +2008,13 @@ def _report_builder_error(renderer, e, *, dist_id: str | None = None) -> None:
 
 def _builder_call(renderer, fn):
     """Run a builder API call, mapping every failure class to one error envelope
-    + exit(1) via _report_builder_error."""
+    + exit(1) via _report_builder_error.
+
+    Never package inside *fn*. ``NodePackageError`` is a ``ValueError``, so the
+    clause below would relabel a packaging failure as ``build_missing_input``
+    and drop the node path from ``details`` — the contract
+    ``_raise_node_package_error`` exists to hold. Package before the call.
+    """
     import urllib.error
 
     from comfy_cli.http import ResponseTooLarge
@@ -2549,20 +2410,18 @@ def delete_cmd(
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
     selected_build_id = _resolve_build_id(renderer, client, _BuildScope(ctx, path, build_id))
-    if not yes:
-        if renderer.is_pretty():
-            if not typer.confirm(f"Delete build {selected_build_id}?"):
-                renderer.info("Aborted.")
-                raise typer.Exit(code=0)
-        else:
-            # No TTY to prompt on (JSON / agent / pipe): refuse rather than block.
-            renderer.error(
-                code="build_delete_needs_confirm",
-                message="refusing to delete without confirmation in non-interactive mode.",
-                hint="pass --yes to confirm the delete",
-                details={"distributionId": selected_build_id},
-            )
-            raise typer.Exit(code=1)
+    if not confirm(
+        f"Delete build {selected_build_id}?",
+        yes=yes,
+        error_code="build_delete_needs_confirm",
+        details={"distributionId": selected_build_id},
+        ctx=ctx,
+    ):
+        # Declining needs a prompt, and a prompt needs pretty mode, where `emit`
+        # is a no-op; a machine caller is refused above with
+        # `build_delete_needs_confirm` rather than reaching this branch.
+        renderer.info("Aborted.")
+        return
     _builder_call(renderer, lambda: client.delete_build(selected_build_id))
     if renderer.is_pretty():
         renderer.success(f"Deleted build {selected_build_id}")

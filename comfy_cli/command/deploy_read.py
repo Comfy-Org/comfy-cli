@@ -12,7 +12,7 @@ import typer
 
 from comfy_cli.builder_api import BuilderAuthError
 from comfy_cli.command.build_paths import BuildSpecNotFoundError, resolve_build_paths
-from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, read_build_spec
+from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, JsonValue, read_build_spec
 from comfy_cli.command.deploy_resolve import (
     BuilderReleaseClient,
     BuildNotPushedError,
@@ -96,22 +96,30 @@ def _logs(renderer: Renderer, client: DeploymentReadClient, deployment_id: str) 
     renderer.emit(logs, command="deploy logs", changed=False)
 
 
+def _event_line(event: JsonValue) -> str:
+    if not isinstance(event, dict):
+        raise server_shape_error("the deployment events response contains a non-object event")
+    message = event.get("message")
+    if message is not None and not isinstance(message, str):
+        raise server_shape_error("a deployment event has an invalid message")
+    suffix = f"  {message}" if message else ""
+    return f"  {required_string(event, 'at')}  {required_string(event, 'status')}{suffix}"
+
+
 def _events(renderer: Renderer, client: DeploymentReadClient, deployment_id: str) -> None:
     result = client.get_deployment_events(deployment_id)
     events = result.get("events")
     if not isinstance(events, list):
         raise server_shape_error("the deployment events response has no events array")
+    # Validated before any branch on output mode: `--json` must reject exactly
+    # the malformed responses pretty mode rejects, not silently forward them.
+    required_string(result, "deploymentId")
+    lines = [_event_line(event) for event in events]
     if renderer.is_pretty():
-        if not events:
+        if not lines:
             renderer.info("No deployment events.")
-        for event in events:
-            if not isinstance(event, dict):
-                raise server_shape_error("the deployment events response contains a non-object event")
-            message = event.get("message")
-            if message is not None and not isinstance(message, str):
-                raise server_shape_error("a deployment event has an invalid message")
-            suffix = f"  {message}" if message else ""
-            renderer.print(f"  {required_string(event, 'at')}  {required_string(event, 'status')}{suffix}")
+        for line in lines:
+            renderer.print(line)
     renderer.emit(result, command="deploy events", changed=False)
 
 

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-from collections.abc import Callable
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
@@ -46,14 +45,6 @@ class FakeControl:
     def get_deployment(self, deployment_id: str) -> JsonObject:
         self.calls.append(f"get:{deployment_id}")
         return copy.deepcopy({**self.row, "id": deployment_id})
-
-
-class FakeToken:
-    def __init__(self) -> None:
-        self.callback: Callable[[], None] | None = None
-
-    def on_cancel(self, callback: Callable[[], None]) -> None:
-        self.callback = callback
 
 
 class FakeAssetClient:
@@ -141,7 +132,6 @@ def install_run(
     monkeypatch.setattr(deploy_run, "_command_clients", lambda: (FakeBuilder(), control))
     monkeypatch.setattr(deploy_run, "DeployAssetClient", lambda *_args, **_kwargs: selected_asset_client)
     monkeypatch.setattr(deploy_run, "DeployJobClient", lambda *_args, **_kwargs: job_client)
-    monkeypatch.setattr(deploy_run.cancellation, "get_token", lambda: FakeToken())
     if watched is not None:
         monkeypatch.setattr(deploy_run, "watch_job", lambda *_args, **_kwargs: watched)
 
@@ -152,7 +142,7 @@ def invoke(
     input_text: str | None = None,
     agentic: bool = True,
 ) -> Result:
-    command = ["--json", "deploy", "run", *args]
+    command = ["--json" if agentic else "--no-json", "deploy", "run", *args]
     if workflow is not None:
         command.extend(["--workflow", str(workflow)])
     return CliRunner(mix_stderr=False).invoke(

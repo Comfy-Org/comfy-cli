@@ -31,8 +31,10 @@ class UpRequest:
     build_id: str
     gpu: str | None
     region: str | None
-    minimum: int
-    maximum: int
+    # ``None`` is "flag omitted", never `--min 0 --max 1`: only omission keeps
+    # the scale a previous `comfy deploy scale` set on a live deployment.
+    minimum: int | None
+    maximum: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +45,11 @@ class UpResult:
     supersedes: list[JsonObject]
     created: bool
     changed: bool
+    # Flags the caller supplied that this reconcile could not apply. Restarting
+    # a stopped deployment is a start, not an edit, so bounds passed alongside
+    # it are dropped — silently discarding explicit input is the same defect as
+    # silently resetting it, so the renderer says so.
+    dropped_bounds: tuple[str, ...] = ()
 
     def payload(self) -> JsonObject:
         supersedes: list[JsonValue] = [*self.supersedes]

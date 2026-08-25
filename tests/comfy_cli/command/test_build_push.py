@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
+import sys
 from pathlib import Path
 
+import jsonschema
 import pytest
 from build_push_support import (
     RecordingBuilder,
@@ -14,7 +18,7 @@ from build_push_support import (
 )
 
 from comfy_cli.command import build
-from comfy_cli.command.build_package import node_content_identity
+from comfy_cli.command.build_package import package_node
 from comfy_cli.command.build_spec import JsonObject
 
 
@@ -38,12 +42,17 @@ def _calls(client: RecordingBuilder, method: str) -> list[JsonObject]:
     return [call for call in client.calls if call["method"] == method]
 
 
+def _schema(name: str) -> JsonObject:
+    path = Path(__file__).parent.parent.parent.parent / "comfy_cli" / "schemas" / name
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def test_dry_run_is_signed_out_and_zero_http(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Given
     path = write_spec(workspace)
     before = path.read_bytes()
     monkeypatch.setattr(build, "_builder_client", lambda *args, **kwargs: pytest.fail("constructed Builder client"))
-    _, node_size = node_content_identity(workspace / "custom_nodes" / "local-node")
+    node_size = package_node(workspace / "custom_nodes" / "local-node").size_bytes
 
     # When
     result = invoke_push(workspace, "--dry-run")
@@ -225,6 +234,89 @@ def test_pin_gate_normalizes_equivalent_repository_identities(workspace: Path, m
     # Then
     assert result.exit_code == 0, result.stderr
     assert len(client.snapshots) == 1
+
+
+def test_a_skipped_symlink_is_named_on_stderr_and_carried_in_the_payload(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    write_spec(workspace)
+    node = workspace / "custom_nodes" / "local-node"
+    (workspace / "shared").mkdir()
+    (workspace / "shared" / "lib.py").write_bytes(b"LIB")
+    os.symlink(workspace / "shared", node / "vendor")
+    monkeypatch.setattr(build, "_builder_client", lambda *args, **kwargs: pytest.fail("constructed Builder client"))
+
+    # When
+    result = invoke_push(workspace, "--dry-run")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = envelope(result)["data"]
+    assert data["skipped_symlinks"] == [
+        {"location": "definition.customNodes[0]", "localPath": "local-node", "member": "vendor"}
+    ]
+    assert "excluded 1 symlink" in result.stderr
+    jsonschema.Draft202012Validator(_schema("build_push.json")).validate(data)
+
+
+def test_a_real_push_keeps_the_skip_report_alongside_its_upload_results(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The dry-run path returns before `payload.update(...)` adds the release
+    keys, so it cannot show that a real push still carries the rows."""
+    # Given
+    write_spec(workspace, build_id="build-1", revision="revision-0")
+    node = workspace / "custom_nodes" / "local-node"
+    (workspace / "shared").mkdir()
+    (workspace / "shared" / "lib.py").write_bytes(b"LIB")
+    os.symlink(workspace / "shared", node / "vendor")
+    client = RecordingBuilder()
+    client.remote_revisions["build-1"] = "revision-0"
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = envelope(result)["data"]
+    assert data["dry_run"] is False
+    assert data["uploaded"] == 2
+    assert data["skipped_symlinks"] == [
+        {"location": "definition.customNodes[0]", "localPath": "local-node", "member": "vendor"}
+    ]
+    jsonschema.Draft202012Validator(_schema("build_push.json")).validate(data)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or getattr(os, "geteuid", lambda: -1)() == 0,
+    reason="needs POSIX mode bits that root ignores",
+)
+def test_an_unreadable_node_file_is_a_spec_error_rather_than_a_traceback(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    write_spec(workspace)
+    secret = workspace / "custom_nodes" / "local-node" / "secret.py"
+    secret.write_bytes(b"SECRET")
+    os.chmod(secret, 0o000)
+    monkeypatch.setattr(build, "_builder_client", lambda *args, **kwargs: pytest.fail("constructed Builder client"))
+
+    # When
+    try:
+        result = invoke_push(workspace, "--dry-run")
+    finally:
+        os.chmod(secret, 0o644)
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert "secret.py could not be read" in error["message"]
+    # The node directory to fix, never the spec YAML: routing this failure
+    # through `BuildSpecInvalidError` used to relabel it with the spec's path.
+    assert error["details"]["path"] == str(workspace / "custom_nodes" / "local-node")
 
 
 def test_update_synchronizes_name_and_description(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:

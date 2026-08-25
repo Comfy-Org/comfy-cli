@@ -276,6 +276,8 @@ def watch_job(
                     sleep_fn(poll_delay)
                     poll_delay = min(poll_delay * 2, MAX_IDLE_INTERVAL_SECONDS)
             case _WatchState.DONE:
+                # Unreachable by the `while state is not DONE` guard above, and kept
+                # only so `assert_never` can prove the match exhausts _WatchState.
                 raise AssertionError("done state must terminate the watch loop")
             case unreachable:
                 assert_never(unreachable)

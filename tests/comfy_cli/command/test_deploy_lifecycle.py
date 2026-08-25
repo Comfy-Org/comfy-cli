@@ -6,11 +6,14 @@ import io
 import json
 import urllib.error
 from email.message import Message
+from pathlib import Path
 
+import jsonschema
 import pytest
 from deploy_up_support import FakeBuilder, deployment
 from typer.testing import CliRunner
 
+from comfy_cli.caller import Caller
 from comfy_cli.cmdline import app
 from comfy_cli.command.build_spec import JsonObject
 from comfy_cli.deploy_api import DeployClient
@@ -94,6 +97,11 @@ def _string(value: JsonObject, key: str) -> str:
     field = value.get(key)
     assert isinstance(field, str)
     return field
+
+
+def _schema(name: str) -> JsonObject:
+    path = Path(__file__).parent.parent.parent.parent / "comfy_cli" / "schemas" / name
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 @pytest.mark.parametrize("command", ["scale", "stop", "start", "delete"])
@@ -222,7 +230,9 @@ def test_delete_without_yes_refuses_agentic_caller(monkeypatch) -> None:
 
     # Then
     assert result.exit_code == 1
-    assert _object(_envelope(result), "error")["code"] == "deploy_delete_needs_confirm"
+    error = _object(_envelope(result), "error")
+    assert error["code"] == "deploy_delete_needs_confirm"
+    assert _object(error, "details")["deploymentId"] == "dep-1"
     assert client.calls == []
 
 
@@ -241,6 +251,67 @@ def test_delete_yes_reports_accepted_teardown_and_retained_record(monkeypatch) -
     assert "teardown" in normalized
     assert "record remains" in normalized
     assert client.calls == [("delete", "dep-1")]
+
+
+def test_delete_declined_at_the_prompt_aborts_without_touching_the_server(monkeypatch) -> None:
+    """A decline is only reachable in pretty mode — `--json` refuses upstream in
+    `interaction.confirm` rather than prompting — so this pins the human path."""
+    # Given
+    client = LifecycleDeploy()
+    _install_client(monkeypatch, client)
+    monkeypatch.setattr(
+        "comfy_cli.interaction.detect_caller",
+        lambda: Caller("user", agentic=False, source_env=None),
+    )
+    monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: False)
+    monkeypatch.setattr("comfy_cli.interaction._ask_confirm", lambda _question: False)
+
+    # When
+    result = _invoke("delete", "--deployment", "dep-1", pretty=True)
+
+    # Then
+    assert result.exit_code == 0
+    assert "Aborted." in result.stdout
+    assert client.calls == []
+
+
+def test_json_delete_never_prompts_and_names_the_deployment_it_refused(monkeypatch) -> None:
+    """`--json` on a TTY used to open questionary on the envelope channel and
+    block; it must refuse with a structured envelope instead."""
+    # Given
+    client = LifecycleDeploy()
+    _install_client(monkeypatch, client)
+    monkeypatch.setattr(
+        "comfy_cli.interaction.detect_caller",
+        lambda: Caller("user", agentic=False, source_env=None),
+    )
+    monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: False)
+    monkeypatch.setattr("comfy_cli.interaction._ask_confirm", lambda _q: pytest.fail("prompted a --json caller"))
+
+    # When
+    result = _invoke("delete", "--deployment", "dep-1")
+
+    # Then
+    assert result.exit_code == 1
+    error = _object(_envelope(result), "error")
+    assert error["code"] == "deploy_delete_needs_confirm"
+    assert _object(error, "details")["deploymentId"] == "dep-1"
+    assert client.calls == []
+
+
+def test_delete_yes_payload_matches_the_published_schema(monkeypatch) -> None:
+    # Given
+    client = LifecycleDeploy()
+    _install_client(monkeypatch, client)
+
+    # When
+    result = _invoke("delete", "--deployment", "dep-1", "-y")
+
+    # Then
+    data = _object(_envelope(result), "data")
+    assert result.exit_code == 0
+    assert data == {"deploymentId": "dep-1", "accepted": True, "recordRetained": True}
+    jsonschema.Draft202012Validator(_schema("deploy_delete.json")).validate(data)
 
 
 def test_start_on_deleted_row_maps_to_deploy_deleted(monkeypatch) -> None:

@@ -17,7 +17,7 @@ from build_push_support import (
 )
 
 from comfy_cli.command import build
-from comfy_cli.command.build_package import build_node_package, node_content_identity
+from comfy_cli.command.build_package import package_node
 from comfy_cli.command.build_spec import JsonObject
 
 
@@ -143,13 +143,13 @@ def test_unchanged_node_reuses_blob_then_changed_node_reuploads(
     write_spec(workspace, models=[], nodes=[local_node()])
     client = RecordingBuilder()
     _install_client(monkeypatch, client)
-    first_package = build_node_package(workspace / "custom_nodes" / "local-node")
+    first_package = package_node(workspace / "custom_nodes" / "local-node").payload
 
     # When
     first = invoke_push(workspace)
     second = invoke_push(workspace)
     (workspace / "custom_nodes" / "local-node" / "nodes.py").write_bytes(b"CHANGED NODE")
-    changed_package = build_node_package(workspace / "custom_nodes" / "local-node")
+    changed_package = package_node(workspace / "custom_nodes" / "local-node").payload
     third = invoke_push(workspace)
 
     # Then
@@ -157,9 +157,8 @@ def test_unchanged_node_reuses_blob_then_changed_node_reuploads(
     assert client.uploaded == [first_package, changed_package]
     assert len(client.blobs) == 2
     node = _entries(_definition(reloaded(workspace)), "customNodes")[0]
-    assert (node["localDigest"], node["localSizeBytes"]) == node_content_identity(
-        workspace / "custom_nodes" / "local-node"
-    )
+    package = package_node(workspace / "custom_nodes" / "local-node")
+    assert (node["localDigest"], node["localSizeBytes"]) == (package.sha256, package.size_bytes)
 
 
 def test_model_change_without_update_refreshes_hash_size_and_only_uploads_once(

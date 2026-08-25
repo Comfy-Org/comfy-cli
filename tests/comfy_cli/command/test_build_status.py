@@ -46,7 +46,7 @@ def _invoke(root: Path, args: list[str], *, token: str | None, agentic: bool):
         [*args, str(root)],
         env={
             "AI_AGENT": "1" if agentic else None,
-            "COMFY_OUTPUT": "json" if agentic else None,
+            "COMFY_OUTPUT": "json" if agentic else "pretty",
             "NO_COLOR": "1",
             "COMFY_BUILDER_TOKEN": token,
             "COMFY_BUILDER_URL": "https://builder.test",
@@ -231,6 +231,29 @@ def test_status_payload_validates_against_its_registered_schema(
     result = invoke_status(workspace)
 
     assert COMMAND_SCHEMAS["comfy build status"] == "build_status"
+    jsonschema.Draft202012Validator(STATUS_SCHEMA).validate(data(result))
+
+
+def test_status_warns_about_a_skipped_symlink_without_touching_its_payload(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`status` rescans, so it sees the omission and says so on stderr — but it
+    persists no digest, so unlike init/update/push/pull it carries no rows in
+    the envelope."""
+    # Given
+    synced_workspace(workspace, monkeypatch)
+    vendored = tmp_path / "shared"
+    vendored.mkdir()
+    (vendored / "lib.py").write_bytes(b"LIB")
+    (workspace / "custom_nodes" / "local-node" / "vendor").symlink_to(vendored)
+
+    # When
+    result = invoke_status(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert "excluded 1 symlink" in result.stderr
+    assert "skipped_symlinks" not in data(result)
     jsonschema.Draft202012Validator(STATUS_SCHEMA).validate(data(result))
 
 

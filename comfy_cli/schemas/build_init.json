@@ -66,6 +66,21 @@
     "count": {"type": "integer"},
     "custom_node_count": {"type": "integer"},
     "total_bytes": {"type": "integer"},
+    "skipped_symlinks": {
+      "description": "Symlinks excluded from a packaged custom node; present only when packaging skipped at least one. `location` points into this payload's definition, `localPath` names the node under custom_nodes/, and `member` is the symlink's path inside that node.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["location", "localPath", "member"],
+        "additionalProperties": false,
+        "properties": {
+          "location": {"type": "string", "minLength": 1},
+          "localPath": {"type": "string", "minLength": 1},
+          "member": {"type": "string", "minLength": 1}
+        }
+      }
+    },
     "definition": {"type": "object"}
   },
   "allOf": [

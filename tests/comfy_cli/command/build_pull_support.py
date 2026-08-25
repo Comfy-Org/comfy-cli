@@ -45,7 +45,10 @@ def invoke_pull(root: Path, *args: str, agentic: bool = True):
         ["build", "pull", *args, str(root)],
         env={
             "AI_AGENT": "1" if agentic else None,
-            "COMFY_OUTPUT": "json" if agentic else None,
+            # A human at a terminal gets pretty output; `None` here would fall
+            # through to the non-tty rule and hand a "TTY human" test a JSON
+            # renderer, which no real interactive caller ever has.
+            "COMFY_OUTPUT": "json" if agentic else "pretty",
             "NO_COLOR": "1",
             "COMFY_BUILDER_TOKEN": None,
             "COMFY_BUILDER_URL": "https://builder.test",

@@ -199,13 +199,13 @@ def write_spec(
     return path
 
 
-def invoke_push(root: Path, *args: str):
+def invoke_push(root: Path, *args: str, agentic: bool = True):
     return CliRunner(mix_stderr=False).invoke(
         cli_app,
         ["build", "push", *args, str(root)],
         env={
-            "AI_AGENT": "1",
-            "COMFY_OUTPUT": "json",
+            "AI_AGENT": "1" if agentic else None,
+            "COMFY_OUTPUT": "json" if agentic else "pretty",
             "NO_COLOR": "1",
             "COMFY_BUILDER_TOKEN": None,
             "COMFY_BUILDER_URL": "https://builder.test",

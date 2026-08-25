@@ -31,6 +31,13 @@ Nothing here reads the environment: the caller, the skip-prompt flag and the
 click context are all injectable, so tests pass a synthetic ``Caller`` instead
 of mutating ``os.environ``.
 
+The one piece of global state this module *does* read is the installed
+``Renderer``, because a prompt and the envelope share stdout and only the
+renderer knows which of the two owns it — see ``_may_prompt``. It is not
+injectable alongside ``caller`` / ``skip_prompt``, so a test that wants a
+prompt has to give the command a pretty renderer (``--no-json``, or
+``COMFY_OUTPUT=pretty``) rather than only a non-agentic ``Caller``.
+
 Tested in ``tests/comfy_cli/test_interaction.py``.
 """
 
@@ -71,8 +78,27 @@ def _skip_prompt_flag() -> bool:
 
 
 def _may_prompt(caller: Caller, skip_prompt: bool) -> bool:
-    """Tenet 1 applies only to a human at a terminal who has not opted out."""
-    return not caller.agentic and not skip_prompt
+    """Tenet 1 applies only to a human at a terminal who has not opted out.
+
+    A JSON caller is never prompted, whatever ``detect_caller`` decided. This is
+    the output-channel rule above applied to the *prompt* half: questionary draws
+    on **stdout**, which in JSON mode carries the ``envelope/1`` contract, so a
+    prompt there writes escape sequences into the machine channel and then blocks
+    forever on an answer no ``--json`` consumer is present to give.
+
+    The check is needed because ``detect_caller`` reads only the environment and
+    stdout's tty-ness, never the *requested* output mode, so a human who types
+    ``comfy --json ...`` at a terminal is ``kind="user"``, ``agentic=False``.
+
+    ``is_pretty()`` is the exact predicate rather than an approximation of one.
+    A non-tty stdout already yields ``kind="pipe", agentic=True``
+    (``caller.detect_caller`` branch 4), so reaching this term at all implies
+    stdout *is* a tty; and with a tty, ``Renderer.resolve`` leaves pretty mode
+    only for an explicit ``--json`` / ``--json-stream`` / ``COMFY_OUTPUT``. So
+    "not pretty" here means precisely "this caller asked for machine output",
+    never merely "stdout happens to be redirected".
+    """
+    return not caller.agentic and not skip_prompt and get_renderer().is_pretty()
 
 
 def _write_command_help(ctx: click.Context | None) -> None:
@@ -231,6 +257,7 @@ def confirm(
     *,
     yes: bool = False,
     error_code: str,
+    details: Mapping[str, object] | None = None,
     caller: Caller | None = None,
     skip_prompt: bool | None = None,
     ctx: click.Context | None = None,
@@ -242,15 +269,21 @@ def confirm(
     ``--yes`` accepts every confirmation, and the global ``--skip-prompt`` says
     run to completion without asking.
 
-    ``--skip-prompt`` is honoured **only for a caller who could have been
-    prompted** — design line 90 scopes it to forcing tenet-3 behaviour *even on
-    a TTY*. It cannot extend to an agent, because the root callback turns it on
-    for every agentic caller automatically (``cmdline.py``, "Agentic callers
-    shouldn't get interactive prompts"). Reading that derived flag as consent
-    would silently accept every destructive confirmation for exactly the
-    callers tenet 2 exists to protect, and would make each command's
-    ``*_needs_confirm`` code unreachable. Suppressing a prompt is not answering
-    it; only ``-y`` answers it.
+    ``--skip-prompt`` is honoured **only for a non-agentic caller** — design
+    line 90 scopes it to forcing tenet-3 behaviour *even on a TTY*. It cannot
+    extend to an agent, because the root callback turns it on for every agentic
+    caller automatically (``cmdline.py``, "Agentic callers shouldn't get
+    interactive prompts"). Reading that derived flag as consent would silently
+    accept every destructive confirmation for exactly the callers tenet 2
+    exists to protect, and would make each command's ``*_needs_confirm`` code
+    unreachable. Suppressing a prompt is not answering it; only ``-y`` answers
+    it.
+
+    Note the hatch is keyed on the *caller*, not on ``_may_prompt``: a human who
+    passes ``--json`` is unpromptable yet still non-agentic, so an explicit
+    ``--skip-prompt`` from them means proceed. That is deliberate — they asked
+    for both machine output and no questions — and it is why the check below is
+    ``not resolved_caller.agentic`` rather than a second ``_may_prompt`` call.
 
     A caller who declines at the prompt gets ``False``, and so does one who
     aborts it — questionary answers ``None`` on Ctrl-C / EOF, and the safe
@@ -262,6 +295,9 @@ def confirm(
         yes: the ``-y`` / ``--yes`` escape hatch.
         error_code: the registered ``error.code`` for the refusal; see
             ``require_option``.
+        details: extra payload keys merged into the refusal, for the identifier
+            the command was about to act on. Without it a refusal names only the
+            question, forcing an agent to parse the subject back out of prose.
         caller: injected for tests; defaults to a live ``detect_caller()``.
         skip_prompt: injected for tests; ``None`` reads the global
             ``--skip-prompt`` flag.
@@ -290,6 +326,13 @@ def confirm(
         error_code=error_code,
         message=f"Confirmation required, but nothing can answer it: {question}",
         hint="pass --yes to confirm without prompting",
-        details={"missing": ["--yes"], "question": question, "caller": resolved_caller.kind},
+        details={
+            # Call-site keys first: the three below are the contract every
+            # consumer reads, so a caller cannot displace them with its payload.
+            **(details or {}),
+            "missing": ["--yes"],
+            "question": question,
+            "caller": resolved_caller.kind,
+        },
         ctx=ctx,
     )

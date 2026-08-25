@@ -25,10 +25,44 @@ history.
 ### Changed
 
 - **Breaking:** `comfy build` is restructured around a local `comfy-build.yaml`
-  spec — `init`, `push`, `pull`, `status`, `validate`, `update`, `delete`, plus
-  `release`, `refs`, and `blob` subgroups. The `comfy distribution` alias and the
-  `scan` / `create` / `version` / `artifact download` / `from-snapshot` commands
-  it fronted are removed.
+  spec — `init`, `push`, `pull`, `status`, `ls`, `show`, `validate`, `update`,
+  `delete`, plus `release`, `refs`, and `blob` subgroups. The `comfy distribution`
+  alias and the `scan` / `create` / `version` / `artifact download` /
+  `from-snapshot` commands it fronted are removed.
+- **Breaking:** the read verbs are renamed, with no aliases left behind:
+  `comfy build list` → `comfy build ls`, `comfy build get` → `comfy build show`,
+  and `comfy build blob list` → `comfy build blob ls`. The reference lookups
+  (`resolve`, `base-images`, `build-targets`, `model-dirs`) move under
+  `comfy build refs`, and `comfy build blob upload` is removed — `comfy build push`
+  uploads local models and nodes from the spec.
+- **Breaking:** the `build_upload_unavailable` error code is retired. It was only
+  ever raised by the removed `create` path, so nothing emits it and it no longer
+  appears in `comfy discover`. This is the one exception to the append-only rule
+  in `comfy_cli/schemas/error_codes.md`: the code is retired, never reused.
+- **Breaking:** a `--json` run of `comfy build` or `comfy deploy` is never
+  prompted, even from a terminal. A confirmation or missing required option now
+  returns the matching refusal envelope — `*_needs_confirm`, `*_missing_input`,
+  or `build_id_unknown` where a Build id could not be resolved — and exits 1,
+  where it previously opened a TUI prompt on the same stream the envelope is
+  written to. Pass `--yes` or the option itself to proceed non-interactively.
+  Other command families still prompt under `--json`; they do not route through
+  `comfy_cli.interaction`, and `--skip-prompt` remains the way to suppress them.
+- **Breaking:** the global `--skip-prompt` now applies to `comfy build delete`,
+  which previously ignored it. Combined with a non-agentic caller it accepts the
+  delete confirmation, matching `build pull` and `build update`.
+- **Breaking:** packaging a local custom node is all-or-nothing. Anything under
+  `custom_nodes/<node>/` that cannot be read now fails `init` / `update` /
+  `status` / `push` / `pull` with one `build_spec_invalid` envelope naming the
+  node directory. Previously the two failure modes diverged and neither was
+  usable: an unreadable **directory** was silently dropped from the archive
+  whose digest becomes the node's committed `localDigest`, while an unreadable
+  **file** escaped as an uncaught `PermissionError` — a traceback with no
+  envelope at all, even under `--json`.
+- Symlinks inside a custom node are still excluded from its archive, but are no
+  longer excluded in silence: `init`, `update`, `push` and `pull` name them on
+  stderr and carry them in a `skipped_symlinks` payload key, including on a
+  `--dry-run` that writes nothing. `status` rescans but publishes no definition
+  to point into, so for it the stderr warning is the whole report.
 
 ## [1.16.0] - 2026-08-10
 

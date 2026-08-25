@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import stat
+import sys
 import zipfile
 from pathlib import Path
 
 import pytest
 
-from comfy_cli.command.build_package import build_node_package, node_content_identity
+from comfy_cli.command.build_package import NodePackageError, package_node
+
+posix_permissions = pytest.mark.skipif(
+    sys.platform == "win32" or getattr(os, "geteuid", lambda: -1)() == 0,
+    reason="needs POSIX mode bits that root ignores",
+)
 
 
 def _node_tree(root: Path) -> Path:
@@ -24,8 +31,8 @@ def test_package_is_byte_identical_across_repeated_builds(tmp_path: Path) -> Non
     node = _node_tree(tmp_path)
 
     # When
-    first = build_node_package(node)
-    second = build_node_package(node)
+    first = package_node(node).payload
+    second = package_node(node).payload
 
     # Then
     assert first == second
@@ -37,8 +44,8 @@ def test_content_identity_is_independent_of_absolute_root(tmp_path: Path) -> Non
     second_node = _node_tree(tmp_path / "different" / "depth")
 
     # When
-    first = node_content_identity(first_node)
-    second = node_content_identity(second_node)
+    first = package_node(first_node).sha256
+    second = package_node(second_node).sha256
 
     # Then
     assert first == second
@@ -47,11 +54,11 @@ def test_content_identity_is_independent_of_absolute_root(tmp_path: Path) -> Non
 def test_content_identity_changes_when_file_content_changes(tmp_path: Path) -> None:
     # Given
     node = _node_tree(tmp_path)
-    before = node_content_identity(node)
+    before = package_node(node).sha256
 
     # When
     (node / "nested" / "data.txt").write_bytes(b"CHANGED")
-    after = node_content_identity(node)
+    after = package_node(node).sha256
 
     # Then
     assert after != before
@@ -70,7 +77,7 @@ def test_package_has_exact_members_and_fixed_metadata(tmp_path: Path) -> None:
     os.symlink(node / "nested", node / "linked-dir")
 
     # When
-    archive = build_node_package(node)
+    archive = package_node(node).payload
 
     # Then
     with zipfile.ZipFile(io.BytesIO(archive)) as package:
@@ -90,4 +97,66 @@ def test_symlinked_node_root_is_rejected(tmp_path: Path) -> None:
 
     # When / Then
     with pytest.raises(ValueError, match="node root.*symlink"):
-        build_node_package(linked_root)
+        package_node(linked_root)
+
+
+def test_identity_describes_the_payload_it_is_returned_with(tmp_path: Path) -> None:
+    # Given
+    node = _node_tree(tmp_path)
+
+    # When
+    package = package_node(node)
+
+    # Then
+    assert package.sha256 == hashlib.sha256(package.payload).hexdigest()
+    assert package.size_bytes == len(package.payload)
+
+
+def test_skipped_symlinks_are_reported_rather_than_dropped_in_silence(tmp_path: Path) -> None:
+    # Given
+    node = _node_tree(tmp_path)
+    (node / "target.txt").write_text("target", encoding="utf-8")
+    os.symlink(node / "target.txt", node / "linked.txt")
+    os.symlink(node / "nested", node / "vendor")
+
+    # When
+    package = package_node(node)
+
+    # Then
+    assert package.skipped_symlinks == ("linked.txt", "vendor")
+    with zipfile.ZipFile(io.BytesIO(package.payload)) as archive:
+        assert "linked.txt" not in archive.namelist()
+        assert "vendor/data.txt" not in archive.namelist()
+
+
+@posix_permissions
+def test_an_untraversable_directory_aborts_instead_of_shrinking_the_archive(tmp_path: Path) -> None:
+    # Given
+    node = _node_tree(tmp_path)
+    vendor = node / "vendor"
+    vendor.mkdir()
+    (vendor / "lib.py").write_bytes(b"LIB")
+    os.chmod(vendor, 0o000)
+
+    # When / Then
+    try:
+        with pytest.raises(NodePackageError, match="vendor could not be read"):
+            package_node(node)
+    finally:
+        os.chmod(vendor, 0o755)
+
+
+@posix_permissions
+def test_an_unreadable_file_raises_the_packaging_error_rather_than_escaping(tmp_path: Path) -> None:
+    # Given
+    node = _node_tree(tmp_path)
+    secret = node / "nested" / "secret.py"
+    secret.write_bytes(b"SECRET")
+    os.chmod(secret, 0o000)
+
+    # When / Then
+    try:
+        with pytest.raises(NodePackageError, match="nested/secret.py could not be read"):
+            package_node(node)
+    finally:
+        os.chmod(secret, 0o644)

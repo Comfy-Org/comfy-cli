@@ -69,11 +69,16 @@ def client(monkeypatch: pytest.MonkeyPatch) -> ReleaseBuilder:
     return recorder
 
 
-def invoke_release(*args: str):
+def invoke_release(*args: str, agentic: bool = True):
     return CliRunner(mix_stderr=False).invoke(
         cli_app,
         ["build", "release", *args],
-        env={"AI_AGENT": "1", "COMFY_OUTPUT": "json", "NO_COLOR": "1", "COMFY_BUILDER_TOKEN": None},
+        env={
+            "AI_AGENT": "1" if agentic else None,
+            "COMFY_OUTPUT": "json" if agentic else "pretty",
+            "NO_COLOR": "1",
+            "COMFY_BUILDER_TOKEN": None,
+        },
     )
 
 
@@ -188,7 +193,7 @@ def test_create_without_target_prompts_human_from_catalog(
     monkeypatch.setattr("comfy_cli.ui.prompt_multi_select", lambda prompt, choices: ["linux/nvidia"])
 
     # When
-    result = invoke_release("create")
+    result = invoke_release("create", agentic=False)
 
     # Then
     assert result.exit_code == 0, result.stderr

@@ -1088,11 +1088,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "run `comfy cloud login` first",
     ),
     ErrorCode(
-        "build_upload_unavailable",
-        "A legacy build upload path could not locate the private bytes it was asked to transfer.",
-        "fix the local path named in the error, then retry",
-    ),
-    ErrorCode(
         "build_builder_error",
         "A `comfy build` builder call got an error from the builder API (HTTP error, network failure, or "
         "an unexpected response shape). `details`/message carry the underlying error.",
@@ -1114,13 +1109,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "build_delete_needs_confirm",
         "`comfy build delete` was run without `--yes` in a non-interactive context (JSON output, an agent, "
-        "or a pipe) where there is no TTY to confirm on. Delete is refused rather than blocking on a prompt.",
+        "or a pipe) where nothing can answer a confirmation. Delete is refused rather than blocking on a "
+        "prompt. `details.distributionId` names the Build, and `details.question` carries the confirmation.",
         "pass `--yes` to confirm the delete when running non-interactively",
     ),
     ErrorCode(
         "build_update_needs_confirm",
         "`comfy build update` was run without `--yes` in a non-interactive context (JSON output, an agent, "
-        "or a pipe) where there is no TTY to confirm on. The rescan would replace the spec's `definition` "
+        "or a pipe) where nothing can answer a confirmation. The rescan would replace the spec's `definition` "
         "with what the installation holds now, so the rewrite is refused rather than blocking on a prompt. "
         "`details.question` carries the confirmation nothing could answer.",
         "pass `--yes` to accept the rescan, or `--dry-run` to read the diff without writing anything",
@@ -1234,8 +1230,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "deploy_delete_needs_confirm",
         "`comfy deploy delete` was run without `--yes` in a non-interactive context. The irreversible "
-        "teardown and soft-delete are refused without explicit consent; `details.question` carries the "
-        "confirmation nothing could answer.",
+        "teardown and soft-delete are refused without explicit consent; `details.deploymentId` names the "
+        "deployment and `details.question` carries the confirmation nothing could answer.",
         "pass `--yes` to confirm the deployment teardown and soft-delete",
     ),
     ErrorCode(

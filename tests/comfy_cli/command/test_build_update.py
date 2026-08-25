@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -268,6 +269,78 @@ def test_the_emitted_payload_validates_against_its_registered_schema(install: Pa
     assert COMMAND_SCHEMAS["comfy build update"] == "build_update"
     schema = json.loads((SCHEMAS_DIR / "build_update.json").read_text(encoding="utf-8"))
     jsonschema.Draft202012Validator(schema).validate(envelope["data"])
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32" or getattr(os, "geteuid", lambda: -1)() == 0,
+    reason="needs POSIX mode bits that root ignores",
+)
+def test_a_scan_packaging_failure_names_the_node_directory_to_fix(install: Path, spec_file: Path) -> None:
+    """`push`/`pull` report this same failure through a different handler, so the
+    path they name has to agree — a spec YAML here would send the user to the
+    wrong file."""
+    # Given
+    secret = install / "custom_nodes" / "local-node" / "secret.py"
+    secret.write_bytes(b"SECRET")
+    os.chmod(secret, 0o000)
+
+    # When
+    try:
+        result = _run(CliRunner(), "update", install, "-y")
+    finally:
+        os.chmod(secret, 0o644)
+
+    # Then
+    error = _envelope(result)["error"]
+    assert result.exit_code == 1
+    assert error["code"] == "build_spec_invalid"
+    assert error["details"]["path"] == str(install / "custom_nodes" / "local-node")
+
+
+@pytest.mark.parametrize("name", ["build_init.json", "build_update.json", "build_pull.json", "build_push.json"])
+def test_every_packaging_schema_declares_skipped_symlinks(name: str) -> None:
+    """`build_init`/`build_update` are `additionalProperties: true`, so validating
+    a payload that carries the key cannot detect its declaration going missing.
+    Assert the declaration itself, and that all four agree on its shape."""
+    # Given / When
+    declared = json.loads((SCHEMAS_DIR / name).read_text(encoding="utf-8"))["properties"].get("skipped_symlinks")
+
+    # Then
+    assert declared is not None, f"{name} emits skipped_symlinks but does not declare it"
+    assert declared["items"]["required"] == ["location", "localPath", "member"]
+    assert declared["items"]["additionalProperties"] is False
+    assert declared["type"] == "array"
+
+
+def test_init_and_update_report_a_skipped_symlink_identically(install: Path, tmp_path: Path) -> None:
+    """Both commands mint the ``localDigest`` the user commits, so an archive
+    packaging left incomplete has to be machine-visible from either one, in the
+    same shape — `build push` emits the same rows for the same node."""
+    # Given
+    vendored = tmp_path / "shared"
+    vendored.mkdir()
+    (vendored / "lib.py").write_bytes(b"LIB")
+    (install / "custom_nodes" / "local-node" / "vendor").symlink_to(vendored)
+    expected = [{"location": "definition.customNodes[0]", "localPath": "local-node", "member": "vendor"}]
+
+    # When
+    init = _envelope(_run(CliRunner(), "init", install, "--name", "Foo", "--force"))
+    update = _envelope(_run(CliRunner(), "update", install, "-y"))
+
+    # Then
+    assert init["data"]["skipped_symlinks"] == expected
+    assert update["data"]["skipped_symlinks"] == expected
+    for name, envelope in (("build_init.json", init), ("build_update.json", update)):
+        schema = json.loads((SCHEMAS_DIR / name).read_text(encoding="utf-8"))
+        jsonschema.Draft202012Validator(schema).validate(envelope["data"])
+
+
+def test_a_clean_install_carries_no_skipped_symlinks_key(install: Path, spec_file: Path) -> None:
+    # Given / When
+    envelope = _envelope(_run(CliRunner(), "update", install, "-y"))
+
+    # Then
+    assert "skipped_symlinks" not in envelope["data"]
 
 
 def test_update_never_constructs_a_builder_client(install: Path, spec_file: Path, monkeypatch) -> None:
