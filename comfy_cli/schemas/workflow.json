@@ -40,7 +40,7 @@
     "node_count": { "type": "integer", "minimum": 0, "description": "print: nodes that got a rendered line (top level + subgraph interiors)." },
     "skipped": {
       "type": "array",
-      "description": "print: nodes not rendered as their own line (UI-only splicing nodes; notes are rendered as comments, not skipped).",
+      "description": "print: nodes not rendered as their own line. UI-only splicing nodes (reason \"spliced\", or \"inlined into <id>.<input>\" for a PrimitiveNode); notes, which are rendered as `#`-comments in `source` AND listed here with reason \"note\".",
       "items": {
         "type": "object",
         "required": ["id", "type", "reason"],

@@ -156,6 +156,12 @@ def test_print_unsupported_lists_reasons(tmp_path, capsys):
     ]
 
 
+def test_print_rejects_unknown_format(capsys):
+    env = _run(["print", str(SD15), "--input", str(SD15_OI), "--format", "json"], capsys, expect_ok=False)
+    assert env["error"]["code"] == "workflow_print_unsupported"
+    assert env["error"]["details"]["reasons"] == ["format 'json'"]
+
+
 def test_print_payload_validates_against_schema(capsys):
     import jsonschema
 

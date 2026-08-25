@@ -622,9 +622,13 @@ def print_cmd(
     ] = None,
     host: Annotated[str | None, typer.Option("--host", show_default=False)] = None,
     port: Annotated[int | None, typer.Option("--port", show_default=False)] = None,
-    where: Annotated[str | None, typer.Option("--where", help="Routing for the catalog fetch: local or cloud.")] = None,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="Routing for the catalog fetch: local or cloud."),
+    ] = None,
     select: Annotated[
-        str | None, typer.Option("--select", help="Project the payload (see `comfy workflow slots --select`).")
+        str | None,
+        typer.Option("--select", show_default=False, help="Project the payload (see `comfy workflow slots --select`)."),
     ] = None,
 ):
     """Read-only. Reuses the catalog for widget names; refuses (with every reason) anything it cannot print faithfully."""
@@ -639,7 +643,18 @@ def print_cmd(
         )
         raise typer.Exit(code=1)
     p, workflow = _load_workflow_or_fail(renderer, file)
-    graph = _get_graph(input_path, host, port, where=where)
+    # Mirrors slots_cmd: a stale-cache fallback is a fact about the rendered
+    # widget names, so it has to reach the caller. `print`'s `warnings` is a
+    # list of plain strings (slots' is a list of objects), so it is reported
+    # as one, appended to whatever the printer itself warned about.
+    _stale: dict = {}
+    graph = _get_graph(
+        input_path,
+        host,
+        port,
+        on_stale=lambda key, err: _stale.update(source=key, reason=err),
+        where=where,
+    )
     try:
         res = render_py(workflow, graph)
     except PrintUnsupported as e:
@@ -649,6 +664,9 @@ def print_cmd(
             details={"reasons": e.reasons, "path": str(p)},
         )
         raise typer.Exit(code=1) from e
+    warnings = list(res.warnings)
+    if _stale:
+        warnings.append(f"object_info_stale: {_stale['source']}: {_stale['reason']}")
     payload = {
         "workflow": str(p),
         "format": "py",
@@ -656,7 +674,7 @@ def print_cmd(
         "bindings": res.bindings,
         "node_count": res.node_count,
         "skipped": res.skipped,
-        "warnings": res.warnings,
+        "warnings": warnings,
     }
     if select is not None:
         from comfy_cli.selector import emit_selected
@@ -664,7 +682,7 @@ def print_cmd(
         return emit_selected(renderer, payload, select, command="workflow print")
     if renderer.is_pretty():
         typer.echo(_strip_terminal_controls(res.source), nl=False)
-        for w in res.warnings:
+        for w in warnings:
             typer.echo(f"warning: {_strip_terminal_controls(w)}", err=True)
     renderer.emit(payload, command="workflow print")
 

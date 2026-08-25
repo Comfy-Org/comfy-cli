@@ -398,7 +398,12 @@ def test_subgraph_instance_and_definition(sd15_graph):
     assert '**{"images.image0":' in inst
     # definition block printed once, names its instances and the address form
     assert "# subgraph d33c1791-dfd2-4102-8540-aa63e4434cd2" in src
+    # item 6: the header states BOTH address forms — inner-node ids and the
+    # (differently shaped) keys the `bindings` map uses.
     assert "instances: 10" in src and "address inner nodes as 10/<id>" in src
+    header = next(ln for ln in src.splitlines() if ln.startswith("# subgraph d33c1791"))
+    assert header.endswith("(address inner nodes as 10/<id>; bindings keyed 10/<name>)")
+    assert any(k.startswith("10/") and res.bindings[k].startswith("10/") for k in res.bindings)
     assert "IN.value" in src and "OUT.IMAGE = " in src
     # inner nodes are addressable
     assert any(v.startswith("10/") or "/" in v for v in res.bindings.values())
@@ -418,8 +423,10 @@ def test_subgraph_instance_and_definition(sd15_graph):
     # da09b826 ("Batch Prompt Iterator") is instantiated only by inner node 3
     # of instance 10 — its header must show the fully qualified address, and
     # inner-node addressing follows the same qualified path.
-    assert '# subgraph da09b826-d678-40e0-a4e4-5f2178043ab6 "Batch Prompt Iterator" — instances: 10/3' in src
-    assert "address inner nodes as 10/3/<id>" in src
+    assert (
+        '# subgraph da09b826-d678-40e0-a4e4-5f2178043ab6 "Batch Prompt Iterator" — instances: 10/3 '
+        "(address inner nodes as 10/3/<id>; bindings keyed 10/3/<name>)" in src
+    )
     assert any(v.startswith("10/3/") for v in res.bindings.values())
     # bracket/binding for that nested instance (no title of its own) fall back
     # to the definition's own name, not the bare inner id.
@@ -609,3 +616,243 @@ def test_definition_lists_every_instance_address(sd15_graph):
     header = next(ln for ln in res.source.splitlines() if ln.startswith(f"# subgraph {inner_uuid}"))
     assert "100/5" in header
     assert "200" in header
+
+
+# ---------------------------------------------------------------------------
+# Final review wave: malformed input, dotted widget names, nested subgraph
+# instance addressing, catalog defaults, bypass markers.
+# ---------------------------------------------------------------------------
+
+SEEDREAM_GOLDEN_LINE = (
+    'byte_dance_seedream_node_v2 = ByteDanceSeedreamNodeV2(prompt="A sci-fi cyberpunk graphic design poster. '
+    "In the center, a striking portrait of a female android with glossy, liquid chrome skin. A vivid swirling "
+    "streak of neon orange, yellow, and pink liquid paint brush stroke horizontally covers her eyes, soft "
+    "smudged color overlay with smooth flowing pigment texture, no cracks or broken facial surfaces. The "
+    "background is a dark, textured charcoal gray. Behind the central figure, large bold white futuristic "
+    'typography reads \\"Seedream 5.0 Pro\\" with a subtle digital glitch and halftone texture. The composition '
+    "is decorated with technical HUD elements, thin white lines, geometric wireframe diagrams, barcodes, and "
+    "small sci-fi text boxes. Semi-transparent glassy spheres with grid textures overlap the foreground, "
+    'creating depth. The overall mood is high-tech, dystopian, and avant-garde.", model="seedream 5.0 pro", '
+    'seed=0, control_after_generate="randomize", watermark=False, thinking=True, '
+    '**{"model.images.image_1": None, "model.size_preset": "(1K) 1024x1024 (1:1)", "model.width": 2048, '
+    '"model.height": 2048})  # 1'
+)
+
+
+def test_seedream_dynamic_combo_golden():
+    # A dynamic combo expands into DOTTED sub-widget names ("model.size_preset")
+    # that are not Python identifiers: they must land in the trailing **{...},
+    # not be pasted in as `model.size_preset=...` (which does not parse).
+    import ast
+
+    wf = json.loads((FIXTURES / "seedream_5_0_pro_t2i_ui.json").read_text())
+    graph = Graph.from_object_info(json.loads((FIXTURES / "object_info_bytedance_seedream_v2.json").read_text()))
+    res = render_py(wf, graph)
+    ast.parse(res.source)  # the whole render is syntactically valid Python
+
+    line = next(ln for ln in res.source.splitlines() if ln.endswith("  # 1"))
+    assert line == SEEDREAM_GOLDEN_LINE
+    kwargs = line.split("**{", 1)[1]
+    for frag in (
+        '"model.size_preset": "(1K) 1024x1024 (1:1)"',
+        '"model.width": 2048',
+        '"model.height": 2048',
+    ):
+        assert frag in kwargs
+    assert "model.size_preset=" not in line and "model.width=" not in line
+    # R11: `thinking` has no serialized widget value; the catalog default prints.
+    assert "thinking=True" in line
+
+
+def test_non_identifier_proxy_names_use_subscripts(sd15_graph):
+    uuid = "22222222-3333-4444-5555-666666666666"
+    sg_def = {
+        "id": uuid,
+        "name": "Odd Names",
+        "inputs": [{"name": "my value", "type": "LATENT"}],
+        "outputs": [{"name": "final image", "type": "IMAGE"}],
+        "nodes": [
+            _node(
+                7,
+                "VAEDecode",
+                inputs=[
+                    {"name": "samples", "type": "LATENT", "link": 1},
+                    {"name": "vae", "type": "VAE", "link": None},
+                ],
+                outputs=[{"name": "IMAGE", "type": "IMAGE"}],
+            )
+        ],
+        "links": [
+            {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0},
+            {"id": 2, "origin_id": 7, "origin_slot": 0, "target_id": -20, "target_slot": 0},
+        ],
+    }
+    wf = {
+        "nodes": [_node(10, uuid, inputs=[{"name": "my value", "type": "LATENT", "link": None}])],
+        "links": [],
+        "definitions": {"subgraphs": [sg_def]},
+        "version": 0.4,
+    }
+    src = render_py(wf, sd15_graph).source
+    assert 'vae_decode = VAEDecode(samples=IN["my value"], vae=None)  # 7' in src
+    assert 'OUT["final image"] = vae_decode' in src
+    assert "IN.my value" not in src and "OUT.final image" not in src
+
+
+@pytest.mark.parametrize("slot", [None, "0"])
+def test_non_integer_link_slot_is_refused_not_raised(sd15_graph, slot):
+    wf = _mini(
+        [
+            _node(
+                1, "EmptyLatentImage", outputs=[{"name": "LATENT", "type": "LATENT", "links": [7]}], widgets=[1, 1, 1]
+            ),
+            _node(
+                2,
+                "VAEDecode",
+                inputs=[{"name": "samples", "type": "LATENT", "link": 7}, {"name": "vae", "type": "VAE", "link": None}],
+            ),
+        ],
+        [[7, 1, slot, 2, 0, "LATENT"]],
+    )
+    with pytest.raises(PrintUnsupported) as e:
+        render_py(wf, sd15_graph)
+    assert e.value.reasons == ["link 7 has a non-integer slot"]
+
+
+def test_malformed_input_entry_is_skipped_with_warning(sd15_graph):
+    n = _node(2, "VAEDecode", inputs=[{"name": "samples", "type": "LATENT", "link": None}])
+    n["inputs"].extend(["junk", 7])
+    res = render_py(_mini([n], []), sd15_graph)
+    assert "vae_decode = VAEDecode(samples=None)  # 2" in res.source
+    assert "node 2: ignoring malformed input entry 'junk'" in res.warnings
+    assert "node 2: ignoring malformed input entry 7" in res.warnings
+
+
+def test_input_without_name_key_does_not_raise(sd15_graph):
+    wf = _mini([_node(2, "VAEDecode", inputs=[{"type": "LATENT", "link": None}])], [])
+    res = render_py(wf, sd15_graph)
+    assert 'vae_decode = VAEDecode(**{"": None})  # 2' in res.source
+    assert res.warnings == []
+
+
+def test_duplicate_node_id_is_refused(sd15_graph):
+    wf = _mini(
+        [
+            _node(1, "EmptyLatentImage", widgets=[1, 1, 1]),
+            _node(1, "VAEDecode", inputs=[{"name": "samples", "type": "LATENT", "link": None}]),
+        ],
+        [],
+    )
+    with pytest.raises(PrintUnsupported) as e:
+        render_py(wf, sd15_graph)
+    assert e.value.reasons == ["duplicate node id 1"]
+
+
+def test_nested_definition_expands_through_every_ancestor_instance(sd15_graph):
+    # Outer is instantiated TWICE (100, 200); its interior — rendered once,
+    # under the first instance — holds Inner at inner id 5. Inner therefore
+    # really exists at 100/5 AND 200/5, and its header must say so.
+    inner_uuid = "33333333-4444-5555-6666-777777777777"
+    outer_uuid = "44444444-5555-6666-7777-888888888888"
+    outer_def = {
+        "id": outer_uuid,
+        "name": "Outer",
+        "nodes": [_node(5, inner_uuid)],
+        "links": [],
+        "inputs": [],
+        "outputs": [],
+    }
+    inner_def = {"id": inner_uuid, "name": "Inner", "nodes": [], "links": [], "inputs": [], "outputs": []}
+    wf = {
+        "nodes": [_node(100, outer_uuid), _node(200, outer_uuid)],
+        "links": [],
+        "definitions": {"subgraphs": [outer_def, inner_def]},
+        "version": 0.4,
+    }
+    res = render_py(wf, sd15_graph)
+    header = next(ln for ln in res.source.splitlines() if ln.strip().startswith(f"# subgraph {inner_uuid}"))
+    assert "instances: 100/5, 200/5" in header
+    # bindings may still key off the first instance only
+    assert "address inner nodes as 100/5/<id>; bindings keyed 100/5/<name>" in header
+
+
+def test_bypassed_source_is_marked_on_the_consumer(sd15_graph):
+    wf = _mini(
+        [
+            _node(
+                1,
+                "EmptyLatentImage",
+                outputs=[{"name": "LATENT", "type": "LATENT", "links": [1]}],
+                widgets=[64, 64, 1],
+                mode=4,
+            ),
+            _node(
+                2,
+                "VAEDecode",
+                inputs=[{"name": "samples", "type": "LATENT", "link": 1}, {"name": "vae", "type": "VAE", "link": None}],
+            ),
+        ],
+        [[1, 1, 0, 2, 0, "LATENT"]],
+    )
+    src = render_py(wf, sd15_graph).source
+    # the link still prints as wired; the marker is the only difference
+    assert "vae_decode = VAEDecode(samples=empty_latent_image, vae=None)  # 2 samples via bypassed 1" in src
+
+
+def test_bypass_marker_does_not_touch_the_sd15_golden(sd15_workflow, sd15_graph):
+    res = render_py(sd15_workflow, sd15_graph)
+    body = "\n".join(ln for ln in res.source.splitlines() if not ln.startswith("# note")) + "\n"
+    assert body == SD15_GOLDEN
+    assert "via bypassed" not in res.source
+
+
+def test_definition_output_warning_is_not_double_qualified(sd15_graph):
+    # A GetNode with no SetNode wired straight to the definition's output: the
+    # warning names the OUT pseudo-target, and must not repeat the instance id.
+    uuid = "55555555-6666-7777-8888-999999999999"
+    sg_def = {
+        "id": uuid,
+        "name": "Dangling Out",
+        "inputs": [],
+        "outputs": [{"name": "IMAGE", "type": "IMAGE"}],
+        "nodes": [_node(9, "GetNode", outputs=[{"name": "IMAGE", "type": "IMAGE"}], widgets=["nope"])],
+        "links": [{"id": 1, "origin_id": 9, "origin_slot": 0, "target_id": -20, "target_slot": 0}],
+    }
+    wf = {
+        "nodes": [_node(11, uuid)],
+        "links": [],
+        "definitions": {"subgraphs": [sg_def]},
+        "version": 0.4,
+    }
+    res = render_py(wf, sd15_graph)
+    assert "OUT.IMAGE = None" in res.source
+    assert "node 11/OUT: input 'IMAGE' reads GetNode 11/9 variable 'nope' that no SetNode publishes" in res.warnings
+    assert not any("11/11" in w for w in res.warnings)
+
+
+def test_reroute_cycle_warns_instead_of_silently_printing_none(sd15_graph):
+    wf = _mini(
+        [
+            _node(
+                5,
+                "Reroute",
+                inputs=[{"name": "", "type": "*", "link": 1}],
+                outputs=[{"name": "", "type": "LATENT", "links": [3]}],
+            ),
+            _node(
+                6,
+                "Reroute",
+                inputs=[{"name": "", "type": "*", "link": 2}],
+                outputs=[{"name": "", "type": "LATENT", "links": [1]}],
+            ),
+            _node(
+                2,
+                "VAEDecode",
+                inputs=[{"name": "samples", "type": "LATENT", "link": 3}, {"name": "vae", "type": "VAE", "link": None}],
+            ),
+        ],
+        [[1, 6, 0, 5, 0, "LATENT"], [2, 5, 0, 6, 0, "LATENT"], [3, 5, 0, 2, 0, "LATENT"]],
+    )
+    res = render_py(wf, sd15_graph)
+    assert "vae_decode = VAEDecode(samples=None, vae=None)  # 2" in res.source
+    assert "node 2: input 'samples' unresolved through a reroute/getnode cycle" in res.warnings
