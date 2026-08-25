@@ -545,6 +545,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "in ComfyUI, use the regular save (File > Save Workflow) — the API export is for `comfy run`, not for editing",
     ),
     ErrorCode(
+        "workflow_print_unsupported",
+        "`comfy workflow print` refused: the workflow contains something it cannot render faithfully "
+        "(legacy group node, dangling link, missing subgraph definition, link cycle, unknown --format). "
+        "`details.reasons` lists every reason.",
+        "fix the listed reasons, or read the graph with `comfy workflow slots` / `comfy workflow ls-nodes`",
+    ),
+    ErrorCode(
         "workflow_slot_invalid",
         "A slot override failed validation (bad shape, unknown address, etc.).",
         "see `details` — addresses follow `<instance_id>.<input_name>`",

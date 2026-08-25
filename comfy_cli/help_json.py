@@ -58,6 +58,10 @@ HELP_EXAMPLES: dict[str, list[str]] = {
     ],
     "comfy node": ["comfy node show installed"],
     "comfy manager": ["comfy manager disable-gui"],
+    "comfy workflow print": [
+        "comfy workflow print wf.json --input object_info.json",
+        "comfy --json workflow print wf.json --select bindings",
+    ],
 }
 
 

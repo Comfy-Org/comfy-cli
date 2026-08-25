@@ -609,6 +609,66 @@ def notes_cmd(
     renderer.emit(payload, command="workflow notes")
 
 
+@app.command(
+    "print", help="Render a workflow as one line of Python-like source per node, with a binding -> node id map."
+)
+@tracking.track_command("workflow")
+def print_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    fmt: Annotated[str, typer.Option("--format", help="Output form. Only `py` today.")] = "py",
+    input_path: Annotated[
+        str | None, typer.Option("--input", help="Offline object_info.json dump for widget names.")
+    ] = None,
+    host: Annotated[str | None, typer.Option("--host")] = None,
+    port: Annotated[int | None, typer.Option("--port")] = None,
+    where: Annotated[str | None, typer.Option("--where", help="Routing for the catalog fetch: local or cloud.")] = None,
+    select: Annotated[
+        str | None, typer.Option("--select", help="Project the payload (see `comfy workflow slots --select`).")
+    ] = None,
+):
+    """Read-only. Reuses the catalog for widget names; refuses (with every reason) anything it cannot print faithfully."""
+    from comfy_cli.workflow_print import PrintUnsupported, render_py
+
+    renderer = get_renderer()
+    if fmt != "py":
+        renderer.error(
+            code="workflow_print_unsupported",
+            message=f"unknown --format {fmt!r}; only `py` is supported",
+            details={"reasons": [f"format {fmt!r}"]},
+        )
+        raise typer.Exit(code=1)
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    graph = _get_graph(input_path, host, port, where=where)
+    try:
+        res = render_py(workflow, graph)
+    except PrintUnsupported as e:
+        renderer.error(
+            code="workflow_print_unsupported",
+            message="workflow contains something `print` cannot render faithfully: " + "; ".join(e.reasons),
+            details={"reasons": e.reasons, "path": str(p)},
+        )
+        raise typer.Exit(code=1) from e
+    payload = {
+        "workflow": str(p),
+        "format": "py",
+        "source": res.source,
+        "bindings": res.bindings,
+        "node_count": res.node_count,
+        "skipped": res.skipped,
+        "warnings": res.warnings,
+    }
+    if renderer.is_pretty():
+        typer.echo(_strip_terminal_controls(res.source), nl=False)
+        for w in res.warnings:
+            typer.echo(f"warning: {_strip_terminal_controls(w)}", err=True)
+    if select:
+        from comfy_cli.selector import emit_selected
+
+        emit_selected(renderer, payload, select, command="workflow print")
+        return
+    renderer.emit(payload, command="workflow print")
+
+
 # ---------------------------------------------------------------------------
 # Saved workflows — list, get, save, delete.
 # ---------------------------------------------------------------------------
