@@ -41,9 +41,9 @@ history.
 - `import comfy_cli.distribution_api` still works for one release and warns;
   import `comfy_cli.builder_api` instead.
 - The `distributionId`, `versionId` and `distributions` keys in `comfy build`
-  `--json` output go after one release; read `buildId`, `releaseId` and
-  `builds` instead. The five schemas that declare them mark each retired key
-  deprecated in its description.
+  `--json` output will be removed after one release; read `buildId`,
+  `releaseId` and `builds` instead. The five schemas that declare them mark
+  each retired key deprecated in its description.
 
 ### Fixed
 
