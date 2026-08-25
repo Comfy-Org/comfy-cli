@@ -408,6 +408,23 @@ def test_subgraph_instance_and_definition(sd15_graph):
     assert (
         "node 19/3: subgraph definition 6d92985e-3e1e-49e2-acea-91c5259d86a8 missing; printed opaquely" in res.warnings
     )
+    # no skipped id is a bare top-level id of a DIFFERENT node: the interior
+    # MarkdownNote (bare inner id "5", inside da09b826 which is itself nested
+    # under instance 10 at inner id 3) must be addressed "10/3/5", not "5" —
+    # top-level node 5 is an unrelated SaveImage.
+    top_level_ids = {str(n["id"]) for n in wf["nodes"]}
+    assert not any(s["id"] in top_level_ids for s in res.skipped)
+    assert {"id": "10/3/5", "type": "MarkdownNote", "reason": "note"} in res.skipped
+    # da09b826 ("Batch Prompt Iterator") is instantiated only by inner node 3
+    # of instance 10 — its header must show the fully qualified address, and
+    # inner-node addressing follows the same qualified path.
+    assert '# subgraph da09b826-d678-40e0-a4e4-5f2178043ab6 "Batch Prompt Iterator" — instances: 10/3' in src
+    assert "address inner nodes as 10/3/<id>" in src
+    assert any(v.startswith("10/3/") for v in res.bindings.values())
+    # bracket/binding for that nested instance (no title of its own) fall back
+    # to the definition's own name, not the bare inner id.
+    assert 'Subgraph["Batch Prompt Iterator"](' in src
+    assert "batch_prompt_iterator = " in src
 
 
 def test_missing_subgraph_definition_prints_opaquely(sd15_graph):
@@ -415,7 +432,180 @@ def test_missing_subgraph_definition_prints_opaquely(sd15_graph):
     res = render_py(wf, sd15_graph)
     line = next(ln for ln in res.source.splitlines() if "# 10 " in ln)
     assert line == (
-        'subgraph = Subgraph["d33c1791-dfd2-4102-8540-aa63e4434cd2"]()'
+        'd33c1791_dfd2_4102_8540_aa63e4434cd2 = Subgraph["d33c1791-dfd2-4102-8540-aa63e4434cd2"]()'
         "  # 10 subgraph d33c1791-dfd2-4102-8540-aa63e4434cd2 definition missing"
     )
     assert "node 10: subgraph definition d33c1791-dfd2-4102-8540-aa63e4434cd2 missing; printed opaquely" in res.warnings
+
+
+def test_reroute_splice_orders_source_before_consumer(sd15_graph):
+    # source 9 -> reroute 5 -> consumer 2. Without resolving the splice before
+    # toposort, the direct link (5 -> 2) drops (Reroute is never printable),
+    # 9 and 2 both have indegree 0, and ties break ascending -> 2 would print
+    # before 9 (use-before-definition).
+    wf = _mini(
+        [
+            _node(
+                2,
+                "VAEDecode",
+                inputs=[{"name": "samples", "type": "LATENT", "link": 1}, {"name": "vae", "type": "VAE", "link": None}],
+            ),
+            _node(
+                5,
+                "Reroute",
+                inputs=[{"name": "", "type": "*", "link": 2}],
+                outputs=[{"name": "", "type": "LATENT", "links": [1]}],
+            ),
+            _node(
+                9, "EmptyLatentImage", outputs=[{"name": "LATENT", "type": "LATENT", "links": [2]}], widgets=[1, 1, 1]
+            ),
+        ],
+        [[1, 5, 0, 2, 0, "LATENT"], [2, 9, 0, 5, 0, "LATENT"]],
+    )
+    res = render_py(wf, sd15_graph)
+    ids_in_order = [ln.rsplit("# ", 1)[1].split()[0] for ln in res.source.splitlines()]
+    assert ids_in_order.index("9") < ids_in_order.index("2")
+
+
+def test_get_set_splice_orders_source_before_consumer(sd15_graph):
+    # source 9 -> SetNode 5 -> GetNode 6 -> consumer 2, same numeric-id trap.
+    wf = _mini(
+        [
+            _node(
+                2,
+                "VAEDecode",
+                inputs=[{"name": "samples", "type": "LATENT", "link": 1}, {"name": "vae", "type": "VAE", "link": None}],
+            ),
+            _node(6, "GetNode", outputs=[{"name": "LATENT", "type": "LATENT", "links": [1]}], widgets=["v"]),
+            _node(5, "SetNode", inputs=[{"name": "LATENT", "type": "*", "link": 2}], widgets=["v"]),
+            _node(
+                9, "EmptyLatentImage", outputs=[{"name": "LATENT", "type": "LATENT", "links": [2]}], widgets=[1, 1, 1]
+            ),
+        ],
+        [[1, 6, 0, 2, 0, "LATENT"], [2, 9, 0, 5, 0, "LATENT"]],
+    )
+    res = render_py(wf, sd15_graph)
+    ids_in_order = [ln.rsplit("# ", 1)[1].split()[0] for ln in res.source.splitlines()]
+    assert ids_in_order.index("9") < ids_in_order.index("2")
+
+
+def test_cycle_through_reroute_is_refused(sd15_graph):
+    # node 1's samples <- node 2 directly; node 2's samples <- node 1 via
+    # reroute 5. Once spliced this is a genuine 2-node cycle, not two
+    # independent, unordered edges.
+    wf = _mini(
+        [
+            _node(
+                1,
+                "VAEDecode",
+                inputs=[
+                    {"name": "samples", "type": "LATENT", "link": 10},
+                    {"name": "vae", "type": "VAE", "link": None},
+                ],
+                outputs=[{"name": "IMAGE", "type": "IMAGE", "links": [20]}],
+            ),
+            _node(
+                2,
+                "VAEDecode",
+                inputs=[
+                    {"name": "samples", "type": "LATENT", "link": 30},
+                    {"name": "vae", "type": "VAE", "link": None},
+                ],
+                outputs=[{"name": "IMAGE", "type": "IMAGE", "links": [40]}],
+            ),
+            _node(
+                5,
+                "Reroute",
+                inputs=[{"name": "", "type": "*", "link": 20}],
+                outputs=[{"name": "", "type": "IMAGE", "links": [30]}],
+            ),
+        ],
+        [[10, 2, 0, 1, 0, "IMAGE"], [20, 1, 0, 5, 0, "IMAGE"], [30, 5, 0, 2, 0, "IMAGE"]],
+    )
+    with pytest.raises(PrintUnsupported) as e:
+        render_py(wf, sd15_graph)
+    assert e.value.reasons == ["link cycle among nodes 1, 2"]
+
+
+def test_regular_node_nonidentifier_input_uses_kwargs_dict(sd15_graph):
+    wf = _mini(
+        [
+            _node(
+                1, "EmptyLatentImage", outputs=[{"name": "LATENT", "type": "LATENT", "links": [1]}], widgets=[1, 1, 1]
+            ),
+            _node(
+                8,
+                "BatchImagesNode",
+                inputs=[
+                    {"name": "images.image0", "type": "IMAGE", "link": None},
+                    {"name": "images.image1", "type": "IMAGE", "link": 1},
+                ],
+            ),
+        ],
+        [[1, 1, 0, 8, 1, "IMAGE"]],
+    )
+    res = render_py(wf, sd15_graph)
+    line = next(ln for ln in res.source.splitlines() if "# 8" in ln)
+    assert "images.image0=" not in line
+    assert "images.image1=" not in line
+    assert '**{"images.image0": None, "images.image1": empty_latent_image}' in line
+
+
+def test_widget_backed_input_with_live_link_uses_edge_ref(sd15_graph):
+    wf = _mini(
+        [
+            _node(20, "TextSource", outputs=[{"name": "STRING", "type": "STRING", "links": [1]}]),
+            _node(
+                6,
+                "CLIPTextEncode",
+                inputs=[
+                    {"name": "clip", "type": "CLIP", "link": None},
+                    {"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": 1},
+                ],
+                widgets=["stale"],
+            ),
+        ],
+        [[1, 20, 0, 6, 1, "STRING"]],
+    )
+    res = render_py(wf, sd15_graph)
+    assert "clip_text_encode = CLIPTextEncode(clip=None, text=text_source)  # 6" in res.source
+    assert "stale" not in res.source
+
+
+def test_sd15_golden_unaffected_by_live_link_widget_fix(sd15_workflow, sd15_graph):
+    # No input in the sd15 fixture has both a "widget" key and a live link
+    # from a real node, so the fix in test_widget_backed_input_with_live_link_uses_edge_ref
+    # must not touch this golden.
+    res = render_py(sd15_workflow, sd15_graph)
+    body = "\n".join(ln for ln in res.source.splitlines() if not ln.startswith("# note")) + "\n"
+    assert body == SD15_GOLDEN
+
+
+def test_definition_lists_every_instance_address(sd15_graph):
+    # INNER is instantiated directly at top level (node 200) AND nested inside
+    # OUTER's own interior (inner node 5 of OUTER's instance, node 100) — its
+    # header must list both, not just whichever was discovered first.
+    inner_uuid = "11111111-2222-3333-4444-555555555555"
+    outer_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    outer_def = {
+        "id": outer_uuid,
+        "name": "Outer",
+        "nodes": [{"id": 5, "type": inner_uuid, "inputs": [], "outputs": [], "widgets_values": []}],
+        "links": [],
+        "inputs": [],
+        "outputs": [],
+    }
+    inner_def = {"id": inner_uuid, "name": "Inner", "nodes": [], "links": [], "inputs": [], "outputs": []}
+    wf = {
+        "nodes": [
+            _node(100, outer_uuid),
+            _node(200, inner_uuid),
+        ],
+        "links": [],
+        "definitions": {"subgraphs": [outer_def, inner_def]},
+        "version": 0.4,
+    }
+    res = render_py(wf, sd15_graph)
+    header = next(ln for ln in res.source.splitlines() if ln.startswith(f"# subgraph {inner_uuid}"))
+    assert "100/5" in header
+    assert "200" in header

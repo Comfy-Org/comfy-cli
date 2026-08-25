@@ -13,7 +13,9 @@ input), with an inline annotation or warning when that resolution can't find
 a real value. Subgraph instances (a node whose ``type`` is the UUID of an
 entry under ``workflow["definitions"]["subgraphs"]``) get a ``Subgraph[...]``
 call line and their definition is rendered once, after the top-level lines,
-as an indented block addressed as ``<first instance id>/<inner id>``.
+as an indented block addressed as ``<first instance address>/<inner id>`` —
+fully qualified through every nesting level, matching
+``workflow_ops._navigate_subgraph_path``.
 
 See the design: decisions D1-D13 (Obsidian, "workflow print (design, 2026-08-25)").
 """
@@ -163,7 +165,14 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
 
 def _toposort(printable: list[dict], link_map: dict[str, tuple]) -> list[dict]:
     """Kahn's algorithm over ``printable`` nodes, using only links whose source
-    AND target are both printable. Ties break by ascending numeric id."""
+    AND target are both printable. Ties break by ascending numeric id.
+
+    ``link_map`` must already have each link's source resolved past any
+    Reroute/GetNode-SetNode splice (see ``_splice_link_map``) — a raw,
+    unresolved ``A -> Reroute -> B`` link contributes no ordering constraint
+    here (Reroute is never printable), which would silently let ``B`` print
+    before ``A`` whenever ``B``'s id sorts lower.
+    """
     ids = [str(n.get("id")) for n in printable]
     printable_ids = set(ids)
     node_by_id = {str(n.get("id")): n for n in printable}
@@ -232,7 +241,12 @@ def _note_comment(node: dict) -> str:
 
 
 def _collect_reroute_sources(nodes: list[dict], link_map: dict[str, tuple]) -> dict[str, tuple]:
-    """``{reroute_id: (src_id, src_slot)}`` from each Reroute's single input link."""
+    """``{reroute_id: (src_id, src_slot)}`` from each Reroute's single input link.
+
+    Cross-reference: workflow_to_api.py's ``_collect_reroute_sources`` (~line
+    559) does the same collection for API-format conversion — the two must
+    agree on what counts as a Reroute's source.
+    """
     out: dict[str, tuple] = {}
     for n in nodes:
         if n.get("type") != "Reroute":
@@ -253,7 +267,12 @@ def _collect_reroute_sources(nodes: list[dict], link_map: dict[str, tuple]) -> d
 
 def _collect_get_set(nodes: list[dict], link_map: dict[str, tuple]) -> tuple[dict[str, tuple], dict[str, str]]:
     """``set_sources[var] = (src_id, src_slot)`` from each SetNode's first linked
-    input; ``get_vars[get_id] = var`` for each GetNode."""
+    input; ``get_vars[get_id] = var`` for each GetNode.
+
+    Cross-reference: workflow_to_api.py's ``_collect_get_set_mappings`` (~line
+    578) does the same collection for API-format conversion — the two must
+    agree on what a SetNode publishes and what a GetNode reads.
+    """
     set_sources: dict[str, tuple] = {}
     get_vars: dict[str, str] = {}
     for n in nodes:
@@ -300,6 +319,11 @@ def _resolve_source(
     - ``("dead_reroute", reroute_id)`` — a Reroute with no upstream link.
     - ``("missing_set", get_id, var)`` — a GetNode whose variable no SetNode publishes.
     - ``("primitive_no_widget", primitive_id)`` — resolves directly to a PrimitiveNode.
+
+    Cross-reference: workflow_to_api.py's ``_Tracers.trace_reroute`` /
+    ``trace_get_set`` (~line 659) walk the same chains for API-format
+    conversion — the two must agree on how far a chain is followed and where
+    it bottoms out.
     """
     seen: set[str] = set()
     for _ in range(_MAX_SPLICE_HOPS):
@@ -331,11 +355,35 @@ def _resolve_source(
     return ("ok", src_id, src_slot)
 
 
+def _splice_link_map(
+    link_map: dict[str, tuple],
+    nodes_by_id: dict[str, dict],
+    reroute_sources: dict[str, tuple],
+    set_sources: dict[str, tuple],
+    get_vars: dict[str, str],
+    proxy_in_id: str | None,
+) -> dict[str, tuple]:
+    """The dependency graph ``_toposort`` should use: each link's source
+    resolved past any Reroute/GetNode-SetNode splice (and the ``-10`` proxy,
+    which never contributes a dependency). A link whose source doesn't
+    resolve to a real node (dead-end Reroute, unpublished GetNode variable,
+    PrimitiveNode) is dropped — there's no real upstream to order against."""
+    resolved: dict[str, tuple] = {}
+    for lid, (src_id, src_slot, tgt_id, tgt_slot) in link_map.items():
+        outcome = _resolve_source(src_id, src_slot, nodes_by_id, reroute_sources, set_sources, get_vars, proxy_in_id)
+        if outcome[0] != "ok":
+            continue
+        resolved[lid] = (outcome[1], outcome[2], tgt_id, tgt_slot)
+    return resolved
+
+
 @dataclass
 class _RenderCtx:
     """Everything the per-node arg builders need to resolve one edge, for
-    either the top-level workflow (``proxy_in_id`` is ``None``) or one
-    subgraph definition's interior (``proxy_in_id`` is ``"-10"``)."""
+    either the top-level workflow (``proxy_in_id``/``addr_prefix`` are
+    ``None``) or one subgraph definition's interior (``proxy_in_id`` is
+    ``"-10"``, ``addr_prefix`` is this block's own fully-qualified address —
+    e.g. ``"10"`` or ``"10/3"`` for a definition nested inside another)."""
 
     graph: Any
     link_map: dict[str, tuple]
@@ -347,15 +395,30 @@ class _RenderCtx:
     get_vars: dict[str, str]
     proxy_in_id: str | None = None
     proxy_in_names: dict[int, str] = field(default_factory=dict)
+    addr_prefix: str | None = None
 
     def proxy_in_name(self, slot: Any) -> str:
         name = self.proxy_in_names.get(slot)
         return name if name else f"slot{slot}"
 
+    def qualify(self, nid: Any) -> str:
+        """This block's fully-qualified address for a bare local node id —
+        identity at the top level, ``"<addr_prefix>/<nid>"`` inside a
+        definition (chaining through every nesting level, matching
+        ``workflow_ops._navigate_subgraph_path``). Used for bindings, skipped
+        ids, and warning text — NOT for a line's own trailing ``# <id>``
+        comment or its annotations, which stay bare inner ids by design."""
+        nid = str(nid)
+        return f"{self.addr_prefix}/{nid}" if self.addr_prefix else nid
+
 
 def _resolve_edge_text(src_id: Any, src_slot: Any, name: str, tgt_id: str, ctx: _RenderCtx) -> tuple:
     """Resolve one edge to ``(ref_text, annotation, warning)``. ``ref_text`` is
-    ``None`` when the edge can't be resolved to a value (prints as ``None``)."""
+    ``None`` when the edge can't be resolved to a value (prints as ``None``).
+    ``tgt_id`` is the bare id of the node whose input this is; warning text
+    (which ends up in ``PrintResult.warnings``) is qualified via
+    ``ctx.qualify`` — the ``annotation`` (which becomes part of the printed
+    line itself) is not, matching the "bare inner ids in comments" rule."""
     outcome = _resolve_source(
         src_id, src_slot, ctx.nodes_by_id, ctx.reroute_sources, ctx.set_sources, ctx.get_vars, ctx.proxy_in_id
     )
@@ -379,35 +442,53 @@ def _resolve_edge_text(src_id: Any, src_slot: Any, name: str, tgt_id: str, ctx: 
         return (
             None,
             None,
-            f"node {tgt_id}: input '{name}' reads GetNode {get_id} variable '{var}' that no SetNode publishes",
+            f"node {ctx.qualify(tgt_id)}: input '{name}' reads GetNode {ctx.qualify(get_id)} variable '{var}' "
+            "that no SetNode publishes",
         )
     if kind == "primitive_no_widget":
         return (
             None,
             None,
-            f"node {tgt_id}: input {name!r} fed by PrimitiveNode {outcome[1]} without a widget; printed as None",
+            f"node {ctx.qualify(tgt_id)}: input {name!r} fed by PrimitiveNode {ctx.qualify(outcome[1])} "
+            "without a widget; printed as None",
         )
     return None, None, None
+
+
+def _place_arg(name: str, text: str, args: list[str], extra: dict[str, str]) -> None:
+    """Append ``name=text`` to ``args`` when ``name`` is a valid Python
+    identifier, else collect it into ``extra`` for a trailing ``**{}``."""
+    if _IDENT.match(name) and not keyword.iskeyword(name):
+        args.append(f"{name}={text}")
+    else:
+        extra[name] = text
 
 
 def _build_args(
     node: dict, m: Any, ctx: _RenderCtx, warnings: list[str]
 ) -> tuple[list[str], bool, list[str], list[tuple]]:
-    """Node call arguments: link inputs (in the node's own input order) first,
-    then widgets. Returns ``(args, unknown, annotations, prim_hits)`` where
+    """Node call arguments: link inputs (in the node's own input order,
+    non-identifier names collected into a trailing ``**{}``) first, then
+    widgets. Returns ``(args, unknown, annotations, prim_hits)`` where
     ``unknown`` is True when the class isn't in the catalog (or there is no
-    catalog), ``annotations`` are suffix strings to append to the line comment,
-    and ``prim_hits`` are ``(primitive_id, skipped_reason)`` pairs for
-    PrimitiveNode-into-widget splices found here."""
+    catalog), ``annotations`` are suffix strings to append to the line
+    comment, and ``prim_hits`` are ``(qualified_primitive_id, qualified_skip_reason)``
+    pairs for PrimitiveNode-into-widget splices found here."""
     nid = str(node.get("id"))
     args: list[str] = []
+    extra: dict[str, str] = {}
     annotations: list[str] = []
     prim_hits: list[tuple] = []
 
-    # Pre-pass: widget-backed inputs. A link into one never overrides the
-    # node's own widget value (D9) EXCEPT when it resolves to the subgraph
-    # input proxy (D10) — that value genuinely comes from outside, there is no
-    # static default to fall back to.
+    # Pre-pass: widget-backed inputs. A LIVE link to a real, printable node is
+    # the truth — it's printed as a ref in the link pass below and skipped in
+    # the widget-values pass. A link that resolves to the subgraph input
+    # proxy is similarly a real (if opaque) upstream value. A PrimitiveNode
+    # source is the one case that keeps the node's own static widget value
+    # (that's what ComfyUI itself shows), annotated instead of substituted. A
+    # dead-end (unlinked Reroute, unpublished SetNode variable) falls through
+    # to the static value too — there's nothing better to show.
+    live_link_refs: dict[str, str] = {}
     widget_overrides: dict[str, str] = {}
     for inp in node.get("inputs") or []:
         if "widget" not in inp:
@@ -423,24 +504,33 @@ def _build_args(
         outcome = _resolve_source(
             src_id, src_slot, ctx.nodes_by_id, ctx.reroute_sources, ctx.set_sources, ctx.get_vars, ctx.proxy_in_id
         )
-        if outcome[0] == "in_proxy":
+        if outcome[0] == "ok":
+            rid_s = str(outcome[1])
+            if rid_s in ctx.printable_ids:
+                src_node = ctx.nodes_by_id.get(rid_s)
+                binding = ctx.binding_by_id.get(rid_s)
+                if src_node is not None and binding is not None:
+                    live_link_refs[name] = _edge_ref(binding, src_node, src_node.get("type", ""), outcome[2], ctx.graph)
+        elif outcome[0] == "in_proxy":
             widget_overrides[name] = f"IN.{ctx.proxy_in_name(outcome[1])}"
         elif outcome[0] == "primitive_no_widget":
             prim_id = outcome[1]
             annotations.append(f" {name} from primitive {prim_id}")
-            prim_hits.append((prim_id, f"inlined into {nid}.{name}"))
+            prim_hits.append((ctx.qualify(prim_id), f"inlined into {ctx.qualify(nid)}.{name}"))
 
     for inp in node.get("inputs") or []:
         name = inp.get("name")
         if "widget" in inp:
-            continue  # widget-backed input: printed in the widget pass instead
+            if name in live_link_refs:
+                _place_arg(name, live_link_refs[name], args, extra)
+            continue  # otherwise: printed in the widget pass instead
         link_id = inp.get("link")
         if link_id is None:
-            args.append(f"{name}=None")
+            _place_arg(name, "None", args, extra)
             continue
         link = ctx.link_map.get(str(link_id))
         if link is None:
-            args.append(f"{name}=None")
+            _place_arg(name, "None", args, extra)
             continue
         src_id, src_slot, _tgt_id, _tgt_slot = link
         ref, ann, warn = _resolve_edge_text(src_id, src_slot, name, nid, ctx)
@@ -448,7 +538,11 @@ def _build_args(
             warnings.append(warn)
         if ann:
             annotations.append(ann)
-        args.append(f"{name}={ref if ref is not None else 'None'}")
+        _place_arg(name, ref if ref is not None else "None", args, extra)
+
+    if extra:
+        inner = ", ".join(f"{json.dumps(k, ensure_ascii=False)}: {v}" for k, v in extra.items())
+        args.append(f"**{{{inner}}}")
 
     class_type = node.get("type", "")
     widgets_values = node.get("widgets_values")
@@ -457,13 +551,15 @@ def _build_args(
         positional = widgets_values if isinstance(widgets_values, list) else []
         if positional:
             args.append(f"widgets={py_literal(positional)}")
-        warnings.append(f"node {node.get('id')}: class {class_type!r} not in catalog; widgets printed positionally")
+        warnings.append(f"node {ctx.qualify(nid)}: class {class_type!r} not in catalog; widgets printed positionally")
     else:
         positional = _widgets_as_positional(widgets_values, ctx.graph, class_type)
         entries = _expand_widget_entries(m, positional)
         for idx, entry in enumerate(entries):
             value = positional[idx] if idx < len(positional) else None
             arg_name = "control_after_generate" if entry.port is None else entry.name
+            if arg_name in live_link_refs:
+                continue  # already printed in the link pass above
             if arg_name in widget_overrides:
                 args.append(f"{arg_name}={widget_overrides[arg_name]}")
             else:
@@ -476,31 +572,41 @@ def _build_args(
 # ---------------------------------------------------------------------------
 
 
+def _subgraph_instance_name(node: dict, sg_def: dict | None, type_uuid: str) -> str:
+    """The identity string for a subgraph instance — used for both its
+    ``Subgraph[...]`` bracket and its binding name: the instance's own title,
+    else the definition's own name, else the definition's uuid."""
+    title = node.get("title") or None
+    if title:
+        return title
+    if sg_def is not None:
+        def_name = sg_def.get("name") or None
+        if def_name:
+            return def_name
+    return type_uuid
+
+
 def _render_subgraph_instance_line(
-    node: dict, type_uuid: str, binding: str, ctx: _RenderCtx, warnings: list[str]
+    node: dict, type_uuid: str, sg_def: dict, binding: str, ctx: _RenderCtx, warnings: list[str]
 ) -> tuple:
     """A subgraph instance's own line: exposed link inputs by name (or, when
     the name isn't a Python identifier, collected into a trailing ``**{}``);
     widget-backed exposed inputs print positionally from ``widgets_values``
     (subgraphs are never in the catalog) unless their link resolves to the
     enclosing definition's own input proxy, in which case that ref is used.
-    Returns ``(line, prim_hits)``."""
+    Any D9 annotation from resolving a link input (e.g. a dead-end Reroute)
+    is appended to the line, same as a regular node. Returns ``(line, prim_hits)``."""
     nid = str(node.get("id"))
-    title = node.get("title") or None
-    bracket = json.dumps(title, ensure_ascii=False) if title else json.dumps(nid)
+    name_str = _subgraph_instance_name(node, sg_def, type_uuid)
+    bracket = json.dumps(name_str, ensure_ascii=False)
     prim_hits: list[tuple] = []
+    annotations: list[str] = []
     args: list[str] = []
     extra: dict[str, str] = {}
 
     inputs = [inp for inp in node.get("inputs") or [] if isinstance(inp, dict)]
     link_inputs = [inp for inp in inputs if "widget" not in inp]
     widget_inputs = [inp for inp in inputs if "widget" in inp]
-
-    def _place(iname: str, text: str) -> None:
-        if _IDENT.match(iname) and not keyword.iskeyword(iname):
-            args.append(f"{iname}={text}")
-        else:
-            extra[iname] = text
 
     for inp in link_inputs:
         iname = inp.get("name") or ""
@@ -510,10 +616,12 @@ def _render_subgraph_instance_line(
             link = ctx.link_map.get(str(link_id))
             if link is not None:
                 src_id, src_slot, _tgt_id, _tgt_slot = link
-                ref, _ann, warn = _resolve_edge_text(src_id, src_slot, iname, nid, ctx)
+                ref, ann, warn = _resolve_edge_text(src_id, src_slot, iname, nid, ctx)
                 if warn:
                     warnings.append(warn)
-        _place(iname, ref if ref is not None else "None")
+                if ann:
+                    annotations.append(ann)
+        _place_arg(iname, ref if ref is not None else "None", args, extra)
 
     widgets_values = node.get("widgets_values")
     positional = widgets_values if isinstance(widgets_values, list) else []
@@ -537,35 +645,38 @@ def _render_subgraph_instance_line(
                 if outcome[0] == "in_proxy":
                     override = f"IN.{ctx.proxy_in_name(outcome[1])}"
                 elif outcome[0] == "primitive_no_widget":
-                    prim_hits.append((outcome[1], f"inlined into {nid}.{iname}"))
+                    prim_hits.append((ctx.qualify(outcome[1]), f"inlined into {ctx.qualify(nid)}.{iname}"))
         if override is not None:
             text = override
         else:
             value = positional[k] if k < len(positional) else None
             text = py_literal(value)
-        _place(iname, text)
+        _place_arg(iname, text, args, extra)
 
     if extra:
         inner = ", ".join(f"{json.dumps(k, ensure_ascii=False)}: {v}" for k, v in extra.items())
         args.append(f"**{{{inner}}}")
 
     line = f"{binding} = Subgraph[{bracket}]({', '.join(args)})  # {nid} subgraph {type_uuid}"
+    for ann in annotations:
+        line += ann
     return line, prim_hits
 
 
 def _render_missing_subgraph_line(
-    node: dict, type_uuid: str, binding: str, ctx: _RenderCtx, addr: str, warnings: list[str]
+    node: dict, type_uuid: str, binding: str, ctx: _RenderCtx, warnings: list[str]
 ) -> str:
     """D11 (amended): a subgraph instance whose definition is missing is never
     a refusal, at any depth — it's printed opaquely instead. Wired link inputs
     resolve by the instance's own input name (non-identifier names via
     ``**{}``, same as a resolved instance); widget-backed instance inputs
     print positionally as a single ``widgets=[...]`` (there's no definition to
-    name them against). ``addr`` is the node's address for the warning text —
-    the bare id at top level, ``<instance>/<inner>`` inside a definition."""
+    name them against). Any D9 annotation is appended, same as a resolved
+    instance. The warning uses this node's fully-qualified address."""
     nid = str(node.get("id"))
     args: list[str] = []
     extra: dict[str, str] = {}
+    annotations: list[str] = []
 
     inputs = [inp for inp in node.get("inputs") or [] if isinstance(inp, dict)]
     link_inputs = [inp for inp in inputs if "widget" not in inp]
@@ -578,14 +689,12 @@ def _render_missing_subgraph_line(
             link = ctx.link_map.get(str(link_id))
             if link is not None:
                 src_id, src_slot, _tgt_id, _tgt_slot = link
-                ref, _ann, warn = _resolve_edge_text(src_id, src_slot, iname, nid, ctx)
+                ref, ann, warn = _resolve_edge_text(src_id, src_slot, iname, nid, ctx)
                 if warn:
                     warnings.append(warn)
-        text = ref if ref is not None else "None"
-        if _IDENT.match(iname) and not keyword.iskeyword(iname):
-            args.append(f"{iname}={text}")
-        else:
-            extra[iname] = text
+                if ann:
+                    annotations.append(ann)
+        _place_arg(iname, ref if ref is not None else "None", args, extra)
 
     if extra:
         inner = ", ".join(f"{json.dumps(k, ensure_ascii=False)}: {v}" for k, v in extra.items())
@@ -595,11 +704,17 @@ def _render_missing_subgraph_line(
     if isinstance(widgets_values, list) and widgets_values:
         args.append(f"widgets={py_literal(widgets_values)}")
 
-    warnings.append(f"node {addr}: subgraph definition {type_uuid} missing; printed opaquely")
-    return f"{binding} = Subgraph[{json.dumps(type_uuid)}]({', '.join(args)})  # {nid} subgraph {type_uuid} definition missing"
+    warnings.append(f"node {ctx.qualify(nid)}: subgraph definition {type_uuid} missing; printed opaquely")
+    line = f"{binding} = Subgraph[{json.dumps(type_uuid)}]({', '.join(args)})  # {nid} subgraph {type_uuid} definition missing"
+    for ann in annotations:
+        line += ann
+    return line
 
 
 def _definition_header(def_id: str, sg_def: dict, state: _State) -> str:
+    """Called only after every block has been rendered (so nested instances
+    discovered while rendering other blocks are already registered) — lists
+    every fully-qualified instance address, not just the first."""
     name = sg_def.get("name") or def_id
     instances = sorted(state.instances_by_def.get(def_id, []), key=_sort_key)
     first = state.first_instance_by_def.get(def_id, instances[0] if instances else def_id)
@@ -643,19 +758,19 @@ class _State:
         self.first_instance_by_def: dict[str, str] = {}
         self.primitive_reason: dict[str, str] = {}
 
-    def register_instance(self, def_id: str, instance_id: str, depth: int) -> None:
-        self.instances_by_def.setdefault(def_id, []).append(instance_id)
+    def register_instance(self, def_id: str, instance_addr: str, depth: int) -> None:
+        """``instance_addr`` is the fully-qualified address of the instance
+        node (e.g. ``"10"`` at top level, ``"10/3"`` nested one level)."""
+        self.instances_by_def.setdefault(def_id, []).append(instance_addr)
         if def_id not in self.def_seen:
             self.def_seen.add(def_id)
-            self.first_instance_by_def[def_id] = instance_id
+            self.first_instance_by_def[def_id] = instance_addr
             self.def_depth[def_id] = depth
             self.def_order.append(def_id)
 
 
 def _render_node_line(n: dict, name: str, ctx: _RenderCtx, graph: Graph | None, state: _State) -> str:
-    """One printed line for a node that is not itself a (resolvable) subgraph
-    instance: a regular class call, or the ``Node[...]`` fallback for a
-    nested subgraph instance whose definition is missing."""
+    """One printed line for a regular (non-subgraph-instance) node."""
     nid = str(n.get("id"))
     t = n.get("type", "")
     m = graph.node(t) if graph is not None else None
@@ -684,15 +799,14 @@ def _render_nodes(
     binding_by_id: dict[str, str],
     state: _State,
     depth: int,
-    addr_prefix: str | None = None,
 ) -> list[str]:
     """Render one printed line per node in ``order``: a resolved subgraph
     instance gets the ``Subgraph[...]`` format, an instance whose definition
     is missing gets the opaque D11 fallback (never a refusal), everything else
     is a regular class call. Shared between the top-level workflow and a
-    definition's interior (``addr_prefix`` is that definition's first
-    instance id, used to address a missing-definition warning as
-    ``<instance>/<inner>``)."""
+    definition's interior — ``ctx.addr_prefix`` (this block's own
+    fully-qualified address) is what makes a nested instance's address and a
+    nested skip/warning fully qualified through every level."""
     lines: list[str] = []
     for n in order:
         nid = str(n.get("id"))
@@ -700,33 +814,33 @@ def _render_nodes(
         name = binding_by_id[nid]
         if is_subgraph_uuid(t):
             sg_def = defs_by_id.get(t)
+            addr = ctx.qualify(nid)
             if sg_def is not None:
-                line, prim_hits = _render_subgraph_instance_line(n, t, name, ctx, state.warnings)
+                line, prim_hits = _render_subgraph_instance_line(n, t, sg_def, name, ctx, state.warnings)
                 for prim_id, reason in prim_hits:
                     state.primitive_reason.setdefault(prim_id, reason)
-                state.register_instance(t, nid, depth)
+                state.register_instance(t, addr, depth)
             else:
-                addr = f"{addr_prefix}/{nid}" if addr_prefix else nid
-                line = _render_missing_subgraph_line(n, t, name, ctx, addr, state.warnings)
+                line = _render_missing_subgraph_line(n, t, name, ctx, state.warnings)
         else:
             line = _render_node_line(n, name, ctx, graph, state)
         lines.append(line)
     return lines
 
 
-def _build_bindings(order: list[dict]) -> dict[str, str]:
+def _build_bindings(order: list[dict], defs_by_id: dict[str, dict]) -> dict[str, str]:
     """Local binding names for one node list, in print order: a subgraph
-    instance (resolved or not — a missing definition doesn't change what it
-    fundamentally is) binds off its own title, falling back to ``"subgraph"``;
-    everything else binds off its class type, as usual."""
+    instance (resolved or not) binds off the same identity string as its
+    bracket — its own title, else its definition's name, else its
+    definition's uuid; everything else binds off its class type, as usual."""
     used: dict[str, int] = {}
     binding_by_id: dict[str, str] = {}
     for n in order:
         nid = str(n.get("id"))
         t = n.get("type", "")
         if is_subgraph_uuid(t):
-            title = n.get("title") or None
-            name = binding_name(title or "subgraph", used)
+            name_str = _subgraph_instance_name(n, defs_by_id.get(t), t)
+            name = binding_name(name_str, used)
         else:
             name = binding_name(t, used)
         binding_by_id[nid] = name
@@ -760,18 +874,20 @@ def _render_definition_block(
     notes = [n for n in interior_nodes if n.get("type") in _NOTE_TYPES]
     ui_only_skipped = [n for n in interior_nodes if n.get("type") in _UI_ONLY and n.get("type") not in _NOTE_TYPES]
 
-    order = _toposort(printable, all_links)
-
     nodes_by_id = {str(n.get("id")): n for n in interior_nodes}
     printable_ids = {str(n.get("id")) for n in printable}
 
+    # Collected BEFORE toposort so a splice contributes a resolved dependency
+    # edge instead of silently dropping the ordering constraint (item 1).
     reroute_sources = _collect_reroute_sources(interior_nodes, all_links)
     set_sources, get_vars = _collect_get_set(interior_nodes, all_links)
+    toposort_links = _splice_link_map(all_links, nodes_by_id, reroute_sources, set_sources, get_vars, _PROXY_IN)
+    order = _toposort(printable, toposort_links)
 
     proxy_in_names = {i: inp.get("name") for i, inp in enumerate(sg_def.get("inputs") or []) if isinstance(inp, dict)}
     proxy_out_names = {i: o.get("name") for i, o in enumerate(sg_def.get("outputs") or []) if isinstance(o, dict)}
 
-    binding_by_id = _build_bindings(order)
+    binding_by_id = _build_bindings(order, state.defs_by_id)
     first_instance = state.first_instance_by_def.get(def_id, def_id)
 
     ctx = _RenderCtx(
@@ -785,20 +901,19 @@ def _render_definition_block(
         get_vars=get_vars,
         proxy_in_id=_PROXY_IN,
         proxy_in_names=proxy_in_names,
+        addr_prefix=first_instance,
     )
 
-    lines = _render_nodes(
-        order, ctx, graph, state.defs_by_id, binding_by_id, state, depth + 1, addr_prefix=first_instance
-    )
+    lines = _render_nodes(order, ctx, graph, state.defs_by_id, binding_by_id, state, depth + 1)
 
     for n in sorted(notes, key=lambda n: _sort_key(str(n.get("id")))):
         lines.append(_note_comment(n))
-        state.skipped.append({"id": str(n.get("id")), "type": n.get("type"), "reason": "note"})
+        state.skipped.append({"id": ctx.qualify(n.get("id")), "type": n.get("type"), "reason": "note"})
     for n in ui_only_skipped:
         t = n.get("type")
-        nid = str(n.get("id"))
-        reason = state.primitive_reason.get(nid, "spliced") if t == "PrimitiveNode" else "spliced"
-        state.skipped.append({"id": nid, "type": t, "reason": reason})
+        addr = ctx.qualify(n.get("id"))
+        reason = state.primitive_reason.get(addr, "spliced") if t == "PrimitiveNode" else "spliced"
+        state.skipped.append({"id": addr, "type": t, "reason": reason})
 
     out_sources: dict[Any, tuple] = {}
     for oid, oslot, tid, tslot in all_links.values():
@@ -809,7 +924,7 @@ def _render_definition_block(
     for slot in sorted(out_sources, key=_sort_key):
         oid, oslot = out_sources[slot]
         out_name = proxy_out_names.get(slot) or f"out{slot}"
-        ref, _ann, warn = _resolve_edge_text(oid, oslot, out_name, f"{def_id} OUT", ctx)
+        ref, _ann, warn = _resolve_edge_text(oid, oslot, out_name, f"{first_instance} OUT", ctx)
         if warn:
             state.warnings.append(warn)
         lines.append(f"OUT.{out_name} = {ref if ref is not None else 'None'}")
@@ -842,17 +957,18 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
     notes = [n for n in nodes if n.get("type") in _NOTE_TYPES]
     ui_only_skipped = [n for n in nodes if n.get("type") in _UI_ONLY and n.get("type") not in _NOTE_TYPES]
 
-    order = _toposort(printable, link_map)
-
     nodes_by_id = {str(n.get("id")): n for n in nodes}
     printable_ids = {str(n.get("id")) for n in printable}
 
+    # Collected BEFORE toposort — see _render_definition_block and item 1.
     reroute_sources = _collect_reroute_sources(nodes, link_map)
     set_sources, get_vars = _collect_get_set(nodes, link_map)
+    toposort_links = _splice_link_map(link_map, nodes_by_id, reroute_sources, set_sources, get_vars, None)
+    order = _toposort(printable, toposort_links)
 
     # binding_name is called once per node, in topological order, so the
     # dedupe suffixes (_2, _3, ...) match print order.
-    binding_by_id = _build_bindings(order)
+    binding_by_id = _build_bindings(order, defs_by_id)
     bindings: dict[str, str] = {name: nid for nid, name in binding_by_id.items()}
 
     ctx = _RenderCtx(
@@ -874,20 +990,27 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
 
     for n in sorted(notes, key=lambda n: _sort_key(str(n.get("id")))):
         lines.append(_note_comment(n))
-        skipped.append({"id": str(n.get("id")), "type": n.get("type"), "reason": "note"})
+        skipped.append({"id": ctx.qualify(n.get("id")), "type": n.get("type"), "reason": "note"})
     for n in ui_only_skipped:
         t = n.get("type")
-        nid = str(n.get("id"))
-        reason = state.primitive_reason.get(nid, "spliced") if t == "PrimitiveNode" else "spliced"
-        skipped.append({"id": nid, "type": t, "reason": reason})
+        addr = ctx.qualify(n.get("id"))
+        reason = state.primitive_reason.get(addr, "spliced") if t == "PrimitiveNode" else "spliced"
+        skipped.append({"id": addr, "type": t, "reason": reason})
 
+    # Render every definition block first (this may discover further nested
+    # definitions, appended to state.def_order and picked up by this same
+    # loop) — only THEN emit headers, so each header's instance list is
+    # complete rather than reporting only what was known when it was reached.
     node_count = len(printable)
+    block_lines_by_def: dict[str, list[str]] = {}
     for def_id in state.def_order:
         sg_def = defs_by_id[def_id]
-        lines.append(_definition_header(def_id, sg_def, state))
         block_lines, block_count = _render_definition_block(def_id, sg_def, graph, state, state.def_depth[def_id])
-        lines.extend("    " + bl for bl in block_lines)
+        block_lines_by_def[def_id] = block_lines
         node_count += block_count
+    for def_id in state.def_order:
+        lines.append(_definition_header(def_id, defs_by_id[def_id], state))
+        lines.extend("    " + bl for bl in block_lines_by_def[def_id])
 
     source = "\n".join(lines) + "\n"
     return PrintResult(source=source, bindings=bindings, node_count=node_count, skipped=skipped, warnings=warnings)
