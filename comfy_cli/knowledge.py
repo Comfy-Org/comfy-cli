@@ -1,7 +1,7 @@
 """Find, validate, and index the compiled comfy-knowledge bundle.
 
 The bundle (``knowledge.json`` + optional ``manifest.json``) is produced by
-``Comfy-Org/comfy-knowledge``. It reaches this process by one of three routes,
+the internal comfy-knowledge build. It reaches this process by one of three routes,
 tried in order: an explicit ``COMFY_KNOWLEDGE_FILE``, the per-user cache, or a
 fetch from ``COMFY_KNOWLEDGE_URL``. A missing or broken bundle is a normal
 state: every entry point here returns ``None`` rather than raising, and nothing
