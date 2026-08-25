@@ -51,6 +51,14 @@ MAX_VERSION_CHARS = 64
 
 UNAVAILABLE_LOCALLY = "the templates or nodes this row resolves to are absent from this install"
 
+# Grammatical filler dropped before subset matching. Deliberately generic English:
+# naming a capability, model or gallery tag here would be a second copy of the
+# bundle's vocabulary, which then drifts every time comfy-knowledge is recompiled.
+_FILLER = frozenset("a an the of to for from with and or in on my me some this that into make create generate".split())
+# A one-word key must be at least this long to match on its own. Guards against a
+# future alias like "3d" dragging a capability into every query mentioning it.
+MIN_SINGLE_TOKEN_CHARS = 4
+
 REASON_ENV_FILE = "COMFY_KNOWLEDGE_FILE is set but could not be loaded"
 REASON_NO_URL = "no cache and COMFY_KNOWLEDGE_URL is not set"
 REASON_FETCH_FAILED = "fetch failed and no cached bundle exists"
@@ -74,6 +82,9 @@ class Bundle:
     # exact path decides it; a real id always keeps its own key.
     normalized_aliases: dict[str, str] = field(default_factory=dict)
     normalized_capabilities: dict[str, str] = field(default_factory=dict)
+    # (word set, capability id) for every capability id and alias, so an intent
+    # phrase reaches the row its own wording names. See :func:`_resolve_tokens`.
+    capability_tokens: tuple[tuple[frozenset[str], str], ...] = ()
 
 
 # One-element tuple so a memoized ``None`` is distinguishable from "not loaded yet".
@@ -131,6 +142,15 @@ def _normalize(s: str) -> str:
     """Spelling-variant key: "Hailuo 3", "hailuo-03" and "HAILUO 03" all become "hailuo3"."""
     s = re.sub(r"(?<!\d)0+(?=\d)", "", s.lower())
     return re.sub(r"[^a-z0-9]", "", s)
+
+
+def _tokens(s: str) -> frozenset[str]:
+    """Word set for subset matching, with grammatical filler dropped.
+
+    Only generic English is listed here — no capability, model or tag name — so
+    this stays put while the bundle changes underneath it.
+    """
+    return frozenset(t for t in re.split(r"[^a-z0-9]+", s.lower()) if t and t not in _FILLER)
 
 
 def _normalized_map(keys: dict[str, str], *, ids: Collection[str] = ()) -> dict[str, str]:
@@ -465,6 +485,7 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         model_capabilities=model_capabilities,
         normalized_aliases=_normalized_map(aliases, ids=models),
         normalized_capabilities=_normalized_map(capability_keys, ids=capabilities),
+        capability_tokens=tuple((words, cid) for key, cid in capability_keys.items() if (words := _tokens(key))),
     )
 
 
@@ -489,9 +510,40 @@ def _lookup(bundle: Bundle, queries: Iterable[str]) -> tuple[list[tuple[str, str
             seen.add(mid)
             models.append((mid, exact))
         cid = exact if exact in bundle.capabilities else bundle.normalized_capabilities.get(_normalize(q))
+        if cid is None:
+            cid = _resolve_tokens(bundle, q)
         if cid is not None and cid not in caps:
             caps.append(cid)
     return models, caps
+
+
+def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
+    """Capability whose id or alias is worded inside ``query``; ``None`` if none is.
+
+    Callers ask in sentences ("image to 3d model mesh") while the bundle is keyed
+    on tags and ids ("Image to Model", "image-to-3d"), and :func:`_normalize`
+    only strips punctuation, so the exact path misses everything phrased. A key
+    matches when all of its words appear in the query, and the longest key wins
+    so a more specific capability is not outvoted by a broader one.
+
+    Ambiguity resolves to nothing rather than to a guess, matching
+    :func:`_normalized_map`: a tie between two capabilities is not an answer.
+    """
+    words = _tokens(query)
+    if not words:
+        return None
+    best: set[str] = set()
+    best_len = 0
+    for key_words, cid in bundle.capability_tokens:
+        if len(key_words) < best_len or not key_words <= words:
+            continue
+        if len(key_words) == 1 and len(next(iter(key_words))) < MIN_SINGLE_TOKEN_CHARS:
+            continue
+        if len(key_words) > best_len:
+            best, best_len = {cid}, len(key_words)
+        else:
+            best.add(cid)
+    return next(iter(best)) if len(best) == 1 else None
 
 
 def _text(value: Any) -> str | None:
