@@ -1057,7 +1057,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "build_definition_invalid",
         "`comfy build create --from <path>` could not read the definition file, or it isn't a "
-        "distribution definition (missing/invalid JSON or no `models` key). `details.path` carries the path.",
+        "build definition (missing/invalid JSON or no `models` key). `details.path` carries the path.",
         "pass a file produced by `comfy build scan -o <path>`",
     ),
     ErrorCode(
@@ -1093,7 +1093,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "build_missing_comfy_version",
         "`comfy build create` was given a definition with no `baseComfyVersion`. The builder can create "
-        "the distribution but cannot cut a build without a pinned ComfyUI version, so create fails fast here "
+        "the build but cannot cut a release without a pinned ComfyUI version, so create fails fast here "
         "instead of surfacing a raw builder 400 after doing work. `details.path` carries the definition path.",
         "re-scan with `--comfy-version <ref>` (a tag, branch, or commit), or add a `baseComfyVersion` to the definition JSON",
     ),

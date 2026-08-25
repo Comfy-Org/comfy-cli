@@ -25,6 +25,25 @@ history.
   and whether a ComfyUI version still has to be pinned.
 - `CONTRIBUTING.md` (renamed from `DEV_README.md`) and this changelog.
 
+### Changed
+
+- The builder client module is now `comfy_cli.builder_api` (was
+  `comfy_cli.distribution_api`), and its methods say build and release
+  (`create_build`, `list_releases`, ...), matching the builder's public API.
+  Emitted JSON keys (`distributionId`, `distributions`) and the
+  `distribution-definition/0` schema id are unchanged.
+
+### Deprecated
+
+- `import comfy_cli.distribution_api` still works for one release and warns;
+  import `comfy_cli.builder_api` instead.
+
+### Fixed
+
+- The shipped `build_from_snapshot.json` schema now requires the `build` key
+  the builder actually serves; it still required the pre-rename `distribution`
+  key, so a valid `comfy build from-snapshot --json` payload failed validation.
+
 ## [1.16.0] - 2026-08-10
 
 [Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.16.0) · 16 commits since v1.15.0. No breaking changes.

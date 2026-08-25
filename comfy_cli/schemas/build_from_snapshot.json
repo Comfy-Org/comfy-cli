@@ -3,10 +3,10 @@
   "$id": "https://comfy.org/schemas/build_from_snapshot.json",
   "title": "comfy build from-snapshot --json data payload",
   "type": "object",
-  "required": ["distribution"],
+  "required": ["build"],
   "additionalProperties": true,
   "properties": {
-    "distribution": {"type": "object", "additionalProperties": true},
+    "build": {"type": "object", "additionalProperties": true},
     "report": {"type": "object", "additionalProperties": true}
   }
 }
