@@ -554,13 +554,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "workflow_slot_invalid",
         "A slot override failed validation (bad shape, unknown address, etc.).",
-        "see `details` — addresses follow `<instance_id>.<input_name>`",
+        "see `details` — addresses follow `<instance_id>.<input_name>`; `comfy workflow print <file>` shows every node with its id and widget names",
     ),
     ErrorCode(
         "workflow_edit_invalid",
         "A structured edit (add-node/connect/set-widget/delete-node) failed: "
         "unknown class_type, missing node, bad slot/widget name, or malformed address.",
-        "run `comfy workflow slots <file>` for widget addresses or `comfy nodes types` for class_types",
+        "run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read (`comfy workflow slots <file>` for exact `<node_id>.<input>` addresses, `comfy nodes search` for class names)",
     ),
     ErrorCode(
         "workflow_clear_not_batchable",
