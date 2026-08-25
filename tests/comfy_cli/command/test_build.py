@@ -1563,6 +1563,8 @@ class _FakeBuilderHandler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler's spelling)
         if self.path == "/v1/builds":
             return self._reply(200, {"builds": [{"id": "dist-1", "name": "portrait"}]})
+        if self.path == "/v1/builds/dist-1/releases":
+            return self._reply(200, {"releases": [{"id": "rel-9", "status": "complete"}]})
         if self.path.startswith("/v1/releases/rel-9/logs"):
             return self._reply(200, {"releaseId": "rel-9", "os": "linux", "log": "pip install ok", "truncated": False})
         return self.send_error(404)
@@ -2048,6 +2050,12 @@ def _shipped_schema(name: str) -> dict:
             "build_version_create.json",
             {"buildId": ("distributionId", "dist-1"), "releaseId": ("versionId", "rel-9")},
             id="build-release-create",
+        ),
+        pytest.param(
+            ["build", "release", "list", "dist-1"],
+            "build_version_list.json",
+            {"releases": ("versions", [{"id": "rel-9", "status": "complete"}])},
+            id="build-release-list",
         ),
         pytest.param(
             ["build", "release", "logs", "rel-9"],

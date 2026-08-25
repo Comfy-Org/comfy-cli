@@ -1535,7 +1535,7 @@ def version_list(
             renderer.info("No releases yet.")
         for v in versions:
             renderer.print(f"  {v.get('id', '?')}  {v.get('status', '')}")
-    renderer.emit({"versions": versions}, command="build release list")
+    renderer.emit({"releases": versions, "versions": versions}, command="build release list")
 
 
 @version_app.command("get", help="Show a release's build status.")
