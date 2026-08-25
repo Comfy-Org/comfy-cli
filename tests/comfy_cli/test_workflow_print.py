@@ -258,3 +258,156 @@ def test_legacy_group_node_is_refused(sd15_graph):
     with pytest.raises(PrintUnsupported) as e:
         render_py(wf, sd15_graph)
     assert e.value.reasons == ["node 1 is a legacy group node (workflow>MyGroup)"]
+
+
+def test_reroute_is_spliced(sd15_graph):
+    wf = _mini(
+        [
+            _node(
+                1, "EmptyLatentImage", outputs=[{"name": "LATENT", "type": "LATENT", "links": [1]}], widgets=[1, 1, 1]
+            ),
+            _node(
+                5,
+                "Reroute",
+                inputs=[{"name": "", "type": "*", "link": 1}],
+                outputs=[{"name": "", "type": "LATENT", "links": [2]}],
+            ),
+            _node(
+                2,
+                "VAEDecode",
+                inputs=[{"name": "samples", "type": "LATENT", "link": 2}, {"name": "vae", "type": "VAE", "link": None}],
+            ),
+        ],
+        [[1, 1, 0, 5, 0, "LATENT"], [2, 5, 0, 2, 0, "LATENT"]],
+    )
+    res = render_py(wf, sd15_graph)
+    assert "vae_decode = VAEDecode(samples=empty_latent_image, vae=None)  # 2" in res.source
+    assert "Reroute" not in res.source
+    assert {"id": "5", "type": "Reroute", "reason": "spliced"} in res.skipped
+
+
+def test_reroute_chain_and_unlinked_reroute(sd15_graph):
+    wf = _mini(
+        [
+            _node(
+                1, "EmptyLatentImage", outputs=[{"name": "LATENT", "type": "LATENT", "links": [1]}], widgets=[1, 1, 1]
+            ),
+            _node(
+                5,
+                "Reroute",
+                inputs=[{"name": "", "type": "*", "link": 1}],
+                outputs=[{"name": "", "type": "LATENT", "links": [2]}],
+            ),
+            _node(
+                6,
+                "Reroute",
+                inputs=[{"name": "", "type": "*", "link": 2}],
+                outputs=[{"name": "", "type": "LATENT", "links": [3]}],
+            ),
+            _node(
+                7,
+                "Reroute",
+                inputs=[{"name": "", "type": "*", "link": None}],
+                outputs=[{"name": "", "type": "VAE", "links": [4]}],
+            ),
+            _node(
+                2,
+                "VAEDecode",
+                inputs=[{"name": "samples", "type": "LATENT", "link": 3}, {"name": "vae", "type": "VAE", "link": 4}],
+            ),
+        ],
+        [[1, 1, 0, 5, 0, "LATENT"], [2, 5, 0, 6, 0, "LATENT"], [3, 6, 0, 2, 0, "LATENT"], [4, 7, 0, 2, 1, "VAE"]],
+    )
+    res = render_py(wf, sd15_graph)
+    assert "vae_decode = VAEDecode(samples=empty_latent_image, vae=None)  # 2 vae unlinked via reroute 7" in res.source
+
+
+def test_get_set_is_spliced(sd15_graph):
+    wf = _mini(
+        [
+            _node(
+                1, "EmptyLatentImage", outputs=[{"name": "LATENT", "type": "LATENT", "links": [1]}], widgets=[1, 1, 1]
+            ),
+            _node(5, "SetNode", inputs=[{"name": "LATENT", "type": "*", "link": 1}], widgets=["lat"]),
+            _node(6, "GetNode", outputs=[{"name": "LATENT", "type": "LATENT", "links": [2]}], widgets=["lat"]),
+            _node(
+                2,
+                "VAEDecode",
+                inputs=[{"name": "samples", "type": "LATENT", "link": 2}, {"name": "vae", "type": "VAE", "link": None}],
+            ),
+        ],
+        [[1, 1, 0, 5, 0, "LATENT"], [2, 6, 0, 2, 0, "LATENT"]],
+    )
+    res = render_py(wf, sd15_graph)
+    assert "vae_decode = VAEDecode(samples=empty_latent_image, vae=None)  # 2" in res.source
+    assert {s["type"] for s in res.skipped} == {"SetNode", "GetNode"}
+
+
+def test_get_without_set_warns(sd15_graph):
+    wf = _mini(
+        [
+            _node(6, "GetNode", outputs=[{"name": "LATENT", "type": "LATENT", "links": [2]}], widgets=["nope"]),
+            _node(
+                2,
+                "VAEDecode",
+                inputs=[{"name": "samples", "type": "LATENT", "link": 2}, {"name": "vae", "type": "VAE", "link": None}],
+            ),
+        ],
+        [[2, 6, 0, 2, 0, "LATENT"]],
+    )
+    res = render_py(wf, sd15_graph)
+    assert "samples=None" in res.source
+    assert "node 2: input 'samples' reads GetNode 6 variable 'nope' that no SetNode publishes" in res.warnings
+
+
+def test_primitive_node_is_noted_on_target(sd15_graph):
+    wf = _mini(
+        [
+            _node(
+                12,
+                "PrimitiveNode",
+                outputs=[{"name": "STRING", "type": "STRING", "links": [1]}],
+                widgets=["hello", "fixed"],
+            ),
+            _node(1, "EmptyLatentImage", outputs=[], widgets=[1, 1, 1]),
+            _node(
+                6,
+                "CLIPTextEncode",
+                inputs=[
+                    {"name": "clip", "type": "CLIP", "link": None},
+                    {"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": 1},
+                ],
+                widgets=["hello"],
+            ),
+        ],
+        [[1, 12, 0, 6, 1, "STRING"]],
+    )
+    res = render_py(wf, sd15_graph)
+    assert 'clip_text_encode = CLIPTextEncode(clip=None, text="hello")  # 6 text from primitive 12' in res.source
+    assert {"id": "12", "type": "PrimitiveNode", "reason": "inlined into 6.text"} in res.skipped
+
+
+def test_subgraph_instance_and_definition(sd15_graph):
+    wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
+    graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
+    res = render_py(wf, graph)
+    src = res.source
+    # instance line: exposed inputs by name, non-identifier names via **{...}
+    inst = next(ln for ln in src.splitlines() if "# 10 " in ln)
+    assert inst.startswith('generate_image_1 = Subgraph["Generate Image 1"](')
+    assert '**{"images.image0":' in inst
+    # definition block printed once, names its instances and the address form
+    assert "# subgraph d33c1791-dfd2-4102-8540-aa63e4434cd2" in src
+    assert "instances: 10" in src and "address inner nodes as 10/<id>" in src
+    assert "IN.value" in src and "OUT.IMAGE = " in src
+    # inner nodes are addressable
+    assert any(v.startswith("10/") or "/" in v for v in res.bindings.values())
+
+
+def test_missing_subgraph_definition_is_refused(sd15_graph):
+    wf = _mini([_node(10, "d33c1791-dfd2-4102-8540-aa63e4434cd2")], [])
+    with pytest.raises(PrintUnsupported) as e:
+        render_py(wf, sd15_graph)
+    assert e.value.reasons == [
+        "node 10 is a subgraph instance whose definition d33c1791-dfd2-4102-8540-aa63e4434cd2 is missing"
+    ]
