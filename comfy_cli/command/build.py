@@ -873,6 +873,17 @@ def plan_create(definition: dict, resolver=resolve_model_source) -> dict:
     }
 
 
+def _id_keys(*, build: str | None = None, release: str | None = None) -> dict[str, str]:
+    """Both spellings of an id. `buildId` and `releaseId` are canonical;
+    `distributionId` and `versionId` go after one release, once pinned scripts have moved."""
+    keys: dict[str, str] = {}
+    if build is not None:
+        keys["buildId"] = keys["distributionId"] = build
+    if release is not None:
+        keys["releaseId"] = keys["versionId"] = release
+    return keys
+
+
 def execute_create(plan: dict, *, client, name: str, locate_bytes, targets=None) -> dict:
     """Run the live create: upload each private blob, stitch its blobId into the
     definition, create the build, and cut a release.
@@ -881,8 +892,7 @@ def execute_create(plan: dict, *, client, name: str, locate_bytes, targets=None)
     ``locate_bytes(upload) -> Path`` finds the local file for a model upload.
     node_zip uploads (hand-dropped local nodes) aren't packaged yet — raises
     NotImplementedError so the caller can surface a clear message. Returns
-    ``{distributionId, versionId, releaseId, statusUrl, uploaded}`` (releaseId
-    is the canonical name for the cut; versionId stays because user scripts pin it)."""
+    ``{buildId, distributionId, releaseId, versionId, statusUrl, uploaded}``."""
     definition = plan["definition"]
     # Preflight the whole upload list before any bytes move: an unsupported local
     # node, or a model whose file can't be found (missing --models-dir), must fail
@@ -909,9 +919,7 @@ def execute_create(plan: dict, *, client, name: str, locate_bytes, targets=None)
         e.build_id = build_id
         raise
     return {
-        "distributionId": build_id,
-        "versionId": version_id,
-        "releaseId": version_id,
+        **_id_keys(build=build_id, release=version_id),
         "statusUrl": status_url,
         "uploaded": uploaded,
     }
@@ -1370,7 +1378,7 @@ def _create_execute(
 
     if renderer.is_pretty():
         renderer.success(f"Created build '{name}'")
-        renderer.print(f"  build:   {result['distributionId']}")
+        renderer.print(f"  build:   {result['buildId']}")
         renderer.print(f"  release: {result['releaseId']}  (uploaded {result['uploaded']} blob(s))")
         renderer.print(f"  status:  {result['statusUrl']}")
     renderer.emit({"name": name, "executed": True, **result}, command="build create", changed=True)
@@ -1405,7 +1413,7 @@ def _report_builder_error(renderer, e, *, build_id: str | None = None) -> None:
     so a cut that fails after create doesn't orphan an unnamed build."""
     import urllib.error
 
-    base = {"distributionId": build_id} if build_id else {}
+    base = _id_keys(build=build_id)
     if isinstance(e, urllib.error.HTTPError):
         body = ""
         try:
@@ -1476,7 +1484,8 @@ def list_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
             renderer.info("No builds yet.")
         for d in dists:
             renderer.print(f"  {d.get('id', '?')}  {d.get('name', '')}")
-    renderer.emit({"distributions": dists}, command="build list")
+    # `builds` is canonical; `distributions` carries the same rows and goes after one release.
+    renderer.emit({"builds": dists, "distributions": dists}, command="build list")
 
 
 @app.command("get", help="Show a build and its full definition.")
@@ -1505,9 +1514,8 @@ def version_create(
     if renderer.is_pretty():
         renderer.success(f"Cut release {release_id}")
         renderer.print(f"  status: {status_url}")
-    # releaseId is the canonical name; versionId stays because user scripts pin it.
     renderer.emit(
-        {"distributionId": build_id, "versionId": release_id, "releaseId": release_id, "statusUrl": status_url},
+        {**_id_keys(build=build_id, release=release_id), "statusUrl": status_url},
         command="build release create",
         changed=True,
     )
@@ -1557,12 +1565,11 @@ def version_logs(
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
     content = _builder_call(renderer, lambda: client.get_version_logs(version_id, os=os_target, gpu=gpu))
-    # The contract carries both spellings of the id: releaseId is canonical and
-    # versionId stays because user scripts pin it. Mirror whichever the builder
-    # returned into the other so either server generation yields both keys.
+    # Mirror whichever spelling the builder returned, so either server generation
+    # yields both keys.
     log_id = content.get("releaseId") or content.get("versionId")
     if log_id:
-        content = {**content, "versionId": log_id, "releaseId": log_id}
+        content = {**content, **_id_keys(release=log_id)}
     if renderer.is_pretty():
         log = content.get("log", "")
         renderer.print(log if log else "(no build log captured yet)")
@@ -1624,14 +1631,14 @@ def delete_cmd(
                 code="build_delete_needs_confirm",
                 message="refusing to delete without confirmation in non-interactive mode.",
                 hint="pass --yes to confirm the delete",
-                details={"distributionId": build_id},
+                details=_id_keys(build=build_id),
             )
             raise typer.Exit(code=1)
     client = _builder_client(renderer, builder_url)
     _builder_call(renderer, lambda: client.delete_build(build_id))
     if renderer.is_pretty():
         renderer.success(f"Deleted build {build_id}")
-    renderer.emit({"distributionId": build_id, "deleted": True}, command="build delete", changed=True)
+    renderer.emit({**_id_keys(build=build_id), "deleted": True}, command="build delete", changed=True)
 
 
 @app.command("update", help="Replace a build's definition from a scan/edited JSON.")
