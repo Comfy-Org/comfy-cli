@@ -67,8 +67,7 @@ def get_not_user_set_default_workspace():
 
 
 def kill_all(pid):
-    # Imported here, not at module level: psutil is the single most expensive
-    # import on the CLI's startup path and only these two helpers need it.
+    # Imported here, not at module level: only kill_all/is_running need psutil.
     import psutil
 
     try:
@@ -82,6 +81,7 @@ def kill_all(pid):
 
 
 def is_running(pid):
+    # Imported here, not at module level: only kill_all/is_running need psutil.
     import psutil
 
     try:
