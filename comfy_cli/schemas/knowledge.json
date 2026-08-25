@@ -27,6 +27,17 @@
     "deprecation": { "type": ["object", "null"], "description": "Matching deprecations entry, if any (resolve)." },
     "bundle_version": { "type": "string", "description": "Bundle version the answer came from (resolve, pick)." },
     "capability": { "type": "string", "description": "Capability id (pick)." },
+    "capabilities": {
+      "type": "array",
+      "description": "Every capability in the bundle, id-sorted (pick with no argument).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "description": { "type": ["string", "null"] }
+        }
+      }
+    },
     "description": { "type": ["string", "null"], "description": "Capability description, null when the capability has none (pick)." },
     "picks": {
       "type": "array",

@@ -759,6 +759,21 @@ class TestCli:
         assert env["error"]["code"] == "knowledge_unknown_capability"
         assert env["error"]["details"]["known"] == ["audio-generation", "lipsync"]
 
+    def test_pick_without_a_capability_lists_them(self, tmp_path, monkeypatch, capsys):
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick"], capsys)
+        assert rc == 0
+        assert env["command"] == "knowledge pick"
+        data = env["data"]
+        assert [c["id"] for c in data["capabilities"]] == ["audio-generation", "lipsync"]
+        assert all("description" in c for c in data["capabilities"])
+        _validate(data)
+
+    def test_pick_without_a_capability_needs_a_bundle(self, capsys):
+        rc, env = _run(["pick"], capsys)
+        assert rc == 1
+        assert env["error"]["code"] == "knowledge_unavailable"
+
     def test_pick_payload_normalizes_rank_and_model(self, tmp_path, monkeypatch, capsys):
         picks = [
             {"model": "x", "rank": "1"},

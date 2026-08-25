@@ -136,13 +136,32 @@ def resolve_cmd(
     renderer.emit(payload, command="knowledge resolve")
 
 
-@app.command("pick", help="Ranked model picks for a capability (e.g. lipsync, text-to-video).")
+def _emit_capabilities(renderer, bundle: knowledge.Bundle) -> None:
+    caps = [
+        {"id": cid, "description": _text((bundle.capabilities.get(cid) or {}).get("description"))}
+        for cid in sorted(bundle.capabilities)
+    ]
+    payload = {"capabilities": caps, "bundle_version": bundle.version, "stale": bundle.stale}
+    if renderer.is_pretty():
+        for cap in caps:
+            tail = f"  {sanitize_markup(cap['description'])}" if cap["description"] else ""
+            rprint(f"[bold]{sanitize_markup(cap['id'])}[/bold]{tail}")
+    renderer.emit(payload, command="knowledge pick")
+
+
+@app.command("pick", help="Ranked model picks for a capability; omit it to list every capability.")
 @tracking.track_command("knowledge")
 def pick_cmd(
-    capability: Annotated[str, typer.Argument(help="Capability id; see `details.known` on a miss.")],
+    capability: Annotated[
+        str | None,
+        typer.Argument(help="Capability id (e.g. lipsync, text-to-video). Omit to list every capability."),
+    ] = None,
 ):
     renderer = get_renderer()
     bundle = _require_bundle(renderer)
+    if capability is None:
+        _emit_capabilities(renderer, bundle)
+        return
     cap = knowledge.pick(bundle, capability)
     if cap is None:
         renderer.error(
