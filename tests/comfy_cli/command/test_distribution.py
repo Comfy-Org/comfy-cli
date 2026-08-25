@@ -1683,3 +1683,144 @@ def test_the_from_path_is_not_shipped_as_telemetry():
     # Supplied but empty is still supplied; absent is absent.
     assert filter_command_kwargs({"from_": None})["from_"] is None
     assert "from_" not in filter_command_kwargs({"name": "demo"})
+
+
+# --- from-workflow: a workflow file becomes a build in one call ---------------
+
+
+WORKFLOW_REPORT = {
+    "unresolvedClasses": ["IPAdapterUnifiedLoader"],
+    "uncheckedClasses": ["ImpactSimpleDetectorSEGS"],
+    "packsWithoutVersion": ["comfyui-kjnodes"],
+    "collidingPacks": ["comfyui-manager"],
+    "unknownClasses": [{"classType": "ReActorFaceSwap", "status": "unknown"}],
+    "models": [{"filename": "flux1-dev.safetensors", "status": "missing", "usedBy": ["UNETLoader"]}],
+    "partnerClasses": {"FluxProUltraImageNode": "black-forest-labs"},
+    "pinnedToLatest": True,
+    "comfyVersionRequired": True,
+}
+
+
+def _workflow_client(report):
+    class FakeClient:
+        def create_distribution_from_workflow(self, name, workflow, *, description=None):
+            self.workflow = workflow
+            return {"build": {"id": "dist-9", "name": name}, "report": report}
+
+    return FakeClient()
+
+
+def test_from_workflow_client_posts_the_graph_to_its_own_endpoint(monkeypatch):
+    calls = []
+
+    def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
+        calls.append((method, url, body))
+        return 201, {"build": {"id": "dist-9"}, "report": {}}
+
+    monkeypatch.setattr("comfy_cli.distribution_api.request_json", fake_request_json)
+    from comfy_cli.distribution_api import BuilderClient
+
+    client = BuilderClient("https://builder.test/", "jwt-token")
+    graph = {"nodes": [{"type": "KSampler"}], "links": []}
+    assert client.create_distribution_from_workflow("portrait", graph)["build"]["id"] == "dist-9"
+    assert calls[-1] == (
+        "POST",
+        "https://builder.test/v1/builds/from-workflow",
+        {"name": "portrait", "workflow": graph},
+    )
+
+    client.create_distribution_from_workflow("portrait", graph, description="a portrait pipeline")
+    assert calls[-1][2] == {"name": "portrait", "workflow": graph, "description": "a portrait pipeline"}
+
+
+def test_from_workflow_reads_the_created_id_and_report_from_their_own_keys(monkeypatch, tmp_path, capsys):
+    """The endpoint answers {build, report}, not a build carrying its report."""
+    wf = tmp_path / "portrait.json"
+    wf.write_text(json.dumps({"nodes": [{"type": "KSampler"}], "links": []}), encoding="utf-8")
+    monkeypatch.setattr(
+        distribution, "_builder_client", lambda renderer, url: _workflow_client({"unresolvedClasses": ["ReActor"]})
+    )
+    distribution.from_workflow_cmd(from_=str(wf), name="portrait")
+    out = capsys.readouterr().out
+    assert "dist-9" in out and "None" not in out
+    assert "ReActor" in out
+
+
+def test_report_advisories_renders_every_field_a_workflow_report_carries():
+    """A workflow report shares no key with a snapshot report, so a fixed
+    snapshot key list renders zero advisories and the import looks clean."""
+    lines = "\n".join(distribution.report_advisories(WORKFLOW_REPORT))
+    assert "IPAdapterUnifiedLoader" in lines
+    assert "ImpactSimpleDetectorSEGS" in lines
+    assert "comfyui-kjnodes" in lines
+    assert "comfyui-manager" in lines
+    assert "ReActorFaceSwap" in lines
+    assert "flux1-dev.safetensors" in lines and "comfy build resolve" in lines
+    assert "FluxProUltraImageNode (black-forest-labs)" in lines
+    assert "newest published" in lines
+    assert "no ComfyUI version is pinned" in lines
+
+
+def test_report_advisories_survives_entries_the_server_shaped_differently():
+    """A scalar where a list of objects belongs must not render one line per
+    character, and a mapping that arrives as a list must not raise."""
+    lines = distribution.report_advisories(
+        {"models": ["flux1-dev.safetensors", 7], "partnerClasses": ["FluxProUltraImageNode"]}
+    )
+    assert len(lines) == 1
+    assert "flux1-dev.safetensors, 7" in lines[0]
+
+
+def test_report_advisories_leaves_a_snapshot_report_unchanged():
+    """`comfy build from-snapshot` shares the renderer, so its output must not move."""
+    assert distribution.report_advisories({"notInRegistry": ["was-node-suite-comfyui"]}) == [
+        "1 pinned to something the Comfy Registry does not publish: was-node-suite-comfyui"
+    ]
+
+
+def test_from_workflow_accepts_the_api_export_dialect(monkeypatch, tmp_path, capsys):
+    """The API export has no `nodes` or `links`, and the builder reads it. A
+    frontend-only check here would refuse a file the server accepts."""
+    api_export = {"3": {"class_type": "KSampler", "inputs": {}}}
+    wf = tmp_path / "portrait_api.json"
+    wf.write_text(json.dumps(api_export), encoding="utf-8")
+    client = _workflow_client({})
+    monkeypatch.setattr(distribution, "_builder_client", lambda renderer, url: client)
+    distribution.from_workflow_cmd(from_=str(wf), name="portrait")
+    assert client.workflow == api_export
+    assert "dist-9" in capsys.readouterr().out
+
+
+def test_from_workflow_names_the_update_command_when_no_comfy_version_is_pinned(monkeypatch, tmp_path, capsys):
+    wf = tmp_path / "portrait.json"
+    wf.write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
+    monkeypatch.setattr(
+        distribution, "_builder_client", lambda renderer, url: _workflow_client({"comfyVersionRequired": True})
+    )
+    distribution.from_workflow_cmd(from_=str(wf), name="portrait")
+    # The renderer wraps to the terminal width, so compare on the unwrapped text.
+    out = " ".join(capsys.readouterr().out.split())
+    assert "cannot be cut yet" in out
+    assert "comfy build update dist-9 --from <file>" in out
+    assert "comfy build release create" not in out
+
+
+def test_from_workflow_names_the_release_command_when_a_comfy_version_is_pinned(monkeypatch, tmp_path, capsys):
+    wf = tmp_path / "portrait.json"
+    wf.write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
+    monkeypatch.setattr(
+        distribution, "_builder_client", lambda renderer, url: _workflow_client({"comfyVersionRequired": False})
+    )
+    distribution.from_workflow_cmd(from_=str(wf), name="portrait")
+    out = " ".join(capsys.readouterr().out.split())
+    assert "comfy build release create dist-9" in out
+    assert "cannot be cut yet" not in out
+
+
+@pytest.mark.parametrize("payload", ["not json at all", "[]"])
+def test_from_workflow_refuses_a_file_that_is_not_a_json_object(tmp_path, capsys, payload):
+    f = tmp_path / "portrait.json"
+    f.write_text(payload, encoding="utf-8")
+    with pytest.raises(typer.Exit):
+        distribution.from_workflow_cmd(from_=str(f), name="portrait")
+    assert "build_workflow_invalid" in capsys.readouterr().out

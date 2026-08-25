@@ -1061,6 +1061,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "pass a file produced by `comfy build scan -o <path>`",
     ),
     ErrorCode(
+        "build_workflow_invalid",
+        "`comfy build from-workflow --from <path>` could not read the workflow file, or it is not a JSON "
+        "object. `details.path` carries the path.",
+        "pass a workflow saved from ComfyUI (either the editing format or the API export)",
+    ),
+    ErrorCode(
         "build_not_signed_in",
         "`comfy build create --execute` found no usable Cloud JWT — the builder authenticates with the "
         "OAuth session token, and there isn't a valid one.",

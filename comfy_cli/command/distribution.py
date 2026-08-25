@@ -576,6 +576,20 @@ _REPORT_ADVISORIES = (
     ("unverifiedPins", "left unchecked because the registry did not answer"),
     ("skippedPins", "dropped: the build owns these packages"),
     ("unpinnablePins", "dropped: not a public PyPI release"),
+    ("unresolvedClasses", "node classes nothing installable provides; the graph will not run without them"),
+    ("uncheckedClasses", "classes the registry never answered about, so nothing confirmed they are missing"),
+    ("packsWithoutVersion", "carried by repository: the registry publishes no installable version of them"),
+    ("collidingPacks", "left out: another pack already claimed the folder they install into"),
+)
+
+# Each entry is (report key, the field that names an entry, what it means to the reader).
+_REPORT_ENTRY_ADVISORIES = (
+    ("unknownClasses", "classType", "node classes the importer could not place in a pack"),
+    (
+        "models",
+        "filename",
+        "models the graph loads that no definition carries; `comfy build resolve` finds download candidates",
+    ),
 )
 
 
@@ -592,11 +606,33 @@ def report_advisories(report: dict) -> list[str]:
     dropped = report.get("droppedComfyVersion")
     if dropped:
         lines.append(f"the ComfyUI release {str(dropped)!r} is not a ref the build can use, so none was set")
+    if report.get("pinnedToLatest") is True:
+        lines.append(
+            "packs the workflow named without a version were pinned to the registry's newest published one, "
+            "so importing the same file again can produce a different build"
+        )
+    if report.get("comfyVersionRequired") is True:
+        lines.append("no ComfyUI version is pinned, so the build cannot be cut until one is set")
     for key, meaning in _REPORT_ADVISORIES:
         entries = report.get(key) or []
         # Every one of these is a list; a scalar would render one line per character.
         if entries and isinstance(entries, list | tuple):
             lines.append(f"{len(entries)} {meaning}: {', '.join(str(e) for e in entries[:8])}")
+    for key, field, meaning in _REPORT_ENTRY_ADVISORIES:
+        entries = report.get(key) or []
+        if not entries or not isinstance(entries, list | tuple):
+            continue
+        # An entry the server shaped differently still prints, as whatever it is.
+        names = [str(e.get(field) or e) if isinstance(e, dict) else str(e) for e in entries[:8]]
+        lines.append(f"{len(entries)} {meaning}: {', '.join(names)}")
+    # A mapping of class name -> provider, so each name carries who serves it.
+    partners = report.get("partnerClasses") or {}
+    if partners and isinstance(partners, dict):
+        served = [f"{cls} ({provider})" for cls, provider in list(partners.items())[:8]]
+        lines.append(
+            f"{len(partners)} node classes call a partner API rather than run from an installed pack: "
+            f"{', '.join(served)}"
+        )
     return lines
 
 
@@ -1619,6 +1655,56 @@ def from_snapshot_cmd(
             renderer.warn(line)
         renderer.info(f"cut a build with `comfy build release create {distribution_id}`")
     renderer.emit(result, command="build from-snapshot", changed=True)
+
+
+@app.command("from-workflow", help="Create a build from a ComfyUI workflow file.")
+@tracking.track_command("build")
+def from_workflow_cmd(
+    from_: Annotated[
+        str, typer.Option("--from", "-f", help="Path to a ComfyUI workflow JSON (editing format or API export).")
+    ],
+    name: Annotated[str, typer.Option("--name", help="Name for the new build.")],
+    description: Annotated[str | None, typer.Option("--description", help="Optional description.")] = None,
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
+    renderer = get_renderer()
+    path = Path(from_).expanduser()
+    try:
+        workflow = json.loads(path.read_text(encoding="utf-8"))
+        # The builder reads both the editing format and the API export, so the
+        # only shape the CLI insists on is a JSON object: the dialect is the
+        # server's call, and a client-side guess would refuse files it accepts.
+        if not isinstance(workflow, dict):
+            raise ValueError(f"expected a JSON object, got {type(workflow).__name__}")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as e:
+        renderer.error(
+            code="build_workflow_invalid",
+            message=f"could not read {path}: {e}",
+            details={"path": str(path)},
+        )
+        raise typer.Exit(code=1) from e
+
+    client = _builder_client(renderer, builder_url)
+    result = _builder_call(
+        renderer, lambda: client.create_distribution_from_workflow(name, workflow, description=description)
+    )
+    created = result.get("build") or {}
+    distribution_id = created.get("id")
+    report = result.get("report") or {}
+    if renderer.is_pretty():
+        renderer.success(f"Created build {distribution_id} from {path.name}")
+        for line in report_advisories(report):
+            renderer.warn(line)
+        # A workflow names no ComfyUI release, so a fresh import has no
+        # baseComfyVersion and a cut would fail. Name the edit, not the cut.
+        if report.get("comfyVersionRequired") is True:
+            renderer.info(
+                "no ComfyUI version is pinned, so this build cannot be cut yet: add `baseComfyVersion` to the "
+                f"definition and save it with `comfy build update {distribution_id} --from <file>`"
+            )
+        else:
+            renderer.info(f"cut a build with `comfy build release create {distribution_id}`")
+    renderer.emit(result, command="build from-workflow", changed=True)
 
 
 @blob_app.command("upload", help="Upload a private file and print the blobId a definition can reference.")

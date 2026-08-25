@@ -10,6 +10,7 @@ Field names match services/comfy-builder/openapi.yaml exactly:
   POST /v1/blobs {kind, filename, sizeBytes, sha256}     -> {blobId, uploadUrl, expiresAt}
   POST /v1/builds {name, definition}              -> {id, ...}
   POST /v1/builds/{id}/releases {targets?}        -> {releaseId, statusUrl}
+  POST /v1/builds/from-workflow {name, workflow}  -> {build, report}
   GET  /v1/releases/{id}                          -> {status, ...}
 """
 
@@ -147,6 +148,14 @@ class BuilderClient:
         if base_image_id:
             body["baseImageId"] = base_image_id
         return self._post(("builds", "from-snapshot"), body)
+
+    def create_distribution_from_workflow(self, name: str, workflow: dict, *, description: str | None = None) -> dict:
+        """POST /v1/builds/from-workflow — read a workflow and store what it
+        maps to, in one call. Returns ``{build, report}``."""
+        body: dict = {"name": name, "workflow": workflow}
+        if description:
+            body["description"] = description
+        return self._post(("builds", "from-workflow"), body)
 
     def _get(self, parts: tuple[str, ...], params: dict | None = None, *, max_bytes: int = _MAX_JSON) -> dict:
         url = self.target.url(*parts)
