@@ -37,7 +37,7 @@
       "additionalProperties": { "type": "string" },
       "description": "print: binding name -> node id. Interior subgraph nodes use qualified keys/ids, e.g. \"10/3/primitive_int\" -> \"10/3/6\"."
     },
-    "node_count": { "type": "integer", "minimum": 0, "description": "print: nodes that got a rendered line (top level + subgraph interiors)." },
+    "node_count": { "type": ["integer", "null"], "minimum": 0, "description": "print: nodes that got a rendered line (top level + subgraph interiors). null for `comfy workflow get` on a non-JSON body." },
     "skipped": {
       "type": "array",
       "description": "print: nodes not rendered as their own line. UI-only splicing nodes (reason \"spliced\", or \"inlined into <id>.<input>\" for a PrimitiveNode); notes, which are rendered as `#`-comments in `source` AND listed here with reason \"note\".",

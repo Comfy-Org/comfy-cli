@@ -873,3 +873,74 @@ def test_reroute_cycle_warns_instead_of_silently_printing_none(sd15_graph):
     res = render_py(wf, sd15_graph)
     assert "vae_decode = VAEDecode(samples=None, vae=None)  # 2" in res.source
     assert "node 2: input 'samples' unresolved through a reroute/getnode cycle" in res.warnings
+
+
+def test_non_object_top_level_node_entries_are_ignored_with_warning(sd15_graph):
+    # litegraph has been seen to serialize a bare `null` into `nodes[]`. `_validate`
+    # used to call `.get("type")` on every entry with no isinstance check, so this
+    # raised AttributeError instead of rendering the rest of the workflow.
+    wf = _mini(
+        [None, _node(1, "EmptyLatentImage", widgets=[64, 64, 1]), "junk"],
+        [],
+    )
+    res = render_py(wf, sd15_graph)
+    assert "empty_latent_image = EmptyLatentImage(width=64, height=64, batch_size=1)  # 1" in res.source
+    assert "workflow: ignoring 2 non-object node entries" in res.warnings
+
+
+def test_non_dict_definitions_block_is_ignored_with_warning(sd15_graph):
+    # `(workflow.get("definitions") or {}).get("subgraphs")` assumed `definitions`
+    # was a dict; a non-empty list is truthy so `or {}` never fired, and `.get`
+    # raised AttributeError. A malformed `definitions` block now degrades to "no
+    # definitions" plus a warning, matching `_extract_notes` in command/workflow.py.
+    wf = _mini([_node(1, "EmptyLatentImage", widgets=[64, 64, 1])], [])
+    wf["definitions"] = [1]
+    res = render_py(wf, sd15_graph)
+    assert "empty_latent_image = EmptyLatentImage(width=64, height=64, batch_size=1)  # 1" in res.source
+    assert "workflow: ignoring non-object definitions block" in res.warnings
+
+
+def test_non_string_output_name_falls_back_to_out_index(sd15_graph):
+    # A dict outputs[slot] with a truthy non-string "name" (e.g. an int) used to
+    # reach `_IDENT.match(out_name)` and raise TypeError. It must fall back to the
+    # indexed `.out[<slot>]` form instead, same as a non-identifier string name.
+    wf = _mini(
+        [
+            _node(
+                1,
+                "EmptyLatentImage",
+                outputs=[
+                    {"name": 1, "type": "LATENT", "links": [1]},
+                    {"name": "extra", "type": "X", "links": []},
+                ],
+                widgets=[1, 1, 1],
+            ),
+            _node(
+                2,
+                "VAEDecode",
+                inputs=[{"name": "samples", "type": "LATENT", "link": 1}, {"name": "vae", "type": "VAE", "link": None}],
+            ),
+        ],
+        [[1, 1, 0, 2, 0, "LATENT"]],
+    )
+    src = render_py(wf, sd15_graph).source
+    assert "samples=empty_latent_image.out[0]" in src
+
+
+def test_bypass_mode_on_resolved_subgraph_instance(sd15_graph):
+    sub_id = "d33c1791-dfd2-4102-8540-aa63e4434cd2"
+    wf = _mini([_node(10, sub_id, mode=4)], [])
+    wf["definitions"] = {"subgraphs": [{"id": sub_id, "name": "MySub", "nodes": [], "links": []}]}
+    res = render_py(wf, sd15_graph)
+    line = next(ln for ln in res.source.splitlines() if "# 10 " in ln)
+    assert line == f'my_sub = Subgraph["MySub"]()  # 10 subgraph {sub_id} mode=bypass'
+
+
+def test_bypass_mode_on_missing_subgraph_definition(sd15_graph):
+    wf = _mini([_node(10, "d33c1791-dfd2-4102-8540-aa63e4434cd2", mode=4)], [])
+    res = render_py(wf, sd15_graph)
+    line = next(ln for ln in res.source.splitlines() if "# 10 " in ln)
+    assert line == (
+        'd33c1791_dfd2_4102_8540_aa63e4434cd2 = Subgraph["d33c1791-dfd2-4102-8540-aa63e4434cd2"]()'
+        "  # 10 subgraph d33c1791-dfd2-4102-8540-aa63e4434cd2 definition missing mode=bypass"
+    )

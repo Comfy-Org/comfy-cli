@@ -46,8 +46,6 @@ _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # proxy nodes — matches workflow_to_api._SUBGRAPH_INPUT_NODE_ID / _OUTPUT_NODE_ID.
 _PROXY_IN = "-10"
 _PROXY_OUT = "-20"
-_MAX_SUBGRAPH_DEPTH = 10
-_MAX_SPLICE_HOPS = 100
 
 
 @dataclass(frozen=True)
@@ -263,7 +261,7 @@ def _edge_ref(binding: str, src_node: dict, src_type: str, slot: int, ctx: _Rend
         m = ctx.graph.node(src_type)
         if m is not None and 0 <= slot < len(m.outputs):
             out_name = m.outputs[slot].name
-    if out_name and _IDENT.match(out_name) and not keyword.iskeyword(out_name):
+    if out_name and isinstance(out_name, str) and _IDENT.match(out_name) and not keyword.iskeyword(out_name):
         return f"{binding}.{out_name}", warning
     return f"{binding}.out[{slot}]", warning
 
@@ -374,7 +372,7 @@ def _resolve_source(
     it bottoms out.
     """
     seen: set[str] = set()
-    for _ in range(_MAX_SPLICE_HOPS):
+    while True:
         key = str(src_id)
         if proxy_in_id is not None and key == proxy_in_id:
             return ("in_proxy", src_slot)
@@ -400,7 +398,6 @@ def _resolve_source(
         if t == "PrimitiveNode":
             return ("primitive_no_widget", key)
         return ("ok", src_id, src_slot)
-    return ("ok", src_id, src_slot)
 
 
 def _splice_link_map(
@@ -687,6 +684,7 @@ def _render_subgraph_instance_line(
     widget-backed exposed inputs print positionally from ``widgets_values``
     (subgraphs are never in the catalog) unless their link resolves to the
     enclosing definition's own input proxy, in which case that ref is used.
+    Gets the same ``mode=bypass``/``mode=mute`` suffix as a regular node.
     Any D9 annotation from resolving a link input (e.g. a dead-end Reroute)
     is appended to the line, same as a regular node. Returns ``(line, prim_hits)``."""
     nid = str(node.get("id"))
@@ -751,6 +749,9 @@ def _render_subgraph_instance_line(
         args.append(f"**{{{inner}}}")
 
     line = f"{binding} = Subgraph[{bracket}]({', '.join(args)})  # {nid} subgraph {type_uuid}"
+    mode = node.get("mode")
+    if mode in _MODE_LABELS:
+        line += f" mode={_MODE_LABELS[mode]}"
     for ann in annotations:
         line += ann
     return line, prim_hits
@@ -764,7 +765,8 @@ def _render_missing_subgraph_line(
     resolve by the instance's own input name (non-identifier names via
     ``**{}``, same as a resolved instance); widget-backed instance inputs
     print positionally as a single ``widgets=[...]`` (there's no definition to
-    name them against). Any D9 annotation is appended, same as a resolved
+    name them against). Gets the same ``mode=bypass``/``mode=mute`` suffix as a
+    resolved instance. Any D9 annotation is appended, same as a resolved
     instance. The warning uses this node's fully-qualified address."""
     nid = str(node.get("id"))
     args: list[str] = []
@@ -800,6 +802,9 @@ def _render_missing_subgraph_line(
     warnings.append(f"node {ctx.qualify(nid)}: subgraph definition {type_uuid} missing; printed opaquely")
     call = f"{binding} = Subgraph[{json.dumps(type_uuid)}]({', '.join(args)})"
     line = f"{call}  # {nid} subgraph {type_uuid} definition missing"
+    mode = node.get("mode")
+    if mode in _MODE_LABELS:
+        line += f" mode={_MODE_LABELS[mode]}"
     for ann in annotations:
         line += ann
     return line
@@ -975,10 +980,14 @@ def _render_definition_block(
     """Render one subgraph definition's interior: its own nodes (recursing for
     nested subgraph instances via the same ``_render_nodes``), its notes, its
     UI-only-splice skips, and ``OUT.<name> = <ref>`` lines for each of its
-    declared outputs. Returns ``(lines, printable_node_count)``."""
-    if depth > _MAX_SUBGRAPH_DEPTH:
-        raise PrintUnsupported(["subgraph nesting deeper than 10"])
+    declared outputs. Returns ``(lines, printable_node_count)``.
 
+    No depth cap: ``state.def_seen`` (see ``_State.register_instance``) already
+    dedupes a definition to its first occurrence in ``state.def_order``, so a
+    self-referential (or mutually-referential) subgraph chain can't grow that
+    queue without bound — depth only grows with genuinely distinct nesting
+    levels, and capping it would misfire on legitimate deep nesting instead of
+    catching anything a cycle could cause."""
     interior_nodes = [n for n in sg_def.get("nodes") or [] if isinstance(n, dict)]
     all_links = _def_links(sg_def)
 
@@ -1062,13 +1071,21 @@ def _render_definition_block(
 
 
 def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
-    nodes = workflow.get("nodes") or []
+    warnings: list[str] = []
+
+    raw_nodes = workflow.get("nodes") or []
+    nodes = [n for n in raw_nodes if isinstance(n, dict)]
+    if len(nodes) != len(raw_nodes):
+        warnings.append(f"workflow: ignoring {len(raw_nodes) - len(nodes)} non-object node entries")
+
     links = workflow.get("links") or []
-    defs_by_id = {
-        sg.get("id"): sg
-        for sg in (workflow.get("definitions") or {}).get("subgraphs") or []
-        if isinstance(sg, dict) and sg.get("id")
-    }
+
+    definitions = workflow.get("definitions")
+    if definitions is not None and not isinstance(definitions, dict):
+        warnings.append("workflow: ignoring non-object definitions block")
+        definitions = None
+    subgraphs = definitions.get("subgraphs") if definitions else None
+    defs_by_id = {sg.get("id"): sg for sg in (subgraphs or []) if isinstance(sg, dict) and sg.get("id")}
 
     reasons = _validate(nodes, links)
     if reasons:
@@ -1108,7 +1125,6 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         get_vars=get_vars,
     )
 
-    warnings: list[str] = []
     skipped: list[dict] = []
     state = _State(defs_by_id, warnings, skipped, bindings)
 
