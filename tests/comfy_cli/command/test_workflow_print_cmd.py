@@ -119,6 +119,14 @@ def test_print_pretty_prints_source_verbatim(capsys):
     assert "ksampler = KSampler(" in result.output and "  # 3" in result.output
 
 
+def test_print_select_in_pretty_mode_prints_only_the_selection():
+    _force_pretty_renderer()
+    result = CliRunner().invoke(workflow_cmd.app, ["print", str(SD15), "--input", str(SD15_OI), "--select", "bindings"])
+    assert result.exit_code == 0, result.output
+    assert "ksampler = KSampler(" not in result.output
+    assert '"ksampler": "3"' in result.output
+
+
 def test_print_rejects_api_format(tmp_path, capsys):
     p = _write_workflow(tmp_path, {"3": {"class_type": "KSampler", "inputs": {}}})
     env = _run(["print", str(p), "--input", str(SD15_OI)], capsys, expect_ok=False)

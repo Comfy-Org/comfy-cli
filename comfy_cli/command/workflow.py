@@ -617,10 +617,11 @@ def print_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
     fmt: Annotated[str, typer.Option("--format", help="Output form. Only `py` today.")] = "py",
     input_path: Annotated[
-        str | None, typer.Option("--input", help="Offline object_info.json dump for widget names.")
+        str | None,
+        typer.Option("--input", show_default=False, help="Offline object_info.json dump for widget names."),
     ] = None,
-    host: Annotated[str | None, typer.Option("--host")] = None,
-    port: Annotated[int | None, typer.Option("--port")] = None,
+    host: Annotated[str | None, typer.Option("--host", show_default=False)] = None,
+    port: Annotated[int | None, typer.Option("--port", show_default=False)] = None,
     where: Annotated[str | None, typer.Option("--where", help="Routing for the catalog fetch: local or cloud.")] = None,
     select: Annotated[
         str | None, typer.Option("--select", help="Project the payload (see `comfy workflow slots --select`).")
@@ -657,15 +658,14 @@ def print_cmd(
         "skipped": res.skipped,
         "warnings": res.warnings,
     }
+    if select is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select, command="workflow print")
     if renderer.is_pretty():
         typer.echo(_strip_terminal_controls(res.source), nl=False)
         for w in res.warnings:
             typer.echo(f"warning: {_strip_terminal_controls(w)}", err=True)
-    if select:
-        from comfy_cli.selector import emit_selected
-
-        emit_selected(renderer, payload, select, command="workflow print")
-        return
     renderer.emit(payload, command="workflow print")
 
 
