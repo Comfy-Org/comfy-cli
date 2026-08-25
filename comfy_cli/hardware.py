@@ -292,11 +292,11 @@ def _detect_gpu(system: str, machine: str, cpu: str | None) -> dict | None:
 
 
 def _detect_ram_bytes() -> int | None:
-    # Lazy: psutil costs more to import than the rest of this module put
-    # together, and only RAM detection needs it.
-    import psutil
-
     try:
+        # Lazy: psutil costs more to import than the rest of this module put
+        # together, and only RAM detection needs it.
+        import psutil
+
         return int(psutil.virtual_memory().total)
     except Exception:
         logger.debug("RAM detection failed", exc_info=True)
