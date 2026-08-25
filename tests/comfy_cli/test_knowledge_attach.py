@@ -85,7 +85,49 @@ class TestLookup:
         bundle = knowledge.load_bundle()
         for q in ("testvid-lipsync", "testvid-avatar", "Testvid Avatar", "flux-kontext-max"):
             assert knowledge.resolve_id(bundle, q) is None, q
-            assert "knowledge" not in _attach(queries=[q]), q
+            # The guard is on the MODEL row. A capability the wording names may
+            # still answer with its ranked picks — 'testvid-lipsync' asking about
+            # lipsync is a question the bundle can answer.
+            assert _attach(queries=[q]).get("knowledge", {}).get("models", []) == [], q
+
+    def test_an_intent_phrase_reaches_the_capability_it_names(self):
+        """Callers ask in sentences; the bundle is keyed on tags and ids. Every
+        word of a key appearing in the query is enough to resolve it."""
+        for q in ("make a talking head video", "lip sync this footage", "audio generation for my clip"):
+            k = _attach(queries=[q])["knowledge"]
+            assert k["picks"], q
+            assert k["hit_ids"] in (["cap:lipsync"], ["cap:audio-generation"]), q
+
+    def test_a_phrase_naming_no_capability_resolves_to_nothing(self):
+        bundle = knowledge.load_bundle()
+        for q in ("how do I load a checkpoint", "a video", "zzzz", "head"):
+            assert knowledge._resolve_tokens(bundle, q) is None, q
+
+    def test_a_tie_between_capabilities_resolves_to_neither(self):
+        """Same rule as the normalized map: two answers are not an answer. The
+        keys differ as strings, so they survive capability_keys' first-wins
+        dedupe and collide only once reduced to word sets."""
+        data = {
+            "models": {},
+            "capabilities": {"alpha": {"aliases": ["video upscale"]}, "beta": {"aliases": ["upscale video"]}},
+        }
+        b = knowledge._index(data, None, source="env", stale=False, path="x", mtime=0.0)
+        assert knowledge._resolve_tokens(b, "please upscale this video") is None
+
+    def test_the_longest_key_wins_over_a_broader_one(self):
+        data = {
+            "models": {},
+            "capabilities": {"broad": {"aliases": ["video"]}, "narrow": {"aliases": ["video upscale"]}},
+        }
+        b = knowledge._index(data, None, source="env", stale=False, path="x", mtime=0.0)
+        assert knowledge._resolve_tokens(b, "please video upscale this") == "narrow"
+        assert knowledge._resolve_tokens(b, "just a video") == "broad"
+
+    def test_a_short_single_word_key_never_matches_alone(self):
+        """Guards a future alias like '3d' from joining every query that says it."""
+        data = {"models": {}, "capabilities": {"cap": {"aliases": ["3d"]}}}
+        b = knowledge._index(data, None, source="env", stale=False, path="x", mtime=0.0)
+        assert knowledge._resolve_tokens(b, "a 3d mesh of my cat") is None
 
     def test_lookup_agrees_with_the_resolve_verb(self):
         bundle = knowledge.load_bundle()
