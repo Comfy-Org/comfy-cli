@@ -136,13 +136,24 @@ def resolve_cmd(
     renderer.emit(payload, command="knowledge resolve")
 
 
-def _emit_capabilities(renderer, bundle: knowledge.Bundle) -> None:
+def _emit_capabilities(renderer, bundle: knowledge.Bundle, *, query: str | None = None) -> None:
+    """The capability list, either as the bare listing or as ``query``'s miss.
+
+    A miss is an answer, not a failure: it reports the same ``zero_hit`` and
+    ``nudge`` an enrichment block uses, so one concept keeps one shape.
+    """
     caps = [
         {"id": cid, "description": _text((bundle.capabilities.get(cid) or {}).get("description"))}
         for cid in sorted(bundle.capabilities)
     ]
-    payload = {"capabilities": caps, "bundle_version": bundle.version, "stale": bundle.stale}
+    payload: dict[str, Any] = {"capabilities": caps, "bundle_version": bundle.version, "stale": bundle.stale}
+    if query is not None:
+        payload["query"] = query
+        payload["zero_hit"] = True
+        payload["nudge"] = f"no curated knowledge for {query!r}; query one of the listed capability ids"
     if renderer.is_pretty():
+        if query is not None:
+            rprint(f"[yellow]no curated knowledge for[/yellow] {sanitize_markup(query)}")
         for cap in caps:
             tail = f"  {sanitize_markup(cap['description'])}" if cap["description"] else ""
             rprint(f"[bold]{sanitize_markup(cap['id'])}[/bold]{tail}")
@@ -164,13 +175,8 @@ def pick_cmd(
         return
     cap = knowledge.pick(bundle, capability)
     if cap is None:
-        renderer.error(
-            code="knowledge_unknown_capability",
-            message=f"no knowledge capability matches {capability!r}",
-            hint="pick one of the listed capabilities",
-            details={"capability": capability, "known": sorted(bundle.capabilities)},
-        )
-        raise typer.Exit(code=1)
+        _emit_capabilities(renderer, bundle, query=capability.strip()[: knowledge.MAX_QUERY_CHARS])
+        return
     picks = []
     for p in cap["picks"]:
         model_id = p.get("model")
@@ -189,6 +195,7 @@ def pick_cmd(
         )
     payload = {
         "capability": _text(cap.get("id")) or capability.strip().lower(),
+        "zero_hit": False,
         "description": _text(cap.get("description")),
         "as_of": _text(cap.get("as_of")),
         "picks": picks,

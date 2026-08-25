@@ -1122,11 +1122,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`comfy knowledge resolve` found no row for the alias or id. `details.close_matches` lists near names.",
         "try one of `details.close_matches`",
     ),
-    ErrorCode(
-        "knowledge_unknown_capability",
-        "`comfy knowledge pick` found no capability with that id. `details.known` lists them all.",
-        "pick one of `details.known`",
-    ),
 )
 
 

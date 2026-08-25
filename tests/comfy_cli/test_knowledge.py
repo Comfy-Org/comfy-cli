@@ -752,12 +752,29 @@ class TestCli:
         assert env["data"]["capability"] == "audio-generation"
         _validate(env["data"])
 
-    def test_pick_miss(self, tmp_path, monkeypatch, capsys):
+    def test_pick_miss_is_a_zero_hit_answer_not_an_error(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
         rc, env = _run(["pick", "nope"], capsys)
-        assert rc == 1
-        assert env["error"]["code"] == "knowledge_unknown_capability"
-        assert env["error"]["details"]["known"] == ["audio-generation", "lipsync"]
+        assert rc == 0
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["zero_hit"] is True
+        assert data["query"] == "nope"
+        assert "nope" in data["nudge"]
+        assert [c["id"] for c in data["capabilities"]] == ["audio-generation", "lipsync"]
+        _validate(data)
+
+    def test_pick_miss_clips_a_long_query(self, tmp_path, monkeypatch, capsys):
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick", "x" * 500], capsys)
+        assert rc == 0
+        assert len(env["data"]["query"]) == knowledge.MAX_QUERY_CHARS
+
+    def test_pick_hit_reports_zero_hit_false(self, tmp_path, monkeypatch, capsys):
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick", "lipsync"], capsys)
+        assert rc == 0
+        assert env["data"]["zero_hit"] is False
 
     def test_pick_without_a_capability_lists_them(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
@@ -815,7 +832,7 @@ class TestCli:
     def test_error_codes_registered(self):
         from comfy_cli import error_codes
 
-        for code in ("knowledge_unavailable", "knowledge_unknown_model", "knowledge_unknown_capability"):
+        for code in ("knowledge_unavailable", "knowledge_unknown_model"):
             assert error_codes.is_registered(code)
 
     def test_fixture_manifest_matches_fixture(self):
