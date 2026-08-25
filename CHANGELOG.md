@@ -30,13 +30,21 @@ history.
 - The builder client module is now `comfy_cli.builder_api` (was
   `comfy_cli.distribution_api`), and its methods say build and release
   (`create_build`, `list_releases`, ...), matching the builder's public API.
-  Emitted JSON keys (`distributionId`, `distributions`) and the
-  `distribution-definition/0` schema id are unchanged.
+  The `distribution-definition/0` schema id is unchanged.
+- `comfy build --json` payloads carry the builder's vocabulary: `buildId`,
+  `releaseId`, and `builds` and `releases` arrays. The retired `distributionId`,
+  `versionId`, `distributions` and `versions` keys are emitted alongside them
+  with identical values, so a pinned script keeps parsing. The shipped schema
+  filenames are unchanged.
 
 ### Deprecated
 
 - `import comfy_cli.distribution_api` still works for one release and warns;
   import `comfy_cli.builder_api` instead.
+- The `distributionId`, `versionId`, `distributions` and `versions` keys in
+  `comfy build` `--json` output will be removed after one release; read
+  `buildId`, `releaseId`, `builds` and `releases` instead. The six schemas that
+  declare them mark each retired key deprecated in its description.
 
 ### Fixed
 

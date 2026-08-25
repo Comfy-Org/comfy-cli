@@ -405,9 +405,10 @@ def test_execute_create_uploads_stitches_and_cuts():
     result = build.execute_create(plan, client=fake, name="demo", locate_bytes=lambda u: Path("/tmp/ae.safetensors"))
 
     assert result == {
+        "buildId": "dist-123",
         "distributionId": "dist-123",
-        "versionId": "ver-456",
         "releaseId": "ver-456",
+        "versionId": "ver-456",
         "statusUrl": "https://status.example/ver-456",
         "uploaded": 1,
     }
@@ -1546,29 +1547,50 @@ def test_distribution_api_module_is_a_warning_shim():
 # --- is its hidden deprecated alias -------------------------------------------
 
 
-class _FakeCutHandler(BaseHTTPRequestHandler):
-    """Answers the cut endpoint the way an upgraded builder does, so the CLI
-    subprocess exercises the real release surface without a network."""
+class _FakeBuilderHandler(BaseHTTPRequestHandler):
+    """A builder speaking the current vocabulary, so the CLI subprocess
+    exercises the real command surface without a network."""
 
-    def do_POST(self):  # noqa: N802 (BaseHTTPRequestHandler's spelling)
-        if self.path == "/v1/builds/dist-1/releases":
-            body = json.dumps({"releaseId": "rel-9", "statusUrl": "https://status.example/rel-9"}).encode()
-            self.send_response(202)
+    def _reply(self, code: int, payload: dict | None):
+        body = json.dumps(payload).encode() if payload is not None else b""
+        self.send_response(code)
+        if body:
             self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        self.send_error(404)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler's spelling)
+        if self.path == "/v1/builds":
+            return self._reply(200, {"builds": [{"id": "dist-1", "name": "portrait"}]})
+        if self.path == "/v1/builds/dist-1/releases":
+            return self._reply(200, {"releases": [{"id": "rel-9", "status": "complete"}]})
+        if self.path.startswith("/v1/releases/rel-9/logs"):
+            return self._reply(200, {"releaseId": "rel-9", "os": "linux", "log": "pip install ok", "truncated": False})
+        return self.send_error(404)
+
+    def do_POST(self):  # noqa: N802
+        if self.path == "/v1/builds":
+            return self._reply(201, {"id": "dist-1", "name": "portrait"})
+        if self.path == "/v1/builds/dist-1/releases":
+            return self._reply(202, {"releaseId": "rel-9", "statusUrl": "https://status.example/rel-9"})
+        if self.path == "/v1/snapshots/resolve":
+            return self._reply(200, {"definition": {"models": [], "customNodes": []}, "report": {}})
+        return self.send_error(404)
+
+    def do_DELETE(self):  # noqa: N802
+        if self.path == "/v1/builds/dist-1":
+            return self._reply(204, None)
+        return self.send_error(404)
 
     def log_message(self, *args):  # keep test output quiet
         pass
 
 
-def _run_cut(spelling: list[str], tmp_path) -> subprocess.CompletedProcess:
-    server = HTTPServer(("127.0.0.1", 0), _FakeCutHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+def _run_builder_cmd(argv: list[str], tmp_path) -> subprocess.CompletedProcess:
+    """Run one `comfy ...` command as a subprocess against a local fake builder."""
+    server = HTTPServer(("127.0.0.1", 0), _FakeBuilderHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         env = {
             **os.environ,
@@ -1580,22 +1602,17 @@ def _run_cut(spelling: list[str], tmp_path) -> subprocess.CompletedProcess:
             "CONDA_PREFIX": "",
         }
         return subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "comfy_cli",
-                *spelling,
-                "create",
-                "dist-1",
-                "--builder-url",
-                f"http://127.0.0.1:{server.server_address[1]}",
-            ],
+            [sys.executable, "-m", "comfy_cli", *argv, "--builder-url", f"http://127.0.0.1:{server.server_address[1]}"],
             capture_output=True,
             text=True,
             env=env,
         )
     finally:
         server.shutdown()
+
+
+def _run_cut(spelling: list[str], tmp_path) -> subprocess.CompletedProcess:
+    return _run_builder_cmd([*spelling, "create", "dist-1"], tmp_path)
 
 
 def test_release_create_json_validates_against_extended_schema(tmp_path):
@@ -2001,3 +2018,80 @@ def test_from_workflow_refuses_a_workflow_nested_past_the_parser_limit(tmp_path,
     with pytest.raises(typer.Exit):
         build.from_workflow_cmd(from_=str(f), name="portrait")
     assert "build_workflow_invalid" in capsys.readouterr().out
+
+
+# --- `--json` output keys: `buildId`, `releaseId` and `builds` are canonical,
+# --- and the retired spellings ride alongside them for one release ------------
+
+
+def _run_against_builder(argv: list[str], tmp_path) -> dict:
+    """Run one `comfy ... --json` command against the fake builder and return
+    the terminal envelope's data payload."""
+    proc = _run_builder_cmd(argv, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout.strip().splitlines()[-1])["data"]
+
+
+def _shipped_schema(name: str) -> dict:
+    return json.loads((Path(build.__file__).parents[1] / "schemas" / name).read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("argv", "schema_name", "pairs"),
+    [
+        pytest.param(
+            ["build", "list"],
+            "build_list.json",
+            {"builds": ("distributions", [{"id": "dist-1", "name": "portrait"}])},
+            id="build-list",
+        ),
+        pytest.param(
+            ["build", "release", "create", "dist-1"],
+            "build_version_create.json",
+            {"buildId": ("distributionId", "dist-1"), "releaseId": ("versionId", "rel-9")},
+            id="build-release-create",
+        ),
+        pytest.param(
+            ["build", "release", "list", "dist-1"],
+            "build_version_list.json",
+            {"releases": ("versions", [{"id": "rel-9", "status": "complete"}])},
+            id="build-release-list",
+        ),
+        pytest.param(
+            ["build", "release", "logs", "rel-9"],
+            "build_version_logs.json",
+            {"releaseId": ("versionId", "rel-9")},
+            id="build-release-logs",
+        ),
+        pytest.param(
+            ["build", "delete", "dist-1", "--yes"],
+            "build_delete.json",
+            {"buildId": ("distributionId", "dist-1")},
+            id="build-delete",
+        ),
+    ],
+)
+def test_json_payload_carries_both_key_spellings(tmp_path, argv, schema_name, pairs):
+    """A script pinned to the retired key reads the same value as one reading the
+    canonical key, and the payload satisfies the shipped schema."""
+    jsonschema = pytest.importorskip("jsonschema")
+    data = _run_against_builder(argv, tmp_path)
+    for canonical, (retired, value) in pairs.items():
+        assert data[canonical] == value
+        assert data[retired] == value
+    jsonschema.validate(instance=data, schema=_shipped_schema(schema_name))
+
+
+def test_build_create_execute_carries_both_key_spellings(tmp_path):
+    """The live create is the one payload carrying both ids at once."""
+    jsonschema = pytest.importorskip("jsonschema")
+    definition = tmp_path / "definition.json"
+    definition.write_text(
+        json.dumps({"baseComfyVersion": "v0.3.40", "models": [], "customNodes": []}), encoding="utf-8"
+    )
+    data = _run_against_builder(
+        ["build", "create", "--from", str(definition), "--name", "portrait", "--execute"], tmp_path
+    )
+    assert data["buildId"] == data["distributionId"] == "dist-1"
+    assert data["releaseId"] == data["versionId"] == "rel-9"
+    jsonschema.validate(instance=data, schema=_shipped_schema("build_create.json"))
