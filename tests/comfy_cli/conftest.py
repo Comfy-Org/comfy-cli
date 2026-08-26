@@ -47,6 +47,8 @@ def _isolate_config_path(tmp_path, monkeypatch):
     mid-session because tests were clobbering them.
     """
     from comfy_cli import constants
+    from comfy_cli.config_manager import ConfigManager
+    from comfy_cli.utils import reset_singleton_for_testing
 
     fake_root = tmp_path / "comfy-cli-config"
     fake_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -54,7 +56,14 @@ def _isolate_config_path(tmp_path, monkeypatch):
     # whichever ``get_os()`` resolves to lands in our tmp dir.
     for k in list(constants.DEFAULT_CONFIG.keys()):
         monkeypatch.setitem(constants.DEFAULT_CONFIG, k, str(fake_root))
+    # ConfigManager is a @singleton that reads the config dir once, at
+    # construction — so repointing the dir alone leaves the FIRST test's
+    # in-memory config serving every later one. Any test that runs the CLI
+    # entrypoint writes `setup_nudged` into it, which then breaks the
+    # onboarding tests' "fresh config" premise hundreds of tests later.
+    reset_singleton_for_testing(ConfigManager)
     yield fake_root
+    reset_singleton_for_testing(ConfigManager)
 
 
 @pytest.fixture(autouse=True)
