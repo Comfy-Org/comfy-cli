@@ -7,7 +7,6 @@ import sys
 from typing import TypedDict
 from urllib.parse import urlparse
 
-import git
 import requests
 import semver
 import typer
@@ -210,6 +209,8 @@ def execute(
 
     elif not check_comfy_repo(repo_dir)[0]:
         # Get actual remote URL for better error message
+        import git
+
         try:
             repo = git.Repo(repo_dir)
             remote_urls = [r.url for r in repo.remotes]
