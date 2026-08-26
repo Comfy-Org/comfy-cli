@@ -438,15 +438,15 @@ class TestTrackCommandRedaction:
         tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
 
         @tracking_module.track_command()
-        def some_cmd(workflow, api_key=None):
+        def some_cmd(name, api_key=None):
             return None
 
-        some_cmd(workflow="wf.json", api_key="sk-supersecret")
+        some_cmd(name="demo", api_key="sk-supersecret")
 
         tracking_module.provider.track.assert_called_once()
         _, _, properties = _last_track_call(tracking_module.provider)
         assert properties["api_key"] == "<redacted>"
-        assert properties["workflow"] == "wf.json"
+        assert properties["name"] == "demo"
         assert "sk-supersecret" not in str(properties)
 
     def test_api_key_none_stays_none(self, tracking_module):
@@ -539,6 +539,60 @@ class TestTrackCommandRedaction:
         assert properties["token"] == "<redacted>"
         assert "my-secret-token" not in str(properties)
 
+    def test_snapshot_and_definition_paths_are_redacted(self, tracking_module):
+        """`comfy build init/update --from-snapshot` takes a local path naming the
+        user's home directory and install layout. `_scrub_value` only strips
+        credentials out of URLs and returns a bare path verbatim, so these keys are
+        redacted by name or not at all.
+        """
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("build")
+        def init(name=None, from_snapshot=None):
+            return None
+
+        init(name="demo", from_snapshot="/Users/someone/ComfyUI-Installs/private/snapshot.json")
+
+        tracking_module.provider.track.assert_called_once()
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["from_snapshot"] == "<redacted>"
+        assert properties["name"] == "demo"
+        assert "ComfyUI-Installs" not in str(properties)
+
+    def test_workflow_paths_are_redacted(self, tracking_module):
+        """Every `--workflow` option is typed `str`, not `Path`, so unlike a
+        `Path` option it survives `_is_trackable` and ships verbatim unless named
+        in `_SENSITIVE_EXACT`."""
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("deploy")
+        def run(workflow=None, wait=None):
+            return None
+
+        run(workflow="/Users/someone/Private Clients/acme-brief/workflow.json", wait=True)
+
+        tracking_module.provider.track.assert_called_once()
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["workflow"] == "<redacted>"
+        assert properties["wait"] is True
+        assert "acme-brief" not in str(properties)
+
+    def test_workflow_path_presence_is_still_reported(self, tracking_module):
+        from comfy_cli.tracking import filter_command_kwargs
+
+        assert filter_command_kwargs({"workflow": None})["workflow"] is None
+        assert "workflow" not in filter_command_kwargs({"wait": True})
+
+    def test_snapshot_path_presence_is_still_reported(self, tracking_module):
+        # Redacting must keep the key, since whether the option was supplied is the
+        # part analytics is entitled to. Supplied-but-empty is still supplied;
+        # absent is absent.
+        from comfy_cli.tracking import filter_command_kwargs
+
+        assert filter_command_kwargs({"from_snapshot": None})["from_snapshot"] is None
+        assert "from_snapshot" not in filter_command_kwargs({"name": "demo"})
+        assert filter_command_kwargs({"from_": "/Users/someone/definition.json"})["from_"] == "<redacted>"
+
     def test_underscore_ctx_is_excluded(self, tracking_module):
         import click
 
@@ -560,15 +614,15 @@ class TestTrackCommandRedaction:
         tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
 
         @tracking_module.track_command()
-        def some_cmd(workflow, callback=None):
+        def some_cmd(name, callback=None):
             return None
 
-        some_cmd(workflow="wf.json", callback=lambda x: x)
+        some_cmd(name="demo", callback=lambda x: x)
 
         tracking_module.provider.track.assert_called_once()
         _, _, properties = _last_track_call(tracking_module.provider)
         assert "callback" not in properties
-        assert properties["workflow"] == "wf.json"
+        assert properties["name"] == "demo"
 
     def test_url_query_string_is_scrubbed(self, tracking_module):
         # CivitAI download links carry the API key as `?token=`.
@@ -609,6 +663,7 @@ class TestSensitiveNameMatcher:
             "prompt",
             "set_overrides",
             "capability",
+            "workflow",
             "set_civitai_api_token",
             "set_hf_api_token",
             "access_token",
@@ -623,7 +678,9 @@ class TestSensitiveNameMatcher:
 
         assert tm._is_sensitive(name) is True
 
-    @pytest.mark.parametrize("name", ["url", "workflow", "changelog_file", "max_tokens", "tokenizer", "relative_path"])
+    @pytest.mark.parametrize(
+        "name", ["url", "workflow_id", "changelog_file", "max_tokens", "tokenizer", "relative_path"]
+    )
     def test_does_not_match(self, name):
         import comfy_cli.tracking as tm
 

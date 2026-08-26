@@ -1052,10 +1052,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     # --- build (the serverless builder) --------------------------------------
     ErrorCode(
-        "build_spec_invalid",
-        "A build spec or legacy scan definition could not be read, has an unsupported schema, or is invalid. "
-        "`details.path` carries the path when one is available.",
-        "fix the named field, or regenerate the file",
+        "build_models_dir_missing",
+        "`comfy build init` could not find a models/ directory to scan. `details.path` carries the "
+        "resolved path. Either no workspace is selected or the given `--models-dir` doesn't exist.",
+        "run from a ComfyUI workspace, or pass `--models-dir <path>` pointing at your models/ folder",
     ),
     ErrorCode(
         "build_spec_write_error",
@@ -1064,47 +1064,43 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check the directory exists and is writable",
     ),
     ErrorCode(
-        "build_spec_not_found",
-        "A `comfy build` command found no spec at the path `PATH` resolved to — `<dir>/comfy-build.yaml` for "
-        "a directory, or the file itself for a `.yaml`/`.json` `PATH`. `details.path` carries the exact "
-        "absolute path probed.",
-        "create a comfy-build.yaml at that path, or pass the PATH that holds the spec",
+        "build_spec_exists",
+        "`comfy build init` found an existing build spec at the output path and refused to replace it. "
+        "`details.path` carries the exact path left untouched.",
+        "pass `--force` to overwrite the local spec intentionally, or choose another `--output` path",
     ),
     ErrorCode(
-        "build_models_dir_missing",
-        "`comfy build scan` could not find a models/ directory to scan. `details.path` carries the "
-        "resolved path. Either no workspace is selected or the given `--models-dir` doesn't exist.",
-        "run from a ComfyUI workspace, or pass `--models-dir <path>` pointing at your models/ folder",
+        "build_missing_input",
+        "A build command cannot act on the options it was given. `details.missing` lists every option the "
+        "caller must provide (interactive callers are prompted instead); `details.conflict` instead lists "
+        "mutually exclusive options that were supplied together, one of which must be dropped; "
+        "`details.invalid` lists supplied values that do not match their option's required form.",
+        "pass every option named in `details.missing`, drop one of `details.conflict`, or respell every "
+        "value in `details.invalid`, and retry",
     ),
     ErrorCode(
-        "build_output_write_error",
-        "`comfy build scan --output <path>` could not write the definition file. `details` carries the "
-        "path and the underlying OS error.",
-        "check the directory exists and is writable",
+        "build_release_not_found",
+        "A `comfy build release show`, `logs`, or `manifest` command omitted RELEASE, but the current Build "
+        "has no release to select. `details.buildId` names the Build whose exhaustive release list was empty.",
+        "run `comfy build release create --target <os>/<gpu>` first, or pass an existing RELEASE id",
     ),
     ErrorCode(
-        "build_definition_invalid",
-        "`comfy build create --from <path>` could not read the definition file, or it isn't a "
-        "build definition (missing/invalid JSON or no `models` key). `details.path` carries the path.",
-        "pass a file produced by `comfy build scan -o <path>`",
+        "build_spec_invalid",
+        "A build spec or legacy scan definition could not be read, has an unsupported schema, or is invalid. "
+        "`details.path` carries the path when one is available.",
+        "fix the named field, or regenerate the file with `comfy build init`",
     ),
     ErrorCode(
         "build_workflow_invalid",
-        "`comfy build from-workflow --from <path>` could not read the workflow file, or it is not a JSON "
-        "object. `details.path` carries the path.",
+        "`comfy build init --from-workflow <path>` or `comfy build update --from-workflow <path>` could not "
+        "read the workflow file, or it is not a JSON object. `details.path` carries the path.",
         "pass a workflow saved from ComfyUI (either the editing format or the API export)",
     ),
     ErrorCode(
         "build_not_signed_in",
-        "`comfy build create --execute` found no usable Cloud JWT — the builder authenticates with the "
-        "OAuth session token, and there isn't a valid one.",
+        "A Builder-backed `comfy build` command found no usable Cloud JWT — the builder authenticates with "
+        "the OAuth session token, and there isn't a valid one.",
         "run `comfy cloud login` first",
-    ),
-    ErrorCode(
-        "build_upload_unavailable",
-        "`comfy build create --execute` couldn't produce a private-blob upload: the model bytes weren't "
-        "found (pass `--models-dir`), or a local (non-git) custom node needs packaging, which isn't supported yet.",
-        "pass `--models-dir <path>` so model bytes can be located; use git-based custom nodes for now",
     ),
     ErrorCode(
         "build_builder_error",
@@ -1119,25 +1115,51 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "the developer platform is in limited beta; request access, then sign in with an enabled account",
     ),
     ErrorCode(
-        "build_missing_comfy_version",
-        "`comfy build create` was given a definition with no `baseComfyVersion`. The builder can create "
-        "the build but cannot cut a release without a pinned ComfyUI version, so create fails fast here "
-        "instead of surfacing a raw builder 400 after doing work. `details.path` carries the definition path.",
-        "re-scan with `--comfy-version <ref>` (a tag, branch, or commit), or add a `baseComfyVersion` to the definition JSON",
-    ),
-    ErrorCode(
         "build_registry_pin_missing",
-        "`comfy build create --execute` sent the definition to the builder's snapshot importer, which "
-        "could not vouch for one or more custom node pins and returned a definition without them. Creating "
-        "anyway would build an image quietly missing what the user asked for, so create stops. The advisories "
-        "printed above name why each pack could not be carried.",
-        "edit the definition to name a published registry version, or remove the pack",
+        "`comfy build push` sent its identity-keyed public-node subset to the builder's snapshot importer, "
+        "which could not vouch for one or more pins. Pushing anyway would save a definition that cannot "
+        "reconstruct every requested public node.",
+        "edit the spec to name a published registry version or normalized repository, or remove the node",
     ),
     ErrorCode(
         "build_delete_needs_confirm",
         "`comfy build delete` was run without `--yes` in a non-interactive context (JSON output, an agent, "
-        "or a pipe) where there is no TTY to confirm on. Delete is refused rather than blocking on a prompt.",
+        "or a pipe) where nothing can answer a confirmation. Delete is refused rather than blocking on a "
+        "prompt. `details.buildId` names the Build, and `details.question` carries the confirmation.",
         "pass `--yes` to confirm the delete when running non-interactively",
+    ),
+    ErrorCode(
+        "build_update_needs_confirm",
+        "`comfy build update` was run without `--yes` in a non-interactive context (JSON output, an agent, "
+        "or a pipe) where nothing can answer a confirmation. The rescan would replace the spec's `definition` "
+        "with what the installation holds now, so the rewrite is refused rather than blocking on a prompt. "
+        "`details.question` carries the confirmation nothing could answer.",
+        "pass `--yes` to accept the rescan, or `--dry-run` to read the diff without writing anything",
+    ),
+    ErrorCode(
+        "build_id_unknown",
+        "`comfy build pull` could not resolve a Build id from `--id` or the local spec, and no interactive "
+        "picker could supply one. `details.missing` names `--id`.",
+        "pass `--id <build-id>`, or push the spec once so it records its Build id",
+    ),
+    ErrorCode(
+        "build_pull_needs_confirm",
+        "`comfy build pull` was run without `--yes` in a non-interactive context. Pull discards local "
+        "definition edits in favor of the fetched Build, so the rewrite is refused without explicit consent.",
+        "pass `--yes` to overwrite the local spec with the fetched Build",
+    ),
+    ErrorCode(
+        "build_spec_stale",
+        "`comfy build push` refused to overwrite a Build whose remote revision differs from the spec's "
+        "`syncedRevision`, or exhausted the bounded `--force` overwrite retries.",
+        "run `comfy build pull` to review the remote changes, then retry; use `--force` to overwrite them",
+    ),
+    ErrorCode(
+        "build_spec_not_found",
+        "A `comfy build` command found no spec at the path `PATH` resolved to — `<dir>/comfy-build.yaml` for "
+        "a directory, or the file itself for a `.yaml`/`.json` `PATH`. `details.path` carries the exact "
+        "absolute path probed. `init` is the only build command that proceeds without a spec.",
+        "run `comfy build init --name <name> [PATH]` to create one, or pass the PATH that holds the spec",
     ),
     # --- knowledge -----------------------------------------------------------
     ErrorCode(

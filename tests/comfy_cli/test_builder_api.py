@@ -71,7 +71,16 @@ class _Recorder:
         self.calls: list[dict[str, Any]] = []
 
     def __call__(self, url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
-        self.calls.append({"method": method, "url": url, "body": body, "max_bytes": max_bytes, "target": target})
+        self.calls.append(
+            {
+                "method": method,
+                "url": url,
+                "body": body,
+                "max_bytes": max_bytes,
+                "target": target,
+                "timeout": timeout,
+            }
+        )
         return 200, dict(self._ENVELOPE)
 
 
@@ -269,6 +278,74 @@ def test_no_client_method_keeps_distribution_or_version_vocabulary():
 def test_get_artifact_download_survives_the_rename():
     """Its command was removed in Todo 3, but the underlying API stays available."""
     assert callable(BuilderClient.get_artifact_download)
+
+
+@pytest.mark.parametrize(
+    "targets",
+    [
+        pytest.param(None, id="explicit-none"),
+        pytest.param([], id="empty-list"),
+        pytest.param((), id="empty-tuple"),
+        pytest.param({"os": "linux", "gpu": "nvidia"}, id="single-mapping-not-a-list"),
+        pytest.param("linux/nvidia", id="string-not-a-list"),
+    ],
+)
+def test_create_release_refuses_a_missing_or_empty_target_list(recorder, targets):
+    """An implicit target spends build minutes nobody asked for, so the refusal
+    happens locally — before a single request leaves the client."""
+    client = BuilderClient(_BASE_URL, "jwt-token")
+
+    with pytest.raises(ValueError, match="non-empty list of targets"):
+        client.create_release("d1", targets)
+
+    assert recorder.calls == []
+
+
+def test_create_release_refuses_when_targets_is_omitted_entirely(recorder):
+    client = BuilderClient(_BASE_URL, "jwt-token")
+
+    with pytest.raises(ValueError, match="non-empty list of targets"):
+        client.create_release("d1")
+
+    assert recorder.calls == []
+
+
+# --- reading a workflow -------------------------------------------------------
+#
+# `resolve_workflow` is the sibling of `resolve_snapshot`, not a rename, so it
+# is pinned here rather than in the equivalence table above.
+
+
+def test_resolve_workflow_posts_the_graph_to_the_resolve_endpoint(recorder):
+    """`build init/update --from-workflow` reads a graph without writing a build
+    row, so it must ride /v1/workflows/resolve — never /v1/builds/from-workflow,
+    which mints a build the local spec has nowhere to put."""
+    client = BuilderClient(_BASE_URL, "jwt-token")
+    graph = {"nodes": [{"type": "KSampler"}]}
+
+    client.resolve_workflow(graph)
+
+    assert len(recorder.calls) == 1
+    call = recorder.calls[0]
+    assert call["method"] == "POST"
+    assert call["url"] == f"{_BASE}/v1/workflows/resolve"
+    assert call["body"] == {"workflow": graph}
+    assert call["max_bytes"] == _MAX_JSON
+
+
+def test_resolve_workflow_outlasts_the_registry_sweep(recorder):
+    """The builder looks every distinct node class up in the registry behind a
+    budget of its own, so the shared POST default would cut a large graph off
+    mid-import. Pinned against a sibling POST so a raised *default* — which would
+    silently relax every other call — cannot satisfy this."""
+    client = BuilderClient(_BASE_URL, "jwt-token")
+
+    client.resolve_workflow({"nodes": []})
+    client.resolve_snapshot({"comfyui": "x"})
+
+    workflow_timeout, snapshot_timeout = (call["timeout"] for call in recorder.calls)
+    assert workflow_timeout == 90.0
+    assert snapshot_timeout == 30.0
 
 
 # --- paged list reads ---------------------------------------------------------

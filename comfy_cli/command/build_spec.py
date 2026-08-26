@@ -18,6 +18,7 @@ _TOP_LEVEL_KEYS: Final = ("schema", "id", "name", "description", "syncedRevision
 _DEFINITION_KEYS: Final = (
     "schema",
     "baseComfyVersion",
+    "baseImage",
     "models",
     "customNodes",
     "pipDependencies",

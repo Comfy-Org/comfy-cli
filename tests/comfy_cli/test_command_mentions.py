@@ -13,6 +13,7 @@ resolver is deliberately conservative.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,28 @@ PACKAGE_ROOT = REPO_ROOT / "comfy_cli"
 # ``command="version"``). Its keys get the stronger structural check below
 # instead of the prose scan.
 PROSE_SCAN_EXCLUDED = {PACKAGE_ROOT / "discovery.py"}
+
+# The two exemption sets below are the *only* escapes from
+# ``test_emit_literals_are_real_command_paths``. Each entry cites the code that
+# proves it cannot be a Typer path, so a future reader can tell an exemption from a
+# tolerated typo. Shrink them when an entry becomes a real command; never grow one
+# to silence a rename — that is the drift this guardrail exists to catch.
+
+# Emitted by a root *flag*: ``comfy --version`` → ``cmdline.py:311``.
+_ROOT_FLAG_ENVELOPES = {"comfy version"}
+
+# Real invocations the Typer tree structurally cannot show:
+#   welcome         — the root callback's envelope for a bare ``comfy`` (cmdline.py:325-344).
+#   generate <verb> — ``generate`` is a plain command, not a group, so its first
+#                     positional can be a model alias (generate/app.py:224-230); these
+#                     verbs dispatch inside the body (already ``COMMAND_SCHEMAS`` keys
+#                     at discovery.py:134-135). ``emit-workflow`` is its flag envelope.
+_NON_TYPER_ENVELOPES = {
+    "comfy welcome",
+    "comfy generate list",
+    "comfy generate schema",
+    "comfy generate emit-workflow",
+}
 
 
 @pytest.fixture(scope="module")
@@ -63,6 +86,25 @@ def _all_command_paths() -> set[str]:
 
     walk(build_help_json(app)["commands"], "comfy")
     return paths
+
+
+def _emitted_command_literals() -> set[str]:
+    """Every ``renderer.emit(…, command="x")`` literal in the package, as ``"comfy x"``."""
+    emitted: set[str] = set()
+    for path in PACKAGE_ROOT.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        try:
+            module = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):
+            continue
+        for node in ast.walk(module):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "emit"):
+                continue
+            for kw in node.keywords:
+                if kw.arg == "command" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    emitted.add(f"comfy {kw.value.value}")
+    return emitted
 
 
 def test_scan_covers_the_expected_surface():
@@ -114,29 +156,27 @@ def test_command_schema_keys_are_commands_or_emitted_envelopes():
     paths; a few name an envelope emitted by a root flag (``--version``). A key
     that is neither advertises a schema for something no agent can ever invoke.
     """
-    import ast
-
     from comfy_cli.discovery import COMMAND_SCHEMAS, STREAM_EVENT_SCHEMAS
 
-    emitted: set[str] = set()
-    for path in PACKAGE_ROOT.rglob("*.py"):
-        if "__pycache__" in path.parts:
-            continue
-        try:
-            module = ast.parse(path.read_text(encoding="utf-8"))
-        except (OSError, SyntaxError):
-            continue
-        for node in ast.walk(module):
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "emit"):
-                continue
-            for kw in node.keywords:
-                if kw.arg == "command" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
-                    emitted.add(f"comfy {kw.value.value}")
+    emitted = _emitted_command_literals()
 
     known = _all_command_paths() | emitted
     for name, catalog in (("COMMAND_SCHEMAS", COMMAND_SCHEMAS), ("STREAM_EVENT_SCHEMAS", STREAM_EVENT_SCHEMAS)):
         stale = sorted(k for k in catalog if k not in known)
         assert not stale, f"{name} keys that are neither a command nor an emitted envelope: {stale}"
+
+
+def test_emit_literals_are_real_command_paths():
+    """The other direction: an emit literal must resolve into the live Typer tree.
+
+    The union above lets an emit literal validate itself — typo
+    ``emit(command="build init")`` into ``"build iiinit"`` and it simply joins
+    ``known``, so ``COMMAND_SCHEMAS`` still "matches" and nothing goes red while
+    the shipped envelope now names a command no agent can invoke. This asserts the
+    subset direction, which is the half that catches a rename.
+    """
+    bad = _emitted_command_literals() - _ROOT_FLAG_ENVELOPES - _NON_TYPER_ENVELOPES - _all_command_paths()
+    assert not bad, f"emit literals that are not real command paths: {sorted(bad)}"
 
 
 # --- resolver unit tests: the lint is only as good as its false-positive rate ---

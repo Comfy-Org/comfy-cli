@@ -1981,24 +1981,6 @@ def standalone(
         sty.to_tarball()
 
 
-def _deprecated_alias_callback(*, old_name: str, new_name: str):
-    """Group callback for a retired spelling: one deprecation warning per
-    invocation on stderr (the envelopes still carry the canonical ``new_name``
-    labels)."""
-
-    def _warn_deprecated() -> None:
-        renderer = get_renderer()
-        renderer.stderr_console().print(
-            f"[yellow]`comfy {old_name}` is deprecated; use `comfy {new_name}` instead.[/yellow]"
-        )
-        # The root callback stamped the envelope `command` with the invoked
-        # (old) group name; re-stamp it so alias envelopes are byte-identical
-        # to the canonical spelling's.
-        renderer.command = new_name
-
-    return _warn_deprecated
-
-
 # Subcommands imported on first use: three top-level commands whose modules
 # are heavy, then every subcommand group. Order matters: it is the order
 # `comfy --help` lists them in (after the commands defined above), so a new
@@ -2049,13 +2031,6 @@ _RootGroup.lazy_subcommands = {
     "jobs": LazySubcommand("comfy_cli.command.jobs", help="List, inspect, and live-watch ComfyUI prompts."),
     "build": LazySubcommand(
         "comfy_cli.command.build", help="Package a local ComfyUI environment into a serverless build."
-    ),
-    # `comfy distribution` was the group's name before the builder's public API
-    # renamed distributions to builds; kept as a warning alias for old scripts.
-    "distribution": LazySubcommand(
-        "comfy_cli.command.build",
-        hidden=True,
-        callback=_deprecated_alias_callback(old_name="distribution", new_name="build"),
     ),
     "project": LazySubcommand("comfy_cli.command.project", help="Project conventions: init and status."),
     "assets": LazySubcommand(

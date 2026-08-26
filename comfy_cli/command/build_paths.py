@@ -68,7 +68,7 @@ class BuildSpecNotFoundError(ValueError):
     """
 
     code = "build_spec_not_found"
-    hint = "create a comfy-build.yaml at that path, or pass the PATH that holds the spec"
+    hint = "run `comfy build init --name <name> [PATH]` to create one, or pass the PATH that holds the spec"
 
     def __init__(self, spec_file: Path) -> None:
         self.spec_file = spec_file

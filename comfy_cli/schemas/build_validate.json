@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://comfy.org/schemas/build_validate.json",
   "title": "comfy build validate --json data payload",
-  "description": "The builder's dry-run resolve result (ValidateResult) for a build's stored definition.",
+  "description": "Offline authoring and wire validation of the local spec, with optional advisory public-model lookup states.",
   "type": "object",
   "additionalProperties": true
 }
