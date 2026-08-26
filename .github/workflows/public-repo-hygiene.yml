@@ -30,12 +30,9 @@ jobs:
       # `HAILUO-03` is MiniMax's Hailuo 03 model, named in the curated
       # knowledge bundle and asserted in tests. It is a product name that
       # happens to match the ticket-ID shape, not an internal reference.
-      #
-      # `HALO-03` is a fictional model id used only in
-      # tests/comfy_cli/test_knowledge.py and test_knowledge_attach.py, to
-      # exercise spelling-variant resolution (`Halo 3` / `halo3` / `HALO-03`
-      # all resolving to the test fixture's `acme-h3`). It coincidentally has
-      # the ticket-ID shape but names no real ticket.
+      # `HALO-03` is a fictional product id used as test fixture data in
+      # tests/comfy_cli/test_knowledge.py and test_knowledge_attach.py — not a
+      # real ticket.
       ticket_allowlist: HAILUO-03,HALO-03
       # Each entry below is a genuine false positive that the checker's two
       # caller-tunable knobs (ticket_allowlist, exclude_paths) cannot clear any
