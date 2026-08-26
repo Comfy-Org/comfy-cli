@@ -118,6 +118,21 @@ comfy build validate <build-id>
 comfy build release create <build-id>
 ```
 
+- **Pick the snapshot by what it says, not by its filename.** `comfyui.baseTag`
+  inside it becomes `baseComfyVersion`, and two snapshots minutes apart can name
+  ComfyUI releases far apart: one real install held `v0.20.1` and `v0.28.3` nine
+  seconds apart. Their `pipPackages` differ too, so the file you pick chooses the
+  pins as well as the version. Read `createdAt`, `trigger` and `comfyui.baseTag`
+  from each, and say which you took.
+- **It fills `pipDependencies` from the snapshot's freeze**, the same hazard the
+  pins section describes, so prune it exactly as you would a scan. The builder
+  drops the torch stack and the frontend packages itself and reports them in
+  `skippedPins`; everything you leave is sent as a hard override.
+- **`--base-image` overrides the choice**, which is the repair when the report
+  says `pythonSatisfied: false`. `comfy build base-images` names the options.
+- **It creates the build before any yes**, exactly as `from-workflow` does, so
+  the disclosure comes before the first command rather than before the cut.
+
 It creates but does not cut, so the cut is yours and `validate` checks the
 definition first. It carries no models, so use the scan path whenever private
 model files have to travel.
@@ -499,7 +514,10 @@ Then three rules for anything you do keep:
 ## Predict the conflict instead of buying it
 
 **This section is for the scan and Desktop paths**, because every check in it
-reads requirement files off an install.
+reads requirement files off an install. **A Desktop install is laid out
+differently**: ComfyUI sits at `<install>/ComfyUI`, so its requirements are under
+that, and the interpreter is `<install>/standalone-env/bin/` rather than
+`<install>/.venv/bin/`. Use those paths in the commands below.
 
 A build takes minutes to tell you two packages disagree. Most of that
 answer is sitting in text files on the user's disk, so look before you cut.
@@ -618,10 +636,12 @@ Say all of this, in plain words, and wait for a yes:
 - **`droppedComfyVersion`**: the ComfyUI ref named is not one the build can use,
   so none was set. Write one; a definition with no version cannot cut.
 
-**These arrive as English from `create --execute` and nowhere else.** A cut made
-with `release create`, which is how the Desktop and workflow paths cut, prints
-none of them and answers with ids alone. Read the release rather than waiting
-for a warning that is not coming.
+**Where these reach you depends on the path.** `create --execute` says them in
+English on stderr. `from-snapshot` and `from-workflow` return them as JSON on the
+creation envelope instead, at `report` and again on the build, which is before
+anything has been spent. A cut made with `release create` prints none of them and
+answers with ids alone, so read the creation envelope and the release rather than
+waiting for a warning that is not coming.
 - **`skippedPins`**: normal. The build owns those packages.
 - **`unpinnablePins`**: a package with no PyPI version to write, an editable or a
   direct URL. Not owned by the build, just undeclarable. A pack may still need it.
