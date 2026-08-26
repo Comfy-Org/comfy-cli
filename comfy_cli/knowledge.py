@@ -724,8 +724,17 @@ def _set_nudge(block: dict, query: str, *, shed_vocabulary: bool = False) -> Non
         del block["nudge"]
 
 
-def _log_query(command: str, queries: list[str], block: dict, bundle: Bundle) -> None:
-    """Feed the curation miss log. Consent-gated and best-effort, like every other event."""
+def log_query(command: str, queries: list[str], *, hit_ids: list, zero_hit: bool, bundle: Bundle) -> None:
+    """Feed the curation miss log. Consent-gated and best-effort, like every other event.
+
+    This is the one place a search term ships verbatim, clipped to
+    ``MAX_QUERY_CHARS``: what people asked for that the bundle does not cover is
+    the whole reason the event exists. The generic ``track_command`` kwarg dump
+    gets no search term, which is why ``capability`` sits in its redaction set.
+
+    ``hit_ids`` names capabilities ``cap:<id>`` and models by bare id, the same
+    way :func:`attach` fills the block's own ``hit_ids``.
+    """
     try:
         from comfy_cli import tracking
 
@@ -734,8 +743,8 @@ def _log_query(command: str, queries: list[str], block: dict, bundle: Bundle) ->
             {
                 "command": command,
                 "queries": queries,
-                "hit_ids": block.get("hit_ids", []),
-                "zero_hit": block.get("zero_hit", False),
+                "hit_ids": hit_ids,
+                "zero_hit": zero_hit,
                 "bundle_version": bundle.version,
             },
         )
@@ -864,7 +873,13 @@ def attach(
             # zero_hit: that feeds the miss log and means an empty block.
             _set_nudge(block, query_list[0])
         if query_list:
-            _log_query(command, query_list, block, bundle)
+            log_query(
+                command,
+                query_list,
+                hit_ids=block.get("hit_ids", []),
+                zero_hit=block.get("zero_hit", False),
+                bundle=bundle,
+            )
         if attached:
             payload["knowledge"] = block
     except Exception:  # noqa: BLE001 — knowledge is additive; the payload ships unchanged on any failure

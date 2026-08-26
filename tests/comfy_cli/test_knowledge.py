@@ -858,3 +858,53 @@ class TestCli:
         raw = FIXTURE_KNOWLEDGE.read_bytes()
         assert manifest["files"]["knowledge.json"]["sha256"] == hashlib.sha256(raw).hexdigest()
         assert manifest["files"]["knowledge.json"]["bytes"] == len(raw)
+
+
+class TestVerbQueryLog:
+    """SKILL.md rule 1 tells the agent a miss records the gap. The verbs are
+    what it runs, so they have to feed the same log enrichment feeds."""
+
+    @pytest.fixture
+    def queries(self, monkeypatch):
+        """Only the miss log. `track_command` fires its own event either way."""
+        from comfy_cli import tracking
+
+        seen: list[dict] = []
+        monkeypatch.setattr(
+            tracking,
+            "track_event",
+            lambda name, props=None, **kw: seen.append(props) if name == "knowledge_query" else None,
+        )
+        return seen
+
+    def test_pick_logs_a_hit_as_a_namespaced_capability(self, tmp_path, monkeypatch, capsys, queries):
+        _env_bundle(tmp_path, monkeypatch)
+        _run(["pick", "lipsync"], capsys)
+        assert len(queries) == 1
+        assert queries[0]["command"] == "knowledge pick"
+        assert queries[0]["queries"] == ["lipsync"]
+        assert queries[0]["hit_ids"] == ["cap:lipsync"]
+        assert queries[0]["zero_hit"] is False
+
+    def test_pick_logs_a_miss_with_the_clipped_query(self, tmp_path, monkeypatch, capsys, queries):
+        _env_bundle(tmp_path, monkeypatch)
+        _run(["pick", "z" * 500], capsys)
+        assert queries[0]["hit_ids"] == []
+        assert queries[0]["zero_hit"] is True
+        assert queries[0]["queries"] == ["z" * knowledge.MAX_QUERY_CHARS]
+
+    def test_resolve_logs_both_a_hit_and_a_miss(self, tmp_path, monkeypatch, capsys, queries):
+        _env_bundle(tmp_path, monkeypatch)
+        _run(["resolve", "testvid"], capsys)
+        _run(["resolve", "zzzz"], capsys)
+        assert len(queries) == 2
+        assert queries[0]["command"] == "knowledge resolve"
+        assert queries[0]["hit_ids"] == ["testvid"]
+        assert queries[0]["zero_hit"] is False
+        assert queries[1]["hit_ids"] == []
+        assert queries[1]["zero_hit"] is True
+
+    def test_the_bare_listing_asks_nothing_so_logs_nothing(self, tmp_path, monkeypatch, capsys, queries):
+        _env_bundle(tmp_path, monkeypatch)
+        _run(["pick"], capsys)
+        assert queries == []

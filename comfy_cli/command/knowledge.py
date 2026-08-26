@@ -103,8 +103,10 @@ def resolve_cmd(
 ):
     renderer = get_renderer()
     bundle = _require_bundle(renderer)
+    logged = [query.strip()[: knowledge.MAX_QUERY_CHARS]]
     model_id = knowledge.resolve_id(bundle, query)
     if model_id is None:
+        knowledge.log_query("knowledge resolve", logged, hit_ids=[], zero_hit=True, bundle=bundle)
         q = query.strip().lower()
         renderer.error(
             code="knowledge_unknown_model",
@@ -116,6 +118,7 @@ def resolve_cmd(
             },
         )
         raise typer.Exit(code=1)
+    knowledge.log_query("knowledge resolve", logged, hit_ids=[model_id], zero_hit=False, bundle=bundle)
     row = bundle.models[model_id]
     payload = {
         "query": query,
@@ -177,10 +180,14 @@ def pick_cmd(
     if capability is None or not capability.strip():
         _emit_capabilities(renderer, bundle)
         return
+    logged = [capability.strip()[: knowledge.MAX_QUERY_CHARS]]
     cap = knowledge.pick(bundle, capability)
     if cap is None:
-        _emit_capabilities(renderer, bundle, query=capability.strip()[: knowledge.MAX_QUERY_CHARS])
+        knowledge.log_query("knowledge pick", logged, hit_ids=[], zero_hit=True, bundle=bundle)
+        _emit_capabilities(renderer, bundle, query=logged[0])
         return
+    capability_id = _text(cap.get("id")) or capability.strip().lower()
+    knowledge.log_query("knowledge pick", logged, hit_ids=[f"cap:{capability_id}"], zero_hit=False, bundle=bundle)
     picks = []
     for p in cap["picks"]:
         model_id = p.get("model")
@@ -198,7 +205,7 @@ def pick_cmd(
             }
         )
     payload = {
-        "capability": _text(cap.get("id")) or capability.strip().lower(),
+        "capability": capability_id,
         "zero_hit": False,
         "description": _text(cap.get("description")),
         "as_of": _text(cap.get("as_of")),
