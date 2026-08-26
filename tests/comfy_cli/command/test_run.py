@@ -2887,6 +2887,11 @@ class TestLocalExecuteItemMapAndGroupedOutputs:
         mock_exec.output_entries = []
         mock_exec.cached_node_ids = []
         mock_exec.executed_node_ids = []
+        # `_emit_queued` hands these to `json.dumps` in NDJSON mode. Unstubbed
+        # MagicMocks make its `default` hook recurse forever on `isoformat`,
+        # retaining every child mock — ~28GB, and the OOM killed the suite.
+        mock_exec.validation_warnings = []
+        mock_exec.workflow_manifest.return_value = []
         return mock_exec
 
     def _run(self, workflow_file, mock_exec, *, wait, extra_patches=()):
