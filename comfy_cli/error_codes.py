@@ -1256,6 +1256,58 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "configured it — `COMFY_DEPLOY_URL`, the deployment's own `endpointUrl`, or a job link derived from it.",
         "point COMFY_DEPLOY_URL at an https:// endpoint, or use a loopback address for local development",
     ),
+    # --- deploy data plane ---------------------------------------------------
+    ErrorCode(
+        "deploy_not_ready",
+        "The deployment data plane cannot accept a job yet. `details.status` comes from a fresh control-plane read.",
+        "wait if the status is transitional; inspect or repair the deployment if it is terminal",
+    ),
+    ErrorCode(
+        "deploy_workflow_invalid",
+        "The data plane rejected the API-format workflow. `details.node_errors` preserves structured per-node failures.",
+        "fix the nodes named in `details.node_errors`, then submit again with a new idempotency key",
+    ),
+    ErrorCode(
+        "deploy_rate_limited",
+        "The deployment job queue is full or the data plane refused the request rate.",
+        "wait for queue capacity before submitting again",
+    ),
+    ErrorCode(
+        "deploy_idempotency_reuse",
+        "The v2 data plane rejected a previously used single-use idempotency key and did not execute the duplicate request.",
+        "do not retry the duplicate invocation automatically",
+    ),
+    ErrorCode(
+        "deploy_job_submit_unknown",
+        "A job submission timed out, lost its connection, or returned HTTP 5xx, so the job may exist. The v2 API has no job-list endpoint, idempotency-key lookup, or client-supplied job id with which to find it.",
+        "do not resubmit automatically because the possibly-created job cannot be found through the v2 API",
+    ),
+    ErrorCode(
+        "deploy_job_failed",
+        "The final authoritative GET for a v2 data-plane job reported `status: failed`. "
+        "`details.job` carries that complete terminal snapshot, including its server error and metrics.",
+        "inspect `details.job.error`, fix the workflow or inputs it names, then submit a new job",
+    ),
+    ErrorCode(
+        "deploy_asset_missing",
+        "An input the run needs is not an asset this account can reach. Either a v2 asset hash probe found "
+        "no blob the caller may mint from while uploads were disabled (`details.file_path` and `details.hash` "
+        "identify it), or the submitted workflow referenced an asset id the account cannot mint, which the "
+        "server reports as `missing_asset` in `details.server_code`.",
+        "remove `--no-upload` to permit a streamed upload, or upload the input before retrying",
+    ),
+    ErrorCode(
+        "deploy_asset_upload_failed",
+        "A v2 multipart asset upload failed or the server rejected its `expected_hash`. A hash mismatch "
+        "mints no asset and reports `hash_mismatch` in `details.server_code`.",
+        "verify the local file is stable and readable, then retry the upload",
+    ),
+    ErrorCode(
+        "deploy_endpoint_unknown",
+        "The control plane returned a null or untrusted deployment `endpointUrl`, or a data-plane follow-up/output "
+        "link named an origin outside the configured exact-origin allowlists. No data-plane credential is attached.",
+        "check COMFY_DEPLOY_HOST_SUFFIXES or COMFY_DEPLOY_STORAGE_ORIGINS, then retry with a trusted platform origin",
+    ),
     # --- knowledge -----------------------------------------------------------
     ErrorCode(
         "knowledge_unavailable",
