@@ -81,6 +81,35 @@ def test_comfy_skill_covers_cloud_setup_and_routing():
         assert needle in text, f"comfy skill should mention {needle}"
 
 
+def test_bundled_frontmatter_parses_as_yaml():
+    """Substring checks pass on frontmatter that no YAML parser will read.
+
+    Claude Code parses the block this writes to ``.claude/skills/<name>/SKILL.md``,
+    so an unquoted ``description`` carrying a ``": "`` loads here and fails there.
+    """
+    import yaml
+
+    for name in bundled_skill_names():
+        front = skill_content(name).split("---\n", 2)[1]
+        parsed = yaml.safe_load(front)
+        assert parsed["name"] == name, f"{name}: frontmatter name doesn't match"
+        assert parsed["description"].strip(), f"{name}: frontmatter description is empty"
+
+
+def test_quoted_description_reads_back_without_its_quotes():
+    """A description quoted to carry a ``": "`` must not render with the quotes."""
+    quoted = '---\nname: x\ndescription: "Do a thing with comfy-cli: turn it on."\n---\n\nBody.\n'
+    assert frontmatter_description(quoted) == "Do a thing with comfy-cli: turn it on."
+
+
+def test_comfy_skill_routes_to_every_sibling():
+    """The driver skill tells an agent which siblings to skim, so it must name them all."""
+    text = skill_content("comfy")
+    for name in bundled_skill_names():
+        if name != "comfy":
+            assert f"`{name}`" in text, f"comfy skill should route to {name}"
+
+
 def test_comfy_build_skill_covers_the_build_group():
     text = skill_content("comfy-build")
     for needle in ("comfy build scan", "comfy build create", "comfy build release"):

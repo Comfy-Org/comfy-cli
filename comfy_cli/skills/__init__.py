@@ -592,11 +592,26 @@ def frontmatter_description(content: str) -> str:
 
     Searches the frontmatter block alone. A ``description:`` line in the body,
     inside a YAML example say, documents something else.
+
+    Read as YAML rather than as a line, so a description quoted to carry a
+    ``": "`` gives back its value and not its quotes. The regex stays as the
+    fallback: frontmatter YAML cannot read is still worth a description here,
+    because this feeds ``comfy skills list`` and the Cursor rule.
     """
     if not content.startswith("---\n"):
         return ""
     _, _, rest = content.partition("---\n")
     front, _, _ = rest.partition("---\n")
+
+    import yaml
+
+    try:
+        parsed = yaml.safe_load(front)
+    except yaml.YAMLError:
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get("description"), str):
+        return " ".join(parsed["description"].split())
+
     m = _FRONTMATTER_DESC_RE.search(front)
     return " ".join(m.group(1).split()) if m and m.group(1).strip() else ""
 

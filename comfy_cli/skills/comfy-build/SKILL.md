@@ -1,6 +1,6 @@
 ---
 name: comfy-build
-description: Create a Comfy Build on the developer platform with comfy-cli: turn a local ComfyUI install, or one sentence about the result the user wants, into a build with a green release, decide the dependency pins before the first cut, and read a failed build's log. Stops at a green build; deploying the result is not covered.
+description: "Create a Comfy Build on the developer platform with comfy-cli: turn a local ComfyUI install, or one sentence about the result the user wants, into a build with a green release, decide the dependency pins before the first cut, and read a failed build's log. Stops at a green build; deploying the result is not covered."
 ---
 
 # comfy-build
