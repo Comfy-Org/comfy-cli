@@ -580,6 +580,14 @@ class TestIndex:
         assert knowledge.pick(bundle, "Lip Sync")["id"] == "lipsync"
         assert knowledge.pick(bundle, "audio generation")["id"] == "audio-generation"
 
+    def test_pick_keeps_the_resolved_id_when_the_row_omits_it(self, bundle):
+        # The reader is tolerant, so a row need not repeat its own key. The id
+        # the caller reports must still be what spelling and wording resolved to,
+        # never the raw phrase.
+        bundle.capabilities["lipsync"].pop("id", None)
+        assert knowledge.pick(bundle, "Lip Sync")["id"] == "lipsync"
+        assert knowledge.pick(bundle, "make me a talking head clip")["id"] == "lipsync"
+
     def test_pick_sorts_missing_rank_last(self):
         b = knowledge._index(
             {
@@ -752,12 +760,62 @@ class TestCli:
         assert env["data"]["capability"] == "audio-generation"
         _validate(env["data"])
 
-    def test_pick_miss(self, tmp_path, monkeypatch, capsys):
+    def test_pick_miss_is_a_zero_hit_answer_not_an_error(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
         rc, env = _run(["pick", "nope"], capsys)
+        assert rc == 0
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["zero_hit"] is True
+        assert data["query"] == "nope"
+        assert "nope" in data["nudge"]
+        assert [c["id"] for c in data["capabilities"]] == ["audio-generation", "lipsync"]
+        _validate(data)
+
+    def test_pick_miss_clips_a_long_query(self, tmp_path, monkeypatch, capsys):
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick", "x" * 500], capsys)
+        assert rc == 0
+        assert len(env["data"]["query"]) == knowledge.MAX_QUERY_CHARS
+
+    def test_pick_hit_reports_zero_hit_false(self, tmp_path, monkeypatch, capsys):
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick", "lipsync"], capsys)
+        assert rc == 0
+        assert env["data"]["zero_hit"] is False
+
+    def test_pick_resolves_a_phrased_request(self, tmp_path, monkeypatch, capsys):
+        # Rule 1 sends the user's own words here, so a sentence must reach the
+        # capability its alias is worded inside.
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick", "make me a talking head clip"], capsys)
+        assert rc == 0
+        assert env["data"]["capability"] == "lipsync"
+        assert env["data"]["zero_hit"] is False
+
+    def test_pick_with_a_blank_capability_lists_them(self, tmp_path, monkeypatch, capsys):
+        # A blank argument means "no capability given", not a curation gap.
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick", "   "], capsys)
+        assert rc == 0
+        assert env["data"]["zero_hit"] is False
+        assert "query" not in env["data"]
+
+    def test_pick_without_a_capability_lists_them(self, tmp_path, monkeypatch, capsys):
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick"], capsys)
+        assert rc == 0
+        assert env["command"] == "knowledge pick"
+        data = env["data"]
+        assert [c["id"] for c in data["capabilities"]] == ["audio-generation", "lipsync"]
+        assert all("description" in c for c in data["capabilities"])
+        assert data["zero_hit"] is False
+        _validate(data)
+
+    def test_pick_without_a_capability_needs_a_bundle(self, capsys):
+        rc, env = _run(["pick"], capsys)
         assert rc == 1
-        assert env["error"]["code"] == "knowledge_unknown_capability"
-        assert env["error"]["details"]["known"] == ["audio-generation", "lipsync"]
+        assert env["error"]["code"] == "knowledge_unavailable"
 
     def test_pick_payload_normalizes_rank_and_model(self, tmp_path, monkeypatch, capsys):
         picks = [
@@ -800,7 +858,7 @@ class TestCli:
     def test_error_codes_registered(self):
         from comfy_cli import error_codes
 
-        for code in ("knowledge_unavailable", "knowledge_unknown_model", "knowledge_unknown_capability"):
+        for code in ("knowledge_unavailable", "knowledge_unknown_model"):
             assert error_codes.is_registered(code)
 
     def test_fixture_manifest_matches_fixture(self):
@@ -808,3 +866,63 @@ class TestCli:
         raw = FIXTURE_KNOWLEDGE.read_bytes()
         assert manifest["files"]["knowledge.json"]["sha256"] == hashlib.sha256(raw).hexdigest()
         assert manifest["files"]["knowledge.json"]["bytes"] == len(raw)
+
+
+class TestVerbQueryLog:
+    """SKILL.md rule 1 tells the agent a miss records the gap. The verbs are
+    what it runs, so they have to feed the same log enrichment feeds."""
+
+    @pytest.fixture
+    def queries(self, monkeypatch):
+        """Only the miss log. `track_command` fires its own event either way."""
+        from comfy_cli import tracking
+
+        seen: list[dict] = []
+        monkeypatch.setattr(
+            tracking,
+            "track_event",
+            lambda name, props=None, **kw: seen.append(props) if name == "knowledge_query" else None,
+        )
+        return seen
+
+    def test_pick_logs_a_hit_as_a_namespaced_capability(self, tmp_path, monkeypatch, capsys, queries):
+        _env_bundle(tmp_path, monkeypatch)
+        _run(["pick", "lipsync"], capsys)
+        assert len(queries) == 1
+        assert queries[0]["command"] == "knowledge pick"
+        assert queries[0]["queries"] == ["lipsync"]
+        assert queries[0]["hit_ids"] == ["cap:lipsync"]
+        assert queries[0]["zero_hit"] is False
+
+    def test_pick_logs_a_phrase_under_the_capability_it_resolved_to(self, tmp_path, monkeypatch, capsys, queries):
+        # The curation feed wants the phrase verbatim, filed under the id it
+        # reached. Filing it under the phrase would make every wording its own row.
+        _env_bundle(tmp_path, monkeypatch)
+        _, env = _run(["pick", "make me a talking head clip"], capsys)
+        assert env["data"]["capability"] == "lipsync"
+        assert queries[0]["queries"] == ["make me a talking head clip"]
+        assert queries[0]["hit_ids"] == ["cap:lipsync"]
+        assert queries[0]["zero_hit"] is False
+
+    def test_pick_logs_a_miss_with_the_clipped_query(self, tmp_path, monkeypatch, capsys, queries):
+        _env_bundle(tmp_path, monkeypatch)
+        _run(["pick", "z" * 500], capsys)
+        assert queries[0]["hit_ids"] == []
+        assert queries[0]["zero_hit"] is True
+        assert queries[0]["queries"] == ["z" * knowledge.MAX_QUERY_CHARS]
+
+    def test_resolve_logs_both_a_hit_and_a_miss(self, tmp_path, monkeypatch, capsys, queries):
+        _env_bundle(tmp_path, monkeypatch)
+        _run(["resolve", "testvid"], capsys)
+        _run(["resolve", "zzzz"], capsys)
+        assert len(queries) == 2
+        assert queries[0]["command"] == "knowledge resolve"
+        assert queries[0]["hit_ids"] == ["testvid"]
+        assert queries[0]["zero_hit"] is False
+        assert queries[1]["hit_ids"] == []
+        assert queries[1]["zero_hit"] is True
+
+    def test_the_bare_listing_asks_nothing_so_logs_nothing(self, tmp_path, monkeypatch, capsys, queries):
+        _env_bundle(tmp_path, monkeypatch)
+        _run(["pick"], capsys)
+        assert queries == []
