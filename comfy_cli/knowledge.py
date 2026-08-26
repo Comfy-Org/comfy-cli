@@ -202,9 +202,15 @@ def resolve(bundle: Bundle, query: str) -> dict | None:
 
 
 def pick(bundle: Bundle, capability: str) -> dict | None:
+    """Ranked picks for a capability, keyed exactly, then by spelling, then by wording.
+
+    The wording pass is the same :func:`_resolve_tokens` enrichment uses, so a
+    phrased request ("upscale this video") resolves here as well as it does when
+    it rides along on a block.
+    """
     cap_id = capability.strip().lower()
     if cap_id not in bundle.capabilities:
-        cap_id = bundle.normalized_capabilities.get(_normalize(cap_id), cap_id)
+        cap_id = bundle.normalized_capabilities.get(_normalize(cap_id)) or _resolve_tokens(bundle, capability) or cap_id
     cap = bundle.capabilities.get(cap_id)
     if cap is None:
         return None

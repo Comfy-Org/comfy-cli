@@ -776,6 +776,23 @@ class TestCli:
         assert rc == 0
         assert env["data"]["zero_hit"] is False
 
+    def test_pick_resolves_a_phrased_request(self, tmp_path, monkeypatch, capsys):
+        # Rule 1 sends the user's own words here, so a sentence must reach the
+        # capability its alias is worded inside.
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick", "make me a talking head clip"], capsys)
+        assert rc == 0
+        assert env["data"]["capability"] == "lipsync"
+        assert env["data"]["zero_hit"] is False
+
+    def test_pick_with_a_blank_capability_lists_them(self, tmp_path, monkeypatch, capsys):
+        # A blank argument means "no capability given", not a curation gap.
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick", "   "], capsys)
+        assert rc == 0
+        assert env["data"]["zero_hit"] is False
+        assert "query" not in env["data"]
+
     def test_pick_without_a_capability_lists_them(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
         rc, env = _run(["pick"], capsys)
@@ -784,6 +801,7 @@ class TestCli:
         data = env["data"]
         assert [c["id"] for c in data["capabilities"]] == ["audio-generation", "lipsync"]
         assert all("description" in c for c in data["capabilities"])
+        assert data["zero_hit"] is False
         _validate(data)
 
     def test_pick_without_a_capability_needs_a_bundle(self, capsys):

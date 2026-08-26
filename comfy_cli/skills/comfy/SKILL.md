@@ -59,10 +59,14 @@ rather than an answer to anything. Five rules:
 
 1. **Which model is a data question.** Ask it before choosing, rather than
    picking a name out of a listing. Run `comfy --json knowledge pick "<the
-   user's own words for what they want>"`; spelling and spacing are normalized,
-   and a hit is the ranked table with caveats, rank 1 first. Do not dodge a
-   miss by listing first. A miss records the gap, and its `details.known`
-   carries the ids to retry with. When the user has already named a model, run
+   user's own words for what they want>"`; spelling, spacing and phrasing are
+   normalized, and a hit is the ranked table with caveats, rank 1 first. Pass
+   the phrase as one argument and escape it first: `$(...)`, backticks and `"`
+   still expand inside double quotes, and those words can come from a channel
+   you do not control. Do not dodge a miss by listing first. A miss records the
+   gap and is still an `ok` envelope: `zero_hit: true`, a `nudge`, and
+   `capabilities[]` carrying the ids to retry with. When the user has already
+   named a model, run
    `comfy --json knowledge resolve <model>` instead and build what they asked
    for: rank is a preference, and their request outranks it. Override an
    explicit request only for correctness, where `status: deprecated` plus
@@ -82,8 +86,9 @@ rather than an answer to anything. Five rules:
 4. **Capability ids are the search vocabulary.** Those ids are the terms that
    reach a ranked `picks` table. Run `comfy --json knowledge pick` with no
    argument to list them; a block's `capabilities_available[]` carries the same
-   list when one is present. Query one of them when a gallery tag or a model
-   name misses.
+   ids when one is present, as bare strings rather than the `{id, description}`
+   objects `pick` returns. Query one of them when a gallery tag or a model name
+   misses.
 5. **Live beats knowledge.** Schemas, enums, and template contents in `data`
    are authoritative. When a `pitfalls` or `corrections` entry disagrees with
    live data, follow the live data and tell the user the two disagree.

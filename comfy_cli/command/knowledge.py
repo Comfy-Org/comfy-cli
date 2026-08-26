@@ -2,7 +2,7 @@
 
     comfy knowledge status [--refresh]
     comfy knowledge resolve <alias-or-id>
-    comfy knowledge pick <capability>
+    comfy knowledge pick [capability]
 
 Backed by :mod:`comfy_cli.knowledge`. JSON mode is the contract; pretty mode
 is a short courtesy view.
@@ -146,10 +146,14 @@ def _emit_capabilities(renderer, bundle: knowledge.Bundle, *, query: str | None 
         {"id": cid, "description": _text((bundle.capabilities.get(cid) or {}).get("description"))}
         for cid in sorted(bundle.capabilities)
     ]
-    payload: dict[str, Any] = {"capabilities": caps, "bundle_version": bundle.version, "stale": bundle.stale}
+    payload: dict[str, Any] = {
+        "capabilities": caps,
+        "zero_hit": query is not None,
+        "bundle_version": bundle.version,
+        "stale": bundle.stale,
+    }
     if query is not None:
         payload["query"] = query
-        payload["zero_hit"] = True
         payload["nudge"] = f"no curated knowledge for {query!r}; query one of the listed capability ids"
     if renderer.is_pretty():
         if query is not None:
@@ -170,7 +174,7 @@ def pick_cmd(
 ):
     renderer = get_renderer()
     bundle = _require_bundle(renderer)
-    if capability is None:
+    if capability is None or not capability.strip():
         _emit_capabilities(renderer, bundle)
         return
     cap = knowledge.pick(bundle, capability)
