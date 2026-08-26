@@ -44,8 +44,17 @@ def _iter_python_files(root: Path):
         yield p
 
 
+#: ``code=`` is ``renderer.error``'s own kwarg. ``error_code=`` is how
+#: ``comfy_cli.interaction``'s ``require_option`` / ``confirm`` take the code:
+#: that helper deliberately hardcodes none, so each command names its own code
+#: at its own call site (the register-with-first-call-site rule). A command
+#: whose only refusal goes through those helpers would otherwise look like it
+#: registered an orphan.
+_CODE_KWARGS = frozenset({"code", "error_code"})
+
+
 def _extract_codes_from_call(call: ast.Call) -> list[str]:
-    """Return any string literal passed as ``code=...`` whose shape matches a code.
+    """Return any string literal passed as a code kwarg whose shape matches a code.
 
     Conservative on what counts as a code (must match the snake_case pattern)
     so we don't accept random ``code=1`` ints (e.g. ``typer.Exit(code=1)``) or
@@ -53,7 +62,7 @@ def _extract_codes_from_call(call: ast.Call) -> list[str]:
     """
     out: list[str] = []
     for kw in call.keywords:
-        if kw.arg != "code":
+        if kw.arg not in _CODE_KWARGS:
             continue
         if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
             value = kw.value.value
