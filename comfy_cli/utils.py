@@ -8,7 +8,7 @@ import shutil
 import tarfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import BinaryIO, cast
+from typing import Any, BinaryIO, cast
 
 import psutil
 from rich import progress
@@ -18,6 +18,11 @@ from rich.table import Table
 from comfy_cli.constants import DEFAULT_COMFY_WORKSPACE, OS, PROC
 from comfy_cli.http import DOWNLOAD_TIMEOUT
 from comfy_cli.typing import PathLike
+
+#: Instance cache per ``@singleton`` class, keyed by the wrapper the decorator
+#: returns. Kept here rather than on that wrapper because several tests reach
+#: the decorated class through ``Wrapper.__closure__[0]``.
+_SINGLETON_CACHES: dict[Any, dict[type, Any]] = {}
 
 
 def singleton(cls):
@@ -37,7 +42,21 @@ def singleton(cls):
             instances[cls] = cls(*args, **kwargs)
         return instances[cls]
 
+    _SINGLETON_CACHES[get_instance] = instances
     return get_instance
+
+
+def reset_singleton_for_testing(factory: Any) -> None:
+    """Drop the instance cached behind a ``@singleton``-decorated class.
+
+    The instance captures process-wide state when it is constructed
+    (``ConfigManager`` reads the config dir exactly once). Tests repoint that
+    state per test, so without this the FIRST test's instance silently serves
+    every later one.
+    """
+    cache = _SINGLETON_CACHES.get(factory)
+    if cache is not None:
+        cache.clear()
 
 
 def get_os():
