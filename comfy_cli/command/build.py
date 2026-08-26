@@ -912,7 +912,7 @@ def execute_create(plan: dict, *, client, name: str, locate_bytes, targets=None)
         uploaded += 1
     build_id = client.create_build(name, definition)
     try:
-        version_id, status_url = client.cut_version(build_id, targets)
+        version_id, status_url = client.create_release(build_id, targets)
     except Exception as e:
         # The build now exists server-side; carry its id on the error so the
         # command can surface it (the user can then delete or retry it, not orphan it).
@@ -1510,7 +1510,7 @@ def version_create(
 ):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    release_id, status_url = _builder_call(renderer, lambda: client.cut_version(build_id))
+    release_id, status_url = _builder_call(renderer, lambda: client.create_release(build_id))
     if renderer.is_pretty():
         renderer.success(f"Cut release {release_id}")
         renderer.print(f"  status: {status_url}")
@@ -1546,7 +1546,7 @@ def version_get(
 ):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    version = _builder_call(renderer, lambda: client.get_version(version_id))
+    version = _builder_call(renderer, lambda: client.get_release(version_id))
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(version))
     renderer.emit(version, command="build release get")
@@ -1564,7 +1564,7 @@ def version_logs(
 ):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    content = _builder_call(renderer, lambda: client.get_version_logs(version_id, os=os_target, gpu=gpu))
+    content = _builder_call(renderer, lambda: client.get_release_logs(version_id, os=os_target, gpu=gpu))
     # Mirror whichever spelling the builder returned, so either server generation
     # yields both keys.
     log_id = content.get("releaseId") or content.get("versionId")
@@ -1915,7 +1915,7 @@ def version_manifest(
 ):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    manifest = _builder_call(renderer, lambda: client.get_version_manifest(version_id))
+    manifest = _builder_call(renderer, lambda: client.get_release_manifest(version_id))
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(manifest))
     renderer.emit(manifest, command="build release manifest")

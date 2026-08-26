@@ -38,8 +38,8 @@ history.
 
 - The builder client module is now `comfy_cli.builder_api` (was
   `comfy_cli.distribution_api`), and its methods say build and release
-  (`create_build`, `list_releases`, ...), matching the builder's public API.
-  The `distribution-definition/0` schema id is unchanged.
+  (`create_build`, `create_release`, `list_releases`, ...), matching the
+  builder's public API. The `distribution-definition/0` schema id is unchanged.
 - `comfy build --json` payloads carry the builder's vocabulary: `buildId`,
   `releaseId`, and `builds` and `releases` arrays. The retired `distributionId`,
   `versionId`, `distributions` and `versions` keys are emitted alongside them
@@ -60,6 +60,10 @@ history.
 - The shipped `build_from_snapshot.json` schema now requires the `build` key
   the builder actually serves; it still required the pre-rename `distribution`
   key, so a valid `comfy build from-snapshot --json` payload failed validation.
+- `comfy build list` and `comfy build release list` show every row again. The
+  builder pages both reads, and the client took only the first page, so a
+  workspace or a build past one page lost its tail — silently, with no error
+  and nothing in the output to say rows were missing.
 
 ## [1.16.0] - 2026-08-10
 

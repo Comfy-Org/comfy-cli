@@ -390,7 +390,7 @@ class _FakeBuilder:
         self.created = (name, definition)
         return "dist-123"
 
-    def cut_version(self, build_id, targets=None):
+    def create_release(self, build_id, targets=None):
         self.cut = (build_id, targets)
         return "ver-456", "https://status.example/ver-456"
 
@@ -535,7 +535,7 @@ def test_builder_client_endpoints_and_parsing(monkeypatch):
     c = BuilderClient("https://builder.test/", "jwt-token")
     assert c.create_blob("model", "f.safetensors", "hash", 5) == ("b1", "https://put")
     assert c.create_build("n", {"models": [], "customNodes": []}) == "d1"
-    assert c.cut_version("d1") == ("v1", "https://s")
+    assert c.create_release("d1") == ("v1", "https://s")
     results = c.resolve_models(["a.safetensors"])
     assert results[0]["candidates"][0]["sourceUri"] == "https://u"
     # URLs carry the /v1 prefix, and the JWT rides on the cloud target
@@ -569,7 +569,7 @@ def test_builder_client_read_endpoints(monkeypatch):
     assert c.list_builds() == [{"id": "d1", "name": "n"}]
     assert c.get_build("d1")["definition"] == {"models": []}
     assert c.list_releases("d1") == [{"id": "v1", "status": "complete"}]
-    logs = c.get_version_logs("v1", os="linux", gpu="nvidia")
+    logs = c.get_release_logs("v1", os="linux", gpu="nvidia")
     assert logs["log"] == "hello" and logs["truncated"] is False
     # reads are GETs under /v1, and the log target selector rides as query params
     assert ("GET", "https://builder.test/v1/builds") in calls
@@ -625,7 +625,7 @@ def test_builder_client_reference_and_update_endpoints(monkeypatch):
     assert c.list_model_directories() == ["checkpoints", "vae"]
     assert c.list_blobs() == [{"blobId": "b1", "filename": "m.safetensors"}]
     assert c.update_build("d1", {"models": []}, "2026-08-01T00:00:00Z")["id"] == "d1"
-    assert c.get_version_manifest("v1")["models"][0]["filename"] == "ae"
+    assert c.get_release_manifest("v1")["models"][0]["filename"] == "ae"
     assert c.get_artifact_download("a1")["downloadUrl"] == "https://dl"
     # update is a PATCH carrying the definition AND the expectedUpdatedAt guard the
     # builder requires (a missing one 409s STALE); the rest are GETs under /v1
@@ -779,7 +779,7 @@ def test_upload_blob_sends_generation_match_header(monkeypatch, tmp_path):
     assert captured["allow_redirects"] is False
 
 
-def test_get_version_logs_uses_large_cap(monkeypatch):
+def test_get_release_logs_uses_large_cap(monkeypatch):
     seen = {}
 
     def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
@@ -789,7 +789,7 @@ def test_get_version_logs_uses_large_cap(monkeypatch):
     monkeypatch.setattr("comfy_cli.builder_api.request_json", fake_request_json)
     from comfy_cli.builder_api import BuilderClient
 
-    BuilderClient("https://builder.test/", "jwt").get_version_logs("v1")
+    BuilderClient("https://builder.test/", "jwt").get_release_logs("v1")
     # the builder caps a served log at 8 MiB; the client cap must sit above that
     assert seen["max_bytes"] > 8 * 1024 * 1024
 
@@ -1165,7 +1165,7 @@ class _ImportingBuilder:
         self.created_with = definition
         return "dist-1"
 
-    def cut_version(self, build_id, targets=None):
+    def create_release(self, build_id, targets=None):
         return ("ver-1", "status-url")
 
 
@@ -1669,7 +1669,7 @@ def test_build_version_alias_hidden_from_build_help():
     assert "version" not in listed
 
 
-def test_cut_version_falls_back_to_buildversionid(monkeypatch):
+def test_create_release_falls_back_to_buildversionid(monkeypatch):
     """A not-yet-upgraded builder answers the cut with buildVersionId; the
     client still parses the id so the CLI works against either generation."""
 
@@ -1681,7 +1681,7 @@ def test_cut_version_falls_back_to_buildversionid(monkeypatch):
     from comfy_cli.builder_api import BuilderClient
 
     c = BuilderClient("https://builder.test/", "jwt")
-    assert c.cut_version("d1") == ("v1", "https://s")
+    assert c.create_release("d1") == ("v1", "https://s")
 
 
 # --- review follow-ups --------------------------------------------------------
