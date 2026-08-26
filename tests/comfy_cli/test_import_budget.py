@@ -2,10 +2,10 @@
 
 Every ``comfy`` invocation pays its import graph before doing any work, and
 agents (comfy-agent, the MCP server) pay it on every tool call. This test pins
-one thing: heavy libraries that only a few commands need must not load for a
-trivial ``--version`` call. ``psutil`` and GitPython used to be imported at
-module level by ``utils.py`` / ``hardware.py`` / ``command/install.py``;
-together they were the largest single share of startup time.
+one thing: heavy libraries and subcommand modules that only some commands need
+must not load for a trivial ``--version`` call. ``psutil``, GitPython, and the
+whole ``comfy_cli.command`` package used to load at startup; see
+``comfy_cli/_lazy.py`` and ``comfy_cli/command/__init__.py``.
 
 The measurement is ``python -X importtime -m comfy_cli --json --version``, run
 in a subprocess so it sees a cold interpreter exactly like a user does.
@@ -18,9 +18,25 @@ import re
 import subprocess
 import sys
 
-# Libraries that must stay off the startup path. Add to this list when a
-# lazy-import fix lands so the fix is guarded.
-FORBIDDEN_AT_STARTUP = ("psutil", "git", "gitdb")
+# Modules that must stay off the startup path (a bare name covers the whole
+# package). Add to this list when a lazy-import fix lands so the fix is guarded.
+FORBIDDEN_AT_STARTUP = (
+    "psutil",
+    "git",
+    "gitdb",
+    "requests",
+    "urllib.request",  # via comfy_cli.http; downloads only
+    "comfy_cli.http",
+    "comfy_cli.standalone",
+    "comfy_cli.command.custom_nodes",
+    "comfy_cli.command.install",
+    "comfy_cli.command.run",
+    "comfy_cli.command.transfer",
+    "comfy_cli.command.project",
+    "comfy_cli.command.nodes",
+    "comfy_cli.command.launch",
+    "comfy_cli.cloud.command",
+)
 
 _IMPORT_LINE = re.compile(r"^import time:\s+\d+ \|\s+\d+ \|\s*(\S+)")
 
@@ -52,6 +68,9 @@ def _startup_modules() -> list[str]:
 
 def test_heavy_libraries_stay_lazy():
     modules = _startup_modules()
-    top_level = {name.split(".")[0] for name in modules}
-    loaded = sorted(top_level & set(FORBIDDEN_AT_STARTUP))
+    loaded = sorted(
+        forbidden
+        for forbidden in FORBIDDEN_AT_STARTUP
+        if any(name == forbidden or name.startswith(forbidden + ".") for name in modules)
+    )
     assert not loaded, f"imported at startup but should be lazy: {loaded}"

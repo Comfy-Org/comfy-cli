@@ -15,7 +15,6 @@ from rich.live import Live
 from rich.table import Table
 
 from comfy_cli.constants import DEFAULT_COMFY_WORKSPACE, OS, PROC
-from comfy_cli.http import DOWNLOAD_TIMEOUT
 from comfy_cli.typing import PathLike
 
 
@@ -111,6 +110,8 @@ def download_url(
     # Imported lazily: requests costs ~30ms to import and utils is on the
     # import path of every CLI invocation; only downloads need it.
     import requests
+
+    from comfy_cli.http import DOWNLOAD_TIMEOUT  # urllib.request behind it costs ~60ms; downloads only
 
     cwd = Path(cwd).expanduser().resolve()
     fpath = cwd / fname
