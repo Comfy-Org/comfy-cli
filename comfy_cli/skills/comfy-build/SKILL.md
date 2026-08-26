@@ -128,11 +128,15 @@ comfy --json build from-workflow --from <workflow>.json --name <name>
 
   ```shell
   comfy --json build get <build-id> | jq .data.definition > def.json
-  # add baseComfyVersion, and the models below, to def.json
+  comfy --json build resolve <filename> [<filename> ...]
+  # write baseComfyVersion, and a models entry per resolved file, into def.json
   comfy build update <build-id> --from def.json
   comfy build validate <build-id>
   comfy build release create <build-id>
   ```
+
+  The ref itself comes from the `git ls-remote` line under *Confirm, then write
+  the definition*, which is the only place it is written down.
 
   **The version alone is not enough to cut something that works.** Add the
   models in the same edit, or the cut goes green and the graph cannot load its
@@ -583,6 +587,11 @@ Say all of this, in plain words, and wait for a yes:
   Python may not resolve against the build's. `--execute` says so in words too.
 - **`droppedComfyVersion`**: the ComfyUI ref named is not one the build can use,
   so none was set. Write one; a definition with no version cannot cut.
+
+**These arrive as English from `create --execute` and nowhere else.** A cut made
+with `release create`, which is how the Desktop and workflow paths cut, prints
+none of them and answers with ids alone. Read the release rather than waiting
+for a warning that is not coming.
 - **`skippedPins`**: normal. The build owns those packages.
 - **`unpinnablePins`**: a package with no PyPI version to write, an editable or a
   direct URL. Not owned by the build, just undeclarable. A pack may still need it.
@@ -660,7 +669,9 @@ wait.
    own. `timeline`'s `error` entries say the same thing per phase.
 2. `comfy build release logs <release-id>`: one target's log, not the whole
    release. It takes `--os` and `--gpu` and picks a target for you when you omit
-   them, so name them once a release has more than one. Read the tail
+   them, so name them once a release has more than one. It answers with an
+   object, so the log text is at `.data.log` rather than the response itself.
+   Read the tail
    for the summary line, then the middle, which is where the cause usually is.
    `truncated` is what says the middle is gone, and it rarely is.
 
@@ -671,7 +682,10 @@ exactly that and stop rather than guessing.
 **`failureReason` opens with the step that failed**, as `<phase>: <cause>`, and
 the phase already halves the search. A `freeze` failure is the definition and
 never a dependency. An `assemble` failure is the packages, which is where a
-conflict shows. `validate` and `bake` come after both.
+conflict shows. `validate` and `bake` come after both. Those four are the phases worth acting
+on, not the whole set: a `failureReason` can open with another name, and one
+the table does not carry is read on its own terms rather than forced into a
+row.
 
 | It says | The one edit |
 | --- | --- |
