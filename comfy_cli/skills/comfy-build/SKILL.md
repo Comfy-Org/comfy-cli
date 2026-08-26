@@ -9,10 +9,6 @@ The platform commands here are the `comfy build` group, from
 [comfy-cli](https://github.com/Comfy-Org/comfy-cli); `comfy which` and
 `comfy cloud login` are its two helpers.
 
-**Needs comfy-cli 1.18.0 or newer.** Earlier versions have no `build` group at
-all, so `comfy build scan` answers `No such command 'build'`. Check with
-`comfy --version`, and `pip install -U comfy-cli` if it is older.
-
 **A cut is not undoable and a build takes minutes**, so the user hears what is
 about to be sent, and agrees, before anything is created on the platform.
 

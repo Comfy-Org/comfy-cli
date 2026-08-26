@@ -17,6 +17,10 @@ history.
 
 ### Added
 
+- `comfy-build`, the skill for building a custom ComfyUI environment on the
+  developer platform, is now bundled with the CLI. `comfy skills show
+  comfy-build` works, and an argument-free `comfy skills install` writes it on a
+  machine with no network.
 - `comfy build from-workflow --from <workflow.json> --name <name>` creates a
   build from a ComfyUI workflow, in the editing format or the API export.
 - A workflow import prints its full report: the node classes nothing provides,
@@ -26,6 +30,11 @@ history.
 - `CONTRIBUTING.md` (renamed from `DEV_README.md`) and this changelog.
 
 ### Changed
+
+- `comfy skills install` no longer fetches any skill over the network.
+  `comfy-build` was the only one it fetched, and it now ships in the wheel and
+  is versioned with the CLI release, so the skill and the commands it describes
+  can no longer drift apart.
 
 - The builder client module is now `comfy_cli.builder_api` (was
   `comfy_cli.distribution_api`), and its methods say build and release

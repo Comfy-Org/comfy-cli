@@ -52,7 +52,7 @@ BUNDLED_SKILLS: tuple[tuple[str, str], ...] = (
 
 # Skills we used to bundle and have since folded into the consolidated `comfy`
 # skill. `install()` prunes any of these left behind on disk so machines that
-# installed an older bundle converge to the current 4 on the next install.
+# installed an older bundle converge to the current set on the next install.
 RETIRED_SKILLS: tuple[str, ...] = (
     "comfy-image",
     "comfy-video",
@@ -356,8 +356,8 @@ def plan_install(
 ) -> list[TargetPlan]:
     """Return a TargetPlan per (skill, target) pair.
 
-    Default skills: every one an install writes, bundled and remote. Default
-    targets: all three. Default scope: user.
+    Default skills: every bundled one. Default targets: all three. Default
+    scope: user.
     """
     root = project_root or Path.cwd()
     plans: list[TargetPlan] = []
@@ -595,8 +595,10 @@ def frontmatter_description(content: str) -> str:
 
     Read as YAML rather than as a line, so a description quoted to carry a
     ``": "`` gives back its value and not its quotes. The regex stays as the
-    fallback: frontmatter YAML cannot read is still worth a description here,
-    because this feeds ``comfy skills list`` and the Cursor rule.
+    fallback for frontmatter YAML rejects, and for frontmatter it reads as
+    something other than a string: ``description: #1 way to break YAML`` parses
+    fine and yields None. Either is still worth a description here, because this
+    feeds ``comfy skills list`` and the Cursor rule.
     """
     if not content.startswith("---\n"):
         return ""
@@ -607,7 +609,9 @@ def frontmatter_description(content: str) -> str:
 
     try:
         parsed = yaml.safe_load(front)
-    except yaml.YAMLError:
+    except Exception:
+        # Not just YAMLError: a deeply nested document raises RecursionError, which
+        # would otherwise escape into install() and abort it between two targets.
         parsed = None
     if isinstance(parsed, dict) and isinstance(parsed.get("description"), str):
         return " ".join(parsed["description"].split())
@@ -630,8 +634,8 @@ def _cursor_description_for(skill_name: str, content: str) -> str:
 
 def _write_cursor_rule(path: Path, content: str, *, skill_name: str) -> None:
     body = _strip_frontmatter(content)
-    # Quote the description: it is now the skill's own text, and a remote skill's
-    # text is not ours to constrain. An unquoted `Build: a thing` or a leading `#`
+    # Quote the description: a path-installed skill's text is not ours to
+    # constrain. An unquoted `Build: a thing` or a leading `#`
     # is a YAML parse error, so Cursor drops a rule that installed fine. A JSON
     # string is a valid YAML double-quoted scalar, and the description is already
     # whitespace-collapsed to one line.

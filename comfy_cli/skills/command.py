@@ -195,11 +195,12 @@ def install_cmd(
 
         header = Text(f"{title_word} · {s} scope", style="dim")
         body = Group(header, Text(""), tbl)
-        # One line per skipped skill, not one per target — the reason is the same
-        # three times, and the table has nowhere to put it.
-        skipped = {r.skill: r.reason for r in results if r.action == "skipped" and r.reason}
-        for name, reason in skipped.items():
-            body = Group(body, Text(f"{name} skipped: {reason}", style="yellow"))
+        # One line per skipped target: every remaining skip is a per-path OSError,
+        # so two targets of one skill fail with two different reasons and the table
+        # has nowhere to put either.
+        for r in results:
+            if r.action == "skipped" and r.reason:
+                body = Group(body, Text(f"{r.skill} ({r.kind}) skipped: {r.reason}", style="yellow"))
         if not dry_run and any(r.action == "wrote" for r in results):
             body = Group(
                 body,

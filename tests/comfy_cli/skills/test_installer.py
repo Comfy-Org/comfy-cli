@@ -102,6 +102,65 @@ def test_quoted_description_reads_back_without_its_quotes():
     assert frontmatter_description(quoted) == "Do a thing with comfy-cli: turn it on."
 
 
+def test_bundled_description_reads_back_unquoted():
+    """The real value that broke, not a stand-in.
+
+    ``comfy-build``'s description is quoted in its frontmatter because it carries
+    a ``": "``. Dropping the YAML read would render those quotes to the user, and
+    a synthetic fixture would not notice.
+    """
+    desc = frontmatter_description(skill_content("comfy-build"))
+    assert desc.startswith("Create a Comfy Build"), desc
+    assert not desc.startswith('"'), "the frontmatter quotes leaked into the description"
+
+
+def test_installed_skill_file_parses_as_yaml(tmp_path: Path):
+    """Claude Code reads the file install() writes, not the one in the package."""
+    import yaml
+
+    install(scope="project", project_root=tmp_path, targets=["claude-code"])
+    for name in bundled_skill_names():
+        front = (tmp_path / f".claude/skills/{name}/SKILL.md").read_text(encoding="utf-8").split("---\n", 2)[1]
+        assert yaml.safe_load(front)["name"] == name
+
+
+def test_path_installed_skill_is_current_not_stale(tmp_path: Path):
+    """A skill with no bundled copy to compare against must not be stale for ever."""
+    name = "my-skill"
+    skill_dir = tmp_path / name
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Local.\n---\n\nLocal.\n", "utf-8")
+    target = tmp_path / "target"
+    target.mkdir()
+
+    install(scope="project", project_root=target, skills=[str(skill_dir)], targets=["claude-code"])
+
+    from comfy_cli.skills import _compute_skill_state, read_manifest
+
+    installed = target / ".claude" / "skills" / name / "SKILL.md"
+    assert _compute_skill_state(installed, name, read_manifest()) == "current"
+
+
+def test_one_unwritable_target_skips_only_itself(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """One failure skips one target; every other target still lands."""
+    import comfy_cli.skills as skills_pkg
+
+    def boom(path, content, *, skill_name):
+        raise OSError(f"[Errno 13] Permission denied: {path}")
+
+    monkeypatch.setattr(skills_pkg, "_write_cursor_rule", boom)
+
+    results = install(scope="project", project_root=tmp_path)
+    by_kind: dict[str, set[str]] = {}
+    for r in results:
+        by_kind.setdefault(r.kind, set()).add(r.action)
+
+    assert by_kind["cursor"] == {"skipped"}
+    assert by_kind["claude-code"] == {"wrote"}, "a failing cursor write must not abort the rest"
+    assert by_kind["agents-md"] == {"wrote"}
+    assert len([r for r in results if r.action == "skipped"]) == len(bundled_skill_names())
+
+
 def test_comfy_skill_routes_to_every_sibling():
     """The driver skill tells an agent which siblings to skim, so it must name them all."""
     text = skill_content("comfy")
@@ -691,9 +750,13 @@ def test_plan_and_install_agree_on_names(tmp_path: Path, monkeypatch: pytest.Mon
     assert planned == installed == set(default_skill_names())
 
 
-def test_path_installed_skill_gets_no_source(tmp_path: Path):
-    """A local (third-party) skill install records no provenance source — that's
-    only ever set for a skill this package didn't ship."""
+def test_manifest_entry_carries_exactly_skill_sha_and_version(tmp_path: Path):
+    """The manifest row is these three fields and nothing else.
+
+    It used to grow a ``source`` key for a skill fetched from another repository.
+    Asserting the absence of that key would now pass for any input, so pin the
+    whole shape instead.
+    """
     from comfy_cli.skills import read_manifest
 
     name = "my-skill"
@@ -706,7 +769,7 @@ def test_path_installed_skill_gets_no_source(tmp_path: Path):
     install(scope="project", project_root=target, skills=[str(skill_dir)], targets=["claude-code"])
 
     entry = read_manifest()[str(target / ".claude" / "skills" / name / "SKILL.md")]
-    assert "source" not in entry
+    assert set(entry) == {"skill", "sha256", "cli_version"}
 
 
 def test_description_is_read_from_frontmatter_only():
