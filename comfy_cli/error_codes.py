@@ -1184,7 +1184,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "deploy_missing_input",
         "A deploy command is missing required interactive input. `comfy deploy up` uses this for immutable compute "
-        "choices; `details.missing` lists every required option.",
+        "choices and `comfy deploy run` uses it for `--workflow`; `details.missing` lists every required option.",
         "pass every option named in `details.missing`, then retry",
     ),
     ErrorCode(
@@ -1256,6 +1256,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "configured it — `COMFY_DEPLOY_URL`, the deployment's own `endpointUrl`, or a job link derived from it.",
         "point COMFY_DEPLOY_URL at an https:// endpoint, or use a loopback address for local development",
     ),
+    ErrorCode(
+        "deploy_endpoint_unknown",
+        "The control plane returned a null or untrusted deployment `endpointUrl`, or a data-plane follow-up/output "
+        "link named an origin outside the configured exact-origin allowlists. No data-plane credential is attached.",
+        "check COMFY_DEPLOY_HOST_SUFFIXES or COMFY_DEPLOY_STORAGE_ORIGINS, then retry with a trusted platform origin",
+    ),
     # --- deploy data plane ---------------------------------------------------
     ErrorCode(
         "deploy_not_ready",
@@ -1266,6 +1272,28 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "deploy_workflow_invalid",
         "The data plane rejected the API-format workflow. `details.node_errors` preserves structured per-node failures.",
         "fix the nodes named in `details.node_errors`, then submit again with a new idempotency key",
+    ),
+    ErrorCode(
+        "deploy_workflow_format_ui",
+        "`comfy deploy run` received a UI-format workflow carrying `nodes` and `links`. Deployment releases expose "
+        "no node-schema endpoint, so the CLI cannot convert that graph safely and refuses it before any request.",
+        "use ComfyUI's 'File > Export (API)' to save as API format, or convert locally with `comfy run` against a "
+        "running ComfyUI instance",
+    ),
+    ErrorCode(
+        "deploy_workflow_asset_outside_root",
+        "A `comfy deploy run` workflow input named a real local file that no allowed ComfyUI asset directory "
+        "holds. `details.path` is the file the string resolved to and `details.asset_roots` lists every directory "
+        "that was allowed. A workflow is third-party data, so the scanner reads only from the install's "
+        "`models/`, `input/` and `output/` directories rather than from anywhere under the working directory.",
+        "move the file under the install's models/, input/ or output/ directory, or pass `--asset-root <dir>`",
+    ),
+    ErrorCode(
+        "deploy_workflow_asset_marker_reserved",
+        "A `comfy deploy run` workflow arrived carrying a `core/ASSET` block whose `info.id` already uses the "
+        "CLI's reserved `local-asset:` prefix, which `details.id` carries. No legitimate producer emits that id, "
+        "and honouring it would repoint the reference at a file this run uploaded from the caller's machine.",
+        "remove the `local-asset:` asset id from the workflow and reference the local file by its path instead",
     ),
     ErrorCode(
         "deploy_rate_limited",
@@ -1289,6 +1317,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "inspect `details.job.error`, fix the workflow or inputs it names, then submit a new job",
     ),
     ErrorCode(
+        "deploy_job_canceled",
+        "The final authoritative GET for a v2 data-plane job reported `status: canceled`. `details.job` carries "
+        "the complete terminal snapshot.",
+        "submit a new `comfy deploy run` invocation if the workflow should execute again",
+    ),
+    ErrorCode(
         "deploy_asset_missing",
         "An input the run needs is not an asset this account can reach. Either a v2 asset hash probe found "
         "no blob the caller may mint from while uploads were disabled (`details.file_path` and `details.hash` "
@@ -1301,12 +1335,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "A v2 multipart asset upload failed or the server rejected its `expected_hash`. A hash mismatch "
         "mints no asset and reports `hash_mismatch` in `details.server_code`.",
         "verify the local file is stable and readable, then retry the upload",
-    ),
-    ErrorCode(
-        "deploy_endpoint_unknown",
-        "The control plane returned a null or untrusted deployment `endpointUrl`, or a data-plane follow-up/output "
-        "link named an origin outside the configured exact-origin allowlists. No data-plane credential is attached.",
-        "check COMFY_DEPLOY_HOST_SUFFIXES or COMFY_DEPLOY_STORAGE_ORIGINS, then retry with a trusted platform origin",
     ),
     # --- knowledge -----------------------------------------------------------
     ErrorCode(

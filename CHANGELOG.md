@@ -34,7 +34,7 @@ history.
   and whether a ComfyUI version still has to be pinned.
 - `CONTRIBUTING.md` (renamed from `DEV_README.md`) and this changelog.
 - `comfy deploy` — run a Build release as a serverless endpoint: `up`, `status`,
-  `ls`, `show`, `logs`, `events`, `scale`, `stop`, `start`, `delete`, and
+  `ls`, `show`, `logs`, `events`, `scale`, `stop`, `start`, `delete`, `run`, and
   `refs compute`.
 
 ### Changed
@@ -59,7 +59,9 @@ history.
   spec — `init`, `push`, `pull`, `status`, `ls`, `show`, `validate`, `update`,
   `delete`, plus `release`, `refs`, and `blob` subgroups. The `comfy distribution`
   alias and the `scan` / `create` / `version` / `artifact download` /
-  `from-snapshot` commands it fronted are removed.
+  `from-snapshot` / `from-workflow` commands it fronted are removed.
+  `from-workflow` returns as the `comfy build init --from-workflow` and
+  `comfy build update --from-workflow` options described under Added.
 - **Breaking:** the read verbs are renamed, with no aliases left behind:
   `comfy build list` → `comfy build ls`, `comfy build get` → `comfy build show`,
   and `comfy build blob list` → `comfy build blob ls`. The reference lookups
@@ -106,6 +108,30 @@ history.
   and it was shipped verbatim: the URL scrubber only strips credentials out of
   URLs and returns a bare path untouched, so the key has to be named in the
   redaction set, and the rename from `--from` had left it out.
+- A misconfigured `COMFY_DEPLOY_URL` is reported as a `deploy_insecure_url`
+  error instead of a traceback. The https guard signalled refusal with a bare
+  `ValueError`, which no deploy command listed in its `except` tuple, so the
+  failure escaped the command layer and `--json` printed no envelope at all.
+  The message now names the setting actually in play rather than
+  `COMFY_CLOUD_BASE_URL`.
+- `comfy deploy ls` cannot hang on a defective pagination cursor. The loop
+  walked whatever `nextCursor` came back until it was falsy, so a repeated
+  cursor spun forever on an ever-growing list. A repeated cursor and a run past
+  the page ceiling are both reported as `deploy_server_error` now.
+- `comfy deploy run` validates a job output's `node_id`, `type` and `id` before
+  it downloads the file rather than after. A malformed response used to leave
+  files in `outputs/` that the result envelope then never accounted for,
+  followed by exit 1 and no manifest.
+- `comfy deploy show`, `status` and `stop` refuse a blank release id instead of
+  matching on it. A lax local copy of the shared field validator accepted the
+  empty string, so a release with a blank `id` adopted every deployment whose
+  `releaseId` was also blank as belonging to that Build — which could point a
+  lifecycle mutation at the wrong deployment.
+- An asset upload's `Content-Length` always describes the bytes that follow it.
+  The length came from a `stat()` at request-build time while the body was
+  opened and read later, when urllib got round to consuming it; both now come
+  from a single open handle, and the body is bounded to exactly the declared
+  size.
 
 ## [1.16.0] - 2026-08-10
 

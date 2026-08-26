@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_run.json",
+  "title": "comfy deploy run --json data payload",
+  "type": "object",
+  "required": ["deployment", "job", "assets", "outputs", "metrics"],
+  "additionalProperties": false,
+  "properties": {
+    "deployment": {
+      "type": "object",
+      "required": ["id", "endpointUrl"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "endpointUrl": {"type": "string", "format": "uri"}
+      }
+    },
+    "job": {
+      "type": "object",
+      "required": ["id", "status"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "status": {"enum": ["queued", "running", "succeeded", "canceling", "canceled", "failed", "expired"]}
+      }
+    },
+    "assets": {
+      "type": "object",
+      "required": ["uploaded", "deduped", "bytes", "files"],
+      "additionalProperties": false,
+      "properties": {
+        "uploaded": {"type": "integer", "minimum": 0},
+        "deduped": {"type": "integer", "minimum": 0},
+        "bytes": {"type": "integer", "minimum": 0},
+        "files": {
+          "description": "Every local file this run handed to the data plane, named individually — the totals above never name a filename. Always present; empty when the workflow referenced no local file.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["local_path", "file_path", "bytes", "uploaded"],
+            "additionalProperties": false,
+            "properties": {
+              "local_path": {"type": "string", "minLength": 1},
+              "file_path": {"type": "string", "minLength": 1},
+              "bytes": {"type": "integer", "minimum": 0},
+              "uploaded": {"type": "boolean"}
+            }
+          }
+        }
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["node_id", "name", "type", "id", "path"],
+        "additionalProperties": false,
+        "properties": {
+          "node_id": {"type": "string"},
+          "name": {"type": "string", "minLength": 1},
+          "type": {"enum": ["image", "video", "audio", "text", "file", "latent"]},
+          "id": {"type": "string", "minLength": 1},
+          "path": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": {"type": ["integer", "null"]}
+    }
+  }
+}

@@ -38,7 +38,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from comfy_cli.command.build_spec import BuildSpecInvalidError
-from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
+from comfy_cli.constants import (
+    DEFAULT_COMFY_INPUT_PATH,
+    DEFAULT_COMFY_MODEL_PATH,
+    DEFAULT_COMFY_OUTPUT_PATH,
+)
 
 #: The canonical spec filename a directory PATH expands to.
 SPEC_FILENAME = "comfy-build.yaml"
@@ -111,12 +115,19 @@ class BuildPaths:
     ``python`` is the only optional member: there is no filesystem-free default
     for the interpreter, so ``None`` means "not overridden — detect it from
     ``install_root``".
+
+    ``input_dir`` and ``output_dir`` have no override flag of their own — they
+    are ComfyUI's own asset directories and always hang off ``install_root``.
+    They exist here so `deploy run`'s workflow scanner derives its read
+    allowlist from the same resolved PATH every build command already uses.
     """
 
     spec_file: Path
     install_root: Path
     models_dir: Path
     custom_nodes_dir: Path
+    input_dir: Path
+    output_dir: Path
     python: Path | None
 
 
@@ -190,5 +201,7 @@ def resolve_build_paths(
         install_root=install_root,
         models_dir=models_dir,
         custom_nodes_dir=custom_nodes_dir,
+        input_dir=install_root / DEFAULT_COMFY_INPUT_PATH,
+        output_dir=install_root / DEFAULT_COMFY_OUTPUT_PATH,
         python=_absolute(opts.python) if opts.python else None,
     )
