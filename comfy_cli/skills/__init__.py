@@ -200,13 +200,8 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _record_installed(target_path: Path, skill_name: str, content: str, source: dict | None = None) -> None:
-    """Add or update the manifest entry for a successfully installed skill file.
-
-    ``source`` names where a remote skill was fetched from, so an install can be
-    reproduced after the fact: the sha256 already recorded says which bytes
-    landed, and the source says which repository and channel produced them.
-    """
+def _record_installed(target_path: Path, skill_name: str, content: str) -> None:
+    """Add or update the manifest entry for a successfully installed skill file."""
     from comfy_cli.config_manager import ConfigManager
 
     try:
@@ -215,14 +210,11 @@ def _record_installed(target_path: Path, skill_name: str, content: str, source: 
         cli_version = "0.0.0"
 
     manifest = read_manifest()
-    entry = {
+    manifest[str(target_path)] = {
         "skill": skill_name,
         "sha256": _sha256(content),
         "cli_version": cli_version,
     }
-    if source is not None:
-        entry["source"] = source
-    manifest[str(target_path)] = entry
     write_manifest(manifest)
 
 
@@ -277,9 +269,9 @@ def _compute_skill_state(path: Path, skill_name: str, manifest: dict) -> SkillSt
     manifest_sha = entry.get("sha256", "")
     if file_sha == manifest_sha:
         # Matches what was installed, so the user hasn't edited it. For a bundled
-        # skill that means the bundle moved on; for one with no local copy to
-        # compare against — remote or path-installed — it is simply current, and
-        # calling it stale would leave it permanently stale.
+        # skill that means the bundle moved on; for a path-installed one, with no
+        # local copy to compare against, it is simply current, and calling it
+        # stale would leave it permanently stale.
         return "stale" if bundled_sha is not None else "current"
 
     # File differs from both manifest and bundled — user edited it.
