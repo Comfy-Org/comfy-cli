@@ -161,6 +161,18 @@ def test_one_unwritable_target_skips_only_itself(tmp_path: Path, monkeypatch: py
     assert len([r for r in results if r.action == "skipped"]) == len(bundled_skill_names())
 
 
+def test_description_is_read_the_way_the_agent_host_reads_it():
+    """A ``#`` after a space opens a YAML comment, and the description stops there.
+
+    The regex this replaced returned the whole line, which disagreed with what
+    Claude Code and Cursor show, since both parse the frontmatter as YAML. Losing
+    the tail is the point: what ``comfy skills list`` prints is now what the agent
+    host actually got.
+    """
+    doc = "---\nname: x\ndescription: Costs 50% # careful with quotas\n---\n\nBody.\n"
+    assert frontmatter_description(doc) == "Costs 50%"
+
+
 def test_comfy_skill_routes_to_every_sibling():
     """The driver skill tells an agent which siblings to skim, so it must name them all."""
     text = skill_content("comfy")
