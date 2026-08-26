@@ -15,8 +15,17 @@ all, so `comfy build scan` answers `No such command 'build'`. Check with
 and a CLI run from source reports a version no comparison can use. Upgrade with
 `pip install -U comfy-cli`.
 
+**Every networked command defaults to production.** `--builder-url`, or
+`$COMFY_BUILDER_URL`, is what points a run somewhere else, and without either
+the CLI talks to `https://platformapi.comfy.org/builder`. Say which environment
+a cut is going to before you spend it.
+
 **A cut is not undoable and a build takes minutes**, so the user hears what is
 about to be sent, and agrees, before anything is created on the platform.
+**Nothing in the CLI enforces that.** `create --execute` and `release create`
+cut with no prompt and take no `--yes`; the only command that stops for
+confirmation is `build delete`. The disclosure is yours to give, not a safety
+net to lean on.
 
 ## What the platform is
 
@@ -25,7 +34,9 @@ about to be sent, and agrees, before anything is created on the platform.
   cut. `comfy build version` is the retired spelling of `comfy build release`
   and warns on every call.
 - **A cut from the CLI builds `linux/nvidia`** and takes no target flag, so do
-  not promise a Windows or CPU artifact.
+  not promise a Windows or CPU artifact. That is the CLI's limit rather than the
+  platform's: `comfy build build-targets` lists what the builder serves, which
+  today includes Windows and CPU as archives.
 - **This skill stops at a green build.** Deploying is a separate decision.
 
 ## The path
@@ -51,8 +62,13 @@ comfy build release get <release-id>
   `not signed in`, and not before. `resolve`, `model-dirs` and `base-images` all
   answer that, so a path needing any of them needs the sign-in first, and
   describing a result rather than scanning an install needs all three. On
-  `FEATURE_NOT_ENABLED`, stop and tell the
-  user the account does not have access yet.
+  `build_not_enabled`, stop and tell the user the account does not have access
+  yet.
+- **Branch on the envelope's `error.code`, not its prose.** `not signed in`
+  arrives as `build_not_signed_in`, and the others worth knowing are
+  `build_not_enabled`, `build_registry_pin_missing`,
+  `build_missing_comfy_version`, `build_definition_invalid` and
+  `build_workflow_invalid`.
 - **`comfy which` names the install** when the user has not said where it is.
 - **`--name` is yours to choose and the user's to keep.** It is how they will
   find the build later, so propose one from the install or the result they asked
@@ -304,6 +320,8 @@ the definition:
   `sha256` of one candidate.** Without a source, `create --execute` reads the
   entry as an upload and demands a real file on disk. `type` is the directory it
   lands in, chosen as the section above describes.
+- **`comfy build release manifest <release-id>` reads the policy back**, which
+  is the only way to confirm what a cut actually sealed.
 - **`comfy build model-dirs` lists the vetted directories**, not the set the
   builder accepts, and needs the user signed in as `resolve` does.
 - **A registry pack entry carries `name`, the pack's slug in `id`, and the
@@ -640,7 +658,9 @@ wait.
    `artifacts[].failureReason`; the release itself carries none.** The failed
    artifact's line is the build's own final cause and is often enough on its
    own. `timeline`'s `error` entries say the same thing per phase.
-2. `comfy build release logs <release-id>`: the whole stored log. Read the tail
+2. `comfy build release logs <release-id>`: one target's log, not the whole
+   release. It takes `--os` and `--gpu` and picks a target for you when you omit
+   them, so name them once a release has more than one. Read the tail
    for the summary line, then the middle, which is where the cause usually is.
    `truncated` is what says the middle is gone, and it rarely is.
 
