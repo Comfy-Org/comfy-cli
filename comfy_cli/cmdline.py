@@ -2032,6 +2032,7 @@ _RootGroup.lazy_subcommands = {
     "build": LazySubcommand(
         "comfy_cli.command.build", help="Package a local ComfyUI environment into a serverless build."
     ),
+    "deploy": LazySubcommand("comfy_cli.command.deploy", help="Create and manage serverless deployments."),
     "project": LazySubcommand("comfy_cli.command.project", help="Project conventions: init and status."),
     "assets": LazySubcommand(
         "comfy_cli.command.project",

@@ -272,6 +272,7 @@ def request_json(
     *,
     method: str = "GET",
     body: dict | None = None,
+    headers: dict[str, str] | None = None,
     timeout: float = 30.0,
     max_bytes: int,
 ) -> tuple[int, dict | list | None]:
@@ -294,12 +295,14 @@ def request_json(
     # validating up front means a bad cap costs no network round-trip.
     if max_bytes < 1:
         raise ValueError(f"max_bytes must be >= 1, got {max_bytes}")
-    headers = target_auth_headers(target)
-    if headers:
+    auth_headers = target_auth_headers(target)
+    if auth_headers:
         assert_safe_url(url)
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
-    for k, v in headers.items():
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    for k, v in auth_headers.items():
         req.add_header(k, v)
     if data is not None:
         req.add_header("Content-Type", "application/json")

@@ -1161,6 +1161,101 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "absolute path probed. `init` is the only build command that proceeds without a spec.",
         "run `comfy build init --name <name> [PATH]` to create one, or pass the PATH that holds the spec",
     ),
+    # --- deploy control plane ------------------------------------------------
+    ErrorCode(
+        "deploy_build_not_pushed",
+        "A deploy command needed the local Build, but the spec has no `id`, so it has not been pushed to the "
+        "Builder yet.",
+        "run `comfy build push`",
+    ),
+    ErrorCode(
+        "deploy_no_deployable_release",
+        "Release resolution exhausted the Build's releases without finding one whose Builder summary has "
+        "`deployable: true`. The error distinguishes an empty release list from releases that lack a "
+        "`linux/nvidia` artifact.",
+        "run `comfy build release create --target linux/nvidia` to cut a release with a `linux/nvidia` artifact",
+    ),
+    ErrorCode(
+        "deploy_ambiguous_deployment",
+        "Deployment resolution found multiple rows tied at the highest status rank and newest creation time. "
+        "`details.candidateIds` lists every indistinguishable deployment id.",
+        "pass `--deployment <id>` to select one deployment explicitly",
+    ),
+    ErrorCode(
+        "deploy_missing_input",
+        "A deploy command is missing required interactive input. `comfy deploy up` uses this for immutable compute "
+        "choices; `details.missing` lists every required option.",
+        "pass every option named in `details.missing`, then retry",
+    ),
+    ErrorCode(
+        "deploy_bad_request",
+        "The deploy control plane rejected structurally invalid input. The message names the invalid field or query parameter.",
+        "fix the field or parameter named in the message, then retry",
+    ),
+    ErrorCode(
+        "deploy_server_error",
+        "A deploy control-plane request failed in transport or returned an HTTP 5xx. Mutating requests are not retried because their outcome may be unknown.",
+        "check network access and COMFY_DEPLOY_URL; retry only after confirming the deployment state",
+    ),
+    ErrorCode(
+        "deploy_not_signed_in",
+        "A deploy control-plane request found no usable Cloud JWT, or the server rejected it with HTTP 401.",
+        "run `comfy cloud login`, then retry",
+    ),
+    ErrorCode(
+        "deploy_not_found",
+        "The deployment id does not exist or is outside the signed-in workspace.",
+        "check the deployment id with `comfy deploy ls --workspace`",
+    ),
+    ErrorCode(
+        "deploy_forbidden",
+        "The signed-in workspace is not allowed to perform the requested deployment operation.",
+        "verify the deployment belongs to this workspace and that the account has deploy access",
+    ),
+    ErrorCode(
+        "deploy_conflict",
+        "The deployment's current state conflicts with the requested operation; the server message names the state or conflict.",
+        "wait for the named state to settle, inspect `comfy deploy status`, then retry",
+    ),
+    ErrorCode(
+        "deploy_payment_required",
+        "The deployment operation requires an active subscription or available credit.",
+        "restore billing eligibility or credits, then retry",
+    ),
+    ErrorCode(
+        "deploy_quota_exceeded",
+        "The workspace reached its active-deployment or concurrent-worker limit.",
+        "stop or scale down another deployment, or raise the workspace limit, then retry",
+    ),
+    ErrorCode(
+        "deploy_compute_unavailable",
+        "The requested GPU and region cannot currently provision the deployment.",
+        "choose another pair from `comfy deploy refs compute`, or retry when capacity changes",
+    ),
+    ErrorCode(
+        "deploy_immutable_compute",
+        "A ready deployment cannot change its GPU class or region in place.",
+        "run `comfy deploy stop`, then `comfy deploy scale --gpu <class> --region <region>`, then `comfy deploy start`",
+    ),
+    ErrorCode(
+        "deploy_deleted",
+        "A deleted deployment is an audit record and cannot be started again.",
+        "create a new deployment with `comfy deploy up`",
+    ),
+    ErrorCode(
+        "deploy_delete_needs_confirm",
+        "`comfy deploy delete` was run without `--yes` in a non-interactive context. The irreversible "
+        "teardown and soft-delete are refused without explicit consent; `details.deploymentId` names the "
+        "deployment and `details.question` carries the confirmation nothing could answer.",
+        "pass `--yes` to confirm the deployment teardown and soft-delete",
+    ),
+    ErrorCode(
+        "deploy_insecure_url",
+        "A deploy endpoint resolved to a non-https, non-loopback URL, so the request was refused before any "
+        "credential was attached. `details.url` is the offending origin and `details.source` names what "
+        "configured it — `COMFY_DEPLOY_URL`, the deployment's own `endpointUrl`, or a job link derived from it.",
+        "point COMFY_DEPLOY_URL at an https:// endpoint, or use a loopback address for local development",
+    ),
     # --- knowledge -----------------------------------------------------------
     ErrorCode(
         "knowledge_unavailable",

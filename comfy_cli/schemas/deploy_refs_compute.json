@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_refs_compute.json",
+  "title": "comfy deploy refs compute --json data payload",
+  "description": "The compute catalog response, passed through without projecting server fields.",
+  "type": "object",
+  "required": ["regions"],
+  "additionalProperties": true,
+  "properties": {
+    "regions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["region", "gpus"],
+        "additionalProperties": true,
+        "properties": {
+          "region": {"type": "string", "minLength": 1},
+          "label": {"type": "string"},
+          "gpus": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["gpuClass"],
+              "additionalProperties": true,
+              "properties": {
+                "gpuClass": {"type": "string", "minLength": 1},
+                "label": {"type": "string"},
+                "vramGb": {"type": "integer", "minimum": 0},
+                "availability": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

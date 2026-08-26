@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_events.json",
+  "title": "comfy deploy events --json data payload",
+  "description": "Deployment status transitions in the server-provided oldest-first order.",
+  "type": "object",
+  "required": ["deploymentId", "events"],
+  "additionalProperties": true,
+  "properties": {
+    "deploymentId": {"type": "string", "minLength": 1},
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["at", "status"],
+        "additionalProperties": true,
+        "properties": {
+          "at": {"type": "string", "format": "date-time"},
+          "message": {"type": ["string", "null"]},
+          "status": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}
