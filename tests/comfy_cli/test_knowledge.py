@@ -580,6 +580,14 @@ class TestIndex:
         assert knowledge.pick(bundle, "Lip Sync")["id"] == "lipsync"
         assert knowledge.pick(bundle, "audio generation")["id"] == "audio-generation"
 
+    def test_pick_keeps_the_resolved_id_when_the_row_omits_it(self, bundle):
+        # The reader is tolerant, so a row need not repeat its own key. The id
+        # the caller reports must still be what spelling and wording resolved to,
+        # never the raw phrase.
+        bundle.capabilities["lipsync"].pop("id", None)
+        assert knowledge.pick(bundle, "Lip Sync")["id"] == "lipsync"
+        assert knowledge.pick(bundle, "make me a talking head clip")["id"] == "lipsync"
+
     def test_pick_sorts_missing_rank_last(self):
         b = knowledge._index(
             {
@@ -883,6 +891,16 @@ class TestVerbQueryLog:
         assert len(queries) == 1
         assert queries[0]["command"] == "knowledge pick"
         assert queries[0]["queries"] == ["lipsync"]
+        assert queries[0]["hit_ids"] == ["cap:lipsync"]
+        assert queries[0]["zero_hit"] is False
+
+    def test_pick_logs_a_phrase_under_the_capability_it_resolved_to(self, tmp_path, monkeypatch, capsys, queries):
+        # The curation feed wants the phrase verbatim, filed under the id it
+        # reached. Filing it under the phrase would make every wording its own row.
+        _env_bundle(tmp_path, monkeypatch)
+        _, env = _run(["pick", "make me a talking head clip"], capsys)
+        assert env["data"]["capability"] == "lipsync"
+        assert queries[0]["queries"] == ["make me a talking head clip"]
         assert queries[0]["hit_ids"] == ["cap:lipsync"]
         assert queries[0]["zero_hit"] is False
 

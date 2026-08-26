@@ -217,6 +217,9 @@ def pick(bundle: Bundle, capability: str) -> dict | None:
     raw_picks = cap.get("picks")
     picks = [p for p in raw_picks if isinstance(p, dict)] if isinstance(raw_picks, list) else []
     out = dict(cap)
+    # The key resolved through spelling and wording is the answer; a row that
+    # omits its own ``id`` must not send the caller back to the raw phrase.
+    out["id"] = cap_id
     out["picks"] = sorted(picks, key=_rank_key)
     return out
 
