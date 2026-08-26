@@ -92,6 +92,26 @@ jobs:
       # File as cloud-code-bot (App token) rather than github-actions[bot]. Absent
       # APP_ID degrades to github-actions[bot] instead of failing.
       bot_app_id: ${{ vars.APP_ID }}
+      # Turn the top `max_prs` CONFIRMED, non-security findings into REVIEW-GATED
+      # PRs instead of issues, which is what `vars.GROOM_CONFIG`'s `max_findings: 0`
+      # here already assumes: that value PARKS issue filing (a literal `[:0]`
+      # slice, not "unlimited"), so without the builder this repo runs the full
+      # finder + verifier and emits nothing at all.
+      #
+      # `max_prs` is NOT set here on purpose: `vars.GROOM_CONFIG` already carries
+      # it (currently 2) and the variable outranks this `with:` block, so a value
+      # here would be dead config that reads as authoritative. Retune the variable.
+      #
+      # HARD PREREQUISITE — do not merge before it is met. `build_pr` reads
+      # `steps.bot_token.outputs.token` with NO github.token fallback (the issue
+      # sink degrades to github-actions[bot]; the PR sink cannot), and callers
+      # grant only `contents: read`, so there is no other way to push a branch.
+      # This repo has NEITHER `vars.APP_ID` NOR `secrets.CLOUD_CODE_BOT_PRIVATE_KEY`
+      # today, so builder mode would kill every finding at the PR sink AFTER the
+      # agents have billed. Provision the PRIVATE KEY FIRST and the APP_ID SECOND:
+      # the reusable mints whenever bot_app_id is non-empty and hard-fails on an
+      # empty key, so the reverse order breaks the runs that currently work.
+      builder: true
       # Keep the assets ref (finder and verifier briefs plus dedup ledger) in
       # lock-step with the `uses:` ref above, so a run always loads the briefs
       # that match the workflow filing the issues.
