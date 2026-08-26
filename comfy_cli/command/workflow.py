@@ -609,6 +609,85 @@ def notes_cmd(
     renderer.emit(payload, command="workflow notes")
 
 
+@app.command(
+    "print", help="Render a workflow as one line of Python-like source per node, with a binding -> node id map."
+)
+@tracking.track_command("workflow")
+def print_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    fmt: Annotated[str, typer.Option("--format", help="Output form. Only `py` today.")] = "py",
+    input_path: Annotated[
+        str | None,
+        typer.Option("--input", show_default=False, help="Offline object_info.json dump for widget names."),
+    ] = None,
+    host: Annotated[str | None, typer.Option("--host", show_default=False)] = None,
+    port: Annotated[int | None, typer.Option("--port", show_default=False)] = None,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="Routing for the catalog fetch: local or cloud."),
+    ] = None,
+    select: Annotated[
+        str | None,
+        typer.Option("--select", show_default=False, help="Project the payload (see `comfy workflow slots --select`)."),
+    ] = None,
+):
+    """Read-only. Reuses the catalog for widget names; refuses (with every reason) anything it cannot print faithfully."""
+    from comfy_cli.workflow_print import PrintUnsupported, render_py
+
+    renderer = get_renderer()
+    if fmt != "py":
+        renderer.error(
+            code="workflow_print_unsupported",
+            message=f"unknown --format {fmt!r}; only `py` is supported",
+            details={"reasons": [f"format {fmt!r}"]},
+        )
+        raise typer.Exit(code=1)
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    # Mirrors slots_cmd: a stale-cache fallback is a fact about the rendered
+    # widget names, so it has to reach the caller. `print`'s `warnings` is a
+    # list of plain strings (slots' is a list of objects), so it is reported
+    # as one, appended to whatever the printer itself warned about.
+    _stale: dict = {}
+    graph = _get_graph(
+        input_path,
+        host,
+        port,
+        on_stale=lambda key, err: _stale.update(source=key, reason=err),
+        where=where,
+    )
+    try:
+        res = render_py(workflow, graph)
+    except PrintUnsupported as e:
+        renderer.error(
+            code="workflow_print_unsupported",
+            message="workflow contains something `print` cannot render faithfully: " + "; ".join(e.reasons),
+            details={"reasons": e.reasons, "path": str(p)},
+        )
+        raise typer.Exit(code=1) from e
+    warnings = list(res.warnings)
+    if _stale:
+        warnings.append(f"object_info_stale: {_stale['source']}: {_stale['reason']}")
+    payload = {
+        "workflow": str(p),
+        "format": "py",
+        "source": res.source,
+        "bindings": res.bindings,
+        "node_count": res.node_count,
+        "skipped": res.skipped,
+        "warnings": warnings,
+    }
+    if select is not None:
+        from comfy_cli.selector import emit_selected
+
+        select_payload = _sanitize_selected_strings(payload) if renderer.is_pretty() else payload
+        return emit_selected(renderer, select_payload, select, command="workflow print")
+    if renderer.is_pretty():
+        typer.echo(_strip_terminal_controls(res.source), nl=False)
+        for w in warnings:
+            typer.echo(f"warning: {_strip_terminal_controls(w)}", err=True)
+    renderer.emit(payload, command="workflow print")
+
+
 # ---------------------------------------------------------------------------
 # Saved workflows — list, get, save, delete.
 # ---------------------------------------------------------------------------
@@ -726,6 +805,24 @@ def _strip_terminal_controls(text: str) -> str:
         if (ch in "\t\n" or 0x20 <= ord(ch) < 0x7F)
         or (ord(ch) >= 0xA0 and unicodedata.category(ch) not in _SPOOFING_CATEGORIES)
     )
+
+
+def _sanitize_selected_strings(value: Any) -> Any:
+    """Recursively strip terminal control chars from string leaves of a ``--select`` payload.
+
+    Only needed for pretty mode: ``emit_selected`` there can write a selected
+    bare string (or a JSON-pretty-printed slice) straight to the terminal, so
+    an escape sequence buried in a node title or widget value would reach the
+    terminal unescaped. JSON mode's encoder already escapes control chars, so
+    this is a no-op there and is never called for it.
+    """
+    if isinstance(value, str):
+        return _strip_terminal_controls(value)
+    if isinstance(value, dict):
+        return {k: _sanitize_selected_strings(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_selected_strings(v) for v in value]
+    return value
 
 
 def _reject_unsafe_workflow_key(renderer, key: str) -> str:
