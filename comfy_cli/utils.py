@@ -10,7 +10,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import BinaryIO, cast
 
-import psutil
 from rich import progress
 from rich.live import Live
 from rich.table import Table
@@ -69,6 +68,9 @@ def get_not_user_set_default_workspace():
 
 
 def kill_all(pid):
+    # Imported here, not at module level: only kill_all/is_running need psutil.
+    import psutil
+
     try:
         parent = psutil.Process(pid)
         children = parent.children(recursive=True)
@@ -80,6 +82,9 @@ def kill_all(pid):
 
 
 def is_running(pid):
+    # Imported here, not at module level: only kill_all/is_running need psutil.
+    import psutil
+
     try:
         psutil.Process(pid)
         return True
