@@ -16,7 +16,9 @@ and a CLI run from source reports a version no comparison can use. Upgrade with
 `pip install -U comfy-cli`.
 
 **You are detected as an agent, and that changes where the output goes.** The
-CLI reads `AI_AGENT` and `CLAUDECODE`, switches to JSON, and then puts the
+CLI checks `COMFY_USER_AGENT`, `AI_AGENT` and `CLAUDECODE`, and failing those
+whether stdout is a terminal, so a piped or backgrounded run counts with no
+variable set at all. It then switches to JSON and puts the
 envelope on stdout and *everything else on stderr*: the base-image warning, the
 policy warning, the deprecation notice, every advisory this file tells you to
 read. Piping stdout alone silently discards all of it, so capture both streams,
@@ -72,8 +74,12 @@ comfy build release get <release-id>
   already authenticated and `comfy cloud whoami` will still answer
   `signed_in: false`. Do not take `whoami` as the pre-check; run the command you
   want and read its error.
+- **Retry once before believing `not signed in`.** It comes back transiently on
+  a token that is valid, and the same call succeeds seconds later. That envelope
+  also reports `"command": "build"` rather than the subcommand, so it does not
+  name what produced it.
 - **Only sign in when told to.** Run `comfy cloud login` if a command answers
-  `not signed in`, and not before. It blocks on a browser callback, so it hangs
+  `not signed in` twice, and not before. It blocks on a browser callback, so it hangs
   an unattended run; under `--json` it emits a `login_url` event first for a
   parent to open. `resolve`, `model-dirs` and `base-images` all
   answer that, so a path needing any of them needs the sign-in first, and
@@ -679,7 +685,11 @@ directory` means two entries claim one folder, so one of them goes.
 
 **One cause per cut, and every edit that cause requires. Three cuts, then stop.**
 One cause often needs several edits, and a failure often reports one cause as
-several symptoms: three packs failing to import can be one wrong pin. Fix that
+several symptoms: three packs failing to import can be one wrong pin. The log
+proves that rather than leaving it to judgement, because Python writes `During
+handling of the above exception` between a cause and the symptom it triggered,
+so a pack whose parenthesised cause matches no row is usually downstream of one
+that does. Fix that
 cause completely, in one cut. Do not split its edits across cuts, and do not
 guess at a second cause in the same cut. Before each
 new cut, tell the user the cause, the exact edit, and which build this is, and
@@ -716,7 +726,7 @@ row.
 | `freeze: ... custom node "<name>"` | That pack's pin names nothing installable. Correct its `registryVersion` against a registry search, or drop the pack. |
 | `freeze: ... blob <id> not found in workspace` | The `blobId` is wrong, or from another workspace. Upload again and take the id from `blob upload`. |
 | `freeze: ... pin ComfyUI "<ref>"` | `baseComfyVersion` names a ref upstream ComfyUI cannot resolve. Take a real tag. |
-| `assemble: ...` `numpy.core.multiarray failed to import`, with `_ARRAY_API not found` above it | A binary built against NumPy 1, not a version disagreement. Read the traceback for the module that failed to import, find the packages that provide it, and pin those to one current version. Never pin `numpy` down to suit the old wheel: core declares `numpy>=1.25.0`. |
+| `assemble: ...` `numpy.core.multiarray failed to import`, with `_ARRAY_API not found` above it | A binary built against NumPy 1, not a version disagreement. Read the traceback for the module that failed to import, find the packages that provide it, and pin those to one current version. Recovering a build you did not scan there is no install to resolve against, so read the version the build already resolved for the unconstrained package out of its own lock lines and check it exists on PyPI. That is where the version comes from; the name still comes from the traceback. Never pin `numpy` down to suit the old wheel: core declares `numpy>=1.25.0`. |
 | the same, with no `_ARRAY_API` line | `numpy` and `scipy` mismatched. Pin both, to versions released for each other. |
 | `no attribute 'long'`, `scipy` in the trace | The same pair, mismatched. Fix both, not one. |
 | `assemble: ComfyUI did not start`, torch in the trace | Remove every torch pin. The build owns that stack. |
@@ -738,8 +748,9 @@ comfy --json build release get <release-id> | jq .data.definition > definition.j
 ```
 
 Then
-`comfy build update <build-id> --from definition.json` and
-`comfy build release create <build-id>`.
+`comfy build update <build-id> --from definition.json`, then
+`comfy build validate <build-id>` to confirm the edit landed, then
+`comfy build release create <build-id>`. `validate` costs nothing on any path.
 
 **Two ids.** `release get` and `release logs` take the release id; `update`,
 `validate` and `release create` take the build id, which the release you just
