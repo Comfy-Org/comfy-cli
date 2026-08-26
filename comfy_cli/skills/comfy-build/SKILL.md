@@ -15,6 +15,15 @@ all, so `comfy build scan` answers `No such command 'build'`. Check with
 and a CLI run from source reports a version no comparison can use. Upgrade with
 `pip install -U comfy-cli`.
 
+**You are detected as an agent, and that changes where the output goes.** The
+CLI reads `AI_AGENT` and `CLAUDECODE`, switches to JSON, and then puts the
+envelope on stdout and *everything else on stderr*: the base-image warning, the
+policy warning, the deprecation notice, every advisory this file tells you to
+read. Piping stdout alone silently discards all of it, so capture both streams,
+or run the step under `--no-json` to get the prose. `--no-json` restores the
+preview and the cut summary; `release get`, `release logs` and `release manifest`
+answer with JSON either way.
+
 **Every networked command defaults to production.** `--builder-url`, or
 `$COMFY_BUILDER_URL`, is what points a run somewhere else, and without either
 the CLI talks to `https://platformapi.comfy.org/builder`. Say which environment
@@ -32,7 +41,8 @@ net to lean on.
 - **A build is an editable definition; a release is an immutable cut of it.**
   Editing a build changes nothing that already exists, so every fix is a new
   cut. `comfy build version` is the retired spelling of `comfy build release`
-  and warns on every call.
+  and warns when invoked, on stderr; `--help` is silent, so the help text is no
+  way to tell the two apart.
 - **A cut from the CLI builds `linux/nvidia`** and takes no target flag, so do
   not promise a Windows or CPU artifact. That is the CLI's limit rather than the
   platform's: `comfy build build-targets` lists what the builder serves, which
@@ -58,8 +68,14 @@ comfy build create --from definition.json --name <name> --models-dir <install>/m
 comfy build release get <release-id>
 ```
 
+- **`COMFY_BUILDER_TOKEN` beats any stored session**, so a run carrying one is
+  already authenticated and `comfy cloud whoami` will still answer
+  `signed_in: false`. Do not take `whoami` as the pre-check; run the command you
+  want and read its error.
 - **Only sign in when told to.** Run `comfy cloud login` if a command answers
-  `not signed in`, and not before. `resolve`, `model-dirs` and `base-images` all
+  `not signed in`, and not before. It blocks on a browser callback, so it hangs
+  an unattended run; under `--json` it emits a `login_url` event first for a
+  parent to open. `resolve`, `model-dirs` and `base-images` all
   answer that, so a path needing any of them needs the sign-in first, and
   describing a result rather than scanning an install needs all three. On
   `build_not_enabled`, stop and tell the user the account does not have access
@@ -324,8 +340,11 @@ the definition:
   `sha256` of one candidate.** Without a source, `create --execute` reads the
   entry as an upload and demands a real file on disk. `type` is the directory it
   lands in, chosen as the section above describes.
-- **`comfy build release manifest <release-id>` reads the policy back**, which
-  is the only way to confirm what a cut actually sealed.
+- **`comfy build release manifest <release-id>` shows a release's models**, and
+  carries a policy key only when one was set. An allow-all release reports
+  neither, so the manifest cannot tell "sealed permitting everything" apart from
+  "not reported": the warning at cut time is the only evidence, and it is on
+  stderr.
 - **`comfy build model-dirs` lists the vetted directories**, not the set the
   builder accepts, and needs the user signed in as `resolve` does.
 - **A registry pack entry carries `name`, the pack's slug in `id`, and the
@@ -409,8 +428,13 @@ publishes: one real install read `pr-was-node-suite-comfyui-47064894` for
 before you cut rather than buying the refusal:
 
 ```shell
+comfy outdated            # names any pack the registry cannot resolve
 curl -s "https://api.comfy.org/nodes/search?search=<id>"
 ```
+
+`comfy outdated` reads the whole install and reports each pack it cannot fetch,
+which finds a bad id without a search per pack. It also names the packs behind
+their latest version, which is provenance worth putting in the disclosure.
 
 `total: 0` means nothing publishes it. Search the pack's real name as words
 rather than as a slug, since the endpoint matches a run of characters: `was
@@ -720,6 +744,10 @@ Then
 **Two ids.** `release get` and `release logs` take the release id; `update`,
 `validate` and `release create` take the build id, which the release you just
 read names at `buildId`.
+
+**Ids are recoverable.** `comfy build list` names the workspace's builds and
+`comfy build release list <build-id>` names a build's releases, so a lost id is
+a lookup rather than a dead end.
 
 **When you stop**, leave the user the definition on disk, every release id, the
 cause you could not get past, and how many builds were run.
