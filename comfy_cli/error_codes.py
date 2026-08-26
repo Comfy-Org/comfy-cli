@@ -1052,6 +1052,25 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     # --- build (the serverless builder) --------------------------------------
     ErrorCode(
+        "build_spec_invalid",
+        "A build spec or legacy scan definition could not be read, has an unsupported schema, or is invalid. "
+        "`details.path` carries the path when one is available.",
+        "fix the named field, or regenerate the file",
+    ),
+    ErrorCode(
+        "build_spec_write_error",
+        "`comfy build` could not write the build spec or legacy scan definition. `details` carries the "
+        "path and the underlying OS error.",
+        "check the directory exists and is writable",
+    ),
+    ErrorCode(
+        "build_spec_not_found",
+        "A `comfy build` command found no spec at the path `PATH` resolved to — `<dir>/comfy-build.yaml` for "
+        "a directory, or the file itself for a `.yaml`/`.json` `PATH`. `details.path` carries the exact "
+        "absolute path probed.",
+        "create a comfy-build.yaml at that path, or pass the PATH that holds the spec",
+    ),
+    ErrorCode(
         "build_models_dir_missing",
         "`comfy build scan` could not find a models/ directory to scan. `details.path` carries the "
         "resolved path. Either no workspace is selected or the given `--models-dir` doesn't exist.",

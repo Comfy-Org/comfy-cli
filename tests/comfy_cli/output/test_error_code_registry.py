@@ -206,6 +206,36 @@ def test_every_registered_code_is_raised(raised_codes):
     )
 
 
+def test_every_build_code_has_a_first_call_site(raised_codes):
+    """The ``build_*`` family is filled in one code at a time, under this rule:
+
+        Each error code is registered in the same change that introduces its
+        first call site. No change pre-registers codes for later ones.
+
+    Pre-registering is not a harmless head start. ``comfy discover`` publishes the
+    registry verbatim, so a code with no call site advertises a branch to agents
+    that nothing can ever take — a documented promise the CLI cannot keep.
+
+    :func:`test_every_registered_code_is_raised` already rejects an orphan anywhere
+    in the registry; this narrows that direction to the build family so the failure
+    names the rule that was broken instead of dropping a bare code into a flat list
+    shared with every other subsystem.
+
+    If this fails: move the registration into the change that raises the code.
+    """
+    BUILD_PREFIX = "build_"
+    build_codes = [c for c in error_codes.all_codes() if c.startswith(BUILD_PREFIX)]
+    # Guards the orphan check below against a silently empty enumeration.
+    assert build_codes, f"no {BUILD_PREFIX}* codes found in the registry — this guard would pass vacuously"
+
+    orphans = sorted(c for c in build_codes if c not in raised_codes)
+    assert not orphans, (
+        f"Registered with no call site under comfy_cli/: {orphans}\n"
+        "Each error code is registered in the same change that introduces its first call site. "
+        "Move the registration into the change that raises it, or wire up the call site now."
+    )
+
+
 def test_codes_match_pattern():
     """Every registered code is snake_case matching the documented pattern."""
     bad = [ec.code for ec in error_codes.REGISTRY if not error_codes.CODE_PATTERN.match(ec.code)]
