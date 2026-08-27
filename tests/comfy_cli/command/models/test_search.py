@@ -95,12 +95,18 @@ _CLOUD_FILES_LORAS = [
 ]
 
 
-# A local install as BE-4733 found it: the interesting models (flux, ltx) live
+# A local install as the bug report found it: the interesting models (flux, ltx) live
 # OUTSIDE `checkpoints`, spread across diffusion_models / loras / vae.
 _LOCAL_SEARCH_FOLDERS = ["checkpoints", "diffusion_models", "loras", "vae"]
 
 _LOCAL_FILES_BY_FOLDER: dict[str, list[dict[str, Any]]] = {
-    "checkpoints": [{"name": "sd_xl_base_1.0.safetensors", "pathIndex": 0}],
+    # Real checkpoint filenames — the separators (`_`, `-`, `.`) and the
+    # word order are what a whole-string substring match cannot cope with.
+    "checkpoints": [
+        {"name": "sd_xl_base_1.0.safetensors", "pathIndex": 0},
+        {"name": "sd_xl_refiner_1.0.safetensors", "pathIndex": 0},
+        {"name": "v1-5-pruned.ckpt", "pathIndex": 0},
+    ],
     "diffusion_models": [
         {"name": "flux1-dev.safetensors", "pathIndex": 0},
         {"name": "ltx-video-2b-v0.9.safetensors", "pathIndex": 0},
@@ -203,7 +209,9 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict[str, Any]):
     """Wire urlopen to a URL→body lookup. Body is JSON-encoded.
 
     Substring matching: the first registered URL substring that matches wins.
-    Unknown URLs raise so we never silently pass on a typo'd path.
+    Unknown URLs raise so we never silently pass on a typo'd path. A ``bytes``
+    payload is served verbatim, so a test can hand back a body that is not
+    valid JSON (or not valid UTF-8) at all.
     """
     calls = []
 
@@ -214,11 +222,17 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, routes: dict[str, Any]):
             if needle in url:
                 if isinstance(payload, Exception):
                     raise payload
-                body = json.dumps(payload).encode()
+                body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
                 return _fake_resp(body)
         raise AssertionError(f"unexpected URL hit by mock: {url}")
 
-    monkeypatch.setattr("urllib.request.urlopen", _fake)
+    # ``_http_get_json`` routes every request through the shared
+    # ``comfy_cli.http.request_json``, which opens via the module's
+    # ``_AUTHED_OPENER`` (built with NoRedirectHandler); the fake still
+    # receives a ``Request`` object, so the route-matching above is unchanged.
+    import comfy_cli.http as http_mod
+
+    monkeypatch.setattr(http_mod._AUTHED_OPENER, "open", _fake)
     return calls
 
 
@@ -266,6 +280,82 @@ class TestListFolders:
         assert env["error"]["code"] == "server_not_running"
         assert env["error"]["details"]["status"] == 500
         assert env["error"]["details"]["body"] == "boom"
+
+
+class TestMalformedResponseEnvelopes:
+    """Regression: an oversize or undecodable body must be an envelope, not a traceback.
+
+    Before the shared ``request_json`` migration, ``_http_get_json`` raised a
+    bare ``ValueError`` past the cap and let ``UnicodeDecodeError`` escape from
+    ``json.loads`` — neither is in the callers' ``(URLError, OSError,
+    JSONDecodeError)`` tuple, so both crashed the CLI with a traceback and no
+    ``--json`` envelope at all.
+    """
+
+    def test_oversize_response_yields_envelope_not_traceback(self, cloud_target, monkeypatch, capsys):
+        monkeypatch.setattr(search_cmd, "_MAX_RESPONSE_BYTES", 4)
+        _patch_urlopen(monkeypatch, {"/api/experiment/models": _CLOUD_FOLDERS})
+        env = _run(["list-folders", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+        # The helper's message is interpolated into the envelope, so it stays informative.
+        assert "byte cap" in env["error"]["message"]
+
+    def test_oversize_response_local_uses_server_not_running(self, local_target, monkeypatch, capsys):
+        monkeypatch.setattr(search_cmd, "_MAX_RESPONSE_BYTES", 4)
+        _patch_urlopen(monkeypatch, {"127.0.0.1:8188/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "server_not_running"
+
+    def test_non_utf8_response_yields_envelope_not_traceback(self, cloud_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/api/experiment/models": b"\xff\xfe\x00not json"})
+        env = _run(["list-folders", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+
+    def test_unparseable_response_yields_envelope_not_traceback(self, cloud_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"/api/experiment/models": b"<html>not json</html>"})
+        env = _run(["list-folders", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+
+    def test_literal_null_body_yields_envelope(self, cloud_target, monkeypatch, capsys):
+        # The one intentional behavior change of the shared-helper migration:
+        # ``request_json`` cannot distinguish a literal JSON ``null`` from an
+        # unparseable body, so both become None and _http_get_json raises. Before,
+        # `list-folders` reported ok:true with count 0 for a `null` body — which
+        # silently presented a malformed response as "this backend has no folders".
+        _patch_urlopen(monkeypatch, {"/api/experiment/models": b"null"})
+        env = _run(["list-folders", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+
+    def test_empty_response_yields_envelope_not_attribute_error(self, cloud_target, monkeypatch, capsys):
+        # `models show` calls body.get() on the parsed result; an empty body used
+        # to reach that as None. It now surfaces as a decode-family envelope.
+        _patch_urlopen(monkeypatch, {"/api/assets": b""})
+        env = _run(["show", "flux1-dev", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+
+    @pytest.mark.parametrize(
+        ("args", "route"),
+        [
+            (["list-folders", "--where", "cloud"], "/api/experiment/models"),
+            (["list-folder", "loras", "--where", "cloud"], "/api/experiment/models/loras"),
+            (["search", "--where", "cloud"], "/api/assets"),
+            (["show", "flux1-dev", "--where", "cloud"], "/api/assets"),
+        ],
+    )
+    def test_every_call_site_routes_oversize_to_envelope(self, args, route, cloud_target, monkeypatch, capsys):
+        # Each of the four handlers wrapping _http_get_json must catch
+        # ResponseTooLarge; an uncaught one would be a traceback, not an envelope.
+        monkeypatch.setattr(search_cmd, "_MAX_RESPONSE_BYTES", 4)
+        _patch_urlopen(monkeypatch, {route: {"assets": [], "total": 0}})
+        env = _run(args, capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "cloud_http_error"
 
 
 # ---------------------------------------------------------------------------
@@ -445,8 +535,7 @@ class TestSearch:
         assert env["ok"] is True
         assert env["data"]["mode"] == "local"
         rows = env["data"]["rows"]
-        assert len(rows) == 1
-        assert rows[0]["name"] == "sd_xl_base_1.0.safetensors"
+        assert [r["name"] for r in rows] == ["sd_xl_base_1.0.safetensors", "sd_xl_refiner_1.0.safetensors"]
         assert rows[0]["type"] == "checkpoints"
         # Local has no enrichment.
         assert rows[0]["base_model"] is None
@@ -456,12 +545,12 @@ class TestSearch:
         _patch_urlopen(monkeypatch, _local_routes())
         env = _run(["search", "--text", "flux", "--where", "local"], capsys)
         names = [r["name"] for r in env["data"]["rows"]]
-        # BE-4733: flux lives in diffusion_models, not checkpoints — it must still be found.
+        # Flux lives in diffusion_models, not checkpoints — it must still be found.
         assert names == ["flux1-dev.safetensors"]
         assert env["data"]["rows"][0]["type"] == "diffusion_models"
 
     def test_local_text_matches_across_folders(self, local_target, monkeypatch, capsys):
-        """BE-4733: every on-disk ltx* file is returned, whatever folder it lives in."""
+        """Every on-disk ltx* file is returned, whatever folder it lives in."""
         _patch_urlopen(monkeypatch, _local_routes())
         env = _run(["search", "--text", "ltx", "--where", "local"], capsys)
         rows = env["data"]["rows"]
@@ -476,6 +565,136 @@ class TestSearch:
         assert all(r["tags"] == [r["type"]] for r in rows)
         assert env["data"]["total"] == 4
         assert env["data"]["shown"] == 4
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            pytest.param("sdxl base", id="squashed-then-raw"),
+            pytest.param("base sdxl", id="reversed-order"),
+            pytest.param("xl base", id="partial-word"),
+            pytest.param("SDXL Base", id="uppercase"),
+            pytest.param("sd-xl base", id="wrong-separator"),
+        ],
+    )
+    def test_local_text_is_token_and_separator_insensitive(self, local_target, monkeypatch, capsys, query):
+        """Multi-word queries match `sd_xl_base_1.0.safetensors`.
+
+        None of these exist as a contiguous substring of the filename — the old
+        whole-string test returned nothing for every one of them.
+        """
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", query, "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert [r["name"] for r in env["data"]["rows"]] == ["sd_xl_base_1.0.safetensors"]
+        assert env["data"]["total"] == 1
+
+    def test_local_single_token_still_matches_every_file(self, local_target, monkeypatch, capsys):
+        """A one-word query keeps its old substring reach — `xl` finds both sd_xl files."""
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "xl", "--type", "checkpoint", "--where", "local"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == [
+            "sd_xl_base_1.0.safetensors",
+            "sd_xl_refiner_1.0.safetensors",
+        ]
+        assert env["data"]["total"] == 2
+
+    def test_local_squashing_can_match_across_a_separator(self, local_target, monkeypatch, capsys):
+        """Documented widening: squashing the name joins words, so `xl` also hits `ltx-lora`.
+
+        `ltx-lora-detail` squashes to `ltxloradetail`, which contains `xl` across
+        the `x`/`l` seam. Deliberate: the squashed pass is what makes `sdxl` find
+        `sd_xl_...`, and the same collapse cannot distinguish a seam from a real
+        word boundary. Over-returning on a short token is the acceptable side of
+        this trade — under-returning is the reported bug.
+        """
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "xl", "--where", "local"], capsys)
+        assert "ltx-lora-detail.safetensors" in [r["name"] for r in env["data"]["rows"]]
+
+    def test_local_single_token_regression_across_separators(self, local_target, monkeypatch, capsys):
+        """`pruned` still finds `v1-5-pruned.ckpt` — the `-`-separated name is untouched."""
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "pruned", "--where", "local"], capsys)
+        assert [r["name"] for r in env["data"]["rows"]] == ["v1-5-pruned.ckpt"]
+        assert env["data"]["total"] == 1
+
+    def test_local_all_tokens_must_match(self, local_target, monkeypatch, capsys):
+        """Token-AND, not token-OR: `base` alone hits, `base nonexistent` must not."""
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "base nonexistent", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["rows"] == []
+        assert env["data"]["total"] == 0
+
+    def test_local_no_match_returns_zero(self, local_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "nonexistent", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["rows"] == []
+        assert env["data"]["total"] == 0
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            pytest.param("---", id="hyphens"),
+            # `.` and `-` are the dangerous ones: they are substrings of nearly
+            # every real filename, so testing them raw made them wildcards.
+            pytest.param(".", id="single-dot"),
+            pytest.param("-", id="single-hyphen"),
+            pytest.param("_", id="underscore"),
+            pytest.param("   ", id="whitespace-only"),
+        ],
+    )
+    def test_local_unmatchable_text_returns_zero(self, local_target, monkeypatch, capsys, query):
+        """`--text` that holds no matchable token filters everything out.
+
+        A separator-only token squashes to `""`, a substring of every name, and
+        matching it raw is no better — `.` hits every file with an extension.
+        Such a query is a filter nothing satisfies, *not* the absence of one, so
+        it must not degrade into a whole-catalog dump.
+        """
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", query, "--limit", "100", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["rows"] == []
+        assert env["data"]["total"] == 0
+
+    def test_local_stray_separator_token_does_not_zero_the_query(self, local_target, monkeypatch, capsys):
+        """`sd - xl` must not AND in a literal `-` that `sd_xl_base...` fails.
+
+        The separator-only token is dropped, so this reads as `sd` AND `xl` —
+        the same result as `sd xl`.
+        """
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "sd - xl", "--type", "checkpoint", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert [r["name"] for r in env["data"]["rows"]] == [
+            "sd_xl_base_1.0.safetensors",
+            "sd_xl_refiner_1.0.safetensors",
+        ]
+
+    def test_local_empty_text_lists_everything(self, local_target, monkeypatch, capsys):
+        """`--text ""` is falsy, so it is "no filter" — as on cloud, which sends no
+        `name_contains` for it. Whitespace-only is the separate case above."""
+        _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "", "--limit", "100", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["total"] == sum(len(f) for f in _LOCAL_FILES_BY_FOLDER.values())
+
+    def test_local_token_and_still_walks_every_folder(self, local_target, monkeypatch, capsys):
+        """PR #603's multi-folder walk is unchanged: no `--type` still fetches every folder."""
+        calls = _patch_urlopen(monkeypatch, _local_routes())
+        env = _run(["search", "--text", "ltx 0.9", "--where", "local"], capsys)
+        # `0.9` squashes to `09`, so it matches `v0.9` and `0.9.7` in either form.
+        assert [r["name"] for r in env["data"]["rows"]] == [
+            "ltx-video-2b-v0.9.safetensors",
+            "ltxv-13b-0.9.7-dev.safetensors",
+        ]
+        # One folder-list call plus one listing per advertised folder.
+        assert [c["url"] for c in calls] == [
+            "http://127.0.0.1:8188/models",
+            *[f"http://127.0.0.1:8188/models/{f}" for f in _LOCAL_SEARCH_FOLDERS],
+        ]
 
     def test_local_type_still_scopes_to_one_folder(self, local_target, monkeypatch, capsys):
         calls = _patch_urlopen(monkeypatch, _local_routes())

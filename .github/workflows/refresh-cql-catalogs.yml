@@ -1,0 +1,277 @@
+name: Refresh CQL catalogs
+
+# Refreshes the three CQL data files bundled under comfy_cli/cql/data/ from their
+# canonical upstream sources and opens a single auto-PR when any of them drifts.
+# These files are loaded at runtime via
+# importlib.resources.files("comfy_cli.cql.data") (see comfy_cli/cql/engine.py),
+# so refreshing them = committing the updated raw files into that directory; the
+# package data is picked up automatically. Unlike the object_info bundle in the
+# MCP repo, no gzip step is needed here — the raw files are committed as-is.
+#
+# Sources:
+#   - supported_nodes.yaml      <- Comfy-Org/comfy-complete@main (public, tokenless)
+#   - cloud_disable_config.yaml <- Comfy-Org/comfy-complete@main (public, tokenless)
+#   - no_gpu_nodes.json         <- Comfy-Org/cloud@main (private, needs a read token)
+#
+# The no_gpu_nodes.json committed here started life as an empty placeholder
+# ({"schema_version": 1, "no_gpu_nodes": []}), which left the CQL no-GPU
+# predicates effectively dead. The count > 0 guard below ensures that empty
+# state can never be silently re-committed.
+#
+# Human prerequisites (this workflow FAILS LOUDLY, not skips, when either is
+# missing — see the verify steps):
+#   - CLOUD_CODE_BOT GitHub App installed on Comfy-Org/comfy-cli with
+#     Contents: write + Pull-requests: write, exposing vars.APP_ID +
+#     secrets.CLOUD_CODE_BOT_PRIVATE_KEY.
+#     Required because detect-unreviewed-merge.yml (SOC 2) needs a human APPROVED
+#     review on every merge to main and GitHub forbids approving your own PR — a
+#     GitHub App is a non-human author any maintainer can approve. The app token
+#     (NOT the default GITHUB_TOKEN) is used for both the branch push and PR so
+#     the push fires the `synchronize` event and CI actually runs on the auto-PR
+#     — pushes made with GITHUB_TOKEN do not trigger workflow runs.
+#   - CLOUD_REPO_READ_TOKEN: a fine-grained PAT (or app token) with Contents:
+#     Read on Comfy-Org/cloud, used ONLY to fetch no_gpu_nodes.json.
+
+on:
+  schedule:
+    # Daily at 06:30 UTC (11:30pm Pacific). Days with no upstream change produce
+    # zero PRs (the "no diff" branch exits cleanly).
+    - cron: '30 6 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  # Only one auto-refresh in flight at a time. cancel-in-progress: false so a
+  # running refresh isn't killed mid-push if a workflow_dispatch races the cron.
+  group: refresh-cql-catalogs
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Refresh
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Mint a CLOUD_CODE_BOT installation token so the auto-PR is authored by
+      # the bot, not by a human — see the header prerequisites for why.
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.CLOUD_CODE_BOT_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v6
+        with:
+          # Persist the app token (not the default GITHUB_TOKEN) as the credential
+          # for `origin` so the later force-push is authored by the bot and fires
+          # the `synchronize` event — a GITHUB_TOKEN push would silently skip CI
+          # on the auto-PR, leaving its required checks stuck pending.
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Verify CLOUD_REPO_READ_TOKEN is set
+        env:
+          CLOUD_REPO_READ_TOKEN: ${{ secrets.CLOUD_REPO_READ_TOKEN }}
+        run: |
+          if [ -z "${CLOUD_REPO_READ_TOKEN:-}" ]; then
+            echo "::error::CLOUD_REPO_READ_TOKEN secret is not set."
+            echo "This workflow needs a PAT (or app token) with:"
+            echo "  - Contents: Read on Comfy-Org/cloud (to fetch the canonical no_gpu_nodes.json)"
+            echo "  (PR creation is handled separately by the CLOUD_CODE_BOT app token, not this PAT.)"
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'  # Follow the min version in pyproject.toml
+
+      - name: Install PyYAML
+        # Pin the version — this job holds the app private key and the cloud read
+        # token, so it must not pull a floating release from PyPI.
+        run: python3 -m pip install --quiet "pyyaml==6.0.2"
+
+      - name: Fetch tokenless comfy-complete files
+        run: |
+          set -euo pipefail
+          BASE="https://raw.githubusercontent.com/Comfy-Org/comfy-complete/main"
+          for f in supported_nodes.yaml cloud_disable_config.yaml; do
+            echo "Fetching $f from comfy-complete@main"
+            curl -fsSL "$BASE/$f" -o "comfy_cli/cql/data/$f"
+            echo "Fetched $(wc -c < "comfy_cli/cql/data/$f") bytes for $f"
+            # Assert each yaml parses (lesson learned the hard way: never commit a corrupt catalog).
+            python3 -c "import yaml,sys; yaml.safe_load(open('comfy_cli/cql/data/$f'))"
+            echo "$f parses as valid YAML"
+          done
+
+      - name: Fetch no_gpu_nodes.json from Comfy-Org/cloud
+        env:
+          GH_TOKEN: ${{ secrets.CLOUD_REPO_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          SRC="services/dispatcher/server/services/preprocessing/data/no_gpu_nodes.json"
+          # Resolve the blob SHA via Contents (explicitly pinned to @main so we
+          # never silently read cloud's default branch if it ever moves) and
+          # fetch the raw bytes via the Git Data blobs API — the blobs API has no
+          # 1 MB size ceiling, so this keeps working as the list grows.
+          SHA=$(gh api "repos/Comfy-Org/cloud/contents/$SRC?ref=main" --jq '.sha')
+          if [ -z "$SHA" ]; then
+            echo "::error::Could not resolve SHA for $SRC on Comfy-Org/cloud@main"
+            exit 1
+          fi
+          echo "Fetching blob $SHA"
+          gh api "repos/Comfy-Org/cloud/git/blobs/$SHA" --jq '.content' \
+            | base64 -d > comfy_cli/cql/data/no_gpu_nodes.json
+          echo "Fetched $(wc -c < comfy_cli/cql/data/no_gpu_nodes.json) bytes"
+          # Sanity guard (lesson learned the hard way): must parse as JSON AND carry a
+          # non-empty no_gpu_nodes *list*, so the empty-placeholder state
+          # ({"no_gpu_nodes": []}, count 0) can never be re-committed silently and
+          # a schema regression to a str/dict can't sneak past the count check.
+          COUNT=$(python3 -c "
+          import json, sys
+          v = json.load(open('comfy_cli/cql/data/no_gpu_nodes.json')).get('no_gpu_nodes')
+          if not isinstance(v, list):
+              sys.exit(f'::error::no_gpu_nodes must be a list, got {type(v).__name__}')
+          print(len(v))")
+          echo "no_gpu_nodes count: $COUNT"
+          if [ "$COUNT" -lt 1 ]; then
+            echo "::error::Fetched no_gpu_nodes.json has $COUNT nodes; refusing to commit an empty catalog."
+            exit 1
+          fi
+
+      - name: Detect changes
+        id: diff
+        run: |
+          set -euo pipefail
+          # Compare the freshly-fetched files against origin/main (the PR base),
+          # not the checked-out ref's HEAD. On a workflow_dispatch from a feature
+          # branch that already carries the newer catalogs, diffing against HEAD
+          # would report "no change" and skip the PR even though origin/main is
+          # still stale; diffing against origin/main is authoritative.
+          git fetch origin main --quiet
+          CHANGED=false
+          SUMMARY=""
+          for f in supported_nodes.yaml cloud_disable_config.yaml no_gpu_nodes.json; do
+            path="comfy_cli/cql/data/$f"
+            # Diff origin/main against the working tree (the fetched file). This
+            # catches drift even for a file untracked on the current branch, since
+            # it exists on origin/main.
+            if git diff --quiet origin/main -- "$path"; then
+              echo "No change to $f"
+              continue
+            fi
+            CHANGED=true
+            echo "Changed: $f"
+            case "$f" in
+              no_gpu_nodes.json)
+                OLD=$(git show "origin/main:$path" 2>/dev/null \
+                  | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d.get('no_gpu_nodes') or []))" 2>/dev/null || echo 0)
+                NEW=$(python3 -c "import json; print(len(json.load(open('$path')).get('no_gpu_nodes') or []))")
+                SUMMARY="${SUMMARY}- $f: no_gpu node count ${OLD} → ${NEW}"$'\n'
+                ;;
+              *)
+                # yaml files: report added/removed line counts as a coarse delta.
+                ADDED=$(git diff --numstat origin/main -- "$path" | awk '{print $1}')
+                REMOVED=$(git diff --numstat origin/main -- "$path" | awk '{print $2}')
+                SUMMARY="${SUMMARY}- $f: +${ADDED:-0} / -${REMOVED:-0} lines"$'\n'
+                ;;
+            esac
+          done
+          echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
+          {
+            echo "summary<<SUMMARY_EOF"
+            printf '%s' "$SUMMARY"
+            echo "SUMMARY_EOF"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$CHANGED" = "false" ]; then
+            echo "No CQL catalog changed; exiting cleanly."
+          fi
+
+      - name: Open or update PR
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          # Author the PR as the CLOUD_CODE_BOT app so a human can approve it —
+          # see the "Generate GitHub App token" step.
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Pass the delta through an env var rather than interpolating the
+          # ${{ }} expression straight into the heredoc — that expression is the
+          # canonical Actions script-injection sink.
+          DELTA_SUMMARY: ${{ steps.diff.outputs.summary }}
+        run: |
+          set -euo pipefail
+          BRANCH="auto/refresh-cql-catalogs"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Save the refreshed files before the branch reset — `git checkout -B`
+          # replaces the working tree with origin/main's, which would otherwise
+          # discard them.
+          TMP=$(mktemp -d)
+          cp comfy_cli/cql/data/supported_nodes.yaml \
+             comfy_cli/cql/data/cloud_disable_config.yaml \
+             comfy_cli/cql/data/no_gpu_nodes.json "$TMP/"
+
+          # Reset the auto branch to current main + the refreshed files,
+          # force-pushing so each run replaces the prior attempt rather than
+          # stacking commits. Explicitly base on origin/main so a
+          # workflow_dispatch from a feature branch can't smuggle in unrelated
+          # commits.
+          git fetch origin main
+          # -f so the checkout discards the working-tree edits unconditionally
+          # (they're already saved in $TMP); without it, if origin/main carries
+          # different content for these tracked files the checkout aborts with
+          # "local changes would be overwritten by checkout".
+          git checkout -f -B "$BRANCH" origin/main
+          cp "$TMP/supported_nodes.yaml" "$TMP/cloud_disable_config.yaml" \
+             "$TMP/no_gpu_nodes.json" comfy_cli/cql/data/
+          git add comfy_cli/cql/data/supported_nodes.yaml \
+                  comfy_cli/cql/data/cloud_disable_config.yaml \
+                  comfy_cli/cql/data/no_gpu_nodes.json
+          # Guard against a same-SHA race: if nothing is staged after the reset
+          # (origin/main already has these exact files), exit cleanly rather
+          # than force-pushing a vacuous branch or opening an empty PR.
+          if git diff --cached --quiet; then
+            echo "Nothing to commit after reset; exiting."
+            exit 0
+          fi
+          git commit -m "data: refresh CQL catalogs (auto)"
+          git push -f origin "$BRANCH"
+
+          BODY=$(cat <<EOF
+          Auto-refresh of the CQL data files under \`comfy_cli/cql/data/\` from their canonical upstream sources.
+
+          ## Delta
+
+          ${DELTA_SUMMARY}
+
+          ## Sources
+
+          - \`supported_nodes.yaml\`, \`cloud_disable_config.yaml\` — \`Comfy-Org/comfy-complete@main\` (public)
+          - \`no_gpu_nodes.json\` — \`Comfy-Org/cloud@main\` (private; fetched with a Contents: Read token)
+
+          These files are loaded at runtime via \`importlib.resources.files("comfy_cli.cql.data")\`, so committing the refreshed raw files here is all that's needed — no path change, no packaging change.
+
+          > Opened automatically by the \`refresh-cql-catalogs\` workflow. Requires the \`CLOUD_CODE_BOT\` app and a \`CLOUD_REPO_READ_TOKEN\` (Contents: Read on the cloud repo) to be provisioned on this repository; the workflow fails loudly if either is missing.
+          EOF
+          )
+
+          # Filter to OPEN, same-repo PRs only. `--state open` avoids updating a
+          # PR a maintainer closed without merging; the isCrossRepository filter
+          # avoids selecting a fork's PR that happens to reuse this branch name
+          # (`--head` matches the ref name only, not the head repo owner).
+          OPEN_PR=$(gh pr list --head "$BRANCH" --state open \
+            --json number,isCrossRepository \
+            --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty')
+          if [ -n "$OPEN_PR" ]; then
+            gh pr edit "$OPEN_PR" \
+              --title "data: refresh CQL catalogs (auto)" \
+              --body "$BODY"
+            echo "Updated existing PR #$OPEN_PR for $BRANCH"
+          else
+            gh pr create --base main --head "$BRANCH" \
+              --title "data: refresh CQL catalogs (auto)" \
+              --body "$BODY"
+          fi

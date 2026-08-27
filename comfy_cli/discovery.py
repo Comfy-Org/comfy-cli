@@ -32,6 +32,38 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy cloud login": "auth",
     "comfy cloud logout": "auth",
     "comfy cloud whoami": "auth",
+    "comfy cloud status": "cloud_status",
+    "comfy build scan": "build",
+    "comfy build create": "build_create",
+    "comfy build list": "build_list",
+    "comfy build get": "build_get",
+    # `comfy build release` is the canonical subgroup; `comfy build version` is
+    # its hidden deprecated alias. Alias envelopes carry the canonical `build
+    # release ...` labels, but both spellings register here so an agent that
+    # looks up the old path still finds the contract (schema files keep their
+    # build_version_* names because user scripts pin them).
+    "comfy build release create": "build_version_create",
+    "comfy build release list": "build_version_list",
+    "comfy build release get": "build_version_get",
+    "comfy build release logs": "build_version_logs",
+    "comfy build release manifest": "build_version_manifest",
+    "comfy build version create": "build_version_create",
+    "comfy build version list": "build_version_list",
+    "comfy build version get": "build_version_get",
+    "comfy build version logs": "build_version_logs",
+    "comfy build validate": "build_validate",
+    "comfy build delete": "build_delete",
+    "comfy build update": "build_update",
+    "comfy build resolve": "build_resolve",
+    "comfy build base-images": "build_base_images",
+    "comfy build build-targets": "build_build_targets",
+    "comfy build model-dirs": "build_model_dirs",
+    "comfy build version manifest": "build_version_manifest",
+    "comfy build artifact download": "build_artifact_download",
+    "comfy build blob list": "build_blob_list",
+    "comfy build blob upload": "build_blob_upload",
+    "comfy build from-snapshot": "build_from_snapshot",
+    "comfy build from-workflow": "build_from_workflow",
     "comfy jobs ls": "jobs",
     "comfy jobs status": "jobs",
     "comfy jobs watch": "jobs",
@@ -40,6 +72,9 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy update": "update",
     # help / validation
     "comfy help": "help",
+    # `comfy workflow validate` is the canonical home; `comfy validate` is the
+    # hidden deprecated alias — both emit the same workflow-validation payload.
+    "comfy workflow validate": "workflow",
     "comfy validate": "workflow",
     # nodes introspection
     "comfy nodes ls": "nodes",
@@ -51,11 +86,26 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy nodes types": "nodes",
     "comfy nodes categories": "nodes",
     "comfy nodes refresh": "nodes",
+    # The widget catalog gets its OWN schema, not `nodes`: `nodes.json` declares
+    # `types` as an array of connection-type names (`nodes types`), and the
+    # catalog's `types` is a class_type→entry map. Same key, different contract.
+    "comfy nodes widget-catalog": "widget_catalog",
     # workflow editing
     "comfy workflow slots": "workflow",
     "comfy workflow set-slot": "workflow",
     "comfy workflow vary": "workflow",
     "comfy workflow notes": "workflow",
+    "comfy workflow print": "workflow",
+    # structured edit primitives + recipes (CRDT op-based authoring)
+    "comfy workflow add-node": "workflow",
+    "comfy workflow connect": "workflow",
+    "comfy workflow set-widget": "workflow",
+    "comfy workflow delete-node": "workflow",
+    "comfy workflow delete-nodes": "workflow",
+    "comfy workflow ls-nodes": "workflow",
+    "comfy workflow apply": "workflow",
+    "comfy workflow capture": "workflow",
+    "comfy workflow foreach": "workflow",
     # workflow cloud CRUD + fragment composition
     "comfy workflow list": "workflow",
     "comfy workflow get": "workflow",
@@ -103,11 +153,17 @@ COMMAND_SCHEMAS: dict[str, str] = {
     # the help tree; agents resolve them through `command_schemas`).
     "comfy generate list": "generate_list",
     "comfy generate schema": "generate_schema",
+    # curated model-knowledge bundle
+    "comfy knowledge status": "knowledge",
+    "comfy knowledge resolve": "knowledge",
+    "comfy knowledge pick": "knowledge",
     # template gallery
     "comfy templates ls": "templates",
     "comfy templates show": "templates",
     "comfy templates fetch": "templates",
+    "comfy templates get": "templates",
     "comfy templates refresh": "templates",
+    "comfy templates check": "templates",
     # lifecycle
     "comfy launch": "launch",
     "comfy stop": "stop",
@@ -118,6 +174,8 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy project init": "project",
     "comfy project status": "project",
     "comfy assets push": "assets",
+    "comfy assets library ls": "assets_library",
+    "comfy assets library ensure": "assets_library",
     # config
     "comfy set-default": "set_default",
     # Not a subcommand: the root `--version` flag emits `command="version"`,

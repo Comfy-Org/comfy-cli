@@ -39,6 +39,21 @@ comfy setup
 
 `comfy setup` walks you through everything — local or cloud routing, authentication, and agent skill installation — in one interactive wizard. Pass `-y` for non-interactive (CI/scripted) installs.
 
+## Run a workflow in the cloud
+
+No local GPU? Route any API-format workflow to [Comfy Cloud](https://www.comfy.org/) with `--where cloud`:
+
+```bash
+comfy cloud login                                        # sign in via your browser (OAuth)
+comfy run --workflow ./workflow.json --where cloud       # submits, prints a prompt_id, returns immediately
+comfy jobs wait <prompt_id> --where cloud                # block until the job finishes (or: jobs status for a one-shot check)
+comfy download <prompt_id> --where cloud -o ./outputs    # save the results locally
+```
+
+`comfy run` submits asynchronously and prints the `prompt_id` you feed to `jobs`/`download`; add `--wait` to block inline instead. Check your sign-in anytime with `comfy cloud whoami`. Export the workflow JSON from ComfyUI via **File → Export (API)** (UI-format JSON is auto-converted). Set cloud as your default target so you can drop the flag: `comfy set-default --where cloud`.
+
+**Credits:** cloud generation (`comfy run --where cloud`, `comfy generate`) consumes Comfy Cloud credits and needs an active subscription. Discovery and inspection commands — `comfy cloud whoami`, `comfy cloud status`, `comfy jobs status/ls`, `comfy templates ls`, `comfy generate list` — don't. Check your balance and tier with `comfy cloud status`.
+
 ## Installation
 
 1. (Recommended) Activate a virtual environment ([venv](https://docs.python.org/3/library/venv.html) or [conda](https://conda.io/projects/conda/en/latest/user-guide/getting-started.html)).
@@ -106,6 +121,12 @@ dependencies using the following precedence:
 - `comfy update` (or `comfy update comfy`): pull the branch the workspace is currently on and reinstall `requirements.txt`.
 - `comfy update all`: also update every installed custom node.
 - `comfy update cli`: upgrade comfy-cli itself.
+
+By default `comfy update all` exits 0 even when the custom-node update step fails — the error is printed, but the exit code says success, so scripts and wrappers can't tell. Pass `--exit-on-fail` (the same flag name and default as `comfy node install --exit-on-fail`) to have that failure exit non-zero instead. The flag only changes the `all` target; `comfy update comfy` and `comfy update cli` already exit non-zero when they fail, and accept the flag as a no-op so it can be forwarded unconditionally.
+
+One limit worth knowing: `--exit-on-fail` can only surface what ComfyUI-Manager's `cm-cli update` reports. `cm-cli` currently handles a *single* pack failing to update by printing `ERROR: ...` and carrying on, still exiting 0, so that particular case stays invisible until ComfyUI-Manager propagates it. Unlike `comfy node install`, the flag is not forwarded to `cm-cli` — only its `install` subcommand accepts `--exit-on-fail`; its `update` subcommand has no such option and would reject it.
+
+When the flag does fire, the exit code is `cm-cli`'s own, normalized so it is always usable: a process killed by a signal becomes `128+N` rather than a truncated value, an exit code that would truncate to 0 becomes 1, and 2 becomes 1 so it can't be mistaken for a CLI usage error. In `--json` mode the failure is also reported as an `update_custom_nodes_failed` error envelope carrying `cm-cli`'s raw status in `details.cm_cli_returncode`.
 
 #### Switching to a specific version
 
@@ -255,6 +276,13 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 
   `comfy node install comfyui-impact-pack`
 
+  > **Note:** the argument is the node's **Comfy Registry ID**, which is
+  > lowercase (e.g. `comfyui-impact-pack`), not the GitHub repository name
+  > (`ComfyUI-Impact-Pack`). Passing the repo-name casing fails to resolve with
+  > an error like `Node 'ComfyUI-Impact-Pack@unknown' not found`. Find a node's
+  > ID on its [Comfy Registry](https://registry.comfy.org) page or via
+  > `comfy node show all`.
+
 - Managing snapshot:
 
   `comfy node save-snapshot`
@@ -270,6 +298,38 @@ comfy node [show|simple-show] [installed|enabled|not-installed|disabled|all|snap
 - Generate deps:
 
   `comfy node deps-in-workflow --workflow=<workflow .json/.png file> --output=<output deps .json file>`
+
+#### `install` vs `registry-install`
+
+comfy-cli offers two ways to install a custom node, backed by different
+mechanisms:
+
+- **`comfy node install <id>...`** delegates to
+  [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager)'s `cm-cli`.
+  It accepts one or more node IDs, resolves them through the Manager's channel
+  database (`--channel`, `--mode`), and installs dependencies via the Manager
+  (so it also supports `--fast-deps`, `--no-deps`, and `--uv-compile`). This is
+  the recommended command for day-to-day node management, and it requires
+  ComfyUI-Manager to be present in the workspace.
+
+  `comfy node install comfyui-impact-pack`
+
+- **`comfy node registry-install <id> [--version <v>]`** talks directly to the
+  [Comfy Registry](https://registry.comfy.org) API. It downloads the published
+  archive for a single node (optionally pinned with `--version`), extracts it
+  into `custom_nodes/`, and runs the node's own install script. It does **not**
+  go through ComfyUI-Manager, so it does not require the Manager to be
+  installed — this is the command the Registry's own install instructions use.
+
+  `comfy node registry-install comfyui-impact-pack`
+
+  `comfy node registry-install comfyui-impact-pack --version 1.0.0`  # install a specific version
+
+  Because `registry-install` bypasses the Manager's dependency machinery and
+  simply runs the node's bundled install script, it only accepts
+  `--force-download` — it does **not** accept `--fast-deps`, `--no-deps`, or
+  `--uv-compile`. If you want fast/unified dependency resolution, use
+  `comfy node install` instead.
 
 #### Unified Dependency Resolution (--uv-compile)
 
@@ -289,7 +349,9 @@ it can identify which node packs have incompatible dependencies and why.
 
   `comfy node uv-sync`
 
-- `--uv-compile` is mutually exclusive with `--fast-deps` and `--no-deps`.
+- `--uv-compile` is mutually exclusive with `--fast-deps` and `--no-deps` —
+  except on `restore-snapshot`, where `--fast-deps` selects the `--uv-compile`
+  path instead (see [--fast-deps](#--fast-deps) below).
 
 - To make `--uv-compile` the default for all commands, see
   [uv-compile default](#uv-compile-default) below.
@@ -298,6 +360,41 @@ it can identify which node packs have incompatible dependencies and why.
 
   `comfy node install comfyui-impact-pack --no-uv-compile`
 
+#### --fast-deps
+
+`--fast-deps` swaps comfy-cli's dependency installation from `pip` to comfy-cli's
+built-in `uv`-based resolver (`DependencyCompiler`), which is significantly
+faster and only requires `uv` (no ComfyUI-Manager). On a dependency version
+conflict it prompts you interactively to pick a version.
+
+- Accepted by: `comfy install`, `comfy node install`, `comfy node reinstall`,
+  and `comfy node restore-snapshot`.
+
+  `comfy install --fast-deps`
+
+  `comfy node install comfyui-impact-pack --fast-deps`
+
+- **Not** accepted by `comfy node registry-install`: that command installs a
+  node directly from the Comfy Registry by running the node's own bundled
+  install script, so it never touches comfy-cli's dependency resolver (see
+  [`install` vs `registry-install`](#install-vs-registry-install) above).
+- Mutually exclusive with `--no-deps` and `--uv-compile`, where those flags
+  exist — the exact pairing is per-command:
+
+  | Command | Rejected combination |
+  |---------|----------------------|
+  | `comfy node install` | `--fast-deps --no-deps`, `--fast-deps --uv-compile` |
+  | `comfy node reinstall` | `--fast-deps --uv-compile` (no `--no-deps` on this command) |
+  | `comfy node restore-snapshot` | `--fast-deps --no-uv-compile` (see below) |
+  | `comfy install` | none (neither flag exists on this command) |
+
+- **Exception — `comfy node restore-snapshot`:** here `--fast-deps` *selects*
+  the `--uv-compile` fast path rather than conflicting with it. ComfyUI-Manager's
+  `cm-cli` has no `--no-deps` on `restore-snapshot`, and its `--uv-compile`
+  already implies no-deps internally, so the two are synonyms on this command.
+  Combining `--fast-deps` with `--no-uv-compile` is the contradiction, and it
+  errors: `Cannot use --fast-deps with --no-uv-compile`.
+
 #### --fast-deps vs --uv-compile
 
 Both flags use `uv` for faster dependency resolution, but they work differently:
@@ -305,7 +402,7 @@ Both flags use `uv` for faster dependency resolution, but they work differently:
 |                       | `--fast-deps`                                   | `--uv-compile`                                |
 |-----------------------|-------------------------------------------------|-----------------------------------------------|
 | **Resolver**          | comfy-cli built-in (`DependencyCompiler`)       | ComfyUI-Manager (`UnifiedDepResolver`)        |
-| **Scope**             | `comfy install`, `comfy node install/reinstall` | Custom node commands only                     |
+| **Scope**             | `comfy install`, `comfy node install/reinstall/restore-snapshot` | Custom node commands only    |
 | **Conflict handling** | Interactive prompt to pick a version            | Automatic detection with node attribution     |
 | **Config default**    | No                                              | Yes (`comfy manager uv-compile-default true`) |
 | **Requires**          | Only `uv`                                       | ComfyUI-Manager v4.1+                         |
@@ -352,6 +449,7 @@ Prerequisites — a Comfy account with a credit balance ([add credits](https://d
 ```bash
 comfy cloud login                   # opens your browser (OAuth + PKCE), stores a session
 comfy cloud whoami                  # confirm who you're signed in as
+comfy cloud status                  # workspace, credit balance, tier, concurrency limit
 ```
 
 Then submit, watch, and collect:
@@ -529,13 +627,69 @@ custom_nodes:
     ...
 ```
 
+## Curated model knowledge
+
+Discovery commands can attach a `knowledge` block to their `--json` output: which
+model a name refers to, whether it is deprecated, ranked picks per capability,
+and known pitfalls. It is **off unless you point the CLI at a bundle**, so a
+default install never emits the block.
+
+Turn it on with either of:
+
+```
+export COMFY_KNOWLEDGE_URL=https://.../knowledge.json   # fetched and cached
+export COMFY_KNOWLEDGE_FILE=/path/to/knowledge.json     # read directly, never cached
+```
+
+Check what is loaded:
+
+```
+comfy knowledge status
+comfy knowledge resolve "Kling 3.0"
+comfy knowledge pick lipsync
+```
+
+Turn it off again:
+
+```
+export COMFY_KNOWLEDGE_DISABLE=1
+```
+
+Clearing `COMFY_KNOWLEDGE_URL` is *not* an off switch. Once a bundle is cached it
+keeps being served, stale or not. `COMFY_KNOWLEDGE_DISABLE` suppresses envelope
+enrichment outright; the `comfy knowledge` verbs keep working under it, since
+those are you asking for the bundle directly.
+
+Enrichment only ever reads the cache, so no command waits on a fetch. The cache
+refreshes during `comfy skills install` and in the background during
+`comfy launch`, or on demand with `comfy knowledge status --refresh`.
+
 ## Analytics
 
-We track analytics using Mixpanel to help us understand usage patterns and know where to prioritize our efforts. When you first download the cli, it will ask you to give consent. If at any point you wish to opt out:
+Analytics are **opt-in and off by default**. The first time you run the CLI in an
+interactive terminal it asks whether to enable tracking, and that prompt defaults
+to no. Nothing is sent unless you answer yes. A non-interactive run (a pipe, CI,
+an agent) never enables it on its own. Setting `DO_NOT_TRACK` or
+`COMFY_NO_TELEMETRY` in the environment overrides the setting and suppresses
+everything.
+
+Change your mind at any time:
 
 ```
+comfy tracking enable
 comfy tracking disable
 ```
+
+When tracking is on, we use Mixpanel to understand usage patterns and know where
+to prioritize our efforts.
+
+**One event carries text you typed.** If a curated knowledge bundle is configured
+— it is not by default, and needs `COMFY_KNOWLEDGE_URL` or `COMFY_KNOWLEDGE_FILE`
+— then `comfy nodes search`, `comfy templates ls`, `comfy generate schema`,
+`comfy generate list` and `comfy models search` send the search terms you typed
+and which curated entries they matched. This tells us what people look for and fail
+to find. It needs both the bundle and your tracking consent, so with either one
+absent nothing is sent.
 
 Check out the usage here: [Mixpanel Board](https://mixpanel.com/p/13hGfPfEPdRkjPtNaS7BYQ)
 
@@ -545,7 +699,8 @@ We welcome contributions to comfy-cli! For ideas, suggestions, or bug reports,
 open an issue at [Comfy-Org/comfy-cli](https://github.com/Comfy-Org/comfy-cli/issues).
 For code changes, fork the repo and open a pull request.
 
-See the [Dev Guide](/DEV_README.md) for setup details.
+See [CONTRIBUTING.md](/CONTRIBUTING.md) for setup, the checks CI enforces,
+and PR conventions. Notable changes are recorded in [CHANGELOG.md](/CHANGELOG.md).
 
 ## License
 

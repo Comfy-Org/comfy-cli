@@ -18,9 +18,7 @@ import os
 import platform
 import subprocess
 
-import psutil
-
-from comfy_cli import cuda_detect
+from comfy_cli import _safe_exec, cuda_detect
 
 logger = logging.getLogger(__name__)
 
@@ -30,11 +28,21 @@ _SUBPROCESS_TIMEOUT = 5
 def _run(cmd: list[str]) -> str | None:
     """Run ``cmd`` and return stripped stdout, or ``None`` on any failure.
 
-    Bounded by ``timeout=5`` so a hung binary can never block the probe.
+    ``cmd[0]`` is resolved to a trusted absolute path via
+    :func:`comfy_cli._safe_exec.resolve_binary` before execution (skipping the
+    probe when the binary is absent or CWD-planted), and the run is bounded by
+    ``timeout=5`` so a hung binary can never block the probe. An empty ``cmd``
+    degrades to ``None`` rather than raising, honouring the module's never-raise
+    contract.
     """
+    if not cmd:
+        return None
+    resolved = _safe_exec.resolve_binary(cmd[0])
+    if resolved is None:
+        return None
     try:
         output = subprocess.check_output(
-            cmd,
+            [resolved, *cmd[1:]],
             text=True,
             timeout=_SUBPROCESS_TIMEOUT,
             stderr=subprocess.DEVNULL,
@@ -234,6 +242,21 @@ def _detect_gpu_amd() -> dict | None:
     }
 
 
+def _is_apple_silicon(machine: str) -> bool:
+    """True when the underlying CPU is Apple Silicon (Darwin already assumed).
+
+    A native arm64 process reports ``machine == 'arm64'`` directly. An x86_64
+    Python running under Rosetta 2 on an Apple Silicon Mac reports
+    ``machine == 'x86_64'``, so fall back to ``sysctl.proc_translated`` — a value
+    of ``'1'`` means the process is translated, which only happens on Apple
+    Silicon. Genuine Intel Macs lack that sysctl key, so ``_run`` returns
+    ``None`` and this stays False.
+    """
+    if machine == "arm64":
+        return True
+    return _run(["sysctl", "-n", "sysctl.proc_translated"]) == "1"
+
+
 def _detect_gpu(system: str, machine: str, cpu: str | None) -> dict | None:
     """Resolve the GPU block, or ``None`` if no GPU is detected.
 
@@ -241,7 +264,7 @@ def _detect_gpu(system: str, machine: str, cpu: str | None) -> dict | None:
     other path tries NVIDIA (nvidia-smi then ctypes), then AMD.
     """
     try:
-        if system == "Darwin" and machine == "arm64":
+        if system == "Darwin" and _is_apple_silicon(machine):
             return {
                 "vendor": "apple",
                 "model": cpu,
@@ -270,6 +293,10 @@ def _detect_gpu(system: str, machine: str, cpu: str | None) -> dict | None:
 
 def _detect_ram_bytes() -> int | None:
     try:
+        # Lazy: psutil costs more to import than the rest of this module put
+        # together, and only RAM detection needs it.
+        import psutil
+
         return int(psutil.virtual_memory().total)
     except Exception:
         logger.debug("RAM detection failed", exc_info=True)

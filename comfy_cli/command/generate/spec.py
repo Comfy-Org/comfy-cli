@@ -41,6 +41,17 @@ _YamlLoader.add_implicit_resolver(
     _re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
     list("tTfF"),
 )
+# PyYAML's YAML 1.1 float resolver only recognizes scientific notation when a
+# decimal point is present (e.g. ``1.0e6``). The remote spec is served as JSON,
+# and ``json.dumps`` emits exponent literals WITHOUT a point for very large/small
+# floats (e.g. ``1e+16``, ``1e-07``); without this those numeric defaults/bounds
+# would silently parse as strings and leak that way into flag schemas. Add a
+# resolver for the point-less exponent form so JSON floats round-trip correctly.
+_YamlLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:float",
+    _re.compile(r"^[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+$"),
+    list("-+0123456789"),
+)
 
 PROXY_PREFIX = "/proxy/"
 DEFAULT_BASE_URL = "https://api.comfy.org"
@@ -223,7 +234,7 @@ _ENDPOINT_ALLOWLIST: list[tuple[str, str, str | None]] = [
     # Reve
     ("reve/v1/image/create", "text-to-image", None),
     ("reve/v1/image/edit", "image-edit", None),
-    # Runway (image)
+    # Runway - image
     ("runway/text_to_image", "text-to-image", None),
     # Video — Kling
     ("kling/v1/videos/text2video", "text-to-video", "kling"),
@@ -484,9 +495,17 @@ def _find_property(schema: dict[str, Any], field: str) -> dict[str, Any] | None:
 def _unknown_endpoint_message(endpoint_id: str) -> str:
     """Build a helpful error suggesting close matches."""
     import difflib
+    import re
 
     candidates = list(_registry().keys()) + list(_ALIASES.keys())
     close = difflib.get_close_matches(endpoint_id, candidates, n=3, cutoff=0.5)
+
+    # Add family candidates keyed on the leading token.
+    head = re.split(r"[-_/.]", endpoint_id.lower(), 1)[0]
+    if len(head) >= 3:
+        family = [c for c in candidates if c.lower().startswith(head) and c not in close]
+        close = (close + sorted(family))[:6]
+
     msg = f"Unknown model: {endpoint_id!r}."
     if close:
         msg += "\nDid you mean: " + ", ".join(close) + "?"

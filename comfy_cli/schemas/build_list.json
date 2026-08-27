@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_list.json",
+  "title": "comfy build list --json data payload",
+  "type": "object",
+  "required": ["builds", "distributions"],
+  "additionalProperties": true,
+  "properties": {
+    "builds": {
+      "type": "array",
+      "description": "The workspace's builds.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"}
+        }
+      }
+    },
+    "distributions": {
+      "type": "array",
+      "description": "Deprecated alias of `builds`, always the same rows. Emitted for one release so pinned scripts keep parsing; prefer `builds`.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"}
+        }
+      }
+    }
+  }
+}

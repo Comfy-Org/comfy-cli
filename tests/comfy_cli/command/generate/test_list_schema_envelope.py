@@ -1,4 +1,4 @@
-"""``comfy generate list`` / ``comfy generate schema`` emit ``envelope/1`` (BE-4933).
+"""``comfy generate list`` / ``comfy generate schema`` emit ``envelope/1``.
 
 These are the two discovery verbs an agent needs before it can run a partner
 model: one enumerates the aliases, the other gives a model's parameters. Both
@@ -207,7 +207,7 @@ def test_schema_unknown_model_emits_registered_error_code():
     assert result.returncode == 1
     assert envelope["ok"] is False
     assert envelope["data"] is None
-    assert envelope["error"]["code"] == "generate_model_unknown"
+    assert envelope["error"]["code"] == "generate_unknown_model"
     assert error_codes.is_registered(envelope["error"]["code"])
     assert envelope["error"]["hint"]
     assert envelope["error"]["details"]["requested"] == "definitely-not-a-model"
@@ -220,7 +220,7 @@ def test_schema_without_a_model_emits_registered_error_code():
     envelope = json.loads(result.stdout.splitlines()[-1])
     assert result.returncode == 1
     assert envelope["ok"] is False
-    assert envelope["error"]["code"] == "missing_argument"
+    assert envelope["error"]["code"] == "generate_bad_args"
     assert error_codes.is_registered(envelope["error"]["code"])
 
 

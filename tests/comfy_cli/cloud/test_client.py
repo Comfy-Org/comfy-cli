@@ -14,7 +14,17 @@ from unittest.mock import patch
 import pytest
 
 from comfy_cli import comfy_client
+from comfy_cli.caller import Caller, usage_source_for
 from comfy_cli.target import Target
+
+
+def _mcp_usage_source() -> str:
+    """What ``usage_source()`` returns under ``COMFY_USER_AGENT=comfy-mcp``.
+
+    Built through the real mapper so these tests pin the wiring, not a
+    hand-copied string; only the environment probe is stubbed out.
+    """
+    return usage_source_for(Caller(kind="comfy-mcp", agentic=True, source_env="COMFY_USER_AGENT"))
 
 
 def _mock_response(payload):
@@ -22,8 +32,10 @@ def _mock_response(payload):
         def __init__(self, body):
             self.body = body if isinstance(body, bytes) else json.dumps(body).encode()
 
-        def read(self):
-            return self.body
+        def read(self, n=None):
+            # Mirror http.client.HTTPResponse.read(amt) — the client reads with
+            # a byte cap, so a no-arg-only fake would not match the real API.
+            return self.body if n is None else self.body[:n]
 
         def __enter__(self):
             return self
@@ -32,6 +44,18 @@ def _mock_response(payload):
             return False
 
     return _Resp(payload)
+
+
+def _header(req, name: str) -> str | None:
+    """Case-insensitive header lookup.
+
+    ``urllib.request.Request.headers`` is a plain dict keyed by
+    ``str.capitalize()``d names, so ``add_header("X-API-Key", ...)`` is stored
+    as ``"X-api-key"`` and both a literal ``"X-API-Key"`` lookup and
+    ``get_header`` are one casing change away from silently missing. A leak
+    guard that can quietly stop testing anything is worse than no guard.
+    """
+    return next((v for k, v in req.headers.items() if k.lower() == name.lower()), None)
 
 
 def _http_error(status: int, body: bytes = b""):
@@ -148,6 +172,37 @@ class TestSubmitPrompt:
         # setdefault — caller wins.
         assert body["extra_data"]["auth_token_comfy_org"] == "caller-token"
 
+    def test_usage_source_is_derived_from_the_caller(self, monkeypatch):
+        """An agentic caller is attributed as ``comfy-cli/<kind>`` so
+        partner-node billing can tell MCP-driven runs from human ones. (The
+        assertions above pin the human case, via the conftest fixture.)"""
+        monkeypatch.setattr(comfy_client, "usage_source", _mcp_usage_source)
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}}),
+        ) as urlopen:
+            comfy_client.Client(CLOUD).submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid")
+        body = json.loads(urlopen.call_args.args[0].data)
+        assert body["extra_data"]["comfy_usage_source"] == "comfy-cli/comfy-mcp"
+
+    def test_caller_supplied_usage_source_still_wins(self, monkeypatch):
+        """setdefault semantics are unchanged by the derivation: a caller that
+        names its own ``comfy_usage_source`` keeps it."""
+        monkeypatch.setattr(comfy_client, "usage_source", _mcp_usage_source)
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}}),
+        ) as urlopen:
+            comfy_client.Client(CLOUD).submit_prompt(
+                {"1": {"class_type": "X", "inputs": {}}},
+                "cid",
+                extra_data={"comfy_usage_source": "some-other-surface"},
+            )
+        body = json.loads(urlopen.call_args.args[0].data)
+        assert body["extra_data"]["comfy_usage_source"] == "some-other-surface"
+
     def test_oauth_refresh_rebuilds_partner_auth_extra_data(self):
         cloud = Target(
             kind="cloud",
@@ -175,6 +230,37 @@ class TestSubmitPrompt:
         assert retry_req.headers["Authorization"] == "Bearer fresh-token"
         assert json.loads(retry_req.data)["extra_data"]["auth_token_comfy_org"] == "fresh-token"
 
+    def test_local_target_with_stray_credentials_sends_no_auth_header(self):
+        """The leak guard the shared header selection carries: credentials that
+        somehow ended up on a LOCAL Target are never sent to the plaintext
+        server. ``_assert_safe_url`` only covers cloud targets, so the
+        ``is_cloud`` gate is the whole defense for the header.
+
+        The body is a second, independent gate: ``submit_prompt`` has its own
+        ``is_cloud`` check before injecting ``auth_token_comfy_org`` into
+        ``extra_data``, so asserting only the headers would stay green while a
+        regression there leaked the stray token to the plaintext server.
+        """
+        local_with_creds = Target(
+            kind="local",
+            base_url="http://127.0.0.1:8188",
+            history_path="history",
+            auth_token="stray-token",
+            api_key="stray-key",
+            host="127.0.0.1",
+            port=8188,
+        )
+        with patch.object(
+            comfy_client._OPENER,
+            "open",
+            return_value=_mock_response({"prompt_id": "pid", "number": 1, "node_errors": {}}),
+        ) as urlopen:
+            comfy_client.Client(local_with_creds).submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid")
+        req = urlopen.call_args.args[0]
+        assert _header(req, "Authorization") is None
+        assert _header(req, "X-API-Key") is None
+        assert json.loads(req.data)["extra_data"] == {"comfy_usage_source": "comfy-cli"}
+
     def test_cloud_with_api_key_sends_x_api_key_header(self):
         cloud_apikey = Target(
             kind="cloud",
@@ -199,8 +285,17 @@ class TestSubmitPrompt:
         body = json.loads(req.data)
         assert body["extra_data"] == {"api_key_comfy_org": "sk-test-1234", "comfy_usage_source": "comfy-cli"}
 
-    def test_cloud_oauth_wins_over_api_key_when_both_set(self):
-        """OAuth-first: if both are configured, the Bearer token wins."""
+    def test_cloud_both_credentials_uses_one_identity_for_header_and_body(self):
+        """Both credentials set is UNREACHABLE in production — ``resolve_target``
+        resolves a single credential, so at most one of api_key / auth_token is
+        ever populated. The tie-break is pinned anyway, because the two paths
+        must not diverge if it ever becomes reachable: the header comes from
+        ``http.target_auth_headers`` and the ``extra_data`` credential from
+        ``submit_prompt``, and both are OAuth-first. A split — gateway
+        authenticated as the API key, partner-API nodes handed the OAuth
+        identity — would also be unrecoverable, since ``_try_refresh_token``
+        early-returns when ``api_key`` is set and so could never heal the 401.
+        """
         cloud_both = Target(
             kind="cloud",
             base_url="https://cloud.example.com",
@@ -218,8 +313,8 @@ class TestSubmitPrompt:
             client = comfy_client.Client(cloud_both)
             client.submit_prompt({"1": {"class_type": "X", "inputs": {}}}, "cid")
         req = urlopen.call_args.args[0]
-        assert req.headers["Authorization"] == "Bearer bearer-token"
-        assert "X-api-key" not in req.headers
+        assert _header(req, "Authorization") == "Bearer bearer-token"
+        assert _header(req, "X-API-Key") is None
         body = json.loads(req.data)
         assert "auth_token_comfy_org" in body["extra_data"]
         assert "api_key_comfy_org" not in body["extra_data"]
@@ -643,7 +738,7 @@ class TestOutputUrls:
 
     def test_extract_resolves_saveglb_3d_key(self):
         """SaveGLB emits entries under the "3d" key, not the classic media
-        keys — shape-based detection must still resolve them (BE-4417)."""
+        keys — shape-based detection must still resolve them."""
         record = {"outputs": {"10": {"3d": [{"filename": "abc123.glb", "subfolder": "3d", "type": "output"}]}}}
         assert comfy_client.extract_output_entries(record) == [
             {"node_id": "10", "filename": "abc123.glb", "subfolder": "3d", "type": "output"}
@@ -853,3 +948,90 @@ class TestTokenRedaction:
     def test_target_repr_omits_token(self):
         # Bearer should never show in logger.debug("%r", target).
         assert "tok-abc" not in repr(CLOUD)
+
+
+# ---------------------------------------------------------------------------
+# Bounded response reads
+# ---------------------------------------------------------------------------
+
+
+class _CapRecordingResp:
+    """A urlopen response that records the byte cap it was read with.
+
+    ``read(None)`` fails outright — an unbounded read is the bug being guarded
+    against, and a lenient fake would let it back in.
+    """
+
+    def __init__(self, body: bytes, status: int = 200):
+        self._body = body
+        self.status = status
+        self.requested: list[int] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self, n=None):
+        if n is None:
+            raise AssertionError("unbounded read() — the body must be read with a cap")
+        self.requested.append(n)
+        return self._body[:n]
+
+
+class TestBoundedResponseReads:
+    def test_response_is_read_with_a_cap_not_unbounded(self):
+        import comfy_cli.http as http_mod
+
+        resp = _CapRecordingResp(json.dumps({"prompt_id": "pid", "number": 1, "node_errors": {}}).encode())
+        target = Target(kind="local", base_url="http://127.0.0.1:8188", path_prefix="")
+        with patch.object(comfy_client._OPENER, "open", return_value=resp):
+            comfy_client.Client(target).submit_prompt({"1": {}}, "cid")
+        # One byte past the cap, so a body that exactly fills it is still complete.
+        assert resp.requested == [http_mod.MAX_RESPONSE_BYTES + 1]
+
+    def test_oversize_response_raises_http_error_not_a_truncated_parse(self, monkeypatch):
+        # A truncated body would surface as a misleading JSON decode error (or,
+        # worse, parse into something plausible). Surface it as the same
+        # HTTPError family every caller already handles instead.
+        import comfy_cli.http as http_mod
+
+        resp = _CapRecordingResp(b"x" * 4096)
+        monkeypatch.setattr(
+            comfy_client,
+            "read_capped",
+            lambda r, url, max_bytes=8: http_mod.read_capped(r, url, max_bytes=max_bytes),
+        )
+        target = Target(kind="local", base_url="http://127.0.0.1:8188", path_prefix="")
+        with patch.object(comfy_client._OPENER, "open", return_value=resp):
+            with pytest.raises(comfy_client.HTTPError) as exc_info:
+                comfy_client.Client(target).submit_prompt({"1": {}}, "cid")
+        assert "too large" in str(exc_info.value)
+
+    def test_error_body_is_read_with_a_cap_too(self):
+        # The 4xx/5xx body comes from the same server as the success body, so
+        # it needs the same ceiling — the fake refuses an unbounded read().
+        err = _http_error(400, b"bad workflow")
+        with patch.object(comfy_client._OPENER, "open", side_effect=err):
+            with pytest.raises(comfy_client.HTTPError) as exc_info:
+                comfy_client.Client(LOCAL).submit_prompt({"1": {}}, "cid")
+        # Still capped-but-generous, so a real error body reaches the caller.
+        assert exc_info.value.body == "bad workflow"
+
+    def test_oversize_error_body_degrades_to_an_empty_body_not_a_crash(self, monkeypatch):
+        # Over the cap the read raises; the status and reason must still make it
+        # out, with the body simply dropped rather than the request blowing up.
+        import comfy_cli.http as http_mod
+
+        monkeypatch.setattr(
+            comfy_client,
+            "read_capped",
+            lambda r, url, max_bytes=4: http_mod.read_capped(r, url, max_bytes=max_bytes),
+        )
+        err = _http_error(500, b"x" * 4096)
+        with patch.object(comfy_client._OPENER, "open", side_effect=err):
+            with pytest.raises(comfy_client.HTTPError) as exc_info:
+                comfy_client.Client(LOCAL).submit_prompt({"1": {}}, "cid")
+        assert exc_info.value.status == 500
+        assert exc_info.value.body == ""

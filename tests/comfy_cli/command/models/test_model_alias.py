@@ -177,6 +177,9 @@ def cloud_target(monkeypatch: pytest.MonkeyPatch):
 
 def _fake_resp(body: bytes):
     class _Resp:
+        def __init__(self):
+            self.status = 200
+
         def __enter__(self):
             return self
 
@@ -193,7 +196,13 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, payload):
     def _fake(req, timeout=None):
         return _fake_resp(json.dumps(payload).encode())
 
-    monkeypatch.setattr("urllib.request.urlopen", _fake)
+    # `_http_get_json` routes every request through `comfy_cli.http.request_json`,
+    # which opens via the module's `_AUTHED_OPENER` (built with
+    # NoRedirectHandler) rather than the global `urllib.request.urlopen` — see
+    # the same pattern in tests/comfy_cli/command/models/test_search.py.
+    import comfy_cli.http as http_mod
+
+    monkeypatch.setattr(http_mod._AUTHED_OPENER, "open", _fake)
 
 
 def _force_json_renderer():

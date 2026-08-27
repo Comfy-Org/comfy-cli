@@ -22,7 +22,7 @@ from typing import Any, TextIO
 
 from rich.console import Console
 
-from comfy_cli.caller import Caller, detect_caller
+from comfy_cli.caller import Caller, detect_caller, stream_is_tty
 from comfy_cli.output.sanitize import sanitize_markup
 
 # Machine-output contract versions, surfaced in every envelope/event line and
@@ -111,7 +111,11 @@ class Renderer:
         env_map = env if env is not None else os.environ
         caller = caller if caller is not None else detect_caller(env_map)
         if is_stdout_tty is None:
-            is_stdout_tty = sys.stdout.isatty()
+            # Guarded probe, not a bare `sys.stdout.isatty()`: this runs from
+            # the main Typer callback before any command dispatch, so under a
+            # detached / `pythonw` stdout a raising probe would kill every
+            # invocation — `comfy --help` included. See `caller.stream_is_tty`.
+            is_stdout_tty = stream_is_tty(getattr(sys, "stdout", None))
 
         mode: OutputMode
         if json_stream_flag:
@@ -247,6 +251,7 @@ class Renderer:
         where: str | None = None,
         changed: bool | None = None,
         ok: bool = True,
+        extra: Mapping[str, Any] | None = None,
     ) -> None:
         """Emit the final envelope. In pretty mode this is a no-op (data was
         already shown by ``print``/``success``/etc).
@@ -256,6 +261,12 @@ class Renderer:
         on an invalid workflow, which still emits its error/warning payload as
         data) pass ``ok=False`` so the envelope's ``ok`` agrees with the
         process exit code.
+
+        ``extra`` merges additional top-level fields into the envelope
+        (additive-optional under envelope/1, e.g. ``--select``'s
+        ``selected_bytes``/``total_bytes``). Core envelope keys are never
+        overridden; when ``extra`` is absent the envelope is byte-identical to
+        an emit without it.
         """
         if self.is_pretty():
             return
@@ -270,6 +281,9 @@ class Renderer:
             changed=changed,
             error=None,
         )
+        if extra:
+            for key, value in extra.items():
+                envelope.setdefault(key, value)
         self._write_json_line(envelope)
         self._envelope_emitted = True
 
@@ -282,6 +296,7 @@ class Renderer:
         details: Mapping[str, Any] | None = None,
         exit_code: int = 1,
         command: str | None = None,
+        where: str | None = None,
     ) -> None:
         """Emit a structured error. In pretty mode, prints red message + yellow
         hint. In JSON mode, emits an envelope with ``ok=false`` and the error
@@ -312,7 +327,7 @@ class Renderer:
             ok=False,
             command=command or self.command,
             data=None,
-            where=self.where,
+            where=where or self.where,
             changed=None,
             error={
                 "code": code,
@@ -376,8 +391,31 @@ class Renderer:
 
     def _write_json_line(self, payload: Mapping[str, Any]) -> None:
         line = json.dumps(payload, default=_json_default, ensure_ascii=False)
-        self.machine_stream.write(line + "\n")
-        self.machine_stream.flush()
+        stream = self.machine_stream
+        try:
+            stream.write(line + "\n")
+            stream.flush()
+        except (AttributeError, ValueError):
+            # Resolving to JSON mode against an unusable stdout must not merely
+            # DEFER the crash to the first emit — by then the command has
+            # already run and its side effects have landed, so dying here is
+            # strictly worse than dying at startup. `machine_stream` falls back
+            # to `sys.stdout`, which under pythonw / a detached parent is
+            # `None` (AttributeError on `.write`) or an already-closed file
+            # (ValueError). Neither can ever receive output, so the write is a
+            # no-op and the process still exits with the right code.
+            #
+            # `OSError` is deliberately NOT caught, even though it looks like it
+            # belongs. A `BrokenPipeError` here means the stream was real and the
+            # reader hung up, which is load-bearing: `comfy cloud login` relies
+            # on it propagating out of the `login_url` emit so the command fails
+            # fast instead of blocking the full 300s on a browser callback nobody
+            # will read (see test_json_login_fails_fast_when_login_url_write_breaks).
+            # Swallowing it would turn that into a silent hang.
+            #
+            # `TypeError` is likewise not caught: it would mean the payload is
+            # malformed, which is our bug and must stay visible.
+            return
 
     @property
     def exit_code(self) -> int:
@@ -385,18 +423,27 @@ class Renderer:
 
 
 def _json_default(obj: Any) -> Any:
-    # Best-effort JSON coercion for common non-serializable types.
-    from pathlib import Path
+    """Coerce one unserializable value to a JSON-native one.
 
-    if isinstance(obj, Path):
-        return str(obj)
-    if isinstance(obj, Enum):
-        return obj.value
+    json feeds anything this returns straight back in when it still cannot
+    encode it, so a hook that returns another opaque object re-enters once per
+    hop and one that keeps producing new objects never terminates at all. The
+    tail coercion is what holds that off: every return is either a scalar json
+    encodes directly or a container it walks itself. A container's members are
+    values of their own, so each costs at most one further hook call, and a
+    container that contains itself trips json's own circular-reference check.
+    """
+    seen: set[int] = set()
+    while isinstance(obj, Enum) and id(obj) not in seen:
+        seen.add(id(obj))
+        obj = obj.value
     if hasattr(obj, "isoformat"):
         try:
-            return obj.isoformat()
+            obj = obj.isoformat()
         except Exception:  # noqa: BLE001
             pass
+    if isinstance(obj, str | int | float | None | list | dict | tuple):
+        return obj
     return str(obj)
 
 

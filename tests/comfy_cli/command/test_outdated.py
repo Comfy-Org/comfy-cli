@@ -98,10 +98,15 @@ def workspace(tmp_path) -> Path:
     ws = tmp_path / "ComfyUI"
     ws.mkdir()
 
-    # --- core: git checkout on tag v0.3.40 ---
+    # --- core: git checkout on tag v0.3.40, with a newer v0.3.41 tag also
+    # already known locally (as a real full clone would have, tags fetched
+    # ahead of whatever's checked out) ---
     _git(ws, "init")
     _commit(ws, "main.py", "# comfy\n", "initial")
     _git(ws, "tag", "v0.3.40")
+    _commit(ws, "main.py", "# comfy v0.3.41\n", "bump")
+    _git(ws, "tag", "v0.3.41")
+    _git(ws, "checkout", "v0.3.40")  # HEAD back on the "installed" tag
 
     custom_nodes = ws / "custom_nodes"
     custom_nodes.mkdir()
@@ -185,20 +190,65 @@ def test_stale_install_flags_core_and_packs(workspace, monkeypatch):
 
 
 def test_up_to_date_install_not_flagged(workspace, monkeypatch):
+    # Move "installed" up to the highest local tag (v0.3.41) so core is
+    # genuinely up to date — core-latest now resolves from local tags first,
+    # so the `get_latest_release` mock below is unreachable for core and is
+    # only here to guarantee a network call would be an obvious failure.
+    _git(workspace, "checkout", "v0.3.41")
     monkeypatch.setattr(
         "comfy_cli.command.install.get_latest_release",
-        lambda *a, **k: {"tag": "v0.3.40"},
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("core must not hit the GitHub API when local tags exist")),
     )
     registry = _FakeRegistry({"comfy-registry-pack": "1.0.0"})
 
     report, _ = outdated_cmd.build_report(str(workspace), registry_api=registry)
 
+    assert report["core"]["latest"] == "v0.3.41"
     assert report["core"]["outdated"] is False
     assert _packs_by_name(report)["comfy-registry-pack"]["outdated"] is False
 
 
-def test_network_failure_yields_null_latest_and_no_warnings_crash(workspace, monkeypatch):
-    """GitHub + registry down → latest: null, outdated: false, warnings, no raise."""
+def test_core_latest_prefers_higher_local_tag_over_mismarked_github_latest(workspace, monkeypatch):
+    """Regression: GitHub's `releases/latest` is a maintainer-set mutable flag
+    and can be mis-pointed at a tag that isn't the highest semver release
+    (e.g. a hotfix flagged back onto an older line). `comfy outdated` must not
+    blindly trust it — it should prefer the highest stable semver tag it
+    already knows about locally, exactly like `comfy install/update
+    --version latest` already does (see install.py's
+    `_resolve_latest_tag_from_local`).
+    """
+    # v0.3.42 is a newer, already-known local tag that GitHub's mutable
+    # "latest" flag (mocked below) fails to point at.
+    _git(workspace, "tag", "v0.3.42")
+    monkeypatch.setattr(
+        "comfy_cli.command.install.get_latest_release",
+        lambda *a, **k: {"tag": "v0.3.41"},  # mis-set: lower than v0.3.42
+    )
+
+    report, _ = outdated_cmd.build_report(str(workspace), registry_api=_FakeRegistry({}))
+
+    assert report["core"]["latest"] == "v0.3.42"
+    assert report["core"]["outdated"] is True
+
+
+def test_network_failure_yields_null_latest_and_no_warnings_crash(tmp_path, monkeypatch):
+    """GitHub + registry down → latest: null, outdated: false, warnings, no raise.
+
+    Core has no local tags (unlike the shared `workspace` fixture), so this
+    exercises the GitHub-API fallback path — the one case where a "network
+    down" simulation can actually surface as `latest: null` for core, now
+    that local tags are consulted first.
+    """
+    ws = tmp_path / "ComfyUI"
+    ws.mkdir()
+    _git(ws, "init")
+    _commit(ws, "main.py", "# comfy\n", "initial")  # no tag → no local signal
+
+    custom_nodes = ws / "custom_nodes"
+    custom_nodes.mkdir()
+    reg = custom_nodes / "comfy-registry-pack"
+    reg.mkdir()
+    (reg / "pyproject.toml").write_text('[project]\nname = "comfy-registry-pack"\nversion = "1.0.0"\n')
 
     def _boom(*a, **k):
         raise RuntimeError("no network")
@@ -206,7 +256,7 @@ def test_network_failure_yields_null_latest_and_no_warnings_crash(workspace, mon
     monkeypatch.setattr("comfy_cli.command.install.get_latest_release", _boom)
     registry = _FakeRegistry({}, raises=True)
 
-    report, warnings = outdated_cmd.build_report(str(workspace), registry_api=registry)
+    report, warnings = outdated_cmd.build_report(str(ws), registry_api=registry)
 
     assert report["core"]["latest"] is None
     assert report["core"]["outdated"] is False
@@ -240,21 +290,28 @@ def test_warm_cache_serves_latest_without_network(workspace, monkeypatch):
     assert not warnings
 
 
-def test_refresh_bypasses_cache(workspace, monkeypatch):
+def test_refresh_bypasses_cache(tmp_path, monkeypatch):
+    """Core has no local tags, so this exercises `--refresh` against the
+    GitHub-API fallback path (mirrors `test_network_failure_...`'s reasoning
+    for why the shared, tagged `workspace` fixture isn't used here)."""
+    ws = tmp_path / "ComfyUI"
+    ws.mkdir()
+    _git(ws, "init")
+    _commit(ws, "main.py", "# comfy\n", "initial")
+    (ws / "custom_nodes").mkdir()
+
     monkeypatch.setattr(
         "comfy_cli.command.install.get_latest_release",
         lambda *a, **k: {"tag": "v0.3.41"},
     )
-    outdated_cmd.build_report(str(workspace), registry_api=_FakeRegistry({"comfy-registry-pack": "1.2.0"}))
+    outdated_cmd.build_report(str(ws), registry_api=_FakeRegistry({}))
 
     # --refresh must re-query even with a warm cache; a down network → null.
     def _boom(*a, **k):
         raise RuntimeError("no network")
 
     monkeypatch.setattr("comfy_cli.command.install.get_latest_release", _boom)
-    report, warnings = outdated_cmd.build_report(
-        str(workspace), refresh=True, registry_api=_FakeRegistry({}, raises=True)
-    )
+    report, warnings = outdated_cmd.build_report(str(ws), refresh=True, registry_api=_FakeRegistry({}, raises=True))
 
     assert report["core"]["latest"] is None
     assert warnings
@@ -437,3 +494,34 @@ def test_cli_json_envelope_shape(workspace, monkeypatch, capsys):
     assert envelope["command"] == "outdated"
     assert envelope["data"]["core"]["outdated"] is True
     assert isinstance(envelope["data"]["packs"], list)
+
+
+# ---------------------------------------------------------------------------
+# cache durability
+# ---------------------------------------------------------------------------
+
+
+def test_save_cache_is_atomic_and_leaves_no_temp_residue():
+    """The cache is written by more than one command (`outdated` and `node
+    deps`). A write interrupted midway must not leave a truncated file that
+    `_load_cache` silently resets to `{}` — so it renames into place rather
+    than truncating the live file.
+    """
+    payload = {"pack:one": {"value": "1.0.0", "ts": 1}, "core": {"value": "v0.3.40", "ts": 1}}
+    outdated_cmd._save_cache(payload)
+
+    path = outdated_cmd._cache_path()
+    assert outdated_cmd._load_cache() == payload
+    assert list(path.parent.iterdir()) == [path], "temp file must not survive the write"
+
+
+def test_save_cache_survives_an_unwritable_cache_dir(monkeypatch, tmp_path):
+    """A read-only cache dir must never break a read-only report."""
+    unwritable = tmp_path / "nope"
+    unwritable.mkdir()
+    unwritable.chmod(0o500)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(unwritable))
+    try:
+        outdated_cmd._save_cache({"pack:one": {"value": "1.0.0", "ts": 1}})
+    finally:
+        unwritable.chmod(0o700)

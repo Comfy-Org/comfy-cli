@@ -7,7 +7,6 @@ import sys
 from typing import TypedDict
 from urllib.parse import urlparse
 
-import git
 import requests
 import semver
 import typer
@@ -16,11 +15,16 @@ from rich.panel import Panel
 from rich.prompt import Confirm
 
 from comfy_cli import constants, ui
+from comfy_cli._safe_exec import BinaryNotFoundError, resolve_required_binary
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
 from comfy_cli.command.github.pr_info import PRInfo
+from comfy_cli.command.version_validators import (  # noqa: F401 — re-exported; moved out so cmdline's decorators don't import this module
+    validate_optional_version,
+    validate_version,
+)
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG
-from comfy_cli.git_utils import checkout_pr, git_checkout_tag
+from comfy_cli.git_utils import checkout_pr, git_checkout_tag, reject_option_like_ref
 from comfy_cli.output import rprint
 from comfy_cli.resolve_python import ensure_workspace_python
 from comfy_cli.uv import DependencyCompiler, ensure_pip
@@ -28,12 +32,6 @@ from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
 workspace_manager = WorkspaceManager()
 console = Console()
-
-
-def get_os_details():
-    os_name = platform.system()  # e.g., Linux, Darwin (macOS), Windows
-    os_version = platform.release()
-    return os_name, os_version
 
 
 def _pip_install_torch(python: str, index_args: list[str]) -> subprocess.CompletedProcess:
@@ -82,7 +80,7 @@ def pip_install_comfyui_dependencies(
 
         if result and result.returncode != 0:
             rprint("Failed to install PyTorch dependencies. Please check your environment (`comfy env`) and try again")
-            sys.exit(1)
+            raise typer.Exit(code=1)
 
         # install directml for AMD windows
         if gpu == GPU_OPTION.AMD and plat == constants.OS.WINDOWS:
@@ -112,7 +110,7 @@ def pip_install_comfyui_dependencies(
     result = subprocess.run([python, "-m", "pip", "install", "-r", "requirements.txt"], check=False)
     if result.returncode != 0:
         rprint("Failed to install ComfyUI dependencies. Please check your environment (`comfy env`) and try again.")
-        sys.exit(1)
+        raise typer.Exit(code=1)
 
 
 def pip_install_manager(repo_dir, python=sys.executable):
@@ -143,6 +141,26 @@ def pip_install_manager(repo_dir, python=sys.executable):
     find_cm_cli.cache_clear()
     find_legacy_manager_clone.cache_clear()
     return True
+
+
+def _install_manager_with_fallback(repo_dir, python, *, bootstrap_pip: bool):
+    """Install ComfyUI-Manager, degrading gracefully when it fails.
+
+    On failure, disable the manager GUI mode so a later ``comfy launch`` doesn't
+    inject manager flags for a manager that isn't actually installed.
+
+    ``bootstrap_pip`` bootstraps pip first (no-op if already present): the
+    fast_deps path leaves a uv-managed venv that may ship no pip, whereas the
+    pip path has already bootstrapped it earlier in ``execute``.
+    """
+    if bootstrap_pip:
+        ensure_pip(python)
+    if not pip_install_manager(repo_dir, python=python):
+        # Manager installation failed - disable to prevent launch issues
+        from comfy_cli.config_manager import ConfigManager
+
+        ConfigManager().set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable")
+        rprint("[yellow]Manager not installed. Launch will run without manager flags.[/yellow]")
 
 
 def execute(
@@ -191,10 +209,12 @@ def execute(
             checkout_stable_comfyui(version=version, repo_dir=repo_dir, url=url)
         except GitHubRateLimitError as e:
             rprint(f"[bold red]Error checking out ComfyUI version: {e}[/bold red]")
-            sys.exit(1)
+            raise typer.Exit(code=1) from e
 
     elif not check_comfy_repo(repo_dir)[0]:
         # Get actual remote URL for better error message
+        import git
+
         try:
             repo = git.Repo(repo_dir)
             remote_urls = [r.url for r in repo.remotes]
@@ -210,12 +230,25 @@ def execute(
             rprint(
                 f"[bold red]'{repo_dir}' already exists. But it is an invalid ComfyUI repository. Remove it and retry.[/bold red]"
             )
-        sys.exit(-1)
+        raise typer.Exit(code=1)
 
     # checkout specified commit
     if commit is not None:
+        # A ``--`` separator cannot protect this argument: git scans for options
+        # *before* the first positional, so ``--upload-pack=…`` would be read as
+        # an option wherever the separator sits. Git refnames may not begin with
+        # ``-`` at all, so refusing such a value rejects only inputs that could
+        # never have worked.
+        try:
+            reject_option_like_ref(commit, "commit")
+        except ValueError as e:
+            rprint(f"[bold red]{e}[/bold red]")
+            raise typer.Exit(code=1) from None
+        # Resolved before the chdir: ``repo_dir`` is user-supplied, so a ``git``
+        # planted there must not be found — nor shadow the real one.
+        git_bin = resolve_required_binary("git")
         os.chdir(repo_dir)
-        subprocess.run(["git", "checkout", commit], check=True)
+        subprocess.run([git_bin, "checkout", commit], check=True)
 
     python = ensure_workspace_python(repo_dir)
     rprint(f"Using Python: [bold]{python}[/bold]")
@@ -251,12 +284,8 @@ def execute(
     else:
         rprint("\nInstalling ComfyUI-Manager..")
         if not fast_deps:
-            if not pip_install_manager(repo_dir, python=python):
-                # Manager installation failed - disable to prevent launch issues
-                from comfy_cli.config_manager import ConfigManager
-
-                ConfigManager().set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable")
-                rprint("[yellow]Manager not installed. Launch will run without manager flags.[/yellow]")
+            # pip was already bootstrapped above for the pip path.
+            _install_manager_with_fallback(repo_dir, python, bootstrap_pip=False)
 
     if fast_deps:
         if python != sys.executable:
@@ -283,14 +312,9 @@ def execute(
         depComp.install_deps()
         # Install manager separately (not included in DependencyCompiler).
         # fast_deps leaves a uv-managed venv that may have no pip, but the
-        # manager install uses pip — bootstrap it first (no-op if present).
+        # manager install uses pip — the helper bootstraps it first.
         if not skip_manager:
-            ensure_pip(python)
-            if not pip_install_manager(repo_dir, python=python):
-                from comfy_cli.config_manager import ConfigManager
-
-                ConfigManager().set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable")
-                rprint("[yellow]Manager not installed. Launch will run without manager flags.[/yellow]")
+            _install_manager_with_fallback(repo_dir, python, bootstrap_pip=True)
 
     if not skip_manager:
         try:
@@ -363,53 +387,6 @@ def handle_pr_checkout(pr_ref: str, comfy_path: str) -> str:
     return pr_info.base_repo_url
 
 
-def validate_version(version: str) -> str | None:
-    """
-    Validates the version string as 'latest', 'nightly', or a semantically version number.
-
-    Args:
-    version (str): The version string to validate.
-
-    Returns:
-    Optional[str]: The validated version string, or None if invalid.
-
-    Raises:
-    ValueError: If the version string is invalid.
-    """
-    if version.lower() in ["nightly", "latest"]:
-        return version.lower()
-
-    # Remove 'v' prefix if present
-    if version.startswith("v"):
-        version = version[1:]
-
-    try:
-        semver.VersionInfo.parse(version)
-        return version
-    except ValueError as exc:
-        raise ValueError(
-            f"Invalid version format: {version}. "
-            "Please use 'nightly', 'latest', or a valid semantic version (e.g., '1.2.3')."
-        ) from exc
-
-
-def validate_optional_version(version: str | None) -> str | None:
-    """Typer callback for an *optional* ``--version`` flag.
-
-    ``validate_version`` is written for a flag that always has a value (``comfy
-    install --version`` defaults to ``nightly``). ``comfy update`` treats the
-    flag as opt-in, so ``None`` must pass through untouched. Invalid input is
-    re-raised as ``typer.BadParameter`` so a headless caller gets the standard
-    CLI usage error instead of a traceback.
-    """
-    if version is None:
-        return None
-    try:
-        return validate_version(version)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-
-
 class GitHubRateLimitError(Exception):
     """Raised when GitHub API rate limit is exceeded"""
 
@@ -472,12 +449,17 @@ def clone_comfyui(url: str, repo_dir: str):
     """
     Clone the ComfyUI repository from the specified URL.
     """
+    git_bin = resolve_required_binary("git")
+    # ``--`` ends option parsing: git permutes options among positionals, so a
+    # ``url`` (or ``repo_dir``) beginning with ``--`` would otherwise be read as
+    # an option — ``--upload-pack=<cmd>`` and ``--config=<k>=<v>`` both turn a
+    # clone into arbitrary command execution.
     if "@" in url:
         # clone specific branch
         url, branch = url.rsplit("@", 1)
-        subprocess.run(["git", "clone", "-b", branch, url, repo_dir], check=True)
+        subprocess.run([git_bin, "clone", "-b", branch, "--", url, repo_dir], check=True)
     else:
-        subprocess.run(["git", "clone", url, repo_dir], check=True)
+        subprocess.run([git_bin, "clone", "--", url, repo_dir], check=True)
 
 
 def _resolve_latest_tag_from_local(repo_dir: str) -> tuple[str | None, bool]:
@@ -505,8 +487,11 @@ def _resolve_latest_tag_from_local(repo_dir: str) -> tuple[str | None, bool]:
     """
     fetch_ok = False
     try:
+        # ``BinaryNotFoundError`` subclasses ``FileNotFoundError``, so an absent
+        # (or CWD-planted, hence refused) ``git`` lands in the same tolerant
+        # handlers that already cover a missing binary here.
         completed = subprocess.run(
-            ["git", "-C", repo_dir, "fetch", "--tags", "--quiet"],
+            [resolve_required_binary("git"), "-C", repo_dir, "fetch", "--tags", "--quiet"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -518,7 +503,7 @@ def _resolve_latest_tag_from_local(repo_dir: str) -> tuple[str | None, bool]:
 
     try:
         result = subprocess.run(
-            ["git", "-C", repo_dir, "tag", "--list"],
+            [resolve_required_binary("git"), "-C", repo_dir, "tag", "--list"],
             capture_output=True,
             text=True,
             check=True,
@@ -601,7 +586,7 @@ def checkout_stable_comfyui(version: str, repo_dir: str, url: str | None = None)
             selected_release = get_latest_release(owner, repo)
             if selected_release is None:
                 rprint(f"Error: No release found for version '{version}'.")
-                sys.exit(1)
+                raise typer.Exit(code=1)
             tag = str(selected_release["tag"])
         elif not fetch_ok:
             # Tag list comes from a cached state — flag it so the user knows
@@ -628,7 +613,7 @@ def checkout_stable_comfyui(version: str, repo_dir: str, url: str | None = None)
         if not success:
             console.print(f"\n[bold red]Failed to checkout tag '{tag}'![/bold red]")
             console.print("[yellow]The version may not exist. Please check available versions.[/yellow]")
-            sys.exit(1)
+            raise typer.Exit(code=1)
 
 
 class VersionSwitchError(Exception):
@@ -663,8 +648,14 @@ def _git_capture(repo_dir: str, *args: str, timeout: int = 30) -> subprocess.Com
     Uses ``git -C`` rather than ``os.chdir`` so a failure part-way through a
     switch can't leave the process in someone else's directory.
     """
-    argv = ["git", "-C", repo_dir, *args]
+    # Only ever used to label a failure result; the spawned argv is built below
+    # from the trusted-resolved path.
+    argv: list[str] = ["git", "-C", repo_dir, *args]
     try:
+        # Resolving inside the ``try`` keeps the never-raises contract: an absent
+        # (or CWD-planted, hence refused) ``git`` raises ``BinaryNotFoundError``,
+        # a ``FileNotFoundError``, and comes back as the usual rc=1 result.
+        argv = [resolve_required_binary("git"), "-C", repo_dir, *args]
         return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout)
     except (subprocess.SubprocessError, FileNotFoundError, OSError) as exc:
         return subprocess.CompletedProcess(args=argv, returncode=1, stdout="", stderr=str(exc))
@@ -786,6 +777,20 @@ def switch_comfyui_version(
 
     :raises VersionSwitchError: on any resolution, stash, or checkout failure.
     """
+    # Checked up front and named for what it is. ``_git_capture`` deliberately
+    # never raises, so without this a git that could not be trusted-resolved
+    # would just look like rc=1 to the first caller below — and the first caller
+    # is a `rev-parse --verify <tag>`, whose non-zero result reports "version not
+    # found: no tag vX". That sends the user hunting for a version that exists.
+    try:
+        resolve_required_binary("git")
+    except BinaryNotFoundError as exc:
+        raise VersionSwitchError(
+            code="version_switch_git_unavailable",
+            message=str(exc),
+            hint="a version switch needs a usable git — install it, or run from a directory that has no git binary in it",
+        ) from exc
+
     previous = _describe_head(comfy_path)
 
     # --- 1. Resolve + validate the target before touching anything -----------

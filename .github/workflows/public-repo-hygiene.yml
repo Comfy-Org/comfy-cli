@@ -1,0 +1,62 @@
+# Description: Thin caller for the shared public-repo-hygiene reusable workflow
+# in Comfy-Org/github-workflows, which owns the checker AND its known-public
+# allowlist. This replaces the in-tree copy this repo used to carry.
+#
+# Why the checker is not in this repo any more: the old job ran
+# the checker straight out of the PR's own checkout, so a PR could widen the
+# allowlist — or disable the scan — and go green. The reusable loads the
+# checker from the pinned `workflows_ref` commit instead, so a PR here cannot
+# reach it through this workflow's inputs. The allowlist is deliberately NOT
+# an input, for the same reason.
+#
+# The pin is kept fresh by bump-public-repo-hygiene-callers.yml once this repo
+# is enrolled in the PUBLIC_REPO_HYGIENE_CALLERS roster.
+name: Public Repo Hygiene
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  hygiene:
+    permissions:
+      contents: read
+    uses: Comfy-Org/github-workflows/.github/workflows/public-repo-hygiene.yml@609f9729b3df0c762118bfe64de6ab649c33be04 # github-workflows main (609f972)
+    with:
+      # REQUIRED, and must equal the `uses:` SHA above — the reusable asserts
+      # they match, which is what pins the checker to the reviewed commit.
+      workflows_ref: 609f9729b3df0c762118bfe64de6ab649c33be04
+      # `HAILUO-03` is MiniMax's Hailuo 03 model, named in the curated
+      # knowledge bundle and asserted in tests. It is a product name that
+      # happens to match the ticket-ID shape, not an internal reference.
+      # `HALO-03` is a fictional product id used as test fixture data in
+      # tests/comfy_cli/test_knowledge.py and test_knowledge_attach.py — not a
+      # real ticket.
+      ticket_allowlist: HAILUO-03,HALO-03
+      # Each entry below is a genuine false positive that the checker's two
+      # caller-tunable knobs (ticket_allowlist, exclude_paths) cannot clear any
+      # other way — the repo allowlist it also checks against
+      # (PUBLIC_COMFY_ORG_REPOS in Comfy-Org/github-workflows) is org-owned and
+      # deliberately not settable here.
+      exclude_paths: |
+        # refresh-cql-catalogs.yml legitimately reads from the private cloud
+        # monorepo (org-scoped, not github-workflows) — this internal
+        # automation is meant to reach it, so the reference is not a leak,
+        # it's the point of the workflow.
+        .github/workflows/refresh-cql-catalogs.yml
+        # Verbatim gallery/workflow template fixtures checked in for tests;
+        # several embed Comfy-Org/<huggingface-model-repo> strings (e.g.
+        # Qwen-Image_ComfyUI, ACE-Step_ComfyUI_repackaged) that are Hugging
+        # Face model repos, not GitHub repos, so they can never appear in the
+        # checker's GitHub-only repo allowlist. Content must stay byte-for-byte
+        # identical to the real templates, so it can't be reworded either.
+        tests/comfy_cli/fixtures/
+        # Real Hugging Face model download URLs pointing at the org's
+        # stable-diffusion-v1-5-archive space on huggingface.co. Same root
+        # cause as the fixtures above: the checker's org/repo pattern doesn't
+        # distinguish a Hugging Face host from a GitHub one, so a correct,
+        # fully-qualified HF URL still reads as an unlisted GitHub repo
+        # reference.
+        tests/e2e/test_e2e.py
+        comfy_cli/command/run/preflight.py

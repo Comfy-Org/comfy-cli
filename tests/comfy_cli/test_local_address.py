@@ -173,6 +173,23 @@ def test_resolve_target_local_honors_env(monkeypatch):
     assert target.port == 8189
 
 
+def test_resolve_target_local_brackets_ipv6_in_url_only(monkeypatch):
+    """``base_url`` gets the bracketed literal; ``Target.host`` stays bare.
+
+    The two are deliberately different representations: the URL needs RFC 3986
+    §3.2.2 brackets, while ``host`` is the bracket-stripped value the address
+    resolver validated. Pins that distinction across the shared
+    ``_bracket_host`` choke point.
+    """
+    from comfy_cli.target import resolve_target
+
+    monkeypatch.setenv(ENV_LOCAL_URL, "http://[::1]:8189")
+    target = resolve_target(where="local")
+    assert target.base_url == "http://[::1]:8189"
+    assert target.host == "::1"
+    assert target.port == 8189
+
+
 def test_resolve_target_local_flag_beats_env(monkeypatch):
     from comfy_cli.target import resolve_target
 
@@ -272,3 +289,43 @@ def test_job_watcher_state_beats_env(monkeypatch):
     with patch("comfy_cli.command.jobs._snapshot", side_effect=fake_snapshot):
         job_watcher._poll_local_once(state, host=None, port=None)
     assert (captured["h"], captured["p"]) == ("recorded-host", 9999)
+
+
+# ---------------------------------------------------------------------------
+# wildcard bind-address canonicalization
+# ---------------------------------------------------------------------------
+#
+# `config.background` records the raw `--listen` value `comfy launch` passed to
+# ComfyUI — a BIND address. `--listen 0.0.0.0` (or `::`) means "every
+# interface"; as a *destination* it isn't a real address. Windows refuses to
+# connect to it, and the object_info fetch's loopback guard rejects it as a
+# non-loopback local host — so feeding it through unchanged turned a reachable
+# background server into a hard failure for `comfy validate` / `comfy nodes`.
+
+
+@pytest.mark.parametrize(
+    ("listen", "expected"),
+    [
+        ("0.0.0.0", DEFAULT_HOST),
+        ("::", "::1"),
+        ("[::]", "::1"),
+        (" 0.0.0.0 ", DEFAULT_HOST),  # the recorded value is not pre-stripped
+    ],
+)
+def test_wildcard_background_host_becomes_loopback(listen, expected, monkeypatch):
+    monkeypatch.delenv(ENV_LOCAL_URL, raising=False)
+    assert resolve_local_host_port(None, None, background=(listen, 8388, 42)) == (expected, 8388)
+
+
+def test_non_wildcard_background_host_is_untouched(monkeypatch):
+    """Only the wildcards are rewritten — a real recorded address passes through."""
+    monkeypatch.delenv(ENV_LOCAL_URL, raising=False)
+    assert resolve_local_host_port(None, None, background=("::1", 8388, 42)) == ("::1", 8388)
+
+
+def test_explicit_wildcard_host_flag_is_not_rewritten(monkeypatch):
+    """The canonicalization is scoped to the recorded BIND address. An explicit
+    `--host 0.0.0.0` is the user naming a destination; leave it alone so the
+    downstream guards judge what they were actually given."""
+    monkeypatch.delenv(ENV_LOCAL_URL, raising=False)
+    assert resolve_local_host_port("0.0.0.0", None, background=("127.0.0.1", 8388, 42)) == ("0.0.0.0", 8388)

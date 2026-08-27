@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_update.json",
+  "title": "comfy build update --json data payload",
+  "description": "The updated build returned by PATCH /v1/builds/{id}.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "definition": {"type": "object"}}
+}

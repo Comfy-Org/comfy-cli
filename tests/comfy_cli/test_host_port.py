@@ -3,6 +3,8 @@ by the `comfy run` command path."""
 
 from __future__ import annotations
 
+import io
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -15,6 +17,7 @@ from comfy_cli.host_port import (
     resolve_host_port,
     validate_host,
 )
+from comfy_cli.output.renderer import OutputMode, Renderer, set_renderer
 
 # ---------------------------------------------------------------------------
 # parse_host_port_arg
@@ -94,6 +97,38 @@ def test_validate_host_rejects_whitespace_and_control_chars(host):
         validate_host(host)
 
 
+@pytest.mark.parametrize("host", ["", "   ", "\t"])
+def test_validate_host_rejects_empty(host):
+    # An empty host is resolved as *absent* downstream (`host or env or
+    # DEFAULT_HOST`), so accepting it silently retargets the request at a
+    # server the caller never named — e.g. `--host "$UNSET_VAR"`.
+    with pytest.raises(typer.BadParameter):
+        validate_host(host)
+
+
+@pytest.mark.parametrize("host", ["a%0d%0aX-Injected:%201", "host%2fpath", "h%40ost", "host%23x"])
+def test_validate_host_rejects_percent_encoded_specials(host):
+    # urllib.request.Request._parse unquotes the host it splits out of the
+    # URL, so a percent-encoded payload decodes downstream of this guard.
+    with pytest.raises(typer.BadParameter):
+        validate_host(host)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1:8188", "localhost:8188", "example.com:80"])
+def test_validate_host_rejects_embedded_port(host):
+    # Colon-bearing hosts get bracketed as IPv6 literals by callers, so a
+    # combined host:port would become `http://[127.0.0.1:8188]:8188` with the
+    # embedded port silently dropped. Only `comfy run` takes the combined
+    # form, and it splits it via parse_host_port_arg first.
+    with pytest.raises(typer.BadParameter):
+        validate_host(host)
+
+
+@pytest.mark.parametrize("host", ["::1", "[::1]", "fe80::1", "2001:db8::8a2e:370:7334"])
+def test_validate_host_allows_ipv6_literals(host):
+    assert validate_host(host) == host
+
+
 # ---------------------------------------------------------------------------
 # resolve_host_port
 # ---------------------------------------------------------------------------
@@ -161,7 +196,7 @@ def test_run_ipv6_host_port_reaches_execute(tmp_path):
         )
     assert result.exit_code == 0, result.output
     args, _ = mock_execute.call_args
-    # execute(workflow, host, port, ...)
+    # positional args of execute - workflow, host, port, ...
     assert args[1] == "[::1]"
     assert args[2] == 8188
 
@@ -179,3 +214,316 @@ def test_run_unsafe_host_exits_before_execute(tmp_path):
         )
     assert result.exit_code != 0
     mock_execute.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# `--port` beats the port embedded in a combined `--host h:p`
+# ---------------------------------------------------------------------------
+#
+# The combined-host sites used to merge the two with `if not port and
+# parsed_port is not None`, which reads an explicit `--port 0` as "not passed"
+# and silently runs against the embedded port. They test `port is None`, so a
+# typed `--port` — including the out-of-range `0` — always wins and reaches the
+# range guard in `resolve_host_port`.
+
+
+def test_run_explicit_port_zero_is_rejected_not_overridden_by_host_port(tmp_path):
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    with patch("comfy_cli.command.run.execute") as mock_execute:
+        result = CliRunner().invoke(
+            app,
+            ["run", "--workflow", _write_workflow(tmp_path), "--host", "127.0.0.1:9100", "--port", "0"],
+            env={"COMFY_WHERE": "local"},
+        )
+    assert result.exit_code == 2, result.output
+    mock_execute.assert_not_called()
+
+
+def test_run_explicit_port_wins_over_embedded_host_port(tmp_path, monkeypatch):
+    monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    with patch("comfy_cli.command.run.execute") as mock_execute:
+        result = CliRunner().invoke(
+            app,
+            ["run", "--workflow", _write_workflow(tmp_path), "--host", "127.0.0.1:9100", "--port", "9200"],
+            env={"COMFY_WHERE": "local"},
+        )
+    assert result.exit_code == 0, result.output
+    args, _ = mock_execute.call_args
+    # positional args of execute - workflow, host, port, ...
+    assert args[1] == "127.0.0.1"
+    assert args[2] == 9200
+
+
+def test_jobs_status_out_of_range_port_is_rejected():
+    """The guard lives in the shared resolver, so the `comfy jobs` sites — which
+    have no combined-host form — inherit it without their own check."""
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    with patch("comfy_cli.command.jobs._server_or_error") as mock_probe:
+        result = CliRunner().invoke(app, ["jobs", "status", "abc123", "--port", "0"])
+    assert result.exit_code == 2, result.output
+    mock_probe.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# explicit-flag validation at the shared choke point
+# ---------------------------------------------------------------------------
+#
+# `resolve_local_host_port` resolves each half as `value or env or bg or
+# DEFAULT`, so every FALSY explicit flag reads as "not passed" and silently
+# retargets the request at a different server. `resolve_host_port` therefore
+# validates an explicitly-passed host/port BEFORE that chain runs.
+
+
+def test_empty_host_flag_is_rejected():
+    """`--host ""` (a wrapper interpolating an unset variable) must error, not
+    fall through to the env/background/default server."""
+    with pytest.raises(typer.BadParameter, match="empty host"):
+        resolve_host_port("", None)
+
+
+def test_blank_host_flag_is_rejected():
+    with pytest.raises(typer.BadParameter, match="empty host"):
+        resolve_host_port("   ", None)
+
+
+@pytest.mark.parametrize("bad_port", [0, -1, 65536, 99999])
+def test_out_of_range_port_flag_is_rejected(bad_port):
+    with pytest.raises(typer.BadParameter, match="out of range"):
+        resolve_host_port(None, bad_port)
+
+
+def test_none_host_and_port_still_resolve(monkeypatch):
+    """The guards fire only on an EXPLICIT value — `None` still means absent."""
+    monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+    with patch("comfy_cli.host_port.ConfigManager") as cm:
+        cm.return_value.background = None
+        assert resolve_host_port(None, None) == (DEFAULT_HOST, DEFAULT_PORT)
+
+
+def test_boundary_ports_are_accepted(monkeypatch):
+    monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+    with patch("comfy_cli.host_port.ConfigManager") as cm:
+        cm.return_value.background = None
+        assert resolve_host_port(None, 1)[1] == 1
+        assert resolve_host_port(None, 65535)[1] == 65535
+
+
+# ---------------------------------------------------------------------------
+# A host/port usage error terminates the JSON/NDJSON stream
+# ---------------------------------------------------------------------------
+#
+# `typer.BadParameter` used to escape straight to click, which prints a human
+# usage panel on stderr and exits 2 with ZERO bytes on stdout — so a machine
+# consumer just saw the stream stop, while every other failure on these same
+# commands ends with an `ok:false` envelope. `report_usage_error` emits that
+# terminating envelope first and re-raises, so exit 2 is unchanged.
+
+
+def _usage_envelope(result) -> dict:
+    """Assert exit 2 + a terminating error envelope as stdout's LAST line."""
+    assert result.exit_code == 2, result.stdout + result.stderr
+    lines = result.stdout.strip().splitlines()
+    assert lines, f"stdout was empty; stderr:\n{result.stderr}"
+    env = json.loads(lines[-1])
+    assert env["type"] == "envelope"
+    assert env["ok"] is False
+    assert env["error"]["code"] == "host_port_invalid"
+    # The hint falls back to the registry entry, so agents always get a next step.
+    assert env["error"]["hint"]
+    return env
+
+
+def _invoke(args, **kwargs):
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    return CliRunner(mix_stderr=False).invoke(app, args, **kwargs)
+
+
+def test_run_json_bad_port_terminates_with_envelope(tmp_path):
+    with patch("comfy_cli.command.run.execute") as mock_execute:
+        result = _invoke(
+            ["run", "--json", "--workflow", _write_workflow(tmp_path), "--port", "0"],
+            env={"COMFY_WHERE": "local"},
+        )
+    env = _usage_envelope(result)
+    assert env["command"] == "run"
+    assert "out of range" in env["error"]["message"]
+    mock_execute.assert_not_called()
+
+
+def test_run_json_bad_host_terminates_with_envelope(tmp_path):
+    with patch("comfy_cli.command.run.execute") as mock_execute:
+        result = _invoke(
+            ["run", "--json", "--workflow", _write_workflow(tmp_path), "--host", "x/@y"],
+            env={"COMFY_WHERE": "local"},
+        )
+    env = _usage_envelope(result)
+    assert "invalid host" in env["error"]["message"]
+    mock_execute.assert_not_called()
+
+
+def test_validate_json_mode_bad_port_terminates_with_envelope(tmp_path):
+    """Single-envelope JSON mode has the identical gap — the guard is
+    `is_json()` (JSON *and* NDJSON), not `is_stream()`."""
+    result = _invoke(
+        ["validate", "--workflow", _write_workflow(tmp_path), "--port", "0"],
+        env={"COMFY_OUTPUT": "json", "COMFY_WHERE": "local"},
+    )
+    env = _usage_envelope(result)
+    assert env["command"] == "validate"
+
+
+def test_jobs_ls_auto_selected_json_bad_port_terminates_with_envelope():
+    """No `--json` flag: a non-TTY stdout auto-selects JSON mode, and the gap
+    was just as invisible there (`comfy jobs ls --port 0 | cat`)."""
+    with patch("comfy_cli.command.jobs._server_or_error") as mock_probe:
+        result = _invoke(["jobs", "ls", "--port", "0"])
+    env = _usage_envelope(result)
+    # `jobs ls`, not `jobs`: the failure line must carry the same `command` as
+    # the success envelope so a consumer can dispatch on one value.
+    assert env["command"] == "jobs ls"
+    mock_probe.assert_not_called()
+
+
+def test_nodes_bad_port_terminates_with_envelope():
+    result = _invoke(["nodes", "ls", "--port", "0"], env={"COMFY_WHERE": "local"})
+    assert _usage_envelope(result)["command"] == "nodes"
+
+
+def test_upload_bad_port_terminates_with_envelope(tmp_path):
+    f = tmp_path / "img.png"
+    f.write_bytes(b"\x89PNG\r\n")
+    with patch("comfy_cli.command.transfer._upload_file") as mock_upload:
+        result = _invoke(["upload", str(f), "--port", "0"], env={"COMFY_WHERE": "local"})
+    assert _usage_envelope(result)["command"] == "upload"
+    mock_upload.assert_not_called()
+
+
+def test_upload_bad_host_terminates_with_envelope(tmp_path):
+    f = tmp_path / "img.png"
+    f.write_bytes(b"\x89PNG\r\n")
+    with patch("comfy_cli.command.transfer._upload_file") as mock_upload:
+        result = _invoke(["upload", str(f), "--host", "x/@y"], env={"COMFY_WHERE": "local"})
+    assert "invalid host" in _usage_envelope(result)["error"]["message"]
+    mock_upload.assert_not_called()
+
+
+def test_pretty_mode_prints_the_message_once_and_nothing_on_stdout():
+    """Pretty mode emits nothing extra: click still prints the usage panel to
+    stderr exactly once, and stdout stays empty (no envelope)."""
+    result = _invoke(["jobs", "ls", "--port", "0"], env={"COMFY_OUTPUT": "pretty"})
+    assert result.exit_code == 2
+    assert result.stdout.strip() == ""
+    assert result.stderr.count("out of range") == 1
+
+
+def test_execute_upload_direct_call_emits_envelope(tmp_path):
+    """`transfer.execute_upload`'s defence-in-depth guard fires for direct
+    callers (comfy-mcp's `_with_target`), which never go through click — so the
+    envelope is the ONLY machine-readable signal they get."""
+    from comfy_cli.command.transfer import execute_upload
+
+    buf = io.StringIO()
+    r = Renderer(mode=OutputMode.JSON, command="upload")
+    r.machine_stream = buf
+    set_renderer(r)
+
+    f = tmp_path / "img.png"
+    f.write_bytes(b"\x89PNG\r\n")
+    with pytest.raises(typer.BadParameter):
+        execute_upload([str(f)], where="local", port=0)
+
+    env = json.loads(buf.getvalue().strip().splitlines()[-1])
+    assert env["ok"] is False
+    assert env["error"]["code"] == "host_port_invalid"
+
+
+def test_report_usage_error_is_a_no_op_for_a_pretty_renderer():
+    """Library use (`comfy_cli` imported, no CLI entry) leaves the singleton in
+    pretty mode — the helper must then write nothing and just re-raise."""
+    from comfy_cli.host_port import report_usage_error
+
+    buf = io.StringIO()
+    r = Renderer(mode=OutputMode.PRETTY)
+    r.machine_stream = buf
+    with pytest.raises(typer.BadParameter, match="boom"):
+        with report_usage_error(r):
+            raise typer.BadParameter("boom")
+    assert buf.getvalue() == ""
+
+
+def test_report_usage_error_lets_a_non_badparameter_through_untouched():
+    """Only a usage error is translated — an unrelated exception must not be
+    relabelled as a host/port problem."""
+    from comfy_cli.host_port import report_usage_error
+
+    buf = io.StringIO()
+    r = Renderer(mode=OutputMode.JSON)
+    r.machine_stream = buf
+    with pytest.raises(RuntimeError):
+        with report_usage_error(r):
+            raise RuntimeError("unrelated")
+    assert buf.getvalue() == ""
+
+
+def test_a_broken_stdout_does_not_displace_the_usage_error():
+    """The envelope is best-effort and must never REPLACE the error it reports.
+
+    `Renderer._write_json_line` lets `OSError`/`BrokenPipeError` propagate on
+    purpose. Without the guard, `comfy jobs ls --port 0 | head -1` would swap
+    the `BadParameter` for a `BrokenPipeError`, click would never render the
+    usage panel, and the exit code would stop being the documented 2.
+    """
+    from comfy_cli.host_port import report_usage_error
+
+    class BrokenStream(io.StringIO):
+        def write(self, s):
+            raise BrokenPipeError(32, "Broken pipe")
+
+    r = Renderer(mode=OutputMode.JSON)
+    r.machine_stream = BrokenStream()
+    with pytest.raises(typer.BadParameter, match="invalid port"):
+        with report_usage_error(r):
+            raise typer.BadParameter("invalid port: 0 is out of range (1-65535)")
+
+
+def test_credentials_in_a_rejected_host_are_redacted_from_the_envelope():
+    """`validate_host` echoes the rejected value with `{host!r}`, so a
+    `user:pass@host` would otherwise land verbatim in the JSON stream that
+    agent harnesses capture and persist."""
+    from comfy_cli.host_port import report_usage_error
+
+    buf = io.StringIO()
+    r = Renderer(mode=OutputMode.JSON)
+    r.machine_stream = buf
+    with pytest.raises(typer.BadParameter):
+        with report_usage_error(r):
+            validate_host("user:s3cret@server")
+
+    message = json.loads(buf.getvalue().strip().splitlines()[-1])["error"]["message"]
+    assert "s3cret" not in message
+    assert "***@" in message
+
+
+def test_report_usage_error_command_overrides_the_renderer_default():
+    from comfy_cli.host_port import report_usage_error
+
+    buf = io.StringIO()
+    r = Renderer(mode=OutputMode.JSON, command="jobs")
+    r.machine_stream = buf
+    with pytest.raises(typer.BadParameter):
+        with report_usage_error(r, command="jobs status"):
+            raise typer.BadParameter("nope")
+    assert json.loads(buf.getvalue().strip().splitlines()[-1])["command"] == "jobs status"

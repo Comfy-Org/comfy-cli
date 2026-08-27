@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from comfy_cli import comfy_client, jobs_state
-from comfy_cli.comfy_client import extract_output_entries
+from comfy_cli.comfy_client import extract_output_entries, extract_text_outputs
 from comfy_cli.command import transfer
 from comfy_cli.output import Renderer, set_renderer
 from comfy_cli.output.renderer import OutputMode, reset_renderer_for_testing
@@ -232,6 +232,52 @@ class TestExtractOutputEntries:
         assert outputs[0]["url"] == "https://cloud.example.com/api/view?filename=ComfyUI_a.png&subfolder=&type=output"
 
 
+class TestExtractTextOutputs:
+    """Text/STRING node outputs (GeminiNode descriptions, ShowText, …) live as
+    bare-string lists under ``outputs[node]["text"]`` — a shape the media-key
+    flatten drops. This pure helper groups them by node id."""
+
+    def test_groups_text_by_node(self):
+        record = {
+            "outputs": {
+                "7": {"text": ["a cat sitting on a mat", "second string"]},
+                "9": {"images": [{"filename": "x.png", "type": "output"}]},
+                "11": {"text": ["only line"]},
+            }
+        }
+        assert extract_text_outputs(record) == {
+            "7": ["a cat sitting on a mat", "second string"],
+            "11": ["only line"],
+        }
+
+    def test_no_text_yields_empty(self):
+        # A completed run with only media outputs -> {} (never raises).
+        record = {"outputs": {"9": {"images": [{"filename": "x.png", "type": "output"}]}}}
+        assert extract_text_outputs(record) == {}
+        assert extract_text_outputs({}) == {}
+        assert extract_text_outputs({"outputs": {}}) == {}
+
+    def test_non_list_text_is_skipped(self):
+        # Some nodes stash a bare string under "text"; only lists are kept.
+        assert extract_text_outputs({"outputs": {"7": {"text": "not a list"}}}) == {}
+        assert extract_text_outputs({"outputs": {"7": {"text": None}}}) == {}
+
+    def test_mixed_type_items_keep_only_strings(self):
+        record = {"outputs": {"7": {"text": ["keep", 42, None, {"nested": 1}, "also keep"]}}}
+        assert extract_text_outputs(record) == {"7": ["keep", "also keep"]}
+        # A list with no string items drops the node entirely.
+        assert extract_text_outputs({"outputs": {"7": {"text": [1, 2, 3]}}}) == {}
+
+    def test_non_dict_outputs_and_nodes_tolerated(self):
+        assert extract_text_outputs({"outputs": "garbage"}) == {}
+        assert extract_text_outputs({"outputs": None}) == {}
+        assert extract_text_outputs({"outputs": {"7": "garbage", "9": {"text": ["ok"]}}}) == {"9": ["ok"]}
+
+    def test_node_ids_coerced_to_str(self):
+        # /history keys can arrive as ints in some serializations.
+        assert extract_text_outputs({"outputs": {7: {"text": ["x"]}}}) == {"7": ["x"]}
+
+
 GLB_RECORD = {
     "status": {"completed": True, "status_str": "success"},
     "outputs": {"10": {"3d": [{"filename": "abc123.glb", "subfolder": "3d", "type": "output"}]}},
@@ -239,7 +285,7 @@ GLB_RECORD = {
 
 
 class TestSaveGlb3dDownload:
-    """Regression (BE-4417): a SaveGLB job emits its output under the "3d"
+    """Regression: a SaveGLB job emits its output under the "3d"
     key. Shape-based extraction must resolve it so `comfy download` saves the
     `.glb` instead of erroring `download_no_outputs`."""
 
@@ -918,7 +964,7 @@ class TestSSRFGuardIntact:
 
 class TestDownloadHelperExtraction:
     """Direct, guard-pinning unit tests for the per-URL helpers extracted from
-    ``execute_download`` (BE-3273): ``_download_one_url`` orchestrates naming +
+    ``execute_download``: ``_download_one_url`` orchestrates naming +
     the symlink-dest refusal + branch dispatch; ``_copy_local_one`` and
     ``_stream_http_one`` carry the two download branches. The behavior-preserving
     extraction must keep every guard, envelope code, and exit intact — and the
@@ -1231,8 +1277,7 @@ class TestDownloadExtensionSanitized:
     query param (a compromised/malicious server). Unlike the `item` token, it
     was never sanitized, so control/ANSI bytes reached the on-disk name and
     the echoed path — a terminal-injection vector in human mode. `_sanitize_ext`
-    whitelists it to a safe charset while preserving the no-traversal guarantee
-    (BE-3326)."""
+    whitelists it to a safe charset while preserving the no-traversal guarantee."""
 
     # A real ESC control byte, exactly as a hostile server could return it.
     _ATTACK_NAME = "out.png\x1b[31mHACK"
@@ -1303,7 +1348,7 @@ class TestDownloadExtensionSanitized:
 
     def test_local_source_control_bytes_stripped_from_ext(self, fake_target, tmp_path, capsys):
         # The local-copy branch derives `ext` from the on-disk source name and
-        # must be sanitized too (BE-3326 applies to both branches).
+        # must be sanitized too (the rule applies to both branches).
         src_dir = tmp_path / "output"
         src_dir.mkdir()
         src = src_dir / self._ATTACK_NAME

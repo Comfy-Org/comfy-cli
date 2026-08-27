@@ -1,4 +1,4 @@
-"""Guardrail: every ``comfy …`` we print must be a command that exists (BE-2996).
+"""Guardrail: every ``comfy …`` we print must be a command that exists.
 
 The audit found eight help/hint strings pointing users at ``comfy auth login``,
 which has never been a command — the real one is ``comfy cloud login``. Nothing
@@ -170,7 +170,7 @@ def test_valid_mentions_pass(text, tree, globals_):
 @pytest.mark.parametrize(
     ("text", "unknown"),
     [
-        ("comfy auth login", "login"),  # the BE-2996 regression itself
+        ("comfy auth login", "login"),  # the original regression itself
         ("comfy cloud singin", "singin"),
         ("comfy nope", "nope"),
         ("comfy model downlaod --url x", "downlaod"),

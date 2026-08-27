@@ -1,3 +1,4 @@
+import contextlib
 import os
 import pathlib
 import platform
@@ -12,8 +13,13 @@ import typer
 from rich.console import Console
 
 from comfy_cli import constants, logging, tracking, ui, utils
+from comfy_cli._safe_exec import BinaryNotFoundError
 from comfy_cli.command.custom_nodes.bisect_custom_nodes import bisect_app
-from comfy_cli.command.custom_nodes.cm_cli_util import execute_cm_cli, find_cm_cli
+from comfy_cli.command.custom_nodes.cm_cli_util import (
+    execute_cm_cli,
+    find_cm_cli,
+    normalize_cm_cli_exit_code,
+)
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import NODE_ZIP_FILENAME
 from comfy_cli.file_utils import (
@@ -23,10 +29,11 @@ from comfy_cli.file_utils import (
     upload_file_to_signed_url,
     zip_files,
 )
+from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
-from comfy_cli.output.renderer import get_renderer
 from comfy_cli.registry import (
     RegistryAPI,
+    RegistryAPIError,
     extract_node_configuration,
     initialize_project_config,
 )
@@ -115,14 +122,12 @@ def get_installed_packages():
 
 def try_install_script(repo_path, install_cmd, instant_execution=False):
     startup_script_path = os.path.join(workspace_manager.workspace_path, "startup-scripts")
+    # Windows always defers to the startup script. ComfyUI-Manager additionally
+    # gated this on the ComfyUI checkout being newer than a required commit;
+    # that comparison was deliberately dropped (Yoland) because comfy-cli tracks
+    # no required-commit datetime to compare against.
     if not instant_execution and (
-        (len(install_cmd) > 0 and install_cmd[0].startswith("#"))
-        or (
-            platform.system() == "Windows"
-            # From Yoland: disable commit compare
-            # and comfy_ui_commit_datetime.date()
-            # >= comfy_ui_required_commit_datetime.date()
-        )
+        (len(install_cmd) > 0 and install_cmd[0].startswith("#")) or platform.system() == "Windows"
     ):
         if not os.path.exists(startup_script_path):
             os.makedirs(startup_script_path)
@@ -134,26 +139,15 @@ def try_install_script(repo_path, install_cmd, instant_execution=False):
 
         return True
     else:
-        # From Yoland: Disable blacklisting
-        # if len(install_cmd) == 5 and install_cmd[2:4] == ['pip', 'install']:
-        #     if is_blacklisted(install_cmd[4]):
-        #         print(f"[ComfyUI-Manager] skip black listed pip installation: '{install_cmd[4]}'")
-        #         return True
-
+        # ComfyUI-Manager screened pip installs against a package blacklist here.
+        # Deliberately not carried over (Yoland): comfy-cli ships no blacklist,
+        # so every install command runs as given.
         print(f"\n## ComfyUI-Manager: EXECUTE => {install_cmd}")
         code = run_script(install_cmd, cwd=repo_path)
 
-        # From Yoland: Disable warning
-        # if platform.system() != "Windows":
-        #     try:
-        #         if comfy_ui_commit_datetime.date() < comfy_ui_required_commit_datetime.date():
-        #             print("\n\n###################################################################")
-        #             print(f"[WARN] ComfyUI-Manager: Your ComfyUI version ({comfy_ui_revision})[{comfy_ui_commit_datetime.date()}] is too old. Please update to the latest version.")
-        #             print(f"[WARN] The extension installation feature may not work properly in the current installed ComfyUI version on Windows environment.")
-        #             print("###################################################################\n\n")
-        #     except:
-        #         pass
-
+        # ComfyUI-Manager also warned on non-Windows when the ComfyUI checkout
+        # was older than the required commit. Dropped for the same reason as
+        # above — there is no required-commit datetime here.
         if code != 0:
             print("install script failed")
             return False
@@ -163,12 +157,10 @@ def execute_install_script(repo_path):
     install_script_path = os.path.join(repo_path, "install.py")
     requirements_path = os.path.join(repo_path, "requirements.txt")
 
-    # From Yoland: disable lazy mode
-    # if lazy_mode:
-    #     install_cmd = ["#LAZY-INSTALL-SCRIPT",  sys.executable]
-    #     try_install_script(repo_path, install_cmd)
-    # else:
-
+    # ComfyUI-Manager's "lazy mode" — queueing a #LAZY-INSTALL-SCRIPT marker for
+    # the next startup instead of installing now — was deliberately not carried
+    # over (Yoland). comfy-cli installs eagerly so failures surface in the
+    # command that caused them rather than on some later launch.
     if os.path.exists(requirements_path):
         print("Install: pip packages")
         python = resolve_workspace_python(workspace_manager.workspace_path)
@@ -219,6 +211,15 @@ def restore_snapshot(
         show_default=False,
         help="Restore for pip packages specified by local paths.",
     ),
+    fast_deps: Annotated[
+        bool,
+        typer.Option(
+            "--fast-deps",
+            show_default=False,
+            help="Use the fast (uv) dependency installer, matching `comfy install --fast-deps`. "
+            "For snapshot restore this runs the uv-compile fast path (requires ComfyUI-Manager v4.1+).",
+        ),
+    ] = False,
     uv_compile: Annotated[
         bool | None,
         typer.Option(
@@ -228,6 +229,16 @@ def restore_snapshot(
         ),
     ] = None,
 ):
+    # `--fast-deps` mirrors the `comfy install --fast-deps` UX (issue #217). cm_cli's
+    # `restore-snapshot` does NOT accept `--no-deps`, so the DependencyCompiler-based
+    # fast path used by `install`/`reinstall` is unavailable here; the fast uv path
+    # restore-snapshot *does* support is `--uv-compile` (it sets no-deps + batch-resolves
+    # with uv internally). So `--fast-deps` forwards the uv-compile fast path. Passing it
+    # alongside an explicit `--no-uv-compile` is contradictory.
+    if fast_deps and uv_compile is False:
+        typer.echo("Cannot use --fast-deps with --no-uv-compile", err=True)
+        raise typer.Exit(code=1)
+
     extras = []
 
     if pip_non_url:
@@ -239,8 +250,12 @@ def restore_snapshot(
     if pip_local_url:
         extras += ["--pip-local-url"]
 
+    effective_uv_compile = _resolve_uv_compile(uv_compile)
+    if fast_deps:
+        effective_uv_compile = True
+
     path = os.path.abspath(path)
-    execute_cm_cli(["restore-snapshot", path] + extras, uv_compile=_resolve_uv_compile(uv_compile))
+    execute_cm_cli(["restore-snapshot", path] + extras, uv_compile=effective_uv_compile)
 
 
 @app.command("restore-dependencies", help="Restore dependencies from installed custom nodes")
@@ -281,7 +296,7 @@ def enable_gui():
 @manager_app.command("disable-gui", help="Disable the ComfyUI-Manager GUI (Manager stays enabled, headless)")
 @tracking.track_command("node")
 def disable_gui():
-    """Enable ComfyUI-Manager but disable its GUI."""
+    """Disable the ComfyUI-Manager GUI. Manager stays enabled, headless."""
     config_manager = ConfigManager()
     config_manager.set(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable-gui")
     print("[bold green]ComfyUI-Manager enabled with GUI disabled.[/bold green]")
@@ -640,19 +655,64 @@ def install(
     else:
         cmd = ["install"] + nodes
 
+    renderer = get_renderer()
+    # execute_cm_cli streams cm-cli's raw output to sys.stdout; in JSON/NDJSON
+    # mode stdout is reserved for the single envelope, so route the stream to
+    # stderr (mirrors pack_scan._read_pyproject and outdated._core_latest).
+    stream_ctx = contextlib.nullcontext() if renderer.is_pretty() else contextlib.redirect_stdout(sys.stderr)
     try:
-        execute_cm_cli(
-            cmd,
-            channel=channel,
-            fast_deps=fast_deps,
-            no_deps=no_deps,
-            uv_compile=effective_uv_compile,
-            mode=mode,
-            raise_on_error=exit_on_fail,
-        )
+        with stream_ctx:
+            execute_cm_cli(
+                cmd,
+                channel=channel,
+                fast_deps=fast_deps,
+                no_deps=no_deps,
+                uv_compile=effective_uv_compile,
+                mode=mode,
+                raise_on_error=exit_on_fail,
+            )
     except subprocess.CalledProcessError as e:
-        if exit_on_fail:
-            raise typer.Exit(code=e.returncode)
+        if not exit_on_fail:
+            # execute_cm_cli re-raises unexpected exit codes even with raise_on_error
+            # off; keep surfacing those instead of swallowing them here (mirrors the
+            # `comfy update all` handler in cmdline.py).
+            raise
+        raw = e.returncode
+        code = normalize_cm_cli_exit_code(raw)
+        failed_argv = e.cmd if isinstance(e.cmd, list | tuple) else [e.cmd]
+        ran_cm_cli = any(str(part).replace("-", "_") == "cm_cli" for part in failed_argv)
+        if fast_deps and not ran_cm_cli:
+            # With --fast-deps, execute_cm_cli runs DependencyCompiler after cm-cli
+            # succeeds; a pip/uv failure there is not a cm-cli failure — the packs
+            # themselves installed.
+            message = (
+                f"dependency installation after `cm-cli install` failed with exit code {raw} "
+                "(the packs installed; their dependencies did not)."
+            )
+            hint = (
+                "see the pip/uv output above for the failing dependency; "
+                "re-run `comfy node install --fast-deps --exit-on-fail ...` to retry"
+            )
+            details = {"returncode": raw, "failed_stage": "dependency-install"}
+        else:
+            if raw < 0:
+                message = f"`cm-cli install` was killed by signal {-raw}."
+            else:
+                message = f"`cm-cli install` failed with exit code {raw}."
+            hint = (
+                "see the cm-cli output above for the failing pack; "
+                "re-run `comfy node install --exit-on-fail ...` to retry"
+            )
+            details = {"cm_cli_returncode": raw, "failed_stage": "cm-cli"}
+        renderer.error(
+            code="node_install_failed",
+            message=message,
+            hint=hint,
+            details=details,
+            exit_code=code,
+            command="node install",
+        )
+        raise typer.Exit(code=code) from e
 
 
 @app.command(help="Reinstall custom nodes")
@@ -1002,12 +1062,40 @@ def deps(
             autocompletion=installed_pack_completer,
         ),
     ] = None,
+    registry: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--registry",
+            show_default=False,
+            help=(
+                "Registry node id of a NOT-yet-installed pack to include, so its declared dependencies can be "
+                "checked for conflicts before installing. Repeatable, and additive with the pack names above. "
+                "Always reports the pack's LATEST published version: the registry exposes no read-only endpoint "
+                "for a pinned version's dependencies. Installs nothing."
+            ),
+            autocompletion=node_completer,
+        ),
+    ] = None,
+    refresh: Annotated[
+        bool,
+        typer.Option(
+            "--refresh",
+            help="Bypass the 1h cache of registry lookups (only affects --registry).",
+        ),
+    ] = False,
 ):
-    # Native + read-only on purpose: no cm-cli, no pip install, no network, so
-    # it works on a workspace that never installed ComfyUI-Manager.
+    # Native + read-only on purpose: no cm-cli, no pip install, and no network
+    # at all unless --registry is passed (a side-effect-free GET /nodes/{id}) —
+    # so it works on a workspace that never installed ComfyUI-Manager.
     from comfy_cli.command import node_deps
 
-    node_deps.execute(get_renderer(), workspace_manager.workspace_path, pack_names)
+    node_deps.execute(
+        get_renderer(),
+        workspace_manager.workspace_path,
+        pack_names,
+        registry_ids=registry,
+        refresh=refresh,
+    )
 
 
 def validate_node_for_publishing():
@@ -1056,14 +1144,13 @@ def validate_node_for_publishing():
     return config
 
 
-@app.command("validate", help="Run validation checks for publishing")
+@app.command("validate", help="Validate this custom node for registry publishing")
 @tracking.track_command("publish")
 def validate():
     """
     Run validation checks that would be performed during publishing.
     """
     validate_node_for_publishing()
-    # print("[green]✓ All validation checks passed successfully[/green]")
 
 
 def resolve_publish_changelog(changelog: str | None, changelog_file: str | None) -> str:
@@ -1162,8 +1249,15 @@ def publish(
         # Upload the zip file to the signed URL
         typer.echo("Uploading zip file...")
         upload_file_to_signed_url(signed_url, zip_filename)
+    except RegistryAPIError as e:
+        get_renderer().error(
+            code="node_publish_failed",
+            message=str(e),
+            details={"status": e.status, "body": e.body},
+        )
+        raise typer.Exit(code=1) from e
     except Exception as e:
-        ui.display_error_message({str(e)})
+        ui.display_error_message(str(e))
         raise typer.Exit(code=1)
 
 
@@ -1253,15 +1347,33 @@ def registry_install(
     try:
         # Call the API to install the node
         node_version = registry_api.install_node(node_id, version)
-        if not node_version.download_url:
-            logging.error("Download URL not provided from the registry.")
-            ui.display_error_message(f"Failed to download the custom node {node_id}.")
-            return
-
+    except RegistryAPIError as e:
+        logging.error(f"Encountered an error while installing the node. error: {str(e)}")
+        get_renderer().error(
+            code="registry_install_failed",
+            message=f"Failed to download the custom node {node_id}.",
+            details={"node_id": node_id, "status": e.status, "body": e.body},
+        )
+        raise typer.Exit(code=1) from e
     except Exception as e:
         logging.error(f"Encountered an error while installing the node. error: {str(e)}")
-        ui.display_error_message(f"Failed to download the custom node {node_id}.")
-        return
+        get_renderer().error(
+            code="registry_install_failed",
+            message=f"Failed to download the custom node {node_id}.",
+            details={"node_id": node_id},
+        )
+        raise typer.Exit(code=1) from e
+
+    # Checked outside the try: typer.Exit subclasses Exception, so raising it
+    # above would be swallowed by the broad handler and emit a second envelope.
+    if not node_version.download_url:
+        logging.error("Download URL not provided from the registry.")
+        get_renderer().error(
+            code="registry_install_failed",
+            message=f"Failed to download the custom node {node_id}.",
+            details={"node_id": node_id},
+        )
+        raise typer.Exit(code=1)
 
     # Download the node archive
     custom_nodes_path = pathlib.Path(workspace_manager.workspace_path) / "custom_nodes"
@@ -1319,7 +1431,13 @@ def pack():
     if includes:
         typer.echo(f"Including additional directories: {', '.join(includes)}")
 
-    zip_files(zip_filename, includes=includes)
+    try:
+        zip_files(zip_filename, includes=includes)
+    except BinaryNotFoundError as e:
+        # git was found and refused; packing anyway would sweep in untracked and
+        # gitignored files. Abort with the reason rather than a traceback.
+        ui.display_error_message(str(e))
+        raise typer.Exit(code=1) from None
 
     typer.echo(f"Created zip file: {NODE_ZIP_FILENAME}")
     logging.info("Node has been packed successfully.")

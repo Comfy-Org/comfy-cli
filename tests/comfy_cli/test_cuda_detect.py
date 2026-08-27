@@ -1,8 +1,10 @@
+import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from comfy_cli import _safe_exec
 from comfy_cli.cuda_detect import (
     DEFAULT_CUDA_TAG,
     PYTORCH_CUDA_WHEELS,
@@ -67,7 +69,19 @@ class TestDetectViaCtypes:
             assert _detect_via_ctypes() is None
 
 
+_RESOLVED_SMI = os.path.join(os.sep, "usr", "bin", "nvidia-smi")
+
+
 class TestDetectViaNvidiaSmi:
+    @pytest.fixture(autouse=True)
+    def _resolved_nvidia_smi(self):
+        """``_detect_via_nvidia_smi`` resolves ``nvidia-smi`` to an absolute path
+        before spawning it, so these parse-level tests stub the resolution to a
+        fixed path — they then run identically on a machine with no NVIDIA driver
+        installed."""
+        with patch("comfy_cli.cuda_detect._safe_exec.resolve_binary", return_value=_RESOLVED_SMI):
+            yield
+
     def test_happy_path(self):
         output = (
             "Mon Mar 30 12:00:00 2026\n"
@@ -95,6 +109,82 @@ class TestDetectViaNvidiaSmi:
             "comfy_cli.cuda_detect.subprocess.check_output",
             side_effect=subprocess.TimeoutExpired("nvidia-smi", 10),
         ):
+            assert _detect_via_nvidia_smi() is None
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            PermissionError(13, "Permission denied"),
+            OSError(8, "Exec format error"),
+        ],
+        ids=["noexec_or_selinux_denial", "exec_format_error"],
+    )
+    def test_spawn_oserrors_degrade_to_none(self, error):
+        """Spawning a *resolved absolute path* reaches ``OSError`` variants a bare
+        name never did — a probe on a ``noexec`` mount, or a ``+x`` file that is
+        not a valid executable. Both must degrade to ``None`` rather than abort
+        ``comfy install`` with a traceback."""
+        with patch("comfy_cli.cuda_detect.subprocess.check_output", side_effect=error):
+            assert _detect_via_nvidia_smi() is None
+
+
+class TestDetectViaNvidiaSmiResolvesBinaryPath:
+    """``_detect_via_nvidia_smi`` must spawn a resolved absolute path, never the
+    bare name — otherwise Windows' ``CreateProcess`` searches the current working
+    directory first and runs an ``nvidia-smi.exe`` planted there."""
+
+    def test_invokes_resolved_absolute_path(self):
+        captured = {}
+
+        def fake_check_output(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return "| Driver Version: 560.35.03    CUDA Version: 12.6  |\n"
+
+        with (
+            patch.object(_safe_exec.shutil, "which", return_value=_RESOLVED_SMI),
+            patch("comfy_cli.cuda_detect.subprocess.check_output", side_effect=fake_check_output),
+        ):
+            assert _detect_via_nvidia_smi() == (12, 6)
+
+        assert captured["cmd"] == [_RESOLVED_SMI]
+
+    def test_skips_probe_when_binary_absent(self):
+        """A missing binary resolves to None → the probe is skipped entirely and
+        no subprocess is spawned, degrading to the same None as a failed run."""
+        with (
+            patch.object(_safe_exec.shutil, "which", return_value=None),
+            patch("comfy_cli.cuda_detect.subprocess.check_output") as mock_run,
+        ):
+            assert _detect_via_nvidia_smi() is None
+        mock_run.assert_not_called()
+
+    def test_rejects_binary_planted_in_cwd(self, tmp_path):
+        """The attack vector: an ``nvidia-smi`` sitting directly in the CWD is
+        never executed."""
+        planted = tmp_path / "nvidia-smi"
+        planted.write_text("")
+        with (
+            patch.object(_safe_exec.os, "getcwd", return_value=str(tmp_path)),
+            patch.object(_safe_exec.shutil, "which", return_value=str(planted)),
+            patch("comfy_cli.cuda_detect.subprocess.check_output") as mock_run,
+        ):
+            assert _detect_via_nvidia_smi() is None
+        mock_run.assert_not_called()
+
+    def test_never_spawns_a_relative_match(self):
+        """A relative ``which`` result is anchored in the CWD; handing it to
+        ``subprocess`` would re-resolve it there, so the probe is skipped."""
+        with (
+            patch.object(_safe_exec.shutil, "which", return_value=os.path.join("subdir", "nvidia-smi")),
+            patch("comfy_cli.cuda_detect.subprocess.check_output") as mock_run,
+        ):
+            assert _detect_via_nvidia_smi() is None
+        mock_run.assert_not_called()
+
+    def test_resolution_failure_degrades_to_none(self):
+        """A broken PATH lookup keeps the existing degrade-to-None contract — no
+        new exception escapes the probe."""
+        with patch.object(_safe_exec.shutil, "which", side_effect=RuntimeError("boom")):
             assert _detect_via_nvidia_smi() is None
 
 

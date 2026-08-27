@@ -45,6 +45,22 @@ class TestStepBuilders:
         ]:
             assert needle in titles, f"missing coverage for: {needle}"
 
+    def test_whoami_step_targets_cloud_not_auth(self):
+        # Sign-in status lives under `comfy cloud whoami`; `comfy auth` is the
+        # model-host token group. Guard against regressing back to `auth whoami`.
+        state = run_cli._DemoState(workflow_path="/tmp/x.json")
+        steps = run_cli._build_steps(state)
+        whoami = [s for s in steps if "whoami" in s.title.lower()]
+        assert len(whoami) == 1, "expected exactly one whoami demo step"
+        invs = whoami[0].invocations or []
+        assert invs, "whoami step should expose invocations"
+        for inv in invs:
+            assert "whoami" in inv.argv, f"unexpected whoami argv: {inv.argv}"
+            assert "cloud" in inv.argv, f"whoami step must target cloud: {inv.argv}"
+            assert "auth" not in inv.argv, f"whoami step must not use auth: {inv.argv}"
+            assert "cloud whoami" in inv.label, f"unexpected whoami label: {inv.label}"
+            assert "auth whoami" not in inv.label, f"whoami label must not use auth: {inv.label}"
+
     def test_build_steps_includes_parallel_fleet(self):
         state = run_cli._DemoState(workflow_path="/tmp/x.json")
         steps = run_cli._build_steps(state)
@@ -236,9 +252,11 @@ class TestExecute:
 
 
 def test_cloud_print_prompt_does_not_submit(monkeypatch, tmp_path):
-    """--print-prompt on the cloud route prints the graph and never submits."""
-    import typer
+    """--print-prompt on the cloud route prints the graph and never submits.
 
+    It also *returns* rather than raising `typer.Exit(0)` — same termination as
+    the local path's dry run (both exit 0 through the CLI either way).
+    """
     import comfy_cli.comfy_client as cc
     from comfy_cli.command.run import execute_cloud
 
@@ -257,9 +275,7 @@ def test_cloud_print_prompt_does_not_submit(monkeypatch, tmp_path):
     # should return BEFORE Client is even constructed.
     monkeypatch.setattr(cc, "Client", FakeClient)
 
-    with pytest.raises(typer.Exit) as exc:
-        execute_cloud(str(wf), wait=True, print_prompt=True, timeout=5)
-    assert exc.value.exit_code == 0
+    assert execute_cloud(str(wf), wait=True, print_prompt=True, timeout=5) is None
 
 
 if __name__ == "__main__":

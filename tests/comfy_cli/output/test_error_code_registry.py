@@ -44,8 +44,17 @@ def _iter_python_files(root: Path):
         yield p
 
 
+#: ``code=`` is ``renderer.error``'s own kwarg. ``error_code=`` is how
+#: ``comfy_cli.interaction``'s ``require_option`` / ``confirm`` take the code:
+#: that helper deliberately hardcodes none, so each command names its own code
+#: at its own call site (the register-with-first-call-site rule). A command
+#: whose only refusal goes through those helpers would otherwise look like it
+#: registered an orphan.
+_CODE_KWARGS = frozenset({"code", "error_code"})
+
+
 def _extract_codes_from_call(call: ast.Call) -> list[str]:
-    """Return any string literal passed as ``code=...`` whose shape matches a code.
+    """Return any string literal passed as a code kwarg whose shape matches a code.
 
     Conservative on what counts as a code (must match the snake_case pattern)
     so we don't accept random ``code=1`` ints (e.g. ``typer.Exit(code=1)``) or
@@ -53,7 +62,7 @@ def _extract_codes_from_call(call: ast.Call) -> list[str]:
     """
     out: list[str] = []
     for kw in call.keywords:
-        if kw.arg != "code":
+        if kw.arg not in _CODE_KWARGS:
             continue
         if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
             value = kw.value.value
@@ -194,6 +203,36 @@ def test_every_registered_code_is_raised(raised_codes):
     dead = [c for c in error_codes.all_codes() if c not in raised_codes]
     assert not dead, (
         f"Registered but never raised:\n{dead}\nEither delete these from comfy_cli/error_codes.REGISTRY or use them."
+    )
+
+
+def test_every_build_code_has_a_first_call_site(raised_codes):
+    """The ``build_*`` family is filled in one code at a time, under this rule:
+
+        Each error code is registered in the same change that introduces its
+        first call site. No change pre-registers codes for later ones.
+
+    Pre-registering is not a harmless head start. ``comfy discover`` publishes the
+    registry verbatim, so a code with no call site advertises a branch to agents
+    that nothing can ever take — a documented promise the CLI cannot keep.
+
+    :func:`test_every_registered_code_is_raised` already rejects an orphan anywhere
+    in the registry; this narrows that direction to the build family so the failure
+    names the rule that was broken instead of dropping a bare code into a flat list
+    shared with every other subsystem.
+
+    If this fails: move the registration into the change that raises the code.
+    """
+    BUILD_PREFIX = "build_"
+    build_codes = [c for c in error_codes.all_codes() if c.startswith(BUILD_PREFIX)]
+    # Guards the orphan check below against a silently empty enumeration.
+    assert build_codes, f"no {BUILD_PREFIX}* codes found in the registry — this guard would pass vacuously"
+
+    orphans = sorted(c for c in build_codes if c not in raised_codes)
+    assert not orphans, (
+        f"Registered with no call site under comfy_cli/: {orphans}\n"
+        "Each error code is registered in the same change that introduces its first call site. "
+        "Move the registration into the change that raises it, or wire up the call site now."
     )
 
 

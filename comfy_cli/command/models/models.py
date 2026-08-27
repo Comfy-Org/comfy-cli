@@ -1,17 +1,20 @@
 import contextlib
+import ntpath
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from typing import Annotated
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse, urlsplit, urlunsplit
 
-import requests
 import typer
 from rich.markup import escape
 
 from comfy_cli import constants, download_state, tracking, ui
+from comfy_cli.command.models import search as models_search_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
 from comfy_cli.file_utils import (
@@ -19,10 +22,12 @@ from comfy_cli.file_utils import (
     DownloadException,
     _friendly_network_error,
     check_unauthorized,
+    cleanup_partials,
     download_file,
 )
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
+from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.workspace_manager import WorkspaceManager
 
 app = typer.Typer()
@@ -60,6 +65,124 @@ def _format_elapsed(seconds: float) -> str:
 
 def potentially_strip_param_url(path_name: str) -> str:
     return path_name.split("?")[0]
+
+
+def _download_failure(
+    *,
+    code: str,
+    message: str,
+    hint: str | None = None,
+    details: dict | None = None,
+) -> typer.Exit:
+    """Emit an ``envelope/1`` error for a `model download` failure and return the
+    ``typer.Exit`` the caller should raise.
+
+    Every failure path in :func:`download` funnels through here so a `--json`
+    consumer always gets a machine-readable ``error.code`` and a non-zero exit —
+    never a bare exit that an envelope-synthesizing wrapper would read as a
+    success for a download that never happened.
+
+    In pretty mode ``renderer.error`` renders the red error panel, so call sites
+    do not print the message themselves. Rich builds the panel body from
+    ``rich.text.Text``, which is literal, so a message containing markup
+    metacharacters (``[/]``) neither crashes nor gets swallowed — no ``escape()``
+    needed.
+
+    ``code`` is keyword-only on purpose: the registry test
+    (``tests/comfy_cli/output/test_error_code_registry.py``) AST-scans for
+    ``code="..."`` keywords, so a positional call site would silently drop out of
+    the both-ways registry enforcement.
+    """
+    get_renderer().error(
+        code=code,
+        message=message,
+        hint=hint,
+        details=details,
+        command="model download",
+    )
+    failure = typer.Exit(code=1)
+    # `typer.Exit` carries an exit code and nothing else, so `str(exc)` is empty.
+    # The foreground claim record wants the same text the user just saw in its
+    # `error` field; stash it here rather than have every raise site thread the
+    # message out by hand.
+    failure.comfy_error_message = message
+    return failure
+
+
+def _scrub_url(url: str) -> str:
+    """Drop the query string, fragment and userinfo from *url*.
+
+    CivitAI download links carry the API token as ``?token=`` — ``tracking._scrub_value``
+    already strips it before telemetry, and an error envelope is a *louder* channel
+    than telemetry (agent/MCP wrappers capture and log stdout verbatim), so the same
+    scrubbing applies to anything we put in ``error.details`` or a log line.
+    """
+    if not isinstance(url, str):
+        return url
+    try:
+        parts = urlsplit(url)
+    except ValueError:  # malformed authority (e.g. an unbracketed IPv6 literal)
+        return url.partition("?")[0].partition("#")[0]
+    if not parts.scheme:
+        return url.partition("?")[0].partition("#")[0]
+    return urlunsplit((parts.scheme, parts.netloc.rpartition("@")[2], parts.path, "", ""))
+
+
+def _reject_unsafe_component(value: str | None, *, label: str, url: str) -> None:
+    """Fail the download if *value* is anything but a single, inert path component.
+
+    ``local_filename`` and ``basemodel`` are joined into the destination path, and
+    both can come straight off the CivitAI API response (``file["name"]``,
+    ``version["baseModel"]``) — which is remote input, accepted without a prompt in
+    non-interactive runs. ``pathlib``/``os.path.join`` do not sanitize ``..`` or an
+    absolute component, so an unvalidated value writes outside the workspace.
+
+    Subdirectories are still reachable — via ``--relative-path``, which is the
+    option that exists for choosing the destination directory — so this rejects a
+    traversal without removing the capability.
+    """
+    if not value:
+        return
+    unsafe = (
+        value in (".", "..")
+        or os.path.isabs(value)
+        or bool(ntpath.splitdrive(value)[0])
+        or "/" in value
+        or "\\" in value
+    )
+    if unsafe:
+        raise _download_failure(
+            code="invalid_argument",
+            message=f"Unsafe {label}: {value!r} is not a plain name (it contains a path separator, a drive, or '..').",
+            hint="use `--relative-path <dir>` to choose the destination directory and `--filename <name>` for a plain name",
+            details={"url": _scrub_url(url), label: value},
+        )
+
+
+def _resolve_civitai_source(fetch, url: str):
+    """Run a CivitAI metadata lookup, converting any failure into an error envelope.
+
+    The lookups raise on HTTP/parse errors and ``request_civitai_model_version_api``
+    returns ``None`` when the version carries no primary file; both used to escape
+    as an unhandled traceback with no envelope.
+    """
+    try:
+        resolved = fetch()
+    except Exception as e:
+        raise _download_failure(
+            code="download_failed",
+            message=f"Could not resolve a downloadable file from the CivitAI URL: {e}",
+            hint="check the model/version exists and is public; a private model needs --set-civitai-api-token",
+            details={"url": _scrub_url(url), "stage": "resolve"},
+        ) from None
+    if resolved is None:
+        raise _download_failure(
+            code="download_failed",
+            message="The CivitAI model version has no primary file to download.",
+            hint="pick a version that has a primary file, or pass its direct download URL",
+            details={"url": _scrub_url(url), "stage": "resolve"},
+        )
+    return resolved
 
 
 def check_huggingface_url(url: str) -> tuple[bool, str | None, str | None, str | None, str | None]:
@@ -161,6 +284,10 @@ def check_civitai_url(url: str) -> tuple[bool, bool, int | None, int | None]:
 
 
 def request_civitai_model_version_api(version_id: int, headers: dict | None = None):
+    # Imported lazily: requests costs ~30ms to import and this module is on
+    # the import path of every CLI invocation.
+    import requests
+
     # Make a request to the CivitAI API to get the model information
     response = requests.get(
         f"https://civitai.com/api/v1/model-versions/{version_id}",
@@ -180,6 +307,8 @@ def request_civitai_model_version_api(version_id: int, headers: dict | None = No
 
 
 def request_civitai_model_api(model_id: int, version_id: int = None, headers: dict | None = None):
+    import requests  # deferred; see request_civitai_model_version_api
+
     # Make a request to the CivitAI API to get the model information
     response = requests.get(f"https://civitai.com/api/v1/models/{model_id}", headers=headers, timeout=10)
     response.raise_for_status()  # Raise an error for bad status codes
@@ -289,7 +418,10 @@ def download(
             headers["Authorization"] = f"Bearer {civitai_api_token}"
 
     if is_civitai_model_url:
-        local_filename, url, model_type, basemodel = request_civitai_model_api(model_id, version_id, headers)
+        local_filename, url, model_type, basemodel = _resolve_civitai_source(
+            lambda: request_civitai_model_api(model_id, version_id, headers), url
+        )
+        _reject_unsafe_component(basemodel, label="basemodel", url=url)
 
         model_path = model_path_map.get(model_type)
 
@@ -299,7 +431,10 @@ def download(
 
             relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
     elif is_civitai_api_url:
-        local_filename, url, model_type, basemodel = request_civitai_model_version_api(version_id, headers)
+        local_filename, url, model_type, basemodel = _resolve_civitai_source(
+            lambda: request_civitai_model_version_api(version_id, headers), url
+        )
+        _reject_unsafe_component(basemodel, label="basemodel", url=url)
 
         model_path = model_path_map.get(model_type)
 
@@ -318,7 +453,14 @@ def download(
             basemodel = ui.prompt_input("Enter base model (e.g. SD1.5, SDXL, ...)", default="")
             relative_path = os.path.join(DEFAULT_COMFY_MODEL_PATH, model_path, basemodel)
     else:
-        print("Model source is unknown")
+        # Neither CivitAI nor Hugging Face — a plain file URL, which IS a supported
+        # source: the download proceeds via download_file() below. This is a note,
+        # not a failure, so it must not short-circuit.
+        # escape() the URL: `print` is Rich's markup-parsing print, and a URL holding
+        # markup metacharacters (`[/]`, or an IPv6 literal like `http://[::1]/x`)
+        # would otherwise raise MarkupError — an uncaught crash with no envelope,
+        # the exact failure mode this command is being hardened against.
+        print(f"Model source is unknown; treating {escape(_scrub_url(url))} as a direct file URL")
 
     if filename is None:
         if local_filename is None:
@@ -331,16 +473,59 @@ def download(
     if relative_path is None:
         relative_path = DEFAULT_COMFY_MODEL_PATH
 
-    if local_filename is None:
-        raise typer.Exit(code=1)
-    if local_filename == "":
-        raise DownloadException("Filename cannot be empty")
+    # None (prompt cancelled / no TTY) and "" (prompting skipped for an agentic
+    # caller, which returns the empty default) are the same failure: nothing to
+    # save the file as. Both used to end without an envelope — a bare exit 1 and
+    # an unhandled DownloadException traceback respectively.
+    if not local_filename:
+        raise _download_failure(
+            code="missing_argument",
+            message="Could not determine a filename to save the model as.",
+            hint="pass `--filename <name>`",
+            details={"url": _scrub_url(url)},
+        )
+
+    _reject_unsafe_component(local_filename, label="filename", url=url)
 
     local_filepath = get_workspace() / relative_path / local_filename
 
+    # A destination-exists check cannot see a transfer that is still in flight: on
+    # the httpx path a background download streams into a `.part` sibling and only
+    # renames onto `dest` at the end, so the destination stays absent for the whole
+    # transfer and two submissions for the same model would both pass, both stream
+    # a full copy, and the later rename would silently overwrite the earlier.
+    #
+    # Ordered *before* `exists()` on purpose: `--downloader aria2` writes straight
+    # to the destination (it owns its own `.aria2` resume control file), so a live
+    # aria2 transfer makes `exists()` true and the caller would get
+    # `model_file_exists` with the hint "remove the existing file" — advice that
+    # deletes the output a running worker is still writing. The accurate refusal
+    # has to win.
+    #
+    # Scope, precisely: this refuses a submission — foreground or `--background` —
+    # into a destination that any live download has claimed, of either kind. It is
+    # kept as a *pre-flight* check even though both submit paths now re-scan after
+    # writing their own claim, because it is what lets the common sequential case
+    # ("I already have this downloading") refuse early, before filename resolution
+    # and an HF round trip, and without leaving a record behind. The post-write
+    # re-scan is the authoritative gate; this one is the cheap one.
+    #
+    # Residual, unchanged and unclosable here: the scan only reads *this*
+    # workspace's state directory, so two invocations from different workspaces
+    # aimed at the same file (via `--relative-path ../..` or an absolute path)
+    # consult disjoint directories and cannot see each other. See
+    # `_active_download_for`.
+    in_flight = _active_download_for(local_filepath)
+    if in_flight is not None:
+        raise _in_flight_failure(in_flight, local_filepath)
+
     if local_filepath.exists():
-        print(f"[bold red]File already exists: {local_filepath}[/bold red]")
-        return
+        raise _download_failure(
+            code="model_file_exists",
+            message=f"File already exists: {local_filepath}",
+            hint="pass `--filename` to save under a different name, or remove the existing file",
+            details={"path": str(local_filepath)},
+        )
 
     start_time = time.monotonic()
 
@@ -351,10 +536,15 @@ def download(
     needs_hf_auth = False
     if is_huggingface_url and check_unauthorized(url, headers):
         if hf_api_token is None:
-            print(
-                f"Unauthorized access to Hugging Face model. Please set the Hugging Face API token using `comfy model download --set-hf-api-token` or via the `{constants.HF_API_TOKEN_ENV_KEY}` environment variable"
+            raise _download_failure(
+                code="hf_unauthorized",
+                message="Unauthorized access to the Hugging Face model, and no Hugging Face API token is configured.",
+                hint=(
+                    "set the token via `comfy model download --set-hf-api-token <token>` or the "
+                    f"`{constants.HF_API_TOKEN_ENV_KEY}` environment variable"
+                ),
+                details={"url": _scrub_url(url), "repo_id": repo_id},
             )
-            return
         needs_hf_auth = True
 
     if background:
@@ -367,39 +557,172 @@ def download(
         )
         return
 
-    if needs_hf_auth:
-        try:
-            import huggingface_hub
-        except ImportError:
-            print("huggingface_hub not found. Installing...")
-            import subprocess
+    # A foreground transfer claims its destination too, for the same reason the
+    # `--background` one does: until it did, it wrote no record and so was
+    # invisible to every other invocation — a second foreground run, or a
+    # `--background` submit started during one, passed both the scan above and
+    # `exists()` and the two transfers landed on the same file. Claim first, then
+    # re-scan (`_enforce_claim`), then move bytes; the record is what makes this
+    # run visible to whoever comes next, and it shows up in `comfy model
+    # downloads` like any other.
+    claim = _claim_foreground(url=url, dest=local_filepath, downloader=resolved_downloader)
+    if claim is not None:
+        _enforce_claim(claim, local_filepath)
 
-            from comfy_cli.resolve_python import resolve_workspace_python
+    try:
+        if needs_hf_auth:
+            try:
+                import huggingface_hub
+            except ImportError:
+                print("huggingface_hub not found. Installing...")
+                import subprocess
 
-            python = resolve_workspace_python(str(get_workspace()))
-            subprocess.check_call([python, "-m", "pip", "install", "huggingface_hub"])
-            import huggingface_hub
+                from comfy_cli.resolve_python import resolve_workspace_python
 
-        print(f"Downloading model {model_id} from Hugging Face...")
-        output_path = huggingface_hub.hf_hub_download(
-            repo_id=repo_id,
-            filename=hf_filename,
-            subfolder=hf_folder_name,
-            revision=hf_branch_name,
-            token=hf_api_token,
-            local_dir=get_workspace() / relative_path,
-            cache_dir=get_workspace() / relative_path,
-        )
-        print(f"Model downloaded successfully to: {output_path}")
+                try:
+                    # NB: this installs into the *workspace* interpreter (pinned by
+                    # tests/comfy_cli/test_models_python_resolution.py), which is not
+                    # necessarily the one running this process — so the import below
+                    # can still fail for e.g. a pipx-installed CLI. That predates this
+                    # change and is tracked separately; what's new here is that the
+                    # failure now ends in an envelope instead of a traceback.
+                    python = resolve_workspace_python(str(get_workspace()))
+                    subprocess.check_call([python, "-m", "pip", "install", "huggingface_hub"])
+                    import huggingface_hub
+                except Exception as e:
+                    raise _download_failure(
+                        code="download_failed",
+                        message=(
+                            f"`huggingface_hub` is required for Hugging Face downloads and could not be installed: {e}"
+                        ),
+                        hint="install it manually (`pip install huggingface_hub`) and retry",
+                        details={"url": _scrub_url(url)},
+                    ) from None
+
+            print(f"Downloading model {escape(str(model_id))} from Hugging Face...")
+            try:
+                output_path = huggingface_hub.hf_hub_download(
+                    repo_id=repo_id,
+                    filename=hf_filename,
+                    subfolder=hf_folder_name,
+                    revision=hf_branch_name,
+                    token=hf_api_token,
+                    local_dir=get_workspace() / relative_path,
+                    cache_dir=get_workspace() / relative_path,
+                )
+            except Exception as e:
+                raise _download_failure(
+                    code="download_failed",
+                    message=f"Hugging Face download failed: {e}",
+                    hint="check the repo/revision exists and the token has access to it",
+                    details={"url": _scrub_url(url), "repo_id": repo_id},
+                ) from None
+
+            # `hf_hub_download` names the file after the *repo* path (`hf_filename`)
+            # and nests it under `hf_folder_name`, so the resolved `local_filename` was
+            # silently ignored on this branch only — the public-HF path below goes
+            # through download_file(local_filepath) and honours it. That split made the
+            # `local_filepath.exists()` guard above check a path this branch never
+            # writes, and made its `model_file_exists` hint ("pass `--filename`")
+            # impossible to act on. Gate the move on the *resolved* name rather than on
+            # `--filename`: `local_filename` can equally come from the prompt above
+            # (whose default is only a suggestion), so keying on `filename is not None`
+            # left the same split open via the prompt door.
+            if pathlib.Path(output_path) != local_filepath:
+                try:
+                    local_filepath.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(output_path), str(local_filepath))
+                    output_path = str(local_filepath)
+                # Covers `shutil.Error` too — it derives from `OSError` (Lib/shutil.py:
+                # `class Error(OSError)`), so the multi-file/partial-move failures
+                # `shutil.move` raises under that name land here and end in an
+                # envelope, not a bare traceback. Pinned by
+                # `test_hf_move_failure_emits_an_envelope_not_a_traceback`, because
+                # this branch has no `except Exception` backstop the way the
+                # direct-download one below does.
+                except OSError as e:
+                    raise _download_failure(
+                        code="download_failed",
+                        message=f"Downloaded the model but could not save it as {local_filepath}: {e}",
+                        hint="check the destination directory is writable, or omit `--filename`",
+                        details={"url": _scrub_url(url), "path": str(local_filepath)},
+                    ) from None
+
+            print(f"Model downloaded successfully to: {escape(str(output_path))}")
+        else:
+            print(f"Start downloading URL: {escape(_scrub_url(url))} into {escape(str(local_filepath))}")
+            try:
+                download_file(
+                    url,
+                    local_filepath,
+                    headers,
+                    downloader=resolved_downloader,
+                    # Feeds the claim record its byte counts — above all the
+                    # total, which is what lets `reconcile` tell a killed-but-
+                    # finished run from a killed-mid-flight one. See
+                    # `_foreground_progress`.
+                    progress_callback=_foreground_progress(claim) if claim is not None else None,
+                )
+            except DownloadException as e:
+                # `message` is rendered through `Text` (see `_download_failure`), which
+                # never parses markup, and `error_panel` sanitizes it (ANSI/control-byte
+                # strip) before it reaches the terminal — so a server-chosen message (the
+                # 401 branch of guess_status_code_reason echoes one, and aria2 relays its
+                # own) can't clear the screen or repaint earlier output.
+                raise _download_failure(
+                    code="download_failed",
+                    message=str(e),
+                    details={"url": _scrub_url(url), "path": str(local_filepath)},
+                ) from None
+            except OSError as e:
+                # download_file() converts network failures to DownloadException, but a
+                # local filesystem failure (unwritable dir, disk full) still escapes as
+                # OSError — which would end the command with a traceback and no envelope.
+                raise _download_failure(
+                    code="download_failed",
+                    message=f"Could not write the downloaded file to {local_filepath}: {e}",
+                    hint="check the destination directory exists, is writable, and has free space",
+                    details={"url": _scrub_url(url), "path": str(local_filepath)},
+                ) from None
+            except Exception as e:
+                # Backstop for the invariant this command promises: a `--json` caller must
+                # never get a bare traceback with no envelope. The downloader can still
+                # raise something neither branch above names — e.g. a malformed
+                # `Content-Length` from a broken proxy used to surface as ValueError out of
+                # `int(...)` (now guarded in file_utils, but the class of failure remains).
+                raise _download_failure(
+                    code="download_failed",
+                    message=f"Download failed unexpectedly ({type(e).__name__}): {e}",
+                    hint="retry; if it persists, re-run without `--json` for the full traceback",
+                    details={"url": _scrub_url(url), "path": str(local_filepath)},
+                ) from None
+    except BaseException as e:
+        # `BaseException`, not `Exception`: every failure above raises `typer.Exit`,
+        # which derives from `click.exceptions.Exit` — a `BaseException` — so an
+        # `Exception` handler would let the ordinary error paths past and leave the
+        # record pinned at `downloading` until something reconciled it. This also
+        # catches the KeyboardInterrupt the error code's hint tells users to send.
+        if claim is not None:
+            claim.status = "failed"
+            # `_download_failure` stashes the message it rendered; a `typer.Exit`
+            # stringifies to "" otherwise.
+            claim.error = getattr(e, "comfy_error_message", None) or str(e) or type(e).__name__
+        raise
     else:
-        print(f"Start downloading URL: {url} into {local_filepath}")
-        try:
-            download_file(url, local_filepath, headers, downloader=resolved_downloader)
-        except DownloadException as e:
-            # escape() so a dynamic error message containing "[/]" or similar
-            # rich-markup syntax doesn't trigger MarkupError or get mis-rendered.
-            print(f"[bold red]{escape(str(e))}[/bold red]")
-            raise typer.Exit(code=1) from None
+        if claim is not None:
+            claim.status = "completed"
+            # Best-effort, and only on the success path where the file is final:
+            # one stat makes `download-status`/`downloads` report a real size and
+            # 100% for this record instead of a bare `completed` with no bytes.
+            with contextlib.suppress(OSError):
+                claim.completed_bytes = os.stat(local_filepath).st_size
+                claim.total_bytes = claim.completed_bytes
+    finally:
+        # Reached on both paths, but never on SIGKILL — which is exactly the case
+        # `download_state.reconcile` already handles: a record whose pid and
+        # pid_create_time no longer match a live process demotes to `failed`, so a
+        # hard-killed foreground run self-clears just like a dead worker.
+        _persist_foreground(claim)
 
     elapsed = time.monotonic() - start_time
     print(f"Done in {_format_elapsed(elapsed)}")
@@ -518,6 +841,12 @@ def _submit_background_download(
         needs_hf_auth=needs_hf_auth,
     )
 
+    # Retire finished records before adding one, so submitting downloads is what
+    # bounds the state directory rather than something the user has to remember
+    # to do. Purely bookkeeping: never let it fail a submit.
+    with contextlib.suppress(Exception):
+        download_state.prune(workspace)
+
     try:
         # The parent directory has to exist before the worker starts writing, and
         # creating it here means a permission problem surfaces synchronously.
@@ -531,6 +860,26 @@ def _submit_background_download(
             hint=f"check that {workspace} is writable, or run without --background",
         )
         raise typer.Exit(code=1) from e
+
+    # Claim, then re-check. The pre-flight scan in `download()` is check-then-act:
+    # between it and the `write` above sit the `--background` split and, for a
+    # Hugging Face url, a whole `check_unauthorized` network round trip — wide
+    # enough for two near-simultaneous submissions to both pass it, both stream a
+    # full copy, and the later `os.replace` to silently overwrite the earlier. The
+    # state record just written *is* the claim, so re-scanning now sees any
+    # competitor that also claimed `dest`. The foreground path does the same thing
+    # with the same helper, so the two now claim against each other as well.
+    #
+    # This *narrows* the race; it does not close it. A re-scan cannot see a claim
+    # that has not been written yet, and nothing orders a competitor's `write`
+    # before our scan — so a competitor whose record lands after we look is still
+    # missed and both submissions proceed (reproduced at 12 simultaneous submits;
+    # 4 and 8 came out clean). What changed is the width of the window: from
+    # `[pre-flight scan -> write]`, which spans the `--background` split and an HF
+    # round trip, down to `[write -> re-scan]`. Closing it needs an atomic claim —
+    # an `O_EXCL` sibling or an `flock` — which is a design call this guard does
+    # not make.
+    _enforce_claim(state, dest)
 
     try:
         pid = _spawn_download_worker(state_file, log_file)
@@ -641,8 +990,14 @@ def _download_worker(
     except DownloadCancelled:
         state.status = "cancelled"
         state.error = None
-        with contextlib.suppress(OSError):
-            pathlib.Path(state.dest).unlink(missing_ok=True)
+        # Same split as `download_cancel`: only aria2 wrote to the destination, so
+        # only aria2's leftovers are ours to delete. The httpx path raises this
+        # from inside the transfer loop, before the rename, and unwinds through
+        # `_download_file_httpx`'s own cleanup — the `.part` is already gone and
+        # anything at `dest` predates this download.
+        if state.downloader == "aria2":
+            with contextlib.suppress(OSError):
+                pathlib.Path(state.dest).unlink(missing_ok=True)
         state.completed_bytes = 0
         with contextlib.suppress(OSError):
             download_state.write_path(path, state)
@@ -701,16 +1056,20 @@ def _render_download_rows(rows: list[dict]) -> None:
     ui.display_table(data, ["ID", "Status", "%", "Bytes", "Elapsed", "Destination"])
     for row in rows:
         if row.get("error"):
-            print(f"[bold red]{row['id']}: {escape(str(row['error']))}[/bold red]")
+            # The state file is written by a detached worker, so this string is
+            # server-influenced text read back from disk — sanitize on the way out.
+            print(f"[bold red]{row['id']}: {sanitize_markup(row['error'])}[/bold red]")
 
 
 def _reconciled(state: download_state.DownloadState) -> tuple[download_state.DownloadState, bool]:
     """Reconcile ``state`` against reality, persisting a *status* correction.
 
-    Only a status change is written back. Byte counts are re-derived from
-    ``stat(dest)`` on every poll anyway, so persisting them buys nothing — and
-    would let a poll racing a live worker rewind the file to whatever this
-    reader happened to load a moment earlier.
+    Only a status change is written back. Persisting the byte counts a reader
+    derived would let a poll racing a live worker rewind the file to whatever
+    this reader happened to load a moment earlier — the worker is the only
+    writer of progress, and mid-flight its state file is normally the sole source
+    of truth (the destination isn't written until the transfer completes; see
+    :func:`download_state.reconcile` for the caveat).
     """
     fresh = download_state.reconcile(state)
     changed = fresh.status != state.status
@@ -720,19 +1079,302 @@ def _reconciled(state: download_state.DownloadState) -> tuple[download_state.Dow
     return fresh, changed
 
 
+def _dest_key(path: pathlib.Path | str) -> str:
+    """The comparison key for "the same destination".
+
+    ``realpath``, not ``abspath``: ComfyUI model directories are routinely
+    symlinks (``models/loras`` pointing at ``/data/loras``) and get addressed
+    both ways, and a lexical normalization leaves those two spellings unequal —
+    so both submissions would pass and their transfers would land on the same
+    inode. ``realpath`` resolves the symlinks that exist and normalizes the rest,
+    which also covers a ``--relative-path`` carrying ``..`` (it is only
+    ``expanduser``-ed, never passed through :func:`_reject_unsafe_component`).
+
+    ``normcase`` folds case on Windows; on POSIX it is identity, so a
+    case-insensitive macOS volume can still alias two spellings past this — the
+    same residual ``local_filepath.exists()`` has.
+    """
+    return os.path.normcase(os.path.realpath(path))
+
+
+def _claim_order(state: download_state.DownloadState) -> tuple[str, str]:
+    """Total order over competing claims on one destination: first writer wins.
+
+    ``started_at`` is second-resolution so ties are common; ``id`` (12 random hex
+    chars) breaks them, and because both racers compute the same order over the
+    same two records they always agree on who won.
+
+    Agreeing on the winner requires both records to be *visible* to both racers,
+    which the re-scan in :func:`_submit_background_download` cannot guarantee — a
+    racer that scans before the other's record lands sees no competitor at all, so
+    this order is never consulted and both proceed. See that call site.
+    """
+    return (state.started_at or "", state.id)
+
+
+def _active_download_for(
+    dest: pathlib.Path,
+    *,
+    exclude_id: str | None = None,
+) -> download_state.DownloadState | None:
+    """The live download already targeting ``dest``, if any — of either kind.
+
+    Foreground runs write records too (see :func:`_claim_foreground`), so this
+    scan now covers foreground-vs-foreground and foreground-vs-background as well
+    as the background-vs-background case it was written for. It does not
+    distinguish them: a claim is a claim, and the caller words its refusal from
+    the winner's ``kind``.
+
+    Reconciles the *matching* records (persisting the correction), so a SIGKILLed
+    worker's stale record demotes to ``failed`` here and never wedges the path.
+    Records for other destinations are filtered out by ``dest`` first and never
+    reconciled: :func:`_reconciled` persists a status correction, and running it
+    over every record would make a plain ``comfy model download`` rewrite
+    bookkeeping for unrelated downloads — off a stale ``list_all`` snapshot, so a
+    worker that completed during the scan could have its ``completed`` record
+    overwritten with ``failed``. Reconcile never rewrites ``dest``, so the
+    unreconciled value is the right key to filter on.
+
+    The predicate is deliberately "reconciled status is active", *not*
+    :func:`download_state.worker_alive`: a just-submitted download sits in
+    ``starting`` with no pid for up to :data:`download_state.STARTUP_GRACE_S`
+    while its worker's interpreter boots, and ``worker_alive`` reports False for
+    a pidless record — so gating on it would pass during exactly the
+    near-simultaneous double-submit this guard exists to catch. Reconcile keeps
+    both a within-grace ``starting`` record and a live worker blocking, while
+    demoting a dead worker's record so it self-clears.
+
+    ``exclude_id`` skips one record: :func:`_submit_background_download` re-runs
+    this scan *after* writing its own claim and must not find itself.
+
+    The scan is scoped to ``get_workspace()``'s state directory, and that is the
+    one residual no claim written here can close. A destination can sit outside
+    the workspace (``--relative-path`` is only ``expanduser``-ed, so it accepts
+    ``..`` and absolute paths), so two invocations run against *different*
+    workspaces but aimed at the same file consult disjoint
+    ``<workspace>/.comfy-downloads`` directories and are invisible to each other
+    — both claim, both win, both write. Closing it needs a claim that lives next
+    to the destination rather than next to the workspace (an ``O_EXCL`` sidecar),
+    or a refusal of workspace-escaping ``--relative-path``; both are design calls
+    with their own tradeoffs and neither is made here.
+    """
+    wanted = _dest_key(dest)
+    winner: download_state.DownloadState | None = None
+    try:
+        for state in download_state.list_all(get_workspace()):
+            if state.id == exclude_id:
+                continue
+            if _dest_key(state.dest) != wanted:
+                continue
+            fresh, _ = _reconciled(state)
+            if fresh.status not in download_state.ACTIVE_STATUSES:
+                continue
+            if winner is None or _claim_order(fresh) < _claim_order(winner):
+                winner = fresh
+    except (OSError, ValueError):
+        # The scan is advisory, so an unreadable state directory — or a corrupt
+        # record that trips a lookup mid-loop — must degrade to the pre-guard
+        # behavior rather than turn a working download into a traceback. This
+        # runs on the foreground path too, which never read the state directory
+        # before, so a single bad file must not break every download in the
+        # workspace. Whole scan, not just `list_all`: the reconcile of a matching
+        # record is just as much part of the advisory read.
+        return None
+    return winner
+
+
+def _in_flight_failure(competitor: download_state.DownloadState, dest: pathlib.Path) -> typer.Exit:
+    """The ``model_download_in_flight`` refusal, worded for the claim we hit.
+
+    Both halves vary by ``kind``. A background download really can be cancelled
+    with ``download-cancel``; a live *foreground* one cannot — that command now
+    refuses it, because the recorded pid is a user CLI process sharing the
+    terminal's foreground process group — so pointing at it would be advice that
+    fails. Ctrl-C in the owning terminal is the honest instruction.
+    """
+    kind = "foreground" if competitor.is_foreground else "background"
+    stop = (
+        "interrupt it with Ctrl-C in the terminal running it"
+        if competitor.is_foreground
+        else f"cancel it with `comfy model download-cancel {competitor.id}`"
+    )
+    return _download_failure(
+        code="model_download_in_flight",
+        message=f"A {kind} download ({competitor.id}) is already writing to {dest}.",
+        hint=f"track it with `comfy model download-status {competitor.id}`, or {stop}",
+        details={
+            "path": str(dest),
+            "download_id": competitor.id,
+            "status": competitor.status,
+            "kind": competitor.kind,
+        },
+    )
+
+
+def _enforce_claim(state: download_state.DownloadState, dest: pathlib.Path) -> None:
+    """Re-scan for a competing claim on ``dest`` and withdraw ours if we lost.
+
+    The second half of claim-then-check, shared by both submit paths. The caller
+    has already *written* ``state`` — that record is the claim — so this scan sees
+    any competitor that also claimed ``dest``, which the pre-flight scan in
+    :func:`download` structurally cannot: it runs before the claim exists, with
+    the ``--background`` split and (for a Hugging Face url) a whole
+    ``check_unauthorized`` round trip between it and the write.
+
+    Both racers run this over the same two records and rank them with the same
+    :func:`_claim_order`, so they agree on the winner instead of both backing off
+    — mutual refusal would wedge the destination and neither download would
+    happen. The loser deletes its own record before raising, so it leaves no
+    phantom claim behind.
+
+    Raises the ``typer.Exit`` the caller should propagate; returns None when we
+    won (or when there was no competitor at all).
+    """
+    competitor = _active_download_for(dest, exclude_id=state.id)
+    if competitor is None or _claim_order(state) < _claim_order(competitor):
+        return
+
+    if not download_state.delete(get_workspace(), state.id):
+        # The unlink failed (a read-only state directory, a permission change
+        # under us). Withdrawing the claim is the whole point of this branch, so
+        # falling back to a terminal status is the next best thing: a `failed`
+        # record is inert to `_active_download_for` and to `download-cancel`,
+        # where the `downloading` one we just wrote would read as a live claim and
+        # refuse every later submission to this destination until something
+        # reconciled it away.
+        state.status = "failed"
+        state.error = f"withdrew this claim; {competitor.id} won {dest}"
+        _persist_foreground(state)
+    raise _in_flight_failure(competitor, dest)
+
+
+def _claim_foreground(url: str, dest: pathlib.Path, downloader: str) -> download_state.DownloadState | None:
+    """Claim ``dest`` for a transfer about to run in *this* process.
+
+    Before this existed the foreground path wrote no record at all, so it was
+    invisible to every other invocation: a second foreground run — or a
+    ``--background`` submit started during one — sailed past the destination scan
+    and past ``exists()`` (the httpx downloader streams into a ``.part`` sibling,
+    so nothing is at ``dest`` until the very end), and the two transfers
+    interleaved into one file. With ``--downloader aria2`` they interleave
+    literally, since aria2 writes straight to the destination.
+
+    ``pid``/``pid_create_time`` are this CLI process's own, which is what makes
+    the record self-clearing: a run that is SIGKILLed never reaches its ``finally``
+    to write a terminal status, and :func:`download_state.reconcile` then demotes
+    the record exactly as it does for a dead worker. Recording
+    ``pid_create_time`` is not optional for that to work — without it
+    :func:`download_state.is_worker_process` falls back to matching the *worker's*
+    argv marker, which a foreground CLI process does not carry.
+
+    Returns None when the claim could not be persisted, *or* when this process's
+    start time could not be read. Both are deliberate degradations to the
+    pre-claim behavior rather than failures: the state directory is bookkeeping,
+    and an unwritable workspace must not turn a download that used to work into
+    an error. (The ``--background`` path *does* fail there, because a detached
+    worker has nowhere else to report from.)
+    """
+    # Absolute, as `_submit_background_download` also takes care to be. `dest` is
+    # built from `workspace_manager.workspace_path`, which is not guaranteed
+    # absolute, and this string is read back by *other* processes: `_dest_key`
+    # resolves it with `realpath`, which anchors a relative path to the reader's
+    # cwd, so a relative `dest` would key differently for a reader started
+    # elsewhere and the two would not recognize each other's claim.
+    # `download_cancel` reads it as a plain path too.
+    dest = pathlib.Path(dest).absolute()
+    # `_scrub_url`, not `url`: a foreground record is written for its *claim*, and
+    # nothing ever reads this field back from one (only the detached worker needs
+    # the real url, and it gets its own record). A resolved download url routinely
+    # carries a credential — CivitAI links append `?token=`, presigned S3/SAS links
+    # carry the signature in the query — so persisting it verbatim would drop a
+    # secret into `<workspace>/.comfy-downloads/`, a directory inside the ComfyUI
+    # checkout that nothing gitignores, for no reader's benefit.
+    state = download_state.new(url=_scrub_url(url), dest=str(dest), downloader=downloader)
+    state.kind = "foreground"
+    state.status = "downloading"
+    state.pid = os.getpid()
+    state.pid_create_time = download_state.process_create_time(state.pid)
+    if state.pid_create_time is None:
+        # Without the start time this claim is unfalsifiable. `worker_alive` falls
+        # back to bare pid liveness when `pid_create_time` is None, so once this
+        # process exits and the OS recycles its number the record reads *live*
+        # forever: `reconcile` never demotes it, every later download to this
+        # destination is refused as `model_download_in_flight`, and
+        # `download-cancel` refuses it as foreground — leaving hand-deletion of
+        # the JSON as the only way out. A claim that cannot retract itself on
+        # death is worse than no claim, so degrade to the pre-claim behavior
+        # exactly as an unwritable state directory does.
+        return None
+    try:
+        download_state.write(get_workspace(), state)
+    except (OSError, ValueError):
+        return None
+    return state
+
+
+def _persist_foreground(state: download_state.DownloadState | None) -> None:
+    """Write a foreground claim to disk. Never raises.
+
+    Used for both the progress writes and the terminal one: the state directory
+    is bookkeeping, and a download that is otherwise fine must not die because a
+    record could not be updated.
+    """
+    if state is None:
+        return
+    with contextlib.suppress(OSError, ValueError):
+        download_state.write(get_workspace(), state)
+
+
+def _foreground_progress(state: download_state.DownloadState) -> Callable[[int, int | None], None]:
+    """A ``progress_callback`` that keeps a foreground claim's counters current.
+
+    Chiefly for ``total_bytes``, which is what lets a foreground record survive a
+    SIGKILL honestly. :func:`download_state.reconcile` resolves a dead ``downloading``
+    record to ``completed`` only when ``total_bytes`` is known and the file on disk
+    reached it; with no callback the field stayed None for the whole transfer, so a
+    run killed in the window between the rename and the ``finally`` below left a
+    *complete* model at ``dest`` under a record that read ``failed`` forever — and
+    ``download-cancel`` then deleted that finished file as an aria2 partial.
+
+    It also makes the record's progress real. ``comfy model downloads`` and
+    ``download-status`` now list foreground downloads, and without this they would
+    report 0 bytes and no percent for the entire transfer.
+
+    Writes are throttled to :data:`download_state.PROGRESS_THROTTLE_S`, as the
+    worker's are, with one exception: a newly-learned total is written
+    immediately. It arrives once, before the first chunk, and it is the field
+    that matters if this process is killed a moment later.
+    """
+    last_write = 0.0
+
+    def on_progress(completed: int, total: int | None) -> None:
+        nonlocal last_write
+        state.completed_bytes = completed
+        learned_total = total is not None and state.total_bytes != total
+        if total is not None:
+            state.total_bytes = total
+        now = time.monotonic()
+        if not learned_total and now - last_write < download_state.PROGRESS_THROTTLE_S:
+            return
+        last_write = now
+        _persist_foreground(state)
+
+    return on_progress
+
+
 @app.command("download-status")
 @tracking.track_command("model")
 def download_status(
     _ctx: typer.Context,
     download_id: Annotated[str, typer.Argument(help="The download id returned by `download --background`.")],
 ):
-    """Report the progress of one background download."""
+    """Report the progress of one download, background or foreground."""
     renderer = get_renderer()
     state = download_state.read(get_workspace(), download_id)
     if state is None:
         renderer.error(
             code="download_not_found",
-            message=f"No background download with id {download_id!r}.",
+            message=f"No download with id {download_id!r}.",
             hint="list the known downloads with `comfy model downloads`",
             details={"id": download_id},
         )
@@ -747,11 +1389,22 @@ def download_status(
 @app.command("downloads")
 @tracking.track_command("model")
 def downloads(_ctx: typer.Context):
-    """List every background download this workspace knows about, newest first."""
+    """List every download this workspace knows about, newest first.
+
+    Covers both kinds: a plain `comfy model download` claims its destination the
+    same way a `--background` one does, so it appears here too (`kind` tells them
+    apart). That is what makes a second run refuse instead of racing into the
+    same file.
+    """
     renderer = get_renderer()
-    rows = [download_state.status_payload(_reconciled(s)[0]) for s in download_state.list_all(get_workspace())]
+    workspace = get_workspace()
+    # Trim before listing: this is the verb whose cost — and whose output — grows
+    # with every record the directory has ever accumulated.
+    with contextlib.suppress(Exception):
+        download_state.prune(workspace)
+    rows = [download_state.status_payload(_reconciled(s)[0]) for s in download_state.list_all(workspace)]
     if not rows:
-        print("No background downloads found.")
+        print("No downloads found.")
     else:
         _render_download_rows(rows)
     renderer.emit({"total": len(rows), "downloads": rows}, command="model downloads")
@@ -763,14 +1416,21 @@ def download_cancel(
     _ctx: typer.Context,
     download_id: Annotated[str, typer.Argument(help="The download id returned by `download --background`.")],
 ):
-    """Kill a background download's worker and remove its partial file."""
+    """Kill a background download's worker and remove its partial file.
+
+    Background only, for a live download: a foreground record's pid is a user CLI
+    process sharing its terminal's foreground process group, so the `killpg` this
+    sends would take out the surrounding shell job. A live foreground download is
+    refused with `model_download_foreground_cancel` and the instruction to Ctrl-C
+    it in its own terminal; a *dead* one still sweeps here as usual.
+    """
     renderer = get_renderer()
     workspace = get_workspace()
     state = download_state.read(workspace, download_id)
     if state is None:
         renderer.error(
             code="download_not_found",
-            message=f"No background download with id {download_id!r}.",
+            message=f"No download with id {download_id!r}.",
             hint="list the known downloads with `comfy model downloads`",
             details={"id": download_id},
         )
@@ -790,10 +1450,55 @@ def download_cancel(
                 download_state.write(workspace, state)
 
     if state.status in download_state.TERMINAL_STATUSES:
+        # Reaching a terminal status is not the same as having reclaimed the disk.
+        # A SIGKILLed worker's *first* `download-status` poll persists reconcile's
+        # `failed` verdict, and from then on this command short-circuits here — so
+        # the only path that sweeps the `.part` file would never run, and multi-GB
+        # of it would sit there with no command able to reclaim it (unlike the old
+        # truncated file at `dest`, a `.part` is invisible to `model list` and
+        # `model remove`). Sweep here too, but only once the worker is confirmed
+        # gone: a `cancelled` record can have been written while its worker was
+        # still running (that is what the "worker may still be running" error
+        # says), and that worker would re-create whatever we removed — or worse,
+        # find the temp it is streaming into deleted underneath it.
+        reclaimed = 0
+        if state.status != "completed" and not download_state.worker_alive(state):
+            reclaimed = cleanup_partials(pathlib.Path(state.dest))
+            if reclaimed:
+                state.completed_bytes = 0
+                with contextlib.suppress(OSError, ValueError):
+                    download_state.write(workspace, state)
         payload = download_state.status_payload(state)
-        print(f"Download {download_id} is already {state.status}; nothing to cancel.")
-        renderer.emit(payload, command="model download-cancel", changed=False)
+        if reclaimed:
+            print(f"Download {download_id} is already {state.status}; reclaimed its partial file.")
+        else:
+            print(f"Download {download_id} is already {state.status}; nothing to cancel.")
+        renderer.emit(payload, command="model download-cancel", changed=bool(reclaimed))
         return
+
+    # Refuse a *live* foreground download before anything is signalled — sentinel
+    # included. Everything below this point assumes the recorded pid belongs to a
+    # detached worker, which `_spawn_download_worker` gives its own session: that
+    # is what makes `kill_worker`'s `os.killpg(os.getpgid(pid), ...)` safe, since
+    # the worker is its own process-group leader and the group contains only it
+    # and its children. A foreground record's pid is the *user's CLI process*,
+    # which shares the terminal's foreground process group — so the same killpg
+    # would take out the surrounding shell job (the pipeline, an enclosing
+    # script), not just the transfer. There is no narrower signal to send from
+    # here, so the honest answer is to tell the user where to press Ctrl-C.
+    #
+    # A *dead* foreground record still goes down the normal path below: the
+    # partial file it left behind is exactly what the user is trying to reclaim,
+    # and `stop_worker`/`kill_worker` are inert for a pid that no longer matches
+    # its recorded start time.
+    if state.is_foreground and download_state.worker_alive(state):
+        renderer.error(
+            code="model_download_foreground_cancel",
+            message=f"Download {download_id} is running in the foreground of another terminal (pid {state.pid}).",
+            hint="interrupt it with Ctrl-C in the terminal running it",
+            details={"id": download_id, "pid": state.pid, "kind": state.kind, "dest": state.dest},
+        )
+        raise typer.Exit(code=1)
 
     # Sentinel first, then the signal. The sentinel is what a worker that is
     # still starting up (no pid on file yet) — or one that outlives SIGTERM —
@@ -834,9 +1539,27 @@ def download_cancel(
         if size is not None:
             state.completed_bytes = size
     else:
-        if stopped and size is not None:
-            with contextlib.suppress(OSError):
-                partial.unlink()
+        if stopped:
+            # Only aria2 writes straight to the destination (it resumes from its
+            # own control file), so only an unfinished *aria2* transfer leaves its
+            # bytes here. The httpx path never writes through the destination, so
+            # a file sitting at `dest` after an httpx cancel is either one that
+            # predates this download — which `download_file` promises survives
+            # either way — or a rename that just landed, e.g. an unknown-length
+            # transfer (`total_bytes` is None, so the `finished` check above can't
+            # see it) whose worker was killed between the rename and persisting
+            # `completed`. Deleting it would destroy a complete model this command
+            # never wrote.
+            if size is not None and state.downloader == "aria2":
+                with contextlib.suppress(OSError):
+                    partial.unlink()
+                    removed = True
+            # The httpx downloader streams into a `.part` sibling and only renames
+            # onto the destination once the transfer completes, so a worker killed
+            # mid-flight leaves its gigabytes *there*, not at `dest`. Without this
+            # sweep the cancel would report success and reclaim nothing — the exact
+            # hand-cleanup this command exists to spare the user.
+            if cleanup_partials(partial):
                 removed = True
         state.status = "cancelled"
         state.error = None if stopped else "worker may still be running; partial file left in place"
@@ -854,7 +1577,7 @@ def download_cancel(
     renderer.emit(payload, command="model download-cancel", changed=True)
 
 
-@app.command(help="Remove downloaded model files, by name or through an interactive picker.")
+@app.command(help="Remove one or more downloaded models by name or via interactive selection.")
 @tracking.track_command("model")
 def remove(
     ctx: typer.Context,
@@ -961,3 +1684,22 @@ def list_command(
         data.append((model.name, model_type, f"{model.stat().st_size // 1024} KB"))
     column_names = ["Model Name", "Type", "Size"]
     ui.display_table(data, column_names)
+
+
+# The `model` noun owns BOTH the local-filesystem ops defined above
+# (download/remove/list) and the backend/cloud discovery leaves
+# (list-folders/list-folder/search/show). The discovery leaves are implemented
+# on `models_search_command.app`; surface them under `model` by borrowing
+# their command registrations (same CommandInfo objects — no logic
+# duplication). Done here rather than in `cmdline.py` so the `model` lazy
+# subcommand entry there stays a plain `getattr(module, "app")` — it only
+# needs to import this module to get the fully-merged tree (BE-2999).
+# Mirror the deprecated alias built in `search.py`: carry BOTH the discovery
+# leaves and any nested discovery sub-groups so `comfy model …` and the
+# `comfy models …` alias stay in lockstep as the discovery tree grows (both
+# are empty of sub-groups today). A group callback is deliberately NOT carried
+# over here: on the alias it scopes to discovery-only leaves, but `model` also
+# owns the local ops (download/remove/list), so mounting discovery's group
+# setup on the whole noun would leak it onto those.
+app.registered_commands.extend(models_search_command.app.registered_commands)
+app.registered_groups.extend(models_search_command.app.registered_groups)

@@ -23,10 +23,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from comfy_cli.http import NoRedirectHandler
+from comfy_cli.caller import usage_source
+from comfy_cli.http import (
+    NoRedirectHandler,
+    ResponseTooLarge,
+    build_http_only_opener,
+    read_capped,
+    target_auth_headers,
+)
+from comfy_cli.http import assert_safe_url as _assert_safe_url
 from comfy_cli.target import Target
-
-_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
 # Transient HTTP failures during polling should back off and retry, not abort.
 # 429 (rate limit) is retried for any method — the request was rejected, not
@@ -95,25 +101,7 @@ class Unauthenticated(Exception):
     """Target needs auth but no valid session is present."""
 
 
-_OPENER = urllib.request.build_opener(NoRedirectHandler())
-
-
-def _assert_safe_url(url: str) -> None:
-    """Reject plaintext HTTP for non-loopback hosts.
-
-    Anything carrying a Bearer token over the wire must be HTTPS unless the
-    host is a loopback address (where there's no network to sniff).
-    """
-    parsed = urllib.parse.urlsplit(url)
-    if parsed.scheme == "https":
-        return
-    host = (parsed.hostname or "").lower()
-    if host in _LOOPBACK_HOSTS:
-        return
-    raise ValueError(
-        f"refusing to send request to non-https, non-loopback URL: {url} "
-        "(set COMFY_CLOUD_BASE_URL to an https:// endpoint)"
-    )
+_OPENER = build_http_only_opener(NoRedirectHandler())
 
 
 @dataclass
@@ -256,26 +244,38 @@ class Client:
         req.add_header("Comfy-Usage-Source", "comfy-cli")
         if data is not None:
             req.add_header("Content-Type", "application/json")
-        # Cloud auth: the policy layer (`resolve_target`) is OAuth-first and
-        # populates at most one of api_key / auth_token, so this is just the
-        # mechanic — send whichever field is set. Only attached on cloud
-        # targets so a stray auth_token on a local target can't leak
-        # credentials to a plaintext server.
-        if self.target.is_cloud:
-            if self.target.auth_token:
-                req.add_header("Authorization", f"Bearer {self.target.auth_token}")
-            elif self.target.api_key:
-                req.add_header("X-API-Key", self.target.api_key)
+        # Cloud auth: `target_auth_headers` owns the header selection for
+        # every authed call site. It is OAuth-first, matching both the policy
+        # layer (`resolve_target`, which populates at most one of api_key /
+        # auth_token anyway) and the `extra_data` credential `submit_prompt`
+        # injects below — header and body can never name different identities.
+        # It also carries the `is_cloud` gate, so a stray auth_token on a
+        # local target can't leak credentials to a plaintext server.
+        for header, value in target_auth_headers(self.target).items():
+            req.add_header(header, value)
         try:
             with _OPENER.open(req, timeout=timeout or self.timeout) as resp:
-                text = resp.read().decode("utf-8", errors="replace")
+                # Bounded read: without a ceiling the server on the other end
+                # decides how much of our memory to consume. An over-cap body
+                # is reported as a response error rather than truncated —
+                # truncated JSON would surface as a misleading parse failure.
+                try:
+                    raw = read_capped(resp, url)
+                except ResponseTooLarge as e:
+                    raise HTTPError(resp.status, "response too large", str(e)) from e
+                text = raw.decode("utf-8", errors="replace")
                 if not text:
                     return None
                 return json.loads(text)
         except urllib.error.HTTPError as e:
             body_text = ""
             try:
-                body_text = e.read().decode("utf-8", errors="replace")
+                # An error body arrives from the same server as the success
+                # body, so it needs the same ceiling. Over-cap it raises, and
+                # the swallow below leaves body_text empty — the status and
+                # reason still reach the caller, which is the part that matters
+                # for a body too large to be a real error message.
+                body_text = read_capped(e, url).decode("utf-8", errors="replace")
             except Exception:  # noqa: BLE001
                 pass
             # Auto-refresh on 401 for OAuth cloud targets, retry once.
@@ -324,10 +324,15 @@ class Client:
         *,
         timeout: float | None = None,
         extra_data: dict | None = None,
+        workflow_id: str | None = None,
     ) -> SubmitResult:
         """POST {prefix}/prompt — submit a workflow for execution.
 
         Caller may pass ``extra_data`` (merged into the request, not overwritten).
+        For cloud submissions, ``workflow_id`` (the cloud workflow entity id) is
+        forwarded as a top-level ``workflow_id`` field so the server can associate
+        the job with an existing workflow and auto-promote a draft on run. Omitted
+        from the body entirely when unset.
         For cloud submissions, the user's OAuth token is injected as
         ``auth_token_comfy_org`` so partner-API nodes (BFL Flux Pro, Gemini
         Nano Banana, etc.) can call out to comfy.org — matching what the web
@@ -341,7 +346,9 @@ class Client:
             merged_extra: dict[str, Any] = dict(extra_data or {})
             # Usage-source attribution rides extra_data too — the execution
             # record keeps it even when the HTTP header is dropped by proxies.
-            merged_extra.setdefault("comfy_usage_source", "comfy-cli")
+            # Derived from the caller, so agent-driven runs are attributable
+            # server-side; an explicit caller-supplied value still wins.
+            merged_extra.setdefault("comfy_usage_source", usage_source())
             # Partner-API nodes (BFL, Gemini, Bria, ByteDance, etc.) read the
             # caller's comfy.org credential out of extra_data. Rebuild this at
             # send time so an OAuth refresh updates both the header and body.
@@ -352,6 +359,10 @@ class Client:
                     merged_extra.setdefault("api_key_comfy_org", self.target.api_key)
             if merged_extra:
                 request_payload["extra_data"] = merged_extra
+            # Cloud workflow entity id: associate this job with an existing
+            # workflow (auto-promotes a draft on run). Only sent when provided.
+            if workflow_id:
+                request_payload["workflow_id"] = workflow_id
             return request_payload
 
         resp = self._request("POST", ("prompt",), body_factory=payload, timeout=timeout)
@@ -569,7 +580,7 @@ def extract_output_entries(record: dict) -> list[dict]:
     outputs. This deliberately covers keys beyond the classic
     ``images/gifs/videos/audio/files`` — notably SaveGLB's ``"3d"`` key and
     the cloud worker's singular ``"video"`` key — so 3D/mesh jobs resolve
-    instead of returning ``download_no_outputs`` (BE-4417). The ``"animated"``
+    instead of returning ``download_no_outputs``. The ``"animated"``
     key is skipped explicitly to match core semantics (it emits ``(True,)``
     boolean flags, not file entries).
 
@@ -603,6 +614,34 @@ def extract_output_entries(record: dict) -> list[dict]:
                         continue
                     seen.add(dedup_key)
                     results.append(entry)
+    return results
+
+
+def extract_text_outputs(record: dict) -> dict[str, list[str]]:
+    """Group the text/STRING node outputs of a /history record by node id.
+
+    Text-emitting nodes (GeminiNode image descriptions, ShowText, anything
+    emitting ``ui.text``) surface their payload as a bare-string list under the
+    ``text`` key of ``outputs[node_id]`` — a shape the media-key flatten in
+    :func:`extract_output_entries` drops entirely. This is the text counterpart:
+    for each node whose ``text`` value is a list, keep its ``str`` items and
+    return ``{node_id: [text, ...]}``. Nodes with no usable text are omitted.
+    Dict-shape tolerant like the flatten above (a non-dict ``outputs`` or a
+    non-dict node entry yields ``{}`` / is skipped rather than raising).
+    """
+    results: dict[str, list[str]] = {}
+    outputs = record.get("outputs") or {}
+    if not isinstance(outputs, dict):
+        return results
+    for node_id, node_output in outputs.items():
+        if not isinstance(node_output, dict):
+            continue
+        text = node_output.get("text")
+        if not isinstance(text, list):
+            continue
+        strings = [item for item in text if isinstance(item, str)]
+        if strings:
+            results[str(node_id)] = strings
     return results
 
 

@@ -24,8 +24,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from comfy_cli.cancellation import get_token  # noqa: F401  — re-exported indirectly
-
 
 class WhereTarget(str, Enum):
     LOCAL = "local"
@@ -101,6 +99,40 @@ def resolve_default(
     return resolve(flag=flag, env=env, config_value=config_value, project_value=project_value)
 
 
+def resolve_default_or_exit(
+    flag: str | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    project_value: str | None = _UNSET,
+) -> WhereResolution:
+    """:func:`resolve_default` that emits a ``where_invalid`` envelope and exits.
+
+    The shared "emit-and-exit" wrapper for command call sites that have no
+    sensible fallback for a bad routing value — a typo'd ``COMFY_WHERE``, a
+    stale ``defaults.where`` in the project ``comfy.yaml``, or a corrupt
+    persisted ``where_default`` would otherwise escape as a raw ``ValueError``
+    traceback, which is the worst possible shape for a machine consumer of a
+    JSON-envelope command.
+
+    Commands that *can* recover (``nodes``, ``jobs``) keep their own
+    ``except ValueError`` fallback instead of calling this.
+    """
+    import typer
+
+    from comfy_cli.output import get_renderer
+
+    try:
+        return resolve_default(flag=flag, env=env, project_value=project_value)
+    except ValueError as e:
+        get_renderer().error(
+            code="where_invalid",
+            message=str(e),
+            hint="use --where local or --where cloud, and check COMFY_WHERE, "
+            "`defaults.where` in comfy.yaml, and `comfy set-default --where`",
+        )
+        raise typer.Exit(code=1) from e
+
+
 def _project_where_default() -> str | None:
     """``defaults.where`` from the project/1 ``comfy.yaml`` governing cwd, if
     any. Discovery itself never raises (see :mod:`comfy_cli.project`); a
@@ -124,8 +156,10 @@ def _has_cloud_credentials() -> bool:
     is clearly the configured backend; preflight surfaces the expiry), so this
     deliberately doesn't use ``resolve_cloud_credential``.
     """
-    from comfy_cli.credentials import find_api_key, get_session
+    from comfy_cli.credentials import cloud_bearer_env_token, find_api_key, get_session
 
+    if cloud_bearer_env_token() is not None:
+        return True
     if find_api_key(purpose="cloud") is not None:
         return True
     return get_session(refresh=False) is not None
@@ -154,6 +188,7 @@ def cloud_preflight() -> CloudError | None:
     """Return an error envelope payload if the cloud path can't proceed.
 
     Accepts either auth path:
+      - ``COMFY_CLOUD_AUTH_TOKEN`` env var (forwarded Bearer token), OR
       - ``COMFY_CLOUD_API_KEY`` env var, OR
       - persisted ``comfy-cloud-api-key`` provider record, OR
       - active OAuth session (valid + non-expired).
@@ -162,10 +197,13 @@ def cloud_preflight() -> CloudError | None:
       - Nothing configured     → ``cloud_not_configured``
       - OAuth session expired  → ``cloud_unauthorized``
     """
-    from comfy_cli.credentials import find_api_key, get_session
+    from comfy_cli.credentials import cloud_bearer_env_token, find_api_key, get_session
 
-    # API key path — no expiry check, key is either valid or it isn't (server
-    # tells us at request time).
+    # Forwarded Bearer token (trusted-caller path) or ambient API key — no
+    # expiry check, the value is either valid or it isn't (server tells us at
+    # request time).
+    if cloud_bearer_env_token() is not None:
+        return None
     if find_api_key(purpose="cloud") is not None:
         return None
 

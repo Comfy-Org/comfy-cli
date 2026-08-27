@@ -1,4 +1,4 @@
-"""The telemetry SDKs must not be imported just by starting the CLI (BE-3289).
+"""The telemetry SDKs must not be imported just by starting the CLI.
 
 `mixpanel` depends on pydantic, which loads the compiled `pydantic_core`
 extension. A `comfy` process that has that extension loaded holds the .pyd/.so
@@ -49,8 +49,8 @@ def test_importing_tracking_does_not_load_telemetry_sdks():
 
 
 def test_importing_the_cli_entrypoint_does_not_load_telemetry_sdks():
-    # cmdline is what `comfy` actually runs, and it is the import chain in the
-    # BE-3289 traceback (cmdline -> tracking -> mixpanel -> pydantic).
+    # cmdline is what `comfy` actually runs, and it heads the import chain from
+    # the original traceback: cmdline -> tracking -> mixpanel -> pydantic.
     loaded = _modules_after("import comfy_cli.cmdline")
     assert not loaded & set(_FORBIDDEN), (
         f"comfy_cli.cmdline imported {sorted(loaded & set(_FORBIDDEN))} at module scope; "

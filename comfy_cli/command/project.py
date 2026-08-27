@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +24,7 @@ import typer
 
 from comfy_cli import tracking
 from comfy_cli.command.transfer import _upload_file
+from comfy_cli.file_utils import atomic_write_text
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.project import (
     ASSETS_LOCK_SCHEMA,
@@ -85,6 +85,11 @@ def _assets_callback():
     (Also keeps Typer from collapsing the single-command group, so the
     command stays ``comfy assets push``, not a bare ``comfy assets``.)
     """
+
+
+from comfy_cli.command.assets_library import app as _assets_library_app  # noqa: E402
+
+assets_app.add_typer(_assets_library_app, name="library")
 
 
 # The marker `comfy project init` writes — deliberately literal and minimal.
@@ -219,6 +224,10 @@ def assets_push_cmd(
         renderer.error(code="invalid_argument", message=str(e))
         raise typer.Exit(code=1) from e
     where_kind = target.kind
+    # Routing resolved — stamp it so the upload failures below name the backend
+    # this push targeted. The `project_not_found` and `invalid_argument` errors
+    # above precede the decision and stay `where: null`.
+    renderer.where = where_kind
 
     assets_dir = project.root / "assets"
     lock_path = project.root / ".comfy" / "assets.lock.json"
@@ -282,18 +291,11 @@ def assets_push_cmd(
 
 
 def _write_assets_lock(path: Path, assets: dict) -> None:
-    """Atomically rewrite the lock (tmp + fsync + rename, the jobs_state
-    pattern) so a crash mid-push can't leave a torn JSON file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Atomically rewrite the lock so a crash mid-push can't leave a torn JSON file."""
     doc = {"schema": ASSETS_LOCK_SCHEMA, "assets": assets}
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(doc, indent=2, sort_keys=True), encoding="utf-8")
-    fd = os.open(str(tmp), os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(tmp, path)
+    # Tier 3 (cross-process state) per the write policy in comfy_cli/file_utils.py:
+    # fsync=True, because a lock lost to power failure means re-pushing assets.
+    atomic_write_text(path, json.dumps(doc, indent=2, sort_keys=True), fsync=True)
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from comfy_cli.command.install import pip_install_manager, validate_version
+from comfy_cli import constants
+from comfy_cli.command.install import _install_manager_with_fallback, pip_install_manager, validate_version
 
 
 def test_validate_version_nightly():
@@ -59,6 +60,36 @@ class TestPipInstallManager:
         mock_run.return_value = MagicMock(returncode=1, stderr="")
         result = pip_install_manager("/fake/repo")
         assert result is False
+
+
+class TestInstallManagerWithFallback:
+    """The dedupe'd manager-install-and-degrade helper shared by the pip and
+    fast_deps paths of ``execute``."""
+
+    @patch("comfy_cli.config_manager.ConfigManager")
+    @patch("comfy_cli.command.install.pip_install_manager", return_value=True)
+    @patch("comfy_cli.command.install.ensure_pip")
+    def test_bootstrap_pip_true_bootstraps_and_installs(self, mock_ensure_pip, mock_install, mock_cfg):
+        _install_manager_with_fallback("/fake/repo", "python", bootstrap_pip=True)
+        mock_ensure_pip.assert_called_once_with("python")
+        mock_install.assert_called_once_with("/fake/repo", python="python")
+        # Success: manager GUI mode is left untouched.
+        mock_cfg.return_value.set.assert_not_called()
+
+    @patch("comfy_cli.config_manager.ConfigManager")
+    @patch("comfy_cli.command.install.pip_install_manager", return_value=True)
+    @patch("comfy_cli.command.install.ensure_pip")
+    def test_bootstrap_pip_false_skips_bootstrap(self, mock_ensure_pip, mock_install, mock_cfg):
+        _install_manager_with_fallback("/fake/repo", "python", bootstrap_pip=False)
+        mock_ensure_pip.assert_not_called()
+        mock_install.assert_called_once_with("/fake/repo", python="python")
+
+    @patch("comfy_cli.config_manager.ConfigManager")
+    @patch("comfy_cli.command.install.pip_install_manager", return_value=False)
+    @patch("comfy_cli.command.install.ensure_pip")
+    def test_failure_disables_manager_gui_mode(self, mock_ensure_pip, mock_install, mock_cfg):
+        _install_manager_with_fallback("/fake/repo", "python", bootstrap_pip=False)
+        mock_cfg.return_value.set.assert_called_once_with(constants.CONFIG_KEY_MANAGER_GUI_MODE, "disable")
 
 
 # Run the tests

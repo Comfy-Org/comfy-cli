@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_from_snapshot.json",
+  "title": "comfy build from-snapshot --json data payload",
+  "type": "object",
+  "required": ["build"],
+  "additionalProperties": true,
+  "properties": {
+    "build": {"type": "object", "additionalProperties": true},
+    "report": {"type": "object", "additionalProperties": true}
+  }
+}

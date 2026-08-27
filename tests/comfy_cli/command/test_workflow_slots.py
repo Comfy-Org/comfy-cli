@@ -42,6 +42,18 @@ def _force_json_renderer():
     return r
 
 
+def _force_pretty_renderer():
+    r = Renderer.resolve(
+        is_stdout_tty=True,
+        env={},
+        caller=Caller(kind="user", agentic=False, source_env=None),
+        no_json_flag=True,
+    )
+    r.mode = OutputMode.PRETTY
+    set_renderer(r)
+    return r
+
+
 def _object_info():
     return {
         "KSampler": {
@@ -155,6 +167,18 @@ def _subgraph_workflow() -> dict:
     return json.loads((_FIXTURES / "subgraph_template_ui.json").read_text(encoding="utf-8"))
 
 
+def _seedream_graph():
+    """Graph built from the vendored ByteDance Seedream object_info (the node's
+    ``model`` input is a COMFY_DYNAMICCOMBO_V3 whose options carry sub-inputs)."""
+    oi = json.loads((_FIXTURES / "object_info_bytedance_seedream_v2.json").read_text(encoding="utf-8"))
+    return Graph.from_object_info(oi)
+
+
+def _seedream_workflow() -> dict:
+    """The pristine Seedream 5.0 Pro t2i template exactly as the frontend ships it."""
+    return json.loads((_FIXTURES / "seedream_5_0_pro_t2i_ui.json").read_text(encoding="utf-8"))
+
+
 @pytest.fixture
 def patched_graph(monkeypatch):
     monkeypatch.setattr(workflow_cmd, "_get_graph", lambda *a, **kw: _fake_graph())
@@ -163,6 +187,11 @@ def patched_graph(monkeypatch):
 @pytest.fixture
 def patched_subgraph_graph(monkeypatch):
     monkeypatch.setattr(workflow_cmd, "_get_graph", lambda *a, **kw: _subgraph_graph())
+
+
+@pytest.fixture
+def patched_seedream_graph(monkeypatch):
+    monkeypatch.setattr(workflow_cmd, "_get_graph", lambda *a, **kw: _seedream_graph())
 
 
 # ---------------------------------------------------------------------------
@@ -266,13 +295,20 @@ def _template_workflow():
     }
 
 
-def _run(args: list[str], capsys) -> dict[str, Any]:
-    _force_json_renderer()
+def _invoke(args: list[str], capsys, renderer_factory=_force_json_renderer) -> tuple[str, str, Any]:
+    """Run the command and return (stdout text, stderr text, CliRunner result)."""
+    renderer_factory()
     runner = CliRunner()
     result = runner.invoke(workflow_cmd.app, args, standalone_mode=False)
-    captured = capsys.readouterr().out
+    streams = capsys.readouterr()
+    captured = streams.out
     if not captured.strip():
         captured = result.stdout or ""
+    return captured, streams.err, result
+
+
+def _run(args: list[str], capsys) -> dict[str, Any]:
+    captured, _err, result = _invoke(args, capsys)
     lines = [ln for ln in captured.strip().splitlines() if ln.strip()]
     for line in reversed(lines):
         try:
@@ -345,16 +381,52 @@ class TestSetSlotDirectMode:
         wf = _direct_workflow()
         path = _write_workflow(tmp_path, wf)
         original_text = path.read_text()
-        # --stdout prints to stdout instead of modifying file
-        _force_json_renderer()
-        runner = CliRunner()
-        runner.invoke(
-            workflow_cmd.app,
-            ["set-slot", str(path), '6.text="a dog"', "--stdout"],
-            standalone_mode=False,
-        )
+        # --stdout returns the result instead of modifying the file
+        _invoke(["set-slot", str(path), '6.text="a dog"', "--stdout"], capsys)
         # File should be unchanged
         assert path.read_text() == original_text
+
+    def test_set_slot_stdout_emits_envelope_under_json(self, patched_graph, tmp_path, capsys):
+        """`--json ... --stdout` must emit an envelope/1 carrying the modified workflow.
+
+        Regression: it used to write the bare workflow object to stdout and skip
+        `renderer.emit`, so every machine caller (the local MCP's default
+        `set_workflow_slot`) saw "no JSON" and failed.
+        """
+        path = _write_workflow(tmp_path, _direct_workflow())
+        original_text = path.read_text()
+        captured, _stderr, _ = _invoke(["set-slot", str(path), '6.text="a dog"', "--stdout"], capsys)
+
+        lines = [ln for ln in captured.strip().splitlines() if ln.strip()]
+        assert len(lines) == 1, f"JSON mode must put exactly one envelope on stdout, got {lines[:3]}"
+        env = json.loads(lines[0])
+        assert env["schema"] == "envelope/1"
+        assert env["type"] == "envelope"
+        assert env["ok"] is True
+        assert env["changed"] is False, "--stdout writes nothing, so the envelope must not claim a change"
+
+        data = env["data"]
+        assert data["out"] == "stdout"
+        assert data["wrote"] is None
+        assert data["applied"] == ["6.text"]
+        # data round-trips the applied override…
+        clip = next(n for n in data["workflow_json"]["nodes"] if n["id"] == 6)
+        assert clip["widgets_values"][0] == "a dog"
+        # …and the source file is untouched.
+        assert path.read_text() == original_text
+
+    def test_set_slot_stdout_prints_raw_workflow_in_human_mode(self, patched_graph, tmp_path, capsys):
+        """Without --json, --stdout still prints the bare workflow so it stays pipeable."""
+        path = _write_workflow(tmp_path, _direct_workflow())
+        captured, _stderr, _ = _invoke(
+            ["set-slot", str(path), '6.text="a dog"', "--stdout"],
+            capsys,
+            _force_pretty_renderer,
+        )
+        wf = json.loads(captured)
+        assert "nodes" in wf and "type" not in wf, "human mode must print the workflow, not an envelope"
+        clip = next(n for n in wf["nodes"] if n["id"] == 6)
+        assert clip["widgets_values"][0] == "a dog"
 
     def test_set_slot_invalid_format(self, patched_graph, tmp_path, capsys):
         path = _write_workflow(tmp_path, _direct_workflow())
@@ -391,8 +463,50 @@ class TestVaryDirectMode:
         )
         assert env["ok"] is True
         assert env["data"]["count"] == 3
+        # Variants went to disk, so they are not inlined in the envelope.
+        assert env["data"]["variants"] is None
         files = sorted(out_dir.glob("*.json"))
         assert len(files) == 3
+
+    def test_vary_without_out_dir_puts_variants_in_envelope(self, patched_graph, tmp_path, capsys):
+        """Same envelope contract as set-slot --stdout: under --json the variants
+        ride in `data.variants` instead of being dumped raw onto stdout."""
+        path = _write_workflow(tmp_path, _direct_workflow())
+        captured, _stderr, _ = _invoke(["vary", str(path), "--slot", "3.seed=[1,2]"], capsys)
+
+        lines = [ln for ln in captured.strip().splitlines() if ln.strip()]
+        assert len(lines) == 1, f"JSON mode must put exactly one envelope on stdout, got {lines[:3]}"
+        env = json.loads(lines[0])
+        assert env["ok"] is True
+        assert env["data"]["count"] == 2
+        variants = env["data"]["variants"]
+        assert len(variants) == 2
+        seeds = [next(n for n in wf["nodes"] if n["id"] == 3)["widgets_values"][0] for wf in variants]
+        assert seeds == [1, 2]
+
+    def test_vary_without_out_dir_still_ndjson_in_human_mode(self, patched_graph, tmp_path, capsys):
+        """Without --json, the variants stay raw NDJSON on stdout for piping.
+
+        stdout must be *strictly* line-delimited JSON: the `✓ produced N
+        variation(s)` summary used to be appended to it, which broke
+        `comfy workflow vary ... --no-json > out.ndjson` for strict consumers.
+        It belongs on stderr.
+        """
+        path = _write_workflow(tmp_path, _direct_workflow())
+        _force_pretty_renderer()
+        # Called directly rather than through CliRunner: CliRunner merges
+        # stderr into stdout, and the stdout/stderr split is what's under test.
+        workflow_cmd.vary_cmd(str(path), ["3.seed=[1,2]"])
+        streams = capsys.readouterr()
+        captured, stderr = streams.out, streams.err
+        lines = [ln for ln in captured.splitlines() if ln.strip()]
+        # Every non-blank stdout line parses as JSON — no summary/footer.
+        wfs = [json.loads(ln) for ln in lines]
+        assert len(wfs) == 2
+        seeds = [next(n for n in wf["nodes"] if n["id"] == 3)["widgets_values"][0] for wf in wfs]
+        assert seeds == [1, 2]
+        # The human summary is still shown, just not on the NDJSON stream.
+        assert "produced 2 variation(s)" in stderr
 
     def test_vary_mismatched_lengths_rejected(self, patched_graph, tmp_path, capsys):
         path = _write_workflow(tmp_path, _direct_workflow())
@@ -642,6 +756,145 @@ class TestVaryNestedSubgraph:
 
 
 # ---------------------------------------------------------------------------
+# Dynamic combos (COMFY_DYNAMICCOMBO_V3) — pristine ByteDance Seedream template
+# ---------------------------------------------------------------------------
+#
+# The frontend inlines the selected option's widget sub-values into the flat
+# positional widgets_values right after the selector, so slot extraction and
+# the set-slot/vary write path must expand the dynamic combo or every widget
+# after it mislabels/miswrites (1.seed reading the model name, 1.seed=42
+# silently clobbering the model selector).
+#
+# Pristine template widgets_values layout (index → slot):
+#   0 prompt · 1 model selector · 2 model.size_preset · 3 model.width
+#   4 model.height · 5 seed · 6 control_after_generate · 7 watermark
+#   (thinking is optional and unserialized → index 8, absent)
+
+
+class TestSlotsDynamicCombo:
+    def test_slots_expand_dynamic_combo_sub_inputs(self, patched_seedream_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        env = _run(["slots", str(path)], capsys)
+        assert env["ok"] is True
+        by_addr = {s["address"]: s for s in env["data"]["slots"]}
+        assert "1.prompt" in by_addr
+
+        model = by_addr["1.model"]
+        assert model["type"] == "COMFY_DYNAMICCOMBO_V3"
+        assert model["current_value"] == "seedream 5.0 pro"
+        assert "seedream 5.0 pro" in model["enum"]
+
+        preset = by_addr["1.model.size_preset"]
+        assert "(1K) 1024x1024 (1:1)" in preset["enum"]
+        assert preset["current_value"] == "(1K) 1024x1024 (1:1)"
+
+        assert by_addr["1.model.width"]["type"] == "INT"
+        assert by_addr["1.model.width"]["current_value"] == 2048
+        assert by_addr["1.model.height"]["type"] == "INT"
+        assert by_addr["1.model.height"]["current_value"] == 2048
+
+        seed = by_addr["1.seed"]
+        assert seed["type"] == "INT"
+        assert seed["current_value"] == 0, "1.seed must read its own slot, not the model selector"
+
+        assert by_addr["1.watermark"]["type"] == "BOOLEAN"
+        assert by_addr["1.watermark"]["current_value"] is False
+        assert "1.thinking" in by_addr
+
+    def test_slots_connection_sub_inputs_not_exposed(self, patched_seedream_graph, tmp_path, capsys):
+        """Autogrow/connection sub-inputs consume no widgets_values slot and
+        must not surface as slots."""
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        env = _run(["slots", str(path)], capsys)
+        addrs = {s["address"] for s in env["data"]["slots"]}
+        assert "1.model.images" not in addrs
+
+
+class TestSetSlotDynamicCombo:
+    def test_set_seed_does_not_clobber_model_selector(self, patched_seedream_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        env = _run(["set-slot", str(path), "1.seed=42"], capsys)
+        assert env["ok"] is True, env
+        wv = json.loads(path.read_text())["nodes"][0]["widgets_values"]
+        assert wv[5] == 42
+        assert wv[1] == "seedream 5.0 pro", "selector must be untouched by a seed write"
+
+    def test_set_sub_input_writes_its_own_slot(self, patched_seedream_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        env = _run(["set-slot", str(path), '1.model.size_preset="Custom"'], capsys)
+        assert env["ok"] is True, env
+        wv = json.loads(path.read_text())["nodes"][0]["widgets_values"]
+        assert wv[2] == "Custom"
+        assert wv[1] == "seedream 5.0 pro"
+
+    def test_selector_change_rebuilds_roster(self, patched_seedream_graph, tmp_path, capsys):
+        original = _seedream_workflow()["nodes"][0]["widgets_values"]
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        env = _run(["set-slot", str(path), '1.model="seedream 5.0 lite"'], capsys)
+        assert env["ok"] is True, env
+        warnings = env["data"]["warnings"]
+        assert any(w.get("code") == "dynamic_combo_roster_rebuilt" for w in warnings), warnings
+
+        wv = json.loads(path.read_text())["nodes"][0]["widgets_values"]
+        # lite adds max_images + fail_on_partial → roster grows by 2.
+        assert len(wv) == len(original) + 2
+        assert wv[0] == original[0], "prompt preserved"
+        assert wv[1] == "seedream 5.0 lite"
+        # lite defaults: size_preset (first enum), width, height, max_images, fail_on_partial.
+        assert wv[2:7] == ["(1K) 1024x1024 (1:1)", 2048, 2048, 1, False]
+        # trailing values (seed / control marker / watermark) preserved + realigned.
+        assert wv[7:] == [0, "randomize", False]
+
+        # The rebuilt roster is addressable: the lite-only sub-slots now exist.
+        env = _run(["slots", str(path)], capsys)
+        addrs = {s["address"]: s["current_value"] for s in env["data"]["slots"]}
+        assert addrs["1.model.max_images"] == 1
+        assert addrs["1.model.fail_on_partial"] is False
+        assert addrs["1.seed"] == 0
+
+    def test_unknown_sub_address_warns_without_writing(self, patched_seedream_graph, tmp_path, capsys):
+        original = _seedream_workflow()["nodes"][0]["widgets_values"]
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        # max_images only exists under the lite/4.5 selectors, not the current pro one.
+        env = _run(["set-slot", str(path), "1.model.max_images=5"], capsys)
+        assert env["ok"] is True, env
+        warnings = env["data"]["warnings"]
+        w = next((w for w in warnings if w.get("code") == "unknown_dynamic_sub_input"), None)
+        assert w is not None, warnings
+        assert "model.size_preset" in (w.get("valid_addresses") or [])
+        wv = json.loads(path.read_text())["nodes"][0]["widgets_values"]
+        assert wv == original, "an unknown sub-address must not mutate widgets_values"
+
+    def test_unknown_selector_option_rejected(self, patched_seedream_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        env = _run(["set-slot", str(path), '1.model="no-such-model"'], capsys)
+        assert env["ok"] is False
+        assert "valid options" in env["error"]["message"]
+
+
+class TestVaryDynamicCombo:
+    def test_vary_over_sub_input(self, patched_seedream_graph, tmp_path, capsys):
+        path = _write_workflow(tmp_path, _seedream_workflow())
+        out_dir = tmp_path / "out"
+        env = _run(
+            [
+                "vary",
+                str(path),
+                "--slot",
+                '1.model.size_preset=["Custom","(2K) 2048x2048 (1:1)"]',
+                "--out-dir",
+                str(out_dir),
+            ],
+            capsys,
+        )
+        assert env["ok"] is True
+        presets = []
+        for f in sorted(out_dir.glob("*.json")):
+            presets.append(json.loads(f.read_text())["nodes"][0]["widgets_values"][2])
+        assert presets == ["Custom", "(2K) 2048x2048 (1:1)"]
+
+
+# ---------------------------------------------------------------------------
 # stale cache envelope — workflow slots/set-slot/vary surface stale flag
 # ---------------------------------------------------------------------------
 #
@@ -702,3 +955,40 @@ class TestStaleEnvelope:
         assert any(w.get("code") == "object_info_stale" for w in warnings), (
             f"expected a warning with code='object_info_stale', got {warnings}"
         )
+
+
+class TestRoutingErrorEnvelope:
+    """A bad routing value must degrade to the JSON failure envelope.
+
+    ``_get_graph`` here has no per-command ``--where`` flag to fall back to, so
+    a typo'd ``COMFY_WHERE`` (or a stale project/persisted ``where_default``)
+    used to escape ``resolve_default`` as a raw ``ValueError`` — the try block
+    around it only handles ``LoadError``. Regression: it is a ``where_invalid``
+    envelope now, and nothing reaches the network.
+    """
+
+    def test_slots_typoed_comfy_where_emits_envelope(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setenv("COMFY_WHERE", "clod")
+        path = _write_workflow(tmp_path, _direct_workflow())
+        captured, _err, result = _invoke(["slots", str(path)], capsys)
+        assert result.exception is None, f"routing error escaped as a traceback: {result.exception!r}"
+        env = json.loads([ln for ln in captured.strip().splitlines() if ln.strip()][-1])
+        assert env["ok"] is False
+        assert env["error"]["code"] == "where_invalid"
+        assert "clod" in env["error"]["message"]
+
+    def test_set_slot_typoed_comfy_where_emits_envelope(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setenv("COMFY_WHERE", "clod")
+        path = _write_workflow(tmp_path, _direct_workflow())
+        env = _run(["set-slot", str(path), '6.text="a dog"'], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "where_invalid"
+
+    def test_input_path_short_circuits_routing(self, tmp_path, monkeypatch, capsys):
+        """``--input`` never resolves routing, so a bad value stays harmless."""
+        monkeypatch.setenv("COMFY_WHERE", "clod")
+        oi = tmp_path / "object_info.json"
+        oi.write_text(json.dumps(_object_info()), encoding="utf-8")
+        path = _write_workflow(tmp_path, _direct_workflow())
+        env = _run(["slots", str(path), "--input", str(oi)], capsys)
+        assert env["ok"] is True, env

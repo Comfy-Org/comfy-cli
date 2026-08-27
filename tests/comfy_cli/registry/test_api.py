@@ -4,8 +4,14 @@ import json
 import unittest
 from unittest.mock import MagicMock, patch
 
+from comfy_cli.http import DEFAULT_HTTP_TIMEOUT
 from comfy_cli.registry import PyProjectConfig
-from comfy_cli.registry.api import RegistryAPI
+from comfy_cli.registry.api import (
+    MAX_ERROR_BODY_CHARS,
+    RegistryAPI,
+    RegistryAPIError,
+    sanitize_error_body,
+)
 from comfy_cli.registry.types import ComfyConfig, License, ProjectConfig, URLs
 
 
@@ -69,9 +75,36 @@ class TestRegistryAPI(unittest.TestCase):
         mock_response.text = "Bad Request"
         mock_post.return_value = mock_response
 
-        with self.assertRaises(Exception) as context:
+        with self.assertRaises(RegistryAPIError) as context:
             self.registry_api.publish_node_version(self.node_config, self.token)
         self.assertIn("Failed to publish node version", str(context.exception))
+        self.assertEqual(context.exception.status, 400)
+        self.assertEqual(context.exception.body, "Bad Request")
+
+    def test_publish_node_version_requires_publisher_id(self):
+        # Client-side validation failure: typed error, no HTTP status/body.
+        self.node_config.tool_comfy.publisher_id = ""
+        with self.assertRaises(RegistryAPIError) as context:
+            self.registry_api.publish_node_version(self.node_config, self.token)
+        self.assertIn("Publisher ID is required", str(context.exception))
+        self.assertIsNone(context.exception.status)
+        self.assertIsNone(context.exception.body)
+
+    @patch("requests.post")
+    def test_publish_node_version_failure_redacts_token_echoed_by_registry(self, mock_post):
+        # The publish payload carries the PAT; a registry error that echoes the
+        # payload back must not leak it into the message or the error body.
+        mock_response = MagicMock()
+        mock_response.status_code = 400
+        mock_response.text = f'{{"error":"bad request","sent":{{"personal_access_token":"{self.token}"}}}}'
+        mock_post.return_value = mock_response
+
+        with self.assertRaises(RegistryAPIError) as context:
+            self.registry_api.publish_node_version(self.node_config, self.token)
+
+        self.assertNotIn(self.token, str(context.exception))
+        self.assertNotIn(self.token, context.exception.body)
+        self.assertIn("***REDACTED***", context.exception.body)
 
     def _mock_publish_response(self, changelog=""):
         mock_response = MagicMock()
@@ -168,9 +201,11 @@ class TestRegistryAPI(unittest.TestCase):
         mock_response.text = "Internal Server Error"
         mock_get.return_value = mock_response
 
-        with self.assertRaises(Exception) as context:
+        with self.assertRaises(RegistryAPIError) as context:
             self.registry_api.list_all_nodes()
         self.assertIn("Failed to retrieve nodes", str(context.exception))
+        self.assertEqual(context.exception.status, 500)
+        self.assertEqual(context.exception.body, "Internal Server Error")
 
     @patch("requests.get")
     def test_install_node_success(self, mock_get):
@@ -197,9 +232,59 @@ class TestRegistryAPI(unittest.TestCase):
         mock_response.text = "Not Found"
         mock_get.return_value = mock_response
 
-        with self.assertRaises(Exception) as context:
+        with self.assertRaises(RegistryAPIError) as context:
             self.registry_api.install_node("node1")
         self.assertIn("Failed to install node", str(context.exception))
+        self.assertEqual(context.exception.status, 404)
+        self.assertEqual(context.exception.body, "Not Found")
+
+    @patch("requests.post")
+    def test_publish_node_version_passes_timeout(self, mock_post):
+        """Registry calls must set a timeout so a stalled peer can't hang the CLI."""
+        mock_response = MagicMock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {
+            "node_version": {
+                "id": "test_node",
+                "version": "0.1.0",
+                "changelog": "",
+                "dependencies": [],
+                "deprecated": False,
+                "downloadUrl": "https://example.com/download",
+            },
+            "signedUrl": "https://example.com/signed",
+        }
+        mock_post.return_value = mock_response
+
+        self.registry_api.publish_node_version(self.node_config, self.token)
+        self.assertEqual(mock_post.call_args.kwargs["timeout"], DEFAULT_HTTP_TIMEOUT)
+
+    @patch("requests.get")
+    def test_list_all_nodes_passes_timeout(self, mock_get):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"nodes": []}
+        mock_get.return_value = mock_response
+
+        self.registry_api.list_all_nodes()
+        self.assertEqual(mock_get.call_args.kwargs["timeout"], DEFAULT_HTTP_TIMEOUT)
+
+    @patch("requests.get")
+    def test_install_node_passes_timeout(self, mock_get):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "node1",
+            "version": "1.0.0",
+            "changelog": "",
+            "dependencies": [],
+            "deprecated": False,
+            "downloadUrl": "https://example.com/download1",
+        }
+        mock_get.return_value = mock_response
+
+        self.registry_api.install_node("node1")
+        self.assertEqual(mock_get.call_args.kwargs["timeout"], DEFAULT_HTTP_TIMEOUT)
 
     @patch("requests.get")
     def test_get_node_success(self, mock_get):
@@ -233,3 +318,39 @@ class TestRegistryAPI(unittest.TestCase):
         with self.assertRaises(Exception) as context:
             self.registry_api.get_node("node1")
         self.assertIn("Failed to retrieve node", str(context.exception))
+
+    @patch("requests.get")
+    def test_get_node_passes_timeout(self, mock_get):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "node1",
+            "name": "Node One",
+            "description": "A node",
+        }
+        mock_get.return_value = mock_response
+
+        self.registry_api.get_node("node1")
+        self.assertEqual(mock_get.call_args.kwargs["timeout"], DEFAULT_HTTP_TIMEOUT)
+
+
+class TestSanitizeErrorBody(unittest.TestCase):
+    def test_leaves_ordinary_body_untouched(self):
+        self.assertEqual(sanitize_error_body("Not Found"), "Not Found")
+
+    def test_redacts_secrets(self):
+        body = '{"personal_access_token":"s3cr3t"}'
+        self.assertEqual(sanitize_error_body(body, secrets=("s3cr3t",)), '{"personal_access_token":"***REDACTED***"}')
+
+    def test_ignores_empty_secrets(self):
+        # A falsy token must not turn every empty string into a redaction marker.
+        self.assertEqual(sanitize_error_body("plain", secrets=(None, "")), "plain")
+
+    def test_escapes_newlines_to_prevent_log_forgery(self):
+        forged = "error\nINFO: everything is fine\r\n"
+        self.assertEqual(sanitize_error_body(forged), "error\\nINFO: everything is fine\\r\\n")
+
+    def test_truncates_oversized_body(self):
+        result = sanitize_error_body("x" * (MAX_ERROR_BODY_CHARS + 500))
+        self.assertTrue(result.startswith("x" * MAX_ERROR_BODY_CHARS))
+        self.assertIn(f"truncated, {MAX_ERROR_BODY_CHARS + 500} chars total", result)

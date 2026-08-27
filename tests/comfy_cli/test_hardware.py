@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import jsonschema
 
-from comfy_cli import hardware
+from comfy_cli import _safe_exec, hardware
 from comfy_cli.env_checker import EnvChecker, format_hardware_summary
 
 _EnvCheckerCls = EnvChecker.__closure__[0].cell_contents
@@ -64,6 +66,36 @@ class TestDetectHardwareMacOS:
 
         assert hw["gpu"] is None
         assert hw["ram_bytes"] == 17179869184
+
+    def test_apple_silicon_under_rosetta_unified_block(self):
+        """An x86_64 Python under Rosetta 2 reports machine == 'x86_64', but
+        sysctl.proc_translated == '1' reveals the underlying Apple Silicon, so
+        the unified-memory block is still reported (not gpu null)."""
+
+        def fake_run(cmd):
+            if cmd == ["sysctl", "-n", "sysctl.proc_translated"]:
+                return "1"
+            if cmd == ["sysctl", "-n", "machdep.cpu.brand_string"]:
+                return "Apple M4 Max"
+            return None
+
+        with (
+            patch.object(hardware.platform, "system", return_value="Darwin"),
+            patch.object(hardware.platform, "machine", return_value="x86_64"),
+            patch.object(hardware.platform, "release", return_value="25.4.0"),
+            patch.object(hardware, "_run", side_effect=fake_run),
+            patch.object(hardware, "_detect_ram_bytes", return_value=68719476736),
+        ):
+            hw = hardware.detect_hardware()
+
+        assert hw["arch"] == "x86_64"
+        assert hw["cpu"] == "Apple M4 Max"
+        assert hw["gpu"] == {
+            "vendor": "apple",
+            "model": "Apple M4 Max",
+            "vram_bytes": None,
+            "unified_memory": True,
+        }
 
 
 class TestDetectHardwareNvidiaSmi:
@@ -186,6 +218,28 @@ class TestDetectHardwareNeverRaises:
         assert hw["os"] is None
         assert hw["arch"] is None
         assert hw["gpu"] is None
+
+
+class TestDetectRamBytesImportFailure:
+    """The lazy ``import psutil`` in ``_detect_ram_bytes`` must live inside its
+    own ``try`` block, or a failed import escapes and breaks
+    ``detect_hardware``'s "never raises" contract."""
+
+    def test_psutil_import_failure_falls_back_to_none(self):
+        # Setting the sys.modules entry to None makes `import psutil` raise
+        # ImportError, whether or not psutil is actually installed.
+        with patch.dict(sys.modules, {"psutil": None}):
+            assert hardware._detect_ram_bytes() is None
+
+    def test_detect_hardware_survives_psutil_import_failure(self):
+        with (
+            patch.dict(sys.modules, {"psutil": None}),
+            patch.object(hardware, "_run", side_effect=TimeoutError("boom")),
+            patch.object(hardware.cuda_detect, "_load_libcuda", side_effect=OSError),
+        ):
+            hw = hardware.detect_hardware()
+
+        assert hw["ram_bytes"] is None
 
 
 class TestDetectGpuAmd:
@@ -351,3 +405,59 @@ class TestFillDataHardware:
             "server": {"running": False},
         }
         jsonschema.Draft202012Validator(_env_schema()).validate(payload)
+
+
+class TestRunResolvesBinaryPath:
+    """``_run`` must resolve the binary to an absolute path (never invoke by bare
+    name) so Windows ``CreateProcess`` can't pick up a CWD-planted executable."""
+
+    def test_run_invokes_resolved_absolute_path(self):
+        captured = {}
+
+        def fake_check_output(cmd, **kwargs):
+            captured["cmd"] = cmd
+            return "ok\n"
+
+        with (
+            patch.object(_safe_exec.shutil, "which", return_value="/usr/bin/sysctl"),
+            patch.object(hardware.subprocess, "check_output", side_effect=fake_check_output),
+        ):
+            result = hardware._run(["sysctl", "-n", "machdep.cpu.brand_string"])
+
+        assert result == "ok"
+        # First element is the resolved absolute path, not the bare name; the
+        # remaining arguments are preserved verbatim.
+        assert captured["cmd"] == ["/usr/bin/sysctl", "-n", "machdep.cpu.brand_string"]
+
+    def test_run_skips_when_binary_absent(self):
+        """A binary missing from PATH resolves to None → probe is skipped and the
+        subprocess is never spawned."""
+        with (
+            patch.object(_safe_exec.shutil, "which", return_value=None),
+            patch.object(hardware.subprocess, "check_output") as mock_run,
+        ):
+            assert hardware._run(["nvidia-smi", "--query-gpu=name"]) is None
+        mock_run.assert_not_called()
+
+    def test_run_never_raises_on_resolve_failure(self):
+        """Even a broken PATH lookup degrades to None, honoring the never-raise
+        contract."""
+        with patch.object(_safe_exec.shutil, "which", side_effect=RuntimeError("boom")):
+            assert hardware._run(["nvidia-smi"]) is None
+
+    def test_run_empty_cmd_returns_none(self):
+        """An empty command degrades to None instead of raising IndexError,
+        honoring the never-raise contract."""
+        with patch.object(hardware.subprocess, "check_output") as mock_run:
+            assert hardware._run([]) is None
+        mock_run.assert_not_called()
+
+    def test_run_never_spawns_a_relative_path(self):
+        """A relative ``which`` match is anchored in the CWD, so ``_run`` skips
+        the probe rather than letting ``subprocess`` re-resolve it there."""
+        with (
+            patch.object(_safe_exec.shutil, "which", return_value=os.path.join("subdir", "nvidia-smi")),
+            patch.object(hardware.subprocess, "check_output") as mock_run,
+        ):
+            assert hardware._run(["nvidia-smi", "--query-gpu=name"]) is None
+        mock_run.assert_not_called()

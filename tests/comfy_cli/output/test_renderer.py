@@ -5,11 +5,21 @@ from __future__ import annotations
 import io
 import json
 import re
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
 
 import pytest
 
 from comfy_cli.caller import Caller
-from comfy_cli.output.renderer import OutputMode, Renderer, get_renderer, reset_renderer_for_testing, set_renderer
+from comfy_cli.output.renderer import (
+    OutputMode,
+    Renderer,
+    _json_default,
+    get_renderer,
+    reset_renderer_for_testing,
+    set_renderer,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -117,6 +127,45 @@ def test_envelope_shape_on_error():
     assert env["error"]["hint"] == "run: comfy install"
     assert env["error"]["details"] is None
     assert r.exit_code == 1
+
+
+def test_error_where_override_lands_on_envelope():
+    """`where=` on error() stamps the routed target, mirroring emit()."""
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.JSON
+    r.machine_stream = stream
+    r.command = "run"
+    r.error("workflow_unknown_nodes", "bad graph", where="cloud")
+    env = json.loads(stream.getvalue().strip())
+    assert env["ok"] is False
+    assert env["where"] == "cloud"
+
+
+def test_error_falls_back_to_renderer_where():
+    """With no override, error() inherits the renderer's routed target — this
+    is what the run path assigns once `--where` resolves."""
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.JSON
+    r.machine_stream = stream
+    r.command = "run"
+    r.where = "local"
+    r.error("server_not_running", "no server")
+    env = json.loads(stream.getvalue().strip())
+    assert env["where"] == "local"
+
+
+def test_error_explicit_where_beats_renderer_where():
+    stream = io.StringIO()
+    r = _resolve()
+    r.mode = OutputMode.JSON
+    r.machine_stream = stream
+    r.command = "run"
+    r.where = "local"
+    r.error("workflow_unknown_nodes", "bad graph", where="cloud")
+    env = json.loads(stream.getvalue().strip())
+    assert env["where"] == "cloud"
 
 
 def test_error_hint_falls_back_to_registry():
@@ -254,7 +303,7 @@ def test_get_renderer_default_is_pretty():
 
 
 # ---------------------------------------------------------------------------
-# Control-sequence sanitizing at the pretty boundary (BE-4794)
+# Control-sequence sanitizing at the pretty boundary
 # ---------------------------------------------------------------------------
 
 _EVIL = "job \x1b[2Jevil"
@@ -395,3 +444,200 @@ def test_pretty_helpers_tolerate_non_string_messages():
     assert "42" in _pretty_output(lambda r: r.warn(42))
     assert "42" in _pretty_output(lambda r: r.info(42))
     assert "42" in _pretty_output(lambda r: r.success(42))
+
+
+class TestResolveSurvivesAnUnusableStdout:
+    """``Renderer.resolve`` runs from the main Typer callback (``cmdline.py``)
+    before any command dispatch, and every call site there omits
+    ``is_stdout_tty``, so it probes ``sys.stdout`` itself.
+
+    Under ``pythonw``, a Windows service, or a detached parent, ``sys.stdout``
+    is ``None`` or an already-closed file. A bare ``sys.stdout.isatty()`` there
+    raises before argument parsing, which takes down EVERY command — including
+    ``comfy --help`` and runs with tracking disabled. The probe is routed
+    through ``caller.stream_is_tty``, so it degrades to "not a TTY" (→ JSON
+    mode, the correct read of a process with no terminal) instead.
+    """
+
+    def test_missing_stdout_resolves_to_json_not_attribute_error(self, monkeypatch):
+        import comfy_cli.output.renderer as renderer_mod
+
+        monkeypatch.setattr(renderer_mod.sys, "stdout", None)
+        r = Renderer.resolve(env={})
+        assert r.mode is OutputMode.JSON
+
+    def test_closed_stdout_resolves_to_json_not_value_error(self, monkeypatch, tmp_path):
+        import comfy_cli.output.renderer as renderer_mod
+
+        handle = open(tmp_path / "out.txt", "w")
+        handle.close()
+        monkeypatch.setattr(renderer_mod.sys, "stdout", handle)
+        assert Renderer.resolve(env={}).mode is OutputMode.JSON
+
+    def test_revoked_fd_stdout_resolves_to_json_not_os_error(self, monkeypatch):
+        import comfy_cli.output.renderer as renderer_mod
+
+        class Revoked:
+            def isatty(self):
+                raise OSError(9, "Bad file descriptor")
+
+        monkeypatch.setattr(renderer_mod.sys, "stdout", Revoked())
+        assert Renderer.resolve(env={}).mode is OutputMode.JSON
+
+    def test_a_live_tty_still_resolves_to_pretty(self, monkeypatch):
+        """The guard must not flip healthy terminals to JSON."""
+        import comfy_cli.output.renderer as renderer_mod
+
+        class Tty:
+            def isatty(self):
+                return True
+
+        monkeypatch.setattr(renderer_mod.sys, "stdout", Tty())
+        assert Renderer.resolve(env={}).mode is OutputMode.PRETTY
+
+
+class TestWritesTolerateADeadMachineStream:
+    """Resolving to JSON mode against an unusable stdout must not merely DEFER
+    the crash to the first emit.
+
+    `machine_stream` falls back to `sys.stdout`, so surviving `resolve` only to
+    die inside `_write_json_line` is strictly worse than dying at startup: by
+    then the command has run and its side effects have landed. A stream that
+    cannot be written to cannot receive output, so the write is a no-op and the
+    process still exits with the right code.
+    """
+
+    def _dead_stdout_renderer(self, monkeypatch, stream):
+        import comfy_cli.output.renderer as renderer_mod
+
+        monkeypatch.setattr(renderer_mod.sys, "stdout", stream)
+        r = Renderer.resolve(env={})
+        assert r.mode is OutputMode.JSON
+        return r
+
+    def test_missing_stdout_emit_is_a_noop(self, monkeypatch):
+        r = self._dead_stdout_renderer(monkeypatch, None)
+        r.emit({"hello": "world"})  # must not raise
+        assert r.exit_code == 0
+
+    def test_missing_stdout_error_still_sets_the_exit_code(self, monkeypatch):
+        r = self._dead_stdout_renderer(monkeypatch, None)
+        r.error(code="server_not_running", message="nope", exit_code=1)
+        assert r.exit_code == 1
+
+    def test_closed_stdout_emit_is_a_noop(self, monkeypatch, tmp_path):
+        handle = open(tmp_path / "out.txt", "w")
+        handle.close()
+        r = self._dead_stdout_renderer(monkeypatch, handle)
+        r.error(code="server_not_running", message="nope", exit_code=1)
+        assert r.exit_code == 1
+
+    def test_broken_pipe_still_propagates(self, monkeypatch):
+        """`OSError` is deliberately excluded from the guard. A BrokenPipeError
+        means the stream was real and the reader hung up, and that has to keep
+        propagating: `comfy cloud login` depends on it escaping the `login_url`
+        emit to fail fast instead of blocking 300s on a browser callback nobody
+        will read (test_json_login_fails_fast_when_login_url_write_breaks).
+        Guarding "no usable stream" must not quietly become "ignore all I/O
+        errors"."""
+
+        class BrokenPipe:
+            def isatty(self):
+                return False
+
+            def write(self, _):
+                raise BrokenPipeError(32, "Broken pipe")
+
+            def flush(self):
+                pass
+
+        r = self._dead_stdout_renderer(monkeypatch, BrokenPipe())
+        with pytest.raises(BrokenPipeError):
+            r.emit({"hello": "world"})
+
+    def test_a_malformed_payload_still_surfaces(self, monkeypatch):
+        """The handler is deliberately narrower than `stream_is_tty`'s: a
+        TypeError from the write means our payload is wrong, which is a bug and
+        must stay visible rather than being silently swallowed."""
+
+        class Fussy:
+            def isatty(self):
+                return False
+
+            def write(self, _):
+                raise TypeError("not a string")
+
+            def flush(self):
+                pass
+
+        r = self._dead_stdout_renderer(monkeypatch, Fussy())
+        with pytest.raises(TypeError):
+            r.emit({"hello": "world"})
+
+
+class TestJsonDefault:
+    def test_a_non_string_isoformat_does_not_loop(self):
+        class FakeStamp:
+            def isoformat(self):
+                return self  # a Mock or a bad stub does exactly this
+
+        assert json.dumps({"when": FakeStamp()}, default=_json_default)
+
+    def test_a_real_isoformat_is_still_used(self):
+        assert _json_default(datetime(2026, 8, 23, tzinfo=timezone.utc)) == "2026-08-23T00:00:00+00:00"
+
+    def test_a_path_becomes_its_string(self):
+        assert _json_default(Path("/tmp/x")) == "/tmp/x"
+
+    def test_an_enum_wrapping_an_opaque_value_is_coerced(self):
+        class Wrapping(Enum):
+            OPAQUE = object()
+
+        assert _json_default(Wrapping.OPAQUE).startswith("<object object")
+
+    def test_the_hook_runs_once_per_value(self):
+        """Single-pass is the whole guarantee: json re-enters the hook for
+        anything it still cannot encode, so one re-entry per value is the same
+        defect as an endless one, caught earlier."""
+
+        class Wrapping(Enum):
+            OPAQUE = object()
+
+        class BadStamp:
+            def isoformat(self):
+                return self
+
+        seen = []
+
+        def counted(obj):
+            seen.append(obj)
+            return _json_default(obj)
+
+        json.dumps({"e": Wrapping.OPAQUE, "s": BadStamp(), "p": Path("/tmp/x")}, default=counted)
+        assert len(seen) == 3
+
+    def test_a_container_value_stays_a_container(self):
+        class Shaped(Enum):
+            LIST = [1, 2]
+            DICT = {"a": 1}
+            TUPLE = (1, 2)
+
+        assert json.dumps(Shaped.LIST, default=_json_default) == "[1, 2]"
+        assert json.dumps(Shaped.DICT, default=_json_default) == '{"a": 1}'
+        assert json.dumps(Shaped.TUPLE, default=_json_default) == "[1, 2]"
+
+    def test_a_nested_enum_unwraps_to_its_innermost_value(self):
+        class Inner(Enum):
+            MEMBER = "leaf"
+
+        class Outer(Enum):
+            MEMBER = Inner.MEMBER
+
+        assert _json_default(Outer.MEMBER) == "leaf"
+
+    def test_a_self_referencing_enum_does_not_loop(self):
+        class Looped(Enum):
+            MEMBER = "placeholder"
+
+        Looped.MEMBER._value_ = Looped.MEMBER
+        assert _json_default(Looped.MEMBER) == str(Looped.MEMBER)
