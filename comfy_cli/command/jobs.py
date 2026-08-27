@@ -34,7 +34,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any
 
 import typer
@@ -2477,7 +2477,7 @@ def _ms_to_iso(value: Any) -> str | None:
     if value is None or isinstance(value, bool):
         return None
     try:
-        return datetime.fromtimestamp(float(value) / 1000, tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(float(value) / 1000, tz=UTC).isoformat()
     except (TypeError, ValueError, OverflowError, OSError):
         return None
 

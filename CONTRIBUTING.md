@@ -42,8 +42,9 @@ clears once you have.
 
 ## Setup
 
-Minimum Python version is **3.10** (the version CI targets, and the floor
-declared in `pyproject.toml`).
+Minimum Python version is **3.11** (the version CI targets, and the floor
+declared in `pyproject.toml`). `enum.StrEnum` and `typing.assert_never` are used
+at module scope, so 3.10 cannot import the package.
 
 The project is `uv`-based, and `uv.lock` is authoritative — CI installs with
 `--locked`, so a dependency change must land as a deliberate lockfile bump.

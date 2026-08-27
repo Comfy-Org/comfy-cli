@@ -13,7 +13,7 @@ import io
 import json
 import os
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -638,7 +638,7 @@ def test_logs_metadata_reports_mtime_and_size(monkeypatch, tmp_path, capsys):
     env = _envelope(capsys)
     assert env["data"]["source"] == "derived_port"
     assert env["data"]["size"] == 4
-    assert env["data"]["mtime"] == datetime.fromtimestamp(1_700_000_000, tz=timezone.utc).isoformat()
+    assert env["data"]["mtime"] == datetime.fromtimestamp(1_700_000_000, tz=UTC).isoformat()
     assert env["data"]["port_mismatch"] is False
 
 

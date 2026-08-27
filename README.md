@@ -58,7 +58,7 @@ comfy download <prompt_id> --where cloud -o ./outputs    # save the results loca
 
 1. (Recommended) Activate a virtual environment ([venv](https://docs.python.org/3/library/venv.html) or [conda](https://conda.io/projects/conda/en/latest/user-guide/getting-started.html)).
 
-2. Install with `pip` (requires Python 3.10+):
+2. Install with `pip` (requires Python 3.11+):
 
    ```bash
    pip install comfy-cli

@@ -19,7 +19,7 @@ live under ``comfy auth`` since they're not cloud-specific.
 from __future__ import annotations
 
 import urllib.error
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 import typer
@@ -690,7 +690,7 @@ def _fmt_expiry(expires_at: int | None) -> str:
     if expires_at is None:
         return "unknown"
     try:
-        dt = datetime.fromtimestamp(expires_at, tz=timezone.utc)
+        dt = datetime.fromtimestamp(expires_at, tz=UTC)
     except (OSError, OverflowError, ValueError):
         return "unknown"
     return dt.isoformat(timespec="seconds")

@@ -10,7 +10,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from stat import S_ISREG
 
 import typer
@@ -1032,7 +1032,7 @@ def logs(tail: int = 200, where: str | None = None, port: int | None = None):
     # (the wrong-port-empty-log case a failed launch attempt leaves behind).
     try:
         st = os.stat(log_path)
-        mtime = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+        mtime = datetime.fromtimestamp(st.st_mtime, tz=UTC).isoformat()
         size = st.st_size
     except (OSError, ValueError, OverflowError):
         # OSError: the same TOCTOU window as the read above. ValueError/OverflowError:

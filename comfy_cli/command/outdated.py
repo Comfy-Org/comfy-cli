@@ -35,7 +35,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -481,7 +481,7 @@ def build_report(
 
     _save_cache(cache)
 
-    checked_at = (now or datetime.now(timezone.utc)).isoformat()
+    checked_at = (now or datetime.now(UTC)).isoformat()
     report = {
         "core": {
             "installed": core_installed,

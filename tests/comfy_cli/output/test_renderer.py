@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 
@@ -584,7 +584,7 @@ class TestJsonDefault:
         assert json.dumps({"when": FakeStamp()}, default=_json_default)
 
     def test_a_real_isoformat_is_still_used(self):
-        assert _json_default(datetime(2026, 8, 23, tzinfo=timezone.utc)) == "2026-08-23T00:00:00+00:00"
+        assert _json_default(datetime(2026, 8, 23, tzinfo=UTC)) == "2026-08-23T00:00:00+00:00"
 
     def test_a_path_becomes_its_string(self):
         assert _json_default(Path("/tmp/x")) == "/tmp/x"

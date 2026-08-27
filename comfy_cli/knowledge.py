@@ -23,7 +23,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -483,7 +483,7 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         version=version[:MAX_VERSION_CHARS] if isinstance(version, str) else "unknown",
         source=source,
         stale=stale,
-        as_of=datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        as_of=datetime.fromtimestamp(mtime, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         path=path,
         models=models,
         capabilities=capabilities,

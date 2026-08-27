@@ -13,7 +13,7 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -131,7 +131,7 @@ _OLD_S = download_state.PRUNE_MAX_AGE_S + 3600
 
 
 def _stamp(seconds_ago: float) -> str:
-    return (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat(timespec="seconds")
+    return (datetime.now(UTC) - timedelta(seconds=seconds_ago)).isoformat(timespec="seconds")
 
 
 def _record(workspace, *, status="completed", age_s=0.0, dest=None):

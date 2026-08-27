@@ -29,7 +29,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -102,7 +102,7 @@ def journal(project: Project, **event) -> None:
     directory, a full disk, or an unserializable value must never fail the
     command being journaled."""
     try:
-        record = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), **event}
+        record = {"ts": datetime.now(UTC).isoformat(timespec="seconds"), **event}
         comfy_dir = project.root / ".comfy"
         comfy_dir.mkdir(parents=True, exist_ok=True)
         with (comfy_dir / "runs.jsonl").open("a", encoding="utf-8") as fh:

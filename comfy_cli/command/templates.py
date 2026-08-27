@@ -346,12 +346,10 @@ def _spawn_background_refresh() -> bool:
         # refresh is genuinely happening.
         return True
 
-    argv = [sys.executable]
-    if sys.version_info >= (3, 11):
-        # -P stops Python prepending the process cwd to sys.path (3.11+),
-        # neutralizing the `-m comfy_cli` cwd-import vector across the board.
-        argv.append("-P")
-    argv += ["-m", "comfy_cli", "templates", "_refresh-cache"]
+    # -P stops Python prepending the process cwd to sys.path (3.11+, which the
+    # declared floor now guarantees), neutralizing the `-m comfy_cli` cwd-import
+    # vector across the board.
+    argv = [sys.executable, "-P", "-m", "comfy_cli", "templates", "_refresh-cache"]
 
     # The detached child runs the full `comfy` entry callback, which on a
     # first-run / non-TTY host would persist an anonymous user_id via a

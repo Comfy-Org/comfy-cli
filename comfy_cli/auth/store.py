@@ -18,7 +18,7 @@ import os
 import re
 import secrets
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -194,7 +194,7 @@ def set(provider: str, key: str) -> AuthRecord:
     if not key:
         raise ValueError("key cannot be empty")
     path = secrets_path()
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     with locking.file_lock(lock_path()):
         data = _read_all(path)
         data["providers"][provider] = {"key": key, "updated_at": now}
@@ -306,7 +306,7 @@ def save_cloud_session(
     if not access_token:
         raise ValueError("access_token cannot be empty")
     path = secrets_path()
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     payload = {
         "base_url": base_url,
         "resource": resource,

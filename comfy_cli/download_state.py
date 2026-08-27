@@ -76,7 +76,7 @@ import sys
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -217,7 +217,7 @@ class DownloadState:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def new(
@@ -497,7 +497,7 @@ def prune(workspace: Path) -> int:
             terminal.append((state, path))
     terminal.sort(key=lambda item: _sort_key(item[0]), reverse=True)
 
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=PRUNE_MAX_AGE_S)
+    cutoff = datetime.now(UTC) - timedelta(seconds=PRUNE_MAX_AGE_S)
     removed = 0
     for index, (state, path) in enumerate(terminal):
         if index < PRUNE_MAX_TERMINAL_RECORDS:
@@ -531,7 +531,7 @@ def _parse_iso(value: str | None) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
 
@@ -542,7 +542,7 @@ def elapsed_seconds(state: DownloadState) -> float:
         return 0.0
     end = _parse_iso(state.updated_at) if state.is_terminal else None
     if end is None:
-        end = datetime.now(timezone.utc)
+        end = datetime.now(UTC)
     return max(0.0, (end - started).total_seconds())
 
 

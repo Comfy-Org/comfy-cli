@@ -7,7 +7,7 @@ for the fuller development and contribution guide.
 
 ## Setup
 
-Requires Python >= 3.10 (CI targets 3.10, the minimum supported version). Install
+Requires Python >= 3.11 (CI targets 3.11, the minimum supported version). Install
 the package with its dev extras in editable mode:
 
 ```bash

@@ -13,6 +13,7 @@ Design references:
 from __future__ import annotations
 
 import time
+from datetime import UTC
 from typing import Any
 
 from rich.align import Align
@@ -425,9 +426,9 @@ def _iso(expires_at: int | None) -> str:
     if expires_at is None:
         return ""
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        return datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(timespec="seconds")
+        return datetime.fromtimestamp(expires_at, tz=UTC).isoformat(timespec="seconds")
     except (OSError, OverflowError, ValueError):
         return ""
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import urllib.error
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -265,7 +265,7 @@ def assets_push_cmd(
             "sha256": sha,
             "cloud_name": cloud_name,
             "size": size,
-            "pushed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "pushed_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "where": where_kind,
         }
         pushed.append({"name": name, "sha256": sha, "cloud_name": cloud_name, "size": size})

@@ -18,13 +18,17 @@ maintainers = [
   { name = "Dr.Lt.Data", email = "dr.lt.data@gmail.com" },
 ]
 
-requires-python = ">=3.10"
+# 3.11 is a hard floor, not a preference: `enum.StrEnum` and `typing.assert_never`
+# are both 3.11 additions and are imported at module scope across comfy_cli/, so
+# 3.10 cannot import the package at all. CI runs the test suite on exactly this
+# version (see .github/workflows/pytest.yml) — that job is what keeps the
+# declared floor honest, so lower it only alongside those imports.
+requires-python = ">=3.11"
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -87,7 +91,7 @@ include = [ "comfy_cli*" ]
 "comfy_cli.command.generate" = [ "spec/openapi.yml" ]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 
 line-length = 120
 lint.select = [
@@ -103,6 +107,13 @@ lint.select = [
 ]
 lint.extend-ignore = [
   "E501", # Line too long
+  # Off because the fix is behavioral, not stylistic. It fires on the nine
+  # `(str, Enum)` Typer choice types (OS, PROC, GPU_OPTION, OutputMode,
+  # WhereTarget, ...), and under StrEnum both `str(OS.WINDOWS)` and f-string
+  # interpolation yield "windows" where they yield "OS.WINDOWS" today — CLI
+  # output users and tests can see. Ruff marks the fix unsafe for that reason.
+  # Enabling it requires auditing every call site first.
+  "UP042", # replace-str-enum
 ]
 
 [tool.ruff.lint.mccabe]
