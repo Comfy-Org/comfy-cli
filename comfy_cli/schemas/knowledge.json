@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy knowledge *",
+  "description": "Output shape for the knowledge-bundle commands (status, resolve, pick). All subcommands share this schema; each field is optional because the payload varies per subcommand.",
+  "type": "object",
+  "properties": {
+    "loaded": { "type": "boolean", "description": "Whether a bundle is loaded (status)." },
+    "reason": { "type": "string", "description": "Why no bundle loaded (status, loaded=false)." },
+    "source": { "type": "string", "description": "env | cache | fetch | stale-cache (status)." },
+    "stale": { "type": "boolean", "description": "True when served from an expired cache after a failed fetch." },
+    "version": { "type": "string", "description": "Bundle version from manifest.json, or 'unknown' (status)." },
+    "schema_version": { "type": "integer", "description": "Bundle schema version the loader accepts (status)." },
+    "as_of": { "type": ["string", "null"], "description": "ISO-8601 UTC timestamp: file mtime (status) or the capability's as_of, null when the capability has none (pick)." },
+    "path": { "type": "string", "description": "File the bundle bytes were read from (status)." },
+    "env_file": { "type": ["string", "null"], "description": "Value of COMFY_KNOWLEDGE_FILE (status)." },
+    "url": { "type": ["string", "null"], "description": "Value of COMFY_KNOWLEDGE_URL with userinfo, query and fragment removed (status)." },
+    "ttl_seconds": { "type": "number", "description": "Cache TTL in effect (status)." },
+    "cache_path": { "type": "string", "description": "Where a fetched bundle is cached (status)." },
+    "counts": {
+      "type": "object",
+      "description": "Row counts per plane (status).",
+      "additionalProperties": { "type": "integer" }
+    },
+    "query": { "type": "string", "description": "The alias or id as given (resolve), or the capability text that matched nothing, clipped (pick)." },
+    "zero_hit": { "type": "boolean", "description": "True when the capability text matched nothing curated (pick). A miss is an answer, so the envelope stays ok." },
+    "nudge": { "type": "string", "description": "One line naming the miss and pointing at the ids the bundle does cover (pick, zero_hit=true)." },
+    "id": { "type": "string", "description": "Resolved model id (resolve)." },
+    "model": { "type": "object", "description": "The full model row as shipped in the bundle (resolve)." },
+    "deprecation": { "type": ["object", "null"], "description": "Matching deprecations entry, if any (resolve)." },
+    "bundle_version": { "type": "string", "description": "Bundle version the answer came from (resolve, pick)." },
+    "capability": { "type": "string", "description": "Capability id (pick)." },
+    "capabilities": {
+      "type": "array",
+      "description": "Every capability in the bundle, id-sorted (pick with no argument).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "description": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "description": { "type": ["string", "null"], "description": "Capability description, null when the capability has none (pick)." },
+    "picks": {
+      "type": "array",
+      "description": "Ranked picks, rank ascending (pick).",
+      "items": {
+        "type": "object",
+        "properties": {
+          "rank": { "type": ["number", "null"] },
+          "model": { "type": ["string", "null"] },
+          "route": { "type": ["string", "null"] },
+          "template": { "type": ["string", "null"] },
+          "caveat": { "type": ["string", "null"] },
+          "status": { "type": ["string", "null"], "description": "Copied from the pick's model row when that row exists." },
+          "superseded_by": { "type": ["string", "null"], "description": "Copied from the pick's model row when that row exists." }
+        }
+      }
+    }
+  }
+}

@@ -44,6 +44,21 @@ class NodeSpec:
     constant (defaults the node requires but that ``generate`` doesn't surface).
     ``output`` selects the save node (IMAGE → SaveImage, VIDEO → SaveVideo) and
     the partner node's output port that carries the media.
+
+    COMPLETENESS CONTRACT for ``fixed``: it must supply a default for EVERY
+    widget (non-link) input of the node — the *optional* schema section
+    included — unless the value always arrives via ``param_map``/``image_params``.
+    A schema-``optional`` input is not necessarily optional at execution time:
+    V3 nodes may declare an input ``optional=True`` while their ``execute()``
+    signature has no Python default (ByteDanceImageToVideoNode's
+    ``seed``/``camera_fixed``/``watermark`` do exactly this), so a workflow
+    that omits it validates cleanly but crashes at run time with
+    "missing N required positional arguments". The ComfyUI frontend always
+    serializes every widget value, which is why UI-exported workflows never
+    hit this — the emitter must match that behavior.
+    ``tests/comfy_cli/command/generate/test_emit.py`` enforces the contract
+    against a recorded object_info snapshot
+    (``fixtures/partner_nodes_object_info.json``).
     """
 
     node_class: str
@@ -73,7 +88,23 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
             "aspect_ratio": "aspect_ratio",
         },
         image_params={"image": "images", "images": "images"},
-        fixed={"model": "gemini-2.5-flash-image", "seed": 42},
+        fixed={
+            "model": "gemini-2.5-flash-image",
+            "seed": 42,
+            "aspect_ratio": "auto",
+            "response_modalities": "IMAGE+TEXT",
+            # Schema default (snapshot 2026-07); the node's execute() falls back
+            # to "" but the UI serializes this steering prompt, so match it.
+            "system_prompt": (
+                "You are an expert image-generation engine. You must ALWAYS produce an image.\n"
+                "Interpret all user input—regardless of format, intent, or abstraction—as literal "
+                "visual directives for image composition.\n"
+                "If a prompt is conversational or lacks specific visual details, you must creatively "
+                "invent a concrete visual scenario that depicts the concept.\n"
+                "Prioritize generating the visual representation above any text, formatting, or "
+                "conversational requests."
+            ),
+        },
         output="IMAGE",
     ),
     # ByteDance Seedance image-to-video. Node: ByteDanceImageToVideoNode.
@@ -84,9 +115,15 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
             "prompt": "prompt",
             "model": "model",
             "resolution": "resolution",
+            # The proxy flag is --ratio; the node input is aspect_ratio.
+            "ratio": "aspect_ratio",
             "aspect_ratio": "aspect_ratio",
             "duration": "duration",
             "seed": "seed",
+            # Proxy flag --camerafixed; node input camera_fixed.
+            "camerafixed": "camera_fixed",
+            "watermark": "watermark",
+            "generate_audio": "generate_audio",
         },
         image_params={"image": "image"},
         fixed={
@@ -94,6 +131,13 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
             "resolution": "720p",
             "aspect_ratio": "16:9",
             "duration": 5,
+            # Schema-optional but positionally REQUIRED by execute() — omitting
+            # any of these fails the run with "missing required positional
+            # arguments" (observed live on cloud). See the NodeSpec docstring.
+            "seed": 0,
+            "camera_fixed": False,
+            "watermark": False,
+            "generate_audio": False,
         },
         output="VIDEO",
     ),
@@ -127,7 +171,16 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
             "prompt": "prompt",
             "seed": "seed",
         },
-        fixed={"aspect_ratio": "16:9", "raw": False, "prompt_upsampling": False, "seed": 0},
+        # `image_prompt_strength` is schema-optional but positionally required by
+        # execute(); the emitted node must carry every widget input. Default from
+        # the cloud catalog (FluxProUltraImageNode).
+        fixed={
+            "aspect_ratio": "16:9",
+            "raw": False,
+            "prompt_upsampling": False,
+            "seed": 0,
+            "image_prompt_strength": 0.1,
+        },
         aspect_from_wh="aspect_ratio",
         output="IMAGE",
     ),
@@ -200,20 +253,31 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
         raw = values.get(flag)
         if raw is None:
             continue
-        if isinstance(raw, (list, tuple)):
-            raise EmitError(
-                f"--{flag} received multiple files, but emit-workflow currently "
-                "maps this input to a single LoadImage node."
-            )
-        path = str(Path(raw).expanduser())
-        loader_id = str(next_id)
-        next_id += 1
-        workflow[loader_id] = {
-            "class_type": "LoadImage",
-            "_meta": {"title": f"load {Path(path).name}"},
-            "inputs": {"image": path},
-        }
-        node_inputs[node_key] = [loader_id, 0]
+        paths = [str(Path(p).expanduser()) for p in (raw if isinstance(raw, list | tuple) else [raw])]
+        loader_ids: list[str] = []
+        for path in paths:
+            loader_id = str(next_id)
+            next_id += 1
+            workflow[loader_id] = {
+                "class_type": "LoadImage",
+                "_meta": {"title": f"load {Path(path).name}"},
+                "inputs": {"image": path},
+            }
+            loader_ids.append(loader_id)
+        # One file wires straight in; several fold through chained core
+        # ImageBatch nodes (2-input, always present) so the partner still
+        # receives a single IMAGE stream.
+        upstream, upstream_out = loader_ids[0], 0
+        for lid in loader_ids[1:]:
+            batch_id = str(next_id)
+            next_id += 1
+            workflow[batch_id] = {
+                "class_type": "ImageBatch",
+                "_meta": {"title": "batch reference images"},
+                "inputs": {"image1": [upstream, upstream_out], "image2": [lid, 0]},
+            }
+            upstream, upstream_out = batch_id, 0
+        node_inputs[node_key] = [upstream, upstream_out]
 
     # Scalar params → node inputs, honoring the explicit param_map.
     for flag, node_key in ns.param_map.items():

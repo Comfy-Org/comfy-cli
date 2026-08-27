@@ -2,8 +2,8 @@
 
 Onboarding notes for anyone (human or automated agent) making changes to
 `comfy-cli` — a Python/[Typer](https://typer.tiangolo.com/) CLI for installing
-and running ComfyUI. This is a quick-start; see [`DEV_README.md`](DEV_README.md)
-for the fuller development guide.
+and running ComfyUI. This is a quick-start; see [`CONTRIBUTING.md`](CONTRIBUTING.md)
+for the fuller development and contribution guide.
 
 ## Setup
 
@@ -59,7 +59,7 @@ The default branch is **`main`** — branch off `main` and open PRs against it.
 
 - Use `typer` for command/argument handling and `rich` for console output.
 - New commands are registered in `comfy_cli/cmdline.py`; subcommands live under
-  `comfy_cli/command/<name>/`. See [`DEV_README.md`](DEV_README.md#adding-a-new-command)
+  `comfy_cli/command/<name>/`. See [`CONTRIBUTING.md`](CONTRIBUTING.md#adding-a-new-command)
   for the boilerplate.
 - End-to-end tests are disabled by default; enable them with `TEST_E2E=true pytest
   tests/e2e/` (see [`docs/TESTING-e2e.md`](docs/TESTING-e2e.md)).

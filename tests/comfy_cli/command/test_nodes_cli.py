@@ -366,7 +366,7 @@ class TestNodesRefreshPublishedContract:
         assert {f["source"] for f in env["data"]["files"]} == {"bundled"}
 
 
-# local target resolution — config.background parity with `comfy run` (BE-6306)
+# local target resolution — config.background parity with `comfy run`
 # ---------------------------------------------------------------------------
 #
 # `comfy nodes` is the agent's node-discovery surface, so it must read the same
@@ -374,7 +374,7 @@ class TestNodesRefreshPublishedContract:
 # COMFY_LOCAL_URL > 127.0.0.1:8188, skipping the persisted `config.background`
 # step that `run`/`jobs` honor via `host_port.resolve_host_port` — so with
 # ComfyUI launched in the background on a non-default port, discovery listed a
-# different server's nodes than the one the workflow would execute on (BE-6299).
+# different server's nodes than the one the workflow would execute on.
 
 
 BACKGROUND_PORT = 8388

@@ -251,6 +251,7 @@ class Renderer:
         where: str | None = None,
         changed: bool | None = None,
         ok: bool = True,
+        extra: Mapping[str, Any] | None = None,
     ) -> None:
         """Emit the final envelope. In pretty mode this is a no-op (data was
         already shown by ``print``/``success``/etc).
@@ -260,6 +261,12 @@ class Renderer:
         on an invalid workflow, which still emits its error/warning payload as
         data) pass ``ok=False`` so the envelope's ``ok`` agrees with the
         process exit code.
+
+        ``extra`` merges additional top-level fields into the envelope
+        (additive-optional under envelope/1, e.g. ``--select``'s
+        ``selected_bytes``/``total_bytes``). Core envelope keys are never
+        overridden; when ``extra`` is absent the envelope is byte-identical to
+        an emit without it.
         """
         if self.is_pretty():
             return
@@ -274,6 +281,9 @@ class Renderer:
             changed=changed,
             error=None,
         )
+        if extra:
+            for key, value in extra.items():
+                envelope.setdefault(key, value)
         self._write_json_line(envelope)
         self._envelope_emitted = True
 
@@ -286,6 +296,7 @@ class Renderer:
         details: Mapping[str, Any] | None = None,
         exit_code: int = 1,
         command: str | None = None,
+        where: str | None = None,
     ) -> None:
         """Emit a structured error. In pretty mode, prints red message + yellow
         hint. In JSON mode, emits an envelope with ``ok=false`` and the error
@@ -316,7 +327,7 @@ class Renderer:
             ok=False,
             command=command or self.command,
             data=None,
-            where=self.where,
+            where=where or self.where,
             changed=None,
             error={
                 "code": code,
@@ -412,18 +423,27 @@ class Renderer:
 
 
 def _json_default(obj: Any) -> Any:
-    # Best-effort JSON coercion for common non-serializable types.
-    from pathlib import Path
+    """Coerce one unserializable value to a JSON-native one.
 
-    if isinstance(obj, Path):
-        return str(obj)
-    if isinstance(obj, Enum):
-        return obj.value
+    json feeds anything this returns straight back in when it still cannot
+    encode it, so a hook that returns another opaque object re-enters once per
+    hop and one that keeps producing new objects never terminates at all. The
+    tail coercion is what holds that off: every return is either a scalar json
+    encodes directly or a container it walks itself. A container's members are
+    values of their own, so each costs at most one further hook call, and a
+    container that contains itself trips json's own circular-reference check.
+    """
+    seen: set[int] = set()
+    while isinstance(obj, Enum) and id(obj) not in seen:
+        seen.add(id(obj))
+        obj = obj.value
     if hasattr(obj, "isoformat"):
         try:
-            return obj.isoformat()
+            obj = obj.isoformat()
         except Exception:  # noqa: BLE001
             pass
+    if isinstance(obj, str | int | float | None | list | dict | tuple):
+        return obj
     return str(obj)
 
 

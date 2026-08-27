@@ -8,16 +8,19 @@ import shutil
 import tarfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import BinaryIO, cast
+from typing import Any, BinaryIO, cast
 
-import psutil
-import requests
 from rich import progress
 from rich.live import Live
 from rich.table import Table
 
 from comfy_cli.constants import DEFAULT_COMFY_WORKSPACE, OS, PROC
 from comfy_cli.typing import PathLike
+
+#: Instance cache per ``@singleton`` class, keyed by the wrapper the decorator
+#: returns. Kept here rather than on that wrapper because several tests reach
+#: the decorated class through ``Wrapper.__closure__[0]``.
+_SINGLETON_CACHES: dict[Any, dict[type, Any]] = {}
 
 
 def singleton(cls):
@@ -37,7 +40,21 @@ def singleton(cls):
             instances[cls] = cls(*args, **kwargs)
         return instances[cls]
 
+    _SINGLETON_CACHES[get_instance] = instances
     return get_instance
+
+
+def reset_singleton_for_testing(factory: Any) -> None:
+    """Drop the instance cached behind a ``@singleton``-decorated class.
+
+    The instance captures process-wide state when it is constructed
+    (``ConfigManager`` reads the config dir exactly once). Tests repoint that
+    state per test, so without this the FIRST test's instance silently serves
+    every later one.
+    """
+    cache = _SINGLETON_CACHES.get(factory)
+    if cache is not None:
+        cache.clear()
 
 
 def get_os():
@@ -69,6 +86,9 @@ def get_not_user_set_default_workspace():
 
 
 def kill_all(pid):
+    # Imported here, not at module level: only kill_all/is_running need psutil.
+    import psutil
+
     try:
         parent = psutil.Process(pid)
         children = parent.children(recursive=True)
@@ -80,6 +100,9 @@ def kill_all(pid):
 
 
 def is_running(pid):
+    # Imported here, not at module level: only kill_all/is_running need psutil.
+    import psutil
+
     try:
         psutil.Process(pid)
         return True
@@ -103,24 +126,30 @@ def download_url(
 ) -> PathLike:
     """download url to local file fname and show a progress bar.
     See https://stackoverflow.com/q/37573483"""
+    # Imported lazily: requests costs ~30ms to import and utils is on the
+    # import path of every CLI invocation; only downloads need it.
+    import requests
+
+    from comfy_cli.http import DOWNLOAD_TIMEOUT  # urllib.request behind it costs ~60ms; downloads only
+
     cwd = Path(cwd).expanduser().resolve()
     fpath = cwd / fname
 
-    response = requests.get(url, stream=True, allow_redirects=allow_redirects)
-    if response.status_code != 200:
-        response.raise_for_status()  # Will only raise for 4xx codes, so...
-        raise RuntimeError(f"Request to {url} returned status code {response.status_code}")
+    with requests.get(url, stream=True, allow_redirects=allow_redirects, timeout=DOWNLOAD_TIMEOUT) as response:
+        if response.status_code != 200:
+            response.raise_for_status()  # Will only raise for 4xx codes, so...
+            raise RuntimeError(f"Request to {url} returned status code {response.status_code}")
 
-    response.raw.read = functools.partial(response.raw.read, decode_content=True)  # Decompress if needed
-    with fpath.open("wb") as f:
-        if show_progress:
-            fsize = int(response.headers.get("Content-Length", 0))
-            desc = f"downloading {fname}..." + ("(Unknown total file size)" if fsize == 0 else "")
+        response.raw.read = functools.partial(response.raw.read, decode_content=True)  # Decompress if needed
+        with fpath.open("wb") as f:
+            if show_progress:
+                fsize = int(response.headers.get("Content-Length", 0))
+                desc = f"downloading {fname}..." + ("(Unknown total file size)" if fsize == 0 else "")
 
-            with progress.wrap_file(cast(BinaryIO, response.raw), total=fsize, description=desc) as response_raw:
-                shutil.copyfileobj(response_raw, f)
-        else:
-            shutil.copyfileobj(response.raw, f)
+                with progress.wrap_file(cast(BinaryIO, response.raw), total=fsize, description=desc) as response_raw:
+                    shutil.copyfileobj(response_raw, f)
+            else:
+                shutil.copyfileobj(response.raw, f)
 
     return fpath
 

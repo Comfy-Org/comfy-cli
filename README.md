@@ -52,7 +52,7 @@ comfy download <prompt_id> --where cloud -o ./outputs    # save the results loca
 
 `comfy run` submits asynchronously and prints the `prompt_id` you feed to `jobs`/`download`; add `--wait` to block inline instead. Check your sign-in anytime with `comfy cloud whoami`. Export the workflow JSON from ComfyUI via **File → Export (API)** (UI-format JSON is auto-converted). Set cloud as your default target so you can drop the flag: `comfy set-default --where cloud`.
 
-**Credits:** cloud generation (`comfy run --where cloud`, `comfy generate`) consumes Comfy Cloud credits and needs an active subscription. Discovery and inspection commands — `comfy cloud whoami`, `comfy jobs status/ls`, `comfy templates ls`, `comfy generate list` — don't.
+**Credits:** cloud generation (`comfy run --where cloud`, `comfy generate`) consumes Comfy Cloud credits and needs an active subscription. Discovery and inspection commands — `comfy cloud whoami`, `comfy cloud status`, `comfy jobs status/ls`, `comfy templates ls`, `comfy generate list` — don't. Check your balance and tier with `comfy cloud status`.
 
 ## Installation
 
@@ -449,6 +449,7 @@ Prerequisites — a Comfy account with a credit balance ([add credits](https://d
 ```bash
 comfy cloud login                   # opens your browser (OAuth + PKCE), stores a session
 comfy cloud whoami                  # confirm who you're signed in as
+comfy cloud status                  # workspace, credit balance, tier, concurrency limit
 ```
 
 Then submit, watch, and collect:
@@ -626,13 +627,69 @@ custom_nodes:
     ...
 ```
 
+## Curated model knowledge
+
+Discovery commands can attach a `knowledge` block to their `--json` output: which
+model a name refers to, whether it is deprecated, ranked picks per capability,
+and known pitfalls. It is **off unless you point the CLI at a bundle**, so a
+default install never emits the block.
+
+Turn it on with either of:
+
+```
+export COMFY_KNOWLEDGE_URL=https://.../knowledge.json   # fetched and cached
+export COMFY_KNOWLEDGE_FILE=/path/to/knowledge.json     # read directly, never cached
+```
+
+Check what is loaded:
+
+```
+comfy knowledge status
+comfy knowledge resolve "Kling 3.0"
+comfy knowledge pick lipsync
+```
+
+Turn it off again:
+
+```
+export COMFY_KNOWLEDGE_DISABLE=1
+```
+
+Clearing `COMFY_KNOWLEDGE_URL` is *not* an off switch. Once a bundle is cached it
+keeps being served, stale or not. `COMFY_KNOWLEDGE_DISABLE` suppresses envelope
+enrichment outright; the `comfy knowledge` verbs keep working under it, since
+those are you asking for the bundle directly.
+
+Enrichment only ever reads the cache, so no command waits on a fetch. The cache
+refreshes during `comfy skills install` and in the background during
+`comfy launch`, or on demand with `comfy knowledge status --refresh`.
+
 ## Analytics
 
-We track analytics using Mixpanel to help us understand usage patterns and know where to prioritize our efforts. When you first download the cli, it will ask you to give consent. If at any point you wish to opt out:
+Analytics are **opt-in and off by default**. The first time you run the CLI in an
+interactive terminal it asks whether to enable tracking, and that prompt defaults
+to no. Nothing is sent unless you answer yes. A non-interactive run (a pipe, CI,
+an agent) never enables it on its own. Setting `DO_NOT_TRACK` or
+`COMFY_NO_TELEMETRY` in the environment overrides the setting and suppresses
+everything.
+
+Change your mind at any time:
 
 ```
+comfy tracking enable
 comfy tracking disable
 ```
+
+When tracking is on, we use Mixpanel to understand usage patterns and know where
+to prioritize our efforts.
+
+**One event carries text you typed.** If a curated knowledge bundle is configured
+— it is not by default, and needs `COMFY_KNOWLEDGE_URL` or `COMFY_KNOWLEDGE_FILE`
+— then `comfy nodes search`, `comfy templates ls`, `comfy generate schema`,
+`comfy generate list` and `comfy models search` send the search terms you typed
+and which curated entries they matched. This tells us what people look for and fail
+to find. It needs both the bundle and your tracking consent, so with either one
+absent nothing is sent.
 
 Check out the usage here: [Mixpanel Board](https://mixpanel.com/p/13hGfPfEPdRkjPtNaS7BYQ)
 
@@ -642,7 +699,8 @@ We welcome contributions to comfy-cli! For ideas, suggestions, or bug reports,
 open an issue at [Comfy-Org/comfy-cli](https://github.com/Comfy-Org/comfy-cli/issues).
 For code changes, fork the repo and open a pull request.
 
-See the [Dev Guide](/DEV_README.md) for setup details.
+See [CONTRIBUTING.md](/CONTRIBUTING.md) for setup, the checks CI enforces,
+and PR conventions. Notable changes are recorded in [CHANGELOG.md](/CHANGELOG.md).
 
 ## License
 

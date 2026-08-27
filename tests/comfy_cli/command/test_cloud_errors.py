@@ -1,4 +1,4 @@
-"""Unit tests for the shared cloud error → envelope mapper (BE-3266)."""
+"""Unit tests for the shared cloud error → envelope mapper."""
 
 from __future__ import annotations
 

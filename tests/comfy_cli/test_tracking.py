@@ -49,7 +49,7 @@ def tracking_module(tmp_path):
 
 def _last_track_call(provider):
     args, kwargs = provider.track.call_args
-    # Provider.track(event_name, distinct_id=..., properties=...)
+    # Provider.track signature - event_name, distinct_id=..., properties=...
     event_name = args[0] if args else kwargs.get("event_name")
     distinct_id = kwargs.get("distinct_id", args[1] if len(args) > 1 else None)
     properties = kwargs.get("properties", args[2] if len(args) > 2 else {})
@@ -608,6 +608,7 @@ class TestSensitiveNameMatcher:
             "changelog",
             "prompt",
             "set_overrides",
+            "capability",
             "set_civitai_api_token",
             "set_hf_api_token",
             "access_token",
@@ -630,7 +631,7 @@ class TestSensitiveNameMatcher:
 
 
 class TestCliParamNameDriftGate:
-    """BE-992 happened because credential flags were added after the redaction
+    """The leak happened because credential flags were added after the redaction
     set was written. Walk the real CLI tree so the next one cannot land
     unredacted."""
 
@@ -671,7 +672,7 @@ class TestCliParamNameDriftGate:
 class TestTrackCommandRealTyperWiring:
     def test_model_download_kwargs_are_filtered_and_redacted(self, tracking_module):
         # `model download` is the command whose `_ctx` + credential kwarg
-        # combination motivated BE-992; invoke it through Typer for real so
+        # combination motivated the redaction fix; invoke it through Typer for real so
         # the Click context actually lands in the tracked kwargs.
         from typer.testing import CliRunner
 
@@ -754,7 +755,7 @@ class TestPromptTrackingConsent:
         with (
             patch.object(tracking_module.sys.stdin, "isatty", return_value=False),
             patch.object(tracking_module.sys.stdout, "isatty", return_value=True),
-            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+            patch("comfy_cli.ui.prompt_confirm_action") as mock_prompt,
         ):
             tracking_module.prompt_tracking_consent()
         mock_prompt.assert_not_called()
@@ -766,7 +767,7 @@ class TestPromptTrackingConsent:
         with (
             patch.object(tracking_module.sys.stdin, "isatty", return_value=True),
             patch.object(tracking_module.sys.stdout, "isatty", return_value=False),
-            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+            patch("comfy_cli.ui.prompt_confirm_action") as mock_prompt,
         ):
             tracking_module.prompt_tracking_consent()
         mock_prompt.assert_not_called()
@@ -822,7 +823,7 @@ class TestPromptTrackingConsent:
         with (
             patch.object(tracking_module.sys.stdin, "isatty", return_value=True),
             patch.object(tracking_module.sys.stdout, "isatty", return_value=True),
-            patch.object(tracking_module.ui, "prompt_confirm_action", return_value=False) as mock_prompt,
+            patch("comfy_cli.ui.prompt_confirm_action", return_value=False) as mock_prompt,
         ):
             tracking_module.prompt_tracking_consent()
         mock_prompt.assert_called_once()
@@ -833,7 +834,7 @@ class TestPromptTrackingConsent:
         with (
             patch.object(tracking_module.sys.stdin, "isatty", return_value=False),
             patch.object(tracking_module.sys.stdout, "isatty", return_value=False),
-            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+            patch("comfy_cli.ui.prompt_confirm_action") as mock_prompt,
         ):
             tracking_module.prompt_tracking_consent(skip_prompt=True, default_value=False)
         mock_prompt.assert_not_called()
@@ -845,7 +846,7 @@ class TestPromptTrackingConsent:
         with (
             patch.object(tracking_module.sys.stdin, "isatty", return_value=False),
             patch.object(tracking_module.sys.stdout, "isatty", return_value=False),
-            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+            patch("comfy_cli.ui.prompt_confirm_action") as mock_prompt,
         ):
             tracking_module.prompt_tracking_consent()
         mock_prompt.assert_not_called()
@@ -892,7 +893,7 @@ class TestEnvVarOptOut:
         with (
             patch.object(tracking_module.sys.stdin, "isatty", return_value=True),
             patch.object(tracking_module.sys.stdout, "isatty", return_value=True),
-            patch.object(tracking_module.ui, "prompt_confirm_action") as mock_prompt,
+            patch("comfy_cli.ui.prompt_confirm_action") as mock_prompt,
         ):
             tracking_module.prompt_tracking_consent()
         mock_prompt.assert_not_called()

@@ -1,0 +1,509 @@
+{
+  "aliases": {
+    "Acme H3": "acme-h3",
+    "Acme Halo 03": "acme-h3",
+    "Acme Testvid": "testvid",
+    "H3": "acme-h3",
+    "Halo 03": "acme-h3",
+    "Halo H3": "acme-h3",
+    "Lipco 3": "lipco-3",
+    "Lipco Talking Image": "lipco-3",
+    "Lipco Video Lip-Sync": "lipco-3",
+    "Lipco.co": "lipco-3",
+    "Test-Audio": "test-audio-1-5",
+    "Test-Audio 1.5": "test-audio-1-5",
+    "Test-Audio 1.5XL Turbo": "test-audio-1-5",
+    "TestAudio": "test-audio-1-5",
+    "Testvid": "testvid",
+    "Testvid 3.0": "testvid",
+    "Testvid Avatar 2": "testvid-avatar-2",
+    "Testvid Avatar 2.0": "testvid-avatar-2",
+    "kling": "testvid"
+  },
+  "capabilities": {
+    "audio-generation": {
+      "as_of": "2031-01-09",
+      "description": "Music, speech and sound effects. Music and speech are different fetches.",
+      "id": "audio-generation",
+      "picks": [
+        {
+          "caveat": "The fixture's No.1 free music pick. All-in-one twin is audio_test_a_checkpoint.",
+          "model": "test-audio-1-5",
+          "rank": 1,
+          "route": "oss",
+          "template": "audio_test_a_turbo"
+        },
+        {
+          "caveat": "The fixture's paid music pick and cheap.",
+          "model": "testtone",
+          "rank": 2,
+          "route": "partner",
+          "template": "api_testtone_t2m"
+        },
+        {
+          "caveat": "The fixture's free speech pick.",
+          "model": "testvoice",
+          "rank": 3,
+          "route": "oss",
+          "template": "audio-testvoice_tts"
+        },
+        {
+          "caveat": "The fixture's paid speech pick.",
+          "model": "testvoice-api",
+          "rank": 4,
+          "route": "partner",
+          "template": "api_testvoice_text_to_speech"
+        }
+      ],
+      "verified_at": "2031-01-09"
+    },
+    "lipsync": {
+      "aliases": [
+        "Lip Sync",
+        "talking head"
+      ],
+      "as_of": "2031-01-09",
+      "description": "Three distinct jobs: a still plus audio, dubbing existing footage, or a clip that talks with no source audio.",
+      "id": "lipsync",
+      "picks": [
+        {
+          "caveat": "The fixture's No.1 free pick for still-plus-audio.",
+          "model": "testlx",
+          "rank": 1,
+          "route": "oss",
+          "template": "video_testlx_ia2v"
+        },
+        {
+          "caveat": "The fixture's No.1 for dubbing existing video. Talking-image twin is api_lipco_talking_image.",
+          "model": "lipco-3",
+          "rank": 2,
+          "route": "partner",
+          "template": "api_lipco_lip_sync_video"
+        },
+        {
+          "caveat": "Full-body dubbing where identity and background hold.",
+          "model": "testwan1-talk",
+          "rank": 3,
+          "route": "oss",
+          "template": "video_testwan1_talk"
+        },
+        {
+          "caveat": "Audio-driven from a still plus a wav.",
+          "model": "testwan2",
+          "rank": 4,
+          "route": "oss",
+          "template": "video_testwan2_s2v"
+        },
+        {
+          "caveat": "Listed as a candidate, not a default.",
+          "model": "testface",
+          "rank": 5,
+          "route": "partner",
+          "template": "api_testface_talking_photo"
+        },
+        {
+          "caveat": "Only with a photoreal human subject. No template: this pick is the node route.",
+          "model": "testvid",
+          "rank": 6,
+          "route": "partner"
+        },
+        {
+          "caveat": "Not a lipsync model - the required first stage when the caller has no audio.",
+          "model": "testvoice",
+          "rank": 7,
+          "route": "oss",
+          "template": "audio-testvoice_tts"
+        }
+      ],
+      "verified_at": "2031-01-09"
+    }
+  },
+  "deprecations": [
+    {
+      "deprecated_on": "2031-01-09",
+      "id": "testvid-avatar-2",
+      "reason": "End-of-life: do not fetch its template for new work; use lipco-3 instead.",
+      "superseded_by": "lipco-3"
+    },
+    {
+      "deprecated_on": "2030-04-26",
+      "id": "retired-model-2",
+      "reason": "Deprecated with the paid route shutting down. No row and no replacement: the deprecation stands alone."
+    }
+  ],
+  "future_plane": {
+    "x": 1
+  },
+  "models": {
+    "acme-h3": {
+      "aliases": [
+        "Acme H3",
+        "Halo 03",
+        "Halo H3",
+        "H3",
+        "Acme Halo 03"
+      ],
+      "as_of": "2031-01-09",
+      "best_for": [
+        "the default free video model when the caller names none",
+        "video that needs native audio",
+        "2K, up to 15 s, t2v / i2v / FLF / r2v in one family",
+        "character consistency in video via the r2v route"
+      ],
+      "corrections": [
+        {
+          "claim": "The four Acme H3 open weights return nothing in model search even though they load fine via template - absence from search is not absence.",
+          "source": "fixture:cloud"
+        }
+      ],
+      "id": "acme-h3",
+      "modality": "video",
+      "never_confuse_with": [
+        "halo-02"
+      ],
+      "not_for": [
+        "silent photoreal on a small card, where testwan2 is the free workhorse",
+        "1080p paid delivery"
+      ],
+      "pitfalls": [
+        {
+          "source": "fixture:shared",
+          "text": "H3 ships in two routes, always both: free weights (video_acme_h3_*) and paid nodes (api_acme_h3_*). Never claim only the paid path exists."
+        },
+        {
+          "source": "fixture:h3",
+          "text": "Both routes' templates share display titles. Disambiguate by internal name."
+        },
+        {
+          "source": "fixture:h3",
+          "text": "Free i2v is also first-last-frame: last_frame on AcmeH3ImageToVideo is optional and unwired on purpose."
+        },
+        {
+          "source": "fixture:flf",
+          "text": "There is no free video_acme_h3_flf2v file. That name is paid-only."
+        },
+        {
+          "source": "fixture:shared",
+          "text": "The partner registry carries no H3 entry, only the older Halo proxy."
+        },
+        {
+          "source": "fixture:h3",
+          "text": "The alias 'halo' is the older family, never H3. But \"Halo 03\" does mean H3."
+        },
+        {
+          "source": "fixture:h3",
+          "text": "The paid node's enums are not the model's limits. A request outside the presets means offer the free route, not declare it impossible."
+        },
+        {
+          "source": "fixture:h3",
+          "text": "Generation time scales with pixel count faster than linearly."
+        },
+        {
+          "source": "fixture:h3",
+          "text": "Recommend the int8 base model and the low-precision text encoder."
+        },
+        {
+          "source": "fixture:h3",
+          "text": "Generate at the native canvas and upscale later."
+        },
+        {
+          "source": "fixture:video",
+          "text": "Needs a recent server. Six templates: three local, three paid."
+        },
+        {
+          "source": "fixture:h3",
+          "text": "A successful local run is proof the free route works."
+        }
+      ],
+      "resolves": {
+        "nodes": [
+          "AcmeH3ImageToVideo",
+          "AcmeH3ReferenceToVideo",
+          "AcmeHalo03TextToVideoNode"
+        ],
+        "templates": [
+          "video_acme_h3_t2v",
+          "video_acme_h3_i2v",
+          "video_acme_h3_r2v",
+          "api_acme_h3_t2v",
+          "api_acme_h3_flf2v",
+          "api_acme_h3_r2v"
+        ]
+      },
+      "route": "both",
+      "routing": [
+        {
+          "use": "video_acme_h3_t2v",
+          "when": "Best free video, no model named, text to video"
+        },
+        {
+          "use": "video_acme_h3_i2v",
+          "when": "Image to video on the free route"
+        },
+        {
+          "use": "video_acme_h3_i2v",
+          "when": "First-last-frame on the free route: wire a second image to last_frame"
+        },
+        {
+          "use": "video_acme_h3_r2v",
+          "when": "Character consistency in video on the free route"
+        },
+        {
+          "use": "api_acme_h3_t2v",
+          "when": "Paid route, text to video"
+        },
+        {
+          "use": "api_acme_h3_flf2v",
+          "when": "Paid route, first-last-frame"
+        },
+        {
+          "use": "api_acme_h3_r2v",
+          "when": "Paid route, reference to video"
+        }
+      ],
+      "status": "recommended",
+      "tier": "law",
+      "verified_at": "2031-01-09",
+      "visibility": "public",
+      "warnings": [
+        {
+          "source": "fixture:h3",
+          "text": "Pre-spend: the paid route bills per second. Local is free per run."
+        },
+        {
+          "source": "fixture:h3",
+          "text": "On local, speed is the constraint, not feasibility. Quote the estimate."
+        }
+      ]
+    },
+    "lipco-3": {
+      "aliases": [
+        "Lipco 3",
+        "Lipco.co",
+        "Lipco Talking Image",
+        "Lipco Video Lip-Sync"
+      ],
+      "as_of": "2031-01-09",
+      "best_for": [
+        "paid talking image: a portrait plus a voiceover",
+        "dubbing or language-swapping existing footage"
+      ],
+      "id": "lipco-3",
+      "modality": "video",
+      "not_for": [
+        "jobs with no source audio - run text-to-speech first"
+      ],
+      "pitfalls": [
+        {
+          "source": "fixture:lipsync",
+          "text": "Feeding lipco-3 with no audio is a hard fail - run text-to-speech first, then the lipsync graph."
+        },
+        {
+          "source": "fixture:lipsync",
+          "text": "For a clip that talks with no source audio, use acme-h3 with the lines in double quotes."
+        },
+        {
+          "source": "fixture:lipsync",
+          "text": "The seed is cache-only; randomize to re-run."
+        },
+        {
+          "source": "fixture:lipsync",
+          "text": "Talking-image output length equals the audio length."
+        },
+        {
+          "source": "fixture:lipsync",
+          "text": "There is no official second lipsync template. Do not invent one."
+        }
+      ],
+      "resolves": {
+        "nodes": [
+          "LipcoTalkingImageNode",
+          "LipcoLipSyncNode"
+        ],
+        "templates": [
+          "api_lipco_talking_image",
+          "api_lipco_lip_sync_video"
+        ]
+      },
+      "route": "partner",
+      "routing": [
+        {
+          "use": "api_lipco_talking_image",
+          "when": "Paid talking image: still portrait plus a voiceover track"
+        },
+        {
+          "use": "api_lipco_lip_sync_video",
+          "when": "Dub or language-swap an existing video"
+        }
+      ],
+      "status": "recommended",
+      "tier": "canon",
+      "verified_at": "2031-01-09",
+      "visibility": "public",
+      "warnings": [
+        {
+          "source": "fixture:lipsync",
+          "text": "Pre-spend: lipco-3 bills per second. Warn before long audio."
+        }
+      ]
+    },
+    "test-audio-1-5": {
+      "aliases": [
+        "Test-Audio",
+        "Test-Audio 1.5",
+        "Test-Audio 1.5XL Turbo",
+        "TestAudio"
+      ],
+      "as_of": "2031-01-09",
+      "best_for": [
+        "invented songs from tags plus lyrics on the free route"
+      ],
+      "corrections": [
+        {
+          "claim": "The fixture index 'vram' field is made up for audio rows - do not quote it.",
+          "source": "fixture:audio"
+        }
+      ],
+      "id": "test-audio-1-5",
+      "modality": "audio",
+      "not_for": [
+        "talking-head audio unless a song was asked for",
+        "speech - use testvoice instead"
+      ],
+      "pitfalls": [
+        {
+          "source": "fixture:audio",
+          "text": "Do not fetch the v1 audio templates as the 1.5 default."
+        },
+        {
+          "source": "fixture:audio",
+          "text": "Pair the ace-typed encoder with the ace VAE only."
+        },
+        {
+          "source": "fixture:lipsync",
+          "text": "Fixture music is not a talking-head audio source."
+        }
+      ],
+      "resolves": {
+        "templates": [
+          "audio_test_a_turbo",
+          "audio_test_a_checkpoint",
+          "audio_test_a_sft",
+          "audio_test_music_3"
+        ]
+      },
+      "route": "oss",
+      "routing": [
+        {
+          "use": "audio_test_a_turbo",
+          "when": "Everyday free music generation"
+        },
+        {
+          "use": "audio_test_a_checkpoint",
+          "when": "All-in-one checkpoint twin"
+        },
+        {
+          "use": "audio_test_a_sft",
+          "when": "Caller wants CFG control on the music graph"
+        },
+        {
+          "use": "audio_test_music_3",
+          "when": "Caller named Test Music 3"
+        }
+      ],
+      "status": "recommended",
+      "tier": "canon",
+      "verified_at": "2031-01-09",
+      "visibility": "public"
+    },
+    "testvid": {
+      "aliases": [
+        "Testvid",
+        "Testvid 3.0",
+        "Acme Testvid"
+      ],
+      "as_of": "2031-01-09",
+      "best_for": [
+        "invented value at scale, motion control, native 4K (Testvid 3.0)"
+      ],
+      "future_field": true,
+      "id": "testvid",
+      "modality": "video",
+      "never_confuse_with": [
+        "testvid-avatar-2"
+      ],
+      "not_for": [
+        "lip-sync on any subject that is not a photoreal human",
+        "chaining 16:9 image-to-video straight into lip-sync without a resize"
+      ],
+      "pitfalls": [
+        {
+          "source": "fixture:video",
+          "text": "Lip-sync needs a real human face; the fixture model rejects drawn characters."
+        },
+        {
+          "source": "fixture:video",
+          "text": "The 16:9 image-to-video route emits 1924px and the lip-sync route caps at 1920px, so chaining them needs a resize."
+        },
+        {
+          "source": "fixture:video",
+          "text": "Fill every required text widget; an empty one fails at run time."
+        },
+        {
+          "source": "fixture:building",
+          "text": "Take the node class name from the catalog: TestvidImage2VideoNode, not TestvidImageToVideoNode."
+        },
+        {
+          "source": "fixture:video",
+          "text": "Testvid 1.5 and 2.1 retire 2031-09-15. Do not build new work on them."
+        },
+        {
+          "source": "fixture:video",
+          "text": "Testvid Avatar 2.0 is end-of-life: do not fetch its template for new work. Use lipco-3 instead."
+        }
+      ],
+      "resolves": {
+        "nodes": [
+          "TestvidImage2VideoNode",
+          "TestvidLipSyncAudioToVideoNode",
+          "TestvidLipSyncTextToVideoNode"
+        ]
+      },
+      "route": "partner",
+      "status": "available",
+      "tier": "law",
+      "verified_at": "2031-01-09",
+      "visibility": "public",
+      "warnings": [
+        {
+          "source": "fixture:video",
+          "text": "The fixture tier ordering is invented - treat the ranking as soft."
+        }
+      ]
+    },
+    "testvid-avatar-2": {
+      "aliases": [
+        "Testvid Avatar 2.0",
+        "Testvid Avatar 2"
+      ],
+      "as_of": "2031-01-09",
+      "id": "testvid-avatar-2",
+      "modality": "video",
+      "not_for": [
+        "any new work - it is end-of-life"
+      ],
+      "pitfalls": [
+        {
+          "source": "fixture:video",
+          "text": "Testvid Avatar 2.0 is end-of-life. Use lipco-3 for talking-image and dubbing work."
+        }
+      ],
+      "route": "partner",
+      "status": "deprecated",
+      "superseded_by": "lipco-3",
+      "tier": "canon",
+      "verified_at": "2031-01-09",
+      "visibility": "public"
+    }
+  }
+}

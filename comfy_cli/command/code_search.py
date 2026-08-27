@@ -6,7 +6,6 @@ import sys
 from typing import Annotated
 from urllib.parse import quote
 
-import requests
 import typer
 from rich.console import Console
 from rich.text import Text
@@ -40,6 +39,10 @@ def _build_query(query: str, repo: str | None, count: int) -> str:
 
 
 def _fetch_results(query: str) -> dict:
+    # Imported lazily: requests costs ~30ms to import and this module is on
+    # the import path of every CLI invocation.
+    import requests
+
     response = requests.get(API_URL, params={"query": query}, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
@@ -168,6 +171,8 @@ def code_search(
     ] = False,
 ):
     """Search code across ComfyUI repositories."""
+    import requests  # deferred; see _fetch_results
+
     built_query = _build_query(query, repo, count)
 
     try:

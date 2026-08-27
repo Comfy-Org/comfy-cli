@@ -48,7 +48,7 @@ import typer
 from rich import print as rprint
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
-from comfy_cli import constants, tracking, ui
+from comfy_cli import constants, knowledge, tracking, ui
 from comfy_cli.command.generate import adapters, client, emit, output, poll, schema, spec, upload
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.output.renderer import Renderer, get_renderer
@@ -841,12 +841,29 @@ def _list_models(extra_args: list[str]) -> None:
     partner = _arg_value(clean, "--partner", "-p")
     category = _arg_value(clean, "--category", "--style", "-c")
     query = _arg_value(clean, "--query", "-q")
+    # `list`-only, deliberately NOT in `_separate_meta_flags`' meta_names: that
+    # set applies to every generate sub-action, and --select belongs to the
+    # four heavy read commands only (V1-011).
+    select_expr = _arg_value(clean, "--select")
     eps = spec.list_endpoints(partner=partner, category=category, query=query)
     payload = {
         "models": [_model_record(e) for e in eps],
         "count": len(eps),
         "filters": {"partner": partner, "category": category, "query": query},
     }
+    if select_expr is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select_expr, command="generate list")
+    knowledge.attach(
+        payload,
+        command="generate list",
+        queries=[query] if query else [],
+        models=[m["alias"] for m in payload["models"]],
+        brief=True,
+        thin=(not eps and bool(query)),
+        qualified=any(payload["filters"].values()),
+    )
     if renderer.is_pretty():
         if not eps:
             rprint("[yellow]No models match those filters.[/yellow]")
@@ -910,21 +927,20 @@ def _schema(extra_args: list[str]) -> None:
         return
     flags = schema.flags_for(ep)
     name = spec.preferred_alias(ep.id) or ep.id
-    renderer.emit(
-        {
-            "model": name,
-            "id": ep.id,
-            "partner": ep.partner,
-            "category": ep.category,
-            "summary": ep.summary,
-            "mode": "async" if ep.polling else "sync",
-            "polling": ep.polling,
-            "content_type": ep.request_content_type,
-            "params": [_param_record(f) for f in flags],
-            "example": schema.example_invocation(ep, flags, display_name=name),
-        },
-        command="generate schema",
-    )
+    payload = {
+        "model": name,
+        "id": ep.id,
+        "partner": ep.partner,
+        "category": ep.category,
+        "summary": ep.summary,
+        "mode": "async" if ep.polling else "sync",
+        "polling": ep.polling,
+        "content_type": ep.request_content_type,
+        "params": [_param_record(f) for f in flags],
+        "example": schema.example_invocation(ep, flags, display_name=name),
+    }
+    knowledge.attach(payload, command="generate schema", queries=[clean[0], name])
+    renderer.emit(payload, command="generate schema")
 
 
 def _fetch_spec(url: str) -> httpx.Response:

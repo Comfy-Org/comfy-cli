@@ -24,7 +24,7 @@ from typing import Annotated, Any
 
 import typer
 
-from comfy_cli import tracking
+from comfy_cli import knowledge, tracking
 from comfy_cli.cql.engine import Graph, LoadError
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.output.sanitize import sanitize_markup
@@ -74,17 +74,29 @@ def _get_graph(
     and fired when a stale-cache fallback occurs (see loader for signature).
     """
     mode = _resolved_where(where)
+    # Every `comfy nodes` verb routes through here, so this is the one place
+    # the target is decided — stamp it on the renderer so the envelopes emitted
+    # downstream (the `cql_no_graph` error below included) carry `where`
+    # instead of `null`. `--input` reads a dump instead of talking to the
+    # backend, but `mode` still says which catalog the dump is interpreted as,
+    # which is what `where` reports (see the field's schema description).
+    get_renderer().where = mode
     # Resolve the local server the same way `comfy run` / `comfy jobs` do —
     # flag > COMFY_LOCAL_URL > config.background > 127.0.0.1:8188. `resolve_target`
     # deliberately skips the `config.background` step (other callers must not
     # honor it), so callers that do resolve it upstream. Without this, an agent
     # discovering nodes here would read a different server's object_info than the
     # one `comfy run` submits to whenever ComfyUI was launched in the background
-    # on a non-default port (BE-6299).
+    # on a non-default port.
     if input_path is None and mode == "local":
-        from comfy_cli.host_port import resolve_host_port
+        from comfy_cli.host_port import report_usage_error, resolve_host_port
 
-        host, port = resolve_host_port(host, port)
+        # A rejected `--host`/`--port` raises `typer.BadParameter`, which click
+        # turns into a stderr usage panel + exit 2 with nothing on stdout.
+        # Emit the terminating envelope first so JSON/NDJSON consumers get a
+        # parseable final line; the exception still escapes, so exit stays 2.
+        with report_usage_error(get_renderer()):
+            host, port = resolve_host_port(host, port)
     try:
         if input_path is not None:
             # Explicit offline dump — let Graph.load read + annotate it.
@@ -272,6 +284,9 @@ def ls_cmd(
                 "display_name": m.display_name,
                 "output_types": m.output_types(),
                 "output_node": m.is_output_node,
+                # Paid partner-API node vs free open-weights node. JSON only —
+                # the pretty table is deliberately left unchanged.
+                "is_api_node": m.is_api_node,
             }
             for m in nodes
         ],
@@ -308,6 +323,13 @@ def ls_cmd(
                 tbl.add_row(sanitize_markup(m.id), sanitize_markup(m.category or ""), outs)
             renderer.console().print(tbl)
             rprint(f"[dim]{len(nodes)} node(s)[/dim]")
+    knowledge.attach(
+        payload,
+        command="nodes ls",
+        nodes=[r["name"] for r in payload["rows"]],
+        catalog_nodes={m.id for m in graph.all_nodes()},
+        qualified=any(payload["filter"].values()),
+    )
     renderer.emit(payload, command="nodes ls")
 
 
@@ -340,6 +362,14 @@ def show_cmd(
             show_default=False, help="ComfyUI port (defaults to COMFY_LOCAL_URL, the background server, or 8188)."
         ),
     ] = None,
+    select: Annotated[
+        str | None,
+        typer.Option(
+            "--select",
+            show_default=False,
+            help="Project the payload: dot path (inputs.0.name), wildcard (inputs.#.name), comma multi-select.",
+        ),
+    ] = None,
 ):
     renderer = get_renderer()
     _stale: dict = {}
@@ -353,6 +383,28 @@ def show_cmd(
 
     m = graph.node(name)
     if m is None:
+        # A subgraph instance's `type` is its definition UUID, and ls-nodes
+        # prints that verbatim — so callers ask show for a "class" the catalog
+        # can never have. `workflow add-node` already names this shape
+        # (UnknownNodeType subgraph_id); show was left behind with the generic
+        # miss, and prod agents retried it verbatim. Say what the UUID is and
+        # which surface CAN inspect it. difflib against a UUID is pure noise.
+        from comfy_cli.workflow_ops import _UUID_RE
+
+        if _UUID_RE.match(name.strip()):
+            renderer.error(
+                code="node_not_found",
+                message=(
+                    f"{name!r} is a subgraph type id, not a node class — `ls-nodes` prints a subgraph instance's "
+                    "definition uuid as its type, and the catalog has no schema for it."
+                ),
+                hint=(
+                    "inspect the instance's editable inputs with `comfy workflow slots <file>` / `ls-nodes`; "
+                    "interior nodes are addressed `<instance>/<interior>` and written with `set-widget`."
+                ),
+                details={"requested": name, "subgraph_id": True},
+            )
+            raise typer.Exit(code=1)
         # Surface near-matches so the agent can self-correct from the error.
         all_names = [n.id for n in graph.all_nodes()]
         close = difflib.get_close_matches(name, all_names, n=5, cutoff=0.6)
@@ -378,6 +430,11 @@ def show_cmd(
                 "message": f"served from cache ({_stale['source']}): {_stale['reason']}",
             }
         ]
+
+    if select is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select, command="nodes show")
 
     if renderer.is_pretty():
         from rich.table import Table
@@ -437,6 +494,18 @@ def search_cmd(
         ),
     ],
     limit: Annotated[int, typer.Option(help="Cap output to N rows.")] = 20,
+    expand_top: Annotated[
+        int,
+        typer.Option(
+            "--expand-top",
+            metavar="N",
+            help=(
+                "Also attach the full `nodes show` schema (inputs, defaults, enum choices, outputs) "
+                "for the top-N hits under `expanded`, so no follow-up `show` calls are needed. "
+                "0 (the default) leaves the output unchanged."
+            ),
+        ),
+    ] = 0,
     input_path: Annotated[
         str | None,
         typer.Option("--input", show_default=False, help="Path to a local object_info JSON (offline mode)."),
@@ -541,11 +610,40 @@ def search_cmd(
                 "display_name": m.display_name,
                 "description": m.description,
                 "output_types": m.output_types(),
+                # Paid partner-API node vs free open-weights node — two nodes can
+                # share a display name and differ only here (MiniMax H3). JSON
+                # only; the pretty table is deliberately left unchanged.
+                "is_api_node": m.is_api_node,
                 **({"close_match": True} if close_match else {}),
             }
             for m in matched
         ],
     }
+
+    # --expand-top N: kill the search → show × N loop (measured on prod agent
+    # traces: the follow-up `show` args are overwhelmingly a verbatim copy of the
+    # hit name). The top-N returned rows are re-resolved through the SAME catalog
+    # path `nodes show` uses (graph.node → morphism_to_dict), so `expanded[i]` is
+    # exactly the show payload plus a `class_type` key to join back on the row.
+    # A per-hit miss degrades to a per-hit error entry — it never fails the
+    # search, since the rows themselves are still perfectly good results.
+    if expand_top > 0:
+        expanded: list[dict[str, Any]] = []
+        for m in matched[: max(0, expand_top)]:
+            resolved = graph.node(m.id)
+            if resolved is None:
+                expanded.append(
+                    {
+                        "class_type": m.id,
+                        "error": {
+                            "code": "expand_miss",
+                            "message": f"search matched {m.id!r} but the catalog could not resolve its schema",
+                        },
+                    }
+                )
+                continue
+            expanded.append({"class_type": m.id, **graph.morphism_to_dict(resolved)})
+        payload["expanded"] = expanded
 
     if _stale:
         payload["stale"] = True
@@ -589,6 +687,14 @@ def search_cmd(
                 tbl.add_row(sanitize_markup(m.id), sanitize_markup(m.category or ""), desc)
             renderer.console().print(tbl)
             rprint(f"[dim]{len(matched)} node(s)[/dim]")
+    knowledge.attach(
+        payload,
+        command="nodes search",
+        queries=[query],
+        nodes=[r["name"] for r in payload["rows"]],
+        catalog_nodes={m.id for m in graph.all_nodes()},
+        thin=(total_matched == 0),
+    )
     renderer.emit(payload, command="nodes search")
 
 
@@ -723,6 +829,83 @@ def downstream_cmd(
     renderer.emit(payload, command="nodes downstream")
 
 
+def _alias_slug(class_type: str) -> str:
+    """A spec-batch alias for a class name — the same slugging
+    ``workflow_ops.capture_recipe`` uses, so the two surfaces mint identical
+    alias vocabulary."""
+    import re
+
+    return re.sub(r"[^a-z0-9]+", "_", str(class_type or "node").lower()).strip("_") or "node"
+
+
+def _emit_path_ops(graph, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project a routed path (``steps`` from ``find_paths``/``exact_paths``)
+    into a ready-to-apply spec batch in the frozen edit vocabulary.
+
+    THE CONTRACT IS THE ROUND-TRIP: the returned specs must pass
+    ``workflow_ops.apply_specs`` unchanged. Shape:
+
+    * one ``add_node`` per step, with a deterministic dedup-suffixed ``as:``
+      alias (``tinysampler``, ``tinysampler_2``, …);
+    * one ``connect`` per step whose consumed type is produced by an earlier
+      step — from the NEAREST prior producer's matching output to this step's
+      first link input accepting that type. Alias references are emitted as
+      bare names (the freeze vocabulary's valid form; the ``$``-canonical
+      sugar lands with the vocabulary-freeze PR).
+
+    The path's seed FROM type is produced by nothing in the path, so the first
+    step's input deliberately stays unbound — never a phantom connect.
+    """
+    from comfy_cli.workflow_ops import _types_compatible
+
+    # Deterministic dedup-suffixed aliases, one add_node per step.
+    counts: dict[str, int] = {}
+    aliases: list[str] = []
+    specs: list[dict[str, Any]] = []
+    for step in steps:
+        class_type = str(step.get("node") or "")
+        slug = _alias_slug(class_type)
+        counts[slug] = counts.get(slug, 0) + 1
+        alias = slug if counts[slug] == 1 else f"{slug}_{counts[slug]}"
+        aliases.append(alias)
+        specs.append({"op": "add_node", "class_type": class_type, "as": alias})
+
+    def _producer_output(class_type: str, want: str) -> str | None:
+        m = graph.node(class_type)
+        for p in m.outputs if m is not None else ():
+            types = {t.strip() for t in str(p.type).split(",") if t.strip()}
+            if want in types or "*" in types:
+                return p.name
+        return None
+
+    def _consumer_input(class_type: str, want: str) -> str | None:
+        m = graph.node(class_type)
+        ports = [p for p in (m.inputs if m is not None else ()) if p.is_link]
+        # Required inputs first — that's the slot the plan is routing through.
+        for p in sorted(ports, key=lambda p: not p.required):
+            if _types_compatible(want, p.type):
+                return p.name
+        return None
+
+    for j, step in enumerate(steps):
+        want = str(step.get("input_type") or "")
+        if not want:
+            continue  # step consumes nothing from the path (e.g. a loader)
+        # Nearest prior step whose node actually produces `want` — in exact
+        # mode the recorded per-step output_type is one of possibly several
+        # outputs, so resolve against the schema, not just the step record.
+        for k in range(j - 1, -1, -1):
+            src_class = str(steps[k].get("node") or "")
+            out_name = _producer_output(src_class, want)
+            if out_name is None:
+                continue
+            in_name = _consumer_input(str(step.get("node") or ""), want)
+            if in_name is not None:
+                specs.append({"op": "connect", "from": f"{aliases[k]}.{out_name}", "to": f"{aliases[j]}.{in_name}"})
+            break
+    return specs
+
+
 @app.command("path", help="Routed paths from one type to another (e.g. MODEL -> IMAGE).")
 @tracking.track_command("nodes")
 def path_cmd(
@@ -734,9 +917,20 @@ def path_cmd(
         bool,
         typer.Option(
             "--exact/--loose",
-            help="Exact: every step's required link inputs must be satisfiable from the path so far. Loose: any routed sequence.",
+            help="Exact: every step's other required link inputs must be satisfiable (reported per path as 'support'). Loose: any routed sequence.",
         ),
     ] = True,
+    emit_ops: Annotated[
+        bool,
+        typer.Option(
+            "--emit-ops",
+            help=(
+                "Attach each path's plan as a ready-to-apply spec batch under `paths[].ops` "
+                "(frozen add_node/connect vocabulary with `as:` aliases) — feed it straight "
+                "to `comfy workflow apply --ops`."
+            ),
+        ),
+    ] = False,
     input_path: Annotated[str | None, typer.Option("--input", show_default=False)] = None,
     host: Annotated[str | None, typer.Option(show_default=False)] = None,
     port: Annotated[int | None, typer.Option(show_default=False)] = None,
@@ -745,7 +939,45 @@ def path_cmd(
         typer.Option("--where", show_default=False, help="'cloud' to query Comfy Cloud's catalog; default is local."),
     ] = None,
 ):
+    """Envelope contract (``data``):
+
+    - ``mode`` — the *requested* matching mode, ``"exact"`` or ``"loose"``. It
+      echoes ``--exact/--loose`` and says nothing about completeness.
+    - ``exact`` — the exhaustiveness claim, and deliberately NOT the flag echoed
+      back: true only when the listed paths are the complete, type-constrained
+      answer. Exact mode that stopped early (``truncated``), was still expanding
+      at the bound (``depth_limited``), or dropped an alternate route into an
+      already-explored state (``collapsed``) withholds the claim, as does loose
+      mode always. ``exact: true`` with ``count: 0`` is therefore a proof that
+      no route exists; ``exact: false`` means "these paths, maybe not all".
+    - ``truncated`` / ``truncated_by`` / ``depth_limited`` / ``collapsed`` /
+      ``not_searched`` — the individual reasons the claim was withheld, so a
+      caller can widen the right bound instead of guessing.
+    - ``not_searched`` / ``not_searched_reason`` — the walk declined the query
+      and never ran, so the empty result is an abstention, not an answer. No
+      reason is reachable from this command: the only shape ``search_paths``
+      declines is a bound below 1, which is rejected up front with
+      ``path_bounds_invalid`` before the graph is even loaded. Same-type queries
+      (``MODEL MODEL``) are searched like any other and return the real
+      self-returning routes. The fields stay in the envelope so a caller can
+      never mistake an abstention the engine adds later for a proof of
+      unreachability — an abstention always reports ``exact: false``.
+    """
     renderer = get_renderer()
+
+    # A bound below 1 admits no path at all, so the search would return an empty
+    # result with every flag false — i.e. `exact: true, count: 0`, a proof that
+    # no route exists. That proof would come from the typo, not from a walk, so
+    # refuse the bound instead of emitting it.
+    if max_depth < 1 or max_paths < 1:
+        renderer.error(
+            code="path_bounds_invalid",
+            message="--max-depth and --max-paths must be at least 1.",
+            hint="retry with `--max-depth 6 --max-paths 10`",
+            details={"max_depth": max_depth, "max_paths": max_paths},
+        )
+        raise typer.Exit(code=1)
+
     _stale: dict = {}
     graph = _get_graph(
         input_path,
@@ -755,13 +987,30 @@ def path_cmd(
         on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
     )
 
-    finder = graph.exact_paths if exact else graph.find_paths
-    paths = finder(from_type, to_type, max_depth=max_depth, max_paths=max_paths)
+    result = graph.search_paths(from_type, to_type, exact=exact, max_depth=max_depth, max_paths=max_paths)
+    paths = result["paths"]
+    truncated = bool(result["truncated"])
+    depth_limited = bool(result["depth_limited"])
+    collapsed = bool(result["collapsed"])
+    not_searched = bool(result["not_searched"])
 
     payload = {
         "from": from_type,
         "to": to_type,
-        "exact": exact,
+        "mode": "exact" if exact else "loose",
+        # Not the flag echoed back: the honest claim that these paths are the
+        # complete, type-constrained answer. Any early stop (max_paths, the
+        # internal state budget), a frontier still expanding at max_depth, an
+        # intermediate state reached by a second route that was not re-explored,
+        # or a query the walk declined outright means paths may be missing, so
+        # the claim is withheld.
+        "exact": bool(exact and not truncated and not depth_limited and not collapsed and not not_searched),
+        "truncated": truncated,
+        "truncated_by": result["truncated_by"],
+        "depth_limited": depth_limited,
+        "collapsed": collapsed,
+        "not_searched": not_searched,
+        "not_searched_reason": result["not_searched_reason"],
         "max_depth": max_depth,
         "max_paths": max_paths,
         "count": len(paths),
@@ -777,6 +1026,11 @@ def path_cmd(
                     }
                     for s in (p.get("steps") or [])
                 ],
+                "support": list(p.get("support") or []),
+                # --emit-ops: the plan as a ready-to-apply spec batch (round-trips
+                # through workflow_ops.apply_specs unchanged). Absent without the
+                # flag so the default output stays byte-identical.
+                **({"ops": _emit_path_ops(graph, list(p.get("steps") or []))} if emit_ops else {}),
             }
             for p in paths
         ],
@@ -805,12 +1059,24 @@ def path_cmd(
                     f"[cyan]{sanitize_markup(p.get('from'))}[/cyan]  {chain}  "
                     f"[cyan]{sanitize_markup(p.get('to'))}[/cyan]"
                 )
+                needs = ", ".join(
+                    f"{sanitize_markup(s.get('type'))} from {sanitize_markup(s.get('node'))}"
+                    for s in (p.get("support") or [])
+                )
+                if needs:
+                    rprint(f"  [dim]also needs: {needs}[/dim]")
             rprint(f"[dim]{len(paths)} path(s)[/dim]")
+        if truncated:
+            rprint(f"[dim]Partial result — stopped at {payload['truncated_by']}; more paths may exist.[/dim]")
+        elif depth_limited:
+            rprint(f"[dim]Searched to depth {max_depth}; longer paths were not explored.[/dim]")
+        elif collapsed:
+            rprint("[dim]Equivalent alternate routes were collapsed; this is a sample, not every path.[/dim]")
     renderer.emit(payload, command="nodes path")
 
 
 # ---------------------------------------------------------------------------
-# browse: types / categories
+# browse commands - types and categories
 # ---------------------------------------------------------------------------
 
 
@@ -951,6 +1217,102 @@ def categories_cmd(
             renderer.console().print(tbl)
             rprint(f"[dim]{len(flat)} categories[/dim]")
     renderer.emit(payload, command="nodes categories")
+
+
+# ---------------------------------------------------------------------------
+# widget-catalog — the derived name↔index projection the CRDT applier needs
+# ---------------------------------------------------------------------------
+
+
+@app.command(
+    "widget-catalog",
+    help=(
+        "Emit the widget catalog: per-class widget order (plus autogrow/inputcount families) "
+        "with a content-hash catalog_version. The projection of object_info a name<->index "
+        "widget converter needs."
+    ),
+)
+@tracking.track_command("nodes")
+def widget_catalog_cmd(
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="'cloud' to query Comfy Cloud's catalog; default is local."),
+    ] = None,
+    input_path: Annotated[
+        str | None,
+        typer.Option("--input", show_default=False, help="Path to a local object_info JSON (offline mode)."),
+    ] = None,
+    host: Annotated[str | None, typer.Option(show_default=False)] = None,
+    port: Annotated[int | None, typer.Option(show_default=False)] = None,
+    select: Annotated[
+        str | None,
+        typer.Option(
+            "--select",
+            show_default=False,
+            help="Project the payload: dot path (types.KSampler.widget_order), comma multi-select.",
+        ),
+    ] = None,
+):
+    """Export ``{types: {<class_type>: {widget_order, ...}}}`` + ``catalog_version``.
+
+    A ComfyUI workflow stores widget values POSITIONALLY (``widgets_values``);
+    the CRDT document the cloud agent and the frontend co-edit stores them BY
+    NAME. Converting between the two needs the widget order — which
+    ``cql.engine.Graph`` already computes for every ``set-widget`` in this CLI,
+    including the two shapes a naive projection gets wrong (the synthetic
+    ``control_after_generate`` slot, and dynamic-combo sub-widget expansion).
+    Exporting it from here means there is one implementation of widget order,
+    not one per consumer; see ``comfy_cli.cql.widget_catalog``.
+
+    Offline is the normal case for a server-side host: with
+    ``COMFY_OBJECT_INFO_FILE`` set (or ``--input``) this reads a baked dump and
+    never touches the network or a credential.
+    """
+    from comfy_cli.cql.widget_catalog import build_catalog
+
+    renderer = get_renderer()
+    _stale: dict = {}
+    graph = _get_graph(
+        input_path,
+        host,
+        port,
+        where=where,
+        on_stale=lambda key, err: _stale.update(stale=True, source=key, reason=err),
+    )
+
+    payload = build_catalog(graph)
+
+    if _stale:
+        # A stale catalog is still a usable catalog — the version pins WHICH one
+        # it is, so a consumer that cached a different version re-fetches. Warn,
+        # don't fail: the alternative is no catalog at all.
+        payload["stale"] = True
+        payload["warnings"] = [
+            {
+                "code": "object_info_stale",
+                "message": f"served from cache ({_stale['source']}): {_stale['reason']}",
+            }
+        ]
+
+    if select is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select, command="nodes widget-catalog")
+
+    if renderer.is_pretty():
+        from rich.table import Table
+
+        rprint(f"[bold]{payload['class_count']}[/bold] class(es)  [dim]{payload['catalog_version']}[/dim]")
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("class_type")
+        table.add_column("widgets")
+        table.add_column("widget_order")
+        for class_type, entry in sorted(payload["types"].items()):
+            order = entry["widget_order"]
+            table.add_row(sanitize_markup(class_type), str(len(order)), sanitize_markup(", ".join(order)))
+        renderer.console().print(table)
+
+    renderer.emit(payload, command="nodes widget-catalog")
 
 
 # ---------------------------------------------------------------------------

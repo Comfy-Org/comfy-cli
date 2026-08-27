@@ -82,11 +82,19 @@ _SENSITIVE_SUFFIXES = ("_token", "_api_key", "_secret", "_password")
 # `token` is the publish PAT; `changelog` is bulky free text with no analytics
 # value beyond its presence. `key` is the bare `--key` option carrying the Comfy
 # Cloud API key (e.g. `cloud set-key`, auth store). `prompt` (the `comfy run
-# --prompt` positive prompt) and `set_overrides` (the `--set` field=value list)
-# are verbatim user content — like `changelog`, we keep the presence but never
-# ship the text. Sensitive values become "<redacted>" (the key is kept so we can
-# still tell the option was supplied).
-_SENSITIVE_EXACT = frozenset({"api_key", "key", "token", "password", "secret", "changelog", "prompt", "set_overrides"})
+# --prompt` positive prompt), `set_overrides` (the `--set` field=value list) and
+# `capability` (`knowledge pick` takes the user's own phrasing) are verbatim user
+# content — like `changelog`, we keep the presence but never ship the text.
+# Search terms have one channel and it is not this one: `knowledge.log_query`
+# ships them clipped, under `knowledge_query`, where curation reads them.
+# Sensitive values become "<redacted>" (the key is kept so we can still tell the
+# option was supplied).
+# `from_` is the `--from` path: a local filesystem path naming the user's home
+# directory and their install layout, with no analytics value beyond having been
+# supplied.
+_SENSITIVE_EXACT = frozenset(
+    {"api_key", "key", "token", "password", "secret", "changelog", "prompt", "set_overrides", "from_", "capability"}
+)
 
 
 def _is_sensitive(name: str) -> bool:
@@ -324,16 +332,16 @@ class MixpanelProvider:
 
             # mixpanel-python's default Consumer uses request_timeout=None → an
             # unbounded, synchronous requests.post, so a blackholed telemetry
-            # endpoint (accepts TCP, never responds) hangs whichever thread sends
-            # (BE-3354/BE-3403). Sends now happen on the worker below rather than
+            # endpoint (accepts TCP, never responds) hangs whichever thread sends.
+            # Sends now happen on the worker below rather than
             # the caller's thread, so this bound caps how long ONE send can occupy
             # the queue — and with it, how much of the atexit drain's shared 5s
             # deadline a single in-flight event can consume. retry_limit=1
             # (default is 4 with backoff) keeps a blackholed send to a single ~10s
             # attempt instead of ~40s+ across retries.
             self.client = Mixpanel(token, consumer=MixpanelConsumer(request_timeout=10, retry_limit=1))
-            # Dispatch is queue-and-drain so track() never blocks the caller
-            # (BE-5868): @track_command fires its event *before* running the
+            # Dispatch is queue-and-drain so track() never blocks the caller:
+            # @track_command fires its event *before* running the
             # wrapped command body, and `run` fires execution_start before
             # submitting the workflow, so an inline send put a synchronous HTTP
             # round-trip on the hot path of every consented invocation.
@@ -348,7 +356,7 @@ class MixpanelProvider:
             self._drained = threading.Condition()
             # daemon=True with NO atexit hook of our own, and no shutdown
             # sentinel: `_flush_all_providers` is the single bounded shutdown
-            # drain path (BE-3403), and the worker just dies with the process.
+            # drain path, and the worker just dies with the process.
             # Constructed lazily on the first dispatched event (`_get_providers`
             # is only reached from `_dispatch`), so a run that sends nothing —
             # `comfy --help`, shell completion, no consent — never starts it.
@@ -471,14 +479,14 @@ class PostHogProvider:
         # max_retries/timeout tighten the consumer drain budget from the posthog
         # 7.x defaults (3 × 15s ≈ 50s worst case) to ~21s, so the atexit flush
         # can't linger on a blackholed endpoint after the terminal envelope is
-        # already on stdout (BE-3354/BE-3403).
+        # already on stdout.
         self.client = Posthog(project_api_key=token, host=host, disable_geoip=False, max_retries=1, timeout=10)
         # Posthog's constructor registers its own atexit.register(self.join),
         # which runs self.join() synchronously on the main thread at shutdown —
         # independently of _flush_all_providers and NOT bounded by its daemon
         # deadline. Against a blackholed endpoint that join can still block ~21s
         # after the terminal envelope is on stdout, defeating this change. Drop it
-        # so our bounded flush is the only shutdown drain path (BE-3403).
+        # so our bounded flush is the only shutdown drain path.
         atexit.unregister(self.client.join)
         self.enabled = True
 
@@ -818,7 +826,7 @@ def _flush_all_providers() -> None:
         return
     # Telemetry is best-effort by contract: a blackholed endpoint (accepts TCP,
     # never responds) must never let this atexit hook wedge every consumer of the
-    # CLI's stdout after the terminal envelope is already emitted (BE-3329/BE-3403).
+    # CLI's stdout after the terminal envelope is already emitted.
     # Start every provider's flush in a daemon thread, then join them all against
     # a SINGLE shared deadline so total exit delay stays ~5s regardless of how
     # many providers there are (a per-provider join would make it 5s × N).
@@ -847,7 +855,7 @@ def _flush_all_providers() -> None:
             # to the user's stderr *after* the terminal envelope. That is the one
             # thing this module refuses to do for a telemetry failure. It was
             # unreachable for Mixpanel while flush() was a no-op; it isn't now
-            # that flush() actually drains a queue (BE-5868).
+            # that flush() actually drains a queue.
             logging.debug(f"telemetry flush timed out for {type(provider).__name__}; dropping in-flight events")
 
 
@@ -858,7 +866,7 @@ def flush_for_hard_exit() -> None:
     and failure paths, so `_flush_all_providers` never runs there. That was
     harmless while MixpanelProvider sent inline from `track()` — the `launch`
     event was already delivered before the command body ran. Now that dispatch is
-    queue-and-drain (BE-5868) the event is still sitting in the queue at that
+    queue-and-drain the event is still sitting in the queue at that
     point, so those paths have to drain explicitly or drop it every time.
 
     Bounded by the same `_FLUSH_DEADLINE_SECONDS` budget as the atexit hook, and

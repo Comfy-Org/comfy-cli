@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 from typer.testing import CliRunner
 
 from comfy_cli.command.custom_nodes.command import app
+from comfy_cli.registry import RegistryAPIError
 from comfy_cli.registry.types import ComfyConfig, ProjectConfig, PyProjectConfig
 
 runner = CliRunner()
@@ -45,9 +46,9 @@ def test_publish_fails_on_security_violations():
     ):
         result = runner.invoke(app, ["publish"])
 
-        # TODO: re-enable exit when we disable exec and eval
-        # assert result.exit_code == 1
-        # assert "Security issues found" in result.stdout
+        # Security findings are reported as warnings and publishing continues:
+        # exec/eval are still allowed. When they become a hard failure this
+        # should assert exit_code == 1 and the "Security issues found" wording.
         assert "Security warnings found" in result.stdout
 
 
@@ -146,6 +147,38 @@ def test_publish_exits_on_upload_failure():
         assert mock_publish.called
         assert mock_zip.called
         assert mock_upload.called
+
+
+def test_publish_surfaces_registry_api_error_with_code():
+    # A RegistryAPIError from the publish call must be surfaced as a
+    # machine-readable renderer.error(code=..., details={status, body}) and
+    # exit 1 — not a bare traceback.
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = ""
+
+    with (
+        patch("subprocess.run", return_value=mock_result),
+        patch("comfy_cli.command.custom_nodes.command.extract_node_configuration") as mock_extract,
+        patch("comfy_cli.command.custom_nodes.command.registry_api.publish_node_version") as mock_publish,
+        patch("comfy_cli.command.custom_nodes.command.zip_files") as mock_zip,
+        patch("comfy_cli.command.custom_nodes.command.upload_file_to_signed_url") as mock_upload,
+        patch("comfy_cli.command.custom_nodes.command.get_renderer") as mock_get_renderer,
+    ):
+        mock_extract.return_value = create_mock_config()
+        mock_publish.side_effect = RegistryAPIError(
+            "Failed to publish node version: 400 Bad Request", status=400, body="Bad Request"
+        )
+
+        result = runner.invoke(app, ["publish", "--token", "test-token"])
+
+    assert result.exit_code == 1
+    assert not mock_zip.called
+    assert not mock_upload.called
+    mock_get_renderer.return_value.error.assert_called_once()
+    _, kwargs = mock_get_renderer.return_value.error.call_args
+    assert kwargs["code"] == "node_publish_failed"
+    assert kwargs["details"] == {"status": 400, "body": "Bad Request"}
 
 
 def test_publish_fails_when_config_is_none():

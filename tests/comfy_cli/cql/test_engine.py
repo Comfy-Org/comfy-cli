@@ -17,6 +17,7 @@ from comfy_cli.cql.engine import (
     Graph,
     _apply_one_slot,
     _extract_frontend_slots,
+    _write_widget,
 )
 
 # ---------------------------------------------------------------------------
@@ -169,8 +170,11 @@ def _object_info() -> dict[str, Any]:
                     "fps": [[25, 50], {"default": 25}],
                     "resolution": ["COMBO", {"options": ["1920x1080", "2560x1440"], "default": "1920x1080"}],
                 },
+                "optional": {
+                    "seed": ["INT", {"default": 0, "min": 0, "max": 2**31 - 1}],
+                },
             },
-            "input_order": {"required": ["prompt", "duration", "fps", "resolution"]},
+            "input_order": {"required": ["prompt", "duration", "fps", "resolution"], "optional": ["seed"]},
             "output": ["VIDEO"],
             "output_name": ["VIDEO"],
             "category": "partner/video/LTXV",
@@ -190,11 +194,24 @@ def graph() -> Graph:
 @pytest.fixture
 def graph_sd15() -> Graph:
     """Graph built from the real captured sd15 object_info fixture — the same
-    catalog the BE-3349 repro / BE-3357 acceptance criterion runs against."""
+    catalog the repro and the acceptance criterion run against."""
     import json
     from pathlib import Path
 
     fixture = Path(__file__).parent.parent / "fixtures" / "sd15_object_info.json"
+    return Graph.from_object_info(json.loads(fixture.read_text()))
+
+
+@pytest.fixture
+def graph_path() -> Graph:
+    """Graph built from the captured path-search object_info fixture: the sd15
+    core nodes, the audio nodes (AUDIO is consumed but never reaches IMAGE), a
+    second LATENT->IMAGE decoder, and the partner-API image node whose `model`
+    widget is a COMBO of API ids rather than a MODEL input."""
+    import json
+    from pathlib import Path
+
+    fixture = Path(__file__).parent.parent / "fixtures" / "nodes_path_object_info.json"
     return Graph.from_object_info(json.loads(fixture.read_text()))
 
 
@@ -307,6 +324,295 @@ class TestWidgetOrder:
         assert order == []
 
 
+class TestWidgetOrderForNode:
+    """graph.widget_order_for_node — dynamic combos expand by the node's ACTUAL
+    selected key, not the schema's first key (regression for set-widget writing
+    into the wrong slot when the selection expands to a different sub-widget count)."""
+
+    @staticmethod
+    def _dyn_graph() -> Graph:
+        # `model` is a dynamic combo: key "a" → 1 sub-widget, key "b" → 2. `seed`
+        # follows it, so its slot index depends on which key is selected.
+        return Graph.from_object_info(
+            {
+                "DynNode": {
+                    "input": {
+                        "required": {
+                            "model": [
+                                "COMFY_DYNAMICCOMBO_V3",
+                                {
+                                    "options": [
+                                        {
+                                            "key": "a",
+                                            "inputs": {
+                                                "required": {"res": ["COMBO", {"options": ["x", "y"], "default": "x"}]}
+                                            },
+                                        },
+                                        {
+                                            "key": "b",
+                                            "inputs": {
+                                                "required": {
+                                                    "res": ["COMBO", {"options": ["x", "y"], "default": "x"}],
+                                                    "quality": ["COMBO", {"options": ["lo", "hi"], "default": "lo"}],
+                                                }
+                                            },
+                                        },
+                                    ]
+                                },
+                            ],
+                            "seed": ["INT", {"default": 0}],
+                        }
+                    },
+                    "input_order": {"required": ["model", "seed"]},
+                    "output": ["IMAGE"],
+                    "output_name": ["IMAGE"],
+                    "category": "test",
+                    "display_name": "Dyn",
+                    "python_module": "nodes",
+                }
+            }
+        )
+
+    def test_static_order_is_selector_only(self):
+        """`widget_order` is value-INDEPENDENT: a dynamic combo contributes only
+        its selector, because which sub-inputs exist depends on the selection the
+        node actually carries. First-key expansion moved to `widget_order_default`
+        (what a fresh node has, and what the catalog publishes)."""
+        g = self._dyn_graph()
+        # The trailing control_after_generate is implicit: the frontend's
+        # useIntWidget always companions a seed-like INT, schema flag or not —
+        # every order surface must agree with the expansion path on markers.
+        assert g.widget_order("DynNode") == ["model", "seed", "control_after_generate"]
+
+    def test_default_order_uses_first_key(self):
+        g = self._dyn_graph()
+        assert g.widget_order_default("DynNode") == ["model", "model.res", "seed", "control_after_generate"]
+
+    def test_node_order_expands_selected_key(self):
+        g = self._dyn_graph()
+        # Selecting "b" adds model.quality, pushing seed to index 3. The trailing
+        # control_after_generate is implicit: the frontend's useIntWidget always
+        # companions an INT `seed`, regardless of the schema flag.
+        order = g.widget_order_for_node("DynNode", ["b", "x", "hi", 12345])
+        assert order == ["model", "model.res", "model.quality", "seed", "control_after_generate"]
+        assert order.index("seed") == 3
+
+    def test_node_order_first_key_matches_static(self):
+        g = self._dyn_graph()
+        assert g.widget_order_for_node("DynNode", ["a", "x", 999]) == [
+            "model",
+            "model.res",
+            "seed",
+            "control_after_generate",
+        ]
+
+    def test_empty_widgets_falls_back_to_static(self):
+        g = self._dyn_graph()
+        # No values to read -> no selection to expand, so it degrades to the
+        # selector-only static order (plus the implicit seed companion).
+        assert g.widget_order_for_node("DynNode", []) == ["model", "seed", "control_after_generate"]
+
+    def test_set_widget_writes_seed_to_selected_slot(self):
+        """End-to-end: set-widget on a "b"-selected node must land seed at index 3,
+        not overwrite model.quality at index 2."""
+        from comfy_cli import workflow_ops
+
+        g = self._dyn_graph()
+        wf = {"nodes": [{"id": 3, "type": "DynNode", "widgets_values": ["b", "x", "hi", 111]}]}
+        workflow_ops.set_widget(wf, g, 3, "seed", 424242, actor="cli", base_version=0)
+        assert wf["nodes"][0]["widgets_values"] == ["b", "x", "hi", 424242]
+
+
+# ===========================================================================
+# TestWidgetOrderDynamicCombo
+# ===========================================================================
+
+
+def _dynamic_combo_object_info() -> dict:
+    """A COMFY_DYNAMICCOMBO_V3 node with a nested dynamic combo among one
+    option's sub-inputs, plus connection-only subs that own no value slot."""
+    return {
+        "DynNode": {
+            "input": {
+                "required": {
+                    "prompt": ["STRING", {"default": ""}],
+                    "model": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {
+                                    "key": "alpha",
+                                    "inputs": {
+                                        "required": {
+                                            "size": ["COMBO", {"options": ["S", "M"]}],
+                                            "width": ["INT", {"default": 512}],
+                                            "images": ["COMFY_AUTOGROW_V3", {"min": 0}],
+                                        }
+                                    },
+                                },
+                                {
+                                    "key": "beta",
+                                    "inputs": {
+                                        "required": {
+                                            "mode": [
+                                                "COMFY_DYNAMICCOMBO_V3",
+                                                {
+                                                    "options": [
+                                                        {
+                                                            "key": "fast",
+                                                            "inputs": {"required": {"steps": ["INT", {"default": 4}]}},
+                                                        },
+                                                        {
+                                                            "key": "slow",
+                                                            "inputs": {
+                                                                "required": {
+                                                                    "steps": ["INT", {"default": 50}],
+                                                                    "refine": ["BOOLEAN", {"default": True}],
+                                                                }
+                                                            },
+                                                        },
+                                                    ]
+                                                },
+                                            ],
+                                        }
+                                    },
+                                },
+                            ]
+                        },
+                    ],
+                    "seed": ["INT", {"default": 0, "control_after_generate": True}],
+                },
+            },
+            "input_order": {"required": ["prompt", "model", "seed"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "category": "test",
+            "display_name": "DynNode",
+            "python_module": "nodes",
+        }
+    }
+
+
+class TestWidgetOrderDynamicCombo:
+    """Value-aware order expansion for COMFY_DYNAMICCOMBO_V3 ports."""
+
+    @pytest.fixture
+    def dyn_graph(self) -> Graph:
+        return Graph.from_object_info(_dynamic_combo_object_info())
+
+    def test_dynamic_combo_is_widget_not_link(self, dyn_graph: Graph):
+        m = dyn_graph.node("DynNode")
+        model = next(p for p in m.inputs if p.name == "model")
+        assert model.is_link is False
+        assert model.enum_values == ["alpha", "beta"]
+        assert len(model.dynamic_options) == 2
+
+    def test_value_independent_order_has_selector_only(self, dyn_graph: Graph):
+        assert dyn_graph.widget_order("DynNode") == ["prompt", "model", "seed", "control_after_generate"]
+
+    def test_value_aware_order_expands_selected_option(self, dyn_graph: Graph):
+        order = dyn_graph.widget_order_for_node("DynNode", ["p", "alpha", "S", 512, 0, "fixed"])
+        # connection-only sub (COMFY_AUTOGROW_V3 images) contributes no slot.
+        assert order == ["prompt", "model", "model.size", "model.width", "seed", "control_after_generate"]
+
+    def test_value_aware_order_recurses_nested_dynamic_combo(self, dyn_graph: Graph):
+        order = dyn_graph.widget_order_for_node("DynNode", ["p", "beta", "slow", 50, True, 0, "fixed"])
+        assert order == [
+            "prompt",
+            "model",
+            "model.mode",
+            "model.mode.steps",
+            "model.mode.refine",
+            "seed",
+            "control_after_generate",
+        ]
+
+    def test_unknown_selector_expands_nothing(self, dyn_graph: Graph):
+        order = dyn_graph.widget_order_for_node("DynNode", ["p", "gone", 0, "fixed"])
+        assert order == ["prompt", "model", "seed", "control_after_generate"]
+
+    def test_nested_selector_change_rebuilds_inner_roster(self, dyn_graph: Graph):
+        wf = {"nodes": [{"id": 1, "type": "DynNode", "widgets_values": ["p", "beta", "fast", 4, 7, "fixed"]}]}
+        out, warnings = dyn_graph.apply_slots(wf, {"1.model.mode": "slow"})
+        assert [w["code"] for w in warnings] == ["dynamic_combo_roster_rebuilt"]
+        # fast's [steps=4] roster is replaced by slow's defaults [steps=50, refine=True];
+        # the trailing seed + control marker stay aligned.
+        assert out["nodes"][0]["widgets_values"] == ["p", "beta", "slow", 50, True, 7, "fixed"]
+
+    def test_outer_selector_change_replaces_nested_span(self, dyn_graph: Graph):
+        wf = {"nodes": [{"id": 1, "type": "DynNode", "widgets_values": ["p", "beta", "slow", 50, True, 7, "fixed"]}]}
+        out, warnings = dyn_graph.apply_slots(wf, {"1.model": "alpha"})
+        assert [w["code"] for w in warnings] == ["dynamic_combo_roster_rebuilt"]
+        # the whole nested span (mode, mode.steps, mode.refine) is replaced by
+        # alpha's defaults (size first-enum, width default).
+        assert out["nodes"][0]["widgets_values"] == ["p", "alpha", "S", 512, 7, "fixed"]
+
+
+def _dynamic_combo_implicit_seed_object_info() -> dict:
+    """A COMFY_DYNAMICCOMBO_V3 option whose sub-input is an implicit
+    seed/noise_seed INT — the frontend's ``useIntWidget`` composable
+    companions it with a control_after_generate marker even without the
+    schema's ``control_after_generate`` flag (mirrors
+    ``workflow_to_api._has_control_after_generate_companion``)."""
+    return {
+        "SeedComboNode": {
+            "input": {
+                "required": {
+                    "mode": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {"options": [{"key": "a", "inputs": {"required": {"seed": ["INT", {"default": 0}]}}}]},
+                    ],
+                },
+            },
+            "input_order": {"required": ["mode"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "category": "test",
+            "display_name": "SeedComboNode",
+            "python_module": "nodes",
+        }
+    }
+
+
+def _prefixed_dynamic_combo_object_info() -> dict:
+    """Same as above but with a leading widget, so the combo's selector sits
+    at a non-zero positional index — needed to exercise padding-before-write."""
+    info = _dynamic_combo_implicit_seed_object_info()
+    info["PrefixedDynNode"] = info.pop("SeedComboNode")
+    info["PrefixedDynNode"]["display_name"] = "PrefixedDynNode"
+    info["PrefixedDynNode"]["input"]["required"] = {
+        "prefix": ["STRING", {"default": ""}],
+        **info["PrefixedDynNode"]["input"]["required"],
+    }
+    info["PrefixedDynNode"]["input_order"] = {"required": ["prefix", "mode"]}
+    return info
+
+
+class TestDynamicComboImplicitControlAfterGenerate:
+    """Sub-input seed/noise_seed widgets companion a control_after_generate
+    marker even without the schema flag — same rule as the UI→API converter."""
+
+    @pytest.fixture
+    def seed_graph(self) -> Graph:
+        return Graph.from_object_info(_dynamic_combo_implicit_seed_object_info())
+
+    def test_value_aware_order_includes_implicit_marker(self, seed_graph: Graph):
+        order = seed_graph.widget_order_for_node("SeedComboNode", ["a", 0, "fixed"])
+        assert order == ["mode", "mode.seed", "control_after_generate"]
+
+    def test_roster_rebuild_synthesizes_implicit_marker_default(self, seed_graph: Graph):
+        wf = {"nodes": [{"id": 1, "type": "SeedComboNode", "widgets_values": [None]}]}
+        out, warnings = seed_graph.apply_slots(wf, {"1.mode": "a"})
+        assert [w["code"] for w in warnings] == ["dynamic_combo_roster_rebuilt"]
+        assert out["nodes"][0]["widgets_values"] == ["a", 0, "fixed"]
+
+    def test_roster_rebuild_respects_extend_false(self):
+        graph = Graph.from_object_info(_prefixed_dynamic_combo_object_info())
+        node = {"id": 1, "type": "PrefixedDynNode", "widgets_values": []}
+        with pytest.raises(ValueError, match="out of range"):
+            _write_widget(node, "mode", "a", graph, extend=False)
+
+
 # ===========================================================================
 # TestTraversal
 # ===========================================================================
@@ -353,12 +659,292 @@ class TestTraversal:
             for step in p["steps"]:
                 assert graph.node(step["node"]) is not None
 
-    def test_find_paths_same_type_returns_empty(self, graph: Graph):
+    def test_find_paths_same_type_is_searched_not_declined(self, graph: Graph):
+        """Same-type queries used to be refused outright; they are now walked
+        like any other. This small catalog happens to hold no route back to
+        MODEL — nothing here consumes MODEL and emits it — so the empty result
+        is a fact about the catalog rather than an abstention. The catalog that
+        *does* carry one (`LoraLoaderModelOnly`) is the `graph_path` fixture,
+        pinned by `test_same_type_query_finds_the_route` below.
+        """
         assert graph.find_paths("MODEL", "MODEL") == []
+        result = graph.search_paths("MODEL", "MODEL", exact=False, max_depth=4)
+        assert result["paths"] == []
+        assert result["not_searched"] is False
+        assert result["not_searched_reason"] is None
 
     def test_find_paths_unreachable_returns_empty(self, graph: Graph):
         # No node consumes IMAGE and produces MODEL in this fixture
         assert graph.find_paths("IMAGE", "MODEL") == []
+
+
+# ===========================================================================
+# TestPathConstraints
+# ===========================================================================
+
+
+def _node_chain(path: dict) -> tuple[str, ...]:
+    return tuple(s["node"] for s in path["steps"])
+
+
+class TestPathConstraints:
+    """`nodes path` used to enumerate anything that *produced* the target type,
+    ignoring the source type entirely: `AUDIO -> IMAGE` returned the same rows
+    as `MODEL -> IMAGE`, every step carried an empty `input_type`, and the
+    result was still labelled exact. These pin the source constraint, the depth
+    bound, and the honesty of the exhaustiveness claim.
+    """
+
+    def test_unreachable_source_type_returns_no_paths(self, graph_path: Graph):
+        # In THIS fixture AUDIO is consumed (SaveAudio, PreviewAudio) but never
+        # routed to IMAGE, so the correct answer is the empty set — not MODEL's
+        # rows. The emptiness is a fact about the catalog, never a hard-coded
+        # denial; the next test is the falsifier that pins that distinction.
+        assert graph_path.exact_paths("AUDIO", "IMAGE", max_depth=6) == []
+        assert graph_path.find_paths("AUDIO", "IMAGE", max_depth=6) == []
+
+    def test_real_audio_to_image_route_is_found_when_the_catalog_has_one(self, graph_path: Graph):
+        """`AUDIO -> IMAGE` is NOT inherently impossible, and this walker must
+        never treat it that way.
+
+        Current ComfyUI ships `VAEEncodeAudio` (AUDIO + VAE -> LATENT), which
+        reaches IMAGE through the ordinary `VAEDecode` hop. Add that real node
+        to the catalog and the route has to appear — with the VAE it also needs
+        reported as support rather than silently assumed.
+        """
+        info = copy.deepcopy(graph_path.object_info)
+        # Faithful to comfy_extras/nodes_audio.py::VAEEncodeAudio.
+        info["VAEEncodeAudio"] = {
+            "input": {"required": {"audio": ["AUDIO", {}], "vae": ["VAE", {}]}},
+            "input_order": {"required": ["audio", "vae"]},
+            "output": ["LATENT"],
+            "output_is_list": [False],
+            "output_name": ["LATENT"],
+            "name": "VAEEncodeAudio",
+            "display_name": "VAE Encode Audio",
+            "description": "",
+            "category": "model/latent",
+            "python_module": "comfy_extras.nodes_audio",
+            "output_node": False,
+            "search_aliases": ["audio to latent"],
+        }
+        graph = Graph.from_object_info(info)
+
+        paths = graph.exact_paths("AUDIO", "IMAGE", max_depth=6)
+        chains = {_node_chain(p) for p in paths}
+        assert ("VAEEncodeAudio", "VAEDecode") in chains
+        assert ("VAEEncodeAudio", "VAEDecodeTiled") in chains
+        # Every hop is a declared link of the type it claims to consume.
+        for p in paths:
+            assert p["steps"][0]["input_type"] == "AUDIO"
+            assert graph.node("VAEEncodeAudio").has_input("AUDIO")
+        # The VAE that VAEEncodeAudio also needs is surfaced, not assumed away.
+        route = next(p for p in paths if _node_chain(p) == ("VAEEncodeAudio", "VAEDecode"))
+        assert "VAE" in {s["type"] for s in route["support"]}
+
+    def test_unknown_source_type_returns_no_paths(self, graph_path: Graph):
+        assert graph_path.exact_paths("NOT_A_TYPE", "IMAGE", max_depth=6) == []
+
+    def test_source_type_changes_the_answer(self, graph_path: Graph):
+        model = graph_path.exact_paths("MODEL", "IMAGE", max_depth=6)
+        audio = graph_path.exact_paths("AUDIO", "IMAGE", max_depth=6)
+        assert model, "MODEL -> IMAGE should still route through the sampler"
+        assert model != audio
+
+    def test_first_step_consumes_the_declared_source_type(self, graph_path: Graph):
+        for from_type in ("MODEL", "LATENT", "CLIP", "CONDITIONING"):
+            for p in graph_path.exact_paths(from_type, "IMAGE", max_depth=6):
+                first = p["steps"][0]
+                assert first["input_type"] == from_type
+                assert graph_path.node(first["node"]).has_input(from_type)
+
+    def test_every_step_declares_a_link_input_of_its_from_type(self, graph_path: Graph):
+        for p in graph_path.exact_paths("CLIP", "IMAGE", max_depth=6):
+            previous_out = "CLIP"
+            for step in p["steps"]:
+                node = graph_path.node(step["node"])
+                assert step["input_type"] == previous_out
+                assert step["input_type"], "every step reports the type it consumes"
+                assert node.has_input(step["input_type"])
+                assert node.has_output(step["output_type"])
+                previous_out = step["output_type"]
+
+    def test_widget_named_model_is_not_a_model_input(self, graph_path: Graph):
+        """ByteDanceImageNode produces IMAGE and has a *widget* named `model`
+        (a COMBO of API ids) — never a MODEL link input, so it is not a routing
+        step for MODEL, nor for any other type."""
+        bytedance = graph_path.node("ByteDanceImageNode")
+        assert bytedance.has_output("IMAGE")
+        assert bytedance.input_link_types() == []
+        for from_type in ("MODEL", "AUDIO", "CLIP", "LATENT"):
+            for p in graph_path.exact_paths(from_type, "IMAGE", max_depth=6):
+                assert "ByteDanceImageNode" not in _node_chain(p)
+
+    def test_max_depth_bounds_path_length(self, graph_path: Graph):
+        for depth in range(1, 7):
+            for p in graph_path.exact_paths("CLIP", "IMAGE", max_depth=depth):
+                assert len(p["steps"]) <= depth
+
+    def test_shallower_depth_is_a_subset(self, graph_path: Graph):
+        deep = {_node_chain(p) for p in graph_path.exact_paths("CLIP", "IMAGE", max_depth=6)}
+        assert deep
+        for depth in range(1, 6):
+            shallow = {_node_chain(p) for p in graph_path.exact_paths("CLIP", "IMAGE", max_depth=depth)}
+            assert shallow <= deep
+        # The reported case: depth 1 is a *strict* subset of depth 4.
+        shallow = {_node_chain(p) for p in graph_path.exact_paths("MODEL", "IMAGE", max_depth=1)}
+        deep = {_node_chain(p) for p in graph_path.exact_paths("MODEL", "IMAGE", max_depth=4)}
+        assert shallow < deep
+
+    def test_support_nodes_cover_the_other_required_inputs(self, graph_path: Graph):
+        (path,) = [p for p in graph_path.exact_paths("MODEL", "IMAGE", max_depth=6) if "VAEDecode" in _node_chain(p)]
+        support = {s["type"]: s["node"] for s in path["support"]}
+        # KSampler needs conditioning + an initial latent, VAEDecode needs a VAE
+        assert support["CONDITIONING"] == "CLIPTextEncode"
+        assert support["LATENT"] == "EmptyLatentImage"
+        assert support["VAE"] == "CheckpointLoaderSimple"
+        # …and the routed type itself is never listed as support.
+        assert "MODEL" not in support
+
+    def test_free_types_excludes_types_nothing_can_produce(self, graph_path: Graph):
+        free = graph_path.free_types()
+        assert {"MODEL", "LATENT", "IMAGE", "AUDIO"} <= free
+        assert "NOT_A_TYPE" not in free
+
+    def test_exhausted_search_reports_no_truncation(self, graph_path: Graph):
+        result = graph_path.search_paths("AUDIO", "IMAGE", max_depth=6)
+        assert result["paths"] == []
+        assert result["truncated"] is False
+        assert result["depth_limited"] is False
+        assert result["collapsed"] is False
+
+    def test_collapsed_alternate_routes_are_reported(self, graph_path: Graph):
+        """The walk explores each intermediate state once, so a second node
+        offering the same hop is not re-expanded and the chains through it are
+        never printed. That is a real gap in the *listing*, so it has to be
+        reported — silently returning a subset while claiming exactness is the
+        bug this ticket is about, one level down.
+        """
+        info = copy.deepcopy(graph_path.object_info)
+        # A second MODEL -> LATENT sampler: a genuine alternate first hop.
+        info["KSamplerAdvanced"] = copy.deepcopy(info["KSampler"])
+        info["KSamplerAdvanced"]["name"] = "KSamplerAdvanced"
+        graph = Graph.from_object_info(info)
+
+        result = graph.search_paths("MODEL", "IMAGE", max_depth=3)
+        chains = {_node_chain(p) for p in result["paths"]}
+        # Both decoders are reported off the surviving sampler...
+        assert chains == {("KSampler", "VAEDecode"), ("KSampler", "VAEDecodeTiled")}
+        # ...but KSamplerAdvanced's equally valid routes are not, so the result
+        # must not be advertised as the complete set.
+        assert result["collapsed"] is True
+        assert result["truncated"] is False
+        assert result["depth_limited"] is False
+
+    def test_max_paths_is_reported_as_truncation(self, graph_path: Graph):
+        full = graph_path.search_paths("LATENT", "IMAGE", max_depth=6)
+        assert len(full["paths"]) > 1 and full["truncated"] is False
+        capped = graph_path.search_paths("LATENT", "IMAGE", max_depth=6, max_paths=1)
+        assert len(capped["paths"]) == 1
+        assert capped["truncated"] is True
+        assert capped["truncated_by"] == "max_paths"
+
+    def test_depth_cut_is_reported(self, graph_path: Graph):
+        result = graph_path.search_paths("MODEL", "IMAGE", max_depth=1)
+        assert result["paths"] == []
+        assert result["depth_limited"] is True
+
+    def test_state_budget_is_reported_as_truncation(self, graph_path: Graph):
+        result = graph_path.search_paths("CLIP", "IMAGE", max_depth=6, max_states=1)
+        assert result["truncated"] is True
+        assert result["truncated_by"] == "max_states"
+
+    def test_degenerate_bounds_return_nothing(self, graph_path: Graph):
+        # `MODEL -> MODEL` used to sit here as a third degenerate case. It is no
+        # longer degenerate — a same-type query is a real question with a real
+        # answer (see `test_same_type_query_finds_the_route`), so only the
+        # bounds no path can satisfy remain.
+        assert graph_path.search_paths("MODEL", "IMAGE", max_depth=0)["paths"] == []
+        assert graph_path.search_paths("MODEL", "IMAGE", max_paths=0)["paths"] == []
+
+    @pytest.mark.parametrize(
+        ("kwargs", "reason"),
+        [
+            ({"from_type": "MODEL", "to_type": "IMAGE", "max_depth": 0}, "degenerate_bounds"),
+            ({"from_type": "MODEL", "to_type": "IMAGE", "max_paths": 0}, "degenerate_bounds"),
+        ],
+    )
+    def test_declined_queries_declare_the_abstention(self, graph_path: Graph, kwargs, reason):
+        """The query shapes the walk refuses return an empty result. An empty
+        result with every limit flag false is this module's proof that no path
+        exists, so a refusal that stayed silent would forge that proof. Each
+        one says so instead.
+        """
+        from_type = kwargs.pop("from_type")
+        to_type = kwargs.pop("to_type")
+        result = graph_path.search_paths(from_type, to_type, **kwargs)
+        assert result["paths"] == []
+        assert result["not_searched"] is True
+        assert result["not_searched_reason"] == reason
+        # No limit flag is set — which is exactly why the abstention needs its
+        # own signal rather than being inferred from the others.
+        assert result["truncated"] is False
+        assert result["depth_limited"] is False
+        assert result["collapsed"] is False
+
+    def test_same_type_query_finds_the_route(self, graph_path: Graph):
+        """`LoraLoaderModelOnly` in the fixture takes a MODEL link input and
+        emits MODEL, so `MODEL -> MODEL` is genuinely routable — and is now
+        answered rather than declined. The walker used to refuse the query
+        outright and report the empty result as an abstention; the no-op rule
+        (`out_t == cur_type`) no longer drops the hop that answers it.
+        """
+        lora = graph_path.node("LoraLoaderModelOnly")
+        assert lora is not None and "MODEL" in lora.output_types()
+        assert lora.has_input("MODEL")
+
+        result = graph_path.search_paths("MODEL", "MODEL")
+        assert ("LoraLoaderModelOnly",) in {_node_chain(p) for p in result["paths"]}
+        # A real walk, not an abstention — and the one-step route is a genuine
+        # MODEL-in/MODEL-out hop, not a mislabelled edge.
+        assert result["not_searched"] is False
+        assert result["not_searched_reason"] is None
+        one_step = next(p for p in result["paths"] if _node_chain(p) == ("LoraLoaderModelOnly",))
+        assert one_step["from"] == "MODEL" and one_step["to"] == "MODEL"
+        assert one_step["steps"] == [{"node": "LoraLoaderModelOnly", "input_type": "MODEL", "output_type": "MODEL"}]
+
+    def test_no_op_hops_are_still_dropped(self, graph_path: Graph):
+        """The exemption is scoped to the hop that answers a same-type query,
+        and to nothing else — a step that hands back the type it consumed is
+        still a no-op everywhere it is not the terminal step.
+
+        For a FROM != TO query that means *no* step may do it at all: a step
+        whose output equals the target ends the path, so a no-op-looking step
+        requires the incoming type to already be the target, which only the
+        first frontier item can satisfy.
+        """
+        for from_type in ("MODEL", "LATENT", "CLIP", "CONDITIONING"):
+            for p in graph_path.exact_paths(from_type, "IMAGE", max_depth=6):
+                assert all(s["input_type"] != s["output_type"] for s in p["steps"]), (
+                    f"no-op hop in {from_type} -> IMAGE via {_node_chain(p)}"
+                )
+        # And within a same-type query it is the terminal hop only.
+        same_type = graph_path.exact_paths("MODEL", "MODEL", max_depth=6)
+        assert same_type, "fixture must offer at least one MODEL -> MODEL route"
+        for p in same_type:
+            for i, step in enumerate(p["steps"]):
+                if step["input_type"] == step["output_type"]:
+                    assert i == len(p["steps"]) - 1, f"no-op mid-path in {_node_chain(p)}"
+                    assert step["output_type"] == "MODEL"
+
+    def test_completed_walks_are_not_marked_as_declined(self, graph_path: Graph):
+        """The abstention flag must stay off for searches that actually ran,
+        whether they found routes or genuinely exhausted the space."""
+        found = graph_path.search_paths("MODEL", "IMAGE", max_depth=4)
+        assert found["paths"] and found["not_searched"] is False
+        empty = graph_path.search_paths("AUDIO", "IMAGE", max_depth=6)
+        assert empty["paths"] == [] and empty["not_searched"] is False
+        assert empty["not_searched_reason"] is None
 
 
 # ===========================================================================
@@ -706,8 +1292,8 @@ class TestValidateWorkflow:
 
     def test_below_min_error(self, graph: Graph):
         """A value below the catalog min is a hard error (the server rejects it
-        with value_smaller_than_min) — was a warning before BE-3357. Node "1" is
-        wired to a SaveImage output so it is server-reachable (BE-3406); an
+        with value_smaller_than_min) — was a warning previously. Node "1" is
+        wired to a SaveImage output so it is server-reachable; an
         unreachable node would be pruned and the range demoted to a warning."""
         wf = {
             "1": {
@@ -770,8 +1356,11 @@ class TestAutogrowInputs:
             "30": {"class_type": "SaveImage", "inputs": {"images": ["20", 0], "filename_prefix": "out"}},
         }
         result = graph.validate_workflow(wf)
-        assert result["valid"] is True, result["errors"]
         # The dotted slots must not trip type-mismatch or unknown-input noise.
+        # (The bare VAEDecode loaders legitimately miss their own required
+        # links — scope the check to the autogrow node.)
+        errs_autogrow = [e for e in result["errors"] if e["node_id"] == "20"]
+        assert errs_autogrow == [], errs_autogrow
         assert result["warnings"] == []
 
     def test_bare_link_wiring_errors_with_slot_hint(self, graph: Graph):
@@ -790,7 +1379,7 @@ class TestAutogrowInputs:
 
     def test_required_autogrow_with_no_slots_errors(self, graph: Graph):
         # BatchImagesNode "20" is wired to a SaveImage output so it is
-        # server-reachable (BE-3406) — an unreachable node would be pruned.
+        # server-reachable — an unreachable node would be pruned.
         wf = {
             "20": {"class_type": "BatchImagesNode", "inputs": {}},
             "30": {"class_type": "SaveImage", "inputs": {"images": ["20", 0], "filename_prefix": "out"}},
@@ -823,13 +1412,13 @@ class TestAutogrowInputs:
 
 
 # ===========================================================================
-# TestValidateServerParity — BE-3357: presence, no-outputs, range = errors
+# TestValidateServerParity — presence, no-outputs, range = errors
 # ===========================================================================
 
 
 class TestValidateServerParity:
     """Validate mirrors the three server-side rejections that `validate` used to
-    pass silently (BE-3349 / BE-3357), against the captured sd15 catalog:
+    pass silently, against the captured sd15 catalog:
     required-input presence, the no-outputs check, and range violations."""
 
     def _sd15_full(self) -> dict:
@@ -892,7 +1481,7 @@ class TestValidateServerParity:
         assert "wire" in err["hint"] and "MODEL" in err["hint"]
 
     def test_be3349_repro_only_links_wired(self, graph_sd15: Graph):
-        """The BE-3349 acceptance case: a KSampler with only its four link inputs
+        """The acceptance case: a KSampler with only its four link inputs
         wired is missing all six widget inputs → six required_input_missing errors."""
         wf = self._sd15_full()
         wf["3"]["inputs"] = {
@@ -989,7 +1578,7 @@ class TestValidateServerParity:
 
     def test_width_below_min_is_error(self, graph_sd15: Graph):
         """EmptyLatentImage width below the catalog min is a hard error (was a
-        warning before BE-3357)."""
+        warning previously)."""
         wf = self._sd15_full()
         wf["5"]["inputs"]["width"] = 1  # sd15 min is 16
         result = graph_sd15.validate_workflow(wf)
@@ -1006,7 +1595,7 @@ class TestValidateServerParity:
         assert result["valid"] is True, result["errors"]
         assert [e for e in result["errors"] if e.get("node_id") == "_meta"] == []
 
-    # -- Output-reachability pruning (BE-3406): match the server, which only
+    # -- Output-reachability pruning: match the server, which only
     # validates output nodes and their transitive input ancestors. --
 
     def test_disconnected_node_missing_required_is_pruned(self, graph_sd15: Graph):
@@ -1093,7 +1682,7 @@ class TestValidateServerParity:
 
 class TestValidateMalformedInputs:
     """Malformed workflow JSON must yield structured output, never an unhandled
-    traceback (BE-3406 hardening) — the validator's whole contract is to catch
+    traceback — the validator's whole contract is to catch
     bad prompts, so it may not crash on the shapes it's meant to reject."""
 
     def test_non_dict_inputs_does_not_crash(self, graph: Graph):
@@ -1124,7 +1713,7 @@ class TestValidateMalformedInputs:
 class TestValidateEmptyCombo:
     """A COMBO whose option list is declared but EMPTY means the server has zero
     files installed for that field — it rejects every value against it — so it
-    must be reported, not skipped (BE-6585).
+    must be reported, not skipped.
 
     Before this, the membership check was gated on ``self.enum_values`` being
     truthy, so detection got *worse* the emptier the install: ``VAELoader``
@@ -1314,9 +1903,218 @@ class TestValidateEmptyCombo:
         assert ("unet_name", "no_options_available") not in by_field
 
 
+class TestValidateUploadBackedCombo:
+    """A COMBO marked ``<kind>_upload`` in object_info lists the server's
+    *installed input files*, not an install-time enum — so the catalog snapshot
+    can never be authoritative for it and it must not be enum-validated.
+
+    Found live: an agenteval run uploaded an image, wired it into
+    ``LoadImage.image``, and validate answered ``no_options_available`` ("the
+    server reports 0 installed options for image"). The workflow was rejected,
+    the agent retried, and the loop burned two of the turn's paid run slots. The
+    empty-list reasoning that ``no_options_available`` was built on holds for
+    MODEL folders (``UNETLoader``/``CLIPLoader`` — static, install-time) and is
+    exactly wrong for input files, which are per-user and populated at run time
+    by upload. A freshly uploaded file is missing from a POPULATED snapshot just
+    as surely as from an empty one, so BOTH enum branches are skipped.
+    """
+
+    def _object_info(self, **extra) -> dict[str, Any]:
+        # Shapes verified against the production catalog
+        # (services/ingest/data/object_info.json): LoadImage/LoadImageMask use
+        # the list-form dialect with `image_upload`, while the V3 loaders
+        # (LoadAudio/LoadVideo/Load3D) use `["COMBO", {"options": [...], ...}]`
+        # with their own kind of marker.
+        oi = {
+            "LoadImage": {
+                "input": {"required": {"image": [["beach.jpg", "example.png"], {"image_upload": True}]}},
+                "input_order": {"required": ["image"]},
+                "output": ["IMAGE", "MASK"],
+                "output_name": ["IMAGE", "MASK"],
+                "python_module": "nodes",
+            },
+            "LoadImageMask": {
+                # The counter-case lives on the SAME node: `image` is
+                # upload-backed, `channel` is an ordinary enum and must stay
+                # constrained.
+                "input": {
+                    "required": {
+                        "image": [["beach.jpg", "example.png"], {"image_upload": True}],
+                        "channel": [["alpha", "red", "green", "blue"]],
+                    }
+                },
+                "input_order": {"required": ["image", "channel"]},
+                "output": ["MASK"],
+                "output_name": ["MASK"],
+                "python_module": "nodes",
+            },
+            "SaveImage": {
+                "input": {"required": {"images": "IMAGE"}},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+        }
+        oi.update(extra)
+        return oi
+
+    def _graph(self, **extra) -> Graph:
+        return Graph.from_object_info(self._object_info(**extra))
+
+    def _port(self, graph: Graph, class_type: str, name: str):
+        return next(p for p in graph.node(class_type).inputs if p.name == name)
+
+    def test_freshly_uploaded_filename_passes_against_a_populated_catalog(self):
+        """The regression, populated-list half: the snapshot lists other files,
+        the just-uploaded one is not among them, and that is NOT an error."""
+        g = self._graph()
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "LoadImage", "inputs": {"image": "user_upload_9f2c1a.png"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        assert result["valid"] is True, result["errors"]
+        assert [e for e in result["errors"] if e["field"] == "image"] == []
+
+    def test_freshly_uploaded_filename_passes_against_an_empty_catalog(self):
+        """The regression as it actually fired: a server with no sample images
+        declares an EMPTY list, which used to emit ``no_options_available``."""
+        oi = self._object_info()
+        oi["LoadImage"]["input"]["required"]["image"] = [[], {"image_upload": True}]
+        g = Graph.from_object_info(oi)
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "LoadImage", "inputs": {"image": "user_upload_9f2c1a.png"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        assert result["valid"] is True, result["errors"]
+        codes = {e["code"] for e in result["errors"]}
+        assert "no_options_available" not in codes
+        assert "unknown_enum_value" not in codes
+
+    def test_no_warning_on_the_edit_surface_either(self):
+        """``workflow_ops._validate_widget`` (the set-widget/apply warning
+        surface the agent reads) funnels through the same ``validate_catalog``,
+        so assert it directly for both list states."""
+        populated = self._port(self._graph(), "LoadImage", "image")
+        oi = self._object_info()
+        oi["LoadImage"]["input"]["required"]["image"] = [[], {"image_upload": True}]
+        empty = self._port(Graph.from_object_info(oi), "LoadImage", "image")
+        assert populated.validate_catalog("user_upload_9f2c1a.png") == []
+        assert empty.validate_catalog("user_upload_9f2c1a.png") == []
+
+    def test_sibling_plain_enum_on_the_same_node_still_rejects(self):
+        """The anti-blanket check: exempting the upload port must not disarm
+        enum checking for the node's ordinary enums."""
+        g = self._graph()
+        result = g.validate_workflow(
+            {
+                "1": {
+                    "class_type": "LoadImageMask",
+                    "inputs": {"image": "user_upload_9f2c1a.png", "channel": "cyan"},
+                },
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        assert result["valid"] is False
+        errs = [e for e in result["errors"] if e["code"] == "unknown_enum_value"]
+        assert [e["field"] for e in errs] == ["channel"]
+        assert "alpha" in errs[0]["hint"]
+
+    def test_empty_model_folder_still_reports_no_options_available(self):
+        """The behaviour ``no_options_available`` exists for is untouched: an
+        unmarked (model-folder) combo with zero installed options still errors."""
+        g = self._graph(
+            UNETLoader={
+                "input": {"required": {"unet_name": [[]]}},
+                "input_order": {"required": ["unet_name"]},
+                "output": ["MODEL"],
+                "output_name": ["MODEL"],
+                "python_module": "nodes",
+            }
+        )
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux1-dev.safetensors"}},
+                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            }
+        )
+        errs = [e for e in result["errors"] if e["code"] == "no_options_available"]
+        assert [e["field"] for e in errs] == ["unet_name"]
+
+    def test_marker_is_recognized_for_every_upload_kind(self):
+        """ComfyUI names the flag per loader kind — ``image_upload``,
+        ``audio_upload``, ``video_upload``, ``file_upload`` all ship in the
+        production catalog — and the V3 loaders declare their options in the
+        dict-form dialect. All are exempt; an unmarked combo is not."""
+        g = self._graph(
+            LoadAudio={
+                "input": {"required": {"audio": ["COMBO", {"options": ["sample.mp3"], "audio_upload": True}]}},
+                "output": ["AUDIO"],
+                "output_name": ["AUDIO"],
+                "python_module": "nodes",
+            },
+            LoadVideo={
+                "input": {"required": {"file": ["COMBO", {"options": ["bedroom.mp4"], "video_upload": True}]}},
+                "output": ["VIDEO"],
+                "output_name": ["VIDEO"],
+                "python_module": "nodes",
+            },
+            Load3D={
+                "input": {"required": {"model_file": ["COMBO", {"options": ["none"], "file_upload": True}]}},
+                "output": ["MESH"],
+                "output_name": ["MESH"],
+                "python_module": "nodes",
+            },
+        )
+        marked = [("LoadAudio", "audio"), ("LoadVideo", "file"), ("Load3D", "model_file")]
+        for class_type, name in marked:
+            port = self._port(g, class_type, name)
+            assert port.is_upload_backed is True, f"{class_type}.{name}"
+            assert port.validate_catalog("just-uploaded.bin") == [], f"{class_type}.{name}"
+        assert self._port(g, "LoadImageMask", "channel").is_upload_backed is False
+
+    def test_a_falsey_marker_does_not_exempt(self):
+        """``image_upload: false`` is a declaration that the port is NOT
+        upload-backed — it must stay constrained."""
+        oi = self._object_info()
+        oi["LoadImage"]["input"]["required"]["image"] = [["beach.jpg"], {"image_upload": False}]
+        port = self._port(Graph.from_object_info(oi), "LoadImage", "image")
+        assert port.is_upload_backed is False
+        assert [w["code"] for w in port.validate_catalog("nope.png")] == ["unknown_enum_value"]
+
+    def test_upload_port_stays_a_widget_not_a_link(self):
+        """The exemption is validation-only: it must not move the port between
+        widget and link wiring, nor drop the options `show_node` displays."""
+        port = self._port(self._graph(), "LoadImage", "image")
+        assert (port.is_link, port.enum_declared, port.enum_values) == (False, True, ["beach.jpg", "example.png"])
+
+    def test_uploaded_filename_is_not_rewritten_to_a_sample_file(self):
+        """``canonical_combo`` (set-widget's silent auto-correct) is exempt too:
+        against a stale directory listing, "the option it clearly means" is
+        unanswerable, and a case-only match would swap the user's upload for a
+        sample and generate from the wrong image."""
+        port = self._port(self._graph(), "LoadImage", "image")
+        assert port.canonical_combo("Beach.JPG") is None
+        assert port.canonical_combo("images/beach.jpg") is None
+        # An unmarked combo keeps the auto-correct.
+        g = self._graph(
+            VAELoader={
+                "input": {"required": {"vae_name": [["ae.safetensors"]]}},
+                "output": ["VAE"],
+                "output_name": ["VAE"],
+                "python_module": "nodes",
+            }
+        )
+        assert self._port(g, "VAELoader", "vae_name").canonical_combo("vae/ae.safetensors") == "ae.safetensors"
+
+
 class TestValidateDynamicCombo:
     """Validate expands a ``COMFY_DYNAMICCOMBO_V3`` selector's chosen option and
-    checks the dotted sub-inputs the server will actually require (BE-3777).
+    checks the dotted sub-inputs the server will actually require.
 
     object_info declares only the selector (``model``); the frontend and
     ``convert_ui_to_api`` lower the selected option's own INPUT_TYPES into
@@ -1572,10 +2370,9 @@ class TestDirectModeSlots:
     def test_extract_finds_all_widget_inputs(self, graph: Graph):
         wf = _direct_workflow()
         slots = _extract_frontend_slots(wf, graph)
-        # KSampler: seed, steps, cfg, sampler_name, scheduler, denoise (6)
-        # CLIPTextEncode: text (1)
-        # EmptyLatentImage: width, height, batch_size (3)
-        # Total: 10
+        # 10 widget slots expected - 6 from KSampler (seed, steps, cfg,
+        # sampler_name, scheduler, denoise), 1 from CLIPTextEncode (text) and
+        # 3 from EmptyLatentImage (width, height, batch_size).
         assert len(slots) == 10
         names = {s["name"] for s in slots}
         # No link inputs should appear
@@ -1630,6 +2427,39 @@ class TestDirectModeSlots:
         warnings = _apply_one_slot(wf, "3.steps", 99999, graph)
         codes = [w["code"] for w in warnings]
         assert "above_max" in codes
+
+
+class TestSlotSuggestionOnNotFound:
+    """A not-found address is enriched with the real address that carries the
+    intended widget, so an agent that targeted the wrong node/separator (the
+    common LLM failure of rebuilding an address from memory) self-corrects in
+    one step instead of looping."""
+
+    def test_wrong_node_right_widget_suggests_correct_address(self, graph: Graph):
+        # 'text' lives on the CLIPTextEncode (node 6), not EmptyLatentImage (7).
+        wf = _direct_workflow()
+        with pytest.raises(ValueError, match=r"Did you mean:.*6\.text \(CLIPTextEncode\)"):
+            _apply_one_slot(wf, "7.text", "x", graph)
+
+    def test_missing_node_right_widget_suggests_correct_address(self, graph: Graph):
+        # Node 999 doesn't exist (mirrors a wrong id/separator); 'seed' is on KSampler 3.
+        wf = _direct_workflow()
+        with pytest.raises(ValueError, match=r"Did you mean:.*3\.seed \(KSampler\)"):
+            _apply_one_slot(wf, "999.seed", 1, graph)
+
+    def test_unknown_widget_name_gets_no_false_suggestion(self, graph: Graph):
+        # No node carries 'nonexistent' → original error, no "Did you mean".
+        wf = _direct_workflow()
+        with pytest.raises(ValueError) as ei:
+            _apply_one_slot(wf, "3.nonexistent", 1, graph)
+        assert "Did you mean" not in str(ei.value)
+
+    def test_shape_error_is_not_enriched(self, graph: Graph):
+        # The widget resolved fine; a shape rejection must pass through untouched.
+        wf = _direct_workflow()
+        with pytest.raises(ValueError) as ei:
+            _apply_one_slot(wf, "3.seed", "not_an_int", graph)
+        assert "Did you mean" not in str(ei.value)
 
 
 # ===========================================================================
@@ -1701,7 +2531,7 @@ class TestSubgraphIsolation:
                 ]
             },
         }
-        _apply_one_slot(wf, "10/9.text", "VALUE-FOR-10", graph)
+        _apply_one_slot(wf, "10/9.text", "value-for-10", graph)
 
         # Rebuild the definitions index from the (potentially mutated) workflow
         defs = {d["id"]: d for d in wf["definitions"]["subgraphs"]}
@@ -1714,7 +2544,7 @@ class TestSubgraphIsolation:
         # Instance 10 got the new value
         inst10 = next(n for n in wf["nodes"] if n["id"] == 10)
         inst10_def = defs[inst10["type"]]
-        assert inst10_def["nodes"][0]["widgets_values"][0] == "VALUE-FOR-10"
+        assert inst10_def["nodes"][0]["widgets_values"][0] == "value-for-10"
 
     def test_second_write_to_same_instance_no_extra_fork(self, graph: Graph):
         """A second write to the same instance must not create yet another fork."""
@@ -1949,12 +2779,12 @@ def test_slot_address_with_dotted_input_name(graph, monkeypatch):
         inputs = []  # no declared inputs -> _write_widget skips shape/catalog validation
 
     real_node = graph.node
-    real_order = graph.widget_order
+    real_order = graph.widget_order_for_node
     monkeypatch.setattr(graph, "node", lambda nt: _FakeMeta() if nt == "DottedWidgetNode" else real_node(nt))
     monkeypatch.setattr(
         graph,
-        "widget_order",
-        lambda nt: ["images.image0"] if nt == "DottedWidgetNode" else real_order(nt),
+        "widget_order_for_node",
+        lambda nt, wv: ["images.image0"] if nt == "DottedWidgetNode" else real_order(nt, wv),
     )
 
     wf = {
@@ -1986,6 +2816,59 @@ def test_load_from_target_refuses_non_loopback_local_host():
 
     with pytest.raises(LoadError, match="non-loopback"):
         _load_from_target(mode="local", host="example.com", port=8188)
+
+
+class TestComboNormalizationAndSuggestions:
+    """Port.canonical_combo rewrites a mangled model value (dir prefix / dropped
+    subfolder / case drift) to the real option when unambiguous; suggest_combo +
+    validate_catalog.did_you_mean point a rejected value at the nearest options."""
+
+    def _port(self):
+        from comfy_cli.cql.engine import Port
+
+        return Port(
+            name="ckpt_name",
+            type="COMBO",
+            enum_values=["sd_xl_base.safetensors", "v1-5-pruned.safetensors", "sub/model_x.safetensors"],
+        )
+
+    def test_canonical_strips_added_directory_prefix(self):
+        p = self._port()
+        assert p.canonical_combo("checkpoints/sd_xl_base.safetensors") == "sd_xl_base.safetensors"
+
+    def test_canonical_matches_dropped_subfolder_by_basename(self):
+        p = self._port()
+        assert p.canonical_combo("model_x.safetensors") == "sub/model_x.safetensors"
+
+    def test_canonical_case_insensitive(self):
+        p = self._port()
+        assert p.canonical_combo("SD_XL_BASE.SAFETENSORS") == "sd_xl_base.safetensors"
+
+    def test_canonical_exact_value_returns_none(self):
+        p = self._port()
+        assert p.canonical_combo("sd_xl_base.safetensors") is None
+
+    def test_canonical_unknown_returns_none(self):
+        p = self._port()
+        assert p.canonical_combo("realisticVisionV60B1.safetensors") is None
+
+    def test_canonical_ambiguous_basename_returns_none(self):
+        from comfy_cli.cql.engine import Port
+
+        p = Port(name="ckpt_name", type="COMBO", enum_values=["a/dup.safetensors", "b/dup.safetensors"])
+        assert p.canonical_combo("dup.safetensors") is None  # two matches → don't guess
+
+    def test_suggest_returns_close_options(self):
+        p = self._port()
+        got = p.suggest_combo("sd_xl_bas.safetensors")
+        assert "sd_xl_base.safetensors" in got
+
+    def test_validate_catalog_adds_did_you_mean(self):
+        p = self._port()
+        w = p.validate_catalog("v1-5-prund.safetensors")  # typo
+        assert w and w[0]["code"] == "unknown_enum_value"
+        assert "did_you_mean" in w[0]
+        assert "v1-5-pruned.safetensors" in w[0]["did_you_mean"]
 
 
 # ===========================================================================
@@ -2022,3 +2905,201 @@ def test_input_path_load_does_not_touch_the_network(tmp_path, monkeypatch):
     g = Graph.load(input_path=str(dump))
     assert g.node_count() > 0
     assert seen == {"allow_network": False}
+
+
+class TestMatchTypeWildcard:
+    """COMFY_MATCHTYPE_V3 is the V3 schema's generic port: its concrete type is
+    resolved at runtime from whatever it is wired to. It was not recognised as a
+    wildcard, so every edge touching one was reported as edge_type_mismatch —
+    ~30 spurious warnings in a single 48h prod window on graphs that were
+    correct (ComfySwitchNode, ResizeImageMaskNode). The agent explained them away
+    in nearly every reply, which teaches it to discount validator output.
+    """
+
+    @staticmethod
+    def _object_info() -> dict[str, Any]:
+        return {
+            "LoadImage": {
+                "input": {"required": {"image": [["a.png", "b.png"]]}},
+                "input_order": {"required": ["image"]},
+                "output": ["IMAGE"],
+                "output_name": ["IMAGE"],
+                "name": "LoadImage",
+            },
+            # Consumes anything, produces a match-type: the switch/resize shape.
+            "ComfySwitchNode": {
+                "input": {"required": {"on_true": ["COMFY_MATCHTYPE_V3", {}]}},
+                "input_order": {"required": ["on_true"]},
+                "output": ["COMFY_MATCHTYPE_V3"],
+                "output_name": ["out"],
+                "name": "ComfySwitchNode",
+            },
+            "PreviewImage": {
+                "input": {"required": {"images": ["IMAGE", {}]}},
+                "input_order": {"required": ["images"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "name": "PreviewImage",
+            },
+        }
+
+    @pytest.fixture
+    def graph(self) -> Graph:
+        return Graph.from_object_info(self._object_info())
+
+    def test_concrete_into_matchtype_input_is_not_a_mismatch(self, graph: Graph):
+        """IMAGE → COMFY_MATCHTYPE_V3 input: the observed
+        "input 'input' expects COMFY_MATCHTYPE_V3 but LoadImage[0] produces IMAGE".
+        """
+        wf = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            "2": {"class_type": "ComfySwitchNode", "inputs": {"on_true": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        warns = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
+        assert warns == [], f"match-type input must accept any type, got {warns}"
+
+    def test_matchtype_output_into_concrete_input_is_not_a_mismatch(self, graph: Graph):
+        """COMFY_MATCHTYPE_V3 → IMAGE input: the observed
+        "input 'images' expects IMAGE but ResizeImageMaskNode[0] produces COMFY_MATCHTYPE_V3".
+        """
+        wf = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            "2": {"class_type": "ComfySwitchNode", "inputs": {"on_true": ["1", 0]}},
+            "3": {"class_type": "PreviewImage", "inputs": {"images": ["2", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        warns = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
+        assert warns == [], f"match-type output must satisfy any input, got {warns}"
+
+    def test_genuine_mismatch_between_concrete_types_still_warns(self, graph: Graph):
+        """The wildcard must not blanket-silence real mismatches — otherwise the
+        fix trades false positives for false negatives."""
+        oi = self._object_info()
+        oi["MaskOnly"] = {
+            "input": {"required": {"mask": ["MASK", {}]}},
+            "input_order": {"required": ["mask"]},
+            "output": [],
+            "output_name": [],
+            "output_node": True,
+            "name": "MaskOnly",
+        }
+        g = Graph.from_object_info(oi)
+        wf = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            "2": {"class_type": "MaskOnly", "inputs": {"mask": ["1", 0]}},
+        }
+        result = g.validate_workflow(wf)
+        warns = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
+        assert len(warns) == 1, "IMAGE → MASK is a real mismatch and must still warn"
+
+    def test_future_matchtype_revisions_are_wildcards_too(self):
+        """Prefix match, so a V4 match-type cannot silently reintroduce the
+        false warnings this exists to prevent."""
+        from comfy_cli.cql.engine import _is_wildcard_type
+
+        assert _is_wildcard_type("*")
+        assert _is_wildcard_type("COMFY_MATCHTYPE_V3")
+        assert _is_wildcard_type("COMFY_MATCHTYPE_V4")
+        assert not _is_wildcard_type("IMAGE")
+        assert not _is_wildcard_type("")
+
+
+class TestUnreachableNodeIsVisible:
+    """A node that reaches no output is pruned by the server, and every promoted
+    check here skips pruned nodes — so such a graph could validate as
+    "0 errors, 0 warnings" while doing nothing the author intended.
+
+    Prod repro: a depth-ControlNet whose output was never wired into the sampler
+    validated completely clean. The graph then ran twice, produced an image with
+    no pose applied, and cost two paid GPU runs and three turns of "it does
+    nothing" / "still no pose" before the dangling link was found.
+    """
+
+    @staticmethod
+    def _object_info() -> dict[str, Any]:
+        return {
+            "LoadImage": {
+                "input": {"required": {"image": [["a.png"]]}},
+                "input_order": {"required": ["image"]},
+                "output": ["IMAGE"],
+                "output_name": ["IMAGE"],
+                "name": "LoadImage",
+            },
+            "DepthControlNet": {
+                "input": {"required": {"image": ["IMAGE", {}]}},
+                "input_order": {"required": ["image"]},
+                "output": ["CONTROL_NET"],
+                "output_name": ["CONTROL_NET"],
+                "name": "DepthControlNet",
+            },
+            "SaveImage": {
+                "input": {"required": {"images": ["IMAGE", {}]}},
+                "input_order": {"required": ["images"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "name": "SaveImage",
+            },
+            "MarkdownNote": {
+                "input": {"required": {}},
+                "input_order": {"required": []},
+                "output": [],
+                "output_name": [],
+                "name": "MarkdownNote",
+            },
+        }
+
+    @pytest.fixture
+    def graph(self) -> Graph:
+        return Graph.from_object_info(self._object_info())
+
+    def test_dangling_node_is_reported(self, graph: Graph):
+        """The ControlNet is fully configured and internally valid — its OUTPUT
+        just goes nowhere. That silence is the whole defect."""
+        wf = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            # Wired IN, but its CONTROL_NET output feeds nothing.
+            "2": {"class_type": "DepthControlNet", "inputs": {"image": ["1", 0]}},
+            "3": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+
+        # Still valid: the server does run this graph, it just drops node 2.
+        assert result["valid"] is True, result["errors"]
+        warns = [w for w in result["warnings"] if w["code"] == "node_not_reachable_from_output"]
+        assert len(warns) == 1, f"the dangling node must be visible, got {result['warnings']}"
+        assert warns[0]["node_id"] == "2"
+        assert "DepthControlNet" in warns[0]["message"]
+
+    def test_fully_wired_graph_warns_about_nothing(self, graph: Graph):
+        """No false positives on a correct graph — otherwise this becomes the
+        next warning the agent learns to explain away."""
+        wf = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        warns = [w for w in result["warnings"] if w["code"] == "node_not_reachable_from_output"]
+        assert warns == [], f"a fully wired graph must warn about nothing, got {warns}"
+
+    def test_output_less_notes_are_not_flagged(self, graph: Graph):
+        """MarkdownNote produces nothing and is supposed to feed nothing."""
+        wf = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+            "3": {"class_type": "MarkdownNote", "inputs": {}},
+        }
+        result = graph.validate_workflow(wf)
+        warns = [w for w in result["warnings"] if w["code"] == "node_not_reachable_from_output"]
+        assert warns == [], f"note-style nodes legitimately feed nothing, got {warns}"
+
+    def test_no_output_node_at_all_does_not_double_report(self, graph: Graph):
+        """With no output node the graph already fails prompt_no_outputs; adding
+        a reachability warning per node would just be noise on top."""
+        wf = {"1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}}}
+        result = graph.validate_workflow(wf)
+        assert any(e["code"] == "prompt_no_outputs" for e in result["errors"])
+        warns = [w for w in result["warnings"] if w["code"] == "node_not_reachable_from_output"]
+        assert warns == [], "prompt_no_outputs already says it; don't pile on"

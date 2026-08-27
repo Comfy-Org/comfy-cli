@@ -258,7 +258,7 @@ class TestGetStats:
 
 
 class TestFetchResults:
-    @patch("comfy_cli.command.code_search.requests.get")
+    @patch("requests.get")
     def test_successful_fetch(self, mock_get, raw_api_response):
         mock_response = MagicMock()
         mock_response.json.return_value = raw_api_response
@@ -270,7 +270,7 @@ class TestFetchResults:
         mock_get.assert_called_once_with(API_URL, params={"query": "LoadImage"}, timeout=REQUEST_TIMEOUT)
         assert result == raw_api_response
 
-    @patch("comfy_cli.command.code_search.requests.get")
+    @patch("requests.get")
     def test_http_error_propagates(self, mock_get):
         mock_response = MagicMock()
         mock_response.raise_for_status.side_effect = requests.HTTPError(response=MagicMock(status_code=500))
@@ -279,14 +279,14 @@ class TestFetchResults:
         with pytest.raises(requests.HTTPError):
             _fetch_results("LoadImage")
 
-    @patch("comfy_cli.command.code_search.requests.get")
+    @patch("requests.get")
     def test_timeout_propagates(self, mock_get):
         mock_get.side_effect = requests.Timeout("timed out")
 
         with pytest.raises(requests.Timeout):
             _fetch_results("LoadImage")
 
-    @patch("comfy_cli.command.code_search.requests.get")
+    @patch("requests.get")
     def test_connection_error_propagates(self, mock_get):
         mock_get.side_effect = requests.ConnectionError("no connection")
 

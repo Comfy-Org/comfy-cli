@@ -4,12 +4,22 @@ API-format workflow shape.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app as cli_app
 from comfy_cli.command.generate import emit, spec
+from comfy_cli.cql.engine import Graph
+
+# Recorded object_info for the partner nodes MODEL_NODE_MAP targets, snapshotted
+# from the cloud catalog. Used to enforce NodeSpec's completeness contract: the
+# emitted node must carry EVERY widget input, optional section included (a
+# schema-`optional` input may still be positionally required by execute()).
+PARTNER_OBJECT_INFO = json.loads(
+    (Path(__file__).parent / "fixtures" / "partner_nodes_object_info.json").read_text(encoding="utf-8")
+)
 
 
 @pytest.fixture(autouse=True)
@@ -65,6 +75,66 @@ def test_build_kling_i2v_class_and_start_frame():
     assert wf["1"]["class_type"] == "KlingImage2VideoNode"
     loader_id = next(k for k, v in wf.items() if v["class_type"] == "LoadImage")
     assert wf["1"]["inputs"]["start_frame"] == [loader_id, 0]
+
+
+def test_build_seedance_fills_execute_required_defaults():
+    """Regression: ByteDanceImageToVideoNode declares seed/camera_fixed/watermark
+    `optional=True` in its schema but its execute() takes them WITHOUT Python
+    defaults — omitting them validates cleanly and then fails the run with
+    "missing 3 required positional arguments" (observed live on cloud). The
+    emitter must always write them."""
+    wf = emit.build_workflow(
+        "seedance",
+        {"prompt": "drift", "image": "frame.png", "model": "seedance-1-0-lite-i2v-250428"},
+    )
+    inputs = wf["1"]["inputs"]
+    assert inputs["seed"] == 0
+    assert inputs["camera_fixed"] is False
+    assert inputs["watermark"] is False
+    assert inputs["generate_audio"] is False
+
+
+def test_build_seedance_proxy_flag_spellings_reach_node_inputs():
+    """The generate proxy flags are --ratio/--camerafixed; the node inputs are
+    aspect_ratio/camera_fixed. User-passed values must not be dropped."""
+    wf = emit.build_workflow(
+        "seedance",
+        {"prompt": "drift", "image": "frame.png", "ratio": "9:16", "camerafixed": True, "watermark": True},
+    )
+    inputs = wf["1"]["inputs"]
+    assert inputs["aspect_ratio"] == "9:16"
+    assert inputs["camera_fixed"] is True
+    assert inputs["watermark"] is True
+
+
+@pytest.mark.parametrize("model", sorted(emit.MODEL_NODE_MAP))
+def test_emitted_node_covers_every_widget_input(model):
+    """Completeness contract (see NodeSpec docstring): for every model the
+    emitter supports, the emitted partner node must contain ALL of the node's
+    widget (non-link) inputs — required AND optional — plus every required link
+    input. Schema-`optional` does not imply optional-at-execute for V3 nodes,
+    so any absent widget input is a potential run-time crash."""
+    ns = emit.MODEL_NODE_MAP[model]
+    graph = Graph.from_object_info(PARTNER_OBJECT_INFO)
+    meta = graph.node(ns.node_class)
+    assert meta is not None, f"{ns.node_class} missing from the fixture snapshot — refresh it"
+
+    values = {"prompt": "p"}
+    if ns.image_params:
+        values[next(iter(ns.image_params))] = "img.png"
+    wf = emit.build_workflow(model, values)
+    inputs = wf["1"]["inputs"]
+
+    for port in meta.inputs:
+        if port.is_link:
+            if port.required:
+                assert port.name in inputs, f"{model}: required link input {port.name!r} not wired"
+            continue
+        assert port.name in inputs, (
+            f"{model}: widget input {port.name!r} missing from the emitted node — "
+            f"schema-optional inputs may still be positionally required at execute() "
+            f"time; add a default to MODEL_NODE_MAP[{model!r}].fixed"
+        )
 
 
 def test_unknown_model_lists_supported():
@@ -222,3 +292,28 @@ def test_cli_emit_output_prefix(runner, tmp_path, monkeypatch):
     wf = json.loads(out.read_text())
     save = next(n for n in wf.values() if n["class_type"] == "SaveImage")
     assert save["inputs"]["filename_prefix"] == "myfox"
+
+
+def test_build_workflow_single_element_list_unwraps():
+    wf = emit.build_workflow("nano-banana", {"prompt": "p", "image": ["ref.jpg"]})
+    loaders = [n for n in wf.values() if n["class_type"] == "LoadImage"]
+    assert len(loaders) == 1
+    assert not any(n["class_type"] == "ImageBatch" for n in wf.values())
+
+
+def test_build_workflow_two_images_chains_imagebatch():
+    wf = emit.build_workflow("nano-banana", {"prompt": "p", "image": ["a.jpg", "b.jpg"]})
+    loaders = {i: n for i, n in wf.items() if n["class_type"] == "LoadImage"}
+    batches = {i: n for i, n in wf.items() if n["class_type"] == "ImageBatch"}
+    assert len(loaders) == 2 and len(batches) == 1
+    ((batch_id, batch),) = batches.items()
+    assert {batch["inputs"]["image1"][0], batch["inputs"]["image2"][0]} == set(loaders)
+    assert wf["1"]["inputs"]["images"] == [batch_id, 0]
+
+
+def test_build_workflow_three_images_chains_two_batches():
+    wf = emit.build_workflow("nano-banana", {"prompt": "p", "image": ["a.jpg", "b.jpg", "c.jpg"]})
+    batches = [i for i, n in wf.items() if n["class_type"] == "ImageBatch"]
+    assert len(batches) == 2
+    # terminal batch feeds the partner node
+    assert wf["1"]["inputs"]["images"][0] in batches

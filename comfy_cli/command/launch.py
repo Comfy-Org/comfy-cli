@@ -18,12 +18,14 @@ from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 
-from comfy_cli import constants, utils
+from comfy_cli import constants, knowledge, utils
+from comfy_cli.caller import stream_is_tty
 from comfy_cli.command.custom_nodes.cm_cli_util import find_cm_cli, resolve_manager_gui_mode
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.env_checker import _bracket_host, check_comfy_server_running
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware print: stderr in JSON mode
+from comfy_cli.output.sanitize import close_open_sgr, sanitize_log_markup, sanitize_terminal_stream
 from comfy_cli.resolve_python import resolve_workspace_python
 from comfy_cli.workspace_manager import WorkspaceManager, WorkspaceType
 
@@ -39,7 +41,7 @@ def _hard_exit(code: int) -> None:
     so `comfy_cli.tracking`'s shutdown drain never runs here. That cost nothing
     while Mixpanel sent inline from `track()`: `@track_command` fires the
     `launch` event *before* the command body runs, so it was already delivered.
-    Now that dispatch is queue-and-drain (BE-5868) the event is still queued at
+    Now that dispatch is queue-and-drain the event is still queued at
     this point, and without an explicit drain every `comfy launch` — background
     success included — silently drops its own telemetry.
 
@@ -113,6 +115,147 @@ def _emit_launch_success(listen, port, pid) -> None:
         )
 
 
+# Backoff for a redirector thread whose pipe has nothing to give (not started,
+# exited, or mid-reboot). Long enough that an idle pump costs nothing, short
+# enough that a rebooted server's first lines are not visibly delayed.
+_REDIRECTOR_IDLE_SLEEP = 0.05
+
+
+def _relay_child_line(line: str) -> None:
+    """Relay one line of the background child's ComfyUI output, verbatim.
+
+    This is a *capture* path, not a render path: the child's stdout is
+    ``comfyui_<port>.log`` (see ``launch_and_monitor``), so every byte ComfyUI
+    wrote has to land in the file unchanged for ``comfy logs`` to be worth
+    reading. That rules out ``print`` — in this module that name is the
+    Rich-backed ``rprint``, and routing a line through Rich mangles it three
+    ways:
+
+    - *Markup parsing.* ComfyUI's output is full of square brackets (log
+      levels, ``[1/4]`` step counters, tqdm bars, quoted paths in tracebacks).
+      ``Progress: [####  ] 50%`` loses the bracketed run, and an unbalanced
+      ``[/red]`` raises ``rich.errors.MarkupError``. The raise is the damaging
+      one: it kills the redirector thread, so the log truncates at exactly the
+      moment something is going wrong.
+    - *Wrapping.* ``rich.print`` builds a ``Console`` per call, whose width
+      auto-detects to 80 against the non-tty logfile. Long lines — absolute
+      model paths, traceback frames, tqdm bars — get newlines injected.
+    - *Highlighting and emoji.* The default ``ReprHighlighter`` injects ANSI
+      colour ComfyUI never emitted (Rich honours an inherited ``FORCE_COLOR``),
+      and ``:x:``-style runs get emoji-substituted.
+
+    ``escape()`` only addresses the first, and not exactly: ``render`` rewrites
+    ``\\[`` to ``[`` unconditionally, so ``C:\\[TEMP]\\model.safetensors`` loses
+    a backslash, and a chunk ending in a lone backslash gains one. So write to
+    the stream directly and skip Rich entirely — the same reasoning (and the
+    same ``pretty_stream``) as the raw write ``comfy logs`` uses to replay the
+    file.
+
+    ANSI ComfyUI emitted is preserved because it is part of what ComfyUI
+    genuinely wrote. Sanitizing it is the display path's job:
+    ``background_launch``'s error panel does that (``sanitize_log_markup``).
+    Note that ``logs()`` deliberately does *not* strip it outright either — it
+    replays the file through ``sanitize_terminal_stream``, which keeps colour,
+    so ``comfy logs`` still shows what ComfyUI's own output looked like.
+    """
+    stream = get_renderer().pretty_stream
+    stream.write(line)
+    # Rich flushed on every print; the logfile is block-buffered, and
+    # `launch_and_monitor` tails it live waiting for the startup marker.
+    stream.flush()
+
+
+# How long the exit path will wait for the pumps to reach EOF before giving up
+# and exiting anyway. Generous next to the microseconds a drain of an already
+# exited child actually takes, but bounded: a *descendant* that inherited the
+# pipe keeps the write end open, so `readline()` there blocks until that
+# grandchild dies. Shutting down promptly beats waiting on it.
+_DRAIN_DEADLINE = 2.0
+
+
+def _pump_child_pipe(
+    pick_pipe,
+    stop: threading.Event | None = None,
+    drain: threading.Event | None = None,
+) -> None:
+    """Relay one of the background child's pipes until the process exits.
+
+    ``pick_pipe`` is re-called every pass rather than handed a pipe once:
+    ``launch_comfyui`` *reassigns* ``process`` on every reboot, and re-reading
+    is how a rebooted server's output keeps reaching the log.
+
+    The consequence is that there is no terminal condition to break on — an
+    empty read means "the current child's pipe is closed", which is equally the
+    not-started-yet, the exited, and the mid-reboot state. So back off rather
+    than break, and never spin: an unguarded ``readline()`` on a closed pipe
+    returns ``""`` immediately and forever, burning a core for the rest of the
+    run. (Two such threads, both non-daemon, used to do exactly that from the
+    moment the server exited.)
+
+    The two events are the seams that follow from that, and they are not the
+    same request:
+
+    - ``stop`` means *give up now*, mid-pipe if need be. Production never sets
+      it; a caller that needs the thread to actually end — the tests — has no
+      other way to ask.
+    - ``drain`` means *the child has exited, so finish the pipe and then end*.
+      Only once a read comes back empty is the pipe genuinely at EOF, and only
+      then does the loop return. That distinction is the whole point: exiting
+      on the flag itself would drop exactly the buffered tail — the last frames
+      of the traceback that killed the server — that the drain exists to save.
+    """
+    while stop is None or not stop.is_set():
+        pipe = pick_pipe()
+        line = ""
+        try:
+            if pipe is not None:
+                line = pipe.readline()
+                if line:
+                    _relay_child_line(line)
+        except (ValueError, OSError):
+            # A closed handle — the reboot path swaps the pipe out from under
+            # us, and a torn-down stdout fails the relay's write the same way.
+            # Back off and retry: losing a line beats losing the pump, which
+            # would truncate the log for the rest of the run. Under `drain`
+            # there is no retry left to make, and the loop below ends it.
+            line = ""
+        if not line:
+            if drain is not None and drain.is_set():
+                return
+            # Wait on an event rather than sleep where there is one, so a
+            # `drain` raised mid-backoff is answered now and not up to
+            # `_REDIRECTOR_IDLE_SLEEP` later.
+            waiter = stop if stop is not None else drain
+            if waiter is None:
+                time.sleep(_REDIRECTOR_IDLE_SLEEP)
+            else:
+                waiter.wait(_REDIRECTOR_IDLE_SLEEP)
+
+
+def _drain_child_pipes(drain: threading.Event, pumps, deadline: float = _DRAIN_DEADLINE) -> None:
+    """Let the pumps finish the exited child's pipes before the process dies.
+
+    ``process.wait()`` returning only means the child is gone, not that its
+    output has been read: whatever it wrote last is still sitting in the pipe
+    buffer. Every exit below is ``_hard_exit`` (``os._exit``), which takes the
+    daemon pumps with it wherever they are — so without this the tail of the
+    log is lost precisely when it matters most, on the crash whose traceback
+    ``background_launch`` is about to render.
+
+    The race is not theoretical: a pump that happens to be inside its
+    ``_REDIRECTOR_IDLE_SLEEP`` backoff when the child writes its last line and
+    exits has not yet read that line, and the exit path is not obliged to take
+    longer than the backoff to reach ``os._exit``.
+
+    Bounded, and best-effort by construction — the pumps stay daemons, so
+    blowing the deadline costs the tail rather than the shutdown.
+    """
+    drain.set()
+    end = time.monotonic() + deadline
+    for pump in pumps:
+        pump.join(max(0.0, end - time.monotonic()))
+
+
 def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
     reboot_path = None
 
@@ -142,6 +285,10 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
             # Continue with default frontend
 
     process = None
+
+    # The only long-lived comfy process: a fetch started here has until the
+    # server exits to finish, which no discovery command can offer.
+    threading.Thread(target=knowledge.refresh_if_stale, daemon=True, name="knowledge-refresh").start()
 
     if "COMFY_CLI_BACKGROUND" not in os.environ:
         # If not running in background mode, there's no need to use popen. This can prevent the issue of linefeeds occurring with tqdm.
@@ -182,18 +329,29 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
             os.remove(reboot_path)
     else:
         # If running in background mode without using a popen, broken pipe errors may occur when flushing stdout/stderr.
-        def redirector_stderr():
-            while True:
-                if process is not None and process.stderr is not None:
-                    print(process.stderr.readline(), end="")
-
-        def redirector_stdout():
-            while True:
-                if process is not None and process.stdout is not None:
-                    print(process.stdout.readline(), end="")
-
-        threading.Thread(target=redirector_stderr).start()
-        threading.Thread(target=redirector_stdout).start()
+        # Daemon threads: every exit path here is `_hard_exit` (os._exit), which
+        # kills them regardless, but a `Popen` failure or an early Ctrl-C returns
+        # normally — and non-daemon pumps would hang interpreter shutdown there.
+        # Held onto so the exit paths below can drain them first; the reboot
+        # path deliberately does not, since the same pumps carry the restarted
+        # server's output.
+        drain = threading.Event()
+        pumps = [
+            threading.Thread(
+                target=_pump_child_pipe,
+                args=(lambda: process.stderr if process is not None else None,),
+                kwargs={"drain": drain},
+                daemon=True,
+            ),
+            threading.Thread(
+                target=_pump_child_pipe,
+                args=(lambda: process.stdout if process is not None else None,),
+                kwargs={"drain": drain},
+                daemon=True,
+            ),
+        ]
+        for pump in pumps:
+            pump.start()
 
         try:
             while True:
@@ -205,6 +363,10 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
                         text=True,
                         env=new_env,
                         encoding="utf-8",
+                        # ComfyUI and custom nodes can emit non-UTF-8 bytes; a
+                        # strict decode would raise inside the redirector thread
+                        # and truncate the log from that byte onward.
+                        errors="replace",
                         shell=True,  # win32 only
                         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,  # win32 only
                     )
@@ -214,6 +376,7 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
                         text=True,
                         env=new_env,
                         encoding="utf-8",
+                        errors="replace",  # see the win32 branch above
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                     )
@@ -221,15 +384,26 @@ def launch_comfyui(extra, frontend_pr=None, python=sys.executable):
                 process.wait()
 
                 if reboot_path is None:
+                    # Drain before printing, so our message lands after the
+                    # child's own output rather than in the middle of it.
+                    _drain_child_pipes(drain, pumps)
                     print("[bold red]ComfyUI is not installed.[/bold red]\n")
                     _hard_exit(1)
 
                 if not os.path.exists(reboot_path):
+                    # The server exited for good — this is the path whose tail
+                    # `background_launch` renders as the crash panel.
+                    _drain_child_pipes(drain, pumps)
                     _hard_exit(process.returncode)
 
+                # Reboot: no drain. The pumps keep running and pick the new
+                # `process` up on their next pass.
                 os.remove(reboot_path)
         except KeyboardInterrupt:
             if process is not None:
+                # The child takes the same SIGINT and is on its way out; give
+                # its last words the same bounded chance to reach the log.
+                _drain_child_pipes(drain, pumps)
                 _hard_exit(1)
 
 
@@ -369,9 +543,20 @@ def background_launch(extra, frontend_pr=None):
     # Reaching here means the monitor returned without seeing the success line
     # (the success path emits its envelope and _hard_exit(0)s inside the monitor).
     if log is not None:
+        # `log` is ComfyUI's own output, relayed verbatim by `_relay_child_line`
+        # — so it reaches here with its brackets and ANSI intact. Panel content
+        # IS parsed as Rich markup, so this sink needs the markup escape as well
+        # as the escape-byte strip: an unbalanced '[/red]' in the captured log
+        # raised MarkupError from inside the failure handler, and any other
+        # bracketed run was silently deleted. The markup-parsing sink is why
+        # this is not sanitize_terminal_stream — monochrome is fine in an error
+        # panel, and no colour is worth reporting a failed launch by crashing on
+        # the log that explains it. sanitize_log_markup rather than plain
+        # sanitize_markup so a stray '\x1b]' in the capture truncates one line
+        # instead of the whole traceback below it.
         print(
             Panel(
-                "".join(log),
+                sanitize_log_markup("".join(log)),
                 title="[bold red]Error log during ComfyUI execution[/bold red]",
                 border_style="bright_red",
             )
@@ -801,6 +986,11 @@ def logs(tail: int = 200, where: str | None = None, port: int | None = None):
             command="logs",
         )
         raise typer.Exit(code=1)
+    # Routing is confirmed local, so every envelope from here down can name it —
+    # matching the `where="local"` the success emit already passes explicitly.
+    # Both `where_invalid` errors above stay `where: null`: they *are* the failed
+    # decision, and the second one rejects a target this command won't route to.
+    renderer.where = "local"
 
     resolved = resolve_background_log_path(port)
     if resolved is None:
@@ -877,9 +1067,21 @@ def logs(tail: int = 200, where: str | None = None, port: int | None = None):
                 f"{escape(log_path)}, ComfyUI-Manager's unsuffixed log, which does not "
                 f"record which port it served.[/bold yellow]"
             )
-        # Write raw so ComfyUI log text (which can contain '[...]') isn't
-        # reinterpreted as Rich markup, and byte-for-byte matches the file.
-        renderer.pretty_stream.write("".join(lines))
+        # Raw stream write so ComfyUI log text (which can contain '[...]') isn't
+        # reinterpreted as Rich markup; sanitize_terminal_stream strips the escape
+        # sequences a terminal would act on (CSI-non-SGR/OSC/DCS/stray C0) while
+        # keeping SGR colour, tab/newline/CR — so legitimate logs render unchanged.
+        replayed = sanitize_terminal_stream("".join(lines))
+        # Keeping SGR means a log line that never resets — or opens \x1b[8m
+        # (conceal) — styles every line replayed after it, and then whatever the
+        # user types next. close_open_sgr closes each line the log left open.
+        # Only for a TTY: there is no terminal state to protect behind
+        # `comfy logs > file` or `| grep`, and adding resets there would put
+        # bytes in the output that the source file never contained.
+        stream = renderer.pretty_stream
+        if stream_is_tty(stream):
+            replayed = close_open_sgr(replayed)
+        stream.write(replayed)
 
     renderer.emit(
         {
