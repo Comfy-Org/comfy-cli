@@ -278,6 +278,7 @@ class TestPhrasedQueries:
             ("text to video with audio / sound", "text-to-video"),
             # A partial key match counts when the description supplies more words than the key lacks.
             ("poster with readable text", "text-in-image"),
+            ("a musical poster with readable text", "text-in-image"),
             ("poster with lots of small readable text typography", "text-in-image"),
             ("sound effects generation", "audio-generation"),
             ("4K video generation", None),
@@ -311,8 +312,16 @@ class TestPhrasedQueries:
         assert knowledge._resolve_tokens(b, "alpha gamma delta") == "cap"
         assert knowledge._resolve_tokens(b, "gamma delta") is None
 
-    def test_only_the_first_sentence_of_a_description_counts(self):
-        cap = {"aliases": ["alpha beta"], "description": "gamma delta. Never used for epsilon zeta."}
+    @pytest.mark.parametrize(
+        "description",
+        [
+            "gamma delta. Never used for epsilon zeta.",
+            "gamma delta with no epsilon zeta.",
+            "gamma delta; not epsilon zeta",
+        ],
+    )
+    def test_a_description_stops_counting_where_it_says_what_the_row_is_not(self, description):
+        cap = {"aliases": ["alpha beta"], "description": description}
         b = knowledge._index(
             {"models": {}, "capabilities": {"cap": cap}}, None, source="env", stale=False, path="x", mtime=0.0
         )
@@ -320,15 +329,33 @@ class TestPhrasedQueries:
         assert knowledge._resolve_tokens(b, "alpha epsilon zeta") is None
 
     def test_an_inflected_key_word_still_matches(self):
-        data = {"models": {}, "capabilities": {"cap": {"aliases": ["Background Removal"]}}}
+        data = {"models": {}, "capabilities": {"cap": {"aliases": ["Remove Background"]}}}
         b = knowledge._index(data, None, source="env", stale=False, path="x", mtime=0.0)
-        assert knowledge._resolve_tokens(b, "remove the background from this photo") == "cap"
+        assert knowledge._resolve_tokens(b, "removing the background from this photo") == "cap"
+        assert knowledge._resolve_tokens(b, "backgrounds removed from these photos") == "cap"
+
+    def test_a_four_letter_alias_ending_in_e_is_still_reachable(self):
+        data = {"models": {}, "capabilities": {"cap": {"aliases": ["Pose"]}, "short": {"aliases": ["3D"]}}}
+        b = knowledge._index(data, None, source="env", stale=False, path="x", mtime=0.0)
+        assert knowledge._resolve_tokens(b, "pose estimation") == "cap"
+        assert knowledge._resolve_tokens(b, "a 3d scene") is None
 
     def test_stem_agrees_across_inflections(self):
-        for a, b in (("editing", "edit"), ("edits", "edit"), ("removal", "remove"), ("images", "image")):
+        for a, b in (
+            ("editing", "edit"),
+            ("edits", "edit"),
+            ("removed", "remove"),
+            ("removals", "removal"),
+            ("images", "image"),
+            ("classes", "class"),
+            ("generating", "generate"),
+        ):
             assert knowledge._stem(a) == knowledge._stem(b), (a, b)
         assert knowledge._stem("3d") == "3d"
+        assert knowledge._stem("musical") != knowledge._stem("music")
+        assert knowledge._tokens("generating an image") == knowledge._tokens("generate an image")
         assert knowledge._query_tokens("lip sync") >= {"lip", "sync", "lipsync"}
+        assert "lipsync" not in knowledge._query_tokens("lip or sync")
 
 
 class TestScalarGuards:

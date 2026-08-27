@@ -14,7 +14,6 @@ disturbing the explicit ``comfy knowledge`` verbs.
 from __future__ import annotations
 
 import hashlib
-import itertools
 import json
 import math
 import os
@@ -57,9 +56,11 @@ UNAVAILABLE_LOCALLY = "the templates or nodes this row resolves to are absent fr
 # naming a capability, model or gallery tag here would be a second copy of the
 # bundle's vocabulary, which then drifts every time comfy-knowledge is recompiled.
 _FILLER = frozenset(
-    "a an the of to for from with and or in on at by as is are be do it no not which where while "
+    "a an the of to for from with and or in on at by as is are be do it which where while "
     "my me some this that into make create generate".split()
 )
+# Cut a description here: what follows says what the row is *not*.
+_NEGATOR = re.compile(r"(?<=[.;])\s|\b(?:no|not|never|neither|nor|without|except)\b", re.IGNORECASE)
 # A one-word key must be at least this long to match on its own. Guards against a
 # future alias like "3d" dragging a capability into every query mentioning it.
 MIN_SINGLE_TOKEN_CHARS = 4
@@ -151,16 +152,26 @@ def _normalize(s: str) -> str:
 
 
 def _stem(word: str) -> str:
-    """Suffix strip so "editing", "edits" and "edit" agree, and "removal" meets "remove"."""
-    for suffix in ("ing", "ed", "es", "s", "al"):
-        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
-            word = word[: -len(suffix)]
-            break
+    """Suffix strip, repeated until nothing matches, so "editing", "edits" and "edit" agree.
+
+    Only inflections: "-al" is left alone so "musical" never lands on the alias "Music".
+    """
+    stripped = True
+    while stripped:
+        stripped = False
+        for suffix in ("ing", "ed", "es", "s"):
+            if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+                word = word[: -len(suffix)]
+                stripped = True
+                break
     return word[:-1] if word.endswith("e") and len(word) > 3 else word
 
 
-def _words(s: str) -> list[str]:
-    return [t for t in re.split(r"[^a-z0-9]+", s.lower()) if t and t not in _FILLER]
+_FILLER_STEMS = frozenset(map(_stem, _FILLER))
+
+
+def _split(s: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", s.lower())
 
 
 def _tokens(s: str) -> frozenset[str]:
@@ -169,13 +180,13 @@ def _tokens(s: str) -> frozenset[str]:
     Only generic English is listed in the filler — no capability, model or tag
     name — so this stays put while the bundle changes underneath it.
     """
-    return frozenset(_stem(w) for w in _words(s))
+    return frozenset(w for w in map(_stem, _split(s)) if w not in _FILLER_STEMS)
 
 
 def _query_tokens(s: str) -> frozenset[str]:
     """:func:`_tokens` plus each adjacent pair joined, so "lip sync" reaches the key ``lipsync``."""
-    words = _words(s)
-    return frozenset(_stem(w) for w in itertools.chain(words, (a + b for a, b in zip(words, words[1:]))))
+    words = _split(s)
+    return _tokens(s) | frozenset(_stem(a + b) for a, b in zip(words, words[1:]))
 
 
 def _normalized_map(keys: dict[str, str], *, ids: Collection[str] = ()) -> dict[str, str]:
@@ -509,10 +520,8 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
     key_words: dict[str, set[str]] = defaultdict(set)
     for words, _, cid in capability_tokens:
         key_words[cid] |= words
-    # First sentence only: the rest of a description says what the row is *not*
-    # ("Never used to fix anatomy") and would pull those queries in.
     capability_context = {
-        cid: _tokens(re.split(r"(?<=[.;])\s", desc, maxsplit=1)[0]) - key_words[cid]
+        cid: _tokens(_NEGATOR.split(desc, maxsplit=1)[0]) - key_words[cid]
         for cid, cap in capabilities.items()
         if isinstance(desc := cap.get("description"), str)
     }
@@ -591,7 +600,7 @@ def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
     scored: dict[str, tuple[float, int, int, int]] = {}
     for key_words, key_norm, cid in bundle.capability_tokens:
         hit = key_words & words
-        if not hit or (len(hit) == 1 and len(next(iter(hit))) < MIN_SINGLE_TOKEN_CHARS):
+        if not hit or (len(key_words) == 1 and len(key_norm) < MIN_SINGLE_TOKEN_CHARS):
             continue
         context = len(bundle.capability_context.get(cid, frozenset()) & words)
         missing = len(key_words) - len(hit)
