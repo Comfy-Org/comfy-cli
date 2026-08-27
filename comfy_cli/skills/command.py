@@ -4,7 +4,7 @@ The unlock: instead of running an MCP server, this command teaches every
 agent on the machine how to call ``comfy`` natively. One file per skill,
 three targets, zero protocol.
 
-Bundled skills (4 total) — see ``comfy skills list`` for descriptions:
+Bundled skills (5 total) — see ``comfy skills list`` for descriptions:
 
   - ``comfy``           — the consolidated driver skill (command surface,
                           output contract, routing, discovery, execution,
@@ -13,12 +13,8 @@ Bundled skills (4 total) — see ``comfy skills list`` for descriptions:
   - ``comfy-relay``     — what to put in chat while driving the CLI
   - ``comfy-director``  — narrative multi-shot video production (screenplay,
                           continuity, audio design, conform discipline)
-
-Fetched at install time, not bundled (see ``REMOTE_SKILLS``):
-
-  - ``comfy-build``     — building a ComfyUI distribution on the developer
-                          platform. It lives in Comfy-Org/comfy-skills so its
-                          judgment can be revised without a CLI release.
+  - ``comfy-build``     — building a custom ComfyUI environment on the developer
+                          platform, versioned with this CLI release
 """
 
 from __future__ import annotations
@@ -32,7 +28,6 @@ from comfy_cli import knowledge, tracking
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.skills import (
     BUNDLED_SKILLS,
-    REMOTE_SKILLS,
     TargetKind,
     _compute_skill_state,
     _looks_like_path,
@@ -144,7 +139,7 @@ def install_cmd(
         typer.Option(
             "--skill",
             help=f"Install only the named skill(s). Repeatable. Default: all {len(default_skill_names())} "
-            f"({len(BUNDLED_SKILLS)} bundled, {len(REMOTE_SKILLS)} fetched — see `comfy skills list`).",
+            "(see `comfy skills list`).",
         ),
     ] = None,
     dry_run: Annotated[
@@ -200,11 +195,12 @@ def install_cmd(
 
         header = Text(f"{title_word} · {s} scope", style="dim")
         body = Group(header, Text(""), tbl)
-        # One line per skipped skill, not one per target — the reason is the same
-        # three times, and the table has nowhere to put it.
-        skipped = {r.skill: r.reason for r in results if r.action == "skipped" and r.reason}
-        for name, reason in skipped.items():
-            body = Group(body, Text(f"{name} skipped: {reason}", style="yellow"))
+        # One line per skipped target: every remaining skip is a per-path OSError,
+        # so two targets of one skill fail with two different reasons and the table
+        # has nowhere to put either.
+        for r in results:
+            if r.action == "skipped" and r.reason:
+                body = Group(body, Text(f"{r.skill} ({r.kind}) skipped: {r.reason}", style="yellow"))
         if not dry_run and any(r.action == "wrote" for r in results):
             body = Group(
                 body,
@@ -289,13 +285,6 @@ _LIST_HELP = "List the skills `comfy skills install` writes (" + ", ".join(defau
 def list_cmd():
     renderer = get_renderer()
     rows = [{"name": name, "description": frontmatter_description(skill_content(name))} for name, _ in BUNDLED_SKILLS]
-    # A remote skill's description lives in the repository it is fetched from, so
-    # listing it offline would mean a stale copy here. Say where it comes from
-    # instead — omitting it would hide a skill that `install` does write.
-    rows += [
-        {"name": r.name, "description": f"Fetched from {r.repo} ({r.ref}) by `comfy skills install`."}
-        for r in REMOTE_SKILLS
-    ]
 
     if renderer.is_pretty():
         from rich.table import Table

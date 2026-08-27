@@ -520,7 +520,10 @@ class TestGenerate:
         available and green, while the bundle keyed no such variant."""
         env = _run_generate(["schema", "kling-lipsync"], tmp_path=tmp_path, with_bundle=True)
         assert env["ok"] is True
-        assert "knowledge" not in env["data"]
+        # The guard is on the model row. 'kling-lipsync' names the lipsync
+        # capability, so its ranked picks are a fair answer; the `kling` family
+        # row is not.
+        assert env["data"]["knowledge"]["models"] == []
 
     def test_list_is_brief_and_byte_identical_without_a_bundle(self, tmp_path):
         enriched = _run_generate(["list", "--query", "kling"], tmp_path=tmp_path, with_bundle=True)

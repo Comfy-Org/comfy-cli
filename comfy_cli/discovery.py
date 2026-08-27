@@ -63,6 +63,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy build blob list": "build_blob_list",
     "comfy build blob upload": "build_blob_upload",
     "comfy build from-snapshot": "build_from_snapshot",
+    "comfy build from-workflow": "build_from_workflow",
     "comfy jobs ls": "jobs",
     "comfy jobs status": "jobs",
     "comfy jobs watch": "jobs",
@@ -94,6 +95,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow set-slot": "workflow",
     "comfy workflow vary": "workflow",
     "comfy workflow notes": "workflow",
+    "comfy workflow print": "workflow",
     # structured edit primitives + recipes (CRDT op-based authoring)
     "comfy workflow add-node": "workflow",
     "comfy workflow connect": "workflow",

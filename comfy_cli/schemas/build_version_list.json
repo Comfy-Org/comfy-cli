@@ -3,11 +3,24 @@
   "$id": "https://comfy.org/schemas/build_version_list.json",
   "title": "comfy build release list --json data payload",
   "type": "object",
-  "required": ["versions"],
+  "required": ["releases", "versions"],
   "additionalProperties": true,
   "properties": {
+    "releases": {
+      "type": "array",
+      "description": "The build's releases.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "id": {"type": "string"},
+          "status": {"type": "string"}
+        }
+      }
+    },
     "versions": {
       "type": "array",
+      "description": "Deprecated alias of `releases`, always the same rows. Emitted for one release so pinned scripts keep parsing; prefer `releases`.",
       "items": {
         "type": "object",
         "additionalProperties": true,

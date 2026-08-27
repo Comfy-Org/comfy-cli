@@ -1,7 +1,7 @@
 """Find, validate, and index the compiled comfy-knowledge bundle.
 
 The bundle (``knowledge.json`` + optional ``manifest.json``) is produced by
-the internal comfy-knowledge build. It reaches this process by one of three routes,
+the curated knowledge bundle repo. It reaches this process by one of three routes,
 tried in order: an explicit ``COMFY_KNOWLEDGE_FILE``, the per-user cache, or a
 fetch from ``COMFY_KNOWLEDGE_URL``. A missing or broken bundle is a normal
 state: every entry point here returns ``None`` rather than raising, and nothing
@@ -21,6 +21,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+from collections import defaultdict
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -51,6 +52,23 @@ MAX_VERSION_CHARS = 64
 
 UNAVAILABLE_LOCALLY = "the templates or nodes this row resolves to are absent from this install"
 
+# Grammatical filler dropped before subset matching. Deliberately generic English:
+# naming a capability, model or gallery tag here would be a second copy of the
+# bundle's vocabulary, which then drifts every time comfy-knowledge is recompiled.
+_FILLER = frozenset(
+    "a an the of to for from with and or in on at by as is are be do it which where while "
+    "my me some this that into make create generate".split()
+)
+# A description counts as match context only up to its first sentence end or
+# negator, whichever comes first: what follows says what the row is *not*, or
+# how it routes. "e.g." and "No.1" are not ends.
+_CONTEXT_END = re.compile(
+    r"(?<=[a-z]{2}[.;])\s|\b(?:no|not|never|neither|nor|without|except)\b(?![.\d])", re.IGNORECASE
+)
+# A one-word key must be at least this long to match on its own. Guards against a
+# future alias like "3d" dragging a capability into every query mentioning it.
+MIN_SINGLE_TOKEN_CHARS = 4
+
 REASON_ENV_FILE = "COMFY_KNOWLEDGE_FILE is set but could not be loaded"
 REASON_NO_URL = "no cache and COMFY_KNOWLEDGE_URL is not set"
 REASON_FETCH_FAILED = "fetch failed and no cached bundle exists"
@@ -74,6 +92,10 @@ class Bundle:
     # exact path decides it; a real id always keeps its own key.
     normalized_aliases: dict[str, str] = field(default_factory=dict)
     normalized_capabilities: dict[str, str] = field(default_factory=dict)
+    # (word set, normalized key, capability id) for every capability id and alias,
+    # so an intent phrase reaches the row its own wording names. See :func:`_resolve_tokens`.
+    capability_tokens: tuple[tuple[frozenset[str], str, str], ...] = ()
+    capability_context: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 # One-element tuple so a memoized ``None`` is distinguishable from "not loaded yet".
@@ -133,6 +155,46 @@ def _normalize(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s)
 
 
+def _stem(word: str) -> str:
+    """Suffix strip, repeated until nothing matches, so "editing", "edits" and "edit" agree.
+
+    Only inflections: "-al" is left alone so "musical" never lands on the alias "Music".
+    """
+    stripped = True
+    while stripped:
+        stripped = False
+        for suffix in ("ing", "ed", "s", "e"):
+            if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+                word = word[: -len(suffix)]
+                stripped = True
+                break
+    return word
+
+
+_FILLER_STEMS = frozenset(map(_stem, _FILLER))
+
+
+def _split(s: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", s.lower())
+
+
+def _tokens(s: str) -> frozenset[str]:
+    """Stemmed word set of a key or description, with grammatical filler dropped."""
+    return frozenset(w for w in map(_stem, _split(s)) if w not in _FILLER_STEMS)
+
+
+def _short_key(key: str) -> bool:
+    """A one-word key (filler aside) under MIN_SINGLE_TOKEN_CHARS never matches on wording."""
+    raw = {w for w in _split(key) if _stem(w) not in _FILLER_STEMS}
+    return len(raw) == 1 and len(next(iter(raw))) < MIN_SINGLE_TOKEN_CHARS
+
+
+def _query_tokens(s: str) -> frozenset[str]:
+    """:func:`_tokens` plus each adjacent pair joined, so "lip sync" reaches the key ``lipsync``."""
+    words = _split(s)
+    return _tokens(s) | frozenset(_stem(a + b) for a, b in zip(words, words[1:]))
+
+
 def _normalized_map(keys: dict[str, str], *, ids: Collection[str] = ()) -> dict[str, str]:
     """``_normalize(key) -> target``, with every spelling two targets share left out.
 
@@ -182,15 +244,24 @@ def resolve(bundle: Bundle, query: str) -> dict | None:
 
 
 def pick(bundle: Bundle, capability: str) -> dict | None:
+    """Ranked picks for a capability, keyed exactly, then by spelling, then by wording.
+
+    The wording pass is the same :func:`_resolve_tokens` enrichment uses, so a
+    phrased request ("upscale this video") resolves here as well as it does when
+    it rides along on a block.
+    """
     cap_id = capability.strip().lower()
     if cap_id not in bundle.capabilities:
-        cap_id = bundle.normalized_capabilities.get(_normalize(cap_id), cap_id)
+        cap_id = bundle.normalized_capabilities.get(_normalize(cap_id)) or _resolve_tokens(bundle, capability) or cap_id
     cap = bundle.capabilities.get(cap_id)
     if cap is None:
         return None
     raw_picks = cap.get("picks")
     picks = [p for p in raw_picks if isinstance(p, dict)] if isinstance(raw_picks, list) else []
     out = dict(cap)
+    # The key resolved through spelling and wording is the answer; a row that
+    # omits its own ``id`` must not send the caller back to the raw phrase.
+    out["id"] = cap_id
     out["picks"] = sorted(picks, key=_rank_key)
     return out
 
@@ -449,6 +520,20 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
             if alias:
                 capability_keys.setdefault(alias, cid)
 
+    capability_tokens = tuple(
+        (words, _normalize(key), cid)
+        for key, cid in capability_keys.items()
+        if (words := _tokens(key)) and not _short_key(key)
+    )
+    key_words: dict[str, set[str]] = defaultdict(set)
+    for words, _, cid in capability_tokens:
+        key_words[cid] |= words
+    capability_context = {
+        cid: _tokens(_CONTEXT_END.split(desc, maxsplit=1)[0]) - key_words[cid]
+        for cid, cap in capabilities.items()
+        if isinstance(desc := cap.get("description"), str)
+    }
+
     version = manifest.get("version") if manifest is not None else None
     return Bundle(
         version=version[:MAX_VERSION_CHARS] if isinstance(version, str) else "unknown",
@@ -465,6 +550,8 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         model_capabilities=model_capabilities,
         normalized_aliases=_normalized_map(aliases, ids=models),
         normalized_capabilities=_normalized_map(capability_keys, ids=capabilities),
+        capability_tokens=capability_tokens,
+        capability_context=capability_context,
     )
 
 
@@ -489,9 +576,52 @@ def _lookup(bundle: Bundle, queries: Iterable[str]) -> tuple[list[tuple[str, str
             seen.add(mid)
             models.append((mid, exact))
         cid = exact if exact in bundle.capabilities else bundle.normalized_capabilities.get(_normalize(q))
+        if cid is None:
+            cid = _resolve_tokens(bundle, q)
         if cid is not None and cid not in caps:
             caps.append(cid)
     return models, caps
+
+
+def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
+    """Capability whose id or alias is worded inside ``query``; ``None`` if none is.
+
+    Callers ask in sentences ("image to 3d model mesh") while the bundle is keyed
+    on tags and ids ("Image to Model", "image-to-3d"), and :func:`_normalize`
+    only strips punctuation, so the exact path misses everything phrased.
+
+    Each key scores by the share of its words the query contains. A full match
+    always counts. A partial one counts only when the query shares more words
+    with the capability's description than the key words it lacks, so "poster
+    with readable text" reaches ``text-in-image`` while "4K video generation"
+    reaches nothing. Among capabilities that score the same, the key spelled
+    out literally in the query wins ("text to image" over ``text-in-image``),
+    then the one whose description the query echoes.
+
+    Ambiguity resolves to nothing rather than to a guess, matching
+    :func:`_normalized_map`: a tie between two capabilities is not an answer.
+    """
+    words = _query_tokens(query)
+    if not words:
+        return None
+    literal = _normalize(query)
+    scored: dict[str, tuple[float, int, int, int]] = {}
+    for key_words, key_norm, cid in bundle.capability_tokens:
+        hit = key_words & words
+        if not hit:
+            continue
+        context = len(bundle.capability_context.get(cid, frozenset()) & words)
+        missing = len(key_words) - len(hit)
+        if missing and context <= missing:
+            continue
+        score = (len(hit) / len(key_words), len(hit), len(key_norm) if key_norm in literal else 0, context)
+        if score > scored.get(cid, (0.0, 0, 0, 0)):
+            scored[cid] = score
+    if not scored:
+        return None
+    best = max(scored.values())
+    winners = [cid for cid, score in scored.items() if score == best]
+    return winners[0] if len(winners) == 1 else None
 
 
 def _text(value: Any) -> str | None:
@@ -611,19 +741,26 @@ def _nudge_text(block: dict, head: str) -> str:
     return f"{head}; see capabilities_available"
 
 
+def _hit_ids(block: dict) -> list[str]:
+    """Model ids then ``cap:<id>`` for the capabilities the picks rank, in block order."""
+    caps: list[str] = []
+    for p in block["picks"]:
+        if p["capability"] not in caps:
+            caps.append(p["capability"])
+    return [m["id"] for m in block["models"]] + [f"cap:{c}" for c in caps]
+
+
 def _fit(block: dict) -> None:
     """Drop whole entries until the block fits MAX_BLOCK_BYTES.
+
+    Read alongside :func:`_hit_ids`, which names what survives each pass.
 
     Models first, then picks, and ``capabilities_available`` last: it is the
     only thing that tells an agent which search terms reach a ranked table, so
     it outlives the answers to the current query.
     """
     while True:
-        caps: list[str] = []
-        for p in block["picks"]:
-            if p["capability"] not in caps:
-                caps.append(p["capability"])
-        block["hit_ids"] = [m["id"] for m in block["models"]] + [f"cap:{c}" for c in caps]
+        block["hit_ids"] = _hit_ids(block)
         if _block_bytes(block) <= MAX_BLOCK_BYTES:
             return
         if block["models"]:
@@ -666,21 +803,42 @@ def _set_nudge(block: dict, query: str, *, shed_vocabulary: bool = False) -> Non
         del block["nudge"]
 
 
-def _log_query(command: str, queries: list[str], block: dict, bundle: Bundle) -> None:
-    """Feed the curation miss log. Consent-gated and best-effort, like every other event."""
+def log_query(
+    command: str,
+    queries: list[str],
+    *,
+    hit_ids: list,
+    zero_hit: bool,
+    bundle: Bundle,
+    uncurated: list[str] | None = None,
+) -> None:
+    """Feed the curation miss log. Consent-gated and best-effort, like every other event.
+
+    This is the one place a search term ships verbatim, clipped to
+    ``MAX_QUERY_CHARS``: what people asked for that the bundle does not cover is
+    the whole reason the event exists. The generic ``track_command`` kwarg dump
+    gets no search term, which is why ``capability`` sits in its redaction set.
+
+    ``hit_ids`` names capabilities ``cap:<id>`` and models by bare id, the same
+    way :func:`attach` fills the block's own ``hit_ids``.
+
+    ``uncurated`` is the subset of ``queries`` the bundle keys nothing for, the
+    same list :func:`attach` puts on the block. The verbs that resolve a single
+    term omit it rather than send it empty, since ``hit_ids`` already says so.
+    """
     try:
         from comfy_cli import tracking
 
-        tracking.track_event(
-            "knowledge_query",
-            {
-                "command": command,
-                "queries": queries,
-                "hit_ids": block.get("hit_ids", []),
-                "zero_hit": block.get("zero_hit", False),
-                "bundle_version": bundle.version,
-            },
-        )
+        props = {
+            "command": command,
+            "queries": queries,
+            "hit_ids": hit_ids,
+            "zero_hit": zero_hit,
+            "bundle_version": bundle.version,
+        }
+        if uncurated is not None:
+            props["uncurated_queries"] = uncurated
+        tracking.track_event("knowledge_query", props)
     except Exception:  # noqa: BLE001 — telemetry never decides whether a payload ships
         return
 
@@ -713,6 +871,20 @@ def attach(
     whose own result was empty, which is the only case that earns ``zero_hit``;
     a query that resolved to nothing earns a nudge on its own.
 
+    Three fields carry the miss, and every one of them also reaches
+    :func:`log_query`, so a consumer holding only the envelope recovers what the
+    consent-gated event was told. ``uncurated_queries`` names the terms the
+    bundle keys nothing for, on any block, including one whose rows arrived
+    through the reverse index while the typed term matched nothing. ``hit_ids:
+    []`` says nothing curated came back at all. ``zero_hit`` says the command's
+    own result was empty too, which separates a gap the caller felt from one it
+    never noticed.
+
+    A query nothing curated answers therefore still attaches, carrying no rows.
+    A rowless block naming ids in ``hit_ids`` and no ``uncurated_queries`` is
+    knowledge that exists and did not fit, shed by the byte ceiling, rather than
+    a gap in the bundle.
+
     ``qualified=False`` says the call named no subject — an unfiltered listing,
     whose rows are the whole catalog rather than an answer to anything. Nothing
     is attached there: a curated row picked out of 3655 listed nodes reads as the
@@ -735,6 +907,10 @@ def attach(
             return
         query_list = [q.strip()[:MAX_QUERY_CHARS] for q in queries if isinstance(q, str) and q.strip()]
         model_hits, cap_hits = _lookup(bundle, query_list)
+        # Per term, because one term landing says nothing about the ones beside
+        # it: `templates ls --tag lipsync --name-sub FLF2V` resolves the tag and
+        # misses the name, and a curator ranking gaps needs to see FLF2V.
+        uncurated = [q for q in query_list if _lookup(bundle, [q]) == ([], [])]
         query_resolved = bool(model_hits or cap_hits)
         listed_hits, listed_caps = _lookup(bundle, [m for m in models if isinstance(m, str) and m.strip()])
         seen = {mid for mid, _ in model_hits}
@@ -743,9 +919,13 @@ def attach(
                 seen.add(mid)
                 model_hits.append((mid, matched_on))
         cap_hits.extend(cid for cid in listed_caps if cid not in cap_hits)
+        reverse_answers: set[str] = set()
         for ids, index in ((templates, bundle.templates), (nodes, bundle.nodes)):
             for ident in ids:
-                for mid in index.get(ident, ()):
+                mids = index.get(ident, ())
+                if mids:
+                    reverse_answers.add(_normalize(ident))
+                for mid in mids:
                     if mid not in seen:
                         seen.add(mid)
                         model_hits.append((mid, ident))
@@ -762,12 +942,15 @@ def attach(
             entries.append(entry)
         entries.sort(key=lambda e: (e.get("tier") != "law", e.get("available_locally") is False))
         entries = entries[: MAX_MODELS_BRIEF if brief else MAX_MODELS]
-        if not query_resolved:
+        if uncurated:
             # A node class or template id passed as both a query and a reverse-index
-            # key lands a row whose matched_on is that exact string. Nudging there
-            # would deny a term the block answers on the same line.
-            asked = set(query_list)
-            query_resolved = any(e["matched_on"] in asked for e in entries)
+            # key is a term the bundle does cover. Read before the cap and the
+            # model-id dedupe, because a term the bundle answers is not a gap
+            # whether or not its row won a place in the block. Normalized on both
+            # sides, since node search matches a class name loosely and the term
+            # here is whatever the caller typed.
+            uncurated = [q for q in uncurated if _normalize(q) not in reverse_answers]
+        query_resolved = len(uncurated) < len(query_list)
 
         picks: list[dict] = []
         for cid in cap_hits:
@@ -792,7 +975,18 @@ def attach(
             "zero_hit": False,
         }
         had_hits = bool(entries or picks)
+        if uncurated:
+            # Inside the block before _fit, so the ceiling sheds a curated row
+            # ahead of the record of the gap. A row runs to hundreds of bytes and
+            # answers one query; this is every term that missed, and the event it
+            # has to agree with sheds nothing.
+            block["uncurated_queries"] = uncurated
+        matched_ids = _hit_ids(block)
         _fit(block)
+        if _block_bytes(block) > MAX_BLOCK_BYTES:
+            # Terms long enough to overrun on their own, after _fit shed all it
+            # can. The record is the last thing left to give up.
+            block.pop("uncurated_queries", None)
         attached = True
         if not block["models"] and not block["picks"]:
             if had_hits or not (thin and query_list):
@@ -805,8 +999,34 @@ def attach(
             # query itself matched neither a model nor a capability. Not a
             # zero_hit: that feeds the miss log and means an empty block.
             _set_nudge(block, query_list[0])
+        if not attached and query_list:
+            # The miss reaches log_query, and a consumer with no telemetry
+            # client of its own has only the envelope to read it from. Carrying
+            # no rows is what keeps an empty block off the caller's context.
+            marker = {
+                "bundle_version": bundle.version,
+                "stale": bundle.stale,
+                "as_of": bundle.as_of,
+                # What matched before _fit, not what survived it. Rows shed to
+                # make the ceiling are curated knowledge that exists, and filing
+                # them as a gap would put a covered term in the curation inbox.
+                "hit_ids": matched_ids,
+                "zero_hit": block["zero_hit"],
+            }
+            if uncurated:
+                marker["uncurated_queries"] = uncurated
+            if _block_bytes(marker) <= MAX_BLOCK_BYTES:
+                block = marker
+                attached = True
         if query_list:
-            _log_query(command, query_list, block, bundle)
+            log_query(
+                command,
+                query_list,
+                hit_ids=block.get("hit_ids", []),
+                zero_hit=block.get("zero_hit", False),
+                uncurated=uncurated or None,
+                bundle=bundle,
+            )
         if attached:
             payload["knowledge"] = block
     except Exception:  # noqa: BLE001 — knowledge is additive; the payload ships unchanged on any failure

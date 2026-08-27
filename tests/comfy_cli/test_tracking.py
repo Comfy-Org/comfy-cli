@@ -608,6 +608,7 @@ class TestSensitiveNameMatcher:
             "changelog",
             "prompt",
             "set_overrides",
+            "capability",
             "set_civitai_api_token",
             "set_hf_api_token",
             "access_token",
