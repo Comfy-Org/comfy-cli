@@ -251,7 +251,7 @@ def _phrased_bundle() -> knowledge.Bundle:
         "text-to-video": {"description": "Make a clip from a prompt with no source image."},
         "upscale": {
             "aliases": ["Video Upscale"],
-            "description": "Add resolution or restore detail after generation or editing.",
+            "description": "Add resolution or restore detail after generation or editing. Never used to fix anatomy.",
         },
     }
     return knowledge._index(
@@ -291,6 +291,7 @@ class TestPhrasedQueries:
             ("dub video into another language with lip sync", "lipsync"),
             # Nothing in the table names these; they must stay misses, not resolve to the closest row.
             ("restore old damaged photo keep faces", None),
+            ("fix the anatomy in my image", None),
             ("camera control video", None),
             ("how do I load a checkpoint", None),
         ],
@@ -309,6 +310,14 @@ class TestPhrasedQueries:
         assert knowledge._resolve_tokens(b, "alpha gamma") is None
         assert knowledge._resolve_tokens(b, "alpha gamma delta") == "cap"
         assert knowledge._resolve_tokens(b, "gamma delta") is None
+
+    def test_only_the_first_sentence_of_a_description_counts(self):
+        cap = {"aliases": ["alpha beta"], "description": "gamma delta. Never used for epsilon zeta."}
+        b = knowledge._index(
+            {"models": {}, "capabilities": {"cap": cap}}, None, source="env", stale=False, path="x", mtime=0.0
+        )
+        assert knowledge._resolve_tokens(b, "alpha gamma delta") == "cap"
+        assert knowledge._resolve_tokens(b, "alpha epsilon zeta") is None
 
     def test_an_inflected_key_word_still_matches(self):
         data = {"models": {}, "capabilities": {"cap": {"aliases": ["Background Removal"]}}}

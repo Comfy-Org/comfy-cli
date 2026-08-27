@@ -509,10 +509,10 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
     key_words: dict[str, set[str]] = defaultdict(set)
     for words, _, cid in capability_tokens:
         key_words[cid] |= words
-    # Description words a query may share with a capability, minus the words its
-    # keys already carry, so context only ever counts what the keys did not.
+    # First sentence only: the rest of a description says what the row is *not*
+    # ("Never used to fix anatomy") and would pull those queries in.
     capability_context = {
-        cid: _tokens(desc) - key_words[cid]
+        cid: _tokens(re.split(r"(?<=[.;])\s", desc, maxsplit=1)[0]) - key_words[cid]
         for cid, cap in capabilities.items()
         if isinstance(desc := cap.get("description"), str)
     }
