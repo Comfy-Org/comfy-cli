@@ -2021,10 +2021,10 @@ _RootGroup.lazy_subcommands = {
     ),
     # The `model` noun owns BOTH the local-filesystem ops (download/remove/list)
     # and the backend/cloud discovery leaves (list-folders/list-folder/search/
-    # show) — `models.py` merges the latter in from `search.py` at import time
-    # (BE-2999). `models` (plural) is a hidden, deprecated alias for the
-    # discovery leaves only, built alongside them in `search.py` so resolving
-    # it stays lazy — see the `deprecated_alias_app` built there.
+    # show) — `models.py` merges the latter in from `search.py` at import time.
+    # `models` (plural) is a hidden, deprecated alias for the discovery leaves
+    # only, built alongside them in `search.py` so resolving it stays lazy —
+    # see the `deprecated_alias_app` built there.
     "model": LazySubcommand(
         "comfy_cli.command.models.models",
         help="Manage models — local files on disk plus backend/cloud discovery.",

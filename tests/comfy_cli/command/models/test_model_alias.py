@@ -1,4 +1,4 @@
-"""`models` (plural) → `model` (singular) merge + deprecation alias (BE-2999).
+"""`models` (plural) → `model` (singular) merge + deprecation alias.
 
 Asserts the discovery leaves resolve under the singular `model` noun, that the
 plural `models` spelling still works as a HIDDEN alias, and that invoking the

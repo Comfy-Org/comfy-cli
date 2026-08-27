@@ -1693,7 +1693,7 @@ def list_command(
 # their command registrations (same CommandInfo objects — no logic
 # duplication). Done here rather than in `cmdline.py` so the `model` lazy
 # subcommand entry there stays a plain `getattr(module, "app")` — it only
-# needs to import this module to get the fully-merged tree (BE-2999).
+# needs to import this module to get the fully-merged tree.
 # Mirror the deprecated alias built in `search.py`: carry BOTH the discovery
 # leaves and any nested discovery sub-groups so `comfy model …` and the
 # `comfy models …` alias stay in lockstep as the discovery tree grows (both

@@ -831,7 +831,7 @@ def show_cmd(
 
 # `models` (plural) is now a hidden, deprecated alias for these discovery
 # leaves only — the canonical mount is `comfy model`, which also merges in the
-# local-filesystem ops from `models.py` (BE-2999). Built here, not in
+# local-filesystem ops from `models.py`. Built here, not in
 # `cmdline.py`, so the `models` lazy subcommand entry stays a plain
 # `getattr(module, "deprecated_alias_app")`: resolving it only imports this
 # module, not the (heavier) `models.py` local-ops module the canonical `model`

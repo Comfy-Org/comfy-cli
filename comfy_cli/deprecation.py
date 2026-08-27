@@ -12,7 +12,7 @@ The warning is never silenced — discoverability of the rename is the whole
 point — and in JSON mode it lands on stderr, keeping it out of the
 one-envelope-on-stdout contract.
 
-Introduced for the ``models`` → ``model`` merge (BE-2999); the sibling noun
+Introduced for the ``models`` → ``model`` merge; the sibling noun
 consolidations reuse :func:`add_deprecated_alias`.
 """
 
