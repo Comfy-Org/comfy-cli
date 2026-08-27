@@ -30,4 +30,16 @@ jobs:
       # `HAILUO-03` is MiniMax's Hailuo 03 model, named in the curated
       # knowledge bundle and asserted in tests. It is a product name that
       # happens to match the ticket-ID shape, not an internal reference.
-      ticket_allowlist: HAILUO-03
+      # `HALO-03` is a fictional product id used as test fixture data in
+      # tests/comfy_cli/test_knowledge.py and test_knowledge_attach.py — not a
+      # real ticket.
+      ticket_allowlist: HAILUO-03,HALO-03
+      # No `exclude_paths:` here, deliberately. Every entry this caller used to
+      # carry was a false positive in the checker itself — Hugging Face model
+      # URLs and HF `owner/name` model repos read as unlisted GitHub repos —
+      # and all of them are fixed upstream as of the pin above. The one
+      # remaining entry, `.github/workflows/refresh-cql-catalogs.yml`, is gone
+      # because that file no longer names its private source: the coordinates
+      # moved into secrets. An exclusion suppresses the scan for a whole path
+      # forever, including code not yet written, so the bar for adding one back
+      # is that the finding is unfixable both here and upstream.

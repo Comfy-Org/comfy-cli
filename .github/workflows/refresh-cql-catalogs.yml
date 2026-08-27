@@ -12,7 +12,7 @@ name: Refresh CQL catalogs
 #   - supported_nodes.yaml      <- Comfy-Org/comfy-complete@main (public, tokenless)
 #   - cloud_disable_config.yaml <- Comfy-Org/comfy-complete@main (public, tokenless)
 #   - no_gpu_nodes.json         <- a PRIVATE repo @main (needs a read token); its
-#     coordinates are not written here, see the repo variables below
+#     coordinates are not written here, see the secrets below
 #
 # The no_gpu_nodes.json committed here started life as an empty placeholder
 # ({"schema_version": 1, "no_gpu_nodes": []}), which left the CQL no-GPU
@@ -32,13 +32,15 @@ name: Refresh CQL catalogs
 #     — pushes made with GITHUB_TOKEN do not trigger workflow runs.
 #   - CLOUD_REPO_READ_TOKEN: a fine-grained PAT (or app token) with Contents:
 #     Read on the private source repo, used ONLY to fetch no_gpu_nodes.json.
-#   - vars.CQL_NO_GPU_SOURCE_REPO / vars.CQL_NO_GPU_SOURCE_PATH: the `owner/name`
-#     and in-repo path of that source. They live in repo variables rather than in
-#     this file because comfy-cli is PUBLIC and both the repo name and the path
-#     describe a private service's internals. Anyone with repo admin can read or
-#     change them under Settings > Secrets and variables > Actions; they are
-#     variables, not secrets, because they are configuration this workflow has to
-#     echo in error messages, not credentials.
+#   - CQL_NO_GPU_SOURCE_REPO / CQL_NO_GPU_SOURCE_PATH: the `owner/name` and
+#     in-repo path of that source. They are out of this file because comfy-cli
+#     is PUBLIC and both the repo name and the path describe a private service's
+#     internals. They are SECRETS, not repo variables: Actions prints every
+#     step's resolved `env:` block into the run log, and on a public repo those
+#     logs are world-readable, so a variable would be republished on every run —
+#     exactly what moving them out of the file was meant to prevent. Secrets are
+#     masked in that block. Nothing here echoes either value: the error paths
+#     below name the setting, never its contents.
 
 on:
   schedule:
@@ -83,27 +85,48 @@ jobs:
       - name: Verify the private-source token and coordinates are set
         env:
           CLOUD_REPO_READ_TOKEN: ${{ secrets.CLOUD_REPO_READ_TOKEN }}
-          SRC_REPO: ${{ vars.CQL_NO_GPU_SOURCE_REPO }}
-          SRC_PATH: ${{ vars.CQL_NO_GPU_SOURCE_PATH }}
+          SRC_REPO: ${{ secrets.CQL_NO_GPU_SOURCE_REPO }}
+          SRC_PATH: ${{ secrets.CQL_NO_GPU_SOURCE_PATH }}
         run: |
           if [ -z "${CLOUD_REPO_READ_TOKEN:-}" ]; then
             echo "::error::CLOUD_REPO_READ_TOKEN secret is not set."
             echo "This workflow needs a PAT (or app token) with:"
             echo "  - Contents: Read on the repo named by the CQL_NO_GPU_SOURCE_REPO"
-            echo "    variable (to fetch the canonical no_gpu_nodes.json)"
+            echo "    secret (to fetch the canonical no_gpu_nodes.json)"
             echo "  (PR creation is handled separately by the CLOUD_CODE_BOT app token, not this PAT.)"
             exit 1
           fi
           # Checked HERE, beside the token, rather than at the fetch step: an
-          # unset variable expands to the empty string, so `repos//contents/`
+          # unset secret expands to the empty string, so `repos//contents/`
           # is a 404 that reads like the file moved rather than like a missing
           # prerequisite. Same FAILS-LOUDLY contract as the token above.
           if [ -z "${SRC_REPO:-}" ] || [ -z "${SRC_PATH:-}" ]; then
-            echo "::error::CQL_NO_GPU_SOURCE_REPO / CQL_NO_GPU_SOURCE_PATH repo variables are not set."
-            echo "Set both under Settings > Secrets and variables > Actions > Variables:"
+            echo "::error::CQL_NO_GPU_SOURCE_REPO / CQL_NO_GPU_SOURCE_PATH secrets are not set."
+            echo "Set both under Settings > Secrets and variables > Actions > Secrets:"
             echo "  - CQL_NO_GPU_SOURCE_REPO: the 'owner/name' of the private source repo"
             echo "  - CQL_NO_GPU_SOURCE_PATH: the path to no_gpu_nodes.json within it"
-            echo "They are kept out of this file because comfy-cli is public."
+            echo "They are kept out of this file because comfy-cli is public, and"
+            echo "they are secrets rather than variables because Actions echoes"
+            echo "a step's resolved env: block into the (public) run log."
+            exit 1
+          fi
+          # Shape checks. Both values are spliced into a REST path below and are
+          # mutable by anyone with repo admin without code review, so validate
+          # them here rather than letting a malformed value degrade into an
+          # ambiguous 404 — or, worse, silently redirect the fetch. Rejecting
+          # `?` and `#` also protects the `?ref=main` pin: either character would
+          # end the path component and drop the branch pin, so the fetch would
+          # fall back to the source's default branch.
+          # No value is echoed on failure; the message names the setting only.
+          # Bash `[[ =~ ]]` rather than a `grep` pipeline: it anchors against the
+          # whole value, so an embedded newline cannot smuggle a bad segment
+          # past a per-line match.
+          if [[ ! "$SRC_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::CQL_NO_GPU_SOURCE_REPO must be a bare 'owner/name' — no URL, no scheme, no extra path segments."
+            exit 1
+          fi
+          if [[ ! "$SRC_PATH" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] || [[ "$SRC_PATH" == *..* ]]; then
+            echo "::error::CQL_NO_GPU_SOURCE_PATH must be a repo-relative path — no leading '/', no '..', no query or fragment characters."
             exit 1
           fi
 
@@ -131,18 +154,33 @@ jobs:
           done
 
       - name: Fetch no_gpu_nodes.json from the private source repo
+        id: fetch-no-gpu
         env:
           GH_TOKEN: ${{ secrets.CLOUD_REPO_READ_TOKEN }}
-          SRC_REPO: ${{ vars.CQL_NO_GPU_SOURCE_REPO }}
-          SRC: ${{ vars.CQL_NO_GPU_SOURCE_PATH }}
+          SRC_REPO: ${{ secrets.CQL_NO_GPU_SOURCE_REPO }}
+          SRC: ${{ secrets.CQL_NO_GPU_SOURCE_PATH }}
         run: |
           set -euo pipefail
           # Resolve the blob SHA via Contents (explicitly pinned to @main so we
           # never silently read the source's default branch if it ever moves) and
           # fetch the raw bytes via the Git Data blobs API — the blobs API has no
-          # 1 MB size ceiling, so this keeps working as the list grows.
-          SHA=$(gh api "repos/$SRC_REPO/contents/$SRC?ref=main" --jq '.sha')
-          if [ -z "$SHA" ]; then
+          # 1 MB size ceiling, so the bytes keep coming as the list grows. The
+          # SHA lookup itself still goes through Contents, which does refuse a
+          # >1 MB file under the default JSON media type; the catalog is three
+          # orders of magnitude below that today, and the fix if it ever nears
+          # the line is to resolve the SHA from a listing of the parent
+          # directory, which has no size ceiling.
+          #
+          # `if ! SHA=$(...)` rather than a bare assignment: under `set -e` a
+          # failing `gh api` aborts the step at the assignment and the error
+          # below never prints. `--jq '.sha'` also emits the literal `null` for
+          # a 200 whose payload has no `sha`, which is non-empty and would sail
+          # past a `-z` test straight into `git/blobs/null`, so reject it too.
+          if ! SHA=$(gh api "repos/$SRC_REPO/contents/$SRC?ref=main" --jq '.sha'); then
+            echo "::error::Contents API call failed resolving the no_gpu_nodes.json source blob @main (see the gh error above)."
+            exit 1
+          fi
+          if [ -z "$SHA" ] || [ "$SHA" = "null" ]; then
             echo "::error::Could not resolve SHA for the no_gpu_nodes.json source blob @main"
             exit 1
           fi
@@ -150,6 +188,11 @@ jobs:
           gh api "repos/$SRC_REPO/git/blobs/$SHA" --jq '.content' \
             | base64 -d > comfy_cli/cql/data/no_gpu_nodes.json
           echo "Fetched $(wc -c < comfy_cli/cql/data/no_gpu_nodes.json) bytes"
+          # Provenance for the auto-PR: the source blob SHA is content-addressed
+          # and non-sensitive (it names no repo and no path), and it is the only
+          # way a reviewer of the generated PR can tell a real upstream change
+          # from a source that was quietly re-pointed by editing the secrets.
+          echo "blob_sha=$SHA" >> "$GITHUB_OUTPUT"
           # Sanity guard (lesson learned the hard way): must parse as JSON AND carry a
           # non-empty no_gpu_nodes *list*, so the empty-placeholder state
           # ({"no_gpu_nodes": []}, count 0) can never be re-committed silently and
@@ -224,6 +267,7 @@ jobs:
           # ${{ }} expression straight into the heredoc — that expression is the
           # canonical Actions script-injection sink.
           DELTA_SUMMARY: ${{ steps.diff.outputs.summary }}
+          NO_GPU_BLOB_SHA: ${{ steps.fetch-no-gpu.outputs.blob_sha }}
         run: |
           set -euo pipefail
           BRANCH="auto/refresh-cql-catalogs"
@@ -274,11 +318,11 @@ jobs:
           ## Sources
 
           - \`supported_nodes.yaml\`, \`cloud_disable_config.yaml\` — \`Comfy-Org/comfy-complete@main\` (public)
-          - \`no_gpu_nodes.json\` — a private source repo @main (fetched with a Contents: Read token)
+          - \`no_gpu_nodes.json\` — a private source repo @main (fetched with a Contents: Read token), source blob \`${NO_GPU_BLOB_SHA}\`
 
           These files are loaded at runtime via \`importlib.resources.files("comfy_cli.cql.data")\`, so committing the refreshed raw files here is all that's needed — no path change, no packaging change.
 
-          > Opened automatically by the \`refresh-cql-catalogs\` workflow. Requires the \`CLOUD_CODE_BOT\` app and a \`CLOUD_REPO_READ_TOKEN\` (Contents: Read on the private source repo) to be provisioned on this repository, along with the \`CQL_NO_GPU_SOURCE_REPO\` and \`CQL_NO_GPU_SOURCE_PATH\` repo variables; the workflow fails loudly if any is missing.
+          > Opened automatically by the \`refresh-cql-catalogs\` workflow. Requires the \`CLOUD_CODE_BOT\` app and a \`CLOUD_REPO_READ_TOKEN\` (Contents: Read on the private source repo) to be provisioned on this repository, along with the \`CQL_NO_GPU_SOURCE_REPO\` and \`CQL_NO_GPU_SOURCE_PATH\` secrets; the workflow fails loudly if any is missing.
           EOF
           )
 

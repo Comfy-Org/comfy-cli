@@ -35,7 +35,7 @@ from typing import Annotated, Any, NoReturn
 
 import typer
 
-from comfy_cli import tracking
+from comfy_cli import knowledge, tracking
 from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.output.sanitize import sanitize_markup
@@ -712,6 +712,13 @@ def search_cmd(
         renderer.console().print(tbl)
         tail = f" (of {total} total)" if total != len(rows) else ""
         rprint(f"[dim]{len(rows)} model(s){tail} ({payload['mode']})[/dim]")
+    knowledge.attach(
+        payload,
+        command="models search",
+        queries=[text] if text else [],
+        thin=(total == 0 and bool(text)),
+        qualified=bool(text),
+    )
     renderer.emit(payload, command="models search")
 
 

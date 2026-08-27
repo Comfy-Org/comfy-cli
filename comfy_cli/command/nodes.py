@@ -24,7 +24,7 @@ from typing import Annotated, Any
 
 import typer
 
-from comfy_cli import tracking
+from comfy_cli import knowledge, tracking
 from comfy_cli.cql.engine import Graph, LoadError
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.output.sanitize import sanitize_markup
@@ -323,6 +323,13 @@ def ls_cmd(
                 tbl.add_row(sanitize_markup(m.id), sanitize_markup(m.category or ""), outs)
             renderer.console().print(tbl)
             rprint(f"[dim]{len(nodes)} node(s)[/dim]")
+    knowledge.attach(
+        payload,
+        command="nodes ls",
+        nodes=[r["name"] for r in payload["rows"]],
+        catalog_nodes={m.id for m in graph.all_nodes()},
+        qualified=any(payload["filter"].values()),
+    )
     renderer.emit(payload, command="nodes ls")
 
 
@@ -680,6 +687,14 @@ def search_cmd(
                 tbl.add_row(sanitize_markup(m.id), sanitize_markup(m.category or ""), desc)
             renderer.console().print(tbl)
             rprint(f"[dim]{len(matched)} node(s)[/dim]")
+    knowledge.attach(
+        payload,
+        command="nodes search",
+        queries=[query],
+        nodes=[r["name"] for r in payload["rows"]],
+        catalog_nodes={m.id for m in graph.all_nodes()},
+        thin=(total_matched == 0),
+    )
     renderer.emit(payload, command="nodes search")
 
 
