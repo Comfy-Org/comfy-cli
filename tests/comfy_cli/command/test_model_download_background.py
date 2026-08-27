@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1203,7 +1204,7 @@ class TestAtomicDestinationClaim:
     def test_a_competitor_landing_inside_the_old_window_still_leaves_one_winner(
         self, workspace, monkeypatch, json_renderer
     ):
-        """The BE-6664 interleaving itself, driven deterministically.
+        """The reported double-download interleaving itself, driven deterministically.
 
         The old guard's window is `[our re-scan -> the competitor's write]`: a
         competitor whose record lands *after* we look is invisible to us, so our
@@ -1284,6 +1285,12 @@ class TestAtomicDestinationClaim:
         monkeypatch.setattr(models, "_claim_holder", claim_holder)
         self._no_spawn(monkeypatch)
 
+        # `download` prunes on entry, and prune sweeps stale claims — which would
+        # clear the dead claim before `_acquire_dest_claim` ever collides with it,
+        # so the staged takeover above would never run. The sweep has its own
+        # tests; here it is disabled to keep the takeover window open.
+        monkeypatch.setattr(download_state, "prune", lambda ws: 0)
+
         with patch("comfy_cli.utils.is_running", side_effect=lambda pid: pid == successor.pid):
             with pytest.raises(typer.Exit) as exc:
                 self._submit(dest)
@@ -1298,7 +1305,7 @@ class TestAtomicDestinationClaim:
 
     @pytest.mark.parametrize("iteration", range(3))
     def test_twelve_simultaneous_submits_accept_exactly_one(self, workspace, monkeypatch, json_renderer, iteration):
-        """The acceptance criterion from BE-6664, run for real.
+        """The acceptance criterion for the submit race, run for real.
 
         Twelve threads into one destination with the spawn stubbed out. Repeated,
         because the failure mode this closes was probabilistic (2 of 3 runs at
@@ -1426,7 +1433,10 @@ class TestAtomicDestinationClaim:
         assert exc.value.exit_code == 1
         assert len(calls) == 2, "the retry must happen exactly once"
         env = json_renderer()
-        assert env["error"]["code"] == "model_download_in_flight"
+        # A distinct code, not `model_download_in_flight`: the rival's claim did
+        # not resolve to a live record, so the status/kind that code documents
+        # could only have been invented.
+        assert env["error"]["code"] == "model_download_claim_contested"
         assert env["error"]["details"]["download_id"] == rival_id
         # We withdrew our own record, so no phantom claim is left behind.
         assert download_state.list_all(workspace) == []
@@ -1519,6 +1529,55 @@ class TestAtomicDestinationClaim:
         body = _claim_files(workspace)[0].read_text(encoding="utf-8")
         assert "super-secret" not in body
         assert json.loads(body).keys() == {"download_id", "dest", "created_at"}
+
+    def test_a_cancelled_record_with_a_live_worker_still_blocks(self, workspace, monkeypatch, json_renderer):
+        """A terminal status does not prove the process exited: a cancelled
+        worker is still mid-write until its own terminal transition lands, and
+        it releases the claim itself right after. Clearing its claim on the
+        strength of the status alone would let a second transfer into a
+        destination a live worker may still be writing."""
+        dest = self._dest(workspace)
+        holder = _state(dest=str(dest), status="cancelled", pid=4242)
+        download_state.write(workspace, holder)
+        claim = download_state.claim_path(workspace, models._dest_key(dest))
+        assert download_state.acquire_claim(claim, download_id=holder.id, dest=str(dest))
+        self._no_spawn(monkeypatch)
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            with pytest.raises(typer.Exit) as exc:
+                self._submit(dest)
+
+        assert exc.value.exit_code == 1
+        env = json_renderer()
+        assert env["error"]["code"] == "model_download_in_flight"
+        assert env["error"]["details"]["download_id"] == holder.id
+        assert _claim_owner(workspace) == holder.id
+        # We withdrew our own record rather than clearing theirs.
+        assert [s.id for s in download_state.list_all(workspace)] == [holder.id]
+
+    def test_an_unclearable_stale_claim_is_reported_not_a_phantom(self, workspace, monkeypatch, json_renderer):
+        """A stale claim whose unlink fails would otherwise collide again on the
+        retry and be reported as `model_download_in_flight` naming a download
+        that does not exist — forever, on every submission. Name the real
+        obstacle instead."""
+        dest = self._dest(workspace)
+        claim = download_state.claim_path(workspace, models._dest_key(dest))
+        assert download_state.acquire_claim(claim, download_id="abcdefabcdef", dest=str(dest))
+        # No record for that id, so the claim is stale; the unlink is made to
+        # fail while the claim keeps naming the same dead holder.
+        monkeypatch.setattr(download_state, "release_claim", lambda path, *, owner_id: False)
+        self._no_spawn(monkeypatch)
+
+        with pytest.raises(typer.Exit) as exc:
+            self._submit(dest)
+
+        assert exc.value.exit_code == 1
+        env = json_renderer()
+        assert env["error"]["code"] == "model_download_claim_unclearable"
+        assert env["error"]["details"]["claim_file"] == str(claim)
+        assert env["error"]["details"]["download_id"] == "abcdefabcdef"
+        # We withdrew our own record, so nothing phantom is left behind.
+        assert download_state.list_all(workspace) == []
 
 
 class TestWorkerReleasesTheClaim:
@@ -1635,6 +1694,118 @@ class TestWorkerReleasesTheClaim:
         _reset_envelope()
         submit()
         assert _claim_owner(workspace) != first
+
+    def test_a_failed_first_state_write_releases_it(self, workspace, monkeypatch, tmp_path):
+        """An OSError out of the very first `write_path` — before the transfer
+        even starts — must not strand the claim: the record stays a pidless
+        `starting` that only ages out of the startup grace, and the destination
+        must not stay refused for that whole window."""
+        state, path, claim = self._prepare(workspace, tmp_path)
+        monkeypatch.setattr(download_state, "write_path", MagicMock(side_effect=OSError("read-only file system")))
+        monkeypatch.setattr(models, "download_file", MagicMock(side_effect=AssertionError("a transfer started")))
+
+        with pytest.raises(OSError):
+            models._download_worker(state_file=str(path))
+
+        assert not claim.exists()
+
+
+class TestClaimAtomicPublish:
+    """`acquire_claim` writes the payload to a private temp name and publishes
+    it with `os.link`: creation is still the atomic decider, but the claim is
+    never visible half-written — a colliding submitter that reads it can never
+    mistake a live winner mid-write for a stale claim and unlink it."""
+
+    def test_short_writes_still_publish_a_complete_payload(self, workspace, monkeypatch):
+        claim = download_state.claim_path(workspace, "/tmp/m.safetensors")
+        real_write = os.write
+        monkeypatch.setattr(os, "write", lambda fd, data: real_write(fd, bytes(data)[:1]))
+
+        assert download_state.acquire_claim(claim, download_id="aaaaaaaaaaaa", dest="/tmp/m.safetensors")
+        assert download_state.read_claim(claim) == "aaaaaaaaaaaa"
+
+    def test_a_failed_payload_write_publishes_nothing(self, workspace, monkeypatch):
+        """ENOSPC mid-payload must not leave a claim — empty at the claim path
+        (every reader would call it stale and clear it under us) or orphaned as
+        a temp file. The OSError propagates and the caller degrades to the
+        advisory guard, exactly like an unusable claims directory."""
+        claim = download_state.claim_path(workspace, "/tmp/m.safetensors")
+        monkeypatch.setattr(os, "write", MagicMock(side_effect=OSError(28, "No space left on device")))
+
+        with pytest.raises(OSError):
+            download_state.acquire_claim(claim, download_id="aaaaaaaaaaaa", dest="/tmp/m.safetensors")
+
+        assert not claim.exists()
+        assert list(claim.parent.iterdir()) == []
+
+
+class TestClaimSweep:
+    """`prune` drops claims that no longer point at a live download.
+
+    A claim is normally released by its own worker, and a stranded one only
+    self-clears on the next submit *to the same destination* — so claims for
+    destinations never re-submitted would otherwise accumulate for the life of
+    the workspace."""
+
+    def test_a_claim_with_no_record_is_swept(self, workspace):
+        claim = download_state.claim_path(workspace, "/tmp/a.safetensors")
+        assert download_state.acquire_claim(claim, download_id="abcdefabcdef", dest="/tmp/a.safetensors")
+
+        download_state.prune(workspace)
+
+        assert not claim.exists()
+
+    def test_a_dead_workers_claim_is_swept(self, workspace):
+        state = _state(status="downloading", pid=4242)
+        download_state.write(workspace, state)
+        claim = download_state.claim_path(workspace, "/tmp/b.safetensors")
+        assert download_state.acquire_claim(claim, download_id=state.id, dest="/tmp/b.safetensors")
+
+        with patch("comfy_cli.utils.is_running", return_value=False):
+            download_state.prune(workspace)
+
+        assert not claim.exists()
+
+    def test_a_live_claim_is_kept(self, workspace):
+        state = _state(status="downloading", pid=1234)
+        download_state.write(workspace, state)
+        claim = download_state.claim_path(workspace, "/tmp/c.safetensors")
+        assert download_state.acquire_claim(claim, download_id=state.id, dest="/tmp/c.safetensors")
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            download_state.prune(workspace)
+
+        assert claim.exists()
+
+    def test_a_terminal_record_with_a_live_worker_keeps_its_claim(self, workspace):
+        """Same rule as the submit path: a terminal status does not prove the
+        process is gone, and a still-running worker's claim is its to release."""
+        state = _state(status="cancelled", pid=1234)
+        download_state.write(workspace, state)
+        claim = download_state.claim_path(workspace, "/tmp/d.safetensors")
+        assert download_state.acquire_claim(claim, download_id=state.id, dest="/tmp/d.safetensors")
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            download_state.prune(workspace)
+
+        assert claim.exists()
+
+    def test_temp_leftovers_age_out(self, workspace):
+        """A `.tmp` staging file only survives a SIGKILL inside the milliseconds
+        between write and publish; an aged one is a crashed acquire's leftover,
+        a fresh one may be an acquire in progress."""
+        claims = download_state.claims_dir(workspace)
+        old_tmp = claims / f"x.claim.123.aaaaaaaaaaaa{download_state.CLAIM_TMP_SUFFIX}"
+        old_tmp.write_text("{}", encoding="utf-8")
+        stale_stamp = time.time() - download_state.CLAIM_TMP_MAX_AGE_S * 2
+        os.utime(old_tmp, (stale_stamp, stale_stamp))
+        fresh_tmp = claims / f"y.claim.456.bbbbbbbbbbbb{download_state.CLAIM_TMP_SUFFIX}"
+        fresh_tmp.write_text("{}", encoding="utf-8")
+
+        download_state.prune(workspace)
+
+        assert not old_tmp.exists()
+        assert fresh_tmp.exists()
 
 
 class TestForegroundClaimsItsDestination:

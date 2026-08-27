@@ -969,7 +969,9 @@ def _download_worker(
 
     # The submitter took an `O_EXCL` claim on this destination and we are the
     # only thing that reaches a terminal transition for it, so releasing it is
-    # ours: every exit below goes through `release()`. Derived, never carried in
+    # ours: everything past the cancel-sentinel check runs under a
+    # `try/finally: release()`, so no exit — including an OSError out of the
+    # very first `write_path` — can strand the claim. Derived, never carried in
     # the record — the claim is addressed by destination, not by download.
     # `release_claim` no-ops unless the claim still names us, so a claim a later
     # submitter already cleared and replaced is never unlinked from under it.
@@ -1009,78 +1011,78 @@ def _download_worker(
         release()
         raise typer.Exit(code=0)
 
-    state.pid = os.getpid()
-    state.pid_create_time = download_state.process_create_time(os.getpid())
-    state.status = "downloading"
-    download_state.write_path(path, state)
-
-    last_write = 0.0
-
-    def on_progress(completed: int, total: int | None) -> None:
-        nonlocal last_write
-        state.completed_bytes = completed
-        if total is not None:
-            state.total_bytes = total
-        now = time.monotonic()
-        if now - last_write < download_state.PROGRESS_THROTTLE_S:
-            return
-        last_write = now
-        # Poll for cancellation on the same tick as the progress write, so a
-        # cancelled download is never resurrected to `downloading` by a write
-        # that raced it.
-        if cancelled():
-            raise DownloadCancelled()
-        with contextlib.suppress(OSError):
-            download_state.write_path(path, state)
-
     try:
-        download_file(
-            state.url,
-            pathlib.Path(state.dest),
-            _worker_headers(state),
-            downloader=state.downloader,
-            progress_callback=on_progress,
-        )
-    except DownloadCancelled:
-        state.status = "cancelled"
-        state.error = None
-        # Same split as `download_cancel`: only aria2 wrote to the destination, so
-        # only aria2's leftovers are ours to delete. The httpx path raises this
-        # from inside the transfer loop, before the rename, and unwinds through
-        # `_download_file_httpx`'s own cleanup — the `.part` is already gone and
-        # anything at `dest` predates this download.
-        if state.downloader == "aria2":
-            with contextlib.suppress(OSError):
-                pathlib.Path(state.dest).unlink(missing_ok=True)
-        state.completed_bytes = 0
-        with contextlib.suppress(OSError):
-            download_state.write_path(path, state)
-        release()
-        raise typer.Exit(code=0) from None
-    except BaseException as e:  # noqa: BLE001 — any failure must reach the state file
-        state.status = "failed"
-        state.error = _friendly_network_error(e) if isinstance(e, Exception) else f"{type(e).__name__}"
-        with contextlib.suppress(OSError):
-            download_state.write_path(path, state)
-        release()
-        raise typer.Exit(code=1) from None
-
-    # A transfer that beat the cancel to the finish line stays `completed` and
-    # keeps its file — `download-cancel` re-reads this record before deciding
-    # what to delete, so both sides agree that a fully-downloaded model is not
-    # something to throw away.
-    state.status = "completed"
-    state.error = None
-    actual = pathlib.Path(state.dest)
-    try:
-        state.completed_bytes = actual.stat().st_size
-    except OSError:
-        pass
-    if state.total_bytes is None:
-        state.total_bytes = state.completed_bytes
-    with contextlib.suppress(OSError):
+        state.pid = os.getpid()
+        state.pid_create_time = download_state.process_create_time(os.getpid())
+        state.status = "downloading"
         download_state.write_path(path, state)
-    release()
+
+        last_write = 0.0
+
+        def on_progress(completed: int, total: int | None) -> None:
+            nonlocal last_write
+            state.completed_bytes = completed
+            if total is not None:
+                state.total_bytes = total
+            now = time.monotonic()
+            if now - last_write < download_state.PROGRESS_THROTTLE_S:
+                return
+            last_write = now
+            # Poll for cancellation on the same tick as the progress write, so a
+            # cancelled download is never resurrected to `downloading` by a write
+            # that raced it.
+            if cancelled():
+                raise DownloadCancelled()
+            with contextlib.suppress(OSError):
+                download_state.write_path(path, state)
+
+        try:
+            download_file(
+                state.url,
+                pathlib.Path(state.dest),
+                _worker_headers(state),
+                downloader=state.downloader,
+                progress_callback=on_progress,
+            )
+        except DownloadCancelled:
+            state.status = "cancelled"
+            state.error = None
+            # Same split as `download_cancel`: only aria2 wrote to the destination, so
+            # only aria2's leftovers are ours to delete. The httpx path raises this
+            # from inside the transfer loop, before the rename, and unwinds through
+            # `_download_file_httpx`'s own cleanup — the `.part` is already gone and
+            # anything at `dest` predates this download.
+            if state.downloader == "aria2":
+                with contextlib.suppress(OSError):
+                    pathlib.Path(state.dest).unlink(missing_ok=True)
+            state.completed_bytes = 0
+            with contextlib.suppress(OSError):
+                download_state.write_path(path, state)
+            raise typer.Exit(code=0) from None
+        except BaseException as e:  # noqa: BLE001 — any failure must reach the state file
+            state.status = "failed"
+            state.error = _friendly_network_error(e) if isinstance(e, Exception) else f"{type(e).__name__}"
+            with contextlib.suppress(OSError):
+                download_state.write_path(path, state)
+            raise typer.Exit(code=1) from None
+
+        # A transfer that beat the cancel to the finish line stays `completed` and
+        # keeps its file — `download-cancel` re-reads this record before deciding
+        # what to delete, so both sides agree that a fully-downloaded model is not
+        # something to throw away.
+        state.status = "completed"
+        state.error = None
+        actual = pathlib.Path(state.dest)
+        try:
+            state.completed_bytes = actual.stat().st_size
+        except OSError:
+            pass
+        if state.total_bytes is None:
+            state.total_bytes = state.completed_bytes
+        with contextlib.suppress(OSError):
+            download_state.write_path(path, state)
+    finally:
+        release()
 
 
 def _render_download_rows(rows: list[dict]) -> None:
@@ -1299,11 +1301,17 @@ def _claim_holder(claim_file: pathlib.Path) -> tuple[str | None, download_state.
     """Resolve a claim file to ``(recorded id, live record)``.
 
     A claim is live iff its ``download_id`` resolves to a state record whose
-    *reconciled* status is still active. That delegates the whole liveness
-    question to the record's existing `pid` + `pid_create_time` identity proof
-    and `STARTUP_GRACE_S` window: a SIGKILLed worker's record demotes to
-    `failed` on reconcile, so its claim reads stale here and the next submitter
-    clears it — which is why a SIGKILL needs no sweeper.
+    *reconciled* status is still active, or whose worker process is still
+    provably running. The first arm delegates the liveness question to the
+    record's existing `pid` + `pid_create_time` identity proof and
+    `STARTUP_GRACE_S` window: a SIGKILLed worker's record demotes to `failed`
+    on reconcile, so its claim reads stale here and the next submitter clears
+    it — which is why a SIGKILL needs no sweeper. The second arm covers the
+    gap the first cannot: a terminal status does not prove the process exited
+    (a cancelled worker is still mid-write until its own terminal transition
+    lands, and it releases the claim itself right after), so while
+    `worker_alive` still proves the recorded process is that worker, the claim
+    is its to release, not ours to clear.
 
     An unreadable or corrupt claim, and a claim whose record is gone, both come
     back with no live record: stale. The id is still returned when it could be
@@ -1316,7 +1324,7 @@ def _claim_holder(claim_file: pathlib.Path) -> tuple[str | None, download_state.
     if record is None:
         return download_id, None
     fresh, _ = _reconciled(record)
-    if fresh.status not in download_state.ACTIVE_STATUSES:
+    if fresh.status not in download_state.ACTIVE_STATUSES and not download_state.worker_alive(fresh):
         return download_id, None
     return download_id, fresh
 
@@ -1386,18 +1394,40 @@ def _acquire_dest_claim(
             # offers no conditional unlink), but the surviving window no longer
             # spans a reconcile. If the claim did change under us, the retry
             # below collides with the new holder and refuses, which is right.
-            download_state.release_claim(claim_file, owner_id=holder_id)
+            if not download_state.release_claim(claim_file, owner_id=holder_id):
+                # False for two very different reasons, told apart by a re-read.
+                # The claim changing hands under us is the takeover race above —
+                # fall through and collide with the new holder. The claim still
+                # naming the id we judged stale means the unlink itself failed
+                # (a claim file we cannot remove, or a directory sitting at the
+                # claim path): retrying would collide with the same corpse
+                # forever and report a phantom in-flight download, so name the
+                # real problem instead.
+                if download_state.read_claim(claim_file) == holder_id:
+                    _withdraw_record(state, dest, holder_id)
+                    raise _download_failure(
+                        code="model_download_claim_unclearable",
+                        message=f"A stale download claim on {dest} could not be cleared.",
+                        hint=f"remove the claim file at {claim_file} and retry, or check its permissions",
+                        details={
+                            "path": str(dest),
+                            "claim_file": str(claim_file),
+                            "download_id": holder_id,
+                        },
+                    )
             continue
 
         # Second collision: somebody else took the claim we just cleared. Back
         # off rather than clear theirs too — a retry loop over a contested claim
         # is how two submitters livelock each other. Their id, when the claim was
         # readable, is all we can honestly report: this claim did not resolve to
-        # a live record, so quoting a status from one would be inventing it.
+        # a live record, so quoting a status or kind from one would be inventing
+        # it — hence a distinct code rather than a `model_download_in_flight`
+        # missing the fields that code documents.
         _withdraw_record(state, dest, holder_id)
         named = f" ({holder_id})" if holder_id else ""
         raise _download_failure(
-            code="model_download_in_flight",
+            code="model_download_claim_contested",
             message=f"Another download{named} claimed {dest} first.",
             hint="check `comfy model downloads`, then retry",
             details={"path": str(dest), "download_id": holder_id},
