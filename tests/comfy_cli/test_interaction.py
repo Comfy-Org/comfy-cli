@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -42,6 +43,15 @@ from comfy_cli.interaction import confirm, require_option
 from comfy_cli.output import Renderer, set_renderer
 
 CLI_ROOT = Path(__file__).resolve().parents[2]
+# Rich styles an option name by dimming its first dash, which puts an escape
+# sequence between the two dashes of `--base-image`. A plain substring search
+# for the flag then only matches when color happens to be off.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
 
 HUMAN = Caller(kind="user", agentic=False, source_env=None)
 AGENT = Caller(kind="agent", agentic=True, source_env="AI_AGENT")
@@ -407,9 +417,10 @@ class TestOutputChannels:
         assert envelope["error"]["details"]["missing"] == ["--name", "--base-image"]
         # `comfy build create` pins identity: this command's help, not the root
         # app's, which is what `cmdline.py`'s `ctx.find_root().get_help()` gives.
-        assert "Usage:" in captured.err
-        assert "comfy build create" in captured.err
-        assert "--base-image" in captured.err
+        help_text = _plain(captured.err)
+        assert "Usage:" in help_text
+        assert "comfy build create" in help_text
+        assert "--base-image" in help_text
         assert "Usage:" not in captured.out
 
     def test_pretty_mode_also_keeps_the_help_off_stdout(self, capsys):

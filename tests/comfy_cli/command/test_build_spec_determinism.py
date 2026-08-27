@@ -33,7 +33,7 @@ _PIP_DEPENDENCIES = (
     "some-pkg==1.0.0 \\\n"
     "    --hash=sha256:3b8f1c2d4e5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e \\\n"
     "    --hash=sha256:9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7\n"
-    "-e git+https://github.com/comfy-org/example-node.git@v1.2.3#egg=example-node\n"
+    "-e git+https://github.com/example-org/example-node.git@v1.2.3#egg=example-node\n"
     "aiohttp==3.10.5\n"
 )
 
@@ -258,7 +258,7 @@ def test_two_independent_constructions_emit_the_same_pip_dependencies(two_roots:
 
     # Then
     assert first == second
-    assert "-e git+https://github.com/comfy-org/example-node.git@v1.2.3#egg=example-node" in first
+    assert "-e git+https://github.com/example-org/example-node.git@v1.2.3#egg=example-node" in first
     assert first.count("--hash=sha256:") == 2
 
 

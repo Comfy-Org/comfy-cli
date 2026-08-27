@@ -6,9 +6,10 @@ import json
 import math
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final, Literal, TypeAlias, assert_never
+from typing import Final, Literal, TypeAlias
 
 import yaml
+from typing_extensions import assert_never
 
 from comfy_cli.file_utils import atomic_write_text
 
