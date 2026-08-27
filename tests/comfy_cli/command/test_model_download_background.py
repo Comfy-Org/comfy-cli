@@ -9,7 +9,9 @@ accounting through the real transfer loop, and the envelope shapes agents parse.
 
 from __future__ import annotations
 
+import errno
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -285,6 +287,23 @@ class TestPrune:
 
         assert download_state.prune(workspace) == 0
         assert download_state.read(workspace, state.id) is not None
+
+    def test_a_raising_claim_sweep_never_escapes_prune(self, workspace, monkeypatch):
+        """`prune` documents every step as best effort, and the claim sweep runs
+        before the try block that used to be the only thing delivering that.
+        `_sweep_claims` guards its own directory walk but then calls `read`,
+        which resolves the state dir (an `mkdir`) and catches only `ValueError`.
+        """
+
+        def boom(_workspace):
+            raise OSError("Read-only file system")
+
+        monkeypatch.setattr(download_state, "_sweep_claims", boom)
+        state = _record(workspace, status="completed", age_s=_OLD_S)
+
+        # Does not raise, and the records pass still runs.
+        assert download_state.prune(workspace) == 1
+        assert download_state.read(workspace, state.id) is None
 
     def test_a_failing_prune_never_blocks_a_submit(self, workspace, monkeypatch, json_renderer):
         _record(workspace, status="completed", age_s=_OLD_S)
@@ -1462,6 +1481,57 @@ class TestAtomicDestinationClaim:
                 self._submit(dest)
         assert json_renderer()["error"]["code"] == "model_download_in_flight"
 
+    def test_a_degraded_claim_is_reported_once(self, workspace, monkeypatch, json_renderer, caplog):
+        """Degrading is right; degrading *silently* is not. The advisory guard
+        re-scans rather than arbitrates, so on a filesystem with no hard links
+        every submit quietly gives up the atomicity this path exists for. Once
+        per process, because it is a property of the filesystem, not of the run.
+        """
+        dest = self._dest(workspace)
+        monkeypatch.setattr(models, "_claims_degraded_reported", False)
+        monkeypatch.setattr(
+            download_state,
+            "acquire_claim",
+            MagicMock(side_effect=OSError(errno.EOPNOTSUPP, "Operation not supported")),
+        )
+        self._no_spawn(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger=models.__name__):
+            self._submit(dest)
+        assert json_renderer()["ok"] is True
+
+        warnings = [r for r in caplog.records if "atomic destination claims are unavailable" in r.message]
+        assert len(warnings) == 1
+        assert "does not support the hard link" in warnings[0].getMessage()
+
+        # A second submit on the same process stays quiet.
+        caplog.clear()
+        _reset_envelope()
+        with caplog.at_level(logging.WARNING, logger=models.__name__):
+            self._submit(workspace / self.DEST[0] / "other.safetensors")
+        assert [r for r in caplog.records if "atomic destination claims" in r.message] == []
+
+    def test_a_transient_claim_failure_is_reported_as_such(self, workspace, monkeypatch, json_renderer, caplog):
+        """A read-only state dir is not a filesystem without hard links. Both
+        degrade identically; only the wording differs, so the message does not
+        send someone hunting a filesystem capability that is not the problem."""
+        dest = self._dest(workspace)
+        monkeypatch.setattr(models, "_claims_degraded_reported", False)
+        monkeypatch.setattr(
+            download_state,
+            "acquire_claim",
+            MagicMock(side_effect=OSError(errno.EIO, "Input/output error")),
+        )
+        self._no_spawn(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger=models.__name__):
+            self._submit(dest)
+        assert json_renderer()["ok"] is True
+
+        warnings = [r for r in caplog.records if "atomic destination claims are unavailable" in r.message]
+        assert len(warnings) == 1
+        assert "the claim could not be written" in warnings[0].getMessage()
+
     def test_a_failed_spawn_releases_the_claim(self, workspace, monkeypatch, json_renderer):
         """Nothing else ever would: no worker starts, so no worker reaches the
         terminal transition that releases it."""
@@ -1716,13 +1786,60 @@ class TestClaimAtomicPublish:
     never visible half-written — a colliding submitter that reads it can never
     mistake a live winner mid-write for a stale claim and unlink it."""
 
+    @staticmethod
+    def _patch_claim_writes(monkeypatch, claims_dir, transform):
+        """Apply ``transform`` to writes on the claim's staging fd, and only it.
+
+        `acquire_claim` is exercised by breaking `os.write`, but `os.write` is
+        process-wide: an unscoped patch also truncates (or fails) pytest's own
+        fd-level capture flushes and anything else holding a raw descriptor.
+        So the fd is identified at `os.open` time by the directory it was opened
+        in, and every other descriptor writes normally. Tracked by fd number,
+        which the kernel reuses after a close, so `os.close` untracks it too.
+        """
+        real_open, real_write, real_close = os.open, os.write, os.close
+        staged: set[int] = set()
+
+        def _is_staging(path):
+            try:
+                return os.path.dirname(os.fsdecode(path)) == str(claims_dir)
+            except TypeError:
+                return False
+
+        def tracking_open(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            if _is_staging(path):
+                staged.add(fd)
+            return fd
+
+        def scoped_write(fd, data):
+            if fd in staged:
+                return transform(real_write, fd, data)
+            return real_write(fd, data)
+
+        def untracking_close(fd):
+            staged.discard(fd)
+            return real_close(fd)
+
+        monkeypatch.setattr(os, "open", tracking_open)
+        monkeypatch.setattr(os, "write", scoped_write)
+        monkeypatch.setattr(os, "close", untracking_close)
+
     def test_short_writes_still_publish_a_complete_payload(self, workspace, monkeypatch):
         claim = download_state.claim_path(workspace, "/tmp/m.safetensors")
-        real_write = os.write
-        monkeypatch.setattr(os, "write", lambda fd, data: real_write(fd, bytes(data)[:1]))
+        shortened = []
+
+        def one_byte(write, fd, data):
+            shortened.append(len(data))
+            return write(fd, bytes(data)[:1])
+
+        self._patch_claim_writes(monkeypatch, claim.parent, one_byte)
 
         assert download_state.acquire_claim(claim, download_id="aaaaaaaaaaaa", dest="/tmp/m.safetensors")
         assert download_state.read_claim(claim) == "aaaaaaaaaaaa"
+        # The scoping must not quietly stop matching the staging fd: that would
+        # leave this asserting nothing but that a normal write works.
+        assert len(shortened) > 1, "the short-write patch never reached the claim's descriptor"
 
     def test_a_failed_payload_write_publishes_nothing(self, workspace, monkeypatch):
         """ENOSPC mid-payload must not leave a claim — empty at the claim path
@@ -1730,13 +1847,17 @@ class TestClaimAtomicPublish:
         a temp file. The OSError propagates and the caller degrades to the
         advisory guard, exactly like an unusable claims directory."""
         claim = download_state.claim_path(workspace, "/tmp/m.safetensors")
-        monkeypatch.setattr(os, "write", MagicMock(side_effect=OSError(28, "No space left on device")))
+
+        def _enospc(_write, _fd, _data):
+            raise OSError(28, "No space left on device")
+
+        self._patch_claim_writes(monkeypatch, claim.parent, _enospc)
 
         with pytest.raises(OSError):
             download_state.acquire_claim(claim, download_id="aaaaaaaaaaaa", dest="/tmp/m.safetensors")
 
         assert not claim.exists()
-        assert list(claim.parent.iterdir()) == []
+        assert not list(claim.parent.iterdir())
 
 
 class TestClaimSweep:

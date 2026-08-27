@@ -252,6 +252,17 @@ def acquire_claim(path: Path, *, download_id: str, dest: str) -> bool:
     acquire, so concurrent submitters never collide on it; a leftover from a
     SIGKILL mid-acquire is swept by :func:`prune`.
 
+    **Atomic publication depends on hard-link support.** ``os.link`` is the
+    thing that makes exactly one submitter win, and a filesystem without hard
+    links (exFAT, FAT32, some network and container mounts) fails it with
+    ``OSError`` — ``ENOTSUP``/``EOPNOTSUPP``/``EPERM``, or ``ERROR_NOT_SUPPORTED``
+    on Windows — rather than ``EEXIST``. That error is *not* a collision and is
+    not reported as one: it propagates, and no atomic lock was taken. The caller
+    is expected to degrade to its advisory guard and to say so
+    (:func:`comfy_cli.command.models.models._acquire_dest_claim`), because the
+    advisory guard re-scans rather than arbitrates — concurrent submitters can
+    race again on such a filesystem.
+
     The payload records the ``download_id`` that owns the claim (the pointer a
     later submitter follows to decide whether the claim is still live), the
     destination for a human reading the directory, and when it was taken. No
@@ -691,7 +702,13 @@ def prune(workspace: Path) -> int:
     concurrent prune already removed must never raise into a download. Returns
     the number of records actually removed.
     """
-    _sweep_claims(workspace)
+    # Suppressed here rather than inside the sweep: `_sweep_claims` guards its
+    # own directory walk, but it then calls `read`, which resolves the state
+    # directory (an `mkdir`) and only catches `ValueError`. That `OSError` would
+    # escape `prune` and land in a download, which is exactly what the contract
+    # above promises never happens.
+    with contextlib.suppress(OSError):
+        _sweep_claims(workspace)
     base = Path(workspace) / STATE_DIRNAME
     try:
         if not base.is_dir():

@@ -1,4 +1,6 @@
 import contextlib
+import errno
+import logging
 import ntpath
 import os
 import pathlib
@@ -28,6 +30,8 @@ from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
 from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.workspace_manager import WorkspaceManager
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer()
 
@@ -721,7 +725,7 @@ def download(
         # `download_state.reconcile` already handles: a record whose pid and
         # pid_create_time no longer match a live process demotes to `failed`, so a
         # hard-killed foreground run self-clears just like a dead worker.
-        _persist_foreground(claim)
+        _persist_record(claim)
 
     elapsed = time.monotonic() - start_time
     print(f"Done in {_format_elapsed(elapsed)}")
@@ -1341,7 +1345,53 @@ def _withdraw_record(state: download_state.DownloadState, dest: pathlib.Path, wi
         return
     state.status = "failed"
     state.error = f"withdrew this claim; {winner_id or 'another download'} won {dest}"
-    _persist_foreground(state)
+    _persist_record(state)
+
+
+# `os.link` is what makes the claim atomic, and a filesystem without hard links
+# (exFAT, FAT32, some network and container mounts) refuses it outright rather
+# than transiently. Told apart from a transient failure only to word the warning
+# accurately: both degrade identically, because a download that used to work must
+# not become an error over bookkeeping.
+_CLAIMS_UNSUPPORTED_ERRNOS = frozenset(
+    getattr(errno, name) for name in ("ENOTSUP", "EOPNOTSUPP", "EPERM", "ENOSYS") if hasattr(errno, name)
+)
+# ERROR_INVALID_FUNCTION / ERROR_NOT_SUPPORTED — what Windows returns for
+# `CreateHardLinkW` on a volume that has no hard links.
+_CLAIMS_UNSUPPORTED_WINERRORS = frozenset((1, 50))
+
+_claims_degraded_reported = False
+
+
+def _report_claim_degraded(exc: OSError, dest: pathlib.Path) -> None:
+    """Warn once per process that destination claims are not atomic here.
+
+    Once, because the alternative is a line per submit for a condition that is a
+    property of the filesystem and will not change under a running CLI. It is a
+    warning rather than a hard failure for the reason `_dest_claim_path` returns
+    None rather than raising: claims are bookkeeping, and the advisory guard
+    still catches every competitor it caught before this code existed.
+    """
+    global _claims_degraded_reported
+    if _claims_degraded_reported:
+        return
+    _claims_degraded_reported = True
+    unsupported = exc.errno in _CLAIMS_UNSUPPORTED_ERRNOS or (
+        getattr(exc, "winerror", None) in _CLAIMS_UNSUPPORTED_WINERRORS
+    )
+    why = (
+        "this filesystem does not support the hard link that publishes them"
+        if unsupported
+        else "the claim could not be written"
+    )
+    logger.warning(
+        "atomic destination claims are unavailable (%s: %s); falling back to the "
+        "advisory in-flight scan for %s, which cannot arbitrate between simultaneous "
+        "submissions",
+        why,
+        exc,
+        dest,
+    )
 
 
 def _acquire_dest_claim(
@@ -1366,10 +1416,15 @@ def _acquire_dest_claim(
         try:
             if download_state.acquire_claim(claim_file, download_id=state.id, dest=str(dest)):
                 return
-        except OSError:
+        except OSError as e:
             # Anything other than the collision (a read-only state dir, a
-            # vanished claims directory). Degrade to the advisory guard, exactly
-            # as an unavailable claims directory does.
+            # vanished claims directory, a filesystem with no hard links).
+            # Degrade to the advisory guard, exactly as an unavailable claims
+            # directory does — but say so first: the advisory guard re-scans
+            # rather than arbitrates, so this silently gives up the atomicity
+            # this whole path exists to provide, and a destination on such a
+            # filesystem can be raced again.
+            _report_claim_degraded(e, dest)
             _enforce_claim(state, dest)
             return
 
@@ -1473,7 +1528,7 @@ def _enforce_claim(state: download_state.DownloadState, dest: pathlib.Path) -> N
         # reconciled it away.
         state.status = "failed"
         state.error = f"withdrew this claim; {competitor.id} won {dest}"
-        _persist_foreground(state)
+        _persist_record(state)
     raise _in_flight_failure(competitor, dest)
 
 
@@ -1541,12 +1596,14 @@ def _claim_foreground(url: str, dest: pathlib.Path, downloader: str) -> download
     return state
 
 
-def _persist_foreground(state: download_state.DownloadState | None) -> None:
-    """Write a foreground claim to disk. Never raises.
+def _persist_record(state: download_state.DownloadState | None) -> None:
+    """Write a download record to disk. Never raises.
 
-    Used for both the progress writes and the terminal one: the state directory
-    is bookkeeping, and a download that is otherwise fine must not die because a
-    record could not be updated.
+    Kind-agnostic, and named that way because it is: the foreground path uses it
+    for both the progress writes and the terminal one, and the background
+    arbitration path uses it in :func:`_withdraw_record`. The state directory is
+    bookkeeping either way, and a download that is otherwise fine must not die
+    because a record could not be updated.
     """
     if state is None:
         return
@@ -1586,7 +1643,7 @@ def _foreground_progress(state: download_state.DownloadState) -> Callable[[int, 
         if not learned_total and now - last_write < download_state.PROGRESS_THROTTLE_S:
             return
         last_write = now
-        _persist_foreground(state)
+        _persist_record(state)
 
     return on_progress
 
