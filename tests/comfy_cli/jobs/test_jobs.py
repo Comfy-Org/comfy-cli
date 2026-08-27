@@ -3488,6 +3488,29 @@ def test_history_completed_nodes_tolerates_junk(monkeypatch):
     assert jobs_mod._history_completed_nodes("127.0.0.1", 8188, "pid-j") == set()
 
 
+def test_history_completed_nodes_skips_nulls_and_non_list_node_fields(monkeypatch):
+    """`/history` feeds the same `completed_nodes` set the live stream does, so
+    it needs the same guards: a null id would seat a fabricated `"None"` node in
+    the terminal envelope, and a non-list `nodes` would be walked per character."""
+
+    def fake_get(url, **kw):
+        return {
+            "pid-n": {
+                "status": {
+                    "messages": [
+                        ["execution_cached", {"nodes": [None, "1"]}],
+                        ["execution_interrupted", {"executed": [None, "2"]}],
+                        ["execution_cached", {"nodes": "34"}],
+                    ],
+                },
+                "outputs": {},
+            }
+        }
+
+    monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+    assert jobs_mod._history_completed_nodes("127.0.0.1", 8188, "pid-n") == {"1", "2"}
+
+
 class _ScriptedWS:
     """A `websocket.WebSocket` stand-in that replays a scripted message list.
 

@@ -1932,8 +1932,12 @@ def _history_completed_nodes(host: str, port: int, prompt_id: str) -> set[str]:
             listed = msg[1].get("executed")
         else:
             continue
-        for n in listed or []:
-            nodes.add(str(n))
+        if not isinstance(listed, list):
+            continue
+        # Same null guard as the live `_watch_execution_cached` path: this set
+        # becomes the terminal envelope's completed nodes, and `str(None)`
+        # would seat a fabricated `"None"` node in it.
+        nodes.update(str(n) for n in listed if n is not None)
     outputs = body.get("outputs")
     if isinstance(outputs, dict):
         nodes.update(str(n) for n in outputs)
