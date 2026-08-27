@@ -45,6 +45,6 @@
         "required": ["name", "source", "bytes", "path"]
       }
     },
-    "knowledge": { "$ref": "knowledge_block.json", "description": "Curated model knowledge matching this call; absent when no bundle is loaded or nothing matched, except that an empty result with no match carries zero_hit and a nudge." }
+    "knowledge": { "$ref": "knowledge_block.json", "description": "Curated model knowledge matching this call; absent when no bundle is loaded or the call named no subject. A query term nothing curated answers attaches a rowless block carrying hit_ids: [] and zero_hit, unless the terms alone overrun the byte ceiling." }
   }
 }

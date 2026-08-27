@@ -672,19 +672,26 @@ def _nudge_text(block: dict, head: str) -> str:
     return f"{head}; see capabilities_available"
 
 
+def _hit_ids(block: dict) -> list[str]:
+    """Model ids then ``cap:<id>`` for the capabilities the picks rank, in block order."""
+    caps: list[str] = []
+    for p in block["picks"]:
+        if p["capability"] not in caps:
+            caps.append(p["capability"])
+    return [m["id"] for m in block["models"]] + [f"cap:{c}" for c in caps]
+
+
 def _fit(block: dict) -> None:
     """Drop whole entries until the block fits MAX_BLOCK_BYTES.
+
+    Read alongside :func:`_hit_ids`, which names what survives each pass.
 
     Models first, then picks, and ``capabilities_available`` last: it is the
     only thing that tells an agent which search terms reach a ranked table, so
     it outlives the answers to the current query.
     """
     while True:
-        caps: list[str] = []
-        for p in block["picks"]:
-            if p["capability"] not in caps:
-                caps.append(p["capability"])
-        block["hit_ids"] = [m["id"] for m in block["models"]] + [f"cap:{c}" for c in caps]
+        block["hit_ids"] = _hit_ids(block)
         if _block_bytes(block) <= MAX_BLOCK_BYTES:
             return
         if block["models"]:
@@ -727,7 +734,15 @@ def _set_nudge(block: dict, query: str, *, shed_vocabulary: bool = False) -> Non
         del block["nudge"]
 
 
-def log_query(command: str, queries: list[str], *, hit_ids: list, zero_hit: bool, bundle: Bundle) -> None:
+def log_query(
+    command: str,
+    queries: list[str],
+    *,
+    hit_ids: list,
+    zero_hit: bool,
+    bundle: Bundle,
+    uncurated: list[str] | None = None,
+) -> None:
     """Feed the curation miss log. Consent-gated and best-effort, like every other event.
 
     This is the one place a search term ships verbatim, clipped to
@@ -737,20 +752,24 @@ def log_query(command: str, queries: list[str], *, hit_ids: list, zero_hit: bool
 
     ``hit_ids`` names capabilities ``cap:<id>`` and models by bare id, the same
     way :func:`attach` fills the block's own ``hit_ids``.
+
+    ``uncurated`` is the subset of ``queries`` the bundle keys nothing for, the
+    same list :func:`attach` puts on the block. The verbs that resolve a single
+    term omit it rather than send it empty, since ``hit_ids`` already says so.
     """
     try:
         from comfy_cli import tracking
 
-        tracking.track_event(
-            "knowledge_query",
-            {
-                "command": command,
-                "queries": queries,
-                "hit_ids": hit_ids,
-                "zero_hit": zero_hit,
-                "bundle_version": bundle.version,
-            },
-        )
+        props = {
+            "command": command,
+            "queries": queries,
+            "hit_ids": hit_ids,
+            "zero_hit": zero_hit,
+            "bundle_version": bundle.version,
+        }
+        if uncurated is not None:
+            props["uncurated_queries"] = uncurated
+        tracking.track_event("knowledge_query", props)
     except Exception:  # noqa: BLE001 — telemetry never decides whether a payload ships
         return
 
@@ -783,6 +802,20 @@ def attach(
     whose own result was empty, which is the only case that earns ``zero_hit``;
     a query that resolved to nothing earns a nudge on its own.
 
+    Three fields carry the miss, and every one of them also reaches
+    :func:`log_query`, so a consumer holding only the envelope recovers what the
+    consent-gated event was told. ``uncurated_queries`` names the terms the
+    bundle keys nothing for, on any block, including one whose rows arrived
+    through the reverse index while the typed term matched nothing. ``hit_ids:
+    []`` says nothing curated came back at all. ``zero_hit`` says the command's
+    own result was empty too, which separates a gap the caller felt from one it
+    never noticed.
+
+    A query nothing curated answers therefore still attaches, carrying no rows.
+    A rowless block naming ids in ``hit_ids`` and no ``uncurated_queries`` is
+    knowledge that exists and did not fit, shed by the byte ceiling, rather than
+    a gap in the bundle.
+
     ``qualified=False`` says the call named no subject — an unfiltered listing,
     whose rows are the whole catalog rather than an answer to anything. Nothing
     is attached there: a curated row picked out of 3655 listed nodes reads as the
@@ -805,6 +838,10 @@ def attach(
             return
         query_list = [q.strip()[:MAX_QUERY_CHARS] for q in queries if isinstance(q, str) and q.strip()]
         model_hits, cap_hits = _lookup(bundle, query_list)
+        # Per term, because one term landing says nothing about the ones beside
+        # it: `templates ls --tag lipsync --name-sub FLF2V` resolves the tag and
+        # misses the name, and a curator ranking gaps needs to see FLF2V.
+        uncurated = [q for q in query_list if _lookup(bundle, [q]) == ([], [])]
         query_resolved = bool(model_hits or cap_hits)
         listed_hits, listed_caps = _lookup(bundle, [m for m in models if isinstance(m, str) and m.strip()])
         seen = {mid for mid, _ in model_hits}
@@ -813,9 +850,13 @@ def attach(
                 seen.add(mid)
                 model_hits.append((mid, matched_on))
         cap_hits.extend(cid for cid in listed_caps if cid not in cap_hits)
+        reverse_answers: set[str] = set()
         for ids, index in ((templates, bundle.templates), (nodes, bundle.nodes)):
             for ident in ids:
-                for mid in index.get(ident, ()):
+                mids = index.get(ident, ())
+                if mids:
+                    reverse_answers.add(_normalize(ident))
+                for mid in mids:
                     if mid not in seen:
                         seen.add(mid)
                         model_hits.append((mid, ident))
@@ -832,12 +873,15 @@ def attach(
             entries.append(entry)
         entries.sort(key=lambda e: (e.get("tier") != "law", e.get("available_locally") is False))
         entries = entries[: MAX_MODELS_BRIEF if brief else MAX_MODELS]
-        if not query_resolved:
+        if uncurated:
             # A node class or template id passed as both a query and a reverse-index
-            # key lands a row whose matched_on is that exact string. Nudging there
-            # would deny a term the block answers on the same line.
-            asked = set(query_list)
-            query_resolved = any(e["matched_on"] in asked for e in entries)
+            # key is a term the bundle does cover. Read before the cap and the
+            # model-id dedupe, because a term the bundle answers is not a gap
+            # whether or not its row won a place in the block. Normalized on both
+            # sides, since node search matches a class name loosely and the term
+            # here is whatever the caller typed.
+            uncurated = [q for q in uncurated if _normalize(q) not in reverse_answers]
+        query_resolved = len(uncurated) < len(query_list)
 
         picks: list[dict] = []
         for cid in cap_hits:
@@ -862,7 +906,18 @@ def attach(
             "zero_hit": False,
         }
         had_hits = bool(entries or picks)
+        if uncurated:
+            # Inside the block before _fit, so the ceiling sheds a curated row
+            # ahead of the record of the gap. A row runs to hundreds of bytes and
+            # answers one query; this is every term that missed, and the event it
+            # has to agree with sheds nothing.
+            block["uncurated_queries"] = uncurated
+        matched_ids = _hit_ids(block)
         _fit(block)
+        if _block_bytes(block) > MAX_BLOCK_BYTES:
+            # Terms long enough to overrun on their own, after _fit shed all it
+            # can. The record is the last thing left to give up.
+            block.pop("uncurated_queries", None)
         attached = True
         if not block["models"] and not block["picks"]:
             if had_hits or not (thin and query_list):
@@ -875,12 +930,32 @@ def attach(
             # query itself matched neither a model nor a capability. Not a
             # zero_hit: that feeds the miss log and means an empty block.
             _set_nudge(block, query_list[0])
+        if not attached and query_list:
+            # The miss reaches log_query, and a consumer with no telemetry
+            # client of its own has only the envelope to read it from. Carrying
+            # no rows is what keeps an empty block off the caller's context.
+            marker = {
+                "bundle_version": bundle.version,
+                "stale": bundle.stale,
+                "as_of": bundle.as_of,
+                # What matched before _fit, not what survived it. Rows shed to
+                # make the ceiling are curated knowledge that exists, and filing
+                # them as a gap would put a covered term in the curation inbox.
+                "hit_ids": matched_ids,
+                "zero_hit": block["zero_hit"],
+            }
+            if uncurated:
+                marker["uncurated_queries"] = uncurated
+            if _block_bytes(marker) <= MAX_BLOCK_BYTES:
+                block = marker
+                attached = True
         if query_list:
             log_query(
                 command,
                 query_list,
                 hit_ids=block.get("hit_ids", []),
                 zero_hit=block.get("zero_hit", False),
+                uncurated=uncurated or None,
                 bundle=bundle,
             )
         if attached:
