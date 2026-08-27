@@ -185,8 +185,8 @@ def _tokens(s: str) -> frozenset[str]:
 
 def _short_key(key: str) -> bool:
     """A one-word key (filler aside) under MIN_SINGLE_TOKEN_CHARS never matches on wording."""
-    raw = [w for w in _split(key) if _stem(w) not in _FILLER_STEMS]
-    return len(raw) == 1 and len(raw[0]) < MIN_SINGLE_TOKEN_CHARS
+    raw = {w for w in _split(key) if _stem(w) not in _FILLER_STEMS}
+    return len(raw) == 1 and len(next(iter(raw))) < MIN_SINGLE_TOKEN_CHARS
 
 
 def _query_tokens(s: str) -> frozenset[str]:

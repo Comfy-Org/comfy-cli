@@ -336,7 +336,10 @@ class TestPhrasedQueries:
         assert knowledge._resolve_tokens(b, "backgrounds removed from these photos") == "cap"
 
     def test_a_four_letter_alias_ending_in_e_is_still_reachable(self):
-        data = {"models": {}, "capabilities": {"cap": {"aliases": ["Pose"]}, "short": {"aliases": ["3D", "Make 3D"]}}}
+        data = {
+            "models": {},
+            "capabilities": {"cap": {"aliases": ["Pose"]}, "short": {"aliases": ["3D", "Make 3D", "3D 3D"]}},
+        }
         b = knowledge._index(data, None, source="env", stale=False, path="x", mtime=0.0)
         assert knowledge._resolve_tokens(b, "pose estimation") == "cap"
         assert knowledge._resolve_tokens(b, "a 3d scene") is None
