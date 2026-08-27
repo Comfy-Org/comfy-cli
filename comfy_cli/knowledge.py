@@ -59,8 +59,12 @@ _FILLER = frozenset(
     "a an the of to for from with and or in on at by as is are be do it which where while "
     "my me some this that into make create generate".split()
 )
-# Cut a description here: what follows says what the row is *not*.
-_NEGATOR = re.compile(r"(?<=[.;])\s|\b(?:no|not|never|neither|nor|without|except)\b", re.IGNORECASE)
+# A description counts as match context only up to its first sentence end or
+# negator, whichever comes first: what follows says what the row is *not*, or
+# how it routes. "e.g." and "No.1" are not ends.
+_CONTEXT_END = re.compile(
+    r"(?<=[a-z]{2}[.;])\s|\b(?:no|not|never|neither|nor|without|except)\b(?![.\d])", re.IGNORECASE
+)
 # A one-word key must be at least this long to match on its own. Guards against a
 # future alias like "3d" dragging a capability into every query mentioning it.
 MIN_SINGLE_TOKEN_CHARS = 4
@@ -159,12 +163,12 @@ def _stem(word: str) -> str:
     stripped = True
     while stripped:
         stripped = False
-        for suffix in ("ing", "ed", "es", "s"):
+        for suffix in ("ing", "ed", "s", "e"):
             if word.endswith(suffix) and len(word) - len(suffix) >= 3:
                 word = word[: -len(suffix)]
                 stripped = True
                 break
-    return word[:-1] if word.endswith("e") and len(word) > 3 else word
+    return word
 
 
 _FILLER_STEMS = frozenset(map(_stem, _FILLER))
@@ -175,12 +179,14 @@ def _split(s: str) -> list[str]:
 
 
 def _tokens(s: str) -> frozenset[str]:
-    """Stemmed word set of a key or description, with grammatical filler dropped.
-
-    Only generic English is listed in the filler — no capability, model or tag
-    name — so this stays put while the bundle changes underneath it.
-    """
+    """Stemmed word set of a key or description, with grammatical filler dropped."""
     return frozenset(w for w in map(_stem, _split(s)) if w not in _FILLER_STEMS)
+
+
+def _short_key(key: str) -> bool:
+    """A one-word key (filler aside) under MIN_SINGLE_TOKEN_CHARS never matches on wording."""
+    raw = [w for w in _split(key) if _stem(w) not in _FILLER_STEMS]
+    return len(raw) == 1 and len(raw[0]) < MIN_SINGLE_TOKEN_CHARS
 
 
 def _query_tokens(s: str) -> frozenset[str]:
@@ -515,13 +521,15 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
                 capability_keys.setdefault(alias, cid)
 
     capability_tokens = tuple(
-        (words, _normalize(key), cid) for key, cid in capability_keys.items() if (words := _tokens(key))
+        (words, _normalize(key), cid)
+        for key, cid in capability_keys.items()
+        if (words := _tokens(key)) and not _short_key(key)
     )
     key_words: dict[str, set[str]] = defaultdict(set)
     for words, _, cid in capability_tokens:
         key_words[cid] |= words
     capability_context = {
-        cid: _tokens(_NEGATOR.split(desc, maxsplit=1)[0]) - key_words[cid]
+        cid: _tokens(_CONTEXT_END.split(desc, maxsplit=1)[0]) - key_words[cid]
         for cid, cap in capabilities.items()
         if isinstance(desc := cap.get("description"), str)
     }
@@ -600,7 +608,7 @@ def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
     scored: dict[str, tuple[float, int, int, int]] = {}
     for key_words, key_norm, cid in bundle.capability_tokens:
         hit = key_words & words
-        if not hit or (len(key_words) == 1 and len(key_norm) < MIN_SINGLE_TOKEN_CHARS):
+        if not hit:
             continue
         context = len(bundle.capability_context.get(cid, frozenset()) & words)
         missing = len(key_words) - len(hit)

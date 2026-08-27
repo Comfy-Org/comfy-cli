@@ -318,6 +318,7 @@ class TestPhrasedQueries:
             "gamma delta. Never used for epsilon zeta.",
             "gamma delta with no epsilon zeta.",
             "gamma delta; not epsilon zeta",
+            "gamma delta, e.g. No.1 pick. Never used for epsilon zeta.",
         ],
     )
     def test_a_description_stops_counting_where_it_says_what_the_row_is_not(self, description):
@@ -335,7 +336,7 @@ class TestPhrasedQueries:
         assert knowledge._resolve_tokens(b, "backgrounds removed from these photos") == "cap"
 
     def test_a_four_letter_alias_ending_in_e_is_still_reachable(self):
-        data = {"models": {}, "capabilities": {"cap": {"aliases": ["Pose"]}, "short": {"aliases": ["3D"]}}}
+        data = {"models": {}, "capabilities": {"cap": {"aliases": ["Pose"]}, "short": {"aliases": ["3D", "Make 3D"]}}}
         b = knowledge._index(data, None, source="env", stale=False, path="x", mtime=0.0)
         assert knowledge._resolve_tokens(b, "pose estimation") == "cap"
         assert knowledge._resolve_tokens(b, "a 3d scene") is None
@@ -349,6 +350,8 @@ class TestPhrasedQueries:
             ("images", "image"),
             ("classes", "class"),
             ("generating", "generate"),
+            ("denoising", "denoise"),
+            ("denoised", "denoise"),
         ):
             assert knowledge._stem(a) == knowledge._stem(b), (a, b)
         assert knowledge._stem("3d") == "3d"
