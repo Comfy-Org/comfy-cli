@@ -14,6 +14,7 @@ disturbing the explicit ``comfy knowledge`` verbs.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -21,6 +22,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+from collections import defaultdict
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -54,7 +56,10 @@ UNAVAILABLE_LOCALLY = "the templates or nodes this row resolves to are absent fr
 # Grammatical filler dropped before subset matching. Deliberately generic English:
 # naming a capability, model or gallery tag here would be a second copy of the
 # bundle's vocabulary, which then drifts every time comfy-knowledge is recompiled.
-_FILLER = frozenset("a an the of to for from with and or in on my me some this that into make create generate".split())
+_FILLER = frozenset(
+    "a an the of to for from with and or in on at by as is are be do it no not which where while "
+    "my me some this that into make create generate".split()
+)
 # A one-word key must be at least this long to match on its own. Guards against a
 # future alias like "3d" dragging a capability into every query mentioning it.
 MIN_SINGLE_TOKEN_CHARS = 4
@@ -82,9 +87,10 @@ class Bundle:
     # exact path decides it; a real id always keeps its own key.
     normalized_aliases: dict[str, str] = field(default_factory=dict)
     normalized_capabilities: dict[str, str] = field(default_factory=dict)
-    # (word set, capability id) for every capability id and alias, so an intent
-    # phrase reaches the row its own wording names. See :func:`_resolve_tokens`.
-    capability_tokens: tuple[tuple[frozenset[str], str], ...] = ()
+    # (word set, normalized key, capability id) for every capability id and alias,
+    # so an intent phrase reaches the row its own wording names. See :func:`_resolve_tokens`.
+    capability_tokens: tuple[tuple[frozenset[str], str, str], ...] = ()
+    capability_context: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 # One-element tuple so a memoized ``None`` is distinguishable from "not loaded yet".
@@ -144,13 +150,32 @@ def _normalize(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s)
 
 
-def _tokens(s: str) -> frozenset[str]:
-    """Word set for subset matching, with grammatical filler dropped.
+def _stem(word: str) -> str:
+    """Suffix strip so "editing", "edits" and "edit" agree, and "removal" meets "remove"."""
+    for suffix in ("ing", "ed", "es", "s", "al"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            word = word[: -len(suffix)]
+            break
+    return word[:-1] if word.endswith("e") and len(word) > 3 else word
 
-    Only generic English is listed here — no capability, model or tag name — so
-    this stays put while the bundle changes underneath it.
+
+def _words(s: str) -> list[str]:
+    return [t for t in re.split(r"[^a-z0-9]+", s.lower()) if t and t not in _FILLER]
+
+
+def _tokens(s: str) -> frozenset[str]:
+    """Stemmed word set of a key or description, with grammatical filler dropped.
+
+    Only generic English is listed in the filler — no capability, model or tag
+    name — so this stays put while the bundle changes underneath it.
     """
-    return frozenset(t for t in re.split(r"[^a-z0-9]+", s.lower()) if t and t not in _FILLER)
+    return frozenset(_stem(w) for w in _words(s))
+
+
+def _query_tokens(s: str) -> frozenset[str]:
+    """:func:`_tokens` plus each adjacent pair joined, so "lip sync" reaches the key ``lipsync``."""
+    words = _words(s)
+    return frozenset(_stem(w) for w in itertools.chain(words, (a + b for a, b in zip(words, words[1:]))))
 
 
 def _normalized_map(keys: dict[str, str], *, ids: Collection[str] = ()) -> dict[str, str]:
@@ -478,6 +503,20 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
             if alias:
                 capability_keys.setdefault(alias, cid)
 
+    capability_tokens = tuple(
+        (words, _normalize(key), cid) for key, cid in capability_keys.items() if (words := _tokens(key))
+    )
+    key_words: dict[str, set[str]] = defaultdict(set)
+    for words, _, cid in capability_tokens:
+        key_words[cid] |= words
+    # Description words a query may share with a capability, minus the words its
+    # keys already carry, so context only ever counts what the keys did not.
+    capability_context = {
+        cid: _tokens(desc) - key_words[cid]
+        for cid, cap in capabilities.items()
+        if isinstance(desc := cap.get("description"), str)
+    }
+
     version = manifest.get("version") if manifest is not None else None
     return Bundle(
         version=version[:MAX_VERSION_CHARS] if isinstance(version, str) else "unknown",
@@ -494,7 +533,8 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         model_capabilities=model_capabilities,
         normalized_aliases=_normalized_map(aliases, ids=models),
         normalized_capabilities=_normalized_map(capability_keys, ids=capabilities),
-        capability_tokens=tuple((words, cid) for key, cid in capability_keys.items() if (words := _tokens(key))),
+        capability_tokens=capability_tokens,
+        capability_context=capability_context,
     )
 
 
@@ -531,28 +571,40 @@ def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
 
     Callers ask in sentences ("image to 3d model mesh") while the bundle is keyed
     on tags and ids ("Image to Model", "image-to-3d"), and :func:`_normalize`
-    only strips punctuation, so the exact path misses everything phrased. A key
-    matches when all of its words appear in the query, and the longest key wins
-    so a more specific capability is not outvoted by a broader one.
+    only strips punctuation, so the exact path misses everything phrased.
+
+    Each key scores by the share of its words the query contains. A full match
+    always counts. A partial one counts only when the query shares more words
+    with the capability's description than the key words it lacks, so "poster
+    with readable text" reaches ``text-in-image`` while "4K video generation"
+    reaches nothing. Among capabilities that score the same, the key spelled
+    out literally in the query wins ("text to image" over ``text-in-image``),
+    then the one whose description the query echoes.
 
     Ambiguity resolves to nothing rather than to a guess, matching
     :func:`_normalized_map`: a tie between two capabilities is not an answer.
     """
-    words = _tokens(query)
+    words = _query_tokens(query)
     if not words:
         return None
-    best: set[str] = set()
-    best_len = 0
-    for key_words, cid in bundle.capability_tokens:
-        if len(key_words) < best_len or not key_words <= words:
+    literal = _normalize(query)
+    scored: dict[str, tuple[float, int, int, int]] = {}
+    for key_words, key_norm, cid in bundle.capability_tokens:
+        hit = key_words & words
+        if not hit or (len(hit) == 1 and len(next(iter(hit))) < MIN_SINGLE_TOKEN_CHARS):
             continue
-        if len(key_words) == 1 and len(next(iter(key_words))) < MIN_SINGLE_TOKEN_CHARS:
+        context = len(bundle.capability_context.get(cid, frozenset()) & words)
+        missing = len(key_words) - len(hit)
+        if missing and context <= missing:
             continue
-        if len(key_words) > best_len:
-            best, best_len = {cid}, len(key_words)
-        else:
-            best.add(cid)
-    return next(iter(best)) if len(best) == 1 else None
+        score = (len(hit) / len(key_words), len(hit), len(key_norm) if key_norm in literal else 0, context)
+        if score > scored.get(cid, (0.0, 0, 0, 0)):
+            scored[cid] = score
+    if not scored:
+        return None
+    best = max(scored.values())
+    winners = [cid for cid, score in scored.items() if score == best]
+    return winners[0] if len(winners) == 1 else None
 
 
 def _text(value: Any) -> str | None:
