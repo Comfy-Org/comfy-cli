@@ -230,6 +230,140 @@ class TestLookup:
         assert entry["tier"] == "canon"
 
 
+def _phrased_bundle() -> knowledge.Bundle:
+    """The real bundle's capability keys and descriptions, minus the picks."""
+    capabilities = {
+        "audio-generation": {
+            "aliases": ["Text to Audio", "Music", "Audio"],
+            "description": "Music, text-to-speech and sound effects. Neither is the native audio track of a clip.",
+        },
+        "image-edit": {"description": "Change an existing still by instruction (instruct-edit)."},
+        "inpaint": {
+            "description": "Remove or replace part of an image. Prompt-remove and mask-fill are different fetches."
+        },
+        "lipsync": {"description": "A still plus audio becomes a talking clip, or dubbing existing footage."},
+        "text-in-image": {
+            "description": "Stills where in-image text must be readable: posters, signs, UI, typography."
+        },
+        "text-to-image": {
+            "description": "Make a still image from a prompt with no source image. The photorealism row."
+        },
+        "text-to-video": {"description": "Make a clip from a prompt with no source image."},
+        "upscale": {
+            "aliases": ["Video Upscale"],
+            "description": "Add resolution or restore detail after generation or editing. Never used to fix anatomy.",
+        },
+    }
+    return knowledge._index(
+        {"models": {}, "capabilities": capabilities}, None, source="env", stale=False, path="x", mtime=0.0
+    )
+
+
+class TestPhrasedQueries:
+    """The three defects behind ``knowledge pick``'s miss rate, and the misses that must stay misses."""
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            # A tie on {text, image} breaks on the key spelled out literally, or on description words.
+            ("fast cheap text to image drafts for A/B testing", "text-to-image"),
+            ("fast local text to image with accurate object binding", "text-to-image"),
+            ("image with accurate text and typography", "text-in-image"),
+            ("generate image with readable Chinese text local", "text-in-image"),
+            ("text image", None),
+            # lipsync versus the alias "Audio": the longer literal key wins.
+            ("lipsync talking portrait from photo and audio", "lipsync"),
+            ("make a portrait speak my audio (lipsync talking avatar)", "lipsync"),
+            # text-to-video versus "Text to Audio": same rule.
+            ("text to video with audio / sound", "text-to-video"),
+            # A partial key match counts when the description supplies more words than the key lacks.
+            ("poster with readable text", "text-in-image"),
+            ("a musical poster with readable text", "text-in-image"),
+            ("poster with lots of small readable text typography", "text-in-image"),
+            ("sound effects generation", "audio-generation"),
+            ("4K video generation", None),
+            ("generate image keeping multiple reference photos consistent", None),
+            ("a video", None),
+            # Stemming and joined adjacent words.
+            ("keep the same character while editing an image", "image-edit"),
+            # "removal" is only in inpaint's description, never a key, so this stays a canon gap.
+            ("remove the background from this photo", None),
+            ("lip sync video to new speech", "lipsync"),
+            ("dub video into another language with lip sync", "lipsync"),
+            # Nothing in the table names these; they must stay misses, not resolve to the closest row.
+            ("restore old damaged photo keep faces", None),
+            ("fix the anatomy in my image", None),
+            ("camera control video", None),
+            ("how do I load a checkpoint", None),
+        ],
+    )
+    def test_resolves_the_capability_the_phrase_names(self, query, expected):
+        assert knowledge._resolve_tokens(_phrased_bundle(), query) == expected
+
+    def test_every_id_still_resolves_to_itself(self):
+        b = _phrased_bundle()
+        for cid in b.capabilities:
+            assert knowledge.pick(b, cid)["id"] == cid
+
+    def test_a_partial_match_needs_its_description_to_out_vote_the_missing_words(self):
+        data = {"models": {}, "capabilities": {"cap": {"aliases": ["alpha beta"], "description": "gamma delta"}}}
+        b = knowledge._index(data, None, source="env", stale=False, path="x", mtime=0.0)
+        assert knowledge._resolve_tokens(b, "alpha gamma") is None
+        assert knowledge._resolve_tokens(b, "alpha gamma delta") == "cap"
+        assert knowledge._resolve_tokens(b, "gamma delta") is None
+
+    @pytest.mark.parametrize(
+        "description",
+        [
+            "gamma delta. Never used for epsilon zeta.",
+            "gamma delta with no epsilon zeta.",
+            "gamma delta; not epsilon zeta",
+            "gamma delta, e.g. No.1 pick. Never used for epsilon zeta.",
+        ],
+    )
+    def test_a_description_stops_counting_where_it_says_what_the_row_is_not(self, description):
+        cap = {"aliases": ["alpha beta"], "description": description}
+        b = knowledge._index(
+            {"models": {}, "capabilities": {"cap": cap}}, None, source="env", stale=False, path="x", mtime=0.0
+        )
+        assert knowledge._resolve_tokens(b, "alpha gamma delta") == "cap"
+        assert knowledge._resolve_tokens(b, "alpha epsilon zeta") is None
+
+    def test_an_inflected_key_word_still_matches(self):
+        data = {"models": {}, "capabilities": {"cap": {"aliases": ["Remove Background"]}}}
+        b = knowledge._index(data, None, source="env", stale=False, path="x", mtime=0.0)
+        assert knowledge._resolve_tokens(b, "removing the background from this photo") == "cap"
+        assert knowledge._resolve_tokens(b, "backgrounds removed from these photos") == "cap"
+
+    def test_a_four_letter_alias_ending_in_e_is_still_reachable(self):
+        data = {
+            "models": {},
+            "capabilities": {"cap": {"aliases": ["Pose"]}, "short": {"aliases": ["3D", "Make 3D", "3D 3D"]}},
+        }
+        b = knowledge._index(data, None, source="env", stale=False, path="x", mtime=0.0)
+        assert knowledge._resolve_tokens(b, "pose estimation") == "cap"
+        assert knowledge._resolve_tokens(b, "a 3d scene") is None
+
+    def test_stem_agrees_across_inflections(self):
+        for a, b in (
+            ("editing", "edit"),
+            ("edits", "edit"),
+            ("removed", "remove"),
+            ("removals", "removal"),
+            ("images", "image"),
+            ("classes", "class"),
+            ("generating", "generate"),
+            ("denoising", "denoise"),
+            ("denoised", "denoise"),
+        ):
+            assert knowledge._stem(a) == knowledge._stem(b), (a, b)
+        assert knowledge._stem("3d") == "3d"
+        assert knowledge._stem("musical") != knowledge._stem("music")
+        assert knowledge._tokens("generating an image") == knowledge._tokens("generate an image")
+        assert knowledge._query_tokens("lip sync") >= {"lip", "sync", "lipsync"}
+        assert "lipsync" not in knowledge._query_tokens("lip or sync")
+
+
 class TestScalarGuards:
     def test_non_string_routing_values_are_emitted_as_null(self):
         """Routing is copied straight out of the bundle, and the block schema allows
