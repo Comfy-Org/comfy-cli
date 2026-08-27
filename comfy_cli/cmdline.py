@@ -10,44 +10,10 @@ from rich.console import Console
 
 from comfy_cli import cancellation, constants, env_checker, logging, tracking, ui, utils
 from comfy_cli import where as where_module
+from comfy_cli._lazy import LazyCommand, LazyModule, LazySubcommand, LazyTyperGroup
 from comfy_cli._safe_exec import resolve_required_binary
-from comfy_cli.auth import command as auth_command
 from comfy_cli.caller import stream_is_tty
-from comfy_cli.cloud import command as cloud_command
-from comfy_cli.command import (
-    code_search,
-    custom_nodes,
-    pr_command,
-)
-from comfy_cli.command import distribution as distribution_command
-from comfy_cli.command import generate as generate_command
-from comfy_cli.command import install as install_inner
-from comfy_cli.command import (
-    jobs as jobs_command,
-)
-from comfy_cli.command import knowledge as knowledge_command
-from comfy_cli.command import (
-    nodes as nodes_command,
-)
-from comfy_cli.command import preview as preview_command
-from comfy_cli.command import (
-    project as project_command,
-)
-from comfy_cli.command import run as run_inner
-from comfy_cli.command import run_cli as run_cli_inner
-from comfy_cli.command import (
-    templates as templates_command,
-)
-from comfy_cli.command import transfer as transfer_inner
-from comfy_cli.command import (
-    workflow as workflow_command,
-)
-from comfy_cli.command.custom_nodes.cm_cli_util import normalize_cm_cli_exit_code
-from comfy_cli.command.install import validate_optional_version, validate_version
-from comfy_cli.command.launch import launch as launch_command
-from comfy_cli.command.launch import logs as logs_command
-from comfy_cli.command.models import models as models_command
-from comfy_cli.command.models import search as models_search_command
+from comfy_cli.command.version_validators import validate_optional_version, validate_version
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION, CUDAVersion, ROCmVersion
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, resolve_cuda_wheel
@@ -57,13 +23,32 @@ from comfy_cli.help_json import build_help_json
 from comfy_cli.host_port import report_usage_error, validate_host
 from comfy_cli.output import Renderer, get_renderer, rprint, set_renderer
 from comfy_cli.resolve_python import resolve_workspace_python
-from comfy_cli.skills import command as skill_command
-from comfy_cli.standalone import StandalonePython
 from comfy_cli.uv import DependencyCompiler, ensure_pip
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
+# Deferred imports. These modules are only needed inside the command bodies
+# below, and together they were most of the CLI's startup import graph. The
+# proxies keep the flat module-level names so `patch("comfy_cli.cmdline.run_inner.execute")`
+# and friends keep working; see comfy_cli/_lazy.py. Subcommand *groups* are
+# deferred separately via the table at the bottom of this file.
+install_inner = LazyModule("comfy_cli.command.install")
+run_inner = LazyModule("comfy_cli.command.run")
+run_cli_inner = LazyModule("comfy_cli.command.run_cli")
+transfer_inner = LazyModule("comfy_cli.command.transfer")
+custom_nodes = LazyModule("comfy_cli.command.custom_nodes")
+
 logging.setup_logging()
-app = typer.Typer()
+
+
+class _RootGroup(LazyTyperGroup):
+    """Root click group. Subcommand groups are declared in ``lazy_subcommands``
+    (assigned at the bottom of this module) and imported on first use."""
+
+
+app = typer.Typer(cls=_RootGroup)
+# The lazy builders below pass this to typer's command/group factories; read it
+# off the root app rather than assuming typer's default.
+_RootGroup.pretty_exceptions_short = app.pretty_exceptions_short
 workspace_manager = WorkspaceManager()
 
 console = Console()
@@ -782,6 +767,8 @@ def update(
             # `cm-cli update all` is non-atomic — packs that did update stayed updated — so
             # refresh the id cache exactly as the no-flag path below does before bailing out.
             _refresh_node_id_cache()
+            from comfy_cli.command.custom_nodes.cm_cli_util import normalize_cm_cli_exit_code
+
             code = normalize_cm_cli_exit_code(e.returncode)
             get_renderer().error(
                 code="update_custom_nodes_failed",
@@ -1515,6 +1502,8 @@ def launch(
         ),
     ] = None,
 ):
+    from comfy_cli.command.launch import launch as launch_command
+
     launch_command(background, extra, frontend_pr)
 
 
@@ -1540,6 +1529,8 @@ def logs(
         ),
     ] = None,
 ):
+    from comfy_cli.command.launch import logs as logs_command
+
     logs_command(tail=tail, where=where, port=port)
 
 
@@ -1974,6 +1965,8 @@ def standalone(
         ),
     ] = False,
 ):
+    from comfy_cli.standalone import StandalonePython
+
     comfy_path, _ = workspace_manager.get_workspace_path()
 
     platform = utils.get_os() if platform is None else platform
@@ -1988,60 +1981,10 @@ def standalone(
         sty.to_tarball()
 
 
-generate_command.register_with(app)
-app.add_typer(
-    models_command.app,
-    name="model",
-    help="Manage the model files in this workspace — download, list, remove. (Search/discovery lives under `comfy models`.)",
-)
-app.add_typer(
-    models_search_command.app,
-    name="models",
-    help="Discover models — folders, files, and the cloud asset catalog.",
-)
-app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
-app.add_typer(nodes_command.app, name="nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories).")
-app.add_typer(templates_command.app, name="templates", help="Browse the Comfy workflow-template gallery.")
-app.add_typer(
-    knowledge_command.app,
-    name="knowledge",
-    help="Inspect the curated model-knowledge bundle: status, resolve an alias, ranked picks per capability.",
-)
-app.command(
-    "run-template",
-    help=(
-        "Fetch a gallery template, fill its parameterized inputs (--param KEY=VALUE), "
-        "and run it to completion on local ComfyUI. Paid partner-API templates require --allow-spend."
-    ),
-)(templates_command.run_template_cmd)
-app.add_typer(workflow_command.app, name="workflow", help="Slot-based editing of frontend-format ComfyUI workflows.")
-app.command(
-    "preview",
-    help="Render a previewable PNG from a media file (image → thumb, video → contact sheet, audio → waveform).",
-)(preview_command.preview_cmd)
-app.add_typer(custom_nodes.manager_app, name="manager", help="Manage ComfyUI-Manager.")
-
-app.add_typer(pr_command.app, name="pr-cache", help="Manage PR cache.")
-
-app.add_typer(code_search.app, name="code-search", help="Search code across ComfyUI repositories.")
-app.add_typer(code_search.app, name="cs", hidden=True)
-
-app.add_typer(tracking.app, name="tracking", help="Manage analytics tracking settings.")
-app.add_typer(cloud_command.app, name="cloud", help="Comfy Cloud — sign in, route commands, inspect session.")
-app.add_typer(auth_command.app, name="auth", help="Manage API tokens for model hosts (Civitai, Hugging Face).")
-app.add_typer(jobs_command.app, name="jobs", help="List, inspect, and live-watch ComfyUI prompts.")
-app.add_typer(
-    distribution_command.app,
-    name="build",
-    help="Package a local ComfyUI environment into a serverless build.",
-)
-
-
-def _add_deprecated_alias(root: typer.Typer, group: typer.Typer, *, old_name: str, new_name: str) -> None:
-    """Register ``group`` a second time under its retired name: hidden from help,
-    same command tree, one deprecation warning per invocation on stderr (the
-    envelopes still carry the canonical ``new_name`` labels). Self-contained on
-    purpose so it can fold into a shared add_deprecated_alias helper later."""
+def _deprecated_alias_callback(*, old_name: str, new_name: str):
+    """Group callback for a retired spelling: one deprecation warning per
+    invocation on stderr (the envelopes still carry the canonical ``new_name``
+    labels)."""
 
     def _warn_deprecated() -> None:
         renderer = get_renderer()
@@ -2053,27 +1996,79 @@ def _add_deprecated_alias(root: typer.Typer, group: typer.Typer, *, old_name: st
         # to the canonical spelling's.
         renderer.command = new_name
 
-    root.add_typer(group, name=old_name, hidden=True, callback=_warn_deprecated)
+    return _warn_deprecated
 
 
-# `comfy distribution` was the group's name before the builder's public API
-# renamed distributions to builds; kept as a warning alias for old scripts.
-_add_deprecated_alias(app, distribution_command.app, old_name="distribution", new_name="build")
-app.add_typer(project_command.app, name="project", help="Project conventions: init and status.")
-app.add_typer(
-    project_command.assets_app,
-    name="assets",
-    help="Push project assets to the run target (local or cloud) and track them in the lock.",
-)
-app.add_typer(
-    skill_command.app,
-    name="skills",
-    help="Install the comfy agent skills into Claude Code, Cursor, Aider, and any AGENTS.md-aware tool.",
-)
-# Keep the singular alias for backward compat
-app.add_typer(skill_command.app, name="skill", hidden=True)
-
-# Hidden: the detached watcher subprocess spawned by `comfy run` when async.
-from comfy_cli.command import job_watcher as _job_watcher  # noqa: E402
-
-app.add_typer(_job_watcher.app, name="_watch", hidden=True)
+# Subcommands imported on first use: three top-level commands whose modules
+# are heavy, then every subcommand group. Order matters: it is the order
+# `comfy --help` lists them in (after the commands defined above), so a new
+# entry goes where it should appear, not at the end.
+_RootGroup.lazy_subcommands = {
+    # `generate` registers itself (its command is a closure); see register_with.
+    "generate": LazyCommand("comfy_cli.command.generate", register="register_with"),
+    "run-template": LazyCommand(
+        "comfy_cli.command.templates",
+        attr="run_template_cmd",
+        help=(
+            "Fetch a gallery template, fill its parameterized inputs (--param KEY=VALUE), "
+            "and run it to completion on local ComfyUI. Paid partner-API templates require --allow-spend."
+        ),
+    ),
+    "preview": LazyCommand(
+        "comfy_cli.command.preview",
+        attr="preview_cmd",
+        help="Render a previewable PNG from a media file (image → thumb, video → contact sheet, audio → waveform).",
+    ),
+    "model": LazySubcommand(
+        "comfy_cli.command.models.models",
+        help="Manage the model files in this workspace — download, list, remove. (Search/discovery lives under `comfy models`.)",
+    ),
+    "models": LazySubcommand(
+        "comfy_cli.command.models.search",
+        help="Discover models — folders, files, and the cloud asset catalog.",
+    ),
+    "node": LazySubcommand("comfy_cli.command.custom_nodes", help="Manage custom nodes."),
+    "nodes": LazySubcommand(
+        "comfy_cli.command.nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories)."
+    ),
+    "templates": LazySubcommand("comfy_cli.command.templates", help="Browse the Comfy workflow-template gallery."),
+    "knowledge": LazySubcommand(
+        "comfy_cli.command.knowledge",
+        help="Inspect the curated model-knowledge bundle: status, resolve an alias, ranked picks per capability.",
+    ),
+    "workflow": LazySubcommand(
+        "comfy_cli.command.workflow", help="Slot-based editing of frontend-format ComfyUI workflows."
+    ),
+    "manager": LazySubcommand("comfy_cli.command.custom_nodes", attr="manager_app", help="Manage ComfyUI-Manager."),
+    "pr-cache": LazySubcommand("comfy_cli.command.pr_command", help="Manage PR cache."),
+    "code-search": LazySubcommand("comfy_cli.command.code_search", help="Search code across ComfyUI repositories."),
+    "cs": LazySubcommand("comfy_cli.command.code_search", hidden=True),
+    "tracking": LazySubcommand("comfy_cli.tracking", help="Manage analytics tracking settings."),
+    "cloud": LazySubcommand("comfy_cli.cloud.command", help="Comfy Cloud — sign in, route commands, inspect session."),
+    "auth": LazySubcommand("comfy_cli.auth.command", help="Manage API tokens for model hosts (Civitai, Hugging Face)."),
+    "jobs": LazySubcommand("comfy_cli.command.jobs", help="List, inspect, and live-watch ComfyUI prompts."),
+    "build": LazySubcommand(
+        "comfy_cli.command.build", help="Package a local ComfyUI environment into a serverless build."
+    ),
+    # `comfy distribution` was the group's name before the builder's public API
+    # renamed distributions to builds; kept as a warning alias for old scripts.
+    "distribution": LazySubcommand(
+        "comfy_cli.command.build",
+        hidden=True,
+        callback=_deprecated_alias_callback(old_name="distribution", new_name="build"),
+    ),
+    "project": LazySubcommand("comfy_cli.command.project", help="Project conventions: init and status."),
+    "assets": LazySubcommand(
+        "comfy_cli.command.project",
+        attr="assets_app",
+        help="Push project assets to the run target (local or cloud) and track them in the lock.",
+    ),
+    "skills": LazySubcommand(
+        "comfy_cli.skills.command",
+        help="Install the comfy agent skills into Claude Code, Cursor, Aider, and any AGENTS.md-aware tool.",
+    ),
+    # Keep the singular alias for backward compat
+    "skill": LazySubcommand("comfy_cli.skills.command", hidden=True),
+    # Hidden: the detached watcher subprocess spawned by `comfy run` when async.
+    "_watch": LazySubcommand("comfy_cli.command.job_watcher", hidden=True),
+}

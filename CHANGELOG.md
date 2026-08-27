@@ -17,7 +17,49 @@ history.
 
 ### Added
 
+- `comfy-build`, the skill for building a custom ComfyUI environment on the
+  developer platform, is now bundled with the CLI. `comfy skills show
+  comfy-build` works, and an argument-free `comfy skills install` writes it on a
+  machine with no network.
+- `comfy build from-workflow --from <workflow.json> --name <name>` creates a
+  build from a ComfyUI workflow, in the editing format or the API export.
+- A workflow import prints its full report: the node classes nothing provides,
+  the closest pack the registry named for each one, every model the graph loads
+  (a workflow build carries none of them), the classes served by a partner API,
+  and whether a ComfyUI version still has to be pinned.
 - `CONTRIBUTING.md` (renamed from `DEV_README.md`) and this changelog.
+
+### Changed
+
+- `comfy skills install` no longer fetches any skill over the network.
+  `comfy-build` was the only one it fetched, and it now ships in the wheel and
+  is versioned with the CLI release, so the skill and the commands it describes
+  can no longer drift apart.
+
+- The builder client module is now `comfy_cli.builder_api` (was
+  `comfy_cli.distribution_api`), and its methods say build and release
+  (`create_build`, `list_releases`, ...), matching the builder's public API.
+  The `distribution-definition/0` schema id is unchanged.
+- `comfy build --json` payloads carry the builder's vocabulary: `buildId`,
+  `releaseId`, and `builds` and `releases` arrays. The retired `distributionId`,
+  `versionId`, `distributions` and `versions` keys are emitted alongside them
+  with identical values, so a pinned script keeps parsing. The shipped schema
+  filenames are unchanged.
+
+### Deprecated
+
+- `import comfy_cli.distribution_api` still works for one release and warns;
+  import `comfy_cli.builder_api` instead.
+- The `distributionId`, `versionId`, `distributions` and `versions` keys in
+  `comfy build` `--json` output will be removed after one release; read
+  `buildId`, `releaseId`, `builds` and `releases` instead. The six schemas that
+  declare them mark each retired key deprecated in its description.
+
+### Fixed
+
+- The shipped `build_from_snapshot.json` schema now requires the `build` key
+  the builder actually serves; it still required the pre-rename `distribution`
+  key, so a valid `comfy build from-snapshot --json` payload failed validation.
 
 ## [1.16.0] - 2026-08-10
 

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://comfy.org/schemas/knowledge_block.json",
   "title": "knowledge block",
-  "description": "Curated model knowledge attached as `data.knowledge` by discovery commands (generate schema|list, templates ls|show|get, nodes search|ls, models search). Absent when no bundle is loaded, when nothing matched, or when the call named no subject at all (an unfiltered listing) — except that an empty result with no match carries zero_hit and a nudge. Every field is optional; readers must ignore unknown fields.",
+  "description": "Curated model knowledge attached as `data.knowledge` by discovery commands (generate schema|list, templates ls|show|get, nodes search|ls, models search). Absent when no bundle is loaded, or when the call named no subject at all (an unfiltered listing). A query term nothing curated answers attaches a rowless block: `bundle_version`, `stale`, `as_of`, `hit_ids: []`, `zero_hit` and `uncurated_queries`, with no models and no picks. That block is itself dropped in the one case where the terms alone overrun the byte ceiling. Every field is optional; readers must ignore unknown fields.",
   "type": "object",
   "properties": {
     "bundle_version": { "type": "string", "description": "Version of the comfy-knowledge bundle the block came from." },
@@ -70,9 +70,10 @@
     "hit_ids": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Model ids then `cap:<id>` for capabilities, in block order, after capping."
+      "description": "Model ids then `cap:<id>` for capabilities, in block order, after capping. Empty when nothing curated matched the call. On a rowless block it names what matched and did not fit under the byte ceiling, so a non-empty `hit_ids` with no models and no picks is curated knowledge the caller did not receive rather than a gap."
     },
-    "zero_hit": { "type": "boolean", "description": "True when nothing curated matched and the command's own result was empty." },
+    "zero_hit": { "type": "boolean", "description": "True when nothing curated matched and the command's own result was empty. Read it with `hit_ids`: an empty `hit_ids` is the miss, and this says whether the command's own result came back empty too." },
+    "uncurated_queries": { "type": "array", "items": { "type": "string" }, "description": "The query terms the bundle keys nothing for, clipped to 200 characters each. Present whenever at least one term missed, including on a block whose rows arrived through the reverse index while the term itself matched nothing, which `hit_ids` alone reads as a hit. Absent when every term resolved, so a rowless block without it is rows that existed and did not reach the caller rather than a gap in the bundle. Dropped, like `nudge`, only when the block would otherwise overrun its byte ceiling. The local `knowledge_query` event carries the same list and never sheds it." },
     "nudge": { "type": "string", "description": "One line naming what was asked, pointing at `capabilities_available` for what is covered. Present on a zero-hit thin result, and on a non-empty block whose query matched no model or capability directly." }
   }
 }
