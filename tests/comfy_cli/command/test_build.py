@@ -384,6 +384,10 @@ class _FakeBuilder:
         return f"blob-{filename}", f"https://put.example/{filename}"
 
     def upload_blob(self, upload_url, path):
+        # The real client hands the URL to `requests.put`, which rejects `None`.
+        # A fake that accepted it would let a deduplicated blob regress silently.
+        if upload_url is None:
+            raise requests.exceptions.MissingSchema("Invalid URL 'None': No scheme supplied.")
         self.uploaded.append((upload_url, str(path)))
 
     def create_build(self, name, definition, description=None):
@@ -393,6 +397,15 @@ class _FakeBuilder:
     def create_release(self, build_id, targets=None):
         self.cut = (build_id, targets)
         return "ver-456", "https://status.example/ver-456"
+
+
+class _DeduplicatingBuilder(_FakeBuilder):
+    """A builder that already holds every blob offered to it, so ``create_blob``
+    answers with the existing id and no upload URL."""
+
+    def create_blob(self, kind, filename, sha256, size_bytes):
+        self.blobs_created.append(filename)
+        return f"blob-{filename}", None
 
 
 def test_execute_create_uploads_stitches_and_cuts():
@@ -440,6 +453,42 @@ def test_execute_create_preflights_uploads_before_moving_bytes():
         build.execute_create(plan, client=fake, name="demo", locate_bytes=lambda u: Path("/tmp/x"))
     assert fake.blobs_created == [], "no model should upload when a later node makes the create unsupported"
     assert fake.created is None
+
+
+def test_execute_create_stitches_a_deduplicated_blob_without_uploading_it():
+    """A builder that already holds the bytes answers with the id it has and no
+    upload URL. Sending them anyway PUTs to ``None`` — ``requests`` raises
+    ``MissingSchema`` — and fails the whole create over content already stored,
+    which is exactly the retry this deduplication exists to make cheap."""
+    scan_def = {
+        "models": [{"type": "vae", "filename": "ae.safetensors", "sha256": "h", "sizeBytes": 5, "source": "local"}],
+        "customNodes": [],
+    }
+    plan = build.plan_create(scan_def)
+    fake = _DeduplicatingBuilder()
+
+    result = build.execute_create(plan, client=fake, name="demo", locate_bytes=lambda u: Path("/tmp/ae.safetensors"))
+
+    assert fake.uploaded == [], "a blob the builder already holds has nothing to transfer"
+    assert result["uploaded"] == 0, "`uploaded` counts bytes that moved, not blobs stitched"
+    assert plan["definition"]["models"][0]["blobId"] == "blob-ae.safetensors"
+    assert fake.cut[0] == "dist-123", "the create must still reach the release"
+
+
+def test_blob_upload_reports_the_id_when_the_builder_already_holds_the_bytes(monkeypatch, tmp_path, capsys):
+    """Re-running `comfy build blob upload` on a stored file is the ordinary case:
+    it must answer with the usable id rather than fail on a ``None`` upload URL."""
+    target = tmp_path / "ae.safetensors"
+    target.write_bytes(b"VAE")
+    client = _DeduplicatingBuilder()
+    monkeypatch.setattr(build, "_builder_client", lambda renderer, url: client)
+
+    build.blob_upload_cmd(path=str(target))
+
+    assert client.uploaded == [], "nothing to PUT when the builder deduplicated the blob"
+    out = capsys.readouterr().out
+    assert "blob-ae.safetensors" in out
+    assert "None" not in out, "a None upload URL must never reach the user"
 
 
 class _FakeResolver:
