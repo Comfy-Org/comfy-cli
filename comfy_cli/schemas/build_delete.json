@@ -3,10 +3,11 @@
   "$id": "https://comfy.org/schemas/build_delete.json",
   "title": "comfy build delete --json data payload",
   "type": "object",
-  "required": ["distributionId", "deleted"],
+  "required": ["buildId", "distributionId", "deleted"],
   "additionalProperties": true,
   "properties": {
-    "distributionId": {"type": "string"},
+    "buildId": {"type": "string", "description": "The deleted build's id."},
+    "distributionId": {"type": "string", "description": "Deprecated alias of `buildId`, always identical to it. Emitted for one release so pinned scripts keep parsing; prefer `buildId`."},
     "deleted": {"type": "boolean"}
   }
 }

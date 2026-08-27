@@ -29,7 +29,7 @@
       ],
       "description": "`comfy run` emits converted?/prompt_preview/queued on both targets; its per-node types (executing, execution_cached, progress, executed, output, execution_error) are --where local only, because the cloud run path polls for a terminal record instead of streaming a session. `state` is emitted by `comfy jobs watch --where cloud` for each coarse status transition. This enum is ADVISORY and open-ended: it lists the types this comfy-cli version emits, and adding a type is an additive change that does NOT bump `event/1`. Agents must ignore types they do not recognise rather than treat them as a validation failure — fetch the current schema with `comfy --json discover` instead of pinning this list."
     },
-    "node": {"type": ["string", "null"], "description": "The node this per-node event is about. `execution_cached` carries exactly one node id per event on BOTH the `comfy run` and the `comfy jobs watch` stream."},
+    "node": {"type": ["string", "null"], "description": "The node this per-node event is about. Every `execution_cached` emitted by this version carries exactly one node id here, on BOTH the `comfy run` and the `comfy jobs watch` stream; the `allOf` branch below requires it whenever the legacy `nodes` array is absent. A stream captured from comfy-cli 1.16.0 may instead carry the list-shaped `nodes` (see its description)."},
     "title": {"type": ["string", "null"]},
     "class_type": {"type": ["string", "null"]},
     "completed": {"type": ["integer", "null"]},
@@ -62,9 +62,21 @@
     {
       "if": {"required": ["type"], "properties": {"type": {"const": "execution_cached"}}},
       "then": {
-        "properties": {
-          "nodes": {"type": ["array", "null"], "items": {"type": "string"}}
-        }
+        "description": "Exactly one of the two shapes, never both and never neither: the per-node `node` string every emitter produces today, or the legacy `nodes` array of id strings that only comfy-cli 1.16.0's `comfy jobs watch` ever emitted.",
+        "oneOf": [
+          {
+            "required": ["node"],
+            "not": {"required": ["nodes"]},
+            "properties": {"node": {"type": "string"}}
+          },
+          {
+            "required": ["nodes"],
+            "not": {"required": ["node"]},
+            "properties": {
+              "nodes": {"type": ["array", "null"], "items": {"type": "string"}}
+            }
+          }
+        ]
       }
     }
   ]

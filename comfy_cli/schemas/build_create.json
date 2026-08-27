@@ -27,14 +27,15 @@
         "upload_bytes": {"type": "integer"}
       }
     },
-    "distributionId": {"type": "string"},
-    "versionId": {"type": "string"},
-    "releaseId": {"type": "string"},
+    "buildId": {"type": "string", "description": "The created build's id."},
+    "distributionId": {"type": "string", "description": "Deprecated alias of `buildId`, always identical to it. Emitted for one release so pinned scripts keep parsing; prefer `buildId`."},
+    "releaseId": {"type": "string", "description": "The release cut from the new build."},
+    "versionId": {"type": "string", "description": "Deprecated alias of `releaseId`, always identical to it. Emitted for one release so pinned scripts keep parsing; prefer `releaseId`."},
     "statusUrl": {"type": "string"},
     "uploaded": {"type": "integer"}
   },
   "oneOf": [
     {"properties": {"executed": {"const": false}}, "required": ["plan"]},
-    {"properties": {"executed": {"const": true}}, "required": ["distributionId", "versionId", "releaseId", "statusUrl"]}
+    {"properties": {"executed": {"const": true}}, "required": ["buildId", "distributionId", "releaseId", "versionId", "statusUrl"]}
   ]
 }

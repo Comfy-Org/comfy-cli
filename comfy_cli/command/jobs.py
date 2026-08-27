@@ -1990,16 +1990,25 @@ def _watch_execution_cached(state: _WatchState, data: dict[str, Any]) -> None:
     # special-case a list-shaped `nodes` here. `title`/`class_type` are omitted:
     # watch has no workflow map to resolve them from, and both are optional in
     # the run dialect's own emission.
-    nodes = data.get("nodes") or []
-    for n in nodes:
-        state.completed_nodes.add(str(n))
+    raw = data.get("nodes")
+    if not isinstance(raw, list):
+        # Server-supplied. A bare string would otherwise iterate per character
+        # and fan out one bogus event each, and a non-iterable would raise
+        # TypeError out of the handler; sibling handlers guard the same way
+        # (see `_watch_progress_state`'s isinstance check).
+        return
+    # `comfy run`'s on_cached skips null entries (run/execution.py). Do the
+    # same: stringifying one would emit a phantom `node: "None"` event and
+    # record a fabricated id in the terminal envelope's completed nodes.
+    nodes = [str(n) for n in raw if n is not None]
+    state.completed_nodes.update(nodes)
     renderer = state.renderer
     if renderer.is_pretty():
         renderer.console().print(f"[dim]✓[/dim] cached: {len(nodes)} node(s)")
-    for n in nodes:
+    for node_id in nodes:
         renderer.event(
             "execution_cached",
-            node=str(n),
+            node=node_id,
             prompt_id=state.prompt_id,
         )
 

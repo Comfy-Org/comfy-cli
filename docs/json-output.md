@@ -51,9 +51,11 @@ attaches to `executing`, `execution_cached` and `executed`; it also does not
 carry the `outputs` array on `executed`, reporting each artifact as its own
 `output` event instead. *(Changed since 1.16.0, whose `jobs watch` emitted one
 `execution_cached` carrying a `nodes` array — a run-dialect consumer counting
-cached nodes per event undercounted every cached node beyond the first. The
-`nodes` array form is still accepted by the published event schema so a stream
-captured from 1.16.0 keeps validating, but nothing emits it.)*
+cached nodes per event undercounted every cached node beyond the first. If you
+wrote a watch consumer against 1.16.0 and read `ev["nodes"]` on this event,
+read `ev["node"]` instead, once per event. The `nodes` array form is still
+accepted by the published event schema so a stream captured from 1.16.0 keeps
+validating, but nothing emits it.)*
 
 ## Overview
 

@@ -60,7 +60,7 @@ app = typer.Typer(
 )
 
 # `comfy build release <verb>`: the resource-verb surface for releases
-# (a release is an immutable build cut of a distribution; the builder's public
+# (a release is an immutable cut of a build; the builder's public
 # API renamed build versions to releases). The module keeps the version_app
 # name so internal references stay put.
 version_app = typer.Typer(
@@ -576,6 +576,101 @@ _REPORT_ADVISORIES = (
     ("unverifiedPins", "left unchecked because the registry did not answer"),
     ("skippedPins", "dropped: the build owns these packages"),
     ("unpinnablePins", "dropped: not a public PyPI release"),
+    ("unresolvedClasses", "node classes nothing installable provides; the graph will not run without them"),
+    ("uncheckedClasses", "node classes the registry never answered for, so the build may not carry them"),
+    (
+        "packsWithoutVersion",
+        "packs the build fetches from their repository, because the registry publishes no version of them",
+    ),
+    ("collidingPacks", "packs the build leaves out, because another pack already claimed their install folder"),
+)
+
+# How many names an advisory line prints before it says how many it held back.
+_ADVISORY_NAMES = 8
+
+
+def _from_server(value) -> str:
+    """Scrub one builder-supplied fragment. Class names and filenames travel to
+    the builder from the workflow file and come back in the report, so a crafted
+    file could otherwise forge terminal lines that read as the CLI's own."""
+    return sanitize_error_body(str(value))
+
+
+def _advisory_line(count: int, meaning: str, names: list[str]) -> str:
+    """Count first, then the names, then how many names the line held back."""
+    shown = names[:_ADVISORY_NAMES]
+    held_back = f" (+{count - len(shown)} more)" if count > len(shown) else ""
+    return f"{count} {meaning}: {', '.join(shown)}{held_back}"
+
+
+def _unrenderable(key: str, value) -> str:
+    """The builder sent a key this renderer knows, in a shape it cannot read.
+    Say so: dropping it silently is how a partial import comes to look clean."""
+    return f"the builder sent `{key}` as {type(value).__name__}, which this CLI cannot render; read it with --json"
+
+
+def _best_suggestion(entry: dict, field: str) -> str:
+    """The highest-scored suggestion's ``field``, or "" when none carries one.
+    The catalog ranks what it thinks the workflow meant, so the reader gets the
+    lead rather than the whole list."""
+    ranked = [s for s in (entry.get("suggestions") or []) if isinstance(s, dict) and s.get(field)]
+    if not ranked:
+        return ""
+    best = max(ranked, key=lambda s: s["score"] if isinstance(s.get("score"), int | float) else 0.0)
+    return _from_server(best[field])
+
+
+def _suggested_pack_lines(entries: list) -> list[str]:
+    """`unknownClasses` is the detailed form of `unresolvedClasses`, which already
+    prints the names. What it adds is the pack the registry came closest to, so
+    that is all this renders, and only for the classes that carry one."""
+    suggested = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        pack = _best_suggestion(entry, "packId")
+        if pack:
+            suggested.append(f"{_from_server(entry.get('classType'))} (maybe {pack})")
+    if not suggested:
+        return []
+    meaning = "node classes the registry could not attribute, with the closest pack it named"
+    return [_advisory_line(len(suggested), meaning, suggested)]
+
+
+def _model_lines(entries: list) -> list[str]:
+    """A workflow import builds custom nodes and no models, because a workflow
+    names a model without saying where it comes from. So every model the graph
+    loads is still owed, and ``status`` shapes the wording rather than deciding
+    whether a line exists: the shared catalog already holds a matched one, which
+    needs only a source pointer, while the rest have to be found first."""
+    held, owed = [], []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            owed.append(_from_server(entry))
+            continue
+        name = _from_server(entry.get("filename"))
+        if entry.get("status") == "matched":
+            held.append(name)
+            continue
+        lead = _best_suggestion(entry, "filename")
+        owed.append(f"{name} (maybe {lead})" if lead else name)
+    lines = []
+    if held:
+        meaning = (
+            "models the shared catalog holds that this build does not carry, each needing a sourceUri in the "
+            "definition before you cut"
+        )
+        lines.append(_advisory_line(len(held), meaning, held))
+    if owed:
+        meaning = "models the graph loads that nothing has a source for; `comfy build resolve` finds candidates"
+        lines.append(_advisory_line(len(owed), meaning, owed))
+    return lines
+
+
+# Each entry is (report key, what turns its entries into lines).
+_REPORT_ENTRY_ADVISORIES = (
+    ("unknownClasses", _suggested_pack_lines),
+    ("models", _model_lines),
 )
 
 
@@ -592,11 +687,36 @@ def report_advisories(report: dict) -> list[str]:
     dropped = report.get("droppedComfyVersion")
     if dropped:
         lines.append(f"the ComfyUI release {str(dropped)!r} is not a ref the build can use, so none was set")
+    if report.get("pinnedToLatest") is True:
+        lines.append(
+            "the importer pinned every pack the workflow named without a version to the registry's newest "
+            "published one, so importing the same file later can build something different"
+        )
     for key, meaning in _REPORT_ADVISORIES:
-        entries = report.get(key) or []
-        # Every one of these is a list; a scalar would render one line per character.
-        if entries and isinstance(entries, list | tuple):
-            lines.append(f"{len(entries)} {meaning}: {', '.join(str(e) for e in entries[:8])}")
+        entries = report.get(key)
+        if not entries:
+            continue
+        # A scalar here would otherwise render one line per character.
+        if not isinstance(entries, list | tuple):
+            lines.append(_unrenderable(key, entries))
+            continue
+        lines.append(_advisory_line(len(entries), meaning, [_from_server(e) for e in entries]))
+    for key, render in _REPORT_ENTRY_ADVISORIES:
+        entries = report.get(key)
+        if not entries:
+            continue
+        if not isinstance(entries, list | tuple):
+            lines.append(_unrenderable(key, entries))
+            continue
+        lines.extend(render(entries))
+    # A mapping of class name -> provider, so each name carries who serves it.
+    partners = report.get("partnerClasses")
+    if partners and not isinstance(partners, dict):
+        lines.append(_unrenderable("partnerClasses", partners))
+    elif partners:
+        served = [f"{_from_server(cls)} ({_from_server(provider)})" for cls, provider in partners.items()]
+        meaning = "node classes call a partner API rather than run from an installed pack"
+        lines.append(_advisory_line(len(partners), meaning, served))
     return lines
 
 
@@ -753,16 +873,26 @@ def plan_create(definition: dict, resolver=resolve_model_source) -> dict:
     }
 
 
+def _id_keys(*, build: str | None = None, release: str | None = None) -> dict[str, str]:
+    """Both spellings of an id. `buildId` and `releaseId` are canonical;
+    `distributionId` and `versionId` go after one release, once pinned scripts have moved."""
+    keys: dict[str, str] = {}
+    if build is not None:
+        keys["buildId"] = keys["distributionId"] = build
+    if release is not None:
+        keys["releaseId"] = keys["versionId"] = release
+    return keys
+
+
 def execute_create(plan: dict, *, client, name: str, locate_bytes, targets=None) -> dict:
     """Run the live create: upload each private blob, stitch its blobId into the
-    definition, create the distribution, and cut a build.
+    definition, create the build, and cut a release.
 
     ``client`` is a BuilderClient (or a stand-in with the same methods).
     ``locate_bytes(upload) -> Path`` finds the local file for a model upload.
     node_zip uploads (hand-dropped local nodes) aren't packaged yet — raises
     NotImplementedError so the caller can surface a clear message. Returns
-    ``{distributionId, versionId, releaseId, statusUrl, uploaded}`` (releaseId
-    is the canonical name for the cut; versionId stays because user scripts pin it)."""
+    ``{buildId, distributionId, releaseId, versionId, statusUrl, uploaded}``."""
     definition = plan["definition"]
     # Preflight the whole upload list before any bytes move: an unsupported local
     # node, or a model whose file can't be found (missing --models-dir), must fail
@@ -780,18 +910,16 @@ def execute_create(plan: dict, *, client, name: str, locate_bytes, targets=None)
         section, idx = u["slot"]
         definition[section][idx]["blobId"] = blob_id
         uploaded += 1
-    dist_id = client.create_distribution(name, definition)
+    build_id = client.create_build(name, definition)
     try:
-        version_id, status_url = client.cut_version(dist_id, targets)
+        version_id, status_url = client.cut_version(build_id, targets)
     except Exception as e:
-        # The distribution now exists server-side; carry its id on the error so the
+        # The build now exists server-side; carry its id on the error so the
         # command can surface it (the user can then delete or retry it, not orphan it).
-        e.distribution_id = dist_id
+        e.build_id = build_id
         raise
     return {
-        "distributionId": dist_id,
-        "versionId": version_id,
-        "releaseId": version_id,
+        **_id_keys(build=build_id, release=version_id),
         "statusUrl": status_url,
         "uploaded": uploaded,
     }
@@ -1045,7 +1173,7 @@ def _load_definition(path: Path, *, require_models: bool = True) -> dict:
     except json.JSONDecodeError as e:
         raise ValueError(f"{path} is not valid JSON: {e}") from e
     if not isinstance(data, dict) or (require_models and "models" not in data):
-        raise ValueError(f"{path} is not a distribution definition (no 'models' key)")
+        raise ValueError(f"{path} is not a build definition (no 'models' key)")
     # Guard the fields the create path indexes, so a hand-edited definition returns
     # an error envelope rather than a bare KeyError traceback downstream.
     for i, m in enumerate(data.get("models") or []):
@@ -1077,10 +1205,10 @@ def create_cmd(
     name: Annotated[
         str,
         typer.Option("--name", help="Name for the build."),
-    ] = "untitled-distribution",
+    ] = "untitled-build",
     execute: Annotated[
         bool,
-        typer.Option("--execute", help="Go live: upload blobs, create the distribution, and cut a build."),
+        typer.Option("--execute", help="Go live: upload blobs, create the build, and cut a release."),
     ] = False,
     builder_url: Annotated[
         str | None,
@@ -1243,14 +1371,14 @@ def _create_execute(
         raise typer.Exit(code=1) from e
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
         # Same handler as the read verbs: surface the builder's own message (and the
-        # limited-beta 403), plus the created distribution's id when a cut failed
+        # limited-beta 403), plus the created build's id when a cut failed
         # after create, so the caller can delete or retry it rather than orphan it.
-        _report_builder_error(renderer, e, dist_id=getattr(e, "distribution_id", None))
+        _report_builder_error(renderer, e, build_id=getattr(e, "build_id", None))
         raise typer.Exit(code=1) from e
 
     if renderer.is_pretty():
         renderer.success(f"Created build '{name}'")
-        renderer.print(f"  build:   {result['distributionId']}")
+        renderer.print(f"  build:   {result['buildId']}")
         renderer.print(f"  release: {result['releaseId']}  (uploaded {result['uploaded']} blob(s))")
         renderer.print(f"  status:  {result['statusUrl']}")
     renderer.emit({"name": name, "executed": True, **result}, command="build create", changed=True)
@@ -1264,7 +1392,7 @@ def _builder_client(renderer, builder_url: str | None):
     and skips the interactive OAuth session ``from_session`` uses. The env var wins
     over a stored session so an explicit token always takes precedence.
     """
-    from comfy_cli.distribution_api import BuilderAuthError, BuilderClient
+    from comfy_cli.builder_api import BuilderAuthError, BuilderClient
 
     base_url = builder_url or os.environ.get("COMFY_BUILDER_URL") or DEFAULT_BUILDER_URL
     token = os.environ.get("COMFY_BUILDER_TOKEN")
@@ -1277,15 +1405,15 @@ def _builder_client(renderer, builder_url: str | None):
         raise typer.Exit(code=1) from e
 
 
-def _report_builder_error(renderer, e, *, dist_id: str | None = None) -> None:
+def _report_builder_error(renderer, e, *, build_id: str | None = None) -> None:
     """Emit one error envelope for a builder failure. Prefers the limited-beta 403,
     then the builder's own error body (e.g. `INVALID_DEFINITION: …` or
     `SUBSCRIPTION_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
-    generic transport error. Includes a created distribution's id when supplied,
-    so a cut that fails after create doesn't orphan an unnamed distribution."""
+    generic transport error. Includes a created build's id when supplied,
+    so a cut that fails after create doesn't orphan an unnamed build."""
     import urllib.error
 
-    base = {"distributionId": dist_id} if dist_id else {}
+    base = _id_keys(build=build_id)
     if isinstance(e, urllib.error.HTTPError):
         body = ""
         try:
@@ -1350,24 +1478,25 @@ _BUILDER_URL_OPT = typer.Option("--builder-url", help="Builder base URL. Default
 def list_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    dists = _builder_call(renderer, client.list_distributions)
+    dists = _builder_call(renderer, client.list_builds)
     if renderer.is_pretty():
         if not dists:
             renderer.info("No builds yet.")
         for d in dists:
             renderer.print(f"  {d.get('id', '?')}  {d.get('name', '')}")
-    renderer.emit({"distributions": dists}, command="build list")
+    # `builds` is canonical; `distributions` carries the same rows and goes after one release.
+    renderer.emit({"builds": dists, "distributions": dists}, command="build list")
 
 
 @app.command("get", help="Show a build and its full definition.")
 @tracking.track_command("build")
 def get_cmd(
-    distribution_id: Annotated[str, typer.Argument(help="Build id.")],
+    build_id: Annotated[str, typer.Argument(help="Build id.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    dist = _builder_call(renderer, lambda: client.get_distribution(distribution_id))
+    dist = _builder_call(renderer, lambda: client.get_build(build_id))
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(dist))
     renderer.emit(dist, command="build get")
@@ -1376,18 +1505,17 @@ def get_cmd(
 @version_app.command("create", help="Cut a new release of a build.")
 @tracking.track_command("build")
 def version_create(
-    distribution_id: Annotated[str, typer.Argument(help="Build id to cut a release of.")],
+    build_id: Annotated[str, typer.Argument(help="Build id to cut a release of.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    release_id, status_url = _builder_call(renderer, lambda: client.cut_version(distribution_id))
+    release_id, status_url = _builder_call(renderer, lambda: client.cut_version(build_id))
     if renderer.is_pretty():
         renderer.success(f"Cut release {release_id}")
         renderer.print(f"  status: {status_url}")
-    # releaseId is the canonical name; versionId stays because user scripts pin it.
     renderer.emit(
-        {"distributionId": distribution_id, "versionId": release_id, "releaseId": release_id, "statusUrl": status_url},
+        {**_id_keys(build=build_id, release=release_id), "statusUrl": status_url},
         command="build release create",
         changed=True,
     )
@@ -1396,18 +1524,18 @@ def version_create(
 @version_app.command("list", help="List a build's releases.")
 @tracking.track_command("build")
 def version_list(
-    distribution_id: Annotated[str, typer.Argument(help="Build id.")],
+    build_id: Annotated[str, typer.Argument(help="Build id.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    versions = _builder_call(renderer, lambda: client.list_distribution_versions(distribution_id))
+    versions = _builder_call(renderer, lambda: client.list_releases(build_id))
     if renderer.is_pretty():
         if not versions:
             renderer.info("No releases yet.")
         for v in versions:
             renderer.print(f"  {v.get('id', '?')}  {v.get('status', '')}")
-    renderer.emit({"versions": versions}, command="build release list")
+    renderer.emit({"releases": versions, "versions": versions}, command="build release list")
 
 
 @version_app.command("get", help="Show a release's build status.")
@@ -1437,12 +1565,11 @@ def version_logs(
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
     content = _builder_call(renderer, lambda: client.get_version_logs(version_id, os=os_target, gpu=gpu))
-    # The contract carries both spellings of the id: releaseId is canonical and
-    # versionId stays because user scripts pin it. Mirror whichever the builder
-    # returned into the other so either server generation yields both keys.
+    # Mirror whichever spelling the builder returned, so either server generation
+    # yields both keys.
     log_id = content.get("releaseId") or content.get("versionId")
     if log_id:
-        content = {**content, "versionId": log_id, "releaseId": log_id}
+        content = {**content, **_id_keys(release=log_id)}
     if renderer.is_pretty():
         log = content.get("log", "")
         renderer.print(log if log else "(no build log captured yet)")
@@ -1454,7 +1581,7 @@ def version_logs(
 @app.command("validate", help="Dry-run resolve a build's definition (nothing is built).")
 @tracking.track_command("build")
 def validate_cmd(
-    distribution_id: Annotated[str, typer.Argument(help="Build id.")],
+    build_id: Annotated[str, typer.Argument(help="Build id.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
@@ -1462,7 +1589,7 @@ def validate_cmd(
     # A 400 here means "the definition has problems" — a normal validate outcome,
     # not a transport error; _builder_call surfaces the builder's issue list in the
     # message + details.body so the caller sees exactly what failed to resolve.
-    result = _builder_call(renderer, lambda: client.validate_distribution(distribution_id))
+    result = _builder_call(renderer, lambda: client.validate_build(build_id))
     if renderer.is_pretty():
         # The endpoint checks shape and pin existence. Whether the set installs
         # together is answered by a build, so the line claims only what it did.
@@ -1488,14 +1615,14 @@ def validate_cmd(
 @app.command("delete", help="Delete a build (soft-delete).")
 @tracking.track_command("build")
 def delete_cmd(
-    distribution_id: Annotated[str, typer.Argument(help="Build id.")],
+    build_id: Annotated[str, typer.Argument(help="Build id.")],
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
     if not yes:
         if renderer.is_pretty():
-            if not typer.confirm(f"Delete build {distribution_id}?"):
+            if not typer.confirm(f"Delete build {build_id}?"):
                 renderer.info("Aborted.")
                 raise typer.Exit(code=0)
         else:
@@ -1504,20 +1631,20 @@ def delete_cmd(
                 code="build_delete_needs_confirm",
                 message="refusing to delete without confirmation in non-interactive mode.",
                 hint="pass --yes to confirm the delete",
-                details={"distributionId": distribution_id},
+                details=_id_keys(build=build_id),
             )
             raise typer.Exit(code=1)
     client = _builder_client(renderer, builder_url)
-    _builder_call(renderer, lambda: client.delete_distribution(distribution_id))
+    _builder_call(renderer, lambda: client.delete_build(build_id))
     if renderer.is_pretty():
-        renderer.success(f"Deleted build {distribution_id}")
-    renderer.emit({"distributionId": distribution_id, "deleted": True}, command="build delete", changed=True)
+        renderer.success(f"Deleted build {build_id}")
+    renderer.emit({**_id_keys(build=build_id), "deleted": True}, command="build delete", changed=True)
 
 
 @app.command("update", help="Replace a build's definition from a scan/edited JSON.")
 @tracking.track_command("build")
 def update_cmd(
-    distribution_id: Annotated[str, typer.Argument(help="Build id.")],
+    build_id: Annotated[str, typer.Argument(help="Build id.")],
     from_: Annotated[str, typer.Option("--from", "-f", help="Path to a definition JSON.")],
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
@@ -1553,13 +1680,13 @@ def update_cmd(
     # concurrency, meant for the website's read-edit-save). For a CLI that's just
     # last-writer-wins: fetch the current updatedAt and echo it back, else the save
     # 409s STALE on a missing/zero timestamp.
-    current = _builder_call(renderer, lambda: client.get_distribution(distribution_id))
+    current = _builder_call(renderer, lambda: client.get_build(build_id))
     dist = _builder_call(
         renderer,
-        lambda: client.update_distribution(distribution_id, definition, current.get("updatedAt")),
+        lambda: client.update_build(build_id, definition, current.get("updatedAt")),
     )
     if renderer.is_pretty():
-        renderer.success(f"Updated build {distribution_id}")
+        renderer.success(f"Updated build {build_id}")
     renderer.emit(dist, command="build update", changed=True)
 
 
@@ -1607,18 +1734,83 @@ def from_snapshot_cmd(
     client = _builder_client(renderer, builder_url)
     result = _builder_call(
         renderer,
-        lambda: client.create_distribution_from_snapshot(
+        lambda: client.create_build_from_snapshot(
             name, as_snapshot_envelope(snapshot), description=description, base_image_id=base_image
         ),
     )
     created = result.get("build") or {}
-    distribution_id = created.get("id")
+    build_id = created.get("id")
     if renderer.is_pretty():
-        renderer.success(f"Created build {distribution_id} from {path.name}")
+        renderer.success(f"Created build {build_id} from {path.name}")
         for line in report_advisories(result.get("report") or {}):
             renderer.warn(line)
-        renderer.info(f"cut a build with `comfy build release create {distribution_id}`")
+        renderer.info(f"cut a build with `comfy build release create {build_id}`")
     renderer.emit(result, command="build from-snapshot", changed=True)
+
+
+@app.command("from-workflow", help="Create a build from a ComfyUI workflow file.")
+@tracking.track_command("build")
+def from_workflow_cmd(
+    from_: Annotated[
+        str, typer.Option("--from", "-f", help="Path to a ComfyUI workflow JSON (editing format or API export).")
+    ],
+    name: Annotated[str, typer.Option("--name", help="Name for the new build.")],
+    description: Annotated[str | None, typer.Option("--description", help="Optional description.")] = None,
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
+    renderer = get_renderer()
+    path = Path(from_).expanduser()
+    try:
+        workflow = json.loads(path.read_text(encoding="utf-8"))
+        # The dialect is the builder's call: it reads the editing format and the
+        # API export, so a client-side guess would refuse files it accepts.
+        if not isinstance(workflow, dict):
+            raise ValueError(f"expected a JSON object, got {type(workflow).__name__}")
+    # A deeply nested file makes json.loads recurse until the interpreter stops
+    # it, and that lands outside the ValueError family.
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as e:
+        renderer.error(
+            code="build_workflow_invalid",
+            message=f"could not read {path}: {e}",
+            details={"path": str(path)},
+        )
+        raise typer.Exit(code=1) from e
+
+    client = _builder_client(renderer, builder_url)
+    result = _builder_call(renderer, lambda: client.create_build_from_workflow(name, workflow, description=description))
+    created = result.get("build") if isinstance(result, dict) else None
+    report = result.get("report") if isinstance(result, dict) else None
+    distribution_id = created.get("id") if isinstance(created, dict) else None
+    # The row is already written by the time the answer arrives, so a shape this
+    # command cannot read means a build exists that nothing here can name.
+    if not distribution_id or not isinstance(report, dict):
+        renderer.error(
+            code="build_builder_error",
+            message=(
+                "the builder answered from-workflow with a shape this CLI cannot read, so a build may exist "
+                "that this command cannot name; list your builds with `comfy build list`"
+            ),
+            details={"received": sorted(result) if isinstance(result, dict) else type(result).__name__},
+        )
+        raise typer.Exit(code=1)
+
+    if renderer.is_pretty():
+        renderer.success(f"Created build {distribution_id} from {path.name}")
+        if not report:
+            renderer.warn("the builder sent an empty import report, so nothing here says what the workflow mapped to")
+        for line in report_advisories(report):
+            renderer.warn(line)
+        # comfyVersionRequired is the builder's word on whether a version is
+        # pinned, so only an explicit false says this build can be cut.
+        if report.get("comfyVersionRequired") is False:
+            renderer.info(f"cut a build with `comfy build release create {distribution_id}`")
+        else:
+            renderer.info(
+                "no ComfyUI version is pinned, so this build cannot be cut yet: run `comfy build get "
+                f"{distribution_id} --json | jq .data.definition > def.json`, add `baseComfyVersion` to def.json, "
+                f"then run `comfy build update {distribution_id} --from def.json`"
+            )
+    renderer.emit(result, command="build from-workflow", changed=True)
 
 
 @blob_app.command("upload", help="Upload a private file and print the blobId a definition can reference.")

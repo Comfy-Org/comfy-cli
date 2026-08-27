@@ -3227,6 +3227,29 @@ def test_watch_execution_cached_empty_list_emits_nothing():
     assert r.events == []
 
 
+def test_watch_execution_cached_skips_null_nodes():
+    """`comfy run`'s on_cached does `if n is None: continue`, and the two
+    streams speak one dialect. Stringifying a null would emit a phantom
+    `node: "None"` event and put a fabricated id in the terminal envelope."""
+    st, r = _watch_state()
+    jobs_mod._watch_execution_cached(st, {"nodes": [None, "1"]})
+
+    assert [kw["node"] for _, kw in r.events] == ["1"]
+    assert st.completed_nodes == {"1"}
+
+
+def test_watch_execution_cached_ignores_a_non_list_nodes_field():
+    """`nodes` is server-supplied. A bare string would otherwise fan out one
+    bogus event per character, and a non-iterable would raise TypeError out of
+    the handler and tear down the watch."""
+    st, r = _watch_state()
+    for malformed in ("12", 5, {"1": "x"}):
+        jobs_mod._watch_execution_cached(st, {"nodes": malformed})
+
+    assert r.events == []
+    assert st.completed_nodes == set()
+
+
 def test_watch_progress_uses_throttled_event():
     st, r = _watch_state()
     jobs_mod._watch_progress(st, {"node": "3", "value": 2, "max": 10})

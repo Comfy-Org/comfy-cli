@@ -1,3 +1,5 @@
 {
-    "pythonPlatform": "All", 
+    "pythonPlatform": "All",
+    "venvPath": ".",
+    "venv": ".venv"
 }

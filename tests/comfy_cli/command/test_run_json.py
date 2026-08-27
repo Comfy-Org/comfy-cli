@@ -2028,6 +2028,34 @@ class TestEventSchemaDiscriminatesNodesShape:
         # `comfy jobs watch` has no workflow map, so it omits title/class_type.
         self._validator().validate({"schema": "event/1", "type": "execution_cached", "node": "1", "prompt_id": "p"})
 
+    def test_execution_cached_rejects_an_event_carrying_neither_shape(self):
+        """`node` and the legacy `nodes` are the only two payloads. An event
+        with neither names no node at all, so a consumer counting cached nodes
+        silently reads zero — the schema must catch that, not pass it."""
+        import jsonschema
+
+        with pytest.raises(jsonschema.ValidationError):
+            self._validator().validate({"schema": "event/1", "type": "execution_cached", "prompt_id": "p"})
+
+    def test_execution_cached_rejects_an_event_carrying_both_shapes(self):
+        """Both fields at once is ambiguous: a consumer reading `node` and one
+        reading `nodes` would disagree about how many nodes were cached."""
+        import jsonschema
+
+        with pytest.raises(jsonschema.ValidationError):
+            self._validator().validate(
+                {"schema": "event/1", "type": "execution_cached", "node": "1", "nodes": ["1", "2"]}
+            )
+
+    def test_execution_cached_rejects_a_null_node(self):
+        """Neither emitter can produce one: `comfy run`'s on_cached skips null
+        entries and `jobs watch` filters them, so `node: null` is a regression
+        that would surface a phantom cached node."""
+        import jsonschema
+
+        with pytest.raises(jsonschema.ValidationError):
+            self._validator().validate({"schema": "event/1", "type": "execution_cached", "node": None})
+
 
 class TestMalformedRejectionPayloadStillYieldsAnEnvelope:
     """Every field of the cloud's `node_errors` is server-supplied and only
