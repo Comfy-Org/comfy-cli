@@ -17,6 +17,9 @@ history.
 
 ### Added
 
+- `comfy knowledge pick` attaches each pick's model `fits` block (VRAM per
+  variant, credit rate, max refs) when the bundle carries one, so a size or
+  price constraint can be checked against a number rather than the caveat text.
 - `comfy-build`, the skill for building a custom ComfyUI environment on the
   developer platform, is now bundled with the CLI. `comfy skills show
   comfy-build` works, and an argument-free `comfy skills install` writes it on a
