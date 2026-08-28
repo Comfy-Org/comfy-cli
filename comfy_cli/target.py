@@ -51,7 +51,12 @@ class Target:
 
 
 def resolve_target(
-    *, where: str | None, host: str | None = None, port: int | None = None, config: Any = None
+    *,
+    where: str | None,
+    host: str | None = None,
+    port: int | None = None,
+    config: Any = None,
+    allow_clear: bool = True,
 ) -> Target:
     """Pick a Target based on ``--where`` plus host/port (for local).
 
@@ -60,6 +65,10 @@ def resolve_target(
     auto-detect (``cloud`` if credentials exist, else ``local``).
     The ``config`` arg is honored if passed; otherwise
     we instantiate a ``ConfigManager`` to read the persisted key.
+
+    ``allow_clear=False`` is forwarded to :func:`resolve_cloud_credential` so a
+    best-effort background caller cannot wipe the stored session on a failed
+    token refresh.
     """
     from comfy_cli import where as where_module
 
@@ -92,7 +101,7 @@ def resolve_target(
         # when the token isn't near expiry (no network), and the client/loader
         # still force-refresh *reactively* on a server 401 as a backstop.
         base_url = get_base_url()
-        cred = resolve_cloud_credential(purpose="cloud", base_url=base_url, refresh=True)
+        cred = resolve_cloud_credential(purpose="cloud", base_url=base_url, refresh=True, allow_clear=allow_clear)
         token = cred.value if cred is not None and cred.kind == "oauth" else None
         api_key = cred.value if cred is not None and cred.kind == "api_key" else None
 
