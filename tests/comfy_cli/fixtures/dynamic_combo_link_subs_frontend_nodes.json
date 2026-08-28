@@ -1,0 +1,113 @@
+{
+ "GeminiNanoBanana2V2": {
+  "frontendVersion": "1.42.15",
+  "inputs": [
+   {
+    "name": "model.images.image_1",
+    "type": "IMAGE",
+    "link": 22
+   },
+   {
+    "name": "model.images.image_2",
+    "type": "IMAGE",
+    "link": null
+   },
+   {
+    "name": "model.files",
+    "type": "GEMINI_INPUT_FILES",
+    "link": null
+   }
+  ],
+  "widgets_values": [
+   "Edit the image: change the man's white tank top and light pink corduroy pants to an unbuttoned cream-colored linen button-down shirt and white linen shorts; change his hairstyle to wavy medium-length hair; add round tortoiseshell sunglasses on his nose; change the dog's plain collar to a blue and white striped sailor collar and add a small straw sun hat on the dog; change the background to a sunny beach with warm golden sand and the ocean in the distance; keep the man's kneeling pose, the dog's sitting posture, and their interaction identical to the original image.\n",
+   "Nano Banana 2 (Gemini 3.1 Flash Image)",
+   "auto",
+   "1K",
+   "MINIMAL",
+   191918952969076,
+   "randomize",
+   "IMAGE",
+   "You are an expert image-generation engine. You must ALWAYS produce an image.\nInterpret all user input\u2014regardless of format, intent, or abstraction\u2014as literal visual directives for image composition.\nIf a prompt is conversational or lacks specific visual details, you must creatively invent a concrete visual scenario that depicts the concept.\nPrioritize generating the visual representation above any text, formatting, or conversational requests."
+  ]
+ },
+ "MinimaxHailuo03ReferenceNode": {
+  "frontendVersion": "1.47.11",
+  "inputs": [
+   {
+    "name": "model.reference_images.image_1",
+    "type": "IMAGE",
+    "link": 4
+   },
+   {
+    "name": "model.reference_images.image_2",
+    "type": "IMAGE",
+    "link": null
+   },
+   {
+    "name": "model.reference_videos.video_1",
+    "type": "VIDEO",
+    "link": null
+   },
+   {
+    "name": "model.reference_audios.audio_1",
+    "type": "AUDIO",
+    "link": null
+   }
+  ],
+  "widgets_values": [
+   "MiniMax H3",
+   "Use the uploaded 9-panel storyboard image as the exact visual reference.Create a single continuous cinematic shot of a golden-hour tennis match on a red clay court. Follow the storyboard from left to right, top to bottom, as one smooth unbroken sequence.A Black male player in a yellow polo, yellow shorts, and sporty sunglasses plays against a female player with braided hair, a beige tank top, and a light blue tennis skirt. Preserve their faces, outfits, court, lighting, and color palette exactly as shown.The sequence should move naturally through these moments:1. male player overhead smash2. female player sprinting across the court3. male player backhand follow-through4. extreme close-up of the male player's sunglasses and sweat5. female player jumping to hit the ball6. female player forehand contact with the yellow tennis ball7. male player low lunge on clay8. both players meeting at the net and shaking handsCinematic sports film style, golden hour sunlight, warm orange tones, photoreal, sharp focus, shallow depth of field, smooth steadicam movement, no cuts, no text, no logos, no broadcast graphics.",
+   "768P",
+   "adaptive",
+   5,
+   42,
+   "randomize",
+   false
+  ]
+ },
+ "ByteDance2ReferenceNodeV2": {
+  "frontendVersion": "1.49.6",
+  "inputs": [
+   {
+    "name": "model.reference_images.image_1",
+    "type": "IMAGE",
+    "link": 18
+   },
+   {
+    "name": "model.reference_images.image_2",
+    "type": "IMAGE",
+    "link": null
+   },
+   {
+    "name": "model.reference_videos.video_1",
+    "type": "VIDEO",
+    "link": null
+   },
+   {
+    "name": "model.reference_audios.audio_1",
+    "type": "AUDIO",
+    "link": null
+   },
+   {
+    "name": "model.reference_assets.asset_1",
+    "type": "STRING",
+    "link": null
+   }
+  ],
+  "widgets_values": [
+   "Seedance 2.5",
+   "The crimson marble Medusa statue comes alive, opening her eyes and looking at the camera while the red typography in the background simultaneously dissolves away letter by letter into drifting red particles. The snakes in her hair rise and sway. Both the statue and the background text animate together, poster layout otherwise unchanged, cinematic, no black frames.",
+   "720p",
+   "adaptive",
+   5,
+   true,
+   "reference",
+   "mp4",
+   true,
+   false,
+   0,
+   "randomize",
+   false
+  ]
+ }
+}

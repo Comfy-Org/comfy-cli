@@ -723,3 +723,31 @@ rebuilds the executable graph — the API prompt — not the canvas decoration.
 
 **No change to §§2-8.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
+
+## 14. Amendment v1.5 — 2026-08-27 (link-only dynamic-combo sub-inputs own no slot)
+
+### 14.1 Every order surface skips socket sub-inputs of a dynamic combo
+
+A `COMFY_DYNAMICCOMBO_V3` option may declare sub-inputs that the frontend
+renders as sockets, not widgets: a nested `COMFY_AUTOGROW_V3` list
+(`GeminiNanoBanana2V2.model.images`, `MinimaxHailuo03ReferenceNode
+.model.reference_images`), a `GEMINI_INPUT_FILES` link, a bare `IMAGE` /
+`VIDEO` / `AUDIO`. The canvas never serialises a `widgets_values` entry for
+them. `widget_order_for_node` already skipped them; `widget_order_default`
+(the exported **widget catalog**, pinned by `catalog_version`) and
+`widget_defaults` (what `add_node` materialises) did not. So an `add_node` of
+a dynamic-combo partner node wrote phantom `null` slots in front of `seed`
+(11 values for Nano Banana 2 against the frontend's 9), the API conversion
+of that node shifted every later widget by the phantom count, and a consumer
+mapping names to indexes through the catalog read a canvas-built node's `seed`
+position as `model.reference_images`. All three surfaces now share the
+`_is_link` predicate `_port_from_spec` uses. **`catalog_version` hashes
+change** for every class whose selected option carries a socket sub-input
+(41 classes in the cloud catalog at the time of writing); consumers pinning
+the catalog re-pin with this SHA and re-mint minted documents per the
+doc-host procedure.
+
+**No change to §§2-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. `add_node`'s
+op shape is unchanged; only the length of the `widgets_values` it stamps into
+`op.node` differs for the affected classes.

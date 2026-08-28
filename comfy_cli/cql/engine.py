@@ -628,7 +628,9 @@ def _dynamic_sub_widget_defaults(base: str, options: list, selected: Any = _FIRS
     selected key — as ``widget_order_for_node`` does — keeps the widget order
     aligned to ``widgets_values`` when a node picks an option whose sub-widget
     count differs from the default. An unknown key expands to nothing, matching
-    the converter's ``_dynamic_combo_sub_inputs``."""
+    the converter's ``_dynamic_combo_sub_inputs``. Connection-only sub-inputs
+    are skipped (they have no ``widgets_values`` slot), matching
+    ``_expand_widget_entries``."""
     if not options:
         return {}
     if selected is _FIRST_KEY:
@@ -646,7 +648,19 @@ def _dynamic_sub_widget_defaults(base: str, options: list, selected: Any = _FIRS
         if not isinstance(section_def, dict):
             continue
         for sub_name, spec in section_def.items():
-            _t, _e, enum_values, opts, _declared, _dyn = _parse_input_spec(spec)
+            type_id, is_enum, enum_values, opts, _declared, _dyn = _parse_input_spec(spec)
+            # Connection-only sub-inputs (an IMAGE / VIDEO / AUDIO socket, a
+            # nested COMFY_AUTOGROW_V3 list, GEMINI_INPUT_FILES, ...) own no
+            # ``widgets_values`` slot: the frontend renders them as sockets and
+            # never serializes a value for them. Counting them here put phantom
+            # slots in front of ``seed`` on every dynamic-combo partner node
+            # (GeminiNanoBanana2V2 wrote 11 values where the frontend writes 9),
+            # so ``add-node`` output, the widget catalog and
+            # ``widget_order_for_node`` disagreed with each other and with the
+            # canvas. Same predicate ``_port_from_spec`` / ``_expand_widget_entries``
+            # use, so every widget-order surface skips the same ports.
+            if _is_link(type_id, is_enum, opts.force_input):
+                continue
             default = opts.default
             if default is None and enum_values:
                 default = enum_values[0]

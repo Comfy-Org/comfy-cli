@@ -1,0 +1,1607 @@
+{
+ "GeminiNanoBanana2V2": {
+  "input": {
+   "required": {
+    "prompt": [
+     "STRING",
+     {
+      "tooltip": "Text prompt describing the image to generate or the edits to apply. Include any constraints, styles, or details the model should follow.",
+      "default": "",
+      "multiline": true
+     }
+    ],
+    "model": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "options": [
+       {
+        "key": "Nano Banana 2 (Gemini 3.1 Flash Image)",
+        "inputs": {
+         "required": {
+          "aspect_ratio": [
+           "COMBO",
+           {
+            "tooltip": "If set to 'auto', matches your input image's aspect ratio; if no image is provided, a 16:9 square is usually generated.",
+            "default": "auto",
+            "multiselect": false,
+            "options": [
+             "auto",
+             "1:1",
+             "2:3",
+             "3:2",
+             "3:4",
+             "4:3",
+             "4:5",
+             "5:4",
+             "9:16",
+             "16:9",
+             "21:9",
+             "1:4",
+             "4:1",
+             "8:1",
+             "1:8"
+            ]
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "tooltip": "Target output resolution.",
+            "multiselect": false,
+            "options": [
+             "1K",
+             "2K",
+             "4K"
+            ]
+           }
+          ],
+          "thinking_level": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "MINIMAL",
+             "HIGH"
+            ]
+           }
+          ],
+          "images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "tooltip": "Optional reference image(s). Up to 14 images total.",
+            "template": {
+             "input": {
+              "required": {
+               "image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9",
+              "image_10",
+              "image_11",
+              "image_12",
+              "image_13",
+              "image_14"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         },
+         "optional": {
+          "files": [
+           "GEMINI_INPUT_FILES",
+           {
+            "tooltip": "Optional file(s) to use as context for the model. Accepts inputs from the Gemini Generate Content Input Files node."
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "Nano Banana 2 Lite",
+        "inputs": {
+         "required": {
+          "aspect_ratio": [
+           "COMBO",
+           {
+            "tooltip": "If set to 'auto', matches your input image's aspect ratio; if no image is provided, a 16:9 square is usually generated.",
+            "default": "auto",
+            "multiselect": false,
+            "options": [
+             "auto",
+             "1:1",
+             "2:3",
+             "3:2",
+             "3:4",
+             "4:3",
+             "4:5",
+             "5:4",
+             "9:16",
+             "16:9",
+             "21:9",
+             "1:4",
+             "4:1",
+             "8:1",
+             "1:8"
+            ]
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "tooltip": "Target output resolution.",
+            "multiselect": false,
+            "options": [
+             "1K"
+            ]
+           }
+          ],
+          "thinking_level": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "MINIMAL",
+             "HIGH"
+            ]
+           }
+          ],
+          "images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "tooltip": "Optional reference image(s). Up to 14 images total.",
+            "template": {
+             "input": {
+              "required": {
+               "image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9",
+              "image_10",
+              "image_11",
+              "image_12",
+              "image_13",
+              "image_14"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         },
+         "optional": {
+          "files": [
+           "GEMINI_INPUT_FILES",
+           {
+            "tooltip": "Optional file(s) to use as context for the model. Accepts inputs from the Gemini Generate Content Input Files node."
+           }
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "tooltip": "When the seed is fixed to a specific value, the model makes a best effort to provide the same response for repeated requests. Deterministic output isn't guaranteed. Also, changing the model or parameter settings, such as the temperature, can cause variations in the response even when you use the same seed value. By default, a random seed value is used.",
+      "default": 42,
+      "min": 0,
+      "max": 18446744073709551615,
+      "control_after_generate": true
+     }
+    ],
+    "response_modalities": [
+     "COMBO",
+     {
+      "advanced": true,
+      "multiselect": false,
+      "options": [
+       "IMAGE",
+       "IMAGE+TEXT"
+      ]
+     }
+    ]
+   },
+   "optional": {
+    "system_prompt": [
+     "STRING",
+     {
+      "tooltip": "Foundational instructions that dictate an AI's behavior.",
+      "advanced": true,
+      "default": "You are an expert image-generation engine. You must ALWAYS produce an image.\nInterpret all user input\u2014regardless of format, intent, or abstraction\u2014as literal visual directives for image composition.\nIf a prompt is conversational or lacks specific visual details, you must creatively invent a concrete visual scenario that depicts the concept.\nPrioritize generating the visual representation above any text, formatting, or conversational requests.",
+      "multiline": true
+     }
+    ],
+    "temperature": [
+     "FLOAT",
+     {
+      "tooltip": "Controls randomness in generation. Lower is more focused/deterministic.",
+      "advanced": true,
+      "default": 1.0,
+      "min": 0.0,
+      "max": 2.0,
+      "step": 0.01
+     }
+    ],
+    "top_p": [
+     "FLOAT",
+     {
+      "tooltip": "Nucleus sampling threshold. Lower is more focused, higher more diverse.",
+      "advanced": true,
+      "default": 0.95,
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01
+     }
+    ]
+   },
+   "hidden": {
+    "auth_token_comfy_org": [
+     "AUTH_TOKEN_COMFY_ORG"
+    ],
+    "api_key_comfy_org": [
+     "API_KEY_COMFY_ORG"
+    ],
+    "unique_id": [
+     "UNIQUE_ID"
+    ],
+    "comfy_usage_source": [
+     "COMFY_USAGE_SOURCE"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "prompt",
+    "model",
+    "seed",
+    "response_modalities"
+   ],
+   "optional": [
+    "system_prompt",
+    "temperature",
+    "top_p"
+   ],
+   "hidden": [
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "unique_id",
+    "comfy_usage_source"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE",
+   "STRING",
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false,
+   false,
+   false
+  ],
+  "output_name": [
+   "IMAGE",
+   "STRING",
+   "thought_image"
+  ],
+  "output_tooltips": [
+   null,
+   null,
+   "First image from the model's thinking process. Only available with thinking_level HIGH and IMAGE+TEXT modality."
+  ],
+  "output_matchtypes": null,
+  "name": "GeminiNanoBanana2V2",
+  "display_name": "Nano Banana 2",
+  "description": "Generate or edit images synchronously via Google Vertex API.",
+  "python_module": "comfy_api_nodes.nodes_gemini",
+  "category": "partner/image/Gemini",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": true,
+  "price_badge": {
+   "engine": "jsonata",
+   "depends_on": {
+    "widgets": [
+     {
+      "name": "model",
+      "type": "COMFY_DYNAMICCOMBO_V3"
+     },
+     {
+      "name": "model.resolution",
+      "type": "COMBO"
+     }
+    ],
+    "inputs": [],
+    "input_groups": []
+   },
+   "expr": "\n                (\n                  $contains(widgets.model, \"lite\")\n                    ? {\"type\":\"usd\",\"usd\": 0.0408, \"format\":{\"suffix\":\"/Image\",\"approximate\":true}}\n                    : (\n                        $r := $lookup(widgets, \"model.resolution\");\n                        $prices := {\"1k\": 0.0835, \"2k\": 0.1217, \"4k\": 0.1848};\n                        {\"type\":\"usd\",\"usd\": $lookup($prices, $r), \"format\":{\"suffix\":\"/Image\",\"approximate\":true}}\n                      )\n                )\n                "
+  },
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false
+ },
+ "MinimaxHailuo03ReferenceNode": {
+  "input": {
+   "required": {
+    "model": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "tooltip": "Model to use for video generation.",
+      "options": [
+       {
+        "key": "MiniMax H3",
+        "inputs": {
+         "required": {
+          "prompt": [
+           "STRING",
+           {
+            "tooltip": "Text prompt for video generation.",
+            "default": "",
+            "multiline": true
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "tooltip": "Resolution of the output video.",
+            "multiselect": false,
+            "options": [
+             "768P",
+             "2K"
+            ]
+           }
+          ],
+          "ratio": [
+           "COMBO",
+           {
+            "tooltip": "Aspect ratio of the output video.",
+            "default": "adaptive",
+            "multiselect": false,
+            "options": [
+             "adaptive",
+             "16:9",
+             "4:3",
+             "1:1",
+             "3:4",
+             "9:16",
+             "21:9"
+            ]
+           }
+          ],
+          "duration": [
+           "INT",
+           {
+            "tooltip": "Duration of the output video in seconds (4-15).",
+            "default": 5,
+            "min": 4,
+            "max": 15,
+            "step": 1,
+            "display": "slider"
+           }
+          ],
+          "reference_images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "tooltip": "Subject or style reference images, referred to in the prompt as 'Image 1'..'Image 9' in connection order. Up to 9 images.",
+            "template": {
+             "input": {
+              "required": {
+               "reference_image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_videos": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "tooltip": "Motion or scene reference videos, referred to in the prompt as 'Video 1'..'Video 3' in connection order. Up to 3 videos, 2-15 seconds each, 15 seconds in total.",
+            "template": {
+             "input": {
+              "required": {
+               "reference_video": [
+                "VIDEO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "video_1",
+              "video_2",
+              "video_3"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_audios": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "tooltip": "Audio references, referred to in the prompt as 'Audio 1'..'Audio 3' in connection order. Up to 3 clips, 2-15 seconds each, 15 seconds in total. Cannot be used without a reference image or video.",
+            "template": {
+             "input": {
+              "required": {
+               "reference_audio": [
+                "AUDIO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "audio_1",
+              "audio_2",
+              "audio_3"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "tooltip": "Random seed. The same request with the same seed gives similar, but not guaranteed identical, results.",
+      "default": 42,
+      "min": 0,
+      "max": 4294967295,
+      "step": 1,
+      "control_after_generate": true,
+      "display": "number"
+     }
+    ],
+    "watermark": [
+     "BOOLEAN",
+     {
+      "tooltip": "Whether to add an AIGC watermark to the video.",
+      "advanced": true,
+      "default": false
+     }
+    ]
+   },
+   "hidden": {
+    "auth_token_comfy_org": [
+     "AUTH_TOKEN_COMFY_ORG"
+    ],
+    "api_key_comfy_org": [
+     "API_KEY_COMFY_ORG"
+    ],
+    "unique_id": [
+     "UNIQUE_ID"
+    ],
+    "comfy_usage_source": [
+     "COMFY_USAGE_SOURCE"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "model",
+    "seed",
+    "watermark"
+   ],
+   "hidden": [
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "unique_id",
+    "comfy_usage_source"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VIDEO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "MinimaxHailuo03ReferenceNode",
+  "display_name": "MiniMax H3 Reference to Video",
+  "description": "Generate video conditioned on reference images, videos, and audio using the MiniMax H3 model. Refer to the references in the prompt by their order: 'Image 1', 'Image 2', 'Video 1', 'Audio 1', and so on.",
+  "python_module": "comfy_api_nodes.nodes_minimax",
+  "category": "partner/video/MiniMax",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": true,
+  "price_badge": {
+   "engine": "jsonata",
+   "depends_on": {
+    "widgets": [
+     {
+      "name": "model.resolution",
+      "type": "COMBO"
+     },
+     {
+      "name": "model.duration",
+      "type": "INT"
+     }
+    ],
+    "inputs": [],
+    "input_groups": [
+     "model.reference_images",
+     "model.reference_videos"
+    ]
+   },
+   "expr": "\n                (\n                  $dur := $lookup(widgets, \"model.duration\");\n                  $rate := $lookup(widgets, \"model.resolution\") = \"768p\" ? 0.1287 : 0.1859;\n                  $imgsRaw := $lookup(inputGroups, \"model.reference_images\");\n                  $imgs := $imgsRaw ? $imgsRaw : 0;\n                  $vidsRaw := $lookup(inputGroups, \"model.reference_videos\");\n                  $vids := $vidsRaw ? $vidsRaw : 0;\n                  $base := $dur * $rate + ($imgs > 5 ? ($imgs - 5) * 0.0572 : 0);\n                  $vids > 0\n                    ? {\"type\": \"range_usd\", \"min_usd\": $base + $vids * 2 * $rate,\n                       \"max_usd\": $base + 15 * $rate, \"format\": {\"approximate\": true}}\n                    : {\"type\": \"usd\", \"usd\": $base}\n                )\n                "
+  },
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false
+ },
+ "ByteDance2ReferenceNodeV2": {
+  "input": {
+   "required": {
+    "model": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "tooltip": "Seedance 2.5 for the newest model, videos up to 30 seconds and mp4/mov output; Seedance 2.0 for maximum quality and 4k; Fast for speed optimization; Mini for the fastest, lowest-cost generation.",
+      "options": [
+       {
+        "key": "Seedance 2.5",
+        "inputs": {
+         "required": {
+          "prompt": [
+           "STRING",
+           {
+            "tooltip": "Text prompt for video generation. Put spoken lines in double quotes to steer the generated dialogue.",
+            "default": "",
+            "multiline": true
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "tooltip": "Resolution of the output video.",
+            "default": "720p",
+            "multiselect": false,
+            "options": [
+             "480p",
+             "720p",
+             "1080p"
+            ]
+           }
+          ],
+          "ratio": [
+           "COMBO",
+           {
+            "tooltip": "Aspect ratio of the output video.",
+            "default": "16:9",
+            "multiselect": false,
+            "options": [
+             "16:9",
+             "4:3",
+             "1:1",
+             "3:4",
+             "9:16",
+             "21:9",
+             "adaptive"
+            ]
+           }
+          ],
+          "duration": [
+           "INT",
+           {
+            "tooltip": "Duration of the output video in seconds (4-30).",
+            "default": 5,
+            "min": 4,
+            "max": 30,
+            "step": 1,
+            "display": "slider"
+           }
+          ],
+          "generate_audio": [
+           "BOOLEAN",
+           {
+            "tooltip": "Enable audio generation for the output video.",
+            "default": true
+           }
+          ],
+          "task_type": [
+           "COMBO",
+           {
+            "tooltip": "What to do with the reference media. Every value except auto is validated when the task is submitted, so mismatched settings fail before generation starts. auto: the model infers the task from the prompt and inputs, and settings that conflict with its reading fail only after generation has started. reference: generate a new video guided by the reference images, videos, and audio. edit: change a connected reference video (add, remove, replace); the output keeps the source clip's own length and aspect ratio, and the duration and ratio widgets are ignored. extend: continue a connected reference video forward or backward; the prompt should say 'extend forward', 'extend backward', or 'continue', the aspect ratio follows the source clip, and the output contains only the newly generated segment of the duration you set, not the source clip.",
+            "default": "auto",
+            "multiselect": false,
+            "options": [
+             "auto",
+             "reference",
+             "edit",
+             "extend"
+            ]
+           }
+          ],
+          "output_format": [
+           "COMBO",
+           {
+            "tooltip": "Container format of the output video.",
+            "default": "mp4",
+            "multiselect": false,
+            "options": [
+             "mp4"
+            ]
+           }
+          ],
+          "reference_images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9",
+              "image_10",
+              "image_11",
+              "image_12",
+              "image_13",
+              "image_14",
+              "image_15",
+              "image_16",
+              "image_17",
+              "image_18",
+              "image_19",
+              "image_20",
+              "image_21",
+              "image_22",
+              "image_23",
+              "image_24",
+              "image_25",
+              "image_26",
+              "image_27",
+              "image_28",
+              "image_29",
+              "image_30"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_videos": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_video": [
+                "VIDEO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "video_1",
+              "video_2",
+              "video_3",
+              "video_4",
+              "video_5",
+              "video_6",
+              "video_7",
+              "video_8",
+              "video_9",
+              "video_10"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_audios": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_audio": [
+                "AUDIO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "audio_1",
+              "audio_2",
+              "audio_3",
+              "audio_4",
+              "audio_5",
+              "audio_6",
+              "audio_7",
+              "audio_8",
+              "audio_9",
+              "audio_10"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_assets": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_asset": [
+                "STRING",
+                {
+                 "forceInput": true,
+                 "multiline": false
+                }
+               ]
+              }
+             },
+             "names": [
+              "asset_1",
+              "asset_2",
+              "asset_3",
+              "asset_4",
+              "asset_5",
+              "asset_6",
+              "asset_7",
+              "asset_8",
+              "asset_9",
+              "asset_10",
+              "asset_11",
+              "asset_12",
+              "asset_13",
+              "asset_14",
+              "asset_15",
+              "asset_16",
+              "asset_17",
+              "asset_18",
+              "asset_19",
+              "asset_20",
+              "asset_21",
+              "asset_22",
+              "asset_23",
+              "asset_24",
+              "asset_25",
+              "asset_26",
+              "asset_27",
+              "asset_28",
+              "asset_29",
+              "asset_30"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         },
+         "optional": {
+          "auto_downscale": [
+           "BOOLEAN",
+           {
+            "tooltip": "Automatically downscale reference videos that exceed the model's pixel budget for the selected resolution. Aspect ratio is preserved; videos already within limits are untouched.",
+            "default": true
+           }
+          ],
+          "auto_upscale": [
+           "BOOLEAN",
+           {
+            "tooltip": "Automatically upscale reference videos that are below the model's minimum pixel count for the selected resolution. Aspect ratio is preserved; videos already meeting the minimum are untouched. Note: upscaling a low-resolution source does not add real detail and may produce lower-quality generations.",
+            "advanced": true,
+            "default": false
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "Seedance 2.0",
+        "inputs": {
+         "required": {
+          "prompt": [
+           "STRING",
+           {
+            "tooltip": "Text prompt for video generation.",
+            "default": "",
+            "multiline": true
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "tooltip": "Resolution of the output video.",
+            "multiselect": false,
+            "options": [
+             "480p",
+             "720p",
+             "1080p",
+             "4k"
+            ]
+           }
+          ],
+          "ratio": [
+           "COMBO",
+           {
+            "tooltip": "Aspect ratio of the output video.",
+            "default": "adaptive",
+            "multiselect": false,
+            "options": [
+             "16:9",
+             "4:3",
+             "1:1",
+             "3:4",
+             "9:16",
+             "21:9",
+             "adaptive"
+            ]
+           }
+          ],
+          "duration": [
+           "INT",
+           {
+            "tooltip": "Duration of the output video in seconds (4-15).",
+            "default": 7,
+            "min": 4,
+            "max": 15,
+            "step": 1,
+            "display": "slider"
+           }
+          ],
+          "generate_audio": [
+           "BOOLEAN",
+           {
+            "tooltip": "Enable audio generation for the output video.",
+            "default": true
+           }
+          ],
+          "reference_images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_videos": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_video": [
+                "VIDEO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "video_1",
+              "video_2",
+              "video_3"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_audios": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_audio": [
+                "AUDIO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "audio_1",
+              "audio_2",
+              "audio_3"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_assets": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_asset": [
+                "STRING",
+                {
+                 "forceInput": true,
+                 "multiline": false
+                }
+               ]
+              }
+             },
+             "names": [
+              "asset_1",
+              "asset_2",
+              "asset_3",
+              "asset_4",
+              "asset_5",
+              "asset_6",
+              "asset_7",
+              "asset_8",
+              "asset_9"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         },
+         "optional": {
+          "auto_downscale": [
+           "BOOLEAN",
+           {
+            "tooltip": "Automatically downscale reference videos that exceed the model's pixel budget for the selected resolution. Aspect ratio is preserved; videos already within limits are untouched.",
+            "default": true
+           }
+          ],
+          "auto_upscale": [
+           "BOOLEAN",
+           {
+            "tooltip": "Automatically upscale reference videos that are below the model's minimum pixel count for the selected resolution. Aspect ratio is preserved; videos already meeting the minimum are untouched. Note: upscaling a low-resolution source does not add real detail and may produce lower-quality generations.",
+            "advanced": true,
+            "default": false
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "Seedance 2.0 Fast",
+        "inputs": {
+         "required": {
+          "prompt": [
+           "STRING",
+           {
+            "tooltip": "Text prompt for video generation.",
+            "default": "",
+            "multiline": true
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "tooltip": "Resolution of the output video.",
+            "multiselect": false,
+            "options": [
+             "480p",
+             "720p"
+            ]
+           }
+          ],
+          "ratio": [
+           "COMBO",
+           {
+            "tooltip": "Aspect ratio of the output video.",
+            "default": "adaptive",
+            "multiselect": false,
+            "options": [
+             "16:9",
+             "4:3",
+             "1:1",
+             "3:4",
+             "9:16",
+             "21:9",
+             "adaptive"
+            ]
+           }
+          ],
+          "duration": [
+           "INT",
+           {
+            "tooltip": "Duration of the output video in seconds (4-15).",
+            "default": 7,
+            "min": 4,
+            "max": 15,
+            "step": 1,
+            "display": "slider"
+           }
+          ],
+          "generate_audio": [
+           "BOOLEAN",
+           {
+            "tooltip": "Enable audio generation for the output video.",
+            "default": true
+           }
+          ],
+          "reference_images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_videos": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_video": [
+                "VIDEO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "video_1",
+              "video_2",
+              "video_3"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_audios": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_audio": [
+                "AUDIO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "audio_1",
+              "audio_2",
+              "audio_3"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_assets": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_asset": [
+                "STRING",
+                {
+                 "forceInput": true,
+                 "multiline": false
+                }
+               ]
+              }
+             },
+             "names": [
+              "asset_1",
+              "asset_2",
+              "asset_3",
+              "asset_4",
+              "asset_5",
+              "asset_6",
+              "asset_7",
+              "asset_8",
+              "asset_9"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         },
+         "optional": {
+          "auto_downscale": [
+           "BOOLEAN",
+           {
+            "tooltip": "Automatically downscale reference videos that exceed the model's pixel budget for the selected resolution. Aspect ratio is preserved; videos already within limits are untouched.",
+            "default": true
+           }
+          ],
+          "auto_upscale": [
+           "BOOLEAN",
+           {
+            "tooltip": "Automatically upscale reference videos that are below the model's minimum pixel count for the selected resolution. Aspect ratio is preserved; videos already meeting the minimum are untouched. Note: upscaling a low-resolution source does not add real detail and may produce lower-quality generations.",
+            "advanced": true,
+            "default": false
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "Seedance 2.0 Mini",
+        "inputs": {
+         "required": {
+          "prompt": [
+           "STRING",
+           {
+            "tooltip": "Text prompt for video generation.",
+            "default": "",
+            "multiline": true
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "tooltip": "Resolution of the output video.",
+            "multiselect": false,
+            "options": [
+             "480p",
+             "720p"
+            ]
+           }
+          ],
+          "ratio": [
+           "COMBO",
+           {
+            "tooltip": "Aspect ratio of the output video.",
+            "default": "adaptive",
+            "multiselect": false,
+            "options": [
+             "16:9",
+             "4:3",
+             "1:1",
+             "3:4",
+             "9:16",
+             "21:9",
+             "adaptive"
+            ]
+           }
+          ],
+          "duration": [
+           "INT",
+           {
+            "tooltip": "Duration of the output video in seconds (4-15).",
+            "default": 7,
+            "min": 4,
+            "max": 15,
+            "step": 1,
+            "display": "slider"
+           }
+          ],
+          "generate_audio": [
+           "BOOLEAN",
+           {
+            "tooltip": "Enable audio generation for the output video.",
+            "default": true
+           }
+          ],
+          "reference_images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_videos": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_video": [
+                "VIDEO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "video_1",
+              "video_2",
+              "video_3"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_audios": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_audio": [
+                "AUDIO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "audio_1",
+              "audio_2",
+              "audio_3"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_assets": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_asset": [
+                "STRING",
+                {
+                 "forceInput": true,
+                 "multiline": false
+                }
+               ]
+              }
+             },
+             "names": [
+              "asset_1",
+              "asset_2",
+              "asset_3",
+              "asset_4",
+              "asset_5",
+              "asset_6",
+              "asset_7",
+              "asset_8",
+              "asset_9"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         },
+         "optional": {
+          "auto_downscale": [
+           "BOOLEAN",
+           {
+            "tooltip": "Automatically downscale reference videos that exceed the model's pixel budget for the selected resolution. Aspect ratio is preserved; videos already within limits are untouched.",
+            "default": true
+           }
+          ],
+          "auto_upscale": [
+           "BOOLEAN",
+           {
+            "tooltip": "Automatically upscale reference videos that are below the model's minimum pixel count for the selected resolution. Aspect ratio is preserved; videos already meeting the minimum are untouched. Note: upscaling a low-resolution source does not add real detail and may produce lower-quality generations.",
+            "advanced": true,
+            "default": false
+           }
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "tooltip": "Seed controls whether the node should re-run; results are non-deterministic regardless of seed.",
+      "default": 0,
+      "min": 0,
+      "max": 2147483647,
+      "step": 1,
+      "control_after_generate": true,
+      "display": "number"
+     }
+    ],
+    "watermark": [
+     "BOOLEAN",
+     {
+      "tooltip": "Whether to add a watermark to the video.",
+      "advanced": true,
+      "default": false
+     }
+    ]
+   },
+   "hidden": {
+    "auth_token_comfy_org": [
+     "AUTH_TOKEN_COMFY_ORG"
+    ],
+    "api_key_comfy_org": [
+     "API_KEY_COMFY_ORG"
+    ],
+    "unique_id": [
+     "UNIQUE_ID"
+    ],
+    "comfy_usage_source": [
+     "COMFY_USAGE_SOURCE"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "model",
+    "seed",
+    "watermark"
+   ],
+   "hidden": [
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "unique_id",
+    "comfy_usage_source"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VIDEO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "ByteDance2ReferenceNodeV2",
+  "display_name": "ByteDance Seedance 2.5 Reference to Video",
+  "description": "Generate, edit, or extend video using Seedance 2.5 or 2.0 with reference images, videos, and audio. Supports multimodal reference, video editing, and video extension.",
+  "python_module": "comfy_api_nodes.nodes_bytedance",
+  "category": "partner/video/ByteDance",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": true,
+  "price_badge": {
+   "engine": "jsonata",
+   "depends_on": {
+    "widgets": [
+     {
+      "name": "model",
+      "type": "COMFY_DYNAMICCOMBO_V3"
+     },
+     {
+      "name": "model.resolution",
+      "type": "COMBO"
+     },
+     {
+      "name": "model.ratio",
+      "type": "COMBO"
+     },
+     {
+      "name": "model.duration",
+      "type": "INT"
+     },
+     {
+      "name": "model.task_type",
+      "type": "COMBO"
+     }
+    ],
+    "inputs": [],
+    "input_groups": [
+     "model.reference_videos"
+    ]
+   },
+   "expr": "\n(\n  $m := widgets.model;\n  $res := $lookup(widgets, \"model.resolution\");\n  $ratio := $lookup(widgets, \"model.ratio\");\n  $dur := $lookup(widgets, \"model.duration\");\n  $auto := $lookup(widgets, \"model.task_type\") = \"edit\";\n  $hasVideo := $exists(inputGroups) and $lookup(inputGroups, \"model.reference_videos\") > 0;\n  $ready := $type($m) = \"string\" and $type($res) = \"string\" and ($auto or $type($dur) = \"number\");\n  $ready ? (\n    $contains($m, \"2.5\") ? (\n      $is480 := $res = \"480p\";\n      $is1080 := $res = \"1080p\";\n      $perFrame := $ratio = \"1:1\"  ? ($is480 ? 400      : $is1080 ? 2025      : 900) :\n                   $ratio = \"4:3\"  ? ($is480 ? 411.25   : $is1080 ? 2028      : 905.6719) :\n                   $ratio = \"3:4\"  ? ($is480 ? 411.25   : $is1080 ? 2028      : 905.6719) :\n                   $ratio = \"21:9\" ? ($is480 ? 418.5    : $is1080 ? 2037.9648 : 904.3945) :\n                                     ($is480 ? 400.3125 : $is1080 ? 2025      : 900);\n      $price := $is1080\n        ? ($hasVideo ? 0.01001 : 0.016731)\n        : ($hasVideo ? 0.009152 : 0.015301);\n      $costFor := function($d) { $floor($perFrame * (24 * $d + 1)) / 1000 * $price };\n      $lo := $costFor($auto ? 4 : $dur);\n      $hi := $costFor(($auto ? 30 : $dur) + ($hasVideo ? 30 : 0));\n      $lo = $hi\n        ? {\"type\": \"usd\", \"usd\": $lo, \"format\": {\"approximate\": true}}\n        : {\"type\": \"range_usd\", \"min_usd\": $lo, \"max_usd\": $hi, \"format\": {\"approximate\": true}}\n    ) : (\n      $rate := $res = \"4k\"    ? 195200 :\n               $res = \"1080p\" ? 48800 :\n               $res = \"720p\"  ? 21600 : 10044;\n      $noVideoPrice := $res = \"4k\"    ? 0.00572 :\n                       $res = \"1080p\" ? 0.011011 :\n                       $contains($m, \"mini\") ? 0.005005 :\n                       $contains($m, \"fast\") ? 0.008008 : 0.01001;\n      $videoPrice := $res = \"4k\"    ? 0.003432 :\n                     $res = \"1080p\" ? 0.006721 :\n                     $contains($m, \"mini\") ? 0.003003 :\n                     $contains($m, \"fast\") ? 0.004719 : 0.006149;\n      $hasVideo\n        ? {\"type\": \"range_usd\",\n           \"min_usd\": $ceil($dur * 5 / 3) * $rate * $videoPrice / 1000,\n           \"max_usd\": (15 + $dur) * $rate * $videoPrice / 1000,\n           \"format\": {\"approximate\": true}}\n        : {\"type\": \"usd\", \"usd\": $dur * $rate * $noVideoPrice / 1000,\n           \"format\": {\"approximate\": true}}\n    )\n  ) : undefined\n)\n"
+  },
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false
+ },
+ "LoadImage": {
+  "input": {
+   "required": {
+    "image": [
+     [
+      "beach.jpg",
+      "eth3d.png",
+      "example.png",
+      "example_image.jpg",
+      "groceries.jpg",
+      "image.png",
+      "middlebury.jpg"
+     ],
+     {
+      "image_upload": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "image"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE",
+   "MASK"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_name": [
+   "IMAGE",
+   "MASK"
+  ],
+  "name": "LoadImage",
+  "display_name": "Load Image",
+  "description": "",
+  "python_module": "nodes",
+  "category": "image",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": [
+   "load image",
+   "open image",
+   "import image",
+   "image input",
+   "upload image",
+   "read image",
+   "image loader"
+  ],
+  "essentials_category": "Basics"
+ },
+ "LoadVideo": {
+  "input": {
+   "required": {
+    "file": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": [
+       "bedroom.mp4"
+      ],
+      "video_upload": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "file"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VIDEO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "LoadVideo",
+  "display_name": "Load Video",
+  "description": "",
+  "python_module": "comfy_extras.nodes_video",
+  "category": "video",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "import video",
+   "open video",
+   "video file"
+  ],
+  "essentials_category": "Basics",
+  "has_intermediate_output": false
+ }
+}

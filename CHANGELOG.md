@@ -68,6 +68,20 @@ history.
 
 ### Fixed
 
+- Connection-only sub-inputs of a `COMFY_DYNAMICCOMBO_V3` option (a nested
+  `COMFY_AUTOGROW_V3` image list, a `GEMINI_INPUT_FILES` link, a bare
+  `IMAGE` / `VIDEO` / `AUDIO` socket) no longer count as widget slots in
+  `comfy nodes widget-catalog` or in the node `comfy workflow add-node`
+  materialises. They never own a `widgets_values` entry on the canvas, so
+  counting them put phantom slots in front of `seed` on every dynamic-combo
+  partner node: an added `GeminiNanoBanana2V2` carried 11 values where the
+  frontend writes 9 and converted with its `seed` landing in `system_prompt`,
+  and through the catalog a canvas-built MiniMax H3 node's `seed` position read
+  as `model.reference_images`. `widget_order_default`, `widget_defaults` and
+  `widget_order_for_node` now name the same slots. **`catalog_version` changes**
+  for the affected classes (41 in the cloud catalog); consumers pinning the
+  catalog re-pin. (BE-10291)
+
 - The shipped `build_from_snapshot.json` schema now requires the `build` key
   the builder actually serves; it still required the pre-rename `distribution`
   key, so a valid `comfy build from-snapshot --json` payload failed validation.
