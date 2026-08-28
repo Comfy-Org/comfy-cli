@@ -388,3 +388,16 @@ def test_cli_connect_load_image_into_nano_banana_reference_group(tmp_path, capsy
     assert env["ok"] is True, env
     saved = json.loads(wf_path.read_text())
     assert _inputs(saved, b) == ["model.images.image_1", "model.images.image_2"]
+
+
+def test_grows_on_different_nested_groups_are_different_conflict_targets(graph):
+    """``model.reference_images.image_1`` and ``model.reference_videos.video_1``
+    belong to two groups; keying the grow target on the FIRST dot made both
+    ``model`` and reported a false conflict between them."""
+    wf = _minimax_ui_workflow()
+    wf, v = _add_loader(wf, graph, "LoadVideo")
+    _, op_img = workflow_ops.connect(copy.deepcopy(wf), graph, 2, "IMAGE", 4, "model.reference_images.image_3")
+    _, op_vid = workflow_ops.connect(copy.deepcopy(wf), graph, v, "VIDEO", 4, "model.reference_videos.video_2")
+    assert workflow_ops._write_target(op_img) == ("input", "4", "grow", "model.reference_images")
+    assert workflow_ops._write_target(op_vid) == ("input", "4", "grow", "model.reference_videos")
+    assert workflow_ops.detect_conflict(op_img, op_vid) is False

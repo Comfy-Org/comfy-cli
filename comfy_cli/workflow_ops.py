@@ -2009,7 +2009,10 @@ def _write_target(op: dict) -> tuple:
             # Two autogrow connects onto the same base share a target (their
             # relative order in the batch is the sequence decision the merge
             # consumer must make); distinct bases don't collide.
-            return ("input", str(op["to_node"]), "grow", str(grow["name"]).split(".", 1)[0])
+            # The group is everything before the LAST dot: a group nested
+            # under a dynamic combo (``model.reference_images.image_1``) must
+            # not share a target with its sibling (``model.reference_videos``).
+            return ("input", str(op["to_node"]), "grow", _autogrow_base(str(grow["name"])))
         return ("input", str(op["to_node"]), op["to_slot"])
     return (kind,)
 
