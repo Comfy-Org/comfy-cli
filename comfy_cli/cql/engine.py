@@ -49,9 +49,13 @@ _FRONTEND_DOM_WIDGET_DEFAULTS: dict[str, Any] = {"LOAD_3D": "", "LOAD_3D_ADVANCE
 
 # Widget names the FRONTEND injects into a node's inputs after object_info
 # (``beforeRegisterNodeDef`` in ``uploadImage.ts``/``uploadAudio.ts``/
-# ``load3d.ts``/``saveMesh.ts``). They have no schema port and are never
-# ``set-widget`` targets. Listed with ``control_after_generate`` because all
-# three are marker slots a name<->index consumer must be able to name.
+# ``load3d.ts``/``saveMesh.ts``). They have no schema port. Listed with
+# ``control_after_generate`` because all three are marker slots a name<->index
+# consumer must be able to name — but they differ as EDIT targets: the seed
+# companion carries a real serialized user value (``fixed``/``randomize``/…)
+# and stays writable, while the injected button/player/viewport slots (these
+# two plus the ``PREVIEW_3D`` ``image`` of ``_PREVIEW_3D_CLASSES``) are refused
+# by every write surface — see ``_WidgetEntry.frontend_injected``.
 FRONTEND_MARKER_SLOTS = frozenset({"control_after_generate", "upload", "audioUI"})
 
 # ``Comfy.AudioWidget`` appends an ``audioUI`` player to exactly these classes.
@@ -1331,6 +1335,23 @@ class Graph:
             return []
         return [e.name for e in _expand_widget_entries(m, widgets_values or [])]
 
+    def editable_widget_names(self, class_name: str, widgets_values: list[Any] | None = None) -> list[str]:
+        """The subset of :meth:`widget_order_for_node` a write may target —
+        schema-backed slots only, i.e. what ``comfy workflow slots`` advertises."""
+        m = self._nodes.get(class_name)
+        if m is None:
+            return []
+        return _editable_widget_names(_expand_widget_entries(m, widgets_values or []))
+
+    def frontend_injected_widget_names(self, class_name: str) -> list[str]:
+        """Names in the widget order that the frontend injects with no schema
+        port (``upload``, ``audioUI``, ``PREVIEW_3D`` ``image``). They own a
+        positional slot but are never an edit target."""
+        m = self._nodes.get(class_name)
+        if m is None:
+            return []
+        return frontend_extra_widget_names(m)
+
     def widget_defaults(self, class_name: str) -> dict[str, Any]:
         """Default value per widget-order name — including dynamic-combo selectors
         (first key), their sub-widgets, and control_after_generate. Used by
@@ -2418,15 +2439,43 @@ _MAX_DYNAMIC_COMBO_DEPTH = 16
 class _WidgetEntry:
     """One positional ``widgets_values`` slot in a node's value-aware order.
 
-    ``port`` is ``None`` for a ``control_after_generate`` marker slot (it has
-    no schema port). ``owner`` is the dotted name of the dynamic combo whose
-    selected option contributed this entry (``None`` for top-level inputs) —
-    used to size a combo's sub-span when its selector changes.
+    ``port`` is ``None`` for a marker slot with no schema port: the
+    ``control_after_generate`` seed companion, or a frontend-injected input
+    (``frontend_extra_widget_names``). ``frontend_injected`` tells the two
+    apart — the companion carries a real user value and is writable; an
+    injected ``upload``/``audioUI``/``PREVIEW_3D`` slot is a button, player or
+    viewport state with nothing to validate against, and every write surface
+    refuses it by name (``frontend_injected_widget_error``). ``owner`` is the
+    dotted name of the dynamic combo whose selected option contributed this
+    entry (``None`` for top-level inputs) — used to size a combo's sub-span
+    when its selector changes.
     """
 
     name: str
     port: Port | None
     owner: str | None
+    frontend_injected: bool = False
+
+
+def _editable_widget_names(entries: list[_WidgetEntry]) -> list[str]:
+    """The names a write surface advertises: every schema-backed slot, in
+    positional order — exactly what ``comfy workflow slots`` lists. Marker
+    slots are left out: injected ones are refused, and the writable
+    ``control_after_generate`` companion is deliberately unadvertised."""
+    return [e.name for e in entries if e.port is not None]
+
+
+def frontend_injected_widget_error(node_type: str, widget: str, available: list[str]) -> ValueError:
+    """The refusal every write surface raises for a frontend-injected slot.
+
+    Worded without ``not found`` on purpose: the address resolved, so the
+    sibling-suggestion enrichment (``_enrich_resolution_error``) must not fire.
+    """
+    return ValueError(
+        f"widget {widget!r} on {node_type} is frontend-injected (no schema input; "
+        f"`comfy workflow slots` never lists it) and is not editable; "
+        f"available widgets: {', '.join(available) if available else '(none — all inputs are links)'}"
+    )
 
 
 def _dynamic_combo_sub_ports(dynamic_options: list[dict], selector: Any, prefix: str) -> list[Port]:
@@ -2483,7 +2532,7 @@ def _expand_widget_entries(m: Morphism, widgets_values: list[Any]) -> list[_Widg
             continue
         emit(p.name, p, None, 0)
     for name in frontend_extra_widget_names(m):
-        entries.append(_WidgetEntry(name=name, port=None, owner=None))
+        entries.append(_WidgetEntry(name=name, port=None, owner=None, frontend_injected=True))
     return entries
 
 
@@ -2503,7 +2552,7 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
     widgets = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
     slots: list[dict] = []
     for idx, entry in enumerate(_expand_widget_entries(m, widgets)):
-        if entry.port is None:  # control_after_generate marker — not a slot
+        if entry.port is None:  # control_after_generate / injected marker — not a slot
             continue
         current = widgets[idx] if idx < len(widgets) else None
         slot = {
@@ -2681,23 +2730,26 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         # values this write is about to index against.
         node["widgets_values"] = widgets
     order = graph.widget_order_for_node(node_type, widgets)
+    entries = _expand_widget_entries(m, widgets)
+    if any(e.frontend_injected and e.name == input_name for e in entries):
+        raise frontend_injected_widget_error(node_type, input_name, _editable_widget_names(entries))
     try:
         widget_idx = order.index(input_name)
     except ValueError:
         warning = _unknown_dynamic_sub_warning(m, input_name, order, widgets)
         if warning is not None:
             return [warning]
-        avail = [n for n in order if n != "control_after_generate"]
+        avail = _editable_widget_names(entries)
         raise ValueError(
             f"widget {input_name!r} not found on {node_type}; "
             f"available widgets: {', '.join(avail) if avail else '(none — all inputs are links)'}"
         )
 
-    entries = _expand_widget_entries(m, widgets)
     port = next((e.port for e in entries if e.name == input_name), None)
     if port is None:
-        # Marker slot or an order override without matching entries (tests
-        # monkeypatch widget_order_for_node) — fall back to the declared port.
+        # control_after_generate marker or an order override without matching
+        # entries (tests monkeypatch widget_order_for_node) — fall back to the
+        # declared port.
         port = next((p for p in m.inputs if p.name == input_name), None)
 
     if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options:

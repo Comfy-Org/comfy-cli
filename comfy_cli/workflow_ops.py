@@ -59,7 +59,7 @@ import uuid
 from typing import Any
 
 from comfy_cli import layout
-from comfy_cli.cql.engine import FRONTEND_MARKER_SLOTS
+from comfy_cli.cql.engine import frontend_injected_widget_error
 
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
@@ -2166,11 +2166,20 @@ def _widget_index(graph, class_type: str, widget: str, widgets_values=None) -> i
     # selected key (from ``widgets_values``), not the schema's first key, so the
     # index stays aligned to ``widgets_values`` for the node's real selection.
     order = graph.widget_order_for_node(class_type, widgets_values)
+    # A frontend-injected slot (``upload``/``audioUI``/``PREVIEW_3D`` ``image``)
+    # sits in ``order`` — it owns a position — but has no schema port to
+    # validate against and ``slots`` never advertises it; refuse it by name so
+    # it can't become a ghost target. ``control_after_generate`` is also
+    # unadvertised but stays writable (it carries a real user value).
+    if widget in graph.frontend_injected_widget_names(class_type):
+        raise frontend_injected_widget_error(
+            class_type, widget, graph.editable_widget_names(class_type, widgets_values)
+        )
     if widget not in order:
-        avail = [w for w in order if w not in FRONTEND_MARKER_SLOTS]
+        avail = graph.editable_widget_names(class_type, widgets_values)
         raise ValueError(
             f"widget {widget!r} not found on {class_type}; "
-            f"available: {', '.join(avail) if avail else '(none — all inputs are links)'}"
+            f"available widgets: {', '.join(avail) if avail else '(none — all inputs are links)'}"
         )
     return order.index(widget)
 

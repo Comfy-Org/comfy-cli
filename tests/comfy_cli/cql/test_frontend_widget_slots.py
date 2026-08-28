@@ -26,10 +26,13 @@ every declared one (``getOrderedInputSpecs`` appends unlisted inputs last).
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 import pytest
 
+from comfy_cli import workflow_ops
+from comfy_cli.cql import engine
 from comfy_cli.cql.engine import Graph
 from comfy_cli.workflow_to_api import convert_ui_to_api
 
@@ -361,3 +364,132 @@ class TestConverter:
         }
         result = convert_ui_to_api(workflow, _object_info())
         assert result["1"]["inputs"]["model_file"] == "out/mesh.glb"
+
+
+# ---------------------------------------------------------------------------
+# Injected slots own a position but are never an edit target.
+# ---------------------------------------------------------------------------
+
+
+def _node(node_id: int, cls: str, widgets: list[Any]) -> dict[str, Any]:
+    return {"id": node_id, "type": cls, "inputs": [], "outputs": [], "widgets_values": list(widgets), "mode": 0}
+
+
+def _workflow(*nodes: dict[str, Any]) -> dict[str, Any]:
+    return {"nodes": list(nodes), "links": []}
+
+
+def _available(msg: str) -> list[str]:
+    """The advertised target list out of an edit error, split on the shared
+    ``available widgets:`` marker every write surface renders."""
+    assert "available widgets: " in msg, msg
+    # The not-found path appends a ". Nodes in this workflow: …" hint; names
+    # never contain ". ", so the list ends at the first sentence break.
+    return msg.split("available widgets: ", 1)[1].split(". ", 1)[0].rstrip(".").split(", ")
+
+
+# (class, injected name, the only schema-backed widgets ``slots`` advertises)
+_INJECTED_TARGETS = [
+    ("SaveGLB", "image", ["filename_prefix"]),
+    ("Preview3D", "image", ["model_file"]),
+    ("LoadImage", "upload", ["image"]),
+    ("LoadAudio", "audioUI", ["audio"]),
+]
+
+
+class TestInjectedSlotsAreNotEditable:
+    """``frontend_extra_widget_names`` entries have ``port=None``: no schema to
+    validate against and no address ``comfy workflow slots`` ever lists. Every
+    write surface must refuse them by name — otherwise ``set-widget 1.image``
+    on a SaveGLB silently lands an unvalidated value in the viewport slot."""
+
+    @pytest.mark.parametrize(("cls", "name", "avail"), _INJECTED_TARGETS)
+    def test_set_widget_refuses_injected_slot(self, graph: Graph, cls: str, name: str, avail: list[str]):
+        wf = _workflow(_node(1, cls, _FRONTEND_SHAPES[cls]))
+        before = copy.deepcopy(wf)
+        with pytest.raises(ValueError) as ei:
+            workflow_ops.set_widget(wf, graph, 1, name, "ghost")
+        msg = str(ei.value)
+        assert "frontend-injected" in msg and "not editable" in msg
+        assert _available(msg) == avail
+        assert wf == before
+
+    @pytest.mark.parametrize(("cls", "name", "avail"), _INJECTED_TARGETS)
+    def test_set_slot_refuses_injected_slot(self, graph: Graph, cls: str, name: str, avail: list[str]):
+        # ``set-slot`` / ``vary`` go through ``_write_widget``.
+        wf = _workflow(_node(1, cls, _FRONTEND_SHAPES[cls]))
+        before = copy.deepcopy(wf)
+        with pytest.raises(ValueError) as ei:
+            engine._apply_one_slot(wf, f"1.{name}", "ghost", graph)
+        msg = str(ei.value)
+        assert "frontend-injected" in msg and "not editable" in msg
+        assert _available(msg) == avail
+        assert wf == before
+
+    @pytest.mark.parametrize(("cls", "name", "avail"), _INJECTED_TARGETS)
+    def test_apply_replay_refuses_injected_slot(self, graph: Graph, cls: str, name: str, avail: list[str]):
+        # A hand-built op replayed through ``apply`` must not bypass the check.
+        wf = _workflow(_node(1, cls, _FRONTEND_SHAPES[cls]))
+        before = copy.deepcopy(wf["nodes"])
+        op = workflow_ops._new_op("set_widget", "cli", 0, node_id=1, widget=name, value="ghost")
+        with pytest.raises(ValueError) as ei:
+            workflow_ops.apply_op(wf, op, graph)
+        assert "frontend-injected" in str(ei.value)
+        assert _available(str(ei.value)) == avail
+        assert wf["nodes"] == before
+
+    @pytest.mark.parametrize(("cls", "name", "avail"), _INJECTED_TARGETS)
+    def test_not_found_list_omits_injected_slots(self, graph: Graph, cls: str, name: str, avail: list[str]):
+        # Both lookups' "available" list is what ``slots`` advertises — never
+        # the injected name — so a typo can't be "corrected" onto a ghost.
+        wf = _workflow(_node(1, cls, _FRONTEND_SHAPES[cls]))
+        with pytest.raises(ValueError) as ei:
+            workflow_ops.set_widget(wf, graph, 1, "bogus", "x")
+        assert _available(str(ei.value)) == avail
+        with pytest.raises(ValueError) as ei:
+            engine._apply_one_slot(wf, "1.bogus", "x", graph)
+        assert _available(str(ei.value)) == avail
+
+    @pytest.mark.parametrize(("cls", "name", "avail"), _INJECTED_TARGETS)
+    def test_positional_order_still_names_the_slot(self, graph: Graph, cls: str, name: str, avail: list[str]):
+        # Refusing the write must not drop the slot from the name<->index
+        # contract: it still owns its trailing position.
+        order = graph.widget_order_for_node(cls, _FRONTEND_SHAPES[cls])
+        injected = graph.frontend_injected_widget_names(cls)
+        assert name in injected
+        # Editable slots first, every injected slot trailing — unchanged.
+        assert order == avail + injected
+        assert graph.editable_widget_names(cls, _FRONTEND_SHAPES[cls]) == avail
+
+    @pytest.mark.parametrize(("cls", "name", "avail"), _INJECTED_TARGETS)
+    def test_error_list_matches_slots(self, graph: Graph, cls: str, name: str, avail: list[str]):
+        node = _node(1, cls, _FRONTEND_SHAPES[cls])
+        advertised = [s["name"] for s in engine._node_widget_slots(node, "1", graph)]
+        assert advertised == avail
+        assert name not in advertised
+
+
+class TestControlAfterGenerateStaysWritable:
+    """The seed companion is also a ``port=None`` marker, but unlike the
+    injected button/player/viewport slots it carries a real serialized user
+    value (``fixed``/``randomize``/...) — pinning a seed is a legitimate edit.
+    It stays writable on every surface, and — like ``slots`` — unlisted."""
+
+    def test_set_widget_writes_marker(self, graph: Graph):
+        wf = _workflow(_node(1, "KSampler", [0, "randomize", 20]))
+        wf, op = workflow_ops.set_widget(wf, graph, 1, "control_after_generate", "fixed")
+        assert wf["nodes"][0]["widgets_values"] == [0, "fixed", 20]
+        assert op["widget"] == "control_after_generate"
+
+    def test_set_slot_writes_marker(self, graph: Graph):
+        wf = _workflow(_node(1, "KSampler", [0, "randomize", 20]))
+        assert engine._apply_one_slot(wf, "1.control_after_generate", "fixed", graph) == []
+        assert wf["nodes"][0]["widgets_values"] == [0, "fixed", 20]
+
+    def test_marker_is_not_advertised(self, graph: Graph):
+        wf = _workflow(_node(1, "KSampler", [0, "randomize", 20]))
+        with pytest.raises(ValueError) as ei:
+            workflow_ops.set_widget(wf, graph, 1, "bogus", 1)
+        assert _available(str(ei.value)) == ["seed", "steps"]
+        assert graph.editable_widget_names("KSampler", [0, "randomize", 20]) == ["seed", "steps"]
+        assert graph.frontend_injected_widget_names("KSampler") == []
