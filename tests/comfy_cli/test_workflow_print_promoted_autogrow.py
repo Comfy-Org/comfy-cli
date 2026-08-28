@@ -534,3 +534,44 @@ def test_frontend_injected_slots_are_not_printed_as_control_after_generate(autog
     assert 'image="a.png"' in line
     assert "control_after_generate" not in line
     assert "upload" not in line
+
+
+def test_promoted_values_resolve_once_per_instance_not_per_widget(promoted_graph, monkeypatch):
+    """Review (PR #816): the instance line used to call the public
+    ``promoted.effective_value`` per promoted widget, which re-derived the
+    definition index and re-located the ``PromotedInput`` the loop already
+    held — 451 ``promoted_inputs`` calls for 51 needed on 50 instances. The
+    loop's own ``pi`` and ``_State.promoted_defs`` are the whole answer."""
+    from comfy_cli.cql import promoted as promoted_mod
+
+    base = _gallery("image_z_image_turbo.json")
+    template = next(n for n in base["nodes"] if n["id"] == 57)
+    n_instances = 40
+    wf = {**base, "nodes": [n for n in base["nodes"] if n["id"] != 57], "links": []}
+    for k in range(n_instances):
+        inst = copy.deepcopy(template)
+        inst["id"] = 1000 + k
+        inst["outputs"] = [{**o, "links": []} for o in inst.get("outputs") or []]
+        wf["nodes"].append(inst)
+    wf["nodes"] = [n for n in wf["nodes"] if n["id"] != 9]  # drop the SaveImage that consumed 57
+
+    calls = {"promoted_inputs": 0, "defs_by_id": 0}
+    real_pi, real_defs = promoted_mod.promoted_inputs, promoted_mod.defs_by_id
+
+    def counting_pi(*a, **k):
+        calls["promoted_inputs"] += 1
+        return real_pi(*a, **k)
+
+    def counting_defs(*a, **k):
+        calls["defs_by_id"] += 1
+        return real_defs(*a, **k)
+
+    monkeypatch.setattr(promoted_mod, "promoted_inputs", counting_pi)
+    monkeypatch.setattr(promoted_mod, "defs_by_id", counting_defs)
+    res = render_py(wf, promoted_graph)
+    assert res.warnings == []
+    assert sum("width=1024" in ln for ln in res.source.splitlines()) == n_instances
+    # one walk per instance line, one for the definition's promoted header —
+    # never one per promoted widget (8 per instance here)
+    assert calls["promoted_inputs"] <= n_instances + 2, calls
+    assert calls["defs_by_id"] <= 2, calls

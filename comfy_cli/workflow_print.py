@@ -880,11 +880,9 @@ def _render_subgraph_instance_line(
             if link_id is not None:
                 text = _promoted_widget_link_text(pi.name, link_id, nid, ctx, annotations, prim_hits, warnings)
             if text is None:
-                try:
-                    value = _promoted.effective_value(state.workflow, node, pi.name, ctx.graph)
-                except ValueError as e:  # the definition index disagrees with itself: say so, print None
-                    warnings.append(f"node {ctx.qualify(nid)}: promoted widget {pi.name!r} unreadable: {e}")
-                    value = _promoted.UNSET
+                # ``pi`` and the definition index are this loop's own; the
+                # name-lookup entry point would re-derive both per widget.
+                value = _promoted.effective_value_for(state.workflow, node, sg_def, pi, ctx.graph, state.promoted_defs)
                 text = py_literal(None if value is _promoted.UNSET else value)
         elif pi.source_node is None and link_id is None and ctx.graph is not None:
             # Declared but backed by no boundary link: a legacy template still
@@ -1043,7 +1041,7 @@ class _State:
         self.defs_by_id = defs_by_id
         # The whole workflow and cql.promoted's own definition index: a
         # promoted widget's effective value is resolved from the HOST instance
-        # against its definition (``promoted.effective_value``), at any depth.
+        # against its definition (``promoted.effective_value_for``), at any depth.
         self.workflow: dict = workflow if workflow is not None else {}
         self.promoted_defs: dict[str, dict] = _promoted.defs_by_id(self.workflow)
         self.warnings = warnings

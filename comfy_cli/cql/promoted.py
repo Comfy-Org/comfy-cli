@@ -261,16 +261,28 @@ def source_value(workflow: dict, sg: dict, pi: PromotedInput, graph, defs: dict[
     return _interior_widget_value(inner, str(pi.source_widget), graph)
 
 
+def effective_value_for(
+    workflow: dict, instance: dict, sg: dict, pi: PromotedInput, graph, defs: dict[str, dict]
+) -> Any:
+    """:func:`effective_value` for a caller that already holds the resolved
+    ``PromotedInput`` and the definition index — the host value when
+    materialized, else the interior source value (:data:`UNSET` when even that
+    cannot be read). No name lookup, no re-walk of ``promoted_inputs``: a
+    renderer iterating every promoted input of every instance calls this once
+    per widget without re-deriving what its own loop produced."""
+    value = host_value(instance, pi)
+    if value is not UNSET:
+        return value
+    return source_value(workflow, sg, pi, graph, defs)
+
+
 def _effective(workflow: dict, instance: dict, sg: dict, name: str, graph, defs: dict[str, dict]) -> Any:
     pi = find_promoted(sg, defs, name)
     if pi is None:
         raise ValueError(f"{name!r} is not a promoted input of subgraph {sg.get('id')}")
     if not pi.is_widget:
         raise ValueError(f"promoted input {name!r} on subgraph node {instance.get('id')} is a link input, not a widget")
-    value = host_value(instance, pi)
-    if value is not UNSET:
-        return value
-    return source_value(workflow, sg, pi, graph, defs)
+    return effective_value_for(workflow, instance, sg, pi, graph, defs)
 
 
 def effective_value(workflow: dict, instance: dict, name: str, graph) -> Any:
