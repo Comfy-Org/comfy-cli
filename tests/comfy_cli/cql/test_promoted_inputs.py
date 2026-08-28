@@ -1,4 +1,4 @@
-"""Promoted subgraph widgets: the host-owned value model (BE-10305 scenarios 1/2).
+"""Promoted subgraph widgets: the host-owned value model (the "agent editing subgraph" report, scenarios 1/2).
 
 The frontend (``ComfyUI_frontend`` ADR 0009, ``SubgraphNode.ts``) represents a
 promoted widget as a *linked subgraph input*: the subgraph definition declares

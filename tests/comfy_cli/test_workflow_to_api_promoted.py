@@ -1,8 +1,8 @@
-"""UI→API conversion honors host-owned promoted widget values (BE-10305).
+"""UI→API conversion honors host-owned promoted widget values.
 
 ``convert_ui_to_api`` expanded subgraph instances by reattaching *external*
 links to interior inputs and otherwise reading the interior node's own
-``widgets_values``. That is the pre-ADR-0009 world. A post-migration save
+``widgets_values``. That is the pre-ADR 0009 world. A post-migration save
 keeps the promoted value on the HOST instance (``widgets_values`` positional
 over the widget-backed subgraph inputs), so the interior widget can be stale
 or empty — ``audio_minimax_music_3`` ships an interior ``caption`` of ``''``

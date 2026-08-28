@@ -1,4 +1,4 @@
-"""``set-widget`` / ``connect`` on promoted subgraph widgets (BE-10305 scenarios 1 & 2).
+"""``set-widget`` / ``connect`` on promoted subgraph widgets (the "agent editing subgraph" report, scenarios 1 & 2).
 
 Scenario 1 — *"the agent edited the widget under layer 2, not on the surface;
 the value on the surface overwrites it and the user never sees it."* The
