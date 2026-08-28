@@ -57,7 +57,7 @@
           "caveat": { "type": ["string", "null"] },
           "status": { "type": ["string", "null"], "description": "Copied from the pick's model row when that row exists." },
           "superseded_by": { "type": ["string", "null"], "description": "From the deprecations list or the pick's model row." },
-          "best_for": { "type": "array", "items": { "type": "string" }, "description": "Head of the model row's best_for list, present only when the row has one. The caveat is per capability; this is the row's own routing opinion." },
+          "best_for": { "type": "array", "items": { "type": "string" }, "maxItems": 1, "description": "Head of the model row's best_for list, present only when the row has one. The caveat is per capability; this is the row's own routing opinion." },
           "available_locally": { "type": "boolean", "description": "Present and false when the pick's template is absent from the catalog the command loaded. Ranked picks keep rank order, so a lower-ranked pick without this field is the runnable-now alternative." },
           "unavailable_reason": { "type": "string", "description": "Why available_locally is false." }
         }

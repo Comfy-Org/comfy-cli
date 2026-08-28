@@ -206,11 +206,12 @@ def pick_cmd(
     if renderer.is_pretty():
         from rich.table import Table
 
-        columns = ("rank", "model", "route", "template", "status", "caveat")
+        columns = ("rank", "model", "route", "template", "status", "caveat", "best_for")
         tbl = Table(show_header=True, header_style="bold")
         for col in columns:
             tbl.add_column(col)
         for p in picks:
-            tbl.add_row(*(sanitize_markup("" if p[c] is None else p[c]) for c in columns))
+            cells = {**p, "best_for": ", ".join(p.get("best_for") or [])}
+            tbl.add_row(*(sanitize_markup("" if cells[c] is None else cells[c]) for c in columns))
         renderer.console().print(tbl)
     renderer.emit(payload, command="knowledge pick")

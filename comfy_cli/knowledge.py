@@ -47,9 +47,11 @@ MAX_MODELS = 3
 MAX_MODELS_BRIEF = 20
 MAX_PICKS = 8
 MAX_LIST_ITEMS = 8
-# best_for items per pick. 1 keeps every capability's `knowledge pick` envelope
-# under the 4096 bytes the cloud agent admits verbatim; 2, or not_for alongside,
-# sends image-edit over.
+# best_for items per pick. Bounds item count, not bytes: with today's bundle, 1
+# keeps every capability's `knowledge pick` envelope under the 4096 bytes the
+# cloud agent admits verbatim (2, or not_for alongside, sends image-edit over),
+# but a bundle recompile with longer best_for text isn't guaranteed to stay
+# under that.
 MAX_PICK_BEST_FOR = 1
 MAX_BLOCK_BYTES = 8192
 MAX_QUERY_CHARS = 200  # CLI text is unbounded; the clip bounds the lookup key and the nudge echo
@@ -699,8 +701,8 @@ def pick_entry(bundle: Bundle, p: dict) -> dict:
     decision reads.
     """
     model_id = _text(p.get("model"))
-    row = bundle.models.get(model_id, {}) if model_id is not None else {}
-    dep = bundle.deprecations.get(model_id, {}) if model_id is not None else {}
+    row = (bundle.models.get(model_id) or {}) if model_id is not None else {}
+    dep = (bundle.deprecations.get(model_id) or {}) if model_id is not None else {}
     entry = {
         "rank": pick_rank(p),
         "model": model_id,
@@ -708,9 +710,9 @@ def pick_entry(bundle: Bundle, p: dict) -> dict:
         "template": _text(p.get("template")),
         "caveat": _text(p.get("caveat")),
         "status": _text(row.get("status")),
-        "superseded_by": _text(dep.get("superseded_by") or row.get("superseded_by")),
+        "superseded_by": _text(dep.get("superseded_by")) or _text(row.get("superseded_by")),
     }
-    if best_for := _str_list(row.get("best_for"))[:MAX_PICK_BEST_FOR]:
+    if best_for := [x for x in _str_list(row.get("best_for")) if x][:MAX_PICK_BEST_FOR]:
         entry["best_for"] = best_for
     return entry
 
