@@ -14,6 +14,7 @@ collide; widgets are addressed by name, not array index. See ``workflow_ops``.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Annotated, Any
 
 import typer
@@ -427,9 +428,57 @@ def delete_nodes_cmd(
 # ---------------------------------------------------------------------------
 
 
+def _load_clearable_workflow_or_fail(renderer, path: str) -> tuple[Path, dict[str, Any]]:
+    """Load a workflow file for an operation that DISCARDS its content.
+
+    Every edit command reads through ``_load_workflow_or_fail`` and refuses an
+    API-format document (``workflow_not_frontend_format``), because slot
+    addressing needs ``nodes[]``/``links[]``. ``clear`` and ``reset-doc`` do
+    not: the result is the empty frontend document either way. Gating them on
+    the format of what is being thrown away locked a tab in prod — a
+    ``generate --emit-workflow`` API-format draft could then be neither edited
+    NOR cleared, and the agent abandoned the tab.
+
+    An API-format file is replaced by the empty frontend baseline (the same
+    shape ``foreach`` mints a fresh document from) so the op applies to a
+    frontend document and the file is editable afterwards. A JSON value that is
+    a workflow in neither format still fails as before.
+    """
+    from comfy_cli.command.workflow import _is_frontend_format
+    from comfy_cli.workflow_to_api import is_api_format
+
+    p = Path(path).expanduser()
+    if not p.is_file():
+        renderer.error(code="workflow_not_found", message=f"Workflow file not found: {path}", hint="check the path")
+        raise typer.Exit(code=1)
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except OSError as e:
+        renderer.error(code="workflow_not_found", message=f"Unable to read workflow file: {e}")
+        raise typer.Exit(code=1) from e
+    except json.JSONDecodeError as e:
+        renderer.error(
+            code="workflow_invalid_json",
+            message=f"Workflow file is not valid JSON: {e}",
+            hint="check the file or re-export from ComfyUI",
+        )
+        raise typer.Exit(code=1) from e
+    if _is_frontend_format(data):
+        return p, data
+    if is_api_format(data):
+        return p, {"nodes": [], "links": [], "groups": [], "last_node_id": 0, "last_link_id": 0}
+    renderer.error(
+        code="workflow_not_frontend_format",
+        message="`comfy workflow` requires a workflow document (frontend `nodes[]`/`links[]`, or API format).",
+        hint="in ComfyUI, use `File > Save (As)` to export the editing format",
+        details={"path": str(p)},
+    )
+    raise typer.Exit(code=1)
+
+
 @tracking.track_command("workflow")
 def clear_cmd(
-    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    file: Annotated[str, typer.Argument(help="Workflow JSON (frontend or API format — the content is discarded).")],
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
@@ -437,7 +486,7 @@ def clear_cmd(
 ):
     renderer = get_renderer()
     renderer.command = "workflow clear"
-    p, workflow = _load_workflow_or_fail(renderer, file)
+    p, workflow = _load_clearable_workflow_or_fail(renderer, file)
     workflow, op = workflow_ops.clear(workflow, actor=actor, base_version=base_version)
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow clear")
 
@@ -449,7 +498,7 @@ def clear_cmd(
 
 @tracking.track_command("workflow")
 def reset_doc_cmd(
-    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    file: Annotated[str, typer.Argument(help="Workflow JSON (frontend or API format — the content is discarded).")],
     confirm: Annotated[
         bool,
         typer.Option(
@@ -485,7 +534,7 @@ def reset_doc_cmd(
             ),
         )
         raise typer.Exit(code=1)
-    p, workflow = _load_workflow_or_fail(renderer, file)
+    p, workflow = _load_clearable_workflow_or_fail(renderer, file)
     workflow, op = workflow_ops.reset_doc(workflow, actor=actor, base_version=base_version)
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow reset-doc")
 
