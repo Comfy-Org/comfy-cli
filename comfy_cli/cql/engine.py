@@ -866,14 +866,11 @@ class Graph:
         supported_nodes_yaml: bytes | None = None,
         cloud_disable_yaml: bytes | None = None,
     ) -> None:
-        node_pack: dict[str, str] = {}
-        node_labels: dict[str, list[str]] = {}
-        disable_labels: set[str] = set()
+        from comfy_cli.cql import annotations_source
 
-        if supported_nodes_yaml:
-            node_pack, node_labels = parse_supported_nodes(supported_nodes_yaml)
-        if cloud_disable_yaml:
-            disable_labels = parse_disable_config(cloud_disable_yaml)
+        node_pack, node_labels, disable_labels = annotations_source.parsed_annotations(
+            supported_nodes_yaml, cloud_disable_yaml
+        )
 
         for nid, m in self._nodes.items():
             if nid in node_pack:

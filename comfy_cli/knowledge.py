@@ -30,8 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from comfy_cli.cloud import get_base_url
-from comfy_cli.cql.loader import _cache_dir
-from comfy_cli.file_utils import atomic_write_bytes
+from comfy_cli.file_utils import atomic_write_bytes, cache_dir
 from comfy_cli.http import assert_safe_url, authed_urlopen, plain_urlopen, read_capped
 
 SCHEMA_VERSION = 1
@@ -116,7 +115,7 @@ def last_reason() -> str | None:
 
 
 def cache_paths() -> tuple[Path, Path]:
-    base = _cache_dir() / "knowledge"
+    base = cache_dir() / "knowledge"
     return base / "knowledge.json", base / "manifest.json"
 
 

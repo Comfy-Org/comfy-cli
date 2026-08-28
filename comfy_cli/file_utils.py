@@ -20,6 +20,19 @@ from comfy_cli.output.sanitize import sanitize_value
 
 logger = logging.getLogger(__name__)
 
+
+def cache_dir() -> pathlib.Path:
+    """comfy-cli's per-user cache root.
+
+    ``COMFY_CACHE_DIR`` wins; else ``$XDG_CACHE_HOME/comfy-cli``; else ``~/.cache/comfy-cli``.
+    """
+    explicit = os.environ.get("COMFY_CACHE_DIR", "").strip()
+    if explicit:
+        return pathlib.Path(explicit).expanduser()
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    return pathlib.Path(base) / "comfy-cli"
+
+
 # ---------------------------------------------------------------------------
 # Atomic writes — the write policy
 # ---------------------------------------------------------------------------

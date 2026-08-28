@@ -152,16 +152,17 @@ def test_allow_network_false_never_fetches(cache_dir, monkeypatch):
     assert sup == VALID_SUP  # served straight from the stale cache
 
 
-def test_poisoned_cache_is_ignored_in_favour_of_bundled(cache_dir):
-    """A cache entry that doesn't validate is treated as absent, not served.
+def test_cached_pair_is_served_without_a_yaml_parse(cache_dir, monkeypatch):
+    """The pair cache is trusted as written; reading it must not re-parse YAML."""
+    import yaml
 
-    Before this, a garbage-but-fresh entry was handed to
-    ``engine.parse_supported_nodes``, which degrades to "no annotations"
-    silently — blanking every node's labels for a whole TTL window.
-    """
-    _write_pair(cache_dir, sup=GARBAGE)
-    sup, _ = src.load_annotation_bytes()
-    assert sup == src.bundled_bytes(src._SUPPORTED_NODES)
+    _write_pair(cache_dir)
+
+    def boom(*a, **kw):
+        raise AssertionError("yaml.safe_load must not run on a cache read")
+
+    monkeypatch.setattr(yaml, "safe_load", boom)
+    assert src._read_cached_pair(require_fresh=True) == {src._SUPPORTED_NODES: VALID_SUP, src._CLOUD_DISABLE: VALID_DIS}
 
 
 def test_fetch_success_caches_the_pair(cache_dir, monkeypatch):
@@ -485,3 +486,95 @@ def test_refresh_annotations_marks_failure_for_the_hot_path(monkeypatch):
     assert all(r["source"] == "bundled" for r in results)
     assert all("dns failure" in r["error"] for r in results)
     assert src._in_failure_backoff() is True
+
+
+# ---------------------------------------------------------------------------
+# Parsed-annotation cache
+# ---------------------------------------------------------------------------
+
+
+def _parsed_files(cache_dir):
+    return sorted(cache_dir.glob("annotations-parsed-*.json"))
+
+
+def _forbid_parse(monkeypatch):
+    from comfy_cli.cql import engine
+
+    def boom(data):
+        raise AssertionError("parse_supported_nodes must not run on a cache hit")
+
+    monkeypatch.setattr(engine, "parse_supported_nodes", boom)
+
+
+def test_parsed_annotations_miss_writes_and_hit_skips_parse(cache_dir, monkeypatch):
+    first = src.parsed_annotations(VALID_SUP, VALID_DIS)
+    assert first == ({"NodeA": "demo-pack"}, {"NodeA": ["NetworkAccess"]}, {"NetworkAccess"})
+    files = _parsed_files(cache_dir)
+    assert len(files) == 1
+    assert files[0].name.startswith(f"annotations-parsed-v{src._PARSED_SCHEMA}-")
+
+    _forbid_parse(monkeypatch)
+    assert src.parsed_annotations(VALID_SUP, VALID_DIS) == first
+
+
+def test_parsed_annotations_corrupt_file_is_rebuilt(cache_dir):
+    src.parsed_annotations(VALID_SUP, VALID_DIS)
+    (path,) = _parsed_files(cache_dir)
+    path.write_bytes(b"{not json")
+
+    assert src.parsed_annotations(VALID_SUP, VALID_DIS) == (
+        {"NodeA": "demo-pack"},
+        {"NodeA": ["NetworkAccess"]},
+        {"NetworkAccess"},
+    )
+    assert _parsed_files(cache_dir) == [path]
+    assert json.loads(path.read_bytes())["node_pack"] == {"NodeA": "demo-pack"}
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [
+        b'{"node_pack": [], "node_labels": {}, "disable_labels": []}',
+        b'{"node_pack": {}, "node_labels": {}}',
+        b'{"node_pack": {}, "node_labels": {}, "disable_labels": {}}',
+        b"[]",
+        b"null",
+    ],
+)
+def test_parsed_annotations_wrong_shape_is_a_miss(cache_dir, blob):
+    src.parsed_annotations(VALID_SUP, VALID_DIS)
+    (path,) = _parsed_files(cache_dir)
+    path.write_bytes(blob)
+    assert src.parsed_annotations(VALID_SUP, VALID_DIS)[0] == {"NodeA": "demo-pack"}
+
+
+def test_parsed_annotations_new_bytes_evict_old_file(cache_dir):
+    src.parsed_annotations(VALID_SUP, VALID_DIS)
+    (old,) = _parsed_files(cache_dir)
+
+    other_sup = VALID_SUP.replace(b"NodeA", b"NodeB")
+    assert src.parsed_annotations(other_sup, VALID_DIS)[0] == {"NodeB": "demo-pack"}
+    (new,) = _parsed_files(cache_dir)
+    assert new != old
+    assert not old.exists()
+
+
+def test_parsed_annotations_no_cache_env_skips_disk(cache_dir, monkeypatch):
+    monkeypatch.setenv("COMFY_NO_CACHE", "1")
+    assert src.parsed_annotations(VALID_SUP, VALID_DIS)[0] == {"NodeA": "demo-pack"}
+    assert _parsed_files(cache_dir) == []
+
+
+def test_parsed_annotations_empty_input_touches_nothing(cache_dir, monkeypatch):
+    _forbid_parse(monkeypatch)
+    assert src.parsed_annotations(None, None) == ({}, {}, set())
+    assert src.parsed_annotations(b"", b"") == ({}, {}, set())
+    assert _parsed_files(cache_dir) == []
+
+
+def test_parsed_annotations_survives_unwritable_dir(cache_dir, monkeypatch):
+    def refuse(*a, **kw):
+        raise OSError("read-only")
+
+    monkeypatch.setattr(src, "atomic_write_text", refuse)
+    assert src.parsed_annotations(VALID_SUP, VALID_DIS)[0] == {"NodeA": "demo-pack"}

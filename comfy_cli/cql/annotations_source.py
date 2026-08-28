@@ -61,6 +61,7 @@ If ``comfy-complete`` starts publishing tags or digests, pin to one here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -71,6 +72,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from comfy_cli.file_utils import atomic_write_text, cache_dir
 from comfy_cli.http import plain_urlopen, read_capped
 
 # Public source of truth. Both files are at the repo root on ``main``.
@@ -101,6 +103,9 @@ _FAILURE_STAMP = ".refresh-failed"
 # miss, so an old-format file is re-fetched rather than misread.
 _CACHE_SCHEMA = 1
 
+# Bump when parse_supported_nodes / parse_disable_config change their output shape.
+_PARSED_SCHEMA = 1
+
 # These are two small YAML documents (~32 KB bundled). The shared 64 MiB default
 # is a ceiling for ``/object_info``-sized payloads; a much tighter cap here means
 # a misbehaving or hostile upstream can't stream unbounded data into the memory
@@ -119,9 +124,17 @@ def network_disabled() -> bool:
     return os.environ.get("COMFY_CLI_NO_REMOTE_REFRESH", "").strip().lower() not in _FALSEY
 
 
+def index_cache_disabled() -> bool:
+    """True when ``COMFY_NO_CACHE`` opts out of the parsed-annotation cache.
+
+    Scope is :func:`parsed_annotations` only: the raw YAML pair cache and the
+    object_info cache are unaffected.
+    """
+    return os.environ.get("COMFY_NO_CACHE", "").strip().lower() not in _FALSEY
+
+
 def _cache_dir() -> Path:
-    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return Path(base) / "comfy-cli" / "comfy-complete"
+    return cache_dir() / "comfy-complete"
 
 
 def _cache_file() -> Path:
@@ -348,14 +361,19 @@ def _is_fresh(path: Path) -> bool:
 
 
 def _read_cached_pair(*, require_fresh: bool) -> dict[str, bytes] | None:
-    """The cached pair, if it is complete, valid, and (optionally) fresh.
+    """The cached pair, if it is complete and (optionally) fresh.
 
     Returns ``None`` on anything short of that — missing file, unreadable,
-    non-JSON, wrong schema, an absent entry, or a body that fails its validator.
-    A cache written by an older comfy-cli (per-file, pre-validation) lands in
-    that bucket too, so it is simply re-fetched rather than trusted. Every
-    ``None`` hands the decision back to the caller's next fallback, which
-    eventually reaches the bundled snapshot — never a silent blank annotation.
+    non-JSON, wrong schema, or an absent entry. A cache written by an older
+    comfy-cli (per-file, pre-validation) lands in that bucket too, so it is
+    simply re-fetched rather than trusted. Every ``None`` hands the decision
+    back to the caller's next fallback, which eventually reaches the bundled
+    snapshot — never a silent blank annotation.
+
+    The bodies are not re-validated here: ``_persist_pair`` only ever writes a
+    pair that passed ``_VALIDATORS`` in ``_fetch_one``, and the file lands in
+    one ``os.replace``, so a schema-matching file is valid by construction.
+    Skipping the YAML parse is what keeps this read cheap.
     """
     cache = _cache_file()
     if require_fresh and not _is_fresh(cache):
@@ -375,11 +393,91 @@ def _read_cached_pair(*, require_fresh: bool) -> dict[str, bytes] | None:
         text = files.get(filename)
         if not isinstance(text, str):
             return None
-        data = text.encode("utf-8")
-        if not _VALIDATORS[filename](data):
-            return None
-        out[filename] = data
+        out[filename] = text.encode("utf-8")
     return out
+
+
+# ---------------------------------------------------------------------------
+# Parsed-annotation cache
+# ---------------------------------------------------------------------------
+
+_PARSED_PREFIX = "annotations-parsed-"
+_PARSED_GLOB = f"{_PARSED_PREFIX}*.json"
+
+ParsedAnnotations = tuple[dict[str, str], dict[str, list[str]], set[str]]
+
+
+def _parsed_cache_path(sup: bytes, dis: bytes) -> Path:
+    key = hashlib.sha256(sup + b"\0" + dis).hexdigest()[:16]
+    return _cache_dir() / f"{_PARSED_PREFIX}v{_PARSED_SCHEMA}-{key}.json"
+
+
+def _read_parsed(path: Path) -> ParsedAnnotations | None:
+    try:
+        payload = json.loads(path.read_bytes())
+        node_pack = payload["node_pack"]
+        node_labels = payload["node_labels"]
+        disable_labels = payload["disable_labels"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not (isinstance(node_pack, dict) and isinstance(node_labels, dict) and isinstance(disable_labels, list)):
+        return None
+    return node_pack, node_labels, set(disable_labels)
+
+
+def _write_parsed(path: Path, parsed: ParsedAnnotations) -> None:
+    """Persist ``parsed`` at ``path``, evicting every other parsed file first.
+
+    Newest-only keeps the cache dir from accumulating one file per annotation
+    generation and disposes of a corrupt file in the same sweep. Best-effort.
+    """
+    node_pack, node_labels, disable_labels = parsed
+    payload = {"node_pack": node_pack, "node_labels": node_labels, "disable_labels": sorted(disable_labels)}
+    try:
+        for sibling in path.parent.glob(_PARSED_GLOB):
+            try:
+                sibling.unlink()
+            except OSError:
+                pass
+        atomic_write_text(path, json.dumps(payload))
+    except OSError:
+        pass
+
+
+def parsed_annotations(
+    supported_nodes_yaml: bytes | None,
+    cloud_disable_yaml: bytes | None,
+) -> ParsedAnnotations:
+    """``(node_pack, node_labels, disable_labels)`` for the given annotation bytes.
+
+    The parse result is stored on disk as JSON keyed by a digest of the input
+    bytes, so the YAML is parsed once per upstream generation rather than on
+    every call. A new pair gets a new key and the previous file is evicted on
+    write. ``COMFY_NO_CACHE`` skips the disk entirely. Never raises: a missing,
+    unreadable or malformed cache file is a miss and the documents are parsed
+    again.
+    """
+    sup = supported_nodes_yaml or b""
+    dis = cloud_disable_yaml or b""
+    if not sup and not dis:
+        return {}, {}, set()
+    use_cache = not index_cache_disabled()
+    path = _parsed_cache_path(sup, dis) if use_cache else None
+
+    if path is not None:
+        cached = _read_parsed(path)
+        if cached is not None:
+            return cached
+
+    from comfy_cli.cql.engine import parse_disable_config, parse_supported_nodes
+
+    node_pack, node_labels = parse_supported_nodes(sup) if sup else ({}, {})
+    disable_labels = parse_disable_config(dis) if dis else set()
+    parsed: ParsedAnnotations = (node_pack, node_labels, disable_labels)
+
+    if path is not None:
+        _write_parsed(path, parsed)
+    return parsed
 
 
 def _failure_stamp() -> Path:
