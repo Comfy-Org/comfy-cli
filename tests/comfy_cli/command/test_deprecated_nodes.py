@@ -4,7 +4,7 @@ ComfyUI marks a retired class with ``deprecated: true`` in object_info and
 suffixes its display name with "(DEPRECATED)" / "(Legacy)"; the successor is
 registered under the bare display name (``ImageBatch`` -> ``BatchImagesNode``).
 The frontend hides such classes from its node library by default. The agent
-kept building on ``ImageBatch`` (BE-7684) because ``nodes search`` ranked it
+kept building on ``ImageBatch`` because ``nodes search`` ranked it
 like any live class and ``add-node`` accepted it, so:
 
   * ``nodes search`` / ``nodes ls`` drop deprecated rows unless
