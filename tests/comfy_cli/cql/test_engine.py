@@ -1709,6 +1709,18 @@ class TestValidateMalformedInputs:
         result = graph.validate_workflow(wf)  # must not raise
         assert isinstance(result["errors"], list)
 
+    @pytest.mark.parametrize("bad_inputs", ["model stuff", ["model", {}], [5]])
+    def test_non_dict_inputs_on_dynamic_combo_node_does_not_crash(self, graph_dynamic: Graph, bad_inputs):
+        """A truthy non-dict `inputs` on a node with a COMFY_DYNAMICCOMBO_V3
+        selector used to crash: `_check_dynamic_combos` re-derived `present`
+        from the raw, unsanitized `node_data` instead of the driver loop's
+        already-`or {}`-guarded `node_inputs`, so `present[name]`/`name in
+        present` blew up with a TypeError on a string or list."""
+        wf = {"1": {"class_type": "ClaudeNode", "inputs": bad_inputs}}
+        result = graph_dynamic.validate_workflow(wf)  # must not raise
+        assert result["valid"] is False
+        assert isinstance(result["errors"], list)
+
 
 class TestValidateEmptyCombo:
     """A COMBO whose option list is declared but EMPTY means the server has zero
@@ -3236,6 +3248,145 @@ class TestDynamicComboInputs:
         assert "ckpt-008" not in hint
         assert "and 22 more" in hint
 
+    def test_stale_sub_key_warning_survives_on_unreachable_node(self):
+        """dyn_errors/dyn_warnings used to be bundled into one reachability
+        gate together with the required-presence checks. But the stale-key
+        exemption in the generic per-input loop (which needs dyn_valid_keys/
+        dyn_unresolved) runs for EVERY node regardless of reachability — so
+        an unreachable node's dangling stray dynamic sub-key was silently
+        exempted from the generic dangling_edge check with the compensating
+        unknown_input warning dropped right alongside it (since THAT was
+        reachability-gated), leaving zero diagnostics where an ordinary
+        (non-dynamic) unreachable node's stray key would still warn."""
+        info = {
+            "DynNode": {
+                "input": {
+                    "required": {
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {"key": "A", "inputs": {"required": {"max_tokens": ["INT", {"default": 1}]}}}
+                                ]
+                            },
+                        ]
+                    }
+                },
+                "input_order": {"required": ["model"]},
+                "output": ["STRING"],
+                "output_name": ["text"],
+                "display_name": "DynNode",
+                "python_module": "nodes",
+            },
+            "Sink": {
+                "input": {"required": {}},
+                "input_order": {"required": []},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "display_name": "Sink",
+                "python_module": "nodes",
+            },
+        }
+        g = Graph.from_object_info(info)
+        wf = {
+            # DynNode feeds nothing — unreachable, but still validated for
+            # non-required-presence diagnostics.
+            "1": {
+                "class_type": "DynNode",
+                "inputs": {"model": "A", "model.max_tokens": 5, "model.old_image": ["99", 0]},
+            },
+            "2": {"class_type": "Sink", "inputs": {}},
+        }
+        result = g.validate_workflow(wf)
+        assert "dangling_edge" not in [e["code"] for e in result["errors"]]
+        warn = next(w for w in result["warnings"] if w["code"] == "unknown_input")
+        assert warn["field"] == "model.old_image"
+
+    def test_required_missing_hint_not_self_refuting_when_options_unparseable(self):
+        """A REQUIRED selector that's both absent AND backed by an unreadable
+        options container used to emit "set 'shape' to one of its options: "
+        with nothing after the colon — self-refuting, since `keys` is empty.
+        The hint must say the schema didn't parse instead."""
+        info = {
+            "BadDyn": {
+                "input": {"required": {"shape": ["COMFY_DYNAMICCOMBO_V3", {"options": "garbage"}]}},
+                "input_order": {"required": ["shape"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "display_name": "BadDyn",
+                "python_module": "nodes",
+            }
+        }
+        g = Graph.from_object_info(info)
+        result = g.validate_workflow({"1": {"class_type": "BadDyn", "inputs": {}}})
+        err = next(e for e in result["errors"] if e["code"] == "required_input_missing")
+        assert err["field"] == "shape"
+        assert "one of its options: " not in err["hint"]
+        assert "didn't parse" in err["hint"]
+
+    def test_optional_absent_selector_stray_dangling_key_warns_not_errors(self):
+        """An OPTIONAL selector that's simply absent is a legitimate state —
+        no error for the selector. A stale dotted sub-key left under it is
+        just as unused by the server as one under a resolved-but-unmatched
+        selection (schema expansion is a no-op either way), so it must get
+        the same unknown_input warning, not a false dangling_edge hard error
+        just because the target node doesn't exist."""
+        info = {
+            "OptDyn": {
+                "input": {
+                    "optional": {
+                        "mode": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {"options": [{"key": "go", "inputs": {"required": {"a": ["INT", {}]}}}]},
+                        ]
+                    }
+                },
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+        }
+        g = Graph.from_object_info(info)
+        result = g.validate_workflow({"1": {"class_type": "OptDyn", "inputs": {"mode.a": ["99", 0]}}})
+        assert result["valid"] is True, result["errors"]
+        assert "dangling_edge" not in [e["code"] for e in result["errors"]]
+        warn = next(w for w in result["warnings"] if w["code"] == "unknown_input")
+        assert warn["field"] == "mode.a"
+
+    def test_unknown_input_hint_truncates_many_valid_sub_keys(self):
+        """The `valid sub-keys for this selection` hint on an unknown_input
+        warning must truncate like its sibling required/unknown-enum hints —
+        a resolved option with many sub-inputs shouldn't dump them all."""
+        required = {f"field{i:02d}": ["INT", {"default": 0}] for i in range(20)}
+        info = {
+            "Loader": {
+                "input": {
+                    "required": {
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {"options": [{"key": "big", "inputs": {"required": required, "optional": {}}}]},
+                        ]
+                    }
+                },
+                "input_order": {"required": ["model"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "display_name": "Loader",
+                "python_module": "nodes",
+            }
+        }
+        g = Graph.from_object_info(info)
+        inputs = {"model": "big", **{f"model.field{i:02d}": i for i in range(20)}, "model.bogus": 1}
+        result = g.validate_workflow({"1": {"class_type": "Loader", "inputs": inputs}})
+        warn = next(w for w in result["warnings"] if w["code"] == "unknown_input")
+        assert warn["field"] == "model.bogus"
+        assert "and 12 more" in warn["hint"]
+        assert warn["hint"].count(",") == 7  # 8 shown keys -> 7 separators
+
     def test_deeply_nested_dynamic_options_degrade_without_recursion_error(self):
         """A hostile object_info with pathologically nested dynamic combos
         (deeper than _MAX_SUBGRAPH_DEPTH) parses leniently instead of
@@ -3260,6 +3411,31 @@ class TestDynamicComboInputs:
         g = Graph.from_object_info(info)  # must not raise
         result = g.validate_workflow({"1": {"class_type": "Nest", "inputs": {"root": "deeper"}}})
         assert isinstance(result["valid"], bool)  # deep recursion is bounded, not a crash
+
+    def test_depth_cap_and_malformed_sub_def_mark_prefix_unresolved(self):
+        """The depth-cap bail and a resolved option whose `inputs` isn't a
+        dict both DID resolve the selection but can't enumerate its
+        sub-inputs — the same "cannot judge" class as an absent/invalid/
+        link-valued selector. Both must report the unresolved prefix (not an
+        empty set) so the generic driver loop keeps hard-checking any stray
+        sub-key there instead of silently exempting it, and the
+        `_check_dynamic_combos` warning loop doesn't confidently — and
+        wrongly — mislabel an unparsed sub-key as "matches no sub-input"."""
+        from comfy_cli.cql.engine import _MAX_DYNAMIC_COMBO_DEPTH, _check_dynamic_combo_input
+
+        spec = ["COMFY_DYNAMICCOMBO_V3", {"options": [{"key": "go", "inputs": {"required": {}}}]}]
+        _, _, valid_keys, unresolved = _check_dynamic_combo_input(
+            "1", "Node", "root", spec, True, {"root": "go"}, {}, depth=_MAX_DYNAMIC_COMBO_DEPTH
+        )
+        assert valid_keys == set()
+        assert unresolved == {"root."}
+
+        spec2 = ["COMFY_DYNAMICCOMBO_V3", {"options": [{"key": "go", "inputs": "not-a-dict"}]}]
+        _, _, valid_keys2, unresolved2 = _check_dynamic_combo_input(
+            "1", "Node", "root", spec2, True, {"root": "go"}, {}
+        )
+        assert valid_keys2 == set()
+        assert unresolved2 == {"root."}
 
 
 class TestDynamicComboAutogrowSub:
@@ -3336,6 +3512,24 @@ class TestDynamicComboAutogrowSub:
         assert result["valid"] is False
         err = next(e for e in result["errors"] if e["code"] == "dangling_edge")
         assert err["field"] == "model.images.image0"
+
+    def test_bare_wired_sub_input_errors_like_top_level(self):
+        """Wiring the autogrow sub-input's base name directly as a single
+        connection (`model.images: [src, idx]`, no `.imageN` slot) is the
+        exact same mistake `autogrow_bare_input` catches at the top level —
+        the server still expects one slot key per connection. The top-level
+        driver loop never sees this dotted key (`autogrow_ports` only tracks
+        top-level names), so without a dedicated check it silently validated
+        as an ordinary link."""
+        wf = {
+            "0": {"class_type": "Src", "inputs": {}},
+            "1": {"class_type": "Batch", "inputs": {"model": "multi", "model.images": ["0", 0]}},
+        }
+        result = self._graph().validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "autogrow_bare_input")
+        assert err["field"] == "model.images"
+        assert "model.images.image0" in err["hint"]
 
 
 # ===========================================================================
