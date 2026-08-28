@@ -635,7 +635,7 @@ SEEDREAM_GOLDEN_LINE = (
     'creating depth. The overall mood is high-tech, dystopian, and avant-garde.", model="seedream 5.0 pro", '
     'seed=0, control_after_generate="randomize", watermark=False, thinking=True, '
     '**{"model.images.image_1": None, "model.size_preset": "(1K) 1024x1024 (1:1)", "model.width": 2048, '
-    '"model.height": 2048})  # 1'
+    '"model.height": 2048})  # 1 model.images grows IMAGE'
 )
 
 
@@ -650,7 +650,9 @@ def test_seedream_dynamic_combo_golden():
     res = render_py(wf, graph)
     ast.parse(res.source)  # the whole render is syntactically valid Python
 
-    line = next(ln for ln in res.source.splitlines() if ln.endswith("  # 1"))
+    line = next(ln for ln in res.source.splitlines() if "  # 1 " in ln)
+    # The auto-grow group `model.images` owns no widget slot; it is named in
+    # the comment (with its element type) so the reader knows it exists.
     assert line == SEEDREAM_GOLDEN_LINE
     kwargs = line.split("**{", 1)[1]
     for frag in (
