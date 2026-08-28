@@ -637,16 +637,76 @@ def _set_widget_impl(
     base_version: int = 0,
 ) -> tuple[dict, dict]:
     from comfy_cli.cql import engine as _engine
+    from comfy_cli.cql import promoted as _promoted
 
-    # Subgraph-aware: a subgraph instance's *promoted* input (flat ``57.text`` —
-    # exactly what ``comfy workflow slots`` advertises) or an interior node
-    # (nested ``57/27.text``) resolves INTO the subgraph definition. Both forms
-    # reuse the CQL engine's slot resolver so set-widget and slots agree. The op
-    # carries the resolved interior ``path`` + ``inner_widget`` so apply/replay is
-    # deterministic and writes back into the definition (the change persists).
-    sub = _subgraph_write_target(workflow, node_id, widget)
-    if sub is not None:
-        segments, inner_widget = sub
+    # Subgraph-aware. A promoted widget's value lives on the HOST instance
+    # (ADR 0009: the host value wins over the interior default at run time),
+    # and when an outside node feeds the promoted input, on THAT node — never
+    # on the interior node the legacy ``proxyWidgets`` route pointed at. So a
+    # flat ``57.width``, the interior ``57/13.width`` it backs, and a primitive
+    # wired into ``57.width`` all resolve to the one place the frontend runs.
+    # Unpromoted interior widgets (``57/3.cfg``) still write the definition.
+    target = _resolve_widget_write(workflow, graph, node_id, widget)
+    extra: dict[str, Any] = {}
+    if target.redirected_from is not None:
+        extra["redirected_from"] = target.redirected_from
+    if target.kind == "host":
+        instance = target.node
+        defs = _engine._subgraph_defs_by_id(workflow)
+        sg = defs[str(instance.get("type", ""))]
+        pi = _promoted.find_promoted(sg, defs, widget)
+        inner_type, port = _engine.promoted_source_port(sg, pi, defs, graph)
+        value, norm_note = _normalize_combo(graph, inner_type, port.name if port else widget, value)
+        old = _promoted.effective_value(workflow, instance, widget, graph)
+        warnings: list[dict] = []
+        if port is not None:
+            err = port.validate_shape(value)
+            if err:
+                raise ValueError(err)
+            warnings = [dict(w, field=f"{'/'.join(target.segments)}.{widget}") for w in port.validate_catalog(value)]
+            _refuse_fatal(warnings)
+        if norm_note:
+            warnings = [norm_note, *warnings]
+        op = _new_op(
+            "set_widget",
+            actor,
+            base_version,
+            node_id=instance.get("id") if len(target.segments) == 1 else "/".join(target.segments),
+            widget=widget,
+            value=value,
+            old=None if old is _promoted.UNSET else old,
+            promoted={"value_index": pi.value_index, "instance_path": list(target.segments)},
+            **extra,
+        )
+        if warnings:
+            op["warnings"] = warnings
+        workflow = apply_op(workflow, op, graph)
+        # The materialized host array, for an applier that stores the instance
+        # opaquely (no catalog entry for a subgraph type): it can replace the
+        # positional array wholesale instead of decomposing it by name.
+        op["promoted"]["host_widgets_values"] = _promoted.host_widgets_values(target.node)
+        return workflow, op
+    if target.kind == "legacy_primitive":
+        src = target.node
+        values = src.get("widgets_values")
+        old = values[0] if isinstance(values, list) and values else None
+        op = _new_op(
+            "set_widget",
+            actor,
+            base_version,
+            node_id=src.get("id"),
+            widget=target.widget,
+            value=value,
+            old=old,
+            legacy_primitive=True,
+            **extra,
+        )
+        return apply_op(workflow, op, graph), op
+    if target.kind == "top" and target.redirected_from is not None:
+        node_id = target.node.get("id")
+        widget = target.widget
+    if target.kind == "interior":
+        segments, inner_widget = target.segments, target.widget
         target = _navigate_subgraph_path(workflow, segments)  # read-only: current value + schema
         inner_type = target.get("type", "")
         value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value)
@@ -669,6 +729,7 @@ def _set_widget_impl(
             old=old,
             path=[str(s) for s in segments],
             inner_widget=inner_widget,
+            **extra,
         )
         if warnings:
             op["warnings"] = warnings
@@ -691,10 +752,38 @@ def _set_widget_impl(
         widget=widget,
         value=value,
         old=old,
+        **extra,
     )
     if warnings:
         op["warnings"] = warnings
     return apply_op(workflow, op, graph), op
+
+
+def _refuse_fatal(warnings: list[dict]) -> None:
+    from comfy_cli.cql.engine import FATAL_FINDING_CODES
+
+    for w in warnings:
+        if w.get("code") in FATAL_FINDING_CODES:
+            raise FatalFindingError(w)
+
+
+def _resolve_widget_write(workflow: dict, graph, node_id: Any, widget: str):
+    """Where a set-widget address lands — see ``cql.promoted.resolve_write``.
+    The ``<outer>:<inner>`` alias UI→API lowering mints is accepted like the
+    editable ``<outer>/<inner>`` path."""
+    from comfy_cli.cql import engine as _engine
+    from comfy_cli.cql import promoted as _promoted
+
+    node_str = str(node_id)
+    if _engine._SUBGRAPH_PATH_SEP in node_str:
+        segments = node_str.split(_engine._SUBGRAPH_PATH_SEP)
+    elif ":" in node_str and _find_by_str(workflow, node_str) is None:
+        segments = node_str.split(":")
+    else:
+        if _find(workflow, node_id) is None and _find_by_str(workflow, node_str) is None:
+            _require(workflow, node_id)  # canonical not-found error
+        segments = [node_str]
+    return _promoted.resolve_write(workflow, graph, segments, widget)
 
 
 def _subgraph_write_target(workflow: dict, node_id: Any, widget: str) -> tuple[list[str], str] | None:
@@ -854,8 +943,17 @@ def _promoted_widget_error(workflow: dict, node: dict, slot: Any) -> ValueError 
 
     if not isinstance(slot, str):
         return None
-    if _engine._subgraph_defs_by_id(workflow).get(str(node.get("type", ""))) is None:
+    defs = _engine._subgraph_defs_by_id(workflow)
+    sg = defs.get(str(node.get("type", "")))
+    if sg is None:
         return None
+    from comfy_cli.cql import promoted as _promoted
+
+    pi = _promoted.find_promoted(sg, defs, slot)
+    if pi is not None and (
+        pi.is_widget or pi.source_node is not None or _promoted.legacy_proxy_interior(node, slot) is None
+    ):
+        return None  # a declared input: connect handles it (materialize + wire)
     try:
         target = _subgraph_write_target(workflow, node.get("id"), slot)
     except ValueError:
@@ -910,7 +1008,7 @@ def _connect_impl(
     dst = _require(workflow, to_node)
     out_idx, link_type = _resolve_output_slot(src, graph, from_slot)
     try:
-        in_idx, grow = _resolve_input_target(dst, graph, to_slot, link_type)
+        in_idx, grow = _resolve_input_target(dst, graph, to_slot, link_type, workflow=workflow)
     except ValueError as e:
         promoted = _promoted_widget_error(workflow, dst, to_slot)
         if promoted is not None:
@@ -1705,6 +1803,34 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
     # dropped, so the surviving value is the same in any apply order.
     if not _lww_gate(workflow, op):
         return
+    promoted_write = op.get("promoted")
+    if promoted_write:
+        # Host-owned value of a promoted subgraph input (cql.promoted). The
+        # instance path is one segment for a top-level instance; a nested host
+        # descends (forking shared definitions en route, like interior writes).
+        from comfy_cli.cql import engine as _engine
+        from comfy_cli.cql import promoted as _promoted
+
+        instance_path = [str(s) for s in promoted_write.get("instance_path") or [str(op["node_id"])]]
+        if _find_by_str(workflow, instance_path[0]) is None:
+            return  # instance concurrently deleted => no-op (delete wins)
+        defs_by_id = _engine._subgraph_defs_by_id(workflow)
+        instance = _engine._resolve_node_path(workflow, instance_path, defs_by_id)
+        _promoted.set_host_value(workflow, instance, op["widget"], op["value"], graph)
+        _lww_commit(workflow, op)
+        return
+    if op.get("legacy_primitive"):
+        node = _find_by_str(workflow, op["node_id"])
+        if node is None:
+            return
+        values = node.get("widgets_values")
+        values = list(values) if isinstance(values, list) else []
+        if not values:
+            values.append(None)
+        values[0] = op["value"]
+        node["widgets_values"] = values
+        _lww_commit(workflow, op)
+        return
     path = op.get("path")
     if path:
         # Subgraph interior write. A concurrently-deleted instance => no-op
@@ -1797,9 +1923,15 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
         # schema's own element names, when the catalog carries a template).
         ins = dst.setdefault("inputs", [])
         to_idx = next((k for k, i in enumerate(ins) if i.get("grow_id") == op["link_id"]), None)
+        if to_idx is None and grow.get("promoted"):
+            # A promoted subgraph input is ONE register named by the definition:
+            # a concurrent connect that already materialized it shares the entry.
+            to_idx = next((k for k, i in enumerate(ins) if i.get("name") == grow["name"]), None)
         if to_idx is None:
             inputcount = grow.get("inputcount")
-            if inputcount is not None:
+            if grow.get("promoted"):
+                name = grow["name"]
+            elif inputcount is not None:
                 # Bare-key family (see _next_inputcount_name): a collision must
                 # still grow the next free BARE key, never autogrow's dotted
                 # base.elemN fallback — that name is meaningless for this family.
@@ -2392,7 +2524,9 @@ def _inputcount_family_match(graph, node_type: str, slot: str) -> tuple[str, int
     return elem, n
 
 
-def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -> tuple[int | None, dict | None]:
+def _resolve_input_target(
+    node: dict, graph, slot: Any, elem_type: str | None, workflow: dict | None = None
+) -> tuple[int | None, dict | None]:
     """Resolve a connect target. Returns ``(index, None)`` for a concrete input,
     or ``(None, grow)`` where ``grow`` is the input slot to append (autogrow slot,
     or a widget converted to an input).
@@ -2423,6 +2557,15 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
         return idx, None
     except ValueError:
         pass
+    # Promoted subgraph input (``57.width``): the definition declares it, so it
+    # is a link input on the instance even before the instance carries an
+    # ``inputs[]`` entry for it — the frontend rebuilds those from the
+    # definition on load. Materialize it (widget marker when it backs a
+    # widget) and wire it; type-checked against the declared input type.
+    if workflow is not None and isinstance(slot, str):
+        promoted_grow = _resolve_promoted_target(workflow, node, slot, elem_type)
+        if promoted_grow is not None:
+            return None, promoted_grow
     # Dotted autogrow key (images.image0) or a base that has no concrete slot yet.
     if isinstance(slot, str):
         base = slot.split(".", 1)[0]
@@ -2511,6 +2654,36 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
             )
     names = [i.get("name") for i in ins]
     raise ValueError(f"input {slot!r} not found on node {node.get('id')}; inputs: {names}")
+
+
+def _resolve_promoted_target(workflow: dict, node: dict, slot: str, elem_type: str | None) -> dict | None:
+    """The input to materialize on subgraph instance ``node`` for a connect to
+    its declared input ``slot`` (see ``cql.promoted``). ``None`` when ``node``
+    is not an instance or ``slot`` is not one of its definition's inputs."""
+    from comfy_cli.cql import engine as _engine
+    from comfy_cli.cql import promoted as _promoted
+
+    defs = _engine._subgraph_defs_by_id(workflow)
+    sg = defs.get(str(node.get("type", "")))
+    if sg is None:
+        return None
+    pi = _promoted.find_promoted(sg, defs, slot)
+    if pi is None:
+        return None
+    if not pi.is_widget and pi.source_node is None and _promoted.legacy_proxy_interior(node, slot) is not None:
+        # Declared but unbacked, and a legacy proxy routes the name to an
+        # interior widget: still a value, not a link (the frontend repairs it
+        # into a linked input on load). set-widget owns it.
+        return None
+    if elem_type and not _types_compatible(elem_type, pi.type):
+        raise ValueError(
+            f"type mismatch: {elem_type} output cannot connect to {pi.type} input {slot!r} "
+            f"of subgraph node {node.get('id')}"
+        )
+    grow: dict[str, Any] = {"name": slot, "type": pi.type, "promoted": True}
+    if pi.is_widget:
+        grow["widget"] = slot
+    return grow
 
 
 def _resolve_schema_autogrow(

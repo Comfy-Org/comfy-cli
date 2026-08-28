@@ -2638,6 +2638,23 @@ def _node_widget_slots(node: dict, prefix: str, graph: Graph) -> list[dict]:
         }
         if entry.port.enum_values:
             slot["enum"] = list(entry.port.enum_values)
+        # A widget converted to an input and wired: the link supplies the value
+        # at run time and the stored widget value is inert — say so, so a
+        # caller edits the source instead (the same rule promoted widgets
+        # follow across a subgraph boundary).
+        linked = next(
+            (
+                i.get("link")
+                for i in node.get("inputs") or []
+                if isinstance(i, dict)
+                and isinstance(i.get("widget"), dict)
+                and i["widget"].get("name") == entry.name
+                and i.get("link") is not None
+            ),
+            None,
+        )
+        if linked is not None:
+            slot["linked_from"] = linked
         slots.append(slot)
     return slots
 
@@ -2669,7 +2686,9 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
         seen_addrs.add(addr)
         slots.append(slot)
 
-    def walk(nodes: list, prefix: str, depth: int) -> None:
+    from comfy_cli.cql import promoted as _promoted
+
+    def walk(nodes: list, prefix: str, depth: int, exclude: set[tuple[str, str]]) -> None:
         if depth > _MAX_SUBGRAPH_DEPTH:
             return
         for node in nodes:
@@ -2681,23 +2700,30 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
             sg = defs_by_id.get(node_type)
             if sg is None:
                 for slot in _node_widget_slots(node, node_path, graph):
-                    add(slot)
+                    if (node_id, slot["name"]) not in exclude:
+                        add(slot)
                 continue
 
-            # Subgraph instance. A *curated* template (every declared proxy input
-            # resolves to a live interior widget) keeps its clean, hand-picked
-            # parameter view — we surface only its declared inputs and do NOT
-            # recurse, so the agent sees the intended surface. When the proxies
-            # are missing or dangling (the norm for fetched gallery templates,
-            # whose proxyWidgets point at deleted interior ids) we recurse into
-            # the definition so the real editable inner inputs are reachable.
-            declared, fully_curated = _declared_subgraph_slots(node, sg, node_id, graph)
+            # Subgraph instance. Its promoted widgets are advertised at the
+            # instance address (``57.width``) — the value the frontend runs
+            # lives on the host (cql.promoted), so the interior widget behind
+            # a promotion is NOT advertised: ``57/13.width`` is exactly the
+            # "layer 2" address whose edits the surface overrides. Every
+            # other interior widget is reachable at ``<instance>/<inner>.<w>``
+            # (recursing for nested instances). A legacy template whose
+            # curated surface comes entirely from ``proxyWidgets`` (nothing
+            # linked) keeps its hand-picked view without recursion.
+            declared, fully_curated = _declared_subgraph_slots(node, sg, node_id, graph, workflow)
             for slot in declared:
-                add(slot)
-            if not fully_curated:
-                walk(sg.get("nodes") or [], node_path, depth + 1)
+                if (node_id, slot["name"]) not in exclude:
+                    add(slot)
+            promoted = [p for p in _promoted.promoted_inputs(sg, defs_by_id) if p.is_widget]
+            if fully_curated and not promoted:
+                continue
+            hidden = {(str(p.source_node), str(p.source_widget or p.source_input)) for p in promoted}
+            walk(sg.get("nodes") or [], node_path, depth + 1, hidden)
 
-    walk(workflow.get("nodes") or [], "", 0)
+    walk(workflow.get("nodes") or [], "", 0, set())
     return slots
 
 
@@ -2709,41 +2735,97 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
 _UNRESOLVED = object()
 
 
-def _declared_subgraph_slots(instance: dict, sg: dict, instance_id: str, graph: Graph) -> tuple[list[dict], bool]:
-    """Build slots for a subgraph instance's curated proxy inputs.
+def _declared_subgraph_slots(
+    instance: dict, sg: dict, instance_id: str, graph: Graph, workflow: dict | None = None
+) -> tuple[list[dict], bool]:
+    """Build slots for a subgraph instance's promoted inputs.
+
+    A declared input that a boundary link feeds into an interior widget is a
+    promoted WIDGET (``cql.promoted``): its address is ``<instance>.<name>``
+    and its current value is the one the frontend runs — the host instance's
+    own value when materialized, else the interior default. When an outside
+    link feeds the instance input, the slot says so (``linked_from``): a
+    write must then go to that source node. Socket-only inputs (``VIDEO``…)
+    are link slots, not widget slots. A declared input the definition does
+    not back with a link falls back to the legacy ``proxyWidgets`` route.
 
     Returns ``(slots, fully_curated)`` where ``fully_curated`` is True only when
-    the instance declares at least one input and EVERY declared input resolves
-    to a real interior widget value (so the curated surface is complete and the
-    caller can skip recursion).
+    at least one widget slot exists and EVERY one resolved to a value (so the
+    curated surface is complete and the caller can skip recursion).
     """
+    from comfy_cli.cql import promoted as _promoted
+
     declared: list[dict] = []
-    inputs = sg.get("inputs") or []
     any_declared = False
     all_resolved = True
-    for inp in inputs:
+    defs = _subgraph_defs_by_id(workflow) if workflow is not None else {}
+    promoted_by_name = {p.name: p for p in _promoted.promoted_inputs(sg, defs)}
+    for inp in sg.get("inputs") or []:
         if not isinstance(inp, dict):
             continue
         inp_name = inp.get("name", "")
         if not inp_name:
             continue
+        pi = promoted_by_name.get(inp_name)
+        linked_from = None
+        if pi is not None and pi.is_widget and workflow is not None:
+            current = _promoted.host_value(instance, pi)
+            if current is _promoted.UNSET:
+                current = _promoted.source_value(workflow, sg, pi, graph, defs)
+            if current is _promoted.UNSET:
+                current = _UNRESOLVED
+            linked_from = _promoted.external_link(instance, inp_name)
+        elif pi is not None and pi.is_widget:
+            current = _UNRESOLVED
+        else:
+            legacy = _resolve_proxy_value(instance, sg, inp_name, graph)
+            if legacy is _UNRESOLVED and pi is not None and not pi.is_widget and pi.source_node is None:
+                # Declared but unbacked and unproxied — a socket or a dangling
+                # declaration. Not a widget slot either way.
+                continue
+            current = legacy
         any_declared = True
-        current = _resolve_proxy_value(instance, sg, inp_name, graph)
         if current is _UNRESOLVED:
             all_resolved = False
             continue
         inp_type = inp.get("type", {})
-        declared.append(
-            {
-                "address": f"{instance_id}.{inp_name}",
-                "name": inp_name,
-                "type": inp_type if isinstance(inp_type, str) else str(inp_type),
-                "current_value": current,
-                "instance_id": instance_id,
-                "node_type": instance.get("type", ""),
-            }
-        )
+        slot = {
+            "address": f"{instance_id}.{inp_name}",
+            "name": inp_name,
+            "type": inp_type if isinstance(inp_type, str) else str(inp_type),
+            "current_value": current,
+            "instance_id": instance_id,
+            "node_type": instance.get("type", ""),
+        }
+        if linked_from is not None:
+            slot["linked_from"] = linked_from
+        declared.append(slot)
     return declared, (any_declared and all_resolved)
+
+
+def promoted_source_port(sg: dict, pi: Any, defs: dict[str, dict], graph: Graph) -> tuple[str, Port | None]:
+    """``(interior class, Port)`` of the concrete widget behind promoted input
+    ``pi`` — the schema a host value is validated against."""
+    from comfy_cli.cql import promoted as _promoted
+
+    target = _promoted.deepest_source(sg, pi, defs)
+    if target is None:
+        return "", None
+    path, widget = target
+    current_sg = sg
+    node: dict | None = None
+    for seg in path:
+        node = next((n for n in current_sg.get("nodes") or [] if str(n.get("id")) == seg), None)
+        if node is None:
+            return "", None
+        nxt = defs.get(str(node.get("type", "")))
+        if nxt is not None:
+            current_sg = nxt
+    class_type = str(node.get("type", "")) if node else ""
+    m = graph.node(class_type)
+    if m is None:
+        return class_type, None
+    return class_type, next((p for p in m.inputs if p.name == widget), None)
 
 
 def _resolve_proxy_value(instance: dict, subgraph: dict, input_name: str, graph: Graph):
@@ -3109,50 +3191,42 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
     # Always split on the FIRST dot so multi-dot input names are preserved.
     node_path, input_name = addr.split(".", 1)
     segments = node_path.split(_SUBGRAPH_PATH_SEP)
-
     defs_by_id = _subgraph_defs_by_id(workflow)
 
-    # --- Nested form: descend the subgraph path and write the interior widget. ---
-    if len(segments) > 1:
-        # _resolve_node_path forks every shared definition along the path (each
-        # non-terminal hop) before the terminal write, so sibling instances at
-        # any nesting depth stay independent.
-        target = _resolve_node_path(workflow, segments, defs_by_id)
-        return _write_widget(target, input_name, value, graph, extend=False)
+    from comfy_cli.cql import promoted as _promoted
 
-    instance_id = segments[0]
-    nodes = workflow.get("nodes") or []
-    instance = next((n for n in nodes if isinstance(n, dict) and str(n.get("id", "")) == instance_id), None)
-    if instance is None:
-        raise ValueError(f"node {instance_id} not found in workflow")
-
-    node_type = instance.get("type", "")
-    sg = defs_by_id.get(node_type)
-
-    # --- Curated subgraph proxy input (legacy ``<id>.<declaredInput>``). ---
-    if sg is not None:
-        proxy = (instance.get("properties") or {}).get("proxyWidgets") or []
-        interior_id = None
-        for entry in proxy:
-            if not isinstance(entry, list) or len(entry) < 2:
-                continue
-            name = entry[1] if isinstance(entry[1], str) else str(entry[1])
-            if name == input_name:
-                interior_id = str(entry[0])
-                break
-        if interior_id is None:
-            raise ValueError(
-                f"no proxyWidget mapping for {addr}; "
-                f"address an interior input directly, e.g. {instance_id}/<innerId>.<input> "
-                f"(run `comfy workflow slots` to list them)"
-            )
-        inode = next(
-            (n for n in (sg.get("nodes") or []) if isinstance(n, dict) and str(n.get("id", "")) == interior_id),
-            None,
-        )
-        if inode is None:
-            raise ValueError(f"interior node {interior_id} not found in subgraph")
-        return _write_widget(inode, input_name, value, graph, extend=False)
-
-    # --- Direct mode: regular top-level node. ---
-    return _write_widget(instance, input_name, value, graph, extend=True)
+    # One resolution for every address form — the same one set-widget uses —
+    # so a promoted widget's value lands on the host (or the outside node that
+    # feeds it), an unpromoted interior widget lands in the definition, and a
+    # plain node lands on itself. See ``cql.promoted.resolve_write``.
+    target = _promoted.resolve_write(workflow, graph, segments, input_name)
+    if target.kind == "host":
+        # Fork every shared definition along the path before writing so a
+        # nested host's siblings stay independent (a top-level host has no
+        # non-terminal hop and is not forked — its values are its own).
+        instance = _resolve_node_path(workflow, target.segments, defs_by_id)
+        sg = _subgraph_defs_by_id(workflow).get(str(instance.get("type", "")))
+        pi = _promoted.find_promoted(sg, _subgraph_defs_by_id(workflow), target.widget)
+        _class, port = promoted_source_port(sg, pi, _subgraph_defs_by_id(workflow), graph)
+        warnings: list[dict] = []
+        if port is not None:
+            err = port.validate_shape(value)
+            if err:
+                raise ValueError(err)
+            warnings = [dict(w, field=addr) for w in port.validate_catalog(value)]
+        _promoted.set_host_value(workflow, instance, target.widget, value, graph)
+        return warnings
+    if target.kind == "interior":
+        inner = _resolve_node_path(workflow, target.segments, defs_by_id)
+        return _write_widget(inner, target.widget, value, graph, extend=False)
+    if target.kind == "legacy_primitive":
+        node = target.node
+        values = node.get("widgets_values")
+        values = list(values) if isinstance(values, list) else []
+        if not values:
+            values.append(None)
+        values[0] = value
+        node["widgets_values"] = values
+        return []
+    # --- Direct mode: a regular top-level node (or the primitive feeding a promoted input). ---
+    return _write_widget(target.node, target.widget, value, graph, extend=True)
