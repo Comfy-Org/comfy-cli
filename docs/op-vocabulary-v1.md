@@ -414,6 +414,20 @@ Current contract, pinned:
   never random — and the instance's `type` is repointed, so two replicas
   replaying the same op produce byte-identical graphs and sibling instances
   are never aliased.
+* **Promoted widgets are HOST writes** (BE-10305; `cql.promoted`). A
+  `set_widget` on a promoted input carries `promoted: {instance_path,
+  value_index}` instead of `path`, and its LWW target is the host register
+  `("widget", "57", "text")` — the flat form, the nested interior form of the
+  widget the input links, and the flattened alias all converge there. A
+  legacy `properties.proxyWidgets` entry the definition does not back with a
+  linked input is first repaired the way the frontend's forward migration
+  repairs it on load (`promoted.flush_proxy_migration`): the op additionally
+  carries `promoted.repair = {entry, ids}` where `ids` maps every repairable
+  entry of that instance to the subgraph-input uuid and boundary-link ids the
+  repair mints, derived with SHA-256 from `(instance path, source node,
+  widget)` — deterministic, never random — so replay on any replica produces
+  a byte-identical document. The repair mutates the definition, so a shared
+  one is forked first exactly like an interior write.
 * OPEN: the shared-definition forking semantics above are apply-time behavior
   that rewrites `instance.type` without an explicit op saying so. A full
   specification (fork visibility, interaction with concurrent interior writes
@@ -804,3 +818,13 @@ A write that resolves to a frontend-only `PrimitiveNode` (no catalog entry;
 §14.1 `promoted` payload with `value_index: 0` and `instance_path` = the node
 id, so an opaque store applies it as a plain positional write. Apply treats a
 `promoted` payload on a non-instance node as that positional write.
+
+### 14.4 Legacy `proxyWidgets` entries are repaired before the host write
+
+A `properties.proxyWidgets` entry the definition does not back with a linked
+input is repaired first — the frontend's own forward migration
+(`proxyWidgetMigration.ts`), ported as `promoted.flush_proxy_migration` — and
+the op additionally carries `promoted.repair = {entry, ids}` with the
+subgraph-input and boundary-link ids the repair mints, derived by SHA-256 from
+`(instance path, source node, widget)` so replay anywhere is byte-identical.
+The pinned contract text in §8.7 states the full rule.

@@ -677,11 +677,23 @@ _SG_UUID = "f2fdebf6-dfaf-43b6-9eb2-7f70613cfdc1"
 
 
 def _subgraph_workflow() -> dict:
-    """A minimal curated subgraph template (derived from a fetched gallery
-    template): a top-level subgraph instance `57` whose promoted `text`/`seed`/
-    `steps` route through `proxyWidgets` to interior CLIPTextEncode `27` and
-    KSampler `3`, plus a plain top-level node `9` so we can prove top-level edits
-    still work alongside subgraph edits."""
+    """A minimal LEGACY subgraph template, shaped like the pre-ADR-0009 saves
+    in the gallery (e.g. ``flux_dev_checkpoint_example.json`` node 56 → 52):
+    a top-level subgraph instance `57` whose promoted `text`/`seed`/`steps`
+    exist ONLY as `properties.proxyWidgets` entries routing to interior
+    CLIPTextEncode `27` and KSampler `3` — the definition declares no input
+    for them — plus a plain top-level node `9` so we can prove top-level edits
+    still work alongside subgraph edits.
+
+    History: an earlier version of this fixture also DECLARED `text`/`seed`/
+    `steps` as (unlinked) subgraph inputs. The frontend never writes that
+    shape for a promotion — a declared input nobody links is a dangling
+    socket — and under the frontend's forward migration (which the CLI now
+    runs before writing a legacy promotion) such a declaration collides with
+    the input the repair mints, so `text` would become `text_1`
+    (``nextUniqueName``). See ``test_declared_unlinked_socket_collides_with_the_repair``
+    for that pin; the realistic shape is what the rest of the class uses.
+    """
     return {
         "last_node_id": 60,
         "last_link_id": 0,
@@ -709,15 +721,12 @@ def _subgraph_workflow() -> dict:
                 {
                     "id": _SG_UUID,
                     "name": "Text to Image",
-                    "inputs": [
-                        {"name": "text", "type": "STRING"},
-                        {"name": "seed", "type": "INT"},
-                        {"name": "steps", "type": "INT"},
-                    ],
+                    "inputs": [],
                     "nodes": [
                         {"id": 27, "type": "CLIPTextEncode", "widgets_values": ["old prompt"]},
                         {"id": 3, "type": "KSampler", "widgets_values": [42, "fixed", 20, 8.0, "euler", "normal", 1.0]},
                     ],
+                    "links": [],
                 }
             ]
         },
@@ -729,48 +738,95 @@ def _interior(wf: dict, inner_id) -> dict:
     return next(n for n in sg["nodes"] if str(n["id"]) == str(inner_id))
 
 
+def _instance(wf: dict, node_id=57) -> dict:
+    return next(n for n in wf["nodes"] if n["id"] == node_id)
+
+
 class TestSetWidgetSubgraph:
-    def test_flat_promoted_address_writes_interior_node(self, patched_graph, tmp_path, capsys):
-        """`57.text` — the exact address `slots` advertises — writes CLIPTextEncode 27."""
+    """Legacy ``proxyWidgets`` promotions under the migration semantics.
+
+    These pins changed with the legacy-proxy repair. Before, ``57.text``
+    followed ``proxyWidgets`` into CLIPTextEncode 27 and wrote its
+    ``widgets_values`` — the "layer 2" edit BE-10305 is about: the frontend's
+    load-time migration re-seeds the host from that interior value, so it
+    *looked* right, but the value lived where no other promoted write puts
+    it and ``comfy run`` had no host value to submit. Now the write mirrors
+    the frontend exactly: the definition gains a linked input per legacy
+    entry (``text``/``seed``/``steps``, boundary-linked from the subgraph
+    input node), the instance carries the value, and the interior widget is
+    only the default. The op is a HOST write (no ``path``), carrying the
+    repair it performed so a replica replays to the same document.
+    """
+
+    def test_flat_promoted_address_repairs_and_writes_the_host(self, patched_graph, tmp_path, capsys):
+        """`57.text` — the exact address `slots` advertises — writes the HOST value
+        of the input the repair mints for CLIPTextEncode 27's `text`."""
         path = _write(tmp_path, _subgraph_workflow())
         env = _run(["set-widget", str(path), "57.text", "a cat on a bicycle"], capsys)
         assert env["ok"] is True, env
         op = env["data"]["op"]
         assert op["op"] == "set_widget"
         assert op["node_id"] == 57
+        assert op["widget"] == "text"
         assert op["value"] == "a cat on a bicycle"
         assert op["old"] == "old prompt"
-        # op is self-describing + replayable: resolved interior path + widget.
-        assert op["path"] == ["57", "27"]
-        assert op["inner_widget"] == "text"
+        # op is self-describing + replayable: a host write plus the repair it ran.
+        assert "path" not in op
+        assert op["promoted"]["instance_path"] == ["57"]
+        assert op["promoted"]["value_index"] == 0
+        assert op["promoted"]["repair"]["entry"] == ["27", "text"]
+        assert set(op["promoted"]["repair"]["ids"]) == {"27.text", "3.seed", "3.steps"}
         # CRDT stamping preserved.
         assert isinstance(op["op_id"], str) and op["op_id"]
         assert op["stamp"] == [0, "cli"]
-        # value landed on the interior node, in the definition (persists on disk).
+        # on disk: the definition is repaired, the host owns the value, the
+        # interior widget keeps its default, the legacy route is consumed.
         wf = json.loads(path.read_text())
-        assert _interior(wf, 27)["widgets_values"][0] == "a cat on a bicycle"
+        sg = wf["definitions"]["subgraphs"][0]
+        assert [i["name"] for i in sg["inputs"]] == ["text", "seed", "steps"]
+        assert [(ln["origin_id"], ln["origin_slot"], ln["target_id"]) for ln in sg["links"]] == [
+            (-10, 0, 27),
+            (-10, 1, 3),
+            (-10, 2, 3),
+        ]
+        assert _interior(wf, 27)["inputs"] == [
+            {
+                "localized_name": "text",
+                "name": "text",
+                "type": "STRING",
+                "widget": {"name": "text"},
+                "link": sg["links"][0]["id"],
+            }
+        ]
+        assert _instance(wf)["widgets_values"] == ["a cat on a bicycle", 42, 20]
+        assert _interior(wf, 27)["widgets_values"][0] == "old prompt"
+        assert "proxyWidgets" not in _instance(wf)["properties"]
 
-    def test_flat_promoted_int_input_writes_ksampler(self, patched_graph, tmp_path, capsys):
+    def test_flat_promoted_int_input_writes_the_host_slot(self, patched_graph, tmp_path, capsys):
         path = _write(tmp_path, _subgraph_workflow())
         env = _run(["set-widget", str(path), "57.seed", "12345"], capsys)
         assert env["ok"] is True, env
-        assert env["data"]["op"]["path"] == ["57", "3"]
+        assert env["data"]["op"]["promoted"]["value_index"] == 1
         wf = json.loads(path.read_text())
-        assert _interior(wf, 3)["widgets_values"][0] == 12345  # seed is index 0
+        assert _instance(wf)["widgets_values"] == ["old prompt", 12345, 20]
+        assert _interior(wf, 3)["widgets_values"][0] == 42  # interior default untouched
 
-    def test_nested_interior_address_writes_interior_node(self, patched_graph, tmp_path, capsys):
-        """`57/27.text` (the nested form the skill documents) hits the same widget."""
+    def test_nested_interior_address_is_redirected_to_the_host(self, patched_graph, tmp_path, capsys):
+        """`57/27.text` (the nested form the skill documents) is the widget a
+        legacy promotion owns: the write is redirected to the host, like the
+        interior address of any linked promotion."""
         path = _write(tmp_path, _subgraph_workflow())
         env = _run(["set-widget", str(path), "57/27.text", "a nested cat"], capsys)
         assert env["ok"] is True, env
         op = env["data"]["op"]
-        assert op["node_id"] == "57/27"
-        assert op["path"] == ["57", "27"]
-        assert op["inner_widget"] == "text"
+        assert op["node_id"] == 57 and op["widget"] == "text"
+        assert op["redirected_from"] == "57/27.text"
+        assert "path" not in op
         wf = json.loads(path.read_text())
-        assert _interior(wf, 27)["widgets_values"][0] == "a nested cat"
+        assert _instance(wf)["widgets_values"][0] == "a nested cat"
+        assert _interior(wf, 27)["widgets_values"][0] == "old prompt"
 
-    def test_flattened_colon_address_writes_interior_node(self, patched_graph, tmp_path, capsys):
+    def test_flattened_colon_address_is_redirected_to_the_host(self, patched_graph, tmp_path, capsys):
         """`57:27.text` — the FLATTENED id namespace `validate` and server
         node_errors report after UI→API lowering (workflow_to_api composes inner
         ids as `<outer>:<inner>`) — is accepted as an alias for `57/27.text`.
@@ -780,10 +836,10 @@ class TestSetWidgetSubgraph:
         env = _run(["set-widget", str(path), "57:27.text", "a flattened cat"], capsys)
         assert env["ok"] is True, env
         op = env["data"]["op"]
-        assert op["path"] == ["57", "27"]
-        assert op["inner_widget"] == "text"
+        assert op["node_id"] == 57 and op["widget"] == "text"
+        assert op["redirected_from"] == "57/27.text"
         wf = json.loads(path.read_text())
-        assert _interior(wf, 27)["widgets_values"][0] == "a flattened cat"
+        assert _instance(wf)["widgets_values"][0] == "a flattened cat"
 
     def test_flattened_colon_converges_with_nested_form(self):
         """`57:27.text` and `57/27.text` resolve to the SAME CRDT write target."""
@@ -800,29 +856,68 @@ class TestSetWidgetSubgraph:
         assert "interior node 99 not found" in env["error"]["message"]
 
     def test_flat_and_nested_share_a_conflict_target(self):
-        """Flat `57.text` and nested `57/27.text` land on the same interior
-        widget, so their ops must resolve to the SAME CRDT write target (they
+        """Flat `57.text` and nested `57/27.text` land on the same host value,
+        so their ops must resolve to the SAME CRDT write target (they
         converge — one does not silently clobber the other undetected)."""
         wf = _subgraph_workflow()
         _, flat = workflow_ops.set_widget(copy.deepcopy(wf), _graph(), 57, "text", "A")
         _, nested = workflow_ops.set_widget(copy.deepcopy(wf), _graph(), "57/27", "text", "B")
-        assert workflow_ops._write_target(flat) == workflow_ops._write_target(nested)
+        assert workflow_ops._write_target(flat) == workflow_ops._write_target(nested) == ("widget", "57", "text")
         assert workflow_ops.detect_conflict(flat, nested) is True  # different values, same target
+
+    def test_repair_replays_identically_on_a_fresh_copy(self):
+        base = _subgraph_workflow()
+        applied, op = workflow_ops.set_widget(copy.deepcopy(base), _graph(), 57, "seed", 7)
+        replayed = workflow_ops.apply_op(copy.deepcopy(base), op, _graph())
+        for w in (applied, replayed):
+            w.pop("_applied_ops", None)
+            w.pop("_widget_stamps", None)
+        assert json.dumps(replayed, sort_keys=True) == json.dumps(applied, sort_keys=True)
 
     def test_slots_and_set_widget_agree(self, patched_graph, monkeypatch, tmp_path, capsys):
         """The self-consistency the bug broke: every flat address `slots` emits
-        for the subgraph instance is accepted by set-widget."""
+        for the subgraph instance is accepted by set-widget — before the repair
+        (the legacy entries are advertised where the frontend will show them)
+        and after it (they are ordinary promoted widgets)."""
         # slots resolves its graph via workflow.py's _get_graph; set-widget via
         # workflow_edit.py's. patched_graph covers the latter; patch the former too.
         monkeypatch.setattr(workflow_cmd, "_get_graph", lambda *a, **kw: _graph())
         path = _write(tmp_path, _subgraph_workflow())
         slots_env = _run(["slots", str(path)], capsys)
-        addrs = [s["address"] for s in slots_env["data"]["slots"] if str(s["address"]).startswith("57.")]
+        by_addr = {s["address"]: s for s in slots_env["data"]["slots"]}
+        addrs = [a for a in by_addr if a.startswith("57.")]
         assert addrs, slots_env  # the instance's promoted inputs are advertised flat
+        assert by_addr["57.text"]["current_value"] == "old prompt"
+        assert "57/27.text" not in by_addr  # the interior behind a promotion is not advertised
         for addr in ("57.text", "57.seed", "57.steps"):
             assert addr in addrs
             env = _run(["set-widget", str(path), addr, "3" if addr != "57.text" else "x"], capsys)
             assert env["ok"] is True, (addr, env)
+        slots_env = _run(["slots", str(path)], capsys)
+        after = {s["address"]: s for s in slots_env["data"]["slots"]}
+        assert after["57.text"]["current_value"] == "x" and after["57.seed"]["current_value"] == 3
+
+    def test_declared_unlinked_socket_collides_with_the_repair(self, patched_graph, tmp_path, capsys):
+        """The shape this fixture USED to have: `text` declared as a subgraph
+        input nobody links, plus the legacy `['27','text']` entry. The frontend's
+        migration keeps the dangling socket and mints `text_1` for the widget
+        (``nextUniqueName``); addressing `57.text` still reaches the widget —
+        by its legacy source-widget name — and reports the redirect."""
+        wf = _subgraph_workflow()
+        wf["definitions"]["subgraphs"][0]["inputs"] = [{"name": "text", "type": "STRING"}]
+        path = _write(tmp_path, wf)
+        env = _run(["set-widget", str(path), "57.text", "a cat"], capsys)
+        assert env["ok"] is True, env
+        op = env["data"]["op"]
+        assert op["widget"] == "text_1" and op["redirected_from"] == "57.text"
+        saved = json.loads(path.read_text())
+        assert [i["name"] for i in saved["definitions"]["subgraphs"][0]["inputs"]] == [
+            "text",
+            "text_1",
+            "seed",
+            "steps",
+        ]
+        assert _instance(saved)["widgets_values"] == ["a cat", 42, 20]
 
     def test_unknown_promoted_input_errors_cleanly(self, patched_graph, tmp_path, capsys):
         path = _write(tmp_path, _subgraph_workflow())
@@ -835,9 +930,9 @@ class TestSetWidgetSubgraph:
         path = _write(tmp_path, _subgraph_workflow())
         env = _run(["set-widget", str(path), "57.seed", '"notanumber"'], capsys)
         assert env["ok"] is False
-        # unchanged on disk (edit rejected before write).
+        # unchanged on disk (edit rejected before write — and before any repair).
         wf = json.loads(path.read_text())
-        assert _interior(wf, 3)["widgets_values"][0] == 42
+        assert wf == _subgraph_workflow()
 
     def test_top_level_edit_still_works_with_subgraphs_present(self, patched_graph, tmp_path, capsys):
         """A plain top-level node in a workflow that also contains subgraphs is

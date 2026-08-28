@@ -1,0 +1,821 @@
+{
+  "id": "73b6b198-be12-4114-9363-c1dcd74bf81c",
+  "revision": 0,
+  "last_node_id": 157,
+  "last_link_id": 248,
+  "nodes": [
+    {
+      "id": 125,
+      "type": "LoadImage",
+      "pos": [
+        2860,
+        4920
+      ],
+      "size": [
+        380,
+        480
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            233
+          ]
+        },
+        {
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "latent_space_clud.png",
+        "image"
+      ]
+    },
+    {
+      "id": 131,
+      "type": "SaveImage",
+      "pos": [
+        3670,
+        4920
+      ],
+      "size": [
+        580,
+        480
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 234
+        }
+      ],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "graphic_design_recompose"
+      ]
+    },
+    {
+      "id": 143,
+      "type": "172f1008-9337-4d2f-9212-ee081cb4faf5",
+      "pos": [
+        3280,
+        4920
+      ],
+      "size": [
+        340,
+        180
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 233
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "IMAGE",
+          "links": [
+            234
+          ]
+        }
+      ],
+      "properties": {
+        "proxyWidgets": [
+          [
+            "135",
+            "choice"
+          ],
+          [
+            "156",
+            "value"
+          ],
+          [
+            "142",
+            "value"
+          ]
+        ]
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [
+    [
+      233,
+      125,
+      0,
+      143,
+      0,
+      "IMAGE"
+    ],
+    [
+      234,
+      143,
+      0,
+      131,
+      0,
+      "IMAGE"
+    ]
+  ],
+  "groups": [],
+  "definitions": {
+    "subgraphs": [
+      {
+        "id": "172f1008-9337-4d2f-9212-ee081cb4faf5",
+        "version": 1,
+        "state": {
+          "lastGroupId": 15,
+          "lastNodeId": 157,
+          "lastLinkId": 248,
+          "lastRerouteId": 0
+        },
+        "revision": 0,
+        "config": {},
+        "name": "Recompose Image",
+        "inputNode": {
+          "id": -10,
+          "bounding": [
+            4690,
+            7430,
+            128,
+            68
+          ]
+        },
+        "outputNode": {
+          "id": -20,
+          "bounding": [
+            7680,
+            7470,
+            128,
+            68
+          ]
+        },
+        "inputs": [
+          {
+            "id": "7cbedb18-b324-4f1b-96d7-4517996bc432",
+            "name": "images",
+            "type": "IMAGE",
+            "linkIds": [
+              212,
+              244
+            ],
+            "localized_name": "images",
+            "shape": 7,
+            "pos": [
+              4794,
+              7454
+            ]
+          }
+        ],
+        "outputs": [
+          {
+            "id": "cde817df-cc4a-4726-9aca-fb1e9200a1e6",
+            "name": "output",
+            "type": "IMAGE",
+            "linkIds": [
+              230
+            ],
+            "localized_name": "output",
+            "pos": [
+              7704,
+              7494
+            ]
+          }
+        ],
+        "widgets": [],
+        "nodes": [
+          {
+            "id": 2,
+            "type": "PrimitiveStringMultiline",
+            "pos": [
+              5190,
+              7570
+            ],
+            "size": [
+              560,
+              580
+            ],
+            "flags": {
+              "collapsed": false
+            },
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  211,
+                  247
+                ]
+              }
+            ],
+            "title": "Prompt",
+            "properties": {
+              "Node name for S&R": "PrimitiveStringMultiline"
+            },
+            "widgets_values": [
+              "Role: Act as an expert art director and compositing specialist. Your objective is to adapt the provided image to a new aspect ratio by expanding the background and rearranging its core elements. Never stretch, squish, or letterbox the image.\n\n1. Canvas Expansion & Outpainting\n\nSeamless Extension: Expand the canvas to the target dimensions using generative outpainting. Seamlessly continue the existing environment (sky, textures, walls, floors) while perfectly matching the original lighting, grain, and perspective.\n\nStrict Limitations: Do not shrink the original image onto a blurred or colored background. Do not introduce new focal objects, characters, or decorative borders. Only continue existing environmental elements.\n\n2. Element Redistribution\n\nTreat as Layers: Separate the main components (typography, logos, hero imagery, credits) into distinct, movable elements.\n\nSmart Rearrangement: Reposition these elements to suit the new aspect ratio using professional layout principles (e.g., shifting a vertical stack into a horizontal, side-by-side composition). Use the newly generated space intentionally to avoid awkward negative space.\n\nPreserve Proportions: Maintain the exact original aspect ratio of every individual element. Keep all font styles, weights, and text styling identical. Scale elements uniformly only if required for layout balance.\n\n3. Visual Integrity & Polish\n\nMaintain Hierarchy: Preserve the original visual dominance of the headline, hero image, and logo placement.\n\nNative Feel: The final composition must look cohesive, breathable, and deliberately designed from scratch for this specific format."
+            ]
+          },
+          {
+            "id": 130,
+            "type": "GeminiImage2Node",
+            "pos": [
+              6020,
+              6910
+            ],
+            "size": [
+              470,
+              350
+            ],
+            "flags": {},
+            "order": 5,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "images",
+                "name": "images",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": 212
+              },
+              {
+                "localized_name": "files",
+                "name": "files",
+                "shape": 7,
+                "type": "GEMINI_INPUT_FILES",
+                "link": null
+              },
+              {
+                "localized_name": "prompt",
+                "name": "prompt",
+                "type": "STRING",
+                "widget": {
+                  "name": "prompt"
+                },
+                "link": 211
+              },
+              {
+                "localized_name": "aspect_ratio",
+                "name": "aspect_ratio",
+                "type": "COMBO",
+                "widget": {
+                  "name": "aspect_ratio"
+                },
+                "link": 229
+              },
+              {
+                "localized_name": "resolution",
+                "name": "resolution",
+                "type": "COMBO",
+                "widget": {
+                  "name": "resolution"
+                },
+                "link": 243
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  232
+                ]
+              },
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GeminiImage2Node"
+            },
+            "widgets_values": [
+              "",
+              "gemini-3-pro-image-preview",
+              314507571392615,
+              "randomize",
+              "16:9",
+              "2K",
+              "IMAGE+TEXT",
+              "You are an expert image-generation engine. You must ALWAYS produce an image.\nInterpret all user input—regardless of format, intent, or abstraction—as literal visual directives for image composition.\nIf a prompt is conversational or lacks specific visual details, you must creatively invent a concrete visual scenario that depicts the concept.\nPrioritize generating the visual representation above any text, formatting, or conversational requests."
+            ],
+            "color": "#432",
+            "bgcolor": "#653"
+          },
+          {
+            "id": 134,
+            "type": "ComfySwitchNode",
+            "pos": [
+              7280,
+              7470
+            ],
+            "size": [
+              280,
+              130
+            ],
+            "flags": {},
+            "order": 6,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "on_false",
+                "name": "on_false",
+                "type": "IMAGE",
+                "link": 232
+              },
+              {
+                "localized_name": "on_true",
+                "name": "on_true",
+                "type": "IMAGE",
+                "link": 248
+              },
+              {
+                "localized_name": "switch",
+                "name": "switch",
+                "type": "BOOLEAN",
+                "widget": {
+                  "name": "switch"
+                },
+                "link": 222
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "output",
+                "name": "output",
+                "type": "IMAGE",
+                "links": [
+                  230
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "ComfySwitchNode"
+            },
+            "widgets_values": [
+              true
+            ]
+          },
+          {
+            "id": 135,
+            "type": "CustomCombo",
+            "pos": [
+              6030,
+              8030
+            ],
+            "size": [
+              280,
+              250
+            ],
+            "flags": {},
+            "order": 1,
+            "mode": 0,
+            "inputs": [
+              {
+                "label": "model",
+                "localized_name": "choice",
+                "name": "choice",
+                "type": "COMBO",
+                "widget": {
+                  "name": "choice"
+                },
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": [
+                  217
+                ]
+              },
+              {
+                "localized_name": "INDEX",
+                "name": "INDEX",
+                "type": "INT",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "CustomCombo"
+            },
+            "widgets_values": [
+              "Nano Banana 2",
+              0,
+              "Nano Banana 2",
+              "Nano Banana Pro",
+              ""
+            ]
+          },
+          {
+            "id": 157,
+            "type": "GeminiNanoBanana2V2",
+            "pos": [
+              6020,
+              7540
+            ],
+            "size": [
+              400,
+              350
+            ],
+            "flags": {},
+            "order": 7,
+            "mode": 0,
+            "inputs": [
+              {
+                "localized_name": "prompt",
+                "name": "prompt",
+                "type": "STRING",
+                "widget": {
+                  "name": "prompt"
+                },
+                "link": 247
+              },
+              {
+                "localized_name": "model.aspect_ratio",
+                "name": "model.aspect_ratio",
+                "type": "COMBO",
+                "widget": {
+                  "name": "model.aspect_ratio"
+                },
+                "link": 245
+              },
+              {
+                "localized_name": "model.resolution",
+                "name": "model.resolution",
+                "type": "COMBO",
+                "widget": {
+                  "name": "model.resolution"
+                },
+                "link": 246
+              },
+              {
+                "label": "image_1",
+                "localized_name": "model.images.image_1",
+                "name": "model.images.image_1",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": 244
+              },
+              {
+                "label": "image_2",
+                "localized_name": "model.images.image_2",
+                "name": "model.images.image_2",
+                "shape": 7,
+                "type": "IMAGE",
+                "link": null
+              },
+              {
+                "label": "files",
+                "localized_name": "model.files",
+                "name": "model.files",
+                "shape": 7,
+                "type": "GEMINI_INPUT_FILES",
+                "link": null
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "IMAGE",
+                "name": "IMAGE",
+                "type": "IMAGE",
+                "links": [
+                  248
+                ]
+              },
+              {
+                "localized_name": "STRING",
+                "name": "STRING",
+                "type": "STRING",
+                "links": null
+              },
+              {
+                "localized_name": "thought_image",
+                "name": "thought_image",
+                "type": "IMAGE",
+                "links": null
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "GeminiNanoBanana2V2"
+            },
+            "widgets_values": [
+              "",
+              "Nano Banana 2 (Gemini 3.1 Flash Image)",
+              "16:9",
+              "2K",
+              "MINIMAL",
+              42,
+              "randomize",
+              "IMAGE",
+              "You are an expert image-generation engine. You must ALWAYS produce an image.\nInterpret all user input—regardless of format, intent, or abstraction—as literal visual directives for image composition.\nIf a prompt is conversational or lacks specific visual details, you must creatively invent a concrete visual scenario that depicts the concept.\nPrioritize generating the visual representation above any text, formatting, or conversational requests."
+            ],
+            "color": "#432",
+            "bgcolor": "#653"
+          },
+          {
+            "id": 156,
+            "type": "PrimitiveNode",
+            "pos": [
+              5280,
+              7090
+            ],
+            "size": [
+              450,
+              150
+            ],
+            "flags": {},
+            "order": 3,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+              {
+                "name": "COMBO",
+                "type": "COMBO",
+                "widget": {
+                  "name": "resolution"
+                },
+                "links": [
+                  243,
+                  246
+                ]
+              }
+            ],
+            "title": "resolution",
+            "properties": {
+              "Run widget replace on values": false
+            },
+            "widgets_values": [
+              "2K",
+              "fixed",
+              ""
+            ]
+          },
+          {
+            "id": 142,
+            "type": "PrimitiveNode",
+            "pos": [
+              5280,
+              7310
+            ],
+            "size": [
+              450,
+              150
+            ],
+            "flags": {},
+            "order": 2,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+              {
+                "name": "COMBO",
+                "type": "COMBO",
+                "widget": {
+                  "name": "aspect_ratio"
+                },
+                "links": [
+                  229,
+                  245
+                ]
+              }
+            ],
+            "title": "aspect_ratio",
+            "properties": {
+              "Run widget replace on values": false
+            },
+            "widgets_values": [
+              "16:9",
+              "fixed",
+              ""
+            ]
+          },
+          {
+            "id": 136,
+            "type": "StringCompare",
+            "pos": [
+              6430,
+              8020
+            ],
+            "size": [
+              300,
+              280
+            ],
+            "flags": {},
+            "order": 4,
+            "mode": 0,
+            "showAdvanced": true,
+            "inputs": [
+              {
+                "localized_name": "string_a",
+                "name": "string_a",
+                "type": "STRING",
+                "widget": {
+                  "name": "string_a"
+                },
+                "link": 217
+              }
+            ],
+            "outputs": [
+              {
+                "localized_name": "BOOLEAN",
+                "name": "BOOLEAN",
+                "type": "BOOLEAN",
+                "links": [
+                  222
+                ]
+              }
+            ],
+            "properties": {
+              "Node name for S&R": "StringCompare"
+            },
+            "widgets_values": [
+              "Nano Banana 2",
+              "nano banana 2",
+              "Starts With",
+              false
+            ]
+          }
+        ],
+        "groups": [],
+        "links": [
+          {
+            "id": 211,
+            "origin_id": 2,
+            "origin_slot": 0,
+            "target_id": 130,
+            "target_slot": 2,
+            "type": "STRING"
+          },
+          {
+            "id": 229,
+            "origin_id": 142,
+            "origin_slot": 0,
+            "target_id": 130,
+            "target_slot": 3,
+            "type": "COMBO"
+          },
+          {
+            "id": 232,
+            "origin_id": 130,
+            "origin_slot": 0,
+            "target_id": 134,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 222,
+            "origin_id": 136,
+            "origin_slot": 0,
+            "target_id": 134,
+            "target_slot": 2,
+            "type": "BOOLEAN"
+          },
+          {
+            "id": 217,
+            "origin_id": 135,
+            "origin_slot": 0,
+            "target_id": 136,
+            "target_slot": 0,
+            "type": "STRING"
+          },
+          {
+            "id": 212,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 130,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 230,
+            "origin_id": 134,
+            "origin_slot": 0,
+            "target_id": -20,
+            "target_slot": 0,
+            "type": "IMAGE"
+          },
+          {
+            "id": 243,
+            "origin_id": 156,
+            "origin_slot": 0,
+            "target_id": 130,
+            "target_slot": 4,
+            "type": "COMBO"
+          },
+          {
+            "id": 244,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": 157,
+            "target_slot": 3,
+            "type": "IMAGE"
+          },
+          {
+            "id": 245,
+            "origin_id": 142,
+            "origin_slot": 0,
+            "target_id": 157,
+            "target_slot": 1,
+            "type": "COMBO"
+          },
+          {
+            "id": 246,
+            "origin_id": 156,
+            "origin_slot": 0,
+            "target_id": 157,
+            "target_slot": 2,
+            "type": "COMBO"
+          },
+          {
+            "id": 247,
+            "origin_id": 2,
+            "origin_slot": 0,
+            "target_id": 157,
+            "target_slot": 0,
+            "type": "STRING"
+          },
+          {
+            "id": 248,
+            "origin_id": 157,
+            "origin_slot": 0,
+            "target_id": 134,
+            "target_slot": 1,
+            "type": "IMAGE"
+          }
+        ],
+        "extra": {
+          "workflowRendererVersion": "Vue-corrected"
+        }
+      }
+    ]
+  },
+  "config": {},
+  "extra": {
+    "frontendVersion": "1.44.15",
+    "workflowRendererVersion": "Vue-corrected",
+    "linearMode": false,
+    "linearData": {
+      "inputs": [
+        [
+          "125",
+          "image"
+        ],
+        [
+          "135",
+          "choice"
+        ],
+        [
+          "156",
+          "value"
+        ],
+        [
+          "142",
+          "value"
+        ]
+      ],
+      "outputs": [
+        "131"
+      ]
+    },
+    "VHS_KeepIntermediate": true,
+    "VHS_MetadataImage": true,
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "ds": {
+      "scale": 0.4022323830016147,
+      "offset": [
+        -4682.813818294955,
+        -5898.263907601024
+      ]
+    }
+  },
+  "version": 0.4
+}
