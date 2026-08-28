@@ -1245,6 +1245,48 @@ class TestClear:
         on_disk = json.loads(path.read_text())
         assert on_disk["nodes"] == [] and on_disk["links"] == [] and on_disk["groups"] == []
 
+    # Prod (Langfuse 2026-08-26): `generate --emit-workflow` left an API-format
+    # draft in the tab's scratch file; `apply_ops` then `clear_canvas` both
+    # failed `workflow_not_frontend_format`, and the agent had to abandon the
+    # tab. Clearing discards the content, so its format cannot be a reason to
+    # refuse — the empty document that results is frontend-format regardless.
+    _API_DRAFT = {
+        "1": {"class_type": "GeminiImageNode", "inputs": {"prompt": "a fox", "seed": 1}},
+        "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "generate"}},
+    }
+
+    def test_clear_accepts_an_api_format_draft(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, self._API_DRAFT)
+        env = _run(["clear", str(path)], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["op"]["op"] == "clear"
+        on_disk = json.loads(path.read_text())
+        assert on_disk["nodes"] == [] and on_disk["links"] == [] and on_disk["groups"] == []
+        # The API-format node entries are gone: the file is an editable
+        # frontend document now, so the next add-node/apply succeeds.
+        assert "1" not in on_disk and "2" not in on_disk
+        env = _run(["add-node", str(path), "KSampler"], capsys)
+        assert env["ok"] is True, env
+
+    def test_reset_doc_accepts_an_api_format_draft(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, self._API_DRAFT)
+        env = _run(["reset-doc", str(path), "--confirm"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["op"]["op"] == "reset_doc"
+        on_disk = json.loads(path.read_text())
+        assert on_disk["nodes"] == [] and on_disk["links"] == []
+        assert on_disk["last_node_id"] == 0 and on_disk["last_link_id"] == 0
+        assert "1" not in on_disk and "2" not in on_disk
+
+    def test_clear_still_refuses_a_non_workflow_document(self, patched_graph, tmp_path, capsys):
+        """Accepting either format is not accepting anything: a JSON list is
+        not a workflow of either kind."""
+        path = tmp_path / "w.json"
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        env = _run(["clear", str(path)], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_not_frontend_format"
+
 
 # ---------------------------------------------------------------------------
 # invariant: the edit surface operates on UI (frontend) format ONLY
