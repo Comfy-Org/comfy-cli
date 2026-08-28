@@ -1352,15 +1352,27 @@ def flush_proxy_migration(
         source = _inner_node(sg, e.source_node)
         slot_index = e.slot_index
         if slot_index is None:
-            source.setdefault("inputs", []).append(
-                {
+            if e.source_input is not None:
+                # A nested instance backs the widget with its OWN host input
+                # for the projecting subgraph input (``getSlotFromWidget``
+                # over ``promotedInputWidget``): the slot carries that input's
+                # name, or the outer definition could never resolve the
+                # promotion through the inner one.
+                entry = {
+                    "name": e.source_input,
+                    "type": e.type,
+                    "widget": {"name": e.source_input},
+                    "link": None,
+                }
+            else:
+                entry = {
                     "localized_name": e.widget,
                     "name": e.widget,
                     "type": e.type,
                     "widget": {"name": e.widget},
                     "link": None,
                 }
-            )
+            source.setdefault("inputs", []).append(entry)
             slot_index = len(source["inputs"]) - 1
         new_input = _add_subgraph_input(sg, ids[e.key]["input"], str(e.name), str(e.type), e.label)
         _add_boundary_link(sg, new_input, ids[e.key]["links"][0], source, slot_index, str(e.type))
@@ -1382,9 +1394,12 @@ def flush_proxy_migration(
             quarantine.extend(_quarantine_entry(m, "primitiveBypassFailed") for m in members)
             continue
         targets = _primitive_targets(sg, primitive)
-        for link in [x for x in sg.get("links") or [] if str(x.get("origin_id")) == primitive_id]:
-            if link.get("origin_slot") == 0:
-                _remove_link(sg, link.get("id"))
+        for link in [
+            x
+            for x in sg.get("links") or []
+            if isinstance(x, dict) and str(x.get("origin_id")) == primitive_id and x.get("origin_slot") == 0
+        ]:
+            _remove_link(sg, link.get("id"))
         link_ids = ids[first.key]["links"]
         if len(link_ids) < len(targets):
             link_ids = repair_ids(instance_path, first.source_node, first.widget, len(targets))["links"]

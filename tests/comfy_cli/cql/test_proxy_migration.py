@@ -71,6 +71,67 @@ def _plans(wf: dict, instance_id: int, graph) -> dict[tuple, promoted.LegacyEntr
     return {tuple(e.original): e for e in promoted.plan_proxy_migration(wf, _instance(wf, instance_id), graph)}
 
 
+OUTER = "0f6b0a4e-outer-0000-0000-000000000001"
+INNER = "0f6b0a4e-inner-0000-0000-000000000002"
+
+
+def _nested_legacy_workflow(entries: list[list[str]]) -> dict:
+    """Synthetic: a legacy promotion whose SOURCE is a nested subgraph instance
+    (top 10 → OUTER's node 5, an INNER instance) and whose projecting input
+    (``prompt_text``) is named differently from the widget it projects
+    (CLIPTextEncode 27's ``text``). Node 5 serializes no ``inputs[]`` — the
+    older-save shape — so the repair must synthesize the slot. Node/link
+    shapes are copied from ``flux_dev_checkpoint_example.json``."""
+    return {
+        "last_node_id": 10,
+        "last_link_id": 0,
+        "nodes": [{"id": 10, "type": OUTER, "inputs": [], "outputs": [], "properties": {"proxyWidgets": entries}}],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": OUTER,
+                    "name": "Outer",
+                    "state": {"lastGroupId": 0, "lastNodeId": 5, "lastLinkId": 0, "lastRerouteId": 0},
+                    "inputs": [],
+                    "outputs": [],
+                    "nodes": [{"id": 5, "type": INNER, "inputs": [], "outputs": [], "widgets_values": []}],
+                    "links": [],
+                },
+                {
+                    "id": INNER,
+                    "name": "Inner",
+                    "state": {"lastGroupId": 0, "lastNodeId": 27, "lastLinkId": 1, "lastRerouteId": 0},
+                    "inputs": [{"id": "i1", "name": "prompt_text", "type": "STRING", "linkIds": [1]}],
+                    "outputs": [],
+                    "nodes": [
+                        {
+                            "id": 27,
+                            "type": "CLIPTextEncode",
+                            "inputs": [
+                                {"name": "clip", "type": "CLIP", "link": None},
+                                {"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": 1},
+                            ],
+                            "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "links": []}],
+                            "widgets_values": ["hi"],
+                        }
+                    ],
+                    "links": [
+                        {
+                            "id": 1,
+                            "origin_id": -10,
+                            "origin_slot": 0,
+                            "target_id": 27,
+                            "target_slot": 1,
+                            "type": "STRING",
+                        }
+                    ],
+                },
+            ]
+        },
+    }
+
+
 # --------------------------------------------------------------------------- #
 # nextUniqueName — the frontend's collision rule, ported verbatim
 # --------------------------------------------------------------------------- #
@@ -177,6 +238,32 @@ def test_plan_uses_a_unique_name_when_the_widget_name_is_taken(graph):
     assert _plans(wf, 56, graph)[("52", "seed")].name == "seed_1"
 
 
+def test_plan_normalizes_a_node_prefixed_widget_name(graph):
+    """An older save could prefix the widget name with its node id
+    (``normalizeLegacyProxyWidgetEntry``): the prefix is stripped and kept as
+    the disambiguator; the repair claims the bare widget."""
+    wf = _load(FLUX)
+    inst = _instance(wf, 56)
+    inst["properties"]["proxyWidgets"] = [["52", "52:seed"]]
+    entry = _plans(wf, 56, graph)[("52", "52:seed")]
+    assert entry.plan == "createSubgraphInput"
+    assert entry.widget == "seed"
+    assert entry.disambiguator == "52"
+    assert entry.name == "seed"
+    assert entry.key == "52.seed"
+
+
+def test_plan_resolves_a_nested_instance_source_by_disambiguator(graph):
+    """Through a nested instance the disambiguator must name the interior
+    node the projecting input lands on (``resolveSourceWidget``)."""
+    wf = _nested_legacy_workflow([["5", "27:text"], ["5", "99:text"]])
+    plans = _plans(wf, 10, graph)
+    hit = plans[("5", "27:text")]
+    assert hit.plan == "createSubgraphInput"
+    assert (hit.widget, hit.disambiguator, hit.source_input, hit.type) == ("text", "27", "prompt_text", "STRING")
+    assert plans[("5", "99:text")].reason == "missingSourceWidget"
+
+
 # --------------------------------------------------------------------------- #
 # flush: the structural repair
 # --------------------------------------------------------------------------- #
@@ -279,6 +366,48 @@ def test_flush_synthesizes_the_interior_input_entry_when_none_is_serialized(grap
     ]
     assert _link(sg, link_id)["target_slot"] == 0
     assert inst["widgets_values"] == ["9:16 (Portrait Widescreen)"]
+
+
+def test_flush_synthesizes_a_nested_instance_slot_under_its_projecting_input(graph):
+    """The slot a nested instance backs a promoted widget with is its own
+    host input — named after the PROJECTING INPUT, not the interior widget
+    (``getSlotFromWidget(promotedInputWidget(input))``). Only that name lets
+    the outer definition resolve the promotion through the inner one."""
+    wf = _nested_legacy_workflow([["5", "text"]])
+    inst = _instance(wf, 10)
+    outer = _def_of(wf, inst)
+    ids = promoted.plan_repair_ids(["10"], promoted.plan_proxy_migration(wf, inst, graph))
+    promoted.flush_proxy_migration(wf, inst, graph, ids=ids)
+    link_id = ids["5.text"]["links"][0]
+    assert _inner(outer, 5)["inputs"] == [
+        {"name": "prompt_text", "type": "STRING", "widget": {"name": "prompt_text"}, "link": link_id}
+    ]
+    assert _link(outer, link_id)["target_slot"] == 0
+    pis = promoted.promoted_inputs(outer, promoted.defs_by_id(wf))
+    assert [(p.name, p.value_index, p.nested, p.source_node, p.source_input) for p in pis] == [
+        ("text", 0, True, "5", "prompt_text")
+    ]
+    assert inst["widgets_values"] == ["hi"]
+    promoted.set_host_value(wf, inst, "text", "yo", graph)
+    assert promoted.effective_value(wf, inst, "text", graph) == "yo"
+    # the outer promotion resolves through the inner one to the concrete widget
+    assert promoted.deepest_source(outer, pis[0], promoted.defs_by_id(wf)) == (["5", "27"], "text")
+
+
+def test_flush_ignores_a_malformed_link_entry(graph):
+    """A stray non-dict among ``links`` is skipped like everywhere else in the
+    module, not stack-traced — the primitive repair scans links too."""
+    clean = _load(RECOMPOSER)
+    promoted.flush_proxy_migration(clean, _instance(clean, 143), graph)
+    wf = _load(RECOMPOSER)
+    inst = _instance(wf, 143)
+    sg = _def_of(wf, inst)
+    sg["links"].insert(0, ["not", "a", "link"])
+    report = promoted.flush_proxy_migration(wf, inst, graph)
+    assert report.created == ["choice", "resolution", "aspect_ratio"]
+    assert sg["links"][0] == ["not", "a", "link"]
+    sg["links"].pop(0)
+    assert json.dumps(wf, sort_keys=True) == json.dumps(clean, sort_keys=True)
 
 
 def test_flush_leaves_preview_exposures_in_place(graph):
