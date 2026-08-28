@@ -190,18 +190,7 @@ def pick_cmd(
     knowledge.log_query("knowledge pick", logged, hit_ids=[f"cap:{capability_id}"], zero_hit=False, bundle=bundle)
     picks = []
     for p in cap["picks"]:
-        model_id = p.get("model")
-        model_id = model_id if isinstance(model_id, str) else None
-        row = bundle.models.get(model_id) or {}
-        entry = {
-            "rank": knowledge.pick_rank(p),
-            "model": model_id,
-            "route": _text(p.get("route")),
-            "template": _text(p.get("template")),
-            "caveat": _text(p.get("caveat")),
-            "status": _text(row.get("status")),
-            "superseded_by": _text(row.get("superseded_by")),
-        }
+        entry = knowledge.pick_entry(bundle, p)
         if "fits" in p:
             entry["fits"] = p["fits"]
         picks.append(entry)
@@ -217,11 +206,12 @@ def pick_cmd(
     if renderer.is_pretty():
         from rich.table import Table
 
-        columns = ("rank", "model", "route", "template", "status", "caveat")
+        columns = ("rank", "model", "route", "template", "status", "caveat", "best_for")
         tbl = Table(show_header=True, header_style="bold")
         for col in columns:
             tbl.add_column(col)
         for p in picks:
-            tbl.add_row(*(sanitize_markup("" if p[c] is None else p[c]) for c in columns))
+            cells = {**p, "best_for": ", ".join(p.get("best_for") or [])}
+            tbl.add_row(*(sanitize_markup("" if cells[c] is None else cells[c]) for c in columns))
         renderer.console().print(tbl)
     renderer.emit(payload, command="knowledge pick")
