@@ -25,7 +25,7 @@ from typing import Annotated, Any
 import typer
 from rich import markup as rich_markup
 
-from comfy_cli import tracking
+from comfy_cli import knowledge, tracking
 from comfy_cli.auth import store
 from comfy_cli.cloud import CLIENT_ID, CLIENT_NAME, CONFIG_KEY_BASE_URL, get_base_url, get_resource_url, get_scopes
 from comfy_cli.cloud.oauth import OAuthError, run_login
@@ -133,6 +133,10 @@ def login_cmd(
         token_type=result.tokens.token_type,
         expires_at=result.tokens.expires_at,
     )
+
+    # Fill the knowledge cache while the user is online and freshly signed
+    # in, so the cache-only attach path has a bundle on a brand-new install.
+    knowledge.refresh_if_stale()
 
     if renderer.is_pretty():
         from comfy_cli.output.branding import welcome_banner

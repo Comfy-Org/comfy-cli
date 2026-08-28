@@ -57,6 +57,52 @@ def _no_tracking(monkeypatch):
     monkeypatch.setattr("comfy_cli.tracking.track_event", lambda *a, **k: None)
 
 
+@pytest.fixture(autouse=True)
+def _knowledge_warm(monkeypatch):
+    """Record the post-login knowledge warm instead of fetching a bundle."""
+    calls: list[None] = []
+    monkeypatch.setattr(command.knowledge, "refresh_if_stale", lambda: calls.append(None))
+    return calls
+
+
+def test_login_warms_the_knowledge_cache_after_saving_the_session(monkeypatch, capsys, _knowledge_warm):
+    order: list[str] = []
+
+    def fake_run_login(**kwargs):
+        kwargs["on_url_ready"](_AUTHORIZE_URL)
+        return _login_result()
+
+    real_save = command.store.save_cloud_session
+
+    def save_then_record(**kwargs):
+        order.append("save")
+        return real_save(**kwargs)
+
+    monkeypatch.setattr(command, "run_login", fake_run_login)
+    monkeypatch.setattr(command.store, "save_cloud_session", save_then_record)
+    monkeypatch.setattr(command.knowledge, "refresh_if_stale", lambda: order.append("warm"))
+    set_renderer(Renderer(mode=OutputMode.JSON, command="cloud login", version="test"))
+
+    command.login_cmd(no_browser=True, timeout=300)
+
+    assert order == ["save", "warm"]
+    assert _parse_lines(capsys.readouterr().out)[-1]["ok"] is True
+
+
+def test_login_timeout_does_not_warm_the_knowledge_cache(monkeypatch, capsys, _knowledge_warm):
+    def fake_run_login(**kwargs):
+        kwargs["on_url_ready"](_AUTHORIZE_URL)
+        raise oauth.OAuthError("timed out")
+
+    monkeypatch.setattr(command, "run_login", fake_run_login)
+    set_renderer(Renderer(mode=OutputMode.JSON, command="cloud login", version="test"))
+
+    with pytest.raises(typer.Exit):
+        command.login_cmd(no_browser=True, timeout=1)
+
+    assert _knowledge_warm == []
+
+
 def test_json_login_emits_login_url_event_before_envelope(monkeypatch, capsys):
     """`comfy --json cloud login --no-browser` streams a `login_url` event
     (carrying the authorize URL) ahead of the final, session-redacted envelope."""
