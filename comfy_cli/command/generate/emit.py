@@ -25,7 +25,26 @@ from comfy_cli.command.generate import spec
 
 
 class EmitError(RuntimeError):
-    """``--emit-workflow`` cannot map this model to a partner node."""
+    """``--emit-workflow`` cannot build a workflow for this request."""
+
+
+class UnsupportedModelError(EmitError):
+    """``--emit-workflow`` has no partner-node mapping for ``model``.
+
+    Distinct from the other :class:`EmitError` causes (bad parameters) because
+    the remedy is different — pick a model from ``supported`` — and an agent
+    needs to branch on that without parsing prose. ``generate list`` exposes
+    the same answer up front as ``emit_supported`` per row.
+    """
+
+    def __init__(self, model: str, supported: list[str]):
+        self.model = model
+        self.supported = supported
+        super().__init__(
+            f"--emit-workflow does not support model {model!r}.\n"
+            f"Supported models: {', '.join(supported)}.\n"
+            "These map to ComfyUI API nodes; other proxy models have no node mapping yet."
+        )
 
 
 @dataclass(frozen=True)
@@ -216,20 +235,29 @@ def supported_models() -> list[str]:
     return sorted(MODEL_NODE_MAP)
 
 
-def _resolve_model(model: str) -> tuple[str, NodeSpec]:
-    """Map a user-typed model to a (alias, NodeSpec). Accepts an alias or the
-    canonical endpoint id that an alias resolves to."""
+def _lookup_model(model: str) -> tuple[str, NodeSpec] | None:
+    """(alias, NodeSpec) for a user-typed model — an alias or the canonical
+    endpoint id an alias resolves to — or None when nothing maps to a node."""
     if model in MODEL_NODE_MAP:
         return model, MODEL_NODE_MAP[model]
     canonical = spec.resolve_alias(model)
     pref = spec.preferred_alias(canonical)
     if pref and pref in MODEL_NODE_MAP:
         return pref, MODEL_NODE_MAP[pref]
-    raise EmitError(
-        f"--emit-workflow does not support model {model!r}.\n"
-        f"Supported models: {', '.join(supported_models())}.\n"
-        "These map to ComfyUI API nodes; other proxy models have no node mapping yet."
-    )
+    return None
+
+
+def is_supported(model: str) -> bool:
+    """Whether ``--emit-workflow`` can render ``model`` (alias or canonical id)
+    as a partner node. The per-row ``emit_supported`` flag of ``generate list``."""
+    return _lookup_model(model) is not None
+
+
+def _resolve_model(model: str) -> tuple[str, NodeSpec]:
+    found = _lookup_model(model)
+    if found is None:
+        raise UnsupportedModelError(model, supported_models())
+    return found
 
 
 def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "generate") -> dict[str, Any]:
