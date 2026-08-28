@@ -17,17 +17,24 @@ linked inputs"*, ``SubgraphNode.ts``) represents a promoted widget as a
 The interior widget is only a schema/default provider — *"the host/exterior
 value wins over the interior/source value during repair, persistence, and
 prompt serialization"*. ``properties.proxyWidgets`` is legacy load-time input
-the frontend consumes on migration; it is honored here only as a fallback for
-a name the definition does not declare as an input.
+the frontend consumes on migration. A legacy entry the definition does not
+back with a linked input is repaired the way the frontend repairs it on load
+(:func:`flush_proxy_migration`, the "forward migration" section below) before
+a write lands on it; an entry the migration cannot repair is quarantined and
+its interior widget stays the live one.
 
-Everything in this module is a pure function over workflow JSON. It never
-mutates a subgraph definition: a promoted value is edited on the instance,
-so sibling instances of a shared definition stay independent by construction.
+Everything in this module is a pure function over workflow JSON. A promoted
+value is edited on the instance — the definition is touched only by the
+forward migration, which the op layer runs on an isolated (forked) copy when
+the definition is shared, so sibling instances stay independent.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib as _hashlib
+import re as _re
+import uuid as _uuid
+from dataclasses import dataclass, field
 from typing import Any
 
 #: LiteGraph's id for the virtual subgraph *input* node inside a definition.
@@ -290,6 +297,11 @@ def effective_value(workflow: dict, instance: dict, name: str, graph) -> Any:
     when nothing outside feeds it: the host value if materialized, else the
     interior source value (:data:`UNSET` if even that cannot be read).
 
+    A legacy ``proxyWidgets`` promotion the definition does not back yet
+    reads as the frontend will show it after its own migration: the legacy
+    positional host value, else the interior source (the address is the
+    input name the repair mints — see :func:`plan_proxy_migration`).
+
     Raises ``ValueError`` for a name the definition does not declare, or one
     that is a socket-only input.
     """
@@ -297,6 +309,13 @@ def effective_value(workflow: dict, instance: dict, name: str, graph) -> Any:
     sg = defs.get(str(instance.get("type", "")))
     if sg is None:
         raise ValueError(f"node {instance.get('id')} is not a subgraph instance")
+    pi = find_promoted(sg, defs, name)
+    if pi is None or not pi.is_widget:
+        pending = next(
+            (e for e in plan_proxy_migration(workflow, instance, graph, defs) if e.repairable and e.name == name), None
+        )
+        if pending is not None:
+            return entry_effective_value(workflow, sg, pending, graph, defs)
     return _effective(workflow, instance, sg, name, graph, defs)
 
 
@@ -396,6 +415,11 @@ class WriteTarget:
     widget: str | None = None
     segments: list[str] | None = None
     redirected_from: str | None = None
+    #: A ``host`` target whose promotion is still a legacy ``proxyWidgets``
+    #: entry: the write must first run :func:`flush_proxy_migration` on the
+    #: instance. This is the entry it repairs; ``widget`` is the input name
+    #: the repair mints.
+    repair: Any = None
 
 
 def _find_top(workflow: dict, node_id: Any) -> dict | None:
@@ -442,8 +466,14 @@ def resolve_write(
       there (``redirected_from`` records the given address). An interior
       widget fed by another interior node is refused the same way.
     * any other interior widget — written in the definition, as before.
-    * a promoted name the definition does not declare as an input but the
-      legacy ``proxyWidgets`` still route — the interior, as before.
+    * a name only the legacy ``proxyWidgets`` route — a promotion the
+      frontend's load-time migration turns into a linked input. The host,
+      after the same repair (``repair`` names the entry; see
+      :func:`flush_proxy_migration`). An interior address the repair would
+      own (the entry's source widget, a primitive's fan-out target) redirects
+      there too. An entry the migration cannot repair (quarantined — e.g.
+      ``control_after_generate``, which has no backing input slot) keeps the
+      interior widget as the live one, so the write lands there as before.
     """
     defs = defs_by_id(workflow)
     if len(segments) > 1:
@@ -452,6 +482,17 @@ def resolve_write(
         parent_def = defs.get(str(parent.get("type", "")))
         target_def = defs.get(str(target.get("type", "")))
         given = f"{'/'.join(segments)}.{widget}"
+        if parent_def is not None:
+            pending = planned_repair_for_interior(workflow, parent, graph, str(target.get("id")), widget, defs)
+            if pending is not None:
+                return WriteTarget(
+                    "host",
+                    node=parent,
+                    widget=str(pending.name),
+                    segments=segments[:-1],
+                    redirected_from=redirected_from or given,
+                    repair=pending,
+                )
         entry = next(
             (
                 i
@@ -506,6 +547,17 @@ def resolve_write(
         return WriteTarget("top", node=node, widget=widget, redirected_from=redirected_from)
     given = f"{node_str}.{widget}"
     pi = find_promoted(sg, defs, widget)
+    if pi is None or not pi.is_widget:
+        pending = planned_repair(workflow, node, graph, widget, defs)
+        if pending is not None:
+            return WriteTarget(
+                "host",
+                node=node,
+                widget=str(pending.name),
+                segments=[node_str],
+                redirected_from=redirected_from or (given if pending.name != widget else None),
+                repair=pending,
+            )
     if pi is not None:
         if not pi.is_widget:
             legacy = legacy_proxy_interior(node, widget)
@@ -579,3 +631,863 @@ def trace_upstream_write(
             f"or connect a primitive (e.g. PrimitiveInt) to {given} and set its value."
         )
     raise ValueError(f"{given}: reroute chain too deep")
+
+
+# --------------------------------------------------------------------------- #
+# Legacy ``properties.proxyWidgets`` → linked inputs: the forward migration
+# --------------------------------------------------------------------------- #
+#
+# A port of the frontend's ``flushProxyWidgetMigration``
+# (``src/core/graph/subgraph/migration/proxyWidgetMigration.ts``; ADR 0009
+# "Forward migration", "Primitive-node repair", "Proxy widget error
+# quarantine", "Serialization"). The frontend runs it on every subgraph host
+# when a workflow loads; the CLI runs it on the one instance whose legacy
+# promotion a write is about to edit, so that write can land on the HOST
+# value like every other promoted widget instead of on the interior node.
+#
+# Per entry ``[sourceNodeId, sourceWidgetName(, disambiguator)]``:
+#
+# * already represented by a linked subgraph input → consumed (``alreadyLinked``);
+# * a ``$$``-prefixed name or a preview pseudo-widget → a display-only preview
+#   exposure: no input, no value. The frontend moves it into its
+#   preview-exposure store; the CLI leaves the entry in ``proxyWidgets`` so the
+#   frontend's own load-time migration (which also auto-exposes preview nodes
+#   when ``previewExposures`` is unset) produces exactly the state it would
+#   have produced from the untouched file;
+# * a ``PrimitiveNode`` source → ONE subgraph input for its whole fan-out, every
+#   former target reconnected to it, the primitive left in place but inert
+#   (``primitiveBypass``; all-or-quarantine);
+# * any other value widget → a subgraph input named after the widget
+#   (``nextUniqueName`` on collision), a boundary link from the subgraph input
+#   node (``-10``) into the widget's backing input slot, and the host value
+#   (``createSubgraphInput``);
+# * anything unrepairable → ``properties.proxyWidgetErrorQuarantine`` with
+#   ``{originalEntry, reason, hostValue?, attemptedAtVersion: 1}``.
+#
+# Host values come from the instance's pre-migration ``widgets_values``
+# POSITIONALLY BY ``proxyWidgets`` ORDER (``pickHostValue``) — a hole (no
+# such index) means "keep the interior default". Consumed and quarantined
+# entries are removed from ``proxyWidgets``; canonical saves never re-emit
+# them.
+#
+# Determinism: every id the repair mints (the subgraph input's uuid, each
+# boundary link id) is DERIVED from ``(instance path, source node, widget)``
+# — never random, never a counter — so two replicas replaying the same op, or
+# two replicas independently repairing the same entry, produce byte-identical
+# documents (the convergence requirement of :mod:`comfy_cli.workflow_ops`).
+
+QUARANTINE_PROPERTY = "proxyWidgetErrorQuarantine"
+PROXY_BYPASS_MARKER_PROPERTY = "proxyBypassedToSubgraphInput"
+QUARANTINE_VERSION = 1
+CANVAS_IMAGE_PREVIEW_WIDGET = "$$canvas-image-preview"
+
+#: ``isPreviewPseudoWidget``: a ``$$`` name, or a ``serialize:false`` widget of
+#: type ``preview``/``video``/``audioUI``. The catalog carries no frontend-only
+#: widgets, so the CLI projects the type rule onto the one such widget the
+#: engine already models by name (``FRONTEND_MARKER_SLOTS``): ``audioUI``.
+_PREVIEW_PSEUDO_WIDGET_NAMES = frozenset({"audioUI"})
+
+#: The legacy ``PrimitiveNode`` has no server schema: its value widget is named
+#: ``value`` and, when the target widget carries one, a linked
+#: ``control_after_generate`` follows it in ``widgets_values``.
+_PRIMITIVE_WIDGET_ORDER = ("value", "control_after_generate")
+
+#: ``LEGACY_PROXY_WIDGET_PREFIX_PATTERN``: an older save could prefix a nested
+#: widget name with its node id (``"12:seed"``).
+_LEGACY_PREFIX_RE = _re.compile(r"^\s*(\d+)\s*:\s*(.+)$")
+
+#: Minted link ids share the op model's leaderless range (see
+#: ``workflow_ops.mint_id``): always above any frontend counter id, always
+#: inside JS ``Number.MAX_SAFE_INTEGER``.
+_LINK_ID_FLOOR = 1 << 40
+_LINK_ID_BITS = 52
+
+PLAN_ALREADY_LINKED = "alreadyLinked"
+PLAN_CREATE = "createSubgraphInput"
+PLAN_PRIMITIVE = "primitiveBypass"
+PLAN_PREVIEW = "previewExposure"
+PLAN_QUARANTINE = "quarantine"
+
+
+def next_unique_name(name: str, existing: Any = ()) -> str:
+    """``nextUniqueName``: ``seed`` → ``seed_1`` → ``seed_2`` … while taken."""
+    existing = list(existing)
+    base, i = name, 1
+    while name in existing:
+        name = f"{base}_{i}"
+        i += 1
+    return name
+
+
+@dataclass
+class LegacyEntry:
+    """One ``proxyWidgets`` tuple with the migration's decision for it.
+
+    ``name`` is the subgraph input the entry resolves to: the linked input for
+    ``alreadyLinked``, the (collision-free) input the flush will mint for
+    ``createSubgraphInput``/``primitiveBypass``. ``host_value`` is the legacy
+    positional host value (:data:`UNSET` for a hole). ``targets`` are a
+    primitive's ``(target node id, slot)`` fan-out in reconnect order.
+    """
+
+    original: list
+    index: int
+    source_node: str
+    widget: str
+    disambiguator: str | None
+    plan: str
+    name: str | None = None
+    reason: str | None = None
+    host_value: Any = UNSET
+    type: str | None = None
+    targets: list[tuple[str, int]] = field(default_factory=list)
+    source_input: str | None = None  # a nested instance source: the input it projects
+    slot_index: int | None = None  # createSubgraphInput: the backing input slot (None → synthesize)
+    label: str | None = None
+
+    @property
+    def repairable(self) -> bool:
+        return self.plan in (PLAN_CREATE, PLAN_PRIMITIVE)
+
+    @property
+    def key(self) -> str:
+        return f"{self.source_node}.{self.widget}"
+
+    def as_promoted_input(self, sg: dict) -> PromotedInput:
+        """A schema-only view of the input the repair mints, so the same
+        validation/source-port lookup a linked promotion gets applies."""
+        if self.plan == PLAN_PRIMITIVE:
+            tid, slot = self.targets[0]
+            target = next((n for n in sg.get("nodes") or [] if str(n.get("id")) == tid), None)
+            entry = (target.get("inputs") or [])[slot] if target is not None else None
+            marker = entry.get("widget") if isinstance(entry, dict) else None
+            widget = marker.get("name") if isinstance(marker, dict) and marker.get("name") else entry.get("name")
+            return PromotedInput(
+                name=str(self.name),
+                type=str(self.type),
+                index=-1,
+                value_index=-1,
+                source_node=tid,
+                source_input=str(entry.get("name")) if isinstance(entry, dict) else None,
+                source_widget=str(widget),
+            )
+        nested = self.source_input is not None
+        return PromotedInput(
+            name=str(self.name),
+            type=str(self.type),
+            index=-1,
+            value_index=-1,
+            source_node=self.source_node,
+            source_input=self.source_input if nested else self.widget,
+            source_widget=None if nested else self.widget,
+            nested=nested,
+        )
+
+
+@dataclass
+class FlushReport:
+    consumed: list[list] = field(default_factory=list)
+    created: list[str] = field(default_factory=list)
+    quarantined: list[dict] = field(default_factory=list)
+    remaining: list[list] = field(default_factory=list)
+
+
+def _proxy_tuples(instance: dict) -> list[list]:
+    """``parseProxyWidgets``: the whole property must parse (an array of
+    2/3-string tuples) or none of it migrates."""
+    raw = (instance.get("properties") or {}).get("proxyWidgets")
+    if not isinstance(raw, list):
+        return []
+    out: list[list] = []
+    for entry in raw:
+        if not isinstance(entry, list) or len(entry) not in (2, 3) or not all(isinstance(x, str) for x in entry):
+            return []
+        out.append(list(entry))
+    return out
+
+
+def _inner_node(sg: dict, node_id: Any) -> dict | None:
+    return next((n for n in sg.get("nodes") or [] if isinstance(n, dict) and str(n.get("id")) == str(node_id)), None)
+
+
+def _node_widget_names(node: dict, graph) -> list[str]:
+    """The widgets the frontend would find on ``node`` (``node.widgets``)."""
+    if str(node.get("type", "")) == LEGACY_PRIMITIVE_TYPE:
+        return list(_PRIMITIVE_WIDGET_ORDER)
+    if graph is None:
+        return []
+    from comfy_cli.cql.engine import _widgets_as_positional
+
+    node_type = str(node.get("type", ""))
+    values = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
+    return list(graph.widget_order_for_node(node_type, values))
+
+
+def _node_widget_value(node: dict, widget: str, graph) -> Any:
+    order = _node_widget_names(node, graph)
+    if widget not in order:
+        return UNSET
+    values = node.get("widgets_values")
+    if str(node.get("type", "")) != LEGACY_PRIMITIVE_TYPE and graph is not None:
+        from comfy_cli.cql.engine import _widgets_as_positional
+
+        values = _widgets_as_positional(values, graph, str(node.get("type", "")))
+    if not isinstance(values, list):
+        return UNSET
+    idx = order.index(widget)
+    return values[idx] if idx < len(values) else UNSET
+
+
+def _is_preview_pseudo_widget(widget: str) -> bool:
+    return widget.startswith("$$") or widget in _PREVIEW_PSEUDO_WIDGET_NAMES
+
+
+def _promotion_source(sg: dict, inp: dict, defs: dict[str, dict]) -> tuple[str, str] | None:
+    """``resolvePromotionSource``: the ``(interior node, widget)`` a subgraph
+    input projects — the first of its links that lands on a nested instance's
+    input or on a widget-backed input slot."""
+    links = {x.get("id"): x for x in sg.get("links") or [] if isinstance(x, dict)}
+    for link_id in inp.get("linkIds") or []:
+        link = links.get(link_id) if isinstance(link_id, (int, str)) else None
+        if link is None:
+            continue
+        target = _inner_node(sg, link.get("target_id"))
+        if target is None:
+            continue
+        entries = target.get("inputs") or []
+        slot = link.get("target_slot")
+        entry = entries[slot] if isinstance(slot, int) and 0 <= slot < len(entries) else None
+        if not isinstance(entry, dict):
+            continue
+        if str(target.get("type", "")) in defs:
+            return str(target.get("id")), str(entry.get("name"))
+        marker = entry.get("widget")
+        if isinstance(marker, dict) and marker.get("name"):
+            return str(target.get("id")), str(marker["name"])
+    return None
+
+
+def _find_host_input_for_promotion(sg: dict, defs: dict[str, dict], node_id: str, widget: str) -> str | None:
+    for inp in sg.get("inputs") or []:
+        if isinstance(inp, dict) and _promotion_source(sg, inp, defs) == (node_id, widget):
+            return str(inp.get("name"))
+    return None
+
+
+def _subgraph_input_target(inner_def: dict, defs: dict[str, dict], input_name: str) -> tuple[str, str] | None:
+    """``resolveSubgraphInputTarget``: what a nested instance's input projects."""
+    inp = next((i for i in inner_def.get("inputs") or [] if isinstance(i, dict) and i.get("name") == input_name), None)
+    return _promotion_source(inner_def, inp, defs) if inp is not None else None
+
+
+def _can_resolve_legacy_proxy(sg: dict, defs: dict[str, dict], node_id: str, widget: str, graph) -> bool:
+    """``resolveConcretePromotedWidget(...).status === 'resolved'``: walk
+    through nested instances to a concrete interior widget."""
+    current_sg, current_id, current_widget = sg, node_id, widget
+    for _ in range(_MAX_NESTED_PROMOTION_DEPTH):
+        node = _inner_node(current_sg, current_id)
+        if node is None:
+            return False
+        inner_def = defs.get(str(node.get("type", "")))
+        if inner_def is not None:
+            target = _subgraph_input_target(inner_def, defs, current_widget)
+            if target is None:
+                return False
+            current_sg, (current_id, current_widget) = inner_def, target
+            continue
+        return current_widget in _node_widget_names(node, graph)
+    return False
+
+
+def _normalize_entry(
+    sg: dict, defs: dict[str, dict], node_id: str, widget: str, disambiguator: str | None, graph
+) -> tuple[str, str, str | None]:
+    """``normalizeLegacyProxyWidgetEntry``: strip ``<id>:`` prefixes off a
+    widget name that does not resolve as written, surfacing the deepest
+    prefix as the disambiguator."""
+    if _can_resolve_legacy_proxy(sg, defs, node_id, widget, graph):
+        return node_id, widget, disambiguator
+    remaining, deepest = widget, None
+    while True:
+        m = _LEGACY_PREFIX_RE.match(remaining)
+        if m is None:
+            break
+        deepest, remaining = m.group(1), m.group(2)
+    return node_id, remaining, deepest or disambiguator
+
+
+def _resolve_source_widget(
+    sg: dict, source: dict, widget: str, disambiguator: str | None, defs: dict[str, dict], graph
+) -> tuple[str, str | None] | None:
+    """``resolveSourceWidget``: ``(widget name, projecting input name)``.
+
+    On a nested instance the widget is one of its widget-backed promoted
+    inputs (matched by what the input projects, or by the input's own name);
+    on an ordinary node it is one of the node's widgets — plus the virtual
+    canvas preview every image node can expose (``getPromotableWidgets``).
+    """
+    inner_def = defs.get(str(source.get("type", "")))
+    if inner_def is not None:
+        by_name = {p.name: p for p in promoted_inputs(inner_def, defs)}
+        for inp in inner_def.get("inputs") or []:
+            if not isinstance(inp, dict):
+                continue
+            target = _subgraph_input_target(inner_def, defs, str(inp.get("name")))
+            if disambiguator is not None:
+                hit = target is not None and target[1] == widget and target[0] == disambiguator
+            else:
+                hit = inp.get("name") == widget or (target is not None and target[1] == widget)
+            if not hit:
+                continue
+            pi = by_name.get(str(inp.get("name")))
+            return (widget, str(inp.get("name"))) if pi is not None and pi.is_widget else None
+        return None
+    if widget in _node_widget_names(source, graph) or widget == CANVAS_IMAGE_PREVIEW_WIDGET:
+        return widget, None
+    return None
+
+
+def _slot_for_widget(source: dict, widget: str, projecting_input: str | None, defs: dict[str, dict], graph):
+    """``getSlotFromWidget``: ``(index, entry, type)`` of the input slot backing
+    ``widget``. The serialized ``inputs[]`` may omit an unlinked widget slot
+    the runtime node still has (older saves); then ``index`` is ``None`` and
+    the flush appends one with ``type``. ``None`` when no slot backs it — a
+    frontend-only widget such as ``control_after_generate``."""
+    entries = source.get("inputs") or []
+    inner_def = defs.get(str(source.get("type", "")))
+    if inner_def is not None:
+        name = projecting_input or widget
+        for idx, entry in enumerate(entries):
+            if isinstance(entry, dict) and entry.get("name") == name:
+                return idx, entry, str(entry.get("type") or "*")
+        pi = find_promoted(inner_def, defs, name)
+        return (None, None, pi.type) if pi is not None else None
+    for idx, entry in enumerate(entries):
+        marker = entry.get("widget") if isinstance(entry, dict) else None
+        if isinstance(marker, dict) and marker.get("name") == widget:
+            return idx, entry, str(entry.get("type") or "*")
+    m = graph.node(str(source.get("type", ""))) if graph is not None else None
+    port = next((p for p in m.inputs if p.name == widget), None) if m is not None else None
+    if port is None or port.is_link:
+        return None
+    return None, None, str(port.type)
+
+
+def _primitive_targets(sg: dict, primitive: dict) -> list[tuple[str, int]]:
+    """Every existing link out of the primitive's output 0, in link order."""
+    links = {x.get("id"): x for x in sg.get("links") or [] if isinstance(x, dict)}
+    outputs = primitive.get("outputs") or []
+    listed = outputs[0].get("links") if outputs and isinstance(outputs[0], dict) else None
+    ordered = [links[i] for i in listed if i in links] if isinstance(listed, list) else []
+    if not ordered:
+        ordered = [
+            x
+            for x in links.values()
+            if str(x.get("origin_id")) == str(primitive.get("id")) and x.get("origin_slot") == 0
+        ]
+    return [(str(x.get("target_id")), x.get("target_slot")) for x in ordered if isinstance(x.get("target_slot"), int)]
+
+
+def _types_compatible(a: str, b: str) -> bool:
+    return a == b or a == "*" or b == "*"
+
+
+def plan_proxy_migration(workflow: dict, instance: dict, graph, defs: dict[str, dict] | None = None) -> list:
+    """The migration's decision for every ``proxyWidgets`` entry of
+    ``instance`` — a dry run of :func:`flush_proxy_migration`, in entry order,
+    with the input names the flush will mint (creates first, then primitive
+    cohorts, each ``nextUniqueName``-collision-free against what precedes it).
+    Empty when the instance has no (valid) legacy entries."""
+    defs = defs if defs is not None else defs_by_id(workflow)
+    sg = defs.get(str(instance.get("type", "")))
+    tuples = _proxy_tuples(instance)
+    if sg is None or not tuples:
+        return []
+    host_values = instance.get("widgets_values")
+    host_values = host_values if isinstance(host_values, list) else None
+
+    normalized = [_normalize_entry(sg, defs, t[0], t[1], t[2] if len(t) > 2 else None, graph) for t in tuples]
+    cohort = [(n[0], n[1]) for n in normalized]
+    entries: list[LegacyEntry] = []
+    for index, (original, (node_id, widget, disambiguator)) in enumerate(zip(tuples, normalized)):
+        host_value = host_values[index] if host_values is not None and index < len(host_values) else UNSET
+        e = LegacyEntry(original, index, node_id, widget, disambiguator, PLAN_QUARANTINE, host_value=host_value)
+        entries.append(e)
+        linked = _find_host_input_for_promotion(sg, defs, node_id, widget)
+        if linked is not None:
+            matches = [p for p in promoted_inputs(sg, defs) if p.name == linked]
+            if len(matches) > 1:
+                e.reason = "ambiguousSubgraphInput"
+            elif not matches or not matches[0].is_widget:
+                e.reason = "missingSubgraphInput"
+            else:
+                e.plan, e.name, e.type = PLAN_ALREADY_LINKED, linked, matches[0].type
+            continue
+        source = _inner_node(sg, node_id)
+        if source is None:
+            e.reason = "missingSourceNode"
+            continue
+        if str(source.get("type", "")) == LEGACY_PRIMITIVE_TYPE:
+            bypassed = (source.get("properties") or {}).get(PROXY_BYPASS_MARKER_PROPERTY)
+            if isinstance(bypassed, str):
+                existing = next((p for p in promoted_inputs(sg, defs) if p.name == bypassed), None)
+                if existing is not None:
+                    if existing.is_widget:
+                        e.plan, e.name, e.type = PLAN_ALREADY_LINKED, bypassed, existing.type
+                    else:
+                        e.reason = "missingSubgraphInput"
+                    continue
+            targets = _primitive_targets(sg, source)
+            # ``cohortDuplicatesPrimitive``: two entries naming this primitive
+            # (whatever their widget) still form a cohort to validate.
+            if targets or sum(1 for n in cohort if n[0] == node_id) >= 2:
+                e.plan, e.targets = PLAN_PRIMITIVE, targets
+            else:
+                e.reason = "unlinkedSourceWidget"
+            continue
+        resolved = _resolve_source_widget(sg, source, widget, disambiguator, defs, graph)
+        if resolved is None:
+            e.reason = "missingSourceWidget"
+            continue
+        widget_name, projecting = resolved
+        if widget.startswith("$$") or _is_preview_pseudo_widget(widget_name):
+            e.plan = PLAN_PREVIEW
+            continue
+        slot = _slot_for_widget(source, widget_name, projecting, defs, graph)
+        if slot is None:
+            e.reason = "missingSubgraphInput"  # the widget has no backing input slot
+            continue
+        idx, entry, slot_type = slot
+        e.plan, e.type, e.slot_index, e.source_input = PLAN_CREATE, slot_type, idx, projecting
+        if isinstance(entry, dict) and entry.get("label") is not None:
+            e.label = str(entry["label"])
+
+    # Names, in flush order: creates as they come, then one input per primitive
+    # cohort (validated all-or-quarantine, exactly like ``repairPrimitive``).
+    existing = [str(i.get("name")) for i in sg.get("inputs") or [] if isinstance(i, dict)]
+    for e in entries:
+        if e.plan == PLAN_CREATE:
+            e.name = next_unique_name(e.widget, existing)
+            existing.append(e.name)
+    cohorts: dict[str, list[LegacyEntry]] = {}
+    for e in entries:
+        if e.plan == PLAN_PRIMITIVE:
+            cohorts.setdefault(e.source_node, []).append(e)
+    for primitive_id, members in cohorts.items():
+        primitive = _inner_node(sg, primitive_id)
+        failure = _validate_primitive_cohort(sg, primitive, members)
+        if failure is not None:
+            for e in members:
+                e.plan, e.reason, e.targets = PLAN_QUARANTINE, "primitiveBypassFailed", []
+            continue
+        outputs = primitive.get("outputs") or []
+        output_type = str(outputs[0].get("type") or "*")
+        title = primitive.get("title")
+        base = title if isinstance(title, str) and title and title != LEGACY_PRIMITIVE_TYPE else members[0].widget
+        name = next_unique_name(base, existing)
+        existing.append(name)
+        for e in members:
+            e.name, e.type = name, output_type
+    return entries
+
+
+def _validate_primitive_cohort(sg: dict, primitive: dict | None, members: list) -> str | None:
+    """``validateCohort`` + the pre-mutation checks of ``repairPrimitive``:
+    one primitive, one widget name, every target present and type-compatible."""
+    first = members[0]
+    if any(m.widget != first.widget for m in members):
+        return "cohort validation failed"
+    if primitive is None or str(primitive.get("type", "")) != LEGACY_PRIMITIVE_TYPE:
+        return "node is not a PrimitiveNode"
+    targets = _primitive_targets(sg, primitive)
+    if not targets:
+        return "no targets to reconnect"
+    outputs = primitive.get("outputs") or []
+    if not outputs or not isinstance(outputs[0], dict):
+        return "primitive has no output"
+    output_type = str(outputs[0].get("type") or "*")
+    for tid, slot in targets:
+        target = _inner_node(sg, tid)
+        entries = target.get("inputs") if target is not None else None
+        entry = entries[slot] if isinstance(entries, list) and 0 <= slot < len(entries) else None
+        if not isinstance(entry, dict):
+            return "target slot missing"
+        if not _types_compatible(str(entry.get("type") or "*"), output_type):
+            return "target slot type incompatible"
+    return None
+
+
+def planned_repair(workflow: dict, instance: dict, graph, widget: str, defs: dict[str, dict] | None = None):
+    """The repairable legacy entry a host address ``<instance>.<widget>`` names:
+    by the input name the repair will mint, else by the legacy tuple's own
+    widget name (an alias the caller reports as a redirect)."""
+    plan = [e for e in plan_proxy_migration(workflow, instance, graph, defs) if e.repairable]
+    by_name = next((e for e in plan if e.name == widget), None)
+    return by_name if by_name is not None else next((e for e in plan if e.widget == widget), None)
+
+
+def planned_repair_for_interior(
+    workflow: dict, instance: dict, graph, inner_id: str, widget: str, defs: dict[str, dict] | None = None
+):
+    """The repairable legacy entry whose value the interior address
+    ``<instance>/<inner>.<widget>`` would edit: the entry's own source widget,
+    or one of a primitive's fan-out targets."""
+    defs = defs if defs is not None else defs_by_id(workflow)
+    sg = defs.get(str(instance.get("type", "")))
+    if sg is None:
+        return None
+    for e in plan_proxy_migration(workflow, instance, graph, defs):
+        if not e.repairable:
+            continue
+        if e.source_node == inner_id and e.widget == widget:
+            return e
+        for tid, slot in e.targets:
+            target = _inner_node(sg, tid)
+            entries = target.get("inputs") if target is not None else None
+            entry = entries[slot] if isinstance(entries, list) and 0 <= slot < len(entries) else None
+            marker = entry.get("widget") if isinstance(entry, dict) else None
+            if tid == inner_id and isinstance(marker, dict) and marker.get("name") == widget:
+                return e
+    return None
+
+
+def planned_hidden_sources(workflow: dict, instance: dict, graph, defs: dict[str, dict] | None = None) -> set:
+    """``(interior node, widget)`` pairs a pending repair will own — the
+    interior addresses whose edits the host surface overrides."""
+    defs = defs if defs is not None else defs_by_id(workflow)
+    sg = defs.get(str(instance.get("type", "")))
+    hidden: set[tuple[str, str]] = set()
+    if sg is None:
+        return hidden
+    for e in plan_proxy_migration(workflow, instance, graph, defs):
+        if not e.repairable:
+            continue
+        hidden.add((e.source_node, e.widget))
+        for tid, slot in e.targets:
+            target = _inner_node(sg, tid)
+            entries = target.get("inputs") if target is not None else None
+            entry = entries[slot] if isinstance(entries, list) and 0 <= slot < len(entries) else None
+            marker = entry.get("widget") if isinstance(entry, dict) else None
+            if isinstance(marker, dict) and marker.get("name"):
+                hidden.add((tid, str(marker["name"])))
+    return hidden
+
+
+def entry_effective_value(workflow: dict, sg: dict, entry: LegacyEntry, graph, defs: dict[str, dict]) -> Any:
+    """What the frontend shows for the entry after its own migration: the
+    legacy positional host value when present, else the source widget's
+    current value (a primitive's own value for a bypass)."""
+    if entry.host_value is not UNSET:
+        return entry.host_value
+    if entry.plan == PLAN_PRIMITIVE:
+        primitive = _inner_node(sg, entry.source_node)
+        return _node_widget_value(primitive, entry.widget, graph) if primitive is not None else UNSET
+    return source_value(workflow, sg, entry.as_promoted_input(sg), graph, defs)
+
+
+def repair_ids(instance_path: list, source_node: str, widget: str, n_links: int) -> dict:
+    """The ids a repair of ``(source_node, widget)`` on the instance at
+    ``instance_path`` mints: the subgraph input's uuid and one link id per
+    boundary link. Derived with SHA-256 from the identifiers alone (like
+    ``engine._deterministic_fork_id``), so they are stable across processes
+    and replicas."""
+    seed = "\x00".join(["proxy-repair", *[str(s) for s in instance_path], str(source_node), str(widget)])
+    input_id = str(_uuid.UUID(bytes=_hashlib.sha256(seed.encode()).digest()[:16], version=4))
+    links = []
+    for k in range(n_links):
+        digest = _hashlib.sha256(f"{seed}\x00link{k}".encode()).digest()
+        links.append(_LINK_ID_FLOOR | (int.from_bytes(digest[:8], "big") & ((1 << _LINK_ID_BITS) - 1)))
+    return {"input": input_id, "links": links}
+
+
+def plan_repair_ids(instance_path: list, plan: list) -> dict[str, dict]:
+    """Every repairable entry's ids, keyed ``<source node>.<widget>``."""
+    out: dict[str, dict] = {}
+    for e in plan:
+        if e.repairable and e.key not in out:
+            out[e.key] = repair_ids(instance_path, e.source_node, e.widget, max(1, len(e.targets)))
+    return out
+
+
+def _remove_link(sg: dict, link_id: Any) -> None:
+    link = next((x for x in sg.get("links") or [] if isinstance(x, dict) and x.get("id") == link_id), None)
+    if link is None:
+        return
+    sg["links"] = [x for x in sg.get("links") or [] if x is not link]
+    origin = link.get("origin_id")
+    if origin == SUBGRAPH_INPUT_NODE_ID:
+        for inp in sg.get("inputs") or []:
+            if isinstance(inp, dict) and isinstance(inp.get("linkIds"), list) and link_id in inp["linkIds"]:
+                inp["linkIds"] = [x for x in inp["linkIds"] if x != link_id]
+    else:
+        origin_node = _inner_node(sg, origin)
+        outputs = origin_node.get("outputs") if origin_node is not None else None
+        slot = link.get("origin_slot")
+        if isinstance(outputs, list) and isinstance(slot, int) and 0 <= slot < len(outputs):
+            links = outputs[slot].get("links")
+            if isinstance(links, list):
+                outputs[slot]["links"] = [x for x in links if x != link_id]
+    target = _inner_node(sg, link.get("target_id"))
+    entries = target.get("inputs") if target is not None else None
+    slot = link.get("target_slot")
+    if isinstance(entries, list) and isinstance(slot, int) and 0 <= slot < len(entries):
+        if isinstance(entries[slot], dict) and entries[slot].get("link") == link_id:
+            entries[slot]["link"] = None
+
+
+def _add_boundary_link(sg: dict, new_input: dict, link_id: Any, target: dict, slot: int, slot_type: str) -> None:
+    """``SubgraphInput.connect``: replace whatever fed the slot with a link
+    from the subgraph input node, as the frontend serializes one."""
+    entries = target["inputs"]
+    existing = entries[slot].get("link")
+    if existing is not None:
+        _remove_link(sg, existing)
+    origin_slot = next(i for i, inp in enumerate(sg["inputs"]) if inp is new_input)
+    sg.setdefault("links", []).append(
+        {
+            "id": link_id,
+            "origin_id": SUBGRAPH_INPUT_NODE_ID,
+            "origin_slot": origin_slot,
+            "target_id": target.get("id"),
+            "target_slot": slot,
+            "type": slot_type,
+        }
+    )
+    entries[slot]["link"] = link_id
+    new_input.setdefault("linkIds", []).append(link_id)
+    state = sg.get("state")
+    if isinstance(state, dict):
+        last = state.get("lastLinkId")
+        state["lastLinkId"] = max(last if isinstance(last, int) else 0, link_id)
+
+
+def _add_subgraph_input(sg: dict, input_id: str, name: str, slot_type: str, label: str | None) -> dict:
+    """``Subgraph.addInput`` as the frontend serializes a ``SubgraphInput``
+    (``id``, ``name``, ``type``, ``linkIds``; ``label`` when the source slot
+    carried one). ``pos`` is layout the input node assigns on load."""
+    new_input: dict = {"id": input_id, "name": name, "type": slot_type, "linkIds": []}
+    if label is not None:
+        new_input["label"] = label
+    sg.setdefault("inputs", []).append(new_input)
+    return new_input
+
+
+def _add_host_input(instance: dict, name: str, slot_type: str, label: str | None) -> None:
+    """The host's own ``inputs[]`` entry for a new promoted widget input —
+    the shape a post-migration save carries (``audio_minimax_music_3.json``
+    node 37). Left alone when the instance already serializes one."""
+    if instance_input(instance, name) is not None:
+        return
+    entry: dict = {"name": name, "type": slot_type, "widget": {"name": name}, "link": None}
+    if label is not None:
+        entry = {"label": label, **entry}
+    instance.setdefault("inputs", []).append(entry)
+
+
+def _quarantine_entry(entry: LegacyEntry, reason: str) -> dict:
+    out = {"originalEntry": list(entry.original), "reason": reason, "attemptedAtVersion": QUARANTINE_VERSION}
+    if entry.host_value is not UNSET:
+        out["hostValue"] = entry.host_value
+    return out
+
+
+def flush_proxy_migration(
+    workflow: dict, instance: dict, graph, ids: dict[str, dict] | None = None, instance_path: list | None = None
+) -> FlushReport:
+    """Run the forward migration on ``instance`` IN PLACE (its definition, its
+    interior nodes, its own ``inputs``/``widgets_values``/``properties``).
+
+    ``ids`` are the minted ids per repairable entry (:func:`plan_repair_ids`);
+    derived from ``instance_path`` when not given. Idempotent: an instance
+    without legacy value entries is left untouched. The definition is
+    mutated — callers isolate a shared definition first (the op layer does,
+    via ``engine._isolate_shared_subgraph``).
+    """
+    defs = defs_by_id(workflow)
+    sg = defs.get(str(instance.get("type", "")))
+    report = FlushReport()
+    if sg is None or not _proxy_tuples(instance):
+        return report
+    if graph is None:
+        # Without the catalog no interior widget can be resolved, and the
+        # honest answer to that is not "quarantine everything".
+        raise ValueError(
+            f"repairing the legacy proxyWidgets of subgraph node {instance.get('id')} needs the node catalog"
+        )
+    plan = plan_proxy_migration(workflow, instance, graph, defs)
+    if not plan:
+        return report
+    instance_path = instance_path if instance_path is not None else [str(instance.get("id"))]
+    ids = dict(ids or {})
+    for e in plan:
+        if e.repairable and e.key not in ids:
+            ids[e.key] = repair_ids(instance_path, e.source_node, e.widget, max(1, len(e.targets)))
+
+    # Values the host already carries, read the way ``configure`` applies them
+    # (positionally over the linked inputs) — before the structure changes.
+    pre = {p.name: host_value(instance, p) for p in promoted_inputs(sg, defs) if p.is_widget}
+    applied: dict[str, Any] = {}
+    quarantine: list[dict] = []
+    remaining: list[list] = []
+    cohorts: dict[str, list[LegacyEntry]] = {}
+    for e in plan:
+        if e.plan == PLAN_PREVIEW:
+            remaining.append(list(e.original))
+            continue
+        if e.plan == PLAN_QUARANTINE:
+            if e.reason != "primitiveBypassFailed":
+                quarantine.append(_quarantine_entry(e, str(e.reason)))
+            else:
+                cohorts.setdefault(e.source_node, []).append(e)
+            continue
+        report.consumed.append(list(e.original))
+        if e.plan == PLAN_ALREADY_LINKED:
+            if e.host_value is not UNSET:
+                applied[str(e.name)] = e.host_value
+            continue
+        if e.plan == PLAN_PRIMITIVE:
+            cohorts.setdefault(e.source_node, []).append(e)
+            continue
+        # createSubgraphInput
+        source = _inner_node(sg, e.source_node)
+        slot_index = e.slot_index
+        if slot_index is None:
+            source.setdefault("inputs", []).append(
+                {
+                    "localized_name": e.widget,
+                    "name": e.widget,
+                    "type": e.type,
+                    "widget": {"name": e.widget},
+                    "link": None,
+                }
+            )
+            slot_index = len(source["inputs"]) - 1
+        new_input = _add_subgraph_input(sg, ids[e.key]["input"], str(e.name), str(e.type), e.label)
+        _add_boundary_link(sg, new_input, ids[e.key]["links"][0], source, slot_index, str(e.type))
+        _add_host_input(instance, str(e.name), str(e.type), e.label)
+        report.created.append(str(e.name))
+        if e.host_value is not UNSET:
+            applied[str(e.name)] = e.host_value
+
+    for primitive_id, members in cohorts.items():
+        if members[0].plan == PLAN_QUARANTINE:
+            quarantine.extend(_quarantine_entry(m, "primitiveBypassFailed") for m in members)
+            continue
+        first = members[0]
+        primitive = _inner_node(sg, primitive_id)
+        # ``repairPrimitive`` re-validates against the graph as it is NOW: a
+        # ``createSubgraphInput`` above may have taken over one of the
+        # primitive's targets, so the fan-out is collected again.
+        if _validate_primitive_cohort(sg, primitive, members) is not None:
+            quarantine.extend(_quarantine_entry(m, "primitiveBypassFailed") for m in members)
+            continue
+        targets = _primitive_targets(sg, primitive)
+        for link in [x for x in sg.get("links") or [] if str(x.get("origin_id")) == primitive_id]:
+            if link.get("origin_slot") == 0:
+                _remove_link(sg, link.get("id"))
+        link_ids = ids[first.key]["links"]
+        if len(link_ids) < len(targets):
+            link_ids = repair_ids(instance_path, first.source_node, first.widget, len(targets))["links"]
+        new_input = _add_subgraph_input(sg, ids[first.key]["input"], str(first.name), str(first.type), None)
+        for k, (tid, slot) in enumerate(targets):
+            target = _inner_node(sg, tid)
+            _add_boundary_link(sg, new_input, link_ids[k], target, slot, str(target["inputs"][slot].get("type") or "*"))
+        _add_host_input(instance, str(first.name), str(first.type), None)
+        primitive.setdefault("properties", {})[PROXY_BYPASS_MARKER_PROPERTY] = str(first.name)
+        report.created.append(str(first.name))
+        unique: list[LegacyEntry] = []
+        for m in members:
+            if not any(
+                (u.source_node, u.widget, u.disambiguator) == (m.source_node, m.widget, m.disambiguator) for u in unique
+            ):
+                unique.append(m)
+        valued = next((u for u in unique if u.host_value is not UNSET), None)
+        if valued is not None:
+            applied[str(first.name)] = valued.host_value
+        else:
+            seed = _node_widget_value(primitive, first.widget, graph)
+            if seed is not UNSET:
+                applied[str(first.name)] = seed
+
+    if not report.consumed and not quarantine:
+        return report  # previews only: nothing to consume, nothing to write
+
+    # ``appendQuarantine``: a ``-1`` entry's host value lands on the input of
+    # that name; entries are deduplicated by their original tuple.
+    props = instance.setdefault("properties", {})
+    existing_q = [q for q in props.get(QUARANTINE_PROPERTY) or [] if isinstance(q, dict)]
+    for q in quarantine:
+        if q["originalEntry"][0] == "-1" and "hostValue" in q:
+            applied[str(q["originalEntry"][1])] = q["hostValue"]
+        if not any(x.get("originalEntry") == q["originalEntry"] for x in existing_q):
+            existing_q.append(q)
+            report.quarantined.append(q)
+    if existing_q:
+        props[QUARANTINE_PROPERTY] = existing_q
+    if remaining:
+        props["proxyWidgets"] = remaining
+    else:
+        props.pop("proxyWidgets", None)
+    report.remaining = remaining
+
+    # The host array, positional over the (now repaired) widget-backed inputs:
+    # migrated values first, then what the host already carried, then the
+    # interior default — the serialization the frontend writes after its flush.
+    values: list[Any] = []
+    for p in promoted_inputs(sg, defs):
+        if not p.is_widget:
+            continue
+        value = applied.get(p.name, pre.get(p.name, UNSET))
+        if value is UNSET:
+            value = source_value(workflow, sg, p, graph, defs)
+        values.append(None if value is UNSET else value)
+    instance["widgets_values"] = values
+    return report
+
+
+def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) -> list[tuple[list[str], str]]:
+    """Every concrete ``(interior node path, widget)`` a promoted input feeds —
+    all of its boundary links, through nested instances. A repaired primitive
+    fan-out has several; :func:`deepest_source` reports only the first."""
+    inputs = sg.get("inputs") or []
+    inp = inputs[pi.index] if 0 <= pi.index < len(inputs) and isinstance(inputs[pi.index], dict) else None
+    if inp is None:
+        single = deepest_source(sg, pi, defs)
+        return [single] if single is not None else []
+    return _boundary_targets(sg, inp, defs, 0)
+
+
+def _boundary_targets(sg: dict, inp: dict, defs: dict[str, dict], depth: int) -> list[tuple[list[str], str]]:
+    if depth > _MAX_NESTED_PROMOTION_DEPTH:
+        return []
+    links = {x.get("id"): x for x in sg.get("links") or [] if isinstance(x, dict)}
+    out: list[tuple[list[str], str]] = []
+    for link_id in inp.get("linkIds") or []:
+        link = links.get(link_id) if isinstance(link_id, (int, str)) else None
+        target = _inner_node(sg, link.get("target_id")) if link is not None else None
+        if target is None:
+            continue
+        entries = target.get("inputs") or []
+        slot = link.get("target_slot")
+        entry = entries[slot] if isinstance(slot, int) and 0 <= slot < len(entries) else None
+        if not isinstance(entry, dict):
+            continue
+        tid = str(target.get("id"))
+        inner_def = defs.get(str(target.get("type", "")))
+        if inner_def is not None:
+            inner_inp = next(
+                (
+                    i
+                    for i in inner_def.get("inputs") or []
+                    if isinstance(i, dict) and i.get("name") == entry.get("name")
+                ),
+                None,
+            )
+            if inner_inp is not None:
+                out.extend(([tid, *path], w) for path, w in _boundary_targets(inner_def, inner_inp, defs, depth + 1))
+            continue
+        marker = entry.get("widget")
+        if marker:
+            widget = marker.get("name") if isinstance(marker, dict) else None
+            out.append(([tid], str(widget or entry.get("name"))))
+    return out

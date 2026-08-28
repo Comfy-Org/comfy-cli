@@ -217,20 +217,19 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
             value = _promoted.host_value(instance, pi)
             if value is _promoted.UNSET:
                 continue
-            target = _promoted.deepest_source(sg, pi, subgraph_defs)
-            if target is None:
-                continue
-            path, widget = target
-            entry = api_prompt.get(":".join([prefix, *path]))
-            if not isinstance(entry, dict):
-                continue
-            inputs = entry.setdefault("inputs", {})
-            current = inputs.get(widget)
-            if isinstance(current, list) and len(current) == 2:
-                continue  # wired from inside the definition: the link wins
-            # Same wrapping every widget value gets, so a two-item list host
-            # value is never read back as a ``[node, slot]`` link.
-            inputs[widget] = _wrap_widget_value(value)
+            # Every interior widget the input feeds — a repaired primitive
+            # fan-out links one host value into several targets.
+            for path, widget in _promoted.boundary_widget_targets(sg, pi, subgraph_defs):
+                entry = api_prompt.get(":".join([prefix, *path]))
+                if not isinstance(entry, dict):
+                    continue
+                inputs = entry.setdefault("inputs", {})
+                current = inputs.get(widget)
+                if isinstance(current, list) and len(current) == 2:
+                    continue  # wired from inside the definition: the link wins
+                # Same wrapping every widget value gets, so a two-item list
+                # host value is never read back as a ``[node, slot]`` link.
+                inputs[widget] = _wrap_widget_value(value)
 
     for node in workflow.get("nodes") or []:
         if not isinstance(node, dict):

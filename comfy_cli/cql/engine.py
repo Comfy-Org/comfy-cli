@@ -2721,6 +2721,8 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
             if fully_curated and not promoted:
                 continue
             hidden = {(str(p.source_node), str(p.source_widget or p.source_input)) for p in promoted}
+            # …and the interior widgets a pending legacy repair will own.
+            hidden |= _promoted.planned_hidden_sources(workflow, node, graph, defs_by_id)
             walk(sg.get("nodes") or [], node_path, depth + 1, hidden, sg)
 
     walk(workflow.get("nodes") or [], "", 0, set(), workflow)
@@ -2808,6 +2810,32 @@ def _declared_subgraph_slots(
         if linked_from is not None:
             slot["linked_from"] = linked_from
         declared.append(slot)
+    if workflow is not None:
+        # Legacy ``proxyWidgets`` promotions the definition does not back
+        # yet: the frontend repairs them into linked inputs on load, so they
+        # are advertised where they will live — ``<instance>.<name>`` with the
+        # value the frontend shows (legacy host value, else the interior
+        # source). Reads never mutate; the first write performs the repair.
+        advertised = {s["name"] for s in declared}
+        for entry in _promoted.plan_proxy_migration(workflow, instance, graph, defs):
+            if not entry.repairable or entry.name in advertised:
+                continue
+            advertised.add(entry.name)
+            any_declared = True
+            current = _promoted.entry_effective_value(workflow, sg, entry, graph, defs)
+            if current is _promoted.UNSET:
+                all_resolved = False
+                continue
+            declared.append(
+                {
+                    "address": f"{instance_id}.{entry.name}",
+                    "name": entry.name,
+                    "type": str(entry.type),
+                    "current_value": current,
+                    "instance_id": instance_id,
+                    "node_type": instance.get("type", ""),
+                }
+            )
     return declared, (any_declared and all_resolved)
 
 
@@ -3214,7 +3242,10 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
         # non-terminal hop and is not forked — its values are its own).
         instance = _resolve_node_path(workflow, target.segments, defs_by_id)
         sg = _subgraph_defs_by_id(workflow).get(str(instance.get("type", "")))
-        pi = _promoted.find_promoted(sg, _subgraph_defs_by_id(workflow), target.widget)
+        if target.repair is not None:
+            pi = target.repair.as_promoted_input(sg)
+        else:
+            pi = _promoted.find_promoted(sg, _subgraph_defs_by_id(workflow), target.widget)
         _class, port = promoted_source_port(sg, pi, _subgraph_defs_by_id(workflow), graph)
         warnings: list[dict] = []
         if port is not None:
@@ -3222,6 +3253,12 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
             if err:
                 raise ValueError(err)
             warnings = [dict(w, field=addr) for w in port.validate_catalog(value)]
+        if target.repair is not None:
+            # A legacy ``proxyWidgets`` promotion: run the frontend's forward
+            # migration on this instance first (forking a shared definition,
+            # since the repair mutates it), exactly as the op path does.
+            _isolate_shared_subgraph(workflow, instance, _subgraph_defs_by_id(workflow))
+            _promoted.flush_proxy_migration(workflow, instance, graph, instance_path=list(target.segments))
         _promoted.set_host_value(workflow, instance, target.widget, value, graph)
         return warnings
     if target.kind == "interior":

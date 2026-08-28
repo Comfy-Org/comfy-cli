@@ -652,12 +652,31 @@ def _set_widget_impl(
         extra["redirected_from"] = target.redirected_from
     if target.kind == "host":
         instance = target.node
+        widget = str(target.widget)
         defs = _engine._subgraph_defs_by_id(workflow)
         sg = defs[str(instance.get("type", ""))]
-        pi = _promoted.find_promoted(sg, defs, widget)
+        promoted_meta: dict[str, Any] = {"instance_path": list(target.segments)}
+        if target.repair is not None:
+            # A legacy ``proxyWidgets`` promotion (see ``cql.promoted``
+            # "forward migration"): apply repairs the instance's definition
+            # first — with ids DERIVED from the instance path and the entry,
+            # carried here so any replica mints the same input and links —
+            # and only then writes the host value. The schema/old value come
+            # from the interior widget the repair will link.
+            entry = target.repair
+            plan = _promoted.plan_proxy_migration(workflow, instance, graph, defs)
+            promoted_meta["repair"] = {
+                "entry": list(entry.original),
+                "ids": _promoted.plan_repair_ids(list(target.segments), plan),
+            }
+            pi = entry.as_promoted_input(sg)
+            old = _promoted.entry_effective_value(workflow, sg, entry, graph, defs)
+        else:
+            pi = _promoted.find_promoted(sg, defs, widget)
+            promoted_meta["value_index"] = pi.value_index
+            old = _promoted.effective_value(workflow, instance, widget, graph)
         inner_type, port = _engine.promoted_source_port(sg, pi, defs, graph)
         value, norm_note = _normalize_combo(graph, inner_type, port.name if port else widget, value)
-        old = _promoted.effective_value(workflow, instance, widget, graph)
         warnings: list[dict] = []
         if port is not None:
             err = port.validate_shape(value)
@@ -675,12 +694,18 @@ def _set_widget_impl(
             widget=widget,
             value=value,
             old=None if old is _promoted.UNSET else old,
-            promoted={"value_index": pi.value_index, "instance_path": list(target.segments)},
+            promoted=promoted_meta,
             **extra,
         )
         if warnings:
             op["warnings"] = warnings
         workflow = apply_op(workflow, op, graph)
+        if target.repair is not None:
+            # The slot only exists after the repair (and the instance may sit
+            # on a freshly forked definition): read it back from the document.
+            repaired = _engine._subgraph_defs_by_id(workflow)
+            sg = repaired[str(instance.get("type", ""))]
+            op["promoted"]["value_index"] = _promoted.find_promoted(sg, repaired, widget).value_index
         # The materialized host array, for an applier that stores the instance
         # opaquely (no catalog entry for a subgraph type): it can replace the
         # positional array wholesale instead of decomposing it by name. Read
@@ -1826,7 +1851,20 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
             return  # instance concurrently deleted => no-op (delete wins)
         defs_by_id = _engine._subgraph_defs_by_id(workflow)
         instance = _engine._resolve_node_path(workflow, instance_path, defs_by_id)
-        if defs_by_id.get(str(instance.get("type", ""))) is not None:
+        repair = promoted_write.get("repair")
+        if repair:
+            # Legacy ``proxyWidgets`` promotion: repair the instance's
+            # definition (the frontend's forward migration) before the host
+            # write. The definition is MUTATED, so a shared one is forked
+            # first (deterministic fork id), and the input/link ids come from
+            # the op — replay anywhere yields the same document. Re-resolved
+            # against the current graph: an entry another replica already
+            # repaired is consumed as already linked.
+            _engine._isolate_shared_subgraph(workflow, instance, _engine._subgraph_defs_by_id(workflow))
+            _promoted.flush_proxy_migration(
+                workflow, instance, graph, ids=repair.get("ids") or None, instance_path=instance_path
+            )
+        if _engine._subgraph_defs_by_id(workflow).get(str(instance.get("type", ""))) is not None:
             _promoted.set_host_value(workflow, instance, op["widget"], op["value"], graph)
         else:
             # Not a subgraph instance (a frontend-only PrimitiveNode): a plain
