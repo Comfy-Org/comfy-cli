@@ -2401,6 +2401,12 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
         idx = _resolve_input_slot(node, None, slot)
         if str(ins[idx].get("type", "")).startswith("COMFY_AUTOGROW"):
             base = ins[idx].get("name")
+            # The CLI's own add-node writes this base entry; the schema-aware
+            # resolver applies the declared element type and ``max`` exactly
+            # as it does for a UI-built node (which carries no base entry).
+            resolved = _resolve_schema_autogrow(node, graph, str(base), elem_type) if graph is not None else None
+            if resolved is not None:
+                return resolved
             template = _autogrow_template(graph, node, base)
             return None, _plan_autogrow(ins, base, elem_type, template)
         return idx, None
@@ -2413,6 +2419,9 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
             (i for i in ins if i.get("name") == base and str(i.get("type", "")).startswith("COMFY_AUTOGROW")), None
         )
         if ag is not None:
+            resolved = _resolve_schema_autogrow(node, graph, slot, elem_type) if graph is not None else None
+            if resolved is not None:
+                return resolved
             template = _autogrow_template(graph, node, base)
             grow = _plan_autogrow(ins, base, elem_type, template)  # canonical next sequential slot
             # Addressing the bare base auto-appends. A dotted key is accepted ONLY if
@@ -2432,14 +2441,16 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
     # when the node's ``inputs`` carry no trace of it: a group nested under a
     # dynamic combo (``model.images``), or a top-level group on a UI-built node
     # (the frontend writes the grown ``images.imageN`` slots, never the base).
+    # Widget-backed input: convert the widget to a linked input. Checked before
+    # the schema group resolution so a real widget name always outranks the
+    # bare-element guess (``image0``) a group's vocabulary might also match.
+    node_type = node.get("type", "")
+    if graph is not None and isinstance(slot, str) and slot in graph.widget_order(node_type):
+        return None, {"name": slot, "type": elem_type or "*", "widget": slot}
     if graph is not None and isinstance(slot, str):
         resolved = _resolve_schema_autogrow(node, graph, slot, elem_type)
         if resolved is not None:
             return resolved
-    # Widget-backed input: convert the widget to a linked input.
-    node_type = node.get("type", "")
-    if graph is not None and isinstance(slot, str) and slot in graph.widget_order(node_type):
-        return None, {"name": slot, "type": elem_type or "*", "widget": slot}
     # Bare autogrow ELEMENT name (`image1` for base `images`) — the guess agents
     # make on classic batch nodes, and the top workflow-edit failure in alpha
     # traffic. Map it onto the dotted key it implies and hold it to the same
@@ -2544,17 +2555,19 @@ def _resolve_schema_autogrow(
                 return idx, None
             n += 1
         grown = [i.get("name") for i in ins if str(i.get("name", "")).startswith(base + ".")]
+        # A full group is reported as full FIRST: a gapped key on a full group
+        # must not be handed a "next free key" the next call would refuse.
+        if hi is not None and n >= hi:
+            raise ValueError(
+                f"autogrow input {base!r} on node {node.get('id')} is full: the schema allows at most "
+                f"{hi} slots (existing: {grown})"
+            )
         if target is not None and target != name:
             raise ValueError(
                 f"input {slot!r} is not a valid autogrow slot on node {node.get('id')}; "
                 f"autogrow input {base!r} appends one sequential slot per connection "
                 f"(existing: {grown}) — connect to the base {base!r} to auto-append, "
                 f"or use the next free key {name!r}"
-            )
-        if hi is not None and n >= hi:
-            raise ValueError(
-                f"autogrow input {base!r} on node {node.get('id')} is full: the schema allows at most "
-                f"{hi} slots (existing: {grown})"
             )
         return None, {"name": name, "type": declared or elem_type or "*"}
     return None

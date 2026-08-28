@@ -401,3 +401,57 @@ def test_grows_on_different_nested_groups_are_different_conflict_targets(graph):
     assert workflow_ops._write_target(op_img) == ("input", "4", "grow", "model.reference_images")
     assert workflow_ops._write_target(op_vid) == ("input", "4", "grow", "model.reference_videos")
     assert workflow_ops.detect_conflict(op_img, op_vid) is False
+
+
+# --------------------------------------------------------------------------- #
+# Review (annehe9) on #812: the guards must cover the CLI-built shape too
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_built_top_level_group_refuses_the_wrong_element_type(graph):
+    """``add_node`` writes a ``COMFY_AUTOGROW_V3`` base entry; connecting
+    through it must apply the same declared-element-type check as the
+    UI-built shape (no base entry) does."""
+    wf, au = _add_loader(_empty(), graph, "LoadAudio")
+    wf, batch = _add_loader(wf, graph, "BatchImagesNode")
+    assert _inputs(wf, batch) == ["images"]
+    with pytest.raises(ValueError, match="type mismatch"):
+        workflow_ops.connect(wf, graph, au, "AUDIO", batch, "images")
+    with pytest.raises(ValueError, match="type mismatch"):
+        workflow_ops.connect(wf, graph, au, "AUDIO", batch, "images.image0")
+
+
+def test_cli_built_top_level_group_enforces_max(graph):
+    wf, a = _add_loader(_empty(), graph, "LoadImage")
+    wf, batch = _add_loader(wf, graph, "BatchImagesNode")
+    for _ in range(50):
+        wf, _ = workflow_ops.connect(wf, graph, a, "IMAGE", batch, "images")
+    assert "images.image49" in _inputs(wf, batch)
+    with pytest.raises(ValueError, match=r"(?i)max(imum)? .*50|50 slots|full"):
+        workflow_ops.connect(wf, graph, a, "IMAGE", batch, "images")
+
+
+def test_full_group_reports_full_before_the_next_key_hint(graph):
+    """A gapped key on a FULL group must not be told to use a next key the
+    next call would refuse."""
+    wf = _minimax_ui_workflow()
+    wf, v = _add_loader(wf, graph, "LoadVideo")
+    for _ in range(3):
+        wf, _ = workflow_ops.connect(wf, graph, v, "VIDEO", 4, "model.reference_videos")
+    with pytest.raises(ValueError) as e:
+        workflow_ops.connect(wf, graph, v, "VIDEO", 4, "model.reference_videos.video_9")
+    assert "at most 3" in str(e.value)
+    assert "next free key" not in str(e.value)
+
+
+def test_a_real_widget_name_outranks_the_bare_element_guess(graph):
+    """A node whose group's bare element vocabulary collides with a real
+    widget name keeps the widget→input conversion (the existing precedence)."""
+    oi = json.loads(FIXTURE.read_text())
+    oi["BatchImagesNode"]["input"]["required"]["image0"] = ["STRING", {"default": ""}]
+    oi["BatchImagesNode"]["input_order"]["required"].append("image0")
+    g = Graph.from_object_info(oi)
+    wf, prim = _add_loader(_empty(), g, "LoadImage")
+    wf, batch = _add_loader(wf, g, "BatchImagesNode")
+    _idx, grow = workflow_ops._resolve_input_target(_node(wf, batch), g, "image0", "STRING")
+    assert grow == {"name": "image0", "type": "STRING", "widget": "image0"}
