@@ -175,7 +175,9 @@ def test_connect_type_mismatch_into_a_promoted_input_is_refused(graph):
 def test_connect_to_an_already_materialized_promoted_input_reuses_it(graph):
     wf, prim = _with_primitive(graph)
     wf, first = workflow_ops.connect(wf, graph, prim, "INT", 57, "width")
-    wf, second = workflow_ops.connect(wf, graph, prim, "INT", 57, "width")
+    # every connect to a promoted input shares one LWW register, so a later
+    # connect carries a later base_version (the CLI's --base-version)
+    wf, second = workflow_ops.connect(wf, graph, prim, "INT", 57, "width", base_version=1)
     assert [i["name"] for i in _node(wf, 57)["inputs"]] == ["text", "width"]
     assert _input(_node(wf, 57), "width")["link"] == second["link_id"]
     assert first["link_id"] not in {link[0] for link in wf["links"]}  # replaced, not duplicated
@@ -439,4 +441,57 @@ def test_legacy_primitive_write_carries_a_positional_payload(graph):
     assert op["legacy_primitive"] is True
     assert op["promoted"] == {"value_index": 0, "instance_path": [str(legacy)], "host_widgets_values": [512, "fixed"]}
     replayed = workflow_ops.apply_op(copy.deepcopy(base), op, graph)
+    assert _node(replayed, legacy)["widgets_values"] == [512, "fixed"]
+
+
+def test_later_connect_to_a_materialized_promoted_input_stays_on_the_declared_register(graph):
+    """Once ``57.width`` is materialized, a later connect to it must still be
+    a promoted grow on ``("input", 57, "grow", "width")`` — not a concrete
+    ``to_slot`` op. Otherwise a replica that receives the later op FIRST finds
+    no such slot, drops it (consuming its op_id), then installs the older
+    link from the materializing op: the newer link can never replay."""
+    base = _load("image_z_image_turbo.json")
+    base, a = workflow_ops.add_node(base, graph, "PrimitiveInt")
+    base, b = workflow_ops.add_node(base, graph, "PrimitiveInt")
+    a, b = a["node_id"], b["node_id"]
+    wf, first = workflow_ops.connect(copy.deepcopy(base), graph, a, "INT", 57, "width", actor="a", base_version=0)
+    wf, second = workflow_ops.connect(wf, graph, b, "INT", 57, "width", actor="a", base_version=1)
+    assert second.get("grow", {}).get("promoted") is True
+    assert second["to_slot"] is None
+    assert workflow_ops._write_target(second) == workflow_ops._write_target(first)
+    for order in ((first, second), (second, first)):
+        replica = copy.deepcopy(base)
+        for op in order:
+            replica = workflow_ops.apply_op(replica, op, graph)
+        entries = [i for i in _node(replica, 57)["inputs"] if i["name"] == "width"]
+        assert len(entries) == 1 and entries[0]["link"] == second["link_id"]
+        assert {link[0] for link in replica["links"]} & {first["link_id"], second["link_id"]} == {second["link_id"]}
+
+
+def test_positional_replay_extends_a_partially_present_array_from_the_payload(graph):
+    """A receiver holding a truncated opaque array (``[1024]``) must end up
+    with the payload's tail too, or replicas diverge on the node's state."""
+    wf = _load("image_z_image_turbo.json")
+    wf["last_node_id"] += 1
+    legacy = wf["last_node_id"]
+    wf["nodes"].append(
+        {
+            "id": legacy,
+            "type": "PrimitiveNode",
+            "pos": [0, 0],
+            "size": [210, 82],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "INT", "type": "INT", "widget": {"name": "width"}, "links": []}],
+            "properties": {"Run widget replace on values": False},
+            "widgets_values": [1024, "fixed"],
+        }
+    )
+    wf, _ = workflow_ops.connect(wf, graph, legacy, "INT", 57, "width")
+    receiver = copy.deepcopy(wf)
+    _node(receiver, legacy)["widgets_values"] = [1024]
+    _, op = workflow_ops.set_widget(wf, graph, 57, "width", 512)
+    replayed = workflow_ops.apply_op(receiver, op, graph)
     assert _node(replayed, legacy)["widgets_values"] == [512, "fixed"]

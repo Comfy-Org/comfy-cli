@@ -1883,11 +1883,13 @@ def _apply_positional_write(node: dict, positional: dict, value: Any) -> None:
     values = node.get("widgets_values")
     values = list(values) if isinstance(values, list) else []
     seed = positional.get("host_widgets_values")
-    if len(values) <= idx:
-        if isinstance(seed, list) and len(seed) > len(values):
-            values.extend(seed[len(values) :])
-        while len(values) <= idx:
-            values.append(None)
+    # A receiver holding a truncated array takes the payload's tail whether or
+    # not the written index is inside it — otherwise replicas keep different
+    # opaque state for the same node.
+    if isinstance(seed, list) and len(seed) > len(values):
+        values.extend(seed[len(values) :])
+    while len(values) <= idx:
+        values.append(None)
     values[idx] = value
     node["widgets_values"] = values
 
@@ -2589,6 +2591,19 @@ def _resolve_input_target(
       the API converter reads the link and skips the widget by name.
     """
     ins = node.get("inputs") or []
+    # Promoted subgraph input (``57.width``): the definition declares it, so it
+    # is a link input on the instance even before the instance carries an
+    # ``inputs[]`` entry for it — the frontend rebuilds those from the
+    # definition on load. ALWAYS addressed as a promoted grow, even once the
+    # entry exists: the register is the declared name, so a replica that
+    # receives a later connect before the materializing one still lands it
+    # (a concrete ``to_slot`` op would find no slot, be dropped, and never
+    # replay). Apply reuses the entry by name; type-checked against the
+    # declared input type.
+    if workflow is not None and isinstance(slot, str):
+        promoted_grow = _resolve_promoted_target(workflow, node, slot, elem_type)
+        if promoted_grow is not None:
+            return None, promoted_grow
     # Concrete slot (index or exact name) that is NOT an autogrow base.
     try:
         idx = _resolve_input_slot(node, None, slot)
@@ -2605,15 +2620,6 @@ def _resolve_input_target(
         return idx, None
     except ValueError:
         pass
-    # Promoted subgraph input (``57.width``): the definition declares it, so it
-    # is a link input on the instance even before the instance carries an
-    # ``inputs[]`` entry for it — the frontend rebuilds those from the
-    # definition on load. Materialize it (widget marker when it backs a
-    # widget) and wire it; type-checked against the declared input type.
-    if workflow is not None and isinstance(slot, str):
-        promoted_grow = _resolve_promoted_target(workflow, node, slot, elem_type)
-        if promoted_grow is not None:
-            return None, promoted_grow
     # Dotted autogrow key (images.image0) or a base that has no concrete slot yet.
     if isinstance(slot, str):
         base = slot.split(".", 1)[0]
