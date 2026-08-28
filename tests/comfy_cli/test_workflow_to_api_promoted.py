@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from comfy_cli import workflow_ops
+from comfy_cli import workflow_ops, workflow_to_api
 from comfy_cli.cql.engine import Graph
 from comfy_cli.workflow_to_api import convert_ui_to_api
 
@@ -95,3 +95,20 @@ def test_socket_links_and_host_values_coexist(object_info):
     # the two VIDEO socket inputs are external links, reattached as before
     comps = _api_node(api, "GetVideoComponents", "39:1")["inputs"]
     assert isinstance(comps["video"], list) and len(comps["video"]) == 2
+
+
+def test_list_valued_host_values_are_wrapped_not_read_as_links(object_info, graph):
+    """A two-item list host value must not be mistaken for a ``[node, slot]``
+    link when overlaid onto the interior node."""
+    wf = _load("image_z_image_turbo.json")
+    from comfy_cli.cql import promoted
+
+    promoted.set_host_value(wf, next(n for n in wf["nodes"] if n["id"] == 57), "text", ["a", "b"], graph)
+    api = convert_ui_to_api(wf, object_info)
+    text = _api_node(api, "CLIPTextEncode", "57:27")["inputs"]["text"]
+    plain = _api_node(convert_ui_to_api(_load("image_z_image_turbo.json"), object_info), "CLIPTextEncode", "57:27")[
+        "inputs"
+    ]["text"]
+    assert isinstance(plain, str)
+    assert text != ["a", "b"] or not (isinstance(text, list) and len(text) == 2 and isinstance(text[0], str))
+    assert text == workflow_to_api._wrap_widget_value(["a", "b"])

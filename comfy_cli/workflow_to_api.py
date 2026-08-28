@@ -223,7 +223,9 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
             current = inputs.get(widget)
             if isinstance(current, list) and len(current) == 2:
                 continue  # wired from inside the definition: the link wins
-            inputs[widget] = value
+            # Same wrapping every widget value gets, so a two-item list host
+            # value is never read back as a ``[node, slot]`` link.
+            inputs[widget] = _wrap_widget_value(value)
 
     for node in workflow.get("nodes") or []:
         if not isinstance(node, dict):

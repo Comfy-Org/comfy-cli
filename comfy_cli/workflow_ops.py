@@ -683,8 +683,12 @@ def _set_widget_impl(
         workflow = apply_op(workflow, op, graph)
         # The materialized host array, for an applier that stores the instance
         # opaquely (no catalog entry for a subgraph type): it can replace the
-        # positional array wholesale instead of decomposing it by name.
-        op["promoted"]["host_widgets_values"] = _promoted.host_widgets_values(target.node)
+        # positional array wholesale instead of decomposing it by name. Read
+        # from the instance apply WROTE — a nested host inside a shared
+        # definition was forked on the way down, so the dict captured during
+        # resolution is the pre-fork sibling, not the written one.
+        written = _engine._resolve_node_path(workflow, list(target.segments), _engine._subgraph_defs_by_id(workflow))
+        op["promoted"]["host_widgets_values"] = _promoted.host_widgets_values(written)
         return workflow, op
     if target.kind == "legacy_primitive":
         src = target.node
@@ -2675,12 +2679,15 @@ def _resolve_promoted_target(workflow: dict, node: dict, slot: str, elem_type: s
         # interior widget: still a value, not a link (the frontend repairs it
         # into a linked input on load). set-widget owns it.
         return None
-    if elem_type and not _types_compatible(elem_type, pi.type):
+    # A declared input with no usable type (missing or non-string in the
+    # save) is reachable, not a mismatch: skip the check and stamp the slot
+    # with the source type, as the frontend would infer it.
+    if elem_type and pi.type and not _types_compatible(elem_type, pi.type):
         raise ValueError(
             f"type mismatch: {elem_type} output cannot connect to {pi.type} input {slot!r} "
             f"of subgraph node {node.get('id')}"
         )
-    grow: dict[str, Any] = {"name": slot, "type": pi.type, "promoted": True}
+    grow: dict[str, Any] = {"name": slot, "type": pi.type or elem_type or "*", "promoted": True}
     if pi.is_widget:
         grow["widget"] = slot
     return grow
