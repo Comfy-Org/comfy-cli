@@ -2,7 +2,8 @@
 
 Contract under test:
   * load order: ``COMFY_KNOWLEDGE_FILE`` (authoritative, never cached) >
-    fresh cache > ``COMFY_KNOWLEDGE_URL`` fetch > stale cache > nothing.
+    fresh cache > fetch (``COMFY_KNOWLEDGE_URL``, else the cloud default) >
+    stale cache > nothing.
   * a broken or missing bundle returns ``None``; nothing here raises.
   * manifest ``schema_version`` and ``sha256`` reject a mismatched bundle.
   * the index is a tolerant reader: unknown keys/fields are ignored.
@@ -21,6 +22,7 @@ import json
 import os
 import shutil
 import time
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -218,15 +220,39 @@ class TestLoadOrder:
         monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
         assert knowledge.load_bundle().source == "stale-cache"
 
-    def test_no_cache_no_url_is_none(self):
+    def test_no_cache_and_no_url_fetches_the_default_and_reports_signed_out(self, monkeypatch):
+        calls = _fake_http(monkeypatch, knowledge_bytes=None)
         assert knowledge.load_bundle() is None
-        assert knowledge.last_reason() == knowledge.REASON_NO_URL
+        assert knowledge.last_reason() == knowledge.REASON_SIGNED_OUT
+        assert calls == [knowledge.default_url()]
 
     def test_no_cache_failed_fetch_is_none(self, monkeypatch):
         _fake_http(monkeypatch, knowledge_bytes=None)
         monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
         assert knowledge.load_bundle() is None
         assert knowledge.last_reason() == knowledge.REASON_FETCH_FAILED
+
+    def test_default_url_follows_the_cloud_base_url(self, monkeypatch):
+        monkeypatch.setenv("COMFY_CLOUD_BASE_URL", "https://staging.example/")
+        calls = _fake_http(monkeypatch, knowledge_bytes=FIXTURE_KNOWLEDGE.read_bytes(), manifest_bytes=None)
+        assert knowledge.load_bundle().source == "fetch"
+        assert calls == [
+            "https://staging.example/api/knowledge/knowledge.json",
+            "https://staging.example/api/knowledge/manifest.json",
+        ]
+
+    def test_explicit_url_overrides_the_default(self, monkeypatch):
+        monkeypatch.setenv("COMFY_CLOUD_BASE_URL", "https://staging.example")
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/k/knowledge.json")
+        calls = _fake_http(monkeypatch, knowledge_bytes=FIXTURE_KNOWLEDGE.read_bytes(), manifest_bytes=None)
+        assert knowledge.load_bundle().source == "fetch"
+        assert calls == ["https://example.com/k/knowledge.json", "https://example.com/k/manifest.json"]
+
+    def test_env_file_skips_the_default_fetch(self, tmp_path, monkeypatch):
+        _env_bundle(tmp_path, monkeypatch)
+        calls = _fake_http(monkeypatch, knowledge_bytes=FIXTURE_KNOWLEDGE.read_bytes())
+        assert knowledge.load_bundle().source == "env"
+        assert calls == []
 
     def test_unsafe_url_is_a_fetch_failure(self, monkeypatch):
         calls = _fake_http(monkeypatch, knowledge_bytes=FIXTURE_KNOWLEDGE.read_bytes())
@@ -336,13 +362,32 @@ class TestAuthRouting:
         def fake_authed(url, target, **kw):
             seen["url"] = url
             seen["target_kind"] = target.kind
+            # A failed token refresh during this background fetch must not wipe the stored session.
+            seen["allow_clear"] = target.allow_clear
             return self._fake_resp(b'{"models": {}}')
 
         monkeypatch.setattr(knowledge, "authed_urlopen", fake_authed)
         monkeypatch.setattr(knowledge, "plain_urlopen", lambda *a, **kw: pytest.fail("plain opener used"))
         url = f"{get_base_url()}/api/knowledge/knowledge.json"
         assert knowledge._http_get(url) == b'{"models": {}}'
-        assert seen == {"url": url, "target_kind": "cloud"}
+        assert seen == {"url": url, "target_kind": "cloud", "allow_clear": False}
+
+    def test_signed_out_401_on_the_default_url_degrades_quietly(self, monkeypatch):
+        import comfy_cli.target
+
+        monkeypatch.setattr(knowledge, "_http_get", _REAL_HTTP_GET)
+        monkeypatch.setattr(comfy_cli.target, "resolve_target", lambda **kw: SimpleNamespace(kind="cloud", **kw))
+        seen: list[str] = []
+
+        def unauthorized(url, target, **kw):
+            seen.append(url)
+            raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, None)
+
+        monkeypatch.setattr(knowledge, "authed_urlopen", unauthorized)
+        monkeypatch.setattr(knowledge, "plain_urlopen", lambda *a, **kw: pytest.fail("plain opener used"))
+        assert knowledge.load_bundle() is None
+        assert knowledge.last_reason() == knowledge.REASON_SIGNED_OUT
+        assert seen == [knowledge.default_url()]
 
     def test_lookalike_host_does_not_get_credentials(self, monkeypatch):
         from comfy_cli.cloud import get_base_url
@@ -694,7 +739,7 @@ class TestCli:
         assert data["version"] == "0.1.0-fixture"
         assert data["schema_version"] == 1
         assert data["env_file"] == str(path)
-        assert data["url"] is None
+        assert data["url"] == knowledge.default_url()
         assert data["ttl_seconds"] == knowledge.DEFAULT_TTL_SECONDS
         assert data["counts"] == {"models": 5, "capabilities": 2, "aliases": 23, "deprecations": 2}
         _validate(data)
@@ -705,7 +750,8 @@ class TestCli:
         assert env["ok"] is True
         data = env["data"]
         assert data["loaded"] is False
-        assert data["reason"]
+        assert data["reason"] == knowledge.REASON_SIGNED_OUT
+        assert data["url"] == knowledge.default_url()
         assert data["cache_path"].endswith(os.path.join("knowledge", "knowledge.json"))
         _validate(data)
 
@@ -772,6 +818,16 @@ class TestCli:
         rc, env = _run(["resolve", "x"], capsys)
         assert rc == 1
         assert env["error"]["code"] == "knowledge_unavailable"
+        assert "comfy cloud login" in env["error"]["hint"]
+
+    def test_resolve_after_explicit_url_failure_points_at_the_url(self, monkeypatch, capsys):
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
+        rc, env = _run(["resolve", "x"], capsys)
+        assert rc == 1
+        assert env["error"]["code"] == "knowledge_unavailable"
+        assert knowledge.REASON_FETCH_FAILED in env["error"]["message"]
+        assert "COMFY_KNOWLEDGE_URL" in env["error"]["hint"]
+        assert "comfy cloud login" not in env["error"]["hint"]
 
     def test_pick_hit(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
