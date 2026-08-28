@@ -2,14 +2,53 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://comfy.org/schemas/build_pull.json",
   "title": "comfy build pull --json data payload",
+  "description": "The definition the fetched Build would write or wrote, and the diff against the definition on disk.",
   "type": "object",
-  "required": ["spec_file", "id", "syncedRevision", "written", "definition"],
+  "required": ["spec_file", "id", "syncedRevision", "dry_run", "written", "summary", "diff", "definition"],
   "additionalProperties": false,
+  "$defs": {
+    "collection": {
+      "type": "object",
+      "required": ["added", "removed", "changed", "entries"],
+      "additionalProperties": false,
+      "properties": {
+        "added": {"type": "integer"},
+        "removed": {"type": "integer"},
+        "changed": {"type": "integer"},
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["change", "name", "fields"],
+            "additionalProperties": false,
+            "properties": {
+              "change": {"enum": ["added", "removed", "changed"]},
+              "name": {"type": "string"},
+              "fields": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        }
+      }
+    },
+    "status": {"enum": ["changed", "unchanged"]}
+  },
   "properties": {
     "spec_file": {"type": "string"},
     "id": {"type": "string", "minLength": 1},
     "syncedRevision": {"type": "string", "minLength": 1},
+    "dry_run": {"type": "boolean"},
     "written": {"type": "boolean"},
+    "summary": {"type": "string"},
+    "diff": {
+      "type": "object",
+      "description": "What this pull changes in the local definition, measured against the copy on disk. Per-category counts plus the affected entries, so an agent never parses the table. Collections carry counts and entries; every other definition key carries a bare changed/unchanged status. A `models` or `customNodes` entry the fetched Build omits is reported as `removed`: the collections follow the server's list rather than being merged with the local one.",
+      "required": ["models", "customNodes"],
+      "additionalProperties": {"$ref": "#/$defs/status"},
+      "properties": {
+        "models": {"$ref": "#/$defs/collection"},
+        "customNodes": {"$ref": "#/$defs/collection"}
+      }
+    },
     "skipped_symlinks": {
       "description": "Symlinks excluded from a packaged custom node; present only when packaging skipped at least one. `location` points into this payload's definition, `localPath` names the node under custom_nodes/, and `member` is the symlink's path inside that node.",
       "type": "array",

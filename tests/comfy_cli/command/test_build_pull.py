@@ -467,3 +467,102 @@ def test_every_policy_field_is_server_authoritative_not_just_two_of_the_three(
         "modelPolicy",
         "partnerNodePolicy",
     ]
+
+
+def test_a_fetched_build_that_omits_the_collections_reports_every_entry_it_removes(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The round-trip check cannot see an absent `models` / `customNodes` — the
+    merge sets both unconditionally — so the collections are the one way a pull
+    still drops local entries. The diff is what makes that visible."""
+    # Given a spec holding one local model and one local node, and a Build whose
+    # definition omits both collections (what `definition.ToMap` emits for a
+    # from-workflow import: every field is `omitempty`).
+    write_spec(workspace, build_id="build-a")
+    client = PullBuilder()
+    serve(client, "build-a", {"baseComfyVersion": "v0.3.0"})
+    install_client(monkeypatch, client)
+
+    # When
+    result = invoke_pull(workspace, "-y")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = envelope(result)["data"]
+    assert data["diff"]["models"]["removed"] == 1
+    assert data["diff"]["customNodes"]["removed"] == 1
+    assert [entry["change"] for entry in data["diff"]["models"]["entries"]] == ["removed"]
+    assert data["diff"]["models"]["entries"][0]["name"] == "checkpoints/base.safetensors"
+    assert data["diff"]["customNodes"]["entries"][0]["name"] == "local-node"
+    assert reloaded(workspace)["definition"]["models"] == []
+    schema = json.loads((SCHEMAS_DIR / "build_pull.json").read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator(schema).validate(data)
+
+
+def test_the_confirmation_names_what_the_pull_would_change(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`-y` answers this question, so the question has to carry the consequence;
+    `build update` already puts its summary in the prompt for the same reason."""
+    write_spec(workspace, build_id="build-a")
+    client = PullBuilder()
+    serve(client, "build-a", {"baseComfyVersion": "v0.3.0"})
+    install_client(monkeypatch, client)
+    asked: list[str] = []
+
+    def accept(question: str) -> bool:
+        asked.append(question)
+        return True
+
+    monkeypatch.setattr("comfy_cli.interaction.detect_caller", lambda: Caller("user", False, None))
+    monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: False)
+    monkeypatch.setattr("comfy_cli.interaction._ask_confirm", accept)
+
+    result = invoke_pull(workspace, agentic=False)
+
+    assert result.exit_code == 0, result.stderr
+    (question,) = asked
+    assert "models +0 -1 ~0" in question
+    assert "customNodes +0 -1 ~0" in question
+
+
+def test_dry_run_reports_the_diff_without_writing_or_asking(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The preview an agent needs: with `-y` the payload only lands after the
+    write, so `--dry-run` is the only way to read the diff before deciding. It
+    answers no confirmation either — there is no write to confirm."""
+    path = write_spec(workspace, build_id="build-a")
+    before = path.read_bytes()
+    client = PullBuilder()
+    serve(client, "build-a", {"baseComfyVersion": "v0.3.0"})
+    install_client(monkeypatch, client)
+
+    result = invoke_pull(workspace, "--dry-run")
+
+    assert result.exit_code == 0, result.stderr
+    emitted = envelope(result)
+    assert emitted["changed"] is False
+    data = emitted["data"]
+    assert (data["dry_run"], data["written"]) == (True, False)
+    assert data["diff"]["models"]["removed"] == 1
+    assert path.read_bytes() == before
+    schema = json.loads((SCHEMAS_DIR / "build_pull.json").read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator(schema).validate(data)
+
+
+def test_dry_run_does_not_ask_a_human_to_confirm_a_write_it_will_not_make(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agentic case above can never reach a prompt — `--json` refuses one
+    outright — so only a TTY caller proves the `dry_run` branch really does sit
+    ahead of the confirmation rather than behind it."""
+    path = write_spec(workspace, build_id="build-a")
+    before = path.read_bytes()
+    client = PullBuilder()
+    serve(client, "build-a", {"baseComfyVersion": "v0.3.0"})
+    install_client(monkeypatch, client)
+    monkeypatch.setattr("comfy_cli.interaction.detect_caller", lambda: Caller("user", False, None))
+    monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: False)
+    monkeypatch.setattr("comfy_cli.interaction._ask_confirm", lambda question: pytest.fail("--dry-run prompted"))
+
+    result = invoke_pull(workspace, "--dry-run", agentic=False)
+
+    assert result.exit_code == 0, result.stderr
+    assert path.read_bytes() == before

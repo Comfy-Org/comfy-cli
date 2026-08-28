@@ -32,6 +32,13 @@ history.
   the closest pack the registry named for each one, every model the graph loads
   (a workflow import carries none of them), the classes served by a partner API,
   and whether a ComfyUI version still has to be pinned.
+- `comfy build pull` names what it would change before changing it: the same
+  definition diff `comfy build update` prints, echoed in the confirmation and
+  carried in the `--json` payload as `summary` and `diff`. A fetched Build that
+  omits `models` or `customNodes` drops the local entries, and the diff is where
+  that is now visible. `comfy build pull --dry-run` prints the diff and writes
+  nothing — with `--yes` the payload only arrives after the write, so this is
+  how a non-interactive caller reads the diff before deciding.
 - `CONTRIBUTING.md` (renamed from `DEV_README.md`) and this changelog.
 - `comfy deploy` — run a Build release as a serverless endpoint: `up`, `status`,
   `ls`, `show`, `logs`, `events`, `scale`, `stop`, `start`, `delete`, `run`, and

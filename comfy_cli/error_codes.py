@@ -1146,7 +1146,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "build_pull_needs_confirm",
         "`comfy build pull` was run without `--yes` in a non-interactive context. Pull discards local "
         "definition edits in favor of the fetched Build, so the rewrite is refused without explicit consent.",
-        "pass `--yes` to overwrite the local spec with the fetched Build",
+        "pass `--yes` to overwrite the local spec with the fetched Build, or `--dry-run` to read the diff "
+        "without writing anything",
     ),
     ErrorCode(
         "build_pull_unsynced_definition",

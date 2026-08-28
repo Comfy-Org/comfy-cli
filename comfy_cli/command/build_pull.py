@@ -246,7 +246,17 @@ def merge_pull_definition(local: JsonObject, server: JsonObject) -> JsonObject:
     return merged
 
 
-def merge_pulled_spec(local_spec: JsonObject, remote: JsonObject, build_id: str) -> JsonObject:
+@dataclass(frozen=True, slots=True)
+class PulledSpec:
+    """The spec `pull` writes. ``definition`` is the very object under
+    ``spec["definition"]``, carried alongside so a caller that has to diff or
+    project it does not have to re-narrow it out of a ``JsonValue``."""
+
+    spec: JsonObject
+    definition: JsonObject
+
+
+def merge_pulled_spec(local_spec: JsonObject, remote: JsonObject, build_id: str) -> PulledSpec:
     """Return the atomically writable local spec for one fetched Build."""
     local_definition = local_spec.get("definition")
     server_definition = remote.get("definition")
@@ -261,6 +271,7 @@ def merge_pulled_spec(local_spec: JsonObject, remote: JsonObject, build_id: str)
     revision = remote.get("updatedAt")
     if not isinstance(name, str) or not isinstance(description, str) or not isinstance(revision, str) or not revision:
         raise BuildSpecInvalidError("the fetched Build needs string name, description and updatedAt fields")
+    definition = merge_pull_definition(local_definition, server_definition)
     merged = deepcopy(local_spec)
     merged.update(
         {
@@ -268,7 +279,7 @@ def merge_pulled_spec(local_spec: JsonObject, remote: JsonObject, build_id: str)
             "name": name,
             "description": description,
             "syncedRevision": revision,
-            "definition": merge_pull_definition(local_definition, server_definition),
+            "definition": definition,
         }
     )
-    return merged
+    return PulledSpec(merged, definition)
