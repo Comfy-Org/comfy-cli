@@ -53,7 +53,8 @@
           "template": { "type": ["string", "null"] },
           "caveat": { "type": ["string", "null"] },
           "status": { "type": ["string", "null"], "description": "Copied from the pick's model row when that row exists." },
-          "superseded_by": { "type": ["string", "null"], "description": "Copied from the pick's model row when that row exists." }
+          "superseded_by": { "type": ["string", "null"], "description": "Copied from the pick's model row when that row exists." },
+          "fits": { "type": "object", "description": "The model row's fits block (vram_gb per variant, a credit rate, max_refs, source), present only when the row carries one." }
         }
       }
     }

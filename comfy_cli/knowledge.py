@@ -13,6 +13,7 @@ disturbing the explicit ``comfy knowledge`` verbs.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -262,8 +263,18 @@ def pick(bundle: Bundle, capability: str) -> dict | None:
     # The key resolved through spelling and wording is the answer; a row that
     # omits its own ``id`` must not send the caller back to the raw phrase.
     out["id"] = cap_id
-    out["picks"] = sorted(picks, key=_rank_key)
+    out["picks"] = [_with_fits(bundle, p) for p in sorted(picks, key=_rank_key)]
     return out
+
+
+def _with_fits(bundle: Bundle, p: dict) -> dict:
+    """The pick plus its model row's ``fits`` block, copied so the bundle stays untouched."""
+    model = p.get("model")
+    row = bundle.models.get(model) if isinstance(model, str) else None
+    fits = row.get("fits") if row is not None else None
+    if not isinstance(fits, dict):
+        return p
+    return {**p, "fits": copy.deepcopy(fits)}
 
 
 def pick_rank(p: dict) -> int | float | None:
