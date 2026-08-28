@@ -65,9 +65,10 @@ def _add(wf: dict, graph: Graph, class_type: str) -> tuple[dict, int]:
 
 
 def _line(source: str, node_id: Any) -> str:
-    """The printed line whose trailing comment names ``node_id``."""
-    marker = f"  # {node_id}"
-    return next(ln for ln in source.splitlines() if marker in ln)
+    """The printed line whose trailing comment names ``node_id`` — the whole
+    id, so ``# 4`` never matches a minted id that merely starts with 4."""
+    pattern = re.compile(rf"  # {re.escape(str(node_id))}(?!\d)")
+    return next(ln for ln in source.splitlines() if pattern.search(ln))
 
 
 def _kwargs(line: str) -> str:
@@ -518,3 +519,18 @@ def test_existing_workflow_is_not_mutated_by_printing(promoted_graph, autogrow_g
     before2 = copy.deepcopy(wf2)
     render_py(wf2, autogrow_graph)
     assert wf2 == before2
+
+
+def test_frontend_injected_slots_are_not_printed_as_control_after_generate(autogrow_graph):
+    """An older frontend serialized LoadImage as ``["a.png", "image"]`` — the
+    second value is the injected ``upload`` button slot (``serialize:false``
+    now). It owns no schema port, but it is NOT ``control_after_generate``,
+    and it is not an editable value either: it must not print at all."""
+    wf, nid = _add(_empty(), autogrow_graph, "LoadImage")
+    node = next(n for n in wf["nodes"] if n["id"] == nid)
+    node["widgets_values"] = ["a.png", "image"]
+    source = render_py(wf, autogrow_graph).source
+    line = _line(source, nid)
+    assert 'image="a.png"' in line
+    assert "control_after_generate" not in line
+    assert "upload" not in line
