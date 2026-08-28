@@ -204,7 +204,47 @@ def test_emitted_workflow_is_api_format_node_ids_are_strings():
         assert "inputs" in node
 
 
+def test_is_supported_answers_for_alias_and_canonical_id():
+    """The flag `generate list` exposes must agree with what `build_workflow`
+    accepts — alias or the canonical endpoint id the alias resolves to."""
+    assert emit.is_supported("flux-2") is True
+    assert emit.is_supported(spec.resolve_alias("flux-2")) is True
+    assert emit.is_supported("flux-pro") is False
+    assert emit.is_supported("bfl/flux-pro-1.1/generate") is False
+    assert emit.is_supported("no-such-model") is False
+
+
+def test_unsupported_model_raises_a_typed_error_carrying_the_supported_list():
+    with pytest.raises(emit.UnsupportedModelError) as ei:
+        emit.build_workflow("flux-pro", {"prompt": "x"})
+    assert ei.value.model == "flux-pro"
+    assert ei.value.supported == emit.supported_models()
+    assert isinstance(ei.value, emit.EmitError)  # callers catching the base still work
+
+
 # ─── CLI integration ──────────────────────────────────────────────────────
+
+
+def test_cli_emit_unsupported_model_has_its_own_error_code(runner, tmp_path, monkeypatch):
+    """The prod payload: `generate_workflow flux-pro` → `emit_workflow_failed`
+    "--emit-workflow does not support model 'flux-pro'. Supported: …". The
+    umbrella code also covers bad params and unwritable paths, so the agent
+    could not tell "pick another model" from "fix your arguments". Now it is
+    its own code, with the supported aliases as data, not prose."""
+    monkeypatch.delenv("COMFY_API_KEY", raising=False)
+    monkeypatch.setenv("COMFY_OUTPUT", "json")
+    out = tmp_path / "wf.json"
+    r = runner.invoke(cli_app, ["generate", "flux-pro", "--prompt", "x", "--emit-workflow", str(out)])
+    assert r.exit_code == 1
+    lines = [ln for ln in r.stdout.splitlines() if ln.strip().startswith("{")]
+    env = json.loads(lines[-1])
+    assert env["ok"] is False
+    err = env["error"]
+    assert err["code"] == "emit_workflow_unsupported_model"
+    assert err["details"]["model"] == "flux-pro"
+    assert err["details"]["supported"] == emit.supported_models()
+    assert "generate list" in err["hint"]
+    assert not out.exists()
 
 
 def test_cli_emit_writes_file_no_api_key(runner, tmp_path, monkeypatch):

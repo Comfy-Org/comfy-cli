@@ -572,6 +572,21 @@ def _generate(model: str, extra_args: list[str]) -> None:
             renderer = get_renderer()
             try:
                 workflow = emit.write_workflow(name, values, Path(emit_path).expanduser(), output_prefix=prefix)
+            except emit.UnsupportedModelError as e:
+                # Its own code: the remedy is "pick another model", which is
+                # not what the umbrella `emit_workflow_failed` hint says, and
+                # the supported set travels as data rather than prose.
+                _track_error("emit", e)
+                renderer.error(
+                    code="emit_workflow_unsupported_model",
+                    message=str(e),
+                    hint=(
+                        "choose a model whose `emit_supported` is true in `comfy --json generate list` "
+                        "(see `details.supported`), or call the model through the proxy without --emit-workflow"
+                    ),
+                    details={"model": e.model, "supported": e.supported},
+                )
+                raise typer.Exit(code=1) from e
             except (emit.EmitError, OSError) as e:
                 _track_error("emit", e)
                 hint = (
@@ -821,6 +836,10 @@ def _model_record(e: spec.Endpoint) -> dict[str, object]:
         "category": e.category,
         "mode": "async" if e.polling else "sync",
         "summary": e.summary,
+        # Whether `--emit-workflow` has a partner-node mapping for this model.
+        # Most of the catalog is proxy-only; an agent that could not see this
+        # asked for a workflow it could never get (`emit_workflow_failed`).
+        "emit_supported": emit.is_supported(e.id),
     }
 
 

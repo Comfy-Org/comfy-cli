@@ -922,9 +922,18 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check COMFY_API_BASE_URL points at the Comfy API; the existing cached catalog is still usable",
     ),
     ErrorCode(
+        "emit_workflow_unsupported_model",
+        "`generate --emit-workflow` has no ComfyUI partner-node mapping for the requested model "
+        "(`details.model`); most of the proxy catalog is proxy-only. `details.supported` lists the "
+        "aliases that can be emitted — the same set `generate list` flags with `emit_supported: true`.",
+        "pick a model with `emit_supported: true` in `comfy --json generate list`, or drop "
+        "--emit-workflow and call the model through the proxy",
+    ),
+    ErrorCode(
         "emit_workflow_failed",
-        "`generate --emit-workflow` could not build the partner-node workflow.",
-        "check the model name and that all required inputs are provided",
+        "`generate --emit-workflow` could not build the partner-node workflow for a supported model "
+        "(missing/invalid inputs, or the destination path could not be written).",
+        "check that all required inputs are provided and the destination path is writable",
     ),
     # --- custom node registry ------------------------------------------------
     ErrorCode(
