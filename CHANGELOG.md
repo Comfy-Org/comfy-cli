@@ -30,6 +30,13 @@ history.
   (`createNodeMap(LoadImage): widgets_values has 2 entries but widget_order
   names only 1`) and `set-widget`/conversion read the values after such a
   slot one position off.
+- `comfy generate <model>`, `comfy generate resume` and sync-mode creates now
+  emit the `envelope/1` contract in `--output json` / `ndjson` modes instead
+  of a bare partner blob: the partner payload is wrapped as `data.result`
+  (verbatim) with `data.saved` listing `--download` artifacts, and the
+  payload schema is registered as `comfy generate` → `generate_result.json`
+  so `comfy discover` advertises it. Pretty mode with a tail `--json` keeps
+  the legacy raw blob.
 
 ### Added
 

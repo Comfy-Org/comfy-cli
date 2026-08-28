@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/generate_result.json",
+  "title": "comfy generate",
+  "description": "Terminal result of `comfy generate <model>`, `comfy generate resume <id>`, and sync-mode creates, in JSON/NDJSON modes: the partner's final response body wrapped as `result` (verbatim, so provider-specific fields survive), plus `saved` local paths when --download produced files. Failures do not use this schema — they arrive as an ok=false envelope with a registered error.code.",
+  "type": "object",
+  "required": ["result"],
+  "properties": {
+    "result": {
+      "type": "object",
+      "description": "The partner API's final response payload, unmodified."
+    },
+    "saved": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Local paths written by --download, in URL order. Absent when --download was not passed or produced nothing."
+    }
+  }
+}

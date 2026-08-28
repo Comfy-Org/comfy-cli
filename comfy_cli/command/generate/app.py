@@ -344,10 +344,24 @@ def _emit_result(result: poll.PollResult, *, request_id: str, download: str | No
         # Honor --download in JSON mode too. Previously this returned before
         # saving, so `--json --download` printed the URL but wrote no file,
         # forcing callers to curl the URL by hand. Save first, then surface the
-        # local path alongside the raw response.
+        # local path alongside the response.
+        saved: list[str] = []
         if download and result.status == "succeeded" and result.image_urls:
-            saved = output.save_urls(result.image_urls, download, request_id)
-            output.print_json({"result": result.raw, "saved": [str(p) for p in saved]})
+            saved = [str(p) for p in output.save_urls(result.image_urls, download, request_id)]
+        renderer = get_renderer()
+        if renderer.is_json():
+            # JSON/NDJSON modes get the envelope/1 contract every other
+            # machine-readable command speaks: data.result wraps the partner
+            # payload, data.saved lists --download artifacts. Registered as
+            # COMMAND_SCHEMAS["comfy generate"] -> generate_result.json.
+            data: dict[str, Any] = {"result": result.raw}
+            if saved:
+                data["saved"] = saved
+            renderer.emit(data, ok=True, command="generate")
+            return
+        # Pretty mode with an explicit tail --json keeps the legacy raw blob.
+        if saved:
+            output.print_json({"result": result.raw, "saved": saved})
         else:
             output.print_json(result.raw)
         return
