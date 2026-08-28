@@ -722,7 +722,13 @@ def _build_args(
     else:
         entries = _expand_widget_entries(m, positional)
         for idx, entry in enumerate(entries):
-            arg_name = "control_after_generate" if entry.port is None else entry.name
+            if entry.frontend_injected:
+                # ``upload`` / ``audioUI`` / PREVIEW_3D ``image``: a frontend
+                # button or DOM slot with no schema port and no editable
+                # value (``slots`` omits it, every write surface refuses it).
+                # It owns a positional slot, so it is walked — never printed.
+                continue
+            arg_name = entry.name
             if arg_name in live_link_refs:
                 continue  # already printed in the link pass above
             if arg_name in widget_overrides:
