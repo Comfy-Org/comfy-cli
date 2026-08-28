@@ -341,10 +341,10 @@ def _drop_legacy_cache() -> None:
     Harmless if left behind — nothing reads it any more — but it's dead bytes in
     the user's cache dir, so clean it up the first time we write the new one.
     """
-    cache_dir = _cache_dir()
+    directory = _cache_dir()
     for filename in _FILES:
         try:
-            (cache_dir / filename).unlink()
+            (directory / filename).unlink()
         except OSError:
             pass
 
@@ -418,11 +418,13 @@ def _read_parsed(path: Path) -> ParsedAnnotations | None:
         node_pack = payload["node_pack"]
         node_labels = payload["node_labels"]
         disable_labels = payload["disable_labels"]
+        if not (isinstance(node_pack, dict) and isinstance(node_labels, dict) and isinstance(disable_labels, list)):
+            return None
+        if not all(isinstance(labels, list) for labels in node_labels.values()):
+            return None
+        return node_pack, node_labels, set(disable_labels)
     except (OSError, ValueError, KeyError, TypeError):
         return None
-    if not (isinstance(node_pack, dict) and isinstance(node_labels, dict) and isinstance(disable_labels, list)):
-        return None
-    return node_pack, node_labels, set(disable_labels)
 
 
 def _write_parsed(path: Path, parsed: ParsedAnnotations) -> None:
@@ -432,15 +434,17 @@ def _write_parsed(path: Path, parsed: ParsedAnnotations) -> None:
     generation and disposes of a corrupt file in the same sweep. Best-effort.
     """
     node_pack, node_labels, disable_labels = parsed
-    payload = {"node_pack": node_pack, "node_labels": node_labels, "disable_labels": sorted(disable_labels)}
     try:
+        blob = json.dumps(
+            {"node_pack": node_pack, "node_labels": node_labels, "disable_labels": sorted(disable_labels)}
+        )
         for sibling in path.parent.glob(_PARSED_GLOB):
             try:
                 sibling.unlink()
             except OSError:
                 pass
-        atomic_write_text(path, json.dumps(payload))
-    except OSError:
+        atomic_write_text(path, blob)
+    except (OSError, TypeError, ValueError):
         pass
 
 

@@ -537,6 +537,8 @@ def test_parsed_annotations_corrupt_file_is_rebuilt(cache_dir):
         b'{"node_pack": [], "node_labels": {}, "disable_labels": []}',
         b'{"node_pack": {}, "node_labels": {}}',
         b'{"node_pack": {}, "node_labels": {}, "disable_labels": {}}',
+        b'{"node_pack": {}, "node_labels": {}, "disable_labels": [["x"]]}',
+        b'{"node_pack": {}, "node_labels": {"NodeA": 5}, "disable_labels": []}',
         b"[]",
         b"null",
     ],
@@ -578,3 +580,13 @@ def test_parsed_annotations_survives_unwritable_dir(cache_dir, monkeypatch):
 
     monkeypatch.setattr(src, "atomic_write_text", refuse)
     assert src.parsed_annotations(VALID_SUP, VALID_DIS)[0] == {"NodeA": "demo-pack"}
+
+
+def test_parsed_annotations_unserialisable_parse_result_is_returned_not_cached(cache_dir):
+    """A body that passes the validators but yields a non-JSON or unsortable
+    parse result must still annotate; only the disk write is skipped."""
+    mixed_dis = b"disable_nodes:\n  or:\n    - NetworkAccess: true\n      1: true\n"
+    assert src.parsed_annotations(VALID_SUP, mixed_dis)[2] == {"NetworkAccess", 1}
+    date_sup = b"node_packs:\n  - name: 2020-01-02\n    node_labels: {NodeA: [NetworkAccess]}\n"
+    assert src.parsed_annotations(date_sup, VALID_DIS)[1] == {"NodeA": ["NetworkAccess"]}
+    assert _parsed_files(cache_dir) == []
