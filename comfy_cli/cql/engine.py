@@ -1507,8 +1507,8 @@ class Graph:
             # Required-presence checks apply only to output-reachable nodes: the
             # server prunes unreachable nodes without validating them, so
             # enforcing required inputs on a disconnected node over-rejects a
-            # prompt the server would run (BE-3406). dyn_errors carries the
-            # same class of required-presence-type hard errors (missing/unknown
+            # prompt the server would run. dyn_errors carries the same class
+            # of required-presence-type hard errors (missing/unknown
             # dynamic-combo selection), so it's gated alongside them.
             if node_id in reachable:
                 errors.extend(_check_autogrow_required(node_id, autogrow_ports, autogrow_seen, node_data))

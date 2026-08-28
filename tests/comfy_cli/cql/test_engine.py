@@ -2884,13 +2884,13 @@ class TestComboNormalizationAndSuggestions:
 
 
 # ===========================================================================
-# TestDynamicComboInputs — BE-3358: selection-key enum + dotted sub-inputs
+# TestDynamicComboInputs — selection-key enum + dotted sub-inputs
 # ===========================================================================
 
 
 @pytest.fixture
 def graph_dynamic() -> Graph:
-    """Graph built from the synthetic BE-3349-shaped dynamic-combo fixture:
+    """Graph built from a synthetic dynamic-combo fixture:
     a COMFY_DYNAMICCOMBO_V3 `model` input with two options carrying different
     required sub-inputs (INT with min/max, an enum), one of which nests a
     second dynamic combo (`model.mode` → `model.mode.budget`)."""
@@ -2924,7 +2924,7 @@ class TestDynamicComboInputs:
         assert result["warnings"] == []
 
     def test_missing_required_sub_key_errors(self, graph_dynamic: Graph):
-        """BE-3349 repro 1: {"model": "Opus 4.6"} with no sub-keys."""
+        """Repro 1: {"model": "Opus 4.6"} with no sub-keys."""
         wf = self._node({"prompt": "hi", "model": "Opus 4.6"})
         result = graph_dynamic.validate_workflow(wf)
         assert result["valid"] is False
@@ -2932,7 +2932,7 @@ class TestDynamicComboInputs:
         assert {e["field"] for e in missing} == {"model.max_tokens", "model.mode"}
 
     def test_invalid_selection_key_errors(self, graph_dynamic: Graph):
-        """BE-3349 repro 2: unknown selection is a hard unknown_enum_value
+        """Repro 2: unknown selection is a hard unknown_enum_value
         carrying the full valid_options list."""
         wf = self._node({"prompt": "hi", "model": "NotARealModel", "model.bogus_key": 5})
         result = graph_dynamic.validate_workflow(wf)
@@ -3078,7 +3078,7 @@ class TestDynamicComboInputs:
 
     def test_link_valued_selection_is_skipped(self, graph_dynamic: Graph):
         """A 2-list selection value is a link — treated as a no-op (no crash,
-        no selection error), matching the pre-BE-3358 behavior."""
+        no selection error), matching plain-link handling elsewhere."""
         wf = {
             "0": {
                 "class_type": "ClaudeNode",
