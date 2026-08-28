@@ -631,10 +631,11 @@ custom_nodes:
 
 Discovery commands can attach a `knowledge` block to their `--json` output: which
 model a name refers to, whether it is deprecated, ranked picks per capability,
-and known pitfalls. It is **off unless you point the CLI at a bundle**, so a
-default install never emits the block.
+and known pitfalls. A signed-in install (`comfy cloud login`) fetches the bundle
+from the cloud knowledge channel on its own. Signed out, the fetch fails quietly
+and no block is emitted.
 
-Turn it on with either of:
+Point the CLI at a different bundle with either of:
 
 ```
 export COMFY_KNOWLEDGE_URL=https://.../knowledge.json   # fetched and cached
@@ -655,8 +656,8 @@ Turn it off again:
 export COMFY_KNOWLEDGE_DISABLE=1
 ```
 
-Clearing `COMFY_KNOWLEDGE_URL` is *not* an off switch. Once a bundle is cached it
-keeps being served, stale or not. `COMFY_KNOWLEDGE_DISABLE` suppresses envelope
+Signing out is *not* an off switch. Once a bundle is cached it keeps being
+served, stale or not. `COMFY_KNOWLEDGE_DISABLE` suppresses envelope
 enrichment outright; the `comfy knowledge` verbs keep working under it, since
 those are you asking for the bundle directly.
 
@@ -683,9 +684,9 @@ comfy tracking disable
 When tracking is on, we use Mixpanel to understand usage patterns and know where
 to prioritize our efforts.
 
-**One event carries text you typed.** If a curated knowledge bundle is configured
-— it is not by default, and needs `COMFY_KNOWLEDGE_URL` or `COMFY_KNOWLEDGE_FILE`
-— then `comfy nodes search`, `comfy templates ls`, `comfy generate schema`,
+**One event carries text you typed.** If a curated knowledge bundle is loaded
+(a signed-in install fetches one on its own), then `comfy nodes search`,
+`comfy templates ls`, `comfy generate schema`,
 `comfy generate list` and `comfy models search` send the search terms you typed
 and which curated entries they matched. This tells us what people look for and fail
 to find. It needs both the bundle and your tracking consent, so with either one

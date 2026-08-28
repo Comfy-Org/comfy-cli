@@ -3,7 +3,8 @@
 The bundle (``knowledge.json`` + optional ``manifest.json``) is produced by
 the curated knowledge bundle repo. It reaches this process by one of three routes,
 tried in order: an explicit ``COMFY_KNOWLEDGE_FILE``, the per-user cache, or a
-fetch from ``COMFY_KNOWLEDGE_URL``. A missing or broken bundle is a normal
+fetch from ``COMFY_KNOWLEDGE_URL``, which defaults to the knowledge channel
+under the cloud base URL. A missing or broken bundle is a normal
 state: every entry point here returns ``None`` rather than raising, and nothing
 is written to stdout or stderr. :func:`attach` is how discovery commands add a
 capped ``knowledge`` block to their payload; it is fail-open for the same reason.
@@ -39,6 +40,7 @@ ENV_FILE = "COMFY_KNOWLEDGE_FILE"
 ENV_URL = "COMFY_KNOWLEDGE_URL"
 ENV_TTL = "COMFY_KNOWLEDGE_TTL"
 ENV_DISABLE = "COMFY_KNOWLEDGE_DISABLE"
+DEFAULT_URL_PATH = "/api/knowledge/knowledge.json"
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
 FETCH_TIMEOUT_SECONDS = 10.0
 MAX_BUNDLE_BYTES = 16 * 1024 * 1024
@@ -71,7 +73,10 @@ _CONTEXT_END = re.compile(
 MIN_SINGLE_TOKEN_CHARS = 4
 
 REASON_ENV_FILE = "COMFY_KNOWLEDGE_FILE is set but could not be loaded"
-REASON_NO_URL = "no cache and COMFY_KNOWLEDGE_URL is not set"
+REASON_SIGNED_OUT = (
+    "fetch from the cloud knowledge channel failed and no cached bundle exists; "
+    "the usual cause is being signed out (run `comfy cloud login`)"
+)
 REASON_FETCH_FAILED = "fetch failed and no cached bundle exists"
 
 
@@ -131,11 +136,27 @@ def ttl_seconds() -> float:
     return max(ttl, 0.0) if math.isfinite(ttl) else DEFAULT_TTL_SECONDS
 
 
+def default_url() -> str:
+    """``knowledge.json`` under the cloud base URL, derived on every call.
+
+    Never stored: :func:`_http_get` attaches credentials only under
+    ``get_base_url()``, which resolves per invocation, so a remembered
+    production URL would silently fetch unauthenticated for anyone pointed at
+    another environment.
+    """
+    return get_base_url().rstrip("/") + DEFAULT_URL_PATH
+
+
+def bundle_url() -> str:
+    """``COMFY_KNOWLEDGE_URL`` when set, else :func:`default_url`."""
+    return os.environ.get(ENV_URL, "").strip() or default_url()
+
+
 def load_bundle(*, force_fetch: bool = False, cache_only: bool = False) -> Bundle | None:
     """Return the indexed bundle, or ``None`` when no usable bundle exists.
 
     Memoized per process; ``force_fetch=True`` re-runs the load and skips the
-    cache TTL gate so a fetch happens whenever ``COMFY_KNOWLEDGE_URL`` is set.
+    cache TTL gate so a fetch happens unless ``COMFY_KNOWLEDGE_FILE`` is set.
     ``cache_only=True`` never touches the network: env file, then any cache
     (fresh or stale), else ``None``. The memo is shared, except that a
     cache-only miss is not memoized so a later full load can still fetch.
@@ -309,9 +330,9 @@ def _load(*, force_fetch: bool, cache_only: bool = False) -> tuple[Bundle | None
         if bundle is not None:
             return bundle, None
 
-    url = os.environ.get(ENV_URL, "").strip()
-    if url and not cache_only:
-        bundle = _fetch(url, knowledge_path, manifest_path)
+    explicit_url = os.environ.get(ENV_URL, "").strip()
+    if not cache_only:
+        bundle = _fetch(explicit_url or default_url(), knowledge_path, manifest_path)
         if bundle is not None:
             return bundle, None
 
@@ -319,7 +340,7 @@ def _load(*, force_fetch: bool, cache_only: bool = False) -> tuple[Bundle | None
     bundle = _load_file(knowledge_path, manifest_path, source=source, stale=not fresh)
     if bundle is not None:
         return bundle, None
-    return None, (REASON_FETCH_FAILED if url else REASON_NO_URL)
+    return None, (REASON_FETCH_FAILED if explicit_url else REASON_SIGNED_OUT)
 
 
 def _cache_is_fresh(path: Path) -> bool:
@@ -903,9 +924,9 @@ def attach(
     exactly as it was.
 
     ``COMFY_KNOWLEDGE_DISABLE`` suppresses the block entirely. A cached bundle
-    keeps being read once it exists, stale or not, so clearing
-    ``COMFY_KNOWLEDGE_URL`` is not an off switch and this is. Following
-    ``DO_NOT_TRACK``, any value but empty or ``"0"`` disables.
+    keeps being read once it exists, stale or not, and the default URL means a
+    signed-in install fetches one without being asked, so this is the only off
+    switch. Following ``DO_NOT_TRACK``, any value but empty or ``"0"`` disables.
     """
     try:
         disable = os.environ.get(ENV_DISABLE, "")

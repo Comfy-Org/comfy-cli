@@ -24,11 +24,10 @@ app = typer.Typer(no_args_is_help=True, help="Inspect the curated model-knowledg
 
 
 def _env_context() -> dict[str, Any]:
-    url = os.environ.get(knowledge.ENV_URL, "").strip()
     return {
         "env_file": os.environ.get(knowledge.ENV_FILE, "").strip() or None,
         # Userinfo, query and fragment can carry a token; the path still shows which bundle is configured.
-        "url": tracking._scrub_value(url) if url else None,
+        "url": tracking._scrub_value(knowledge.bundle_url()),
         "ttl_seconds": knowledge.ttl_seconds(),
         "cache_path": str(knowledge.cache_paths()[0]),
     }
@@ -48,7 +47,7 @@ def _require_bundle(renderer) -> knowledge.Bundle:
         renderer.error(
             code="knowledge_unavailable",
             message="no knowledge bundle is loaded",
-            hint="set COMFY_KNOWLEDGE_FILE to a knowledge.json, or COMFY_KNOWLEDGE_URL to fetch one; see `comfy knowledge status`",
+            hint="sign in with `comfy cloud login` so the bundle can be fetched, or set COMFY_KNOWLEDGE_FILE to a knowledge.json; see `comfy knowledge status`",
         )
         raise typer.Exit(code=1)
     return bundle
@@ -59,7 +58,7 @@ def _require_bundle(renderer) -> knowledge.Bundle:
 def status_cmd(
     refresh: Annotated[
         bool,
-        typer.Option("--refresh", help="Re-fetch from COMFY_KNOWLEDGE_URL, ignoring the cache TTL."),
+        typer.Option("--refresh", help="Re-fetch the bundle, ignoring the cache TTL."),
     ] = False,
 ):
     renderer = get_renderer()
