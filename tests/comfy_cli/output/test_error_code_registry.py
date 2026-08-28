@@ -49,8 +49,10 @@ def _iter_python_files(root: Path):
 #: that helper deliberately hardcodes none, so each command names its own code
 #: at its own call site (the register-with-first-call-site rule). A command
 #: whose only refusal goes through those helpers would otherwise look like it
-#: registered an orphan.
-_CODE_KWARGS = frozenset({"code", "error_code"})
+#: registered an orphan. ``not_found_code=`` is the same channel in
+#: ``comfy_cli.command._cloud_errors.handle_cloud_http_error``: each caller
+#: names the 404 code for its own resource (``asset_not_found``, …).
+_CODE_KWARGS = frozenset({"code", "error_code", "not_found_code"})
 
 
 def _extract_codes_from_call(call: ast.Call) -> list[str]:
