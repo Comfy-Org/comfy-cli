@@ -2688,7 +2688,7 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
 
     from comfy_cli.cql import promoted as _promoted
 
-    def walk(nodes: list, prefix: str, depth: int, exclude: set[tuple[str, str]]) -> None:
+    def walk(nodes: list, prefix: str, depth: int, exclude: set[tuple[str, str]], scope: dict) -> None:
         if depth > _MAX_SUBGRAPH_DEPTH:
             return
         for node in nodes:
@@ -2713,7 +2713,7 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
             # (recursing for nested instances). A legacy template whose
             # curated surface comes entirely from ``proxyWidgets`` (nothing
             # linked) keeps its hand-picked view without recursion.
-            declared, fully_curated = _declared_subgraph_slots(node, sg, node_id, graph, workflow)
+            declared, fully_curated = _declared_subgraph_slots(node, sg, node_id, graph, workflow, scope)
             for slot in declared:
                 if (node_id, slot["name"]) not in exclude:
                     add(slot)
@@ -2721,9 +2721,9 @@ def _extract_frontend_slots(workflow: dict, graph: Graph) -> list[dict]:
             if fully_curated and not promoted:
                 continue
             hidden = {(str(p.source_node), str(p.source_widget or p.source_input)) for p in promoted}
-            walk(sg.get("nodes") or [], node_path, depth + 1, hidden)
+            walk(sg.get("nodes") or [], node_path, depth + 1, hidden, sg)
 
-    walk(workflow.get("nodes") or [], "", 0, set())
+    walk(workflow.get("nodes") or [], "", 0, set(), workflow)
     return slots
 
 
@@ -2736,7 +2736,12 @@ _UNRESOLVED = object()
 
 
 def _declared_subgraph_slots(
-    instance: dict, sg: dict, instance_id: str, graph: Graph, workflow: dict | None = None
+    instance: dict,
+    sg: dict,
+    instance_id: str,
+    graph: Graph,
+    workflow: dict | None = None,
+    scope: dict | None = None,
 ) -> tuple[list[dict], bool]:
     """Build slots for a subgraph instance's promoted inputs.
 
@@ -2774,7 +2779,10 @@ def _declared_subgraph_slots(
                 current = _promoted.source_value(workflow, sg, pi, graph, defs)
             if current is _promoted.UNSET:
                 current = _UNRESOLVED
-            linked_from = _promoted.external_link(instance, inp_name)
+            # Only a LIVE link counts (the workflow's for a top-level instance,
+            # the containing definition's for a nested one); a dangling id is
+            # what the frontend drops on load, so the host value runs.
+            linked_from = _promoted.live_external_link(scope if scope is not None else workflow, instance, inp_name)
         elif pi is not None and pi.is_widget:
             current = _UNRESOLVED
         else:
