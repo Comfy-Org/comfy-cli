@@ -160,13 +160,46 @@ def test_primitive_fanout_write_lands_on_the_host_and_previews_stay(graph):
     assert [e[1] for e in inst["properties"]["proxyWidgets"]] == ["$$canvas-image-preview"] * 3
 
 
-def test_legacy_source_widget_name_addresses_a_primitive_repair_too(graph):
-    """``143.value`` — the legacy tuple's own widget name — is accepted as an
-    alias for the input the repair mints (``resolution`` here is the primitive
-    the FIRST ``value`` entry names), reported as a redirect."""
+def test_ambiguous_legacy_alias_is_refused_with_the_minted_names(graph):
+    """``143.value`` — the legacy tuple's own widget name — is an alias for
+    the input the repair mints. Two primitives share it here, so guessing it
+    is refused with both real addresses instead of silently picking one;
+    with one entry left the alias redirects."""
     wf = _load(RECOMPOSER)
+    before = _stripped(wf)
+    with pytest.raises(ValueError) as e:
+        workflow_ops.set_widget(wf, graph, 143, "value", "1K")
+    assert "143.resolution" in str(e.value) and "143.aspect_ratio" in str(e.value)
+    assert _stripped(wf) == before
+    inst = _node(wf, 143)
+    inst["properties"]["proxyWidgets"] = [x for x in inst["properties"]["proxyWidgets"] if x != ["142", "value"]]
     wf, op = workflow_ops.set_widget(wf, graph, 143, "value", "1K")
     assert op["widget"] == "resolution" and op["redirected_from"] == "143.value"
+
+
+def test_interior_address_owned_by_a_legacy_entry_is_redirected_even_when_link_fed(graph):
+    """``143/135.choice`` fed by interior node 2: with no legacy entry naming
+    it the widget write is refused (the link supplies the value). With the
+    legacy entry, the frontend's own migration replaces that link with the
+    boundary link on load, so the host value is what will run — the write is
+    redirected there and the feeder link is dropped, as the frontend drops it."""
+    wf = _load(RECOMPOSER)
+    sg = _def_of(wf, _node(wf, 143))
+    sg["links"].append(
+        {"id": 999001, "origin_id": 2, "origin_slot": 0, "target_id": 135, "target_slot": 0, "type": "STRING"}
+    )
+    _interior(wf, 143, 135)["inputs"][0]["link"] = 999001
+    _interior(wf, 143, 2)["outputs"][0]["links"].append(999001)
+    unowned = copy.deepcopy(wf)
+    _node(unowned, 143)["properties"]["proxyWidgets"] = [["156", "value"], ["142", "value"]]
+    with pytest.raises(ValueError, match="fed by interior node 143/2"):
+        promoted.resolve_write(unowned, graph, ["143", "135"], "choice")
+    target = promoted.resolve_write(wf, graph, ["143", "135"], "choice")
+    assert target.kind == "host" and target.widget == "choice" and target.redirected_from == "143/135.choice"
+    assert target.repair is not None and target.repair.original == ["135", "choice"]
+    # (``choice`` is a COMBO the catalog lists no options for, so the write
+    # itself is refused by validation; the flush that drops the feeder link is
+    # pinned in tests/comfy_cli/cql/test_proxy_migration.py.)
 
 
 # --------------------------------------------------------------------------- #

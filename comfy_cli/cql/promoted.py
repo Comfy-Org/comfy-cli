@@ -483,6 +483,12 @@ def resolve_write(
         target_def = defs.get(str(target.get("type", "")))
         given = f"{'/'.join(segments)}.{widget}"
         if parent_def is not None:
+            # Checked BEFORE the interior-feeder refusal below on purpose: a
+            # widget a legacy entry owns is repaired by the frontend on load,
+            # and that repair replaces any interior link feeding its slot
+            # (see ``plan_proxy_migration``), so the host value — not the
+            # feeder — is what will run. The same slot with no legacy entry
+            # keeps its feeder and is refused.
             pending = planned_repair_for_interior(workflow, parent, graph, str(target.get("id")), widget, defs)
             if pending is not None:
                 return WriteTarget(
@@ -966,6 +972,12 @@ def _slot_for_widget(source: dict, widget: str, projecting_input: str | None, de
         marker = entry.get("widget") if isinstance(entry, dict) else None
         if isinstance(marker, dict) and marker.get("name") == widget:
             return idx, entry, str(entry.get("type") or "*")
+    # An older save can serialize the widget's slot by ``name`` alone (no
+    # marker): that IS the backing slot — the flush restores its marker —
+    # never a reason to append a duplicate beside it.
+    for idx, entry in enumerate(entries):
+        if isinstance(entry, dict) and entry.get("widget") is None and entry.get("name") == widget:
+            return idx, entry, str(entry.get("type") or "*")
     m = graph.node(str(source.get("type", ""))) if graph is not None else None
     port = next((p for p in m.inputs if p.name == widget), None) if m is not None else None
     if port is None or port.is_link:
@@ -1055,9 +1067,18 @@ def plan_proxy_migration(workflow: dict, instance: dict, graph, defs: dict[str, 
             continue
         slot = _slot_for_widget(source, widget_name, projecting, defs, graph)
         if slot is None:
-            e.reason = "missingSubgraphInput"  # the widget has no backing input slot
+            # The widget has no backing input slot (``control_after_generate``).
+            # ``missingSubgraphInput`` is the frontend's own reason code for
+            # this case — ``repairCreateSubgraphInput``: "source widget has no
+            # backing input slot; quarantining" → ``reason: 'missingSubgraphInput'``.
+            e.reason = "missingSubgraphInput"
             continue
         idx, entry, slot_type = slot
+        # A slot already fed by an interior link is repaired all the same: the
+        # frontend calls ``SubgraphInput.connect(slot, node)`` unconditionally
+        # and ``connect`` replaces the incumbent link (``replaceLinkTopology``
+        # + ``_disconnectNodeInput``), so the boundary link takes the slot over
+        # and the interior feeder is dropped — see ``_add_boundary_link``.
         e.plan, e.type, e.slot_index, e.source_input = PLAN_CREATE, slot_type, idx, projecting
         if isinstance(entry, dict) and entry.get("label") is not None:
             e.label = str(entry["label"])
@@ -1123,7 +1144,22 @@ def planned_repair(workflow: dict, instance: dict, graph, widget: str, defs: dic
     widget name (an alias the caller reports as a redirect)."""
     plan = [e for e in plan_proxy_migration(workflow, instance, graph, defs) if e.repairable]
     by_name = next((e for e in plan if e.name == widget), None)
-    return by_name if by_name is not None else next((e for e in plan if e.widget == widget), None)
+    if by_name is not None:
+        return by_name
+    aliased: list[LegacyEntry] = []
+    for e in plan:
+        if e.widget == widget and all(a.name != e.name for a in aliased):
+            aliased.append(e)
+    if len(aliased) > 1:
+        # Two entries share the legacy widget name (two primitives both named
+        # ``value``): never pick one silently — name the minted inputs.
+        node_id = instance.get("id")
+        raise ValueError(
+            f"{node_id}.{widget} is ambiguous: {len(aliased)} legacy promotions on subgraph node {node_id} share "
+            f"the widget name {widget!r}; address one by its input name — "
+            f"{', '.join(f'{node_id}.{a.name}' for a in aliased)}"
+        )
+    return aliased[0] if aliased else None
 
 
 def planned_repair_for_interior(
@@ -1351,6 +1387,14 @@ def flush_proxy_migration(
         # createSubgraphInput
         source = _inner_node(sg, e.source_node)
         slot_index = e.slot_index
+        if slot_index is not None and not isinstance(source["inputs"][slot_index].get("widget"), dict):
+            # A slot serialized by name alone: give it back the marker a
+            # converted widget carries, in the frontend's key order.
+            found = source["inputs"][slot_index]
+            marked = {k: v for k, v in found.items() if k != "link"}
+            marked["widget"] = {"name": e.source_input or e.widget}
+            marked["link"] = found.get("link")
+            source["inputs"][slot_index] = marked
         if slot_index is None:
             if e.source_input is not None:
                 # A nested instance backs the widget with its OWN host input

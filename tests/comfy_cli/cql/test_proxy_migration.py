@@ -410,6 +410,77 @@ def test_flush_ignores_a_malformed_link_entry(graph):
     assert json.dumps(wf, sort_keys=True) == json.dumps(clean, sort_keys=True)
 
 
+def _wire_interior_feeder_into_choice(sg: dict, link_id: int = 999001) -> None:
+    """Feed CustomCombo 135's ``choice`` slot from interior node 2
+    (PrimitiveStringMultiline) — the shape ``resolve_write`` refuses to
+    widget-write when no legacy entry names the slot."""
+    sg["links"].append(
+        {"id": link_id, "origin_id": 2, "origin_slot": 0, "target_id": 135, "target_slot": 0, "type": "STRING"}
+    )
+    _inner(sg, 135)["inputs"][0]["link"] = link_id
+    _inner(sg, 2)["outputs"][0]["links"].append(link_id)
+
+
+def test_flush_replaces_an_interior_link_feeding_the_source_slot(graph):
+    """A legacy entry whose backing slot is already fed by an interior link is
+    still repaired, and the boundary link REPLACES that link — exactly what
+    the frontend does: ``repairCreateSubgraphInput`` calls
+    ``SubgraphInput.connect(slot, node)`` unconditionally, and ``connect``
+    resolves ``inputLink(...)`` for the slot, ``replaceLinkTopology``s it and
+    ``_disconnectNodeInput``s the incumbent (``SubgraphInput.ts``). After the
+    frontend loads such a file the interior feeder is gone and the host value
+    runs, so this is the state a write has to target."""
+    wf = _load(RECOMPOSER)
+    inst = _instance(wf, 143)
+    sg = _def_of(wf, inst)
+    _wire_interior_feeder_into_choice(sg)
+    assert _plans(wf, 143, graph)[("135", "choice")].plan == "createSubgraphInput"
+    ids = promoted.plan_repair_ids(["143"], promoted.plan_proxy_migration(wf, inst, graph))
+    promoted.flush_proxy_migration(wf, inst, graph, ids=ids)
+    boundary = ids["135.choice"]["links"][0]
+    assert _link(sg, 999001) is None
+    assert _inner(sg, 2)["outputs"][0]["links"] == [211, 247]
+    assert _inner(sg, 135)["inputs"][0]["link"] == boundary
+    assert _link(sg, boundary)["origin_id"] == -10
+    assert inst["widgets_values"][0] == "Nano Banana 2"
+
+
+def test_flush_reuses_a_slot_serialized_by_name_only(graph):
+    """An older save can serialize a widget's input slot with ``name`` but no
+    ``widget`` marker: that slot is the backing slot (matched by name), gets
+    its marker back, and is never duplicated."""
+    wf = _load(RECOMPOSER)
+    inst = _instance(wf, 143)
+    sg = _def_of(wf, inst)
+    del _inner(sg, 135)["inputs"][0]["widget"]
+    entry = _plans(wf, 143, graph)[("135", "choice")]
+    assert entry.plan == "createSubgraphInput" and entry.slot_index == 0 and entry.label == "model"
+    ids = promoted.plan_repair_ids(["143"], promoted.plan_proxy_migration(wf, inst, graph))
+    promoted.flush_proxy_migration(wf, inst, graph, ids=ids)
+    assert _inner(sg, 135)["inputs"] == [
+        {
+            "label": "model",
+            "localized_name": "choice",
+            "name": "choice",
+            "type": "COMBO",
+            "widget": {"name": "choice"},
+            "link": ids["135.choice"]["links"][0],
+        }
+    ]
+    assert next(i for i in sg["inputs"] if i["name"] == "choice")["label"] == "model"
+
+
+def test_planned_repair_refuses_an_ambiguous_legacy_alias(graph):
+    """Two entries share the legacy widget name ``value`` (both primitives):
+    the alias is refused with the minted names, never resolved to one of them."""
+    wf = _load(RECOMPOSER)
+    inst = _instance(wf, 143)
+    with pytest.raises(ValueError, match=r"143\.resolution.*143\.aspect_ratio"):
+        promoted.planned_repair(wf, inst, graph, "value")
+    inst["properties"]["proxyWidgets"] = [e for e in inst["properties"]["proxyWidgets"] if e != ["142", "value"]]
+    assert promoted.planned_repair(wf, inst, graph, "value").name == "resolution"
+
+
 def test_flush_leaves_preview_exposures_in_place(graph):
     """``$$`` entries are display-only: no input, no value, and the entry stays
     in ``proxyWidgets`` for the frontend's own preview-exposure migration
