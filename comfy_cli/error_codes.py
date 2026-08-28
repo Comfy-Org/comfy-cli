@@ -362,6 +362,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "sign in with `comfy cloud login` and re-run with `--where cloud`",
     ),
     ErrorCode(
+        "asset_not_found",
+        "Comfy Cloud has no asset with the content hash passed to `assets library ensure` "
+        "(`details.hash`). A file NAME is not a hash: the library is keyed by the sha256 the "
+        "upload computed, which `assets library ls` reports per asset.",
+        "pass the `hash` from `comfy --json assets library ls --name <file>`, or upload the file "
+        "first with `comfy upload <file> --where cloud`",
+    ),
+    ErrorCode(
         "template_fetch_failed",
         "Fetching the per-template workflow JSON from `Comfy-Org/workflow_templates` failed.",
         "check network; if 404, the gallery and templates dir are out of sync — report upstream",

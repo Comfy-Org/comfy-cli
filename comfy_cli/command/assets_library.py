@@ -102,7 +102,26 @@ def ensure_cmd(
     try:
         status, body = http_request(url, target, method="POST", body={"hash": hash, "tags": tag_list})
     except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
-        raise handle_cloud_http_error(renderer, e, operation="ensure") from e
+        # The parameterized helper, not `cloud_http`'s: that one hardcodes the
+        # saved-workflow vocabulary, so a 404 here read "workflow not found
+        # (ensure)" with a hint to list workflows — for a request that never
+        # named a workflow. Seen in prod when an agent passed a file name where
+        # the content hash belongs.
+        from comfy_cli.command._cloud_errors import handle_cloud_http_error as _handle_cloud_http_error
+
+        raise _handle_cloud_http_error(
+            renderer,
+            e,
+            operation="ensure",
+            not_found_code="asset_not_found",
+            not_found_message=f"no asset with content hash {hash!r} in your Comfy Cloud library",
+            not_found_hint=(
+                "pass the `hash` from `comfy --json assets library ls --name <file>` "
+                "(a file name is not a hash), or upload the file first with `comfy upload <file> --where cloud`"
+            ),
+            id_label="hash",
+            resource_id=hash,
+        ) from e
 
     b = body or {}
     payload = {
