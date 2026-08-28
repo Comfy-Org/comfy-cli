@@ -723,3 +723,71 @@ rebuilds the executable graph — the API prompt — not the canvas decoration.
 
 **No change to §§2-8.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
+
+## 14. Amendment v1.5 — 2026-08-28 (promoted subgraph inputs: host writes, one register per declared input, opaque positional writes)
+
+The frontend (ComfyUI_frontend ADR 0009) keeps a promoted subgraph widget's
+value on the HOST instance — `widgets_values[i]` on the instance, positional
+over the definition's inputs that resolve to an interior widget — and runs
+that value over the interior default. Interior `path` writes (§8.7) therefore
+never reached the canvas for a promoted widget. Both sides (this repo,
+comfy-multi-player Amendment A15) now speak the shapes below; a subgraph
+instance's `type` is a definition UUID with no catalog entry, so every replica
+stores its widgets opaquely (positional) and these ops carry what an opaque
+store needs.
+
+### 14.1 `set_widget` host write: the `promoted` payload
+
+A write to a promoted input is a top-level `set_widget` on the INSTANCE
+(`node_id`, `widget` = the declared input name; no `path`/`inner_widget`)
+carrying
+
+```
+"promoted": {"value_index": <int>, "instance_path": [<id>, …],
+             "host_widgets_values": [<full materialized array>]}
+```
+
+`value_index` is the input's position among the definition's widget-backed
+inputs (socket-only inputs own no slot); `instance_path` is one segment for a
+top-level instance and the interior node path for a nested host, resolved and
+forked exactly like an interior `path`; `host_widgets_values` is the array
+after the write, seeded from each input's current effective value so the
+positional array stays aligned with the definition. Apply writes ONE slot,
+extending a shorter stored array from the payload. The register is the
+ordinary `("widget", node_id, widget)` (§11.2 string identity), so the flat
+address and the interior address that backs it (`57/13.width`, which the
+minting side redirects to the host — `redirected_from` records the given
+address, informational) share one register. The host-write register and an
+interior `path` register for the interior widget behind the same promotion
+are deliberately NOT unified (that would need the promotion table at apply
+time); a merge consumer treats them as distinct targets.
+
+### 14.2 `connect` onto a promoted input: one register per declared name
+
+A `connect` whose target is a declared subgraph input the instance does not
+yet carry an `inputs[]` entry for carries
+
+```
+"grow": {"name": <declared input name>, "type": <declared type>,
+         "promoted": true, "widget": <name, only when the input backs a widget>}
+```
+
+Unlike autogrow (§1.2 carve-out), a promoted input is ONE register named by the
+definition — `("input", to_node, "grow", <full name>)`, never split on a dot
+(declared names such as `images.image0` contain one) — and is gated by
+`_lww_gate`/`_lww_commit` exactly like a concrete input (§11.1): the higher
+stamp owns the entry in either apply order, `grow_id` follows the winner, the
+loser's link is retired, and the claim is unconditional once the gate passes.
+Apply reuses an existing entry by name (a concurrent materialization shares
+it) and otherwise appends `{name, type, link, grow_id[, widget:{name}]}`
+verbatim — no numbering. Once materialized, a later connect to the same name
+resolves it as a concrete slot (`to_slot`) on the concrete register; both
+sides agree, and this is not drift.
+
+### 14.3 Opaque positional writes: frontend-only `PrimitiveNode`
+
+A write that resolves to a frontend-only `PrimitiveNode` (no catalog entry;
+`widgets_values[0]` holds the value) carries `legacy_primitive: true` AND the
+§14.1 `promoted` payload with `value_index: 0` and `instance_path` = the node
+id, so an opaque store applies it as a plain positional write. Apply treats a
+`promoted` payload on a non-instance node as that positional write.

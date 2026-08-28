@@ -691,6 +691,9 @@ def _set_widget_impl(
         op["promoted"]["host_widgets_values"] = _promoted.host_widgets_values(written)
         return workflow, op
     if target.kind == "legacy_primitive":
+        # A frontend-only PrimitiveNode has no catalog entry, so every
+        # replica stores it opaquely (positional): carry the same positional
+        # payload a host write carries, and apply it the same way.
         src = target.node
         values = src.get("widgets_values")
         old = values[0] if isinstance(values, list) and values else None
@@ -703,9 +706,12 @@ def _set_widget_impl(
             value=value,
             old=old,
             legacy_primitive=True,
+            promoted={"value_index": 0, "instance_path": [str(src.get("id"))]},
             **extra,
         )
-        return apply_op(workflow, op, graph), op
+        workflow = apply_op(workflow, op, graph)
+        op["promoted"]["host_widgets_values"] = list(src.get("widgets_values") or [])
+        return workflow, op
     if target.kind == "top" and target.redirected_from is not None:
         node_id = target.node.get("id")
         widget = target.widget
@@ -1820,19 +1826,20 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
             return  # instance concurrently deleted => no-op (delete wins)
         defs_by_id = _engine._subgraph_defs_by_id(workflow)
         instance = _engine._resolve_node_path(workflow, instance_path, defs_by_id)
-        _promoted.set_host_value(workflow, instance, op["widget"], op["value"], graph)
+        if defs_by_id.get(str(instance.get("type", ""))) is not None:
+            _promoted.set_host_value(workflow, instance, op["widget"], op["value"], graph)
+        else:
+            # Not a subgraph instance (a frontend-only PrimitiveNode): a plain
+            # positional write, aligned from the op's materialized array.
+            _apply_positional_write(instance, promoted_write, op["value"])
         _lww_commit(workflow, op)
         return
     if op.get("legacy_primitive"):
+        # Pre-payload shape (no ``promoted`` block): widgets_values[0].
         node = _find_by_str(workflow, op["node_id"])
         if node is None:
             return
-        values = node.get("widgets_values")
-        values = list(values) if isinstance(values, list) else []
-        if not values:
-            values.append(None)
-        values[0] = op["value"]
-        node["widgets_values"] = values
+        _apply_positional_write(node, {"value_index": 0}, op["value"])
         _lww_commit(workflow, op)
         return
     path = op.get("path")
@@ -1863,6 +1870,26 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
         widgets.extend([None] * (idx + 1 - len(widgets)))
     widgets[idx] = op["value"]
     _lww_commit(workflow, op)
+
+
+def _apply_positional_write(node: dict, positional: dict, value: Any) -> None:
+    """Write ``value`` at ``positional["value_index"]`` of an opaquely stored
+    node's ``widgets_values``, extending a shorter array from the op's own
+    ``host_widgets_values`` so alignment is preserved (the same rule the
+    doc-host applier follows for a node without a catalog entry)."""
+    idx = positional.get("value_index")
+    if not isinstance(idx, int) or isinstance(idx, bool) or idx < 0:
+        return
+    values = node.get("widgets_values")
+    values = list(values) if isinstance(values, list) else []
+    seed = positional.get("host_widgets_values")
+    if len(values) <= idx:
+        if isinstance(seed, list) and len(seed) > len(values):
+            values.extend(seed[len(values) :])
+        while len(values) <= idx:
+            values.append(None)
+    values[idx] = value
+    node["widgets_values"] = values
 
 
 def _apply_inputcount_bump(workflow: dict, dst: dict, op: dict, graph, widget: str, value: Any) -> None:
@@ -1927,10 +1954,23 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
         # schema's own element names, when the catalog carries a template).
         ins = dst.setdefault("inputs", [])
         to_idx = next((k for k, i in enumerate(ins) if i.get("grow_id") == op["link_id"]), None)
-        if to_idx is None and grow.get("promoted"):
-            # A promoted subgraph input is ONE register named by the definition:
-            # a concurrent connect that already materialized it shares the entry.
-            to_idx = next((k for k, i in enumerate(ins) if i.get("name") == grow["name"]), None)
+        if grow.get("promoted"):
+            # A promoted subgraph input is ONE register named by the definition
+            # (``("input", to_node, "grow", name)``), not a fresh slot per
+            # connect: gate it exactly like a concrete input so the occupant is
+            # decided by stamp, not arrival order, and the doc-host applier
+            # (comfy-multi-player) converges with this replica. The claim is
+            # unconditional once the gate passes (see the concrete branch).
+            if to_idx is None and not _lww_gate(workflow, op):
+                return
+            _lww_commit(workflow, op)
+            if to_idx is None:
+                to_idx = next((k for k, i in enumerate(ins) if i.get("name") == grow["name"]), None)
+            if to_idx is not None:
+                prev = ins[to_idx].get("link")
+                if prev is not None and prev != op["link_id"]:
+                    _remove_link(workflow, prev)
+                ins[to_idx]["grow_id"] = op["link_id"]  # the register follows the winner
         if to_idx is None:
             inputcount = grow.get("inputcount")
             if grow.get("promoted"):
@@ -2156,6 +2196,10 @@ def _write_target(op: dict) -> tuple:
             # Two autogrow connects onto the same base share a target (their
             # relative order in the batch is the sequence decision the merge
             # consumer must make); distinct bases don't collide.
+            if grow.get("promoted"):
+                # A promoted subgraph input is one register per declared NAME
+                # (names may contain dots: ``images.image0``), never per base.
+                return ("input", str(op["to_node"]), "grow", str(grow["name"]))
             # The group is everything before the LAST dot: a group nested
             # under a dynamic combo (``model.reference_images.image_1``) must
             # not share a target with its sibling (``model.reference_videos``).

@@ -380,3 +380,63 @@ def test_connect_does_not_type_check_against_an_untyped_declared_input(graph):
     wf, op = workflow_ops.connect(wf, graph, prim, "INT", 57, "width")
     assert _input(_node(wf, 57), "width")["link"] == op["link_id"]
     assert op["grow"]["type"] == "INT"  # falls back to the source type
+
+
+# Op shapes the doc-host applier (comfy-multi-player) needs to converge
+# --------------------------------------------------------------------------- #
+
+
+def test_concurrent_promoted_connects_converge_by_stamp(graph):
+    """Two replicas wire different primitives into ``57.width`` concurrently.
+    The promoted input is ONE register (``("input", 57, "grow", "width")``):
+    the higher stamp owns the entry in either apply order, ``grow_id`` follows
+    the winner, and the loser's link is not left dangling."""
+    base = _load("image_z_image_turbo.json")
+    base, a = workflow_ops.add_node(base, graph, "PrimitiveInt")
+    base, b = workflow_ops.add_node(base, graph, "PrimitiveInt")
+    a, b = a["node_id"], b["node_id"]
+    _, op_hi = workflow_ops.connect(copy.deepcopy(base), graph, a, "INT", 57, "width", actor="a", base_version=1)
+    _, op_lo = workflow_ops.connect(copy.deepcopy(base), graph, b, "INT", 57, "width", actor="b", base_version=0)
+    assert workflow_ops._write_target(op_hi) == workflow_ops._write_target(op_lo) == ("input", "57", "grow", "width")
+    for order in ((op_hi, op_lo), (op_lo, op_hi)):
+        wf = copy.deepcopy(base)
+        for op in order:
+            wf = workflow_ops.apply_op(wf, op, graph)
+        entries = [i for i in _node(wf, 57)["inputs"] if i["name"] == "width"]
+        assert len(entries) == 1
+        assert entries[0]["link"] == op_hi["link_id"]
+        assert entries[0]["grow_id"] == op_hi["link_id"]
+        link_ids = {link[0] for link in wf["links"]}
+        assert op_hi["link_id"] in link_ids and op_lo["link_id"] not in link_ids
+
+
+def test_legacy_primitive_write_carries_a_positional_payload(graph):
+    """A frontend-only ``PrimitiveNode`` has no catalog entry, so the doc host
+    stores it opaquely: the op must carry the positional payload
+    (``promoted.value_index`` + ``host_widgets_values``) the applier writes,
+    exactly like a host write — and replay on a fresh copy must apply it."""
+    wf = _load("image_z_image_turbo.json")
+    wf["last_node_id"] += 1
+    legacy = wf["last_node_id"]
+    wf["nodes"].append(
+        {
+            "id": legacy,
+            "type": "PrimitiveNode",
+            "pos": [0, 0],
+            "size": [210, 82],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "INT", "type": "INT", "widget": {"name": "width"}, "links": []}],
+            "properties": {"Run widget replace on values": False},
+            "widgets_values": [1024, "fixed"],
+        }
+    )
+    wf, _ = workflow_ops.connect(wf, graph, legacy, "INT", 57, "width")
+    base = copy.deepcopy(wf)
+    wf, op = workflow_ops.set_widget(wf, graph, 57, "width", 512)
+    assert op["legacy_primitive"] is True
+    assert op["promoted"] == {"value_index": 0, "instance_path": [str(legacy)], "host_widgets_values": [512, "fixed"]}
+    replayed = workflow_ops.apply_op(copy.deepcopy(base), op, graph)
+    assert _node(replayed, legacy)["widgets_values"] == [512, "fixed"]
