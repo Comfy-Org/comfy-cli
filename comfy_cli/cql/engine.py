@@ -589,6 +589,26 @@ def _is_wildcard_type(type_id: str) -> bool:
     return type_id in _WILDCARD_TYPES or type_id.startswith(_WILDCARD_TYPE_PREFIX)
 
 
+def _edge_types_compatible(src_type: str, dst_type: str) -> bool:
+    """Whether an output socket of ``src_type`` may drive an input of ``dst_type``.
+
+    A wildcard on either end (``*``, ``COMFY_MATCHTYPE_V3``) always matches.
+    Otherwise defer to the converter's ``_is_valid_connection`` — the mirror of
+    the frontend's ``isValidConnection`` — which expands a COMMA-SEPARATED
+    union on both ends (``INT,FLOAT`` on a math operand, ``MESH,FILE_3D_GLB,…``
+    on a 3D importer) before comparing. Comparing the raw strings reported a
+    ``FLOAT`` output into an ``INT,FLOAT`` input as ``edge_type_mismatch``:
+    12 of the 23 such warnings in a 3-day prod window were this shape, on
+    edges the frontend draws and the server runs.
+    """
+    if _is_wildcard_type(src_type) or _is_wildcard_type(dst_type):
+        return True
+    # Lazy: workflow_to_api imports this module at load time.
+    from comfy_cli.workflow_to_api import _is_valid_connection
+
+    return _is_valid_connection(src_type, dst_type)
+
+
 def _is_dynamic_combo_type(type_id: str) -> bool:
     """V3 dynamic-combo types (e.g. ``COMFY_DYNAMICCOMBO_V3``): a selector
     widget whose chosen option contributes its own sub-inputs. Same rule the
@@ -1625,9 +1645,13 @@ class Graph:
                     if port is not None:
                         src_type = src_m.outputs[out_idx].type
                         dst_type = port.type
-                        if not _is_wildcard_type(src_type) and not _is_wildcard_type(dst_type) and src_type != dst_type:
+                        if not _edge_types_compatible(src_type, dst_type):
                             # Find the correct index for the expected type
-                            correct = [f"[{i}]" for i, p in enumerate(src_m.outputs) if p.type == dst_type]
+                            correct = [
+                                f"[{i}]"
+                                for i, p in enumerate(src_m.outputs)
+                                if _edge_types_compatible(p.type, dst_type)
+                            ]
                             hint = (
                                 f"use {src_class}{correct[0]} instead"
                                 if correct
