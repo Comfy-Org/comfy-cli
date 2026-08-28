@@ -692,19 +692,42 @@ class TestSlotsNestedSubgraph:
         env = _run(["slots", str(path)], capsys)
         addrs = {s["address"] for s in env["data"]["slots"]}
         # instance 10 -> inner node 3 (Batch Prompt Iterator subgraph) -> inner
-        # node 7 (PrimitiveStringMultiline) widget "value".
-        assert "10/3/7.value" in addrs, f"missing doubly-nested slot; got {sorted(addrs)[:30]}"
+        # node 8 (RegexReplace): an unpromoted widget two levels down.
+        assert "10/3/8.regex_pattern" in addrs, f"missing doubly-nested slot; got {sorted(addrs)[:30]}"
+        # Inner node 7's ``value`` is promoted twice up (3.value -> 10.value):
+        # the value the frontend runs lives on host 10, so only that address
+        # is advertised — the interior copies are the "layer 2" that edits
+        # used to land on and the surface overrode.
+        assert "10.value" in addrs
+        assert "10/3.value" not in addrs
+        assert "10/3/7.value" not in addrs
 
 
 class TestSetSlotNestedSubgraph:
-    def test_set_slot_writes_into_subgraph_inner_node(self, patched_subgraph_graph, tmp_path, capsys):
+    def test_set_slot_refuses_a_link_driven_interior_widget(self, patched_subgraph_graph, tmp_path, capsys):
+        """GeminiImage2Node 9's ``prompt`` is fed by interior node 3 (the Batch
+        Prompt Iterator): writing the widget could never take effect, so the
+        write is refused and the driver named instead of silently landing on
+        a value the graph ignores."""
         path = _write_workflow(tmp_path, _subgraph_workflow())
         env = _run(["set-slot", str(path), '10/9.prompt="a red fox in snow"'], capsys)
+        assert env["ok"] is False, env
+        assert "10/3" in env["error"]["message"]
+        wf = json.loads(path.read_text())
+        assert _interior_node(wf, D33, 9)["widgets_values"][0] == ""
+
+    def test_set_slot_writes_the_promoted_host_value(self, patched_subgraph_graph, tmp_path, capsys):
+        """The prompt's source of truth is instance 10's promoted ``value``
+        (its outside link id dangles — the frontend drops it on load — so the
+        host value is what runs)."""
+        path = _write_workflow(tmp_path, _subgraph_workflow())
+        env = _run(["set-slot", str(path), '10.value="a red fox in snow"'], capsys)
         assert env["ok"] is True, env
         wf = json.loads(path.read_text())
-        gemini = _interior_node(wf, D33, 9)
-        # prompt is widget index 0 for GeminiImage2Node.
-        assert gemini["widgets_values"][0] == "a red fox in snow"
+        host = next(n for n in wf["nodes"] if n["id"] == 10)
+        assert host["widgets_values"][0] == "a red fox in snow"
+        # nothing inside the definition was rewritten
+        assert _interior_node(wf, BATCH, 7)["widgets_values"][0] == ""
 
     def test_set_slot_nested_does_not_touch_sibling_instance(self, patched_subgraph_graph, tmp_path, capsys):
         path = _write_workflow(tmp_path, _subgraph_workflow())
@@ -720,8 +743,11 @@ class TestSetSlotNestedSubgraph:
         env = _run(["set-slot", str(path), '10/3/7.value="iterated prompt"'], capsys)
         assert env["ok"] is True, env
         wf = json.loads(path.read_text())
-        prim = _interior_node(wf, BATCH, 7)
-        assert prim["widgets_values"][0] == "iterated prompt"
+        # 7.value is promoted twice up (3.value -> 10.value): the write lands
+        # on host 10, the only place the frontend reads it from.
+        host = next(n for n in wf["nodes"] if n["id"] == 10)
+        assert host["widgets_values"][0] == "iterated prompt"
+        assert _interior_node(wf, BATCH, 7)["widgets_values"][0] == ""
 
     def test_set_slot_unknown_nested_inner_node(self, patched_subgraph_graph, tmp_path, capsys):
         path = _write_workflow(tmp_path, _subgraph_workflow())
@@ -743,7 +769,7 @@ class TestVaryNestedSubgraph:
         path = _write_workflow(tmp_path, _subgraph_workflow())
         out_dir = tmp_path / "out"
         env = _run(
-            ["vary", str(path), "--slot", '10/9.prompt=["cat","dog","fox"]', "--out-dir", str(out_dir)],
+            ["vary", str(path), "--slot", '10.value=["cat","dog","fox"]', "--out-dir", str(out_dir)],
             capsys,
         )
         assert env["ok"] is True
@@ -751,7 +777,7 @@ class TestVaryNestedSubgraph:
         prompts = []
         for f in sorted(out_dir.glob("*.json")):
             wf = json.loads(f.read_text())
-            prompts.append(_interior_node(wf, D33, 9)["widgets_values"][0])
+            prompts.append(next(n for n in wf["nodes"] if n["id"] == 10)["widgets_values"][0])
         assert prompts == ["cat", "dog", "fox"]
 
 

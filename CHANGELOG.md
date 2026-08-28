@@ -17,6 +17,34 @@ history.
 
 ### Fixed
 
+- Promoted subgraph widgets are edited where the frontend reads them. The
+  frontend (ADR 0009) keeps a promoted widget's value on the HOST instance
+  (`widgets_values` positional over the widget-backed subgraph inputs) and
+  runs that value over the interior default; `set-widget 57.width` used to
+  follow the legacy `proxyWidgets` route into the interior node, so the edit
+  neither ran nor showed on the canvas. `set-widget`, `set-slot` and `vary`
+  now write the host value for `<instance>.<input>`, redirect an interior
+  address that backs a promotion (`57/13.width`) to the same host value
+  (`redirected_from` on the op), follow an outside link feeding the promoted
+  input to its primitive (`PrimitiveInt`/`PrimitiveString*`/legacy
+  `PrimitiveNode`, through `Reroute`s) and refuse — naming the driver — when
+  a non-primitive node computes the value. Unpromoted interior widgets still
+  write the definition. The op carries `promoted.value_index` and the
+  materialized `host_widgets_values`.
+- `comfy workflow connect` wires an outside node to a promoted widget
+  (`PrimitiveInt.INT → 57.width`): the definition declares the input, so it
+  is materialized on the instance (with the frontend's `widget` marker) and
+  linked, type-checked against the declared input type.
+- `comfy workflow slots` advertises promoted widgets at the instance address
+  with the value the frontend runs (host value, else interior default), flags
+  widgets fed by a link (`linked_from`), keeps unpromoted interior widgets
+  reachable at `<instance>/<inner>.<widget>` (nested instances included), and
+  no longer advertises the interior address behind a promotion.
+- `convert_ui_to_api` (`comfy run`, `validate`) applies host-owned promoted
+  values onto the expanded interior nodes — a post-migration template whose
+  host prompt differs from the interior default (`audio_minimax_music_3`:
+  interior caption `''`) was submitted with the interior value. Precedence
+  matches the frontend: outside link, then host value, then interior.
 - `comfy workflow connect` can wire a Load Image / Load Video / Load Audio
   into an auto-grow group nested under a dynamic combo (`GeminiNanoBanana2V2`
   `model.images`, `MinimaxHailuo03ReferenceNode` / `ByteDance2ReferenceNodeV2`

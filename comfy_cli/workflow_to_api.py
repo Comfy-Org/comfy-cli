@@ -178,7 +178,59 @@ def convert_ui_to_api(workflow: dict, object_info: dict) -> dict:
             logger.exception("Failed to convert node id=%s type=%s; skipping", node_id_str, node_type)
 
     _strip_orphan_link_inputs(api_prompt)
+    _overlay_promoted_host_values(api_prompt, workflow, subgraph_defs)
     return api_prompt
+
+
+def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_defs: dict[str, dict]) -> None:
+    """Apply host-owned promoted widget values onto the expanded interior nodes.
+
+    A promoted widget's value lives on the HOST instance (``widgets_values``
+    positional over the widget-backed subgraph inputs — ADR 0009); the
+    interior widget is only its default. Expansion above copied the interior
+    default, so a post-migration save (host prompt filled in, interior
+    ``caption`` still ``''``) would submit the wrong prompt. Precedence, as the
+    frontend serializes it: a link feeding the instance input wins (already
+    reattached), else the host value when materialized, else the interior.
+    Inner instances are visited first so an outer host wins over an inner one;
+    an inner input promoted further (linked from ``-10``) is left to the outer.
+    """
+    from comfy_cli.cql import promoted as _promoted
+
+    def visit(instance: dict, sg: dict, prefix: str, depth: int) -> None:
+        if depth > _MAX_SUBGRAPH_ITERATIONS or instance.get("mode") in (_MODE_MUTED, _MODE_BYPASS):
+            return
+        for inner in sg.get("nodes") or []:
+            if not isinstance(inner, dict):
+                continue
+            inner_def = subgraph_defs.get(str(inner.get("type", "")))
+            if inner_def is not None:
+                visit(inner, inner_def, f"{prefix}:{inner.get('id')}", depth + 1)
+        for pi in _promoted.promoted_inputs(sg, subgraph_defs):
+            if not pi.is_widget or _promoted.external_link(instance, pi.name) is not None:
+                continue
+            value = _promoted.host_value(instance, pi)
+            if value is _promoted.UNSET:
+                continue
+            target = _promoted.deepest_source(sg, pi, subgraph_defs)
+            if target is None:
+                continue
+            path, widget = target
+            entry = api_prompt.get(":".join([prefix, *path]))
+            if not isinstance(entry, dict):
+                continue
+            inputs = entry.setdefault("inputs", {})
+            current = inputs.get(widget)
+            if isinstance(current, list) and len(current) == 2:
+                continue  # wired from inside the definition: the link wins
+            inputs[widget] = value
+
+    for node in workflow.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        sg = subgraph_defs.get(str(node.get("type", "")))
+        if sg is not None:
+            visit(node, sg, str(node.get("id")), 0)
 
 
 def _has_group_nodes(workflow: dict) -> bool:
