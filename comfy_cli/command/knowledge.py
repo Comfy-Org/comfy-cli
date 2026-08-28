@@ -190,18 +190,7 @@ def pick_cmd(
     knowledge.log_query("knowledge pick", logged, hit_ids=[f"cap:{capability_id}"], zero_hit=False, bundle=bundle)
     picks = []
     for p in cap["picks"]:
-        model_id = p.get("model")
-        model_id = model_id if isinstance(model_id, str) else None
-        row = bundle.models.get(model_id) or {}
-        entry = {
-            "rank": knowledge.pick_rank(p),
-            "model": model_id,
-            "route": _text(p.get("route")),
-            "template": _text(p.get("template")),
-            "caveat": _text(p.get("caveat")),
-            "status": _text(row.get("status")),
-            "superseded_by": _text(row.get("superseded_by")),
-        }
+        entry = knowledge.pick_entry(bundle, p)
         if "fits" in p:
             entry["fits"] = p["fits"]
         picks.append(entry)

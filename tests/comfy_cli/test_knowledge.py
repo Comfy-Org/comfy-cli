@@ -854,6 +854,39 @@ class TestCli:
         assert rc == 1
         assert env["error"]["code"] == "knowledge_unavailable"
 
+    def test_pick_carries_the_row_best_for_capped(self, tmp_path, monkeypatch, capsys):
+        # A routing opinion written only in the model row must reach the caller
+        # of `knowledge pick`, since the pick's caveat is per capability.
+        picks = [{"model": "x", "rank": 1}, {"model": "y", "rank": 2}, {"model": "z", "rank": 3}]
+        models = {
+            "x": {"id": "x", "best_for": ["multi-ref identity", "product shots", 7, "brand consistency"]},
+            "y": {"id": "y", "status": "available"},
+            "z": {"id": "z", "best_for": "not a list"},
+        }
+        p = tmp_path / "k.json"
+        p.write_text(json.dumps({"models": models, "capabilities": {"c": {"id": "c", "picks": picks}}}))
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+        rc, env = _run(["pick", "c"], capsys)
+        assert rc == 0
+        by_model = {q["model"]: q for q in env["data"]["picks"]}
+        assert by_model["x"]["best_for"] == ["multi-ref identity"]
+        assert "best_for" not in by_model["y"]
+        assert "best_for" not in by_model["z"]
+        _validate(env["data"])
+
+    def test_pick_superseded_by_reads_the_deprecations_list(self, tmp_path, monkeypatch, capsys):
+        data = {
+            "models": {},
+            "deprecations": [{"id": "x", "superseded_by": "y"}],
+            "capabilities": {"c": {"id": "c", "picks": [{"model": "x", "rank": 1}]}},
+        }
+        p = tmp_path / "k.json"
+        p.write_text(json.dumps(data))
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+        _rc, env = _run(["pick", "c"], capsys)
+        assert env["data"]["picks"][0]["superseded_by"] == "y"
+        _validate(env["data"])
+
     def test_pick_payload_normalizes_rank_and_model(self, tmp_path, monkeypatch, capsys):
         picks = [
             {"model": "x", "rank": "1"},

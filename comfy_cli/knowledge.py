@@ -47,6 +47,10 @@ MAX_MODELS = 3
 MAX_MODELS_BRIEF = 20
 MAX_PICKS = 8
 MAX_LIST_ITEMS = 8
+# best_for items per pick. 1 keeps every capability's `knowledge pick` envelope
+# under the 4096 bytes the cloud agent admits verbatim; 2, or not_for alongside,
+# sends image-edit over.
+MAX_PICK_BEST_FOR = 1
 MAX_BLOCK_BYTES = 8192
 MAX_QUERY_CHARS = 200  # CLI text is unbounded; the clip bounds the lookup key and the nudge echo
 MAX_VERSION_CHARS = 64
@@ -686,26 +690,39 @@ def _model_entry(bundle: Bundle, model_id: str, row: dict, *, matched_on: str, b
     return entry
 
 
+def pick_entry(bundle: Bundle, p: dict) -> dict:
+    """One pick as emitted, plus the status and routing opinion of its model row.
+
+    ``best_for`` is the head of the row's list, omitted when the row has none.
+    The pick's ``caveat`` is written for one capability; the row's ``best_for``
+    says what the model is for across all of them, which is what a routing
+    decision reads.
+    """
+    model_id = _text(p.get("model"))
+    row = bundle.models.get(model_id, {}) if model_id is not None else {}
+    dep = bundle.deprecations.get(model_id, {}) if model_id is not None else {}
+    entry = {
+        "rank": pick_rank(p),
+        "model": model_id,
+        "route": _text(p.get("route")),
+        "template": _text(p.get("template")),
+        "caveat": _text(p.get("caveat")),
+        "status": _text(row.get("status")),
+        "superseded_by": _text(dep.get("superseded_by") or row.get("superseded_by")),
+    }
+    if best_for := _str_list(row.get("best_for"))[:MAX_PICK_BEST_FOR]:
+        entry["best_for"] = best_for
+    return entry
+
+
 def _pick_entries(bundle: Bundle, capability_id: str, *, catalog_templates: Collection[str] | None) -> list[dict]:
     cap = pick(bundle, capability_id)
     if cap is None:
         return []
     out: list[dict] = []
     for p in cap["picks"]:
-        template = p.get("template") if isinstance(p.get("template"), str) else None
-        model_id = p.get("model")
-        row = bundle.models.get(model_id, {}) if isinstance(model_id, str) else {}
-        dep = bundle.deprecations.get(model_id, {}) if isinstance(model_id, str) else {}
-        entry = {
-            "capability": capability_id,
-            "rank": pick_rank(p),
-            "model": _text(model_id),
-            "route": _text(p.get("route")),
-            "template": template,
-            "caveat": _text(p.get("caveat")),
-            "status": _text(row.get("status")),
-            "superseded_by": _text(dep.get("superseded_by") or row.get("superseded_by")),
-        }
+        entry = {"capability": capability_id, **pick_entry(bundle, p)}
+        template = entry["template"]
         if catalog_templates is not None and template is not None and template not in catalog_templates:
             entry["available_locally"] = False
             entry["unavailable_reason"] = UNAVAILABLE_LOCALLY
