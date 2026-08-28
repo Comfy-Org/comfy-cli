@@ -36,8 +36,9 @@ import time
 import urllib.error
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, NoReturn
+from typing import TYPE_CHECKING, Annotated, Final, NoReturn
 from urllib.parse import urlsplit
 
 import requests
@@ -96,6 +97,7 @@ from comfy_cli.constants import SUPPORTED_PT_EXTENSIONS
 from comfy_cli.interaction import confirm, require_option
 from comfy_cli.output import get_renderer
 from comfy_cli.registry.api import sanitize_error_body
+from comfy_cli.utils import parse_rfc3339
 
 if TYPE_CHECKING:
     from comfy_cli.builder_api import BuilderClient
@@ -2406,13 +2408,28 @@ def show_cmd(
 _RELEASE_POLL_SECONDS = 2.0
 
 
-def _release_order(release: dict) -> tuple[int, str]:
+#: Sorts below every usable timestamp, so a release the builder dated badly loses
+#: the tiebreak instead of winning it on a value nobody can read. A Go zero
+#: ``time.Time`` marshals to ``0001-01-01T00:00:00Z`` and ties with it, which is
+#: the same answer: neither row carries a date worth ordering on.
+_UNDATED: Final = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _release_order(release: dict) -> tuple[int, datetime]:
+    """Order releases by version, breaking ties on the instant they were cut.
+
+    The instant, not its spelling: the builder marshals Go ``time.Time``, whose
+    trailing-zero trimming leaves the fractional part a variable width, and
+    comparing those as text sorts a whole-second ``...:16Z`` above the strictly
+    later ``...:16.5Z`` — ``.`` precedes ``Z`` in ASCII.
+    """
     version = release.get("version")
     created_at = release.get("createdAt")
-    return (
-        version if isinstance(version, int) else -1,
-        created_at if isinstance(created_at, str) else "",
-    )
+    try:
+        created = parse_rfc3339(created_at) if isinstance(created_at, str) else _UNDATED
+    except ValueError:
+        created = _UNDATED
+    return (version if isinstance(version, int) else -1, created)
 
 
 def _newest_release_id(renderer, client, build_id: str) -> str:

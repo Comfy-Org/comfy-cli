@@ -4,11 +4,13 @@ Module for utility functions.
 
 import functools
 import platform
+import re
 import shutil
 import tarfile
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
-from typing import Any, BinaryIO, cast
+from typing import Any, BinaryIO, Final, cast
 
 from rich import progress
 from rich.live import Live
@@ -83,6 +85,36 @@ def get_proc():
 
 def get_not_user_set_default_workspace():
     return DEFAULT_COMFY_WORKSPACE[get_os()]
+
+
+_RFC3339_RE: Final = re.compile(
+    r"(?P<head>\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2})(?:\.(?P<frac>\d+))?(?P<tz>[Zz]|[+-]\d{2}:?\d{2})?"
+)
+
+
+def parse_rfc3339(value: str) -> datetime:
+    """Parse an RFC 3339 timestamp at any sub-second precision, always aware.
+
+    ``datetime.fromisoformat`` cannot do this alone on Python 3.10, the minimum
+    this package supports: there it takes only 3 or 6 fractional digits and no
+    bare ``Z``. Our Go services marshal ``time.Time``, whose RFC3339Nano
+    encoding trims trailing zeros, so microseconds of ``437450`` ship as
+    ``...:09.43745Z`` — five digits, rejected. Roughly one row in ten is stamped
+    that way, and a ``createdAt`` never changes, so such a row was permanently
+    unreadable rather than intermittently so.
+
+    A missing zone reads as UTC: callers order these against each other, and
+    comparing a naive value to an aware one raises ``TypeError``.
+    """
+    match = _RFC3339_RE.fullmatch(value.strip())
+    if match is None:
+        raise ValueError(f"not an RFC 3339 timestamp: {value!r}")
+    # Pad so ".1" is a tenth of a second rather than a microsecond, and truncate
+    # so Go's nanosecond precision degrades instead of failing.
+    fraction = (match.group("frac") or "")[:6].ljust(6, "0")
+    zone = match.group("tz") or ""
+    offset = "+00:00" if zone in ("Z", "z", "") else (zone if ":" in zone else f"{zone[:3]}:{zone[3:]}")
+    return datetime.fromisoformat(f"{match.group('head')}.{fraction}{offset}")
 
 
 def kill_all(pid):

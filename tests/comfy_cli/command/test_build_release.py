@@ -303,3 +303,39 @@ def test_create_watch_polls_to_complete_and_reflects_target_failure(
     # Then
     assert result.exit_code == expected_exit, result.stderr
     assert len([call for call in client.calls if call["method"] == "get_release"]) == 3
+
+
+def test_same_version_releases_break_the_tie_on_the_instant_not_the_spelling() -> None:
+    """Compared as text, the whole-second stamp wins this pair: ``.`` precedes
+    ``Z``, so the strictly later fractional one sorts below it."""
+    # Given
+    whole_second = {"id": "release-earlier", "version": 1, "createdAt": "2026-08-28T03:26:09Z"}
+    fractional = {"id": "release-later", "version": 1, "createdAt": "2026-08-28T03:26:09.5Z"}
+
+    # When
+    newest = max([whole_second, fractional], key=build._release_order)
+
+    # Then
+    assert newest["id"] == "release-later"
+
+
+@pytest.mark.parametrize(
+    "created_at",
+    [
+        pytest.param("2026-08-28T03:26:09.43745Z", id="zero-trimmed"),
+        pytest.param(None, id="missing"),
+        pytest.param("not-a-timestamp", id="unparsable"),
+    ],
+)
+def test_a_release_order_key_stays_comparable_for_every_created_at(created_at: object) -> None:
+    """The key is a sort key before it is anything else: one row the builder
+    dated oddly must not make ``max`` raise across the whole list."""
+    # Given
+    dated = {"id": "release-dated", "version": 1, "createdAt": "2026-08-28T03:26:09.5Z"}
+    odd = {"id": "release-odd", "version": 1, "createdAt": created_at}
+
+    # When
+    newest = max([odd, dated], key=build._release_order)
+
+    # Then
+    assert newest["id"] == "release-dated"
