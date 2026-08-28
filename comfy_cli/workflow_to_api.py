@@ -197,7 +197,12 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
     """
     from comfy_cli.cql import promoted as _promoted
 
-    def visit(instance: dict, sg: dict, prefix: str, depth: int) -> None:
+    def visit(instance: dict, sg: dict, scope: dict, prefix: str, depth: int) -> None:
+        # ``scope`` holds the links that can feed THIS instance's inputs: the
+        # workflow for a top-level instance, the containing definition for a
+        # nested one. A serialized link id that no longer exists there is one
+        # the frontend drops on load — the input is unlinked and the host value
+        # runs, exactly as ``resolve_write`` and ``slots`` treat it.
         if depth > _MAX_SUBGRAPH_ITERATIONS or instance.get("mode") in (_MODE_MUTED, _MODE_BYPASS):
             return
         for inner in sg.get("nodes") or []:
@@ -205,9 +210,9 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
                 continue
             inner_def = subgraph_defs.get(str(inner.get("type", "")))
             if inner_def is not None:
-                visit(inner, inner_def, f"{prefix}:{inner.get('id')}", depth + 1)
+                visit(inner, inner_def, sg, f"{prefix}:{inner.get('id')}", depth + 1)
         for pi in _promoted.promoted_inputs(sg, subgraph_defs):
-            if not pi.is_widget or _promoted.external_link(instance, pi.name) is not None:
+            if not pi.is_widget or _promoted.live_external_link(scope, instance, pi.name) is not None:
                 continue
             value = _promoted.host_value(instance, pi)
             if value is _promoted.UNSET:
@@ -232,7 +237,7 @@ def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_def
             continue
         sg = subgraph_defs.get(str(node.get("type", "")))
         if sg is not None:
-            visit(node, sg, str(node.get("id")), 0)
+            visit(node, sg, workflow, str(node.get("id")), 0)
 
 
 def _has_group_nodes(workflow: dict) -> bool:

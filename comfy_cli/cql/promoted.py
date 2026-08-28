@@ -162,9 +162,36 @@ def instance_input(instance: dict, name: str) -> dict | None:
 
 
 def external_link(instance: dict, name: str) -> Any:
-    """The link id feeding the instance's input ``name`` from outside, else None."""
+    """The RAW link id serialized on the instance's input ``name``, else None.
+    Prefer :func:`live_external_link`: a serialized id whose link no longer
+    exists is one the frontend drops on load, i.e. the input is unlinked."""
     entry = instance_input(instance, name)
     return None if entry is None else entry.get("link")
+
+
+def link_exists(scope: dict, link_id: Any) -> bool:
+    """Whether ``link_id`` is a live link in ``scope`` — the workflow (top-level
+    links are ``[id, src, slot, dst, slot, type]`` arrays) or a subgraph
+    definition (interior links are ``{"id": …}`` dicts)."""
+    for link in scope.get("links") or []:
+        if isinstance(link, dict):
+            if link.get("id") == link_id:
+                return True
+        elif isinstance(link, (list, tuple)) and link and link[0] == link_id:
+            return True
+    return False
+
+
+def live_external_link(scope: dict, instance: dict, name: str) -> Any:
+    """The link id feeding the instance's input ``name`` from outside, if that
+    link exists in ``scope`` (the workflow for a top-level instance, the
+    containing definition for a nested one); else None. A dangling id is
+    treated as unlinked everywhere — ``set-widget``, ``slots`` and the
+    converter must agree on what runs."""
+    link_id = external_link(instance, name)
+    if link_id is None or not link_exists(scope, link_id):
+        return None
+    return link_id
 
 
 def _quarantine_entries(instance: dict) -> list[dict]:
@@ -478,8 +505,8 @@ def resolve_write(
                 f"promoted input {widget!r} on subgraph node {node_str} is a link input ({pi.type}), not a widget — "
                 f"wire it with `comfy workflow connect <file> <node>.<output> {node_str}.{widget}`"
             )
-        link_id = external_link(node, widget)
-        if link_id is not None and _link_exists(workflow, link_id):
+        link_id = live_external_link(workflow, node, widget)
+        if link_id is not None:
             return trace_upstream_write(workflow, graph, link_id, given, redirected_from=redirected_from or given)
         # No link, or a dangling link id the frontend drops on load: the host
         # value is what runs.
@@ -493,10 +520,6 @@ def resolve_write(
         f"promoted widgets: {', '.join(names) if names else '(none)'} "
         f"(or address an interior widget directly, e.g. {node_str}/<innerId>.<input>)"
     )
-
-
-def _link_exists(workflow: dict, link_id: Any) -> bool:
-    return any(isinstance(x, (list, tuple)) and x and x[0] == link_id for x in workflow.get("links") or [])
 
 
 def trace_upstream_write(

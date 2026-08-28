@@ -112,3 +112,16 @@ def test_list_valued_host_values_are_wrapped_not_read_as_links(object_info, grap
     assert isinstance(plain, str)
     assert text != ["a", "b"] or not (isinstance(text, list) and len(text) == 2 and isinstance(text[0], str))
     assert text == workflow_to_api._wrap_widget_value(["a", "b"])
+
+
+def test_dangling_link_on_a_promoted_input_does_not_drop_the_host_value(object_info):
+    """A promoted input whose serialized ``link`` id no longer exists in
+    ``links`` is unlinked as far as the frontend is concerned (it drops the
+    link on load): the host value must reach the prompt, exactly as
+    ``resolve_write`` already treats that shape."""
+    wf = _load("audio_minimax_music_3.json")
+    inst = next(n for n in wf["nodes"] if n["id"] == 37)
+    inst["inputs"].append({"name": "caption", "type": "STRING", "widget": {"name": "caption"}, "link": 999999})
+    assert all(link[0] != 999999 for link in wf["links"])
+    api = convert_ui_to_api(wf, object_info)
+    assert _api_node(api, "MiniMaxMusic3TextEncode", "37:13")["inputs"]["caption"].startswith("Global Metadata")

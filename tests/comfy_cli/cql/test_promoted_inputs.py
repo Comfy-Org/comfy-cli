@@ -202,3 +202,13 @@ def test_slots_skip_socket_inputs_and_flag_external_links(graph):
     assert "39.clip_to_resize" not in slots
     assert slots["39.pad_second_video"]["current_value"] is False
     assert slots["39.interpolation"]["current_value"] == "lanczos"
+
+
+def test_slots_do_not_report_a_dangling_link_as_linked_from(graph):
+    wf = _load("audio_minimax_music_3.json")
+    inst = _instance(wf, 37)
+    inst["inputs"].append({"name": "caption", "type": "STRING", "widget": {"name": "caption"}, "link": 999999})
+    slots = {s["address"]: s for s in graph.get_template_schema("t", wf)["slots"]}
+    assert "linked_from" not in slots["37.caption"]
+    assert slots["37.caption"]["current_value"].startswith("Global Metadata")
+    assert promoted.live_external_link(wf, inst, "caption") is None
