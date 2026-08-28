@@ -52,6 +52,39 @@ def _object_info_with_deprecated() -> dict[str, Any]:
         "deprecated": True,
         "python_module": "nodes",
     }
+    # Deprecated free class whose only same-name live twin is a paid partner
+    # node: no replacement may be offered.
+    info["OldFreeUpscale"] = {
+        "input": {"required": {"image": "IMAGE"}},
+        "input_order": {"required": ["image"]},
+        "output": ["IMAGE"],
+        "output_name": ["IMAGE"],
+        "category": "image/upscale",
+        "display_name": "Upscale (Legacy)",
+        "deprecated": True,
+        "python_module": "nodes",
+    }
+    info["PaidUpscale"] = {
+        "input": {"required": {"image": "IMAGE"}},
+        "input_order": {"required": ["image"]},
+        "output": ["IMAGE"],
+        "output_name": ["IMAGE"],
+        "category": "partner/image",
+        "display_name": "Upscale",
+        "api_node": True,
+        "python_module": "comfy_api_nodes",
+    }
+    # Deprecated loader that is the ONLY producer of its type.
+    info["OldLoader"] = {
+        "input": {"required": {"name": [["a"]]}},
+        "input_order": {"required": ["name"]},
+        "output": ["OLDTHING"],
+        "output_name": ["OLDTHING"],
+        "category": "loaders",
+        "display_name": "Old Loader",
+        "deprecated": True,
+        "python_module": "nodes",
+    }
     info["OldSampler"] = {
         "input": {"required": {"model": "MODEL"}},
         "input_order": {"required": ["model"]},
@@ -114,6 +147,13 @@ class TestAddNode:
         assert env["error"]["details"]["replacement"] is None
         assert "nodes search" in env["error"]["hint"]
 
+    def test_no_replacement_across_billing_class(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _base_workflow())
+        env = _run(workflow_cmd.app, ["add-node", str(path), "OldFreeUpscale"], capsys)
+        assert env["error"]["code"] == "node_deprecated"
+        assert env["error"]["details"]["replacement"] is None
+        assert "PaidUpscale" not in env["error"]["hint"]
+
     def test_allow_deprecated_adds(self, patched_graph, tmp_path, capsys):
         path = _write(tmp_path, _base_workflow())
         env = _run(workflow_cmd.app, ["add-node", str(path), "ImageBatch", "--allow-deprecated"], capsys)
@@ -169,6 +209,11 @@ class TestDiscovery:
         env = _run(nodes_cmd.app, ["search", "OldSamplr"], capsys)
         assert env["ok"] is True
         assert "OldSampler" not in _names(env)
+
+    def test_deprecated_only_producer_is_not_free(self):
+        g = _graph()
+        assert "OLDTHING" not in g.free_types()
+        assert g._free_producer("OLDTHING", g.free_types()) is None
 
     def test_ls_hides_deprecated_by_default(self, patched_graph, capsys):
         env = _run(nodes_cmd.app, ["ls", "--category", "image/batch"], capsys)

@@ -953,7 +953,9 @@ class Graph:
             while changed:
                 changed = False
                 for m in self._nodes.values():
-                    if not m.can_apply(free):
+                    # Same rule as the producer index: a deprecated loader
+                    # must not make its type look obtainable.
+                    if m.deprecated or not m.can_apply(free):
                         continue
                     for t in m.output_types():
                         if t != "*" and t not in free:

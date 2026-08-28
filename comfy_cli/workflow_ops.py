@@ -225,11 +225,12 @@ _DEPRECATED_DISPLAY_SUFFIX = re.compile(r"\s*\((?:deprecated|legacy)\)\s*$", re.
 
 def _deprecated_replacement(graph, m) -> str | None:
     want = _DEPRECATED_DISPLAY_SUFFIX.sub("", m.display_name).strip().lower()
-    live = [n for n in graph.all_nodes() if not n.deprecated and n.display_name.strip().lower() == want]
     # A free node and a paid partner node can share a display name; never
     # answer a free class with one that bills credits (or vice versa).
-    live.sort(key=lambda n: n.is_api_node != m.is_api_node)
-    return live[0].id if live else None
+    for n in graph.all_nodes():
+        if not n.deprecated and n.is_api_node == m.is_api_node and n.display_name.strip().lower() == want:
+            return n.id
+    return None
 
 
 def _find(workflow: dict, node_id: Any) -> dict | None:
