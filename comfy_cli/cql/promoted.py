@@ -94,7 +94,9 @@ def promoted_inputs(sg: dict, defs: dict[str, dict], depth: int = 0) -> list[Pro
             continue
         name = str(inp.get("name") or "")
         type_id = inp.get("type")
-        type_str = type_id if isinstance(type_id, str) else str(type_id)
+        # A missing or non-string declared type is UNKNOWN (""), never the
+        # repr of whatever was there — callers treat "" as "accept the source".
+        type_str = type_id if isinstance(type_id, str) else ""
         source: tuple[str, str, str | None, bool] | None = None
         for link_id in inp.get("linkIds") or []:
             if not isinstance(link_id, (int, str)):

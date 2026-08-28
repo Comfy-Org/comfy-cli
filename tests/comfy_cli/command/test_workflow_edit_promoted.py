@@ -178,6 +178,7 @@ def test_connect_to_an_already_materialized_promoted_input_reuses_it(graph):
     wf, second = workflow_ops.connect(wf, graph, prim, "INT", 57, "width")
     assert [i["name"] for i in _node(wf, 57)["inputs"]] == ["text", "width"]
     assert _input(_node(wf, 57), "width")["link"] == second["link_id"]
+    assert first["link_id"] not in {link[0] for link in wf["links"]}  # replaced, not duplicated
 
 
 # --------------------------------------------------------------------------- #
@@ -305,3 +306,77 @@ def test_cli_connect_int_node_to_promoted_width(tmp_path, capsys):
     assert env["ok"] is True, env
     saved = json.loads(path.read_text())
     assert _input(_node(saved, 57), "width")["link"] == env["data"]["op"]["link_id"]
+
+
+# --------------------------------------------------------------------------- #
+# Review findings on #815
+# --------------------------------------------------------------------------- #
+
+
+def test_nested_host_payload_reflects_the_forked_instance(graph):
+    """A nested host inside a definition SHARED by two instances is forked on
+    write; the op's ``host_widgets_values`` must be read from the written
+    (forked) instance, not the pre-fork dict captured during resolution."""
+    wf = _load("image_z_image_turbo.json")
+    inner_sg = wf["definitions"]["subgraphs"][0]
+    outer_id = "0e0e0e0e-0000-4000-8000-000000000001"
+    outer = {
+        "id": outer_id,
+        "name": "Outer",
+        "inputs": [],
+        "outputs": [],
+        "widgets": [],
+        "links": [],
+        "nodes": [
+            {
+                "id": 7,
+                "type": inner_sg["id"],
+                "pos": [0, 0],
+                "size": [1, 1],
+                "flags": {},
+                "order": 0,
+                "mode": 0,
+                "inputs": [],
+                "outputs": [],
+                "properties": {},
+                "widgets_values": [],
+            }
+        ],
+    }
+    wf["definitions"]["subgraphs"].append(outer)
+    for nid in (900, 901):  # two instances share the outer definition
+        wf["nodes"].append(
+            {
+                "id": nid,
+                "type": outer_id,
+                "pos": [0, 0],
+                "size": [1, 1],
+                "flags": {},
+                "order": 0,
+                "mode": 0,
+                "inputs": [],
+                "outputs": [],
+                "properties": {},
+                "widgets_values": [],
+            }
+        )
+    wf, op = workflow_ops.set_widget(wf, graph, "900/7", "width", 640)
+    forked = _node(wf, 900)["type"]
+    assert forked != outer_id  # the shared definition was forked for instance 900
+    inner = next(
+        n for n in next(d for d in wf["definitions"]["subgraphs"] if d["id"] == forked)["nodes"] if n["id"] == 7
+    )
+    assert inner["widgets_values"][1] == 640
+    assert op["promoted"]["host_widgets_values"] == inner["widgets_values"]
+    # the sibling's definition is untouched
+    assert next(n for n in outer["nodes"] if n["id"] == 7)["widgets_values"] == []
+
+
+def test_connect_does_not_type_check_against_an_untyped_declared_input(graph):
+    wf, prim = _with_primitive(graph)
+    sg = next(d for d in wf["definitions"]["subgraphs"] if d["id"] == _node(wf, 57)["type"])
+    width = next(i for i in sg["inputs"] if i["name"] == "width")
+    del width["type"]
+    wf, op = workflow_ops.connect(wf, graph, prim, "INT", 57, "width")
+    assert _input(_node(wf, 57), "width")["link"] == op["link_id"]
+    assert op["grow"]["type"] == "INT"  # falls back to the source type
