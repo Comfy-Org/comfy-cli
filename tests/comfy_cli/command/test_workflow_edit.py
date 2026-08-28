@@ -677,7 +677,7 @@ _SG_UUID = "f2fdebf6-dfaf-43b6-9eb2-7f70613cfdc1"
 
 
 def _subgraph_workflow() -> dict:
-    """A minimal LEGACY subgraph template, shaped like the pre-ADR-0009 saves
+    """A minimal LEGACY subgraph template, shaped like the pre-ADR 0009 saves
     in the gallery (e.g. ``flux_dev_checkpoint_example.json`` node 56 → 52):
     a top-level subgraph instance `57` whose promoted `text`/`seed`/`steps`
     exist ONLY as `properties.proxyWidgets` entries routing to interior
@@ -747,7 +747,7 @@ class TestSetWidgetSubgraph:
 
     These pins changed with the legacy-proxy repair. Before, ``57.text``
     followed ``proxyWidgets`` into CLIPTextEncode 27 and wrote its
-    ``widgets_values`` — the "layer 2" edit BE-10305 is about: the frontend's
+    ``widgets_values`` — the "layer 2" edit the subgraph-editing report is about: the frontend's
     load-time migration re-seeds the host from that interior value, so it
     *looked* right, but the value lived where no other promoted write puts
     it and ``comfy run`` had no host value to submit. Now the write mirrors
