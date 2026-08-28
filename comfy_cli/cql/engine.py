@@ -67,6 +67,29 @@ _AUDIO_UI_CLASSES = frozenset(
 # its own extension keyed on the ``audio`` input; ``file_upload`` (3D loaders)
 # and ``mesh_upload`` attach nothing.
 _IMAGE_UPLOAD_FLAGS = frozenset({"image_upload", "animated_image_upload", "video_upload"})
+# File extensions that identify a COMBO's option list as a listing of the
+# server's INPUT folder rather than an install-time vocabulary. The core
+# loaders mark such ports with ``<kind>_upload``; a custom pack that ships its
+# own upload button does not (VideoHelperSuite builds ``VHS_LoadVideo.video``
+# from ``folder_paths.get_input_directory()`` filtered by its
+# ``video_extensions`` and attaches the button by class name in ``VHS.core.js``,
+# so object_info carries a bare ``[["bedroom.mp4"]]``). The listing itself is
+# the evidence: every option is a media file name, which a model folder
+# (``.safetensors``/``.ckpt``/``.gguf``) or a plain enum (``alpha``/``red``)
+# never is. Families mirror what the frontend's upload widgets accept — image,
+# animated image, video, audio, 3D model.
+_INPUT_FILE_EXTENSIONS = frozenset(
+    {
+        # image / animated image
+        "png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff", "avif", "apng",
+        # video (VHS ``video_extensions`` + core LoadVideo)
+        "mp4", "webm", "mkv", "mov", "avi", "m4v",
+        # audio
+        "mp3", "wav", "ogg", "flac", "m4a", "aac", "opus",
+        # 3D
+        "glb", "gltf", "obj", "fbx", "stl", "ply", "usdz",
+    }
+)  # fmt: skip
 # ``Comfy.Preview3D`` / ``Comfy.SaveGLB`` inject a ``PREVIEW_3D`` ``image`` widget.
 _PREVIEW_3D_CLASSES = frozenset({"SaveGLB", "Preview3D"})
 
@@ -98,6 +121,10 @@ class PortOptions:
     # an upload button and the declared options are the server's *installed input
     # files*, not an install-time enum. See ``Port.is_upload_backed``.
     upload: bool = False
+    # True when object_info carried ANY ``<kind>_upload`` key, true or false —
+    # an explicit declaration either way, which ``Port.is_upload_backed`` obeys
+    # over the option-listing heuristic it otherwise falls back to.
+    upload_declared: bool = False
     # The ``<kind>_upload`` flag names that were set (``("image_upload",)``),
     # so callers can tell WHICH frontend upload extension claims the input.
     upload_flags: tuple[str, ...] = ()
@@ -265,8 +292,24 @@ class Port:
         port is left unconstrained and the real membership check is the
         server's at run time. The sibling ``LoadImageMask.channel`` carries no
         marker and stays a normal, constrained enum.
+
+        The marker is the CORE loaders' contract. A custom pack that ships its
+        own upload button (VideoHelperSuite: ``VHS_LoadVideo.video`` is the
+        input folder filtered by ``video_extensions``, button attached by class
+        name in ``VHS.core.js``) reaches object_info as a bare option list, and
+        the enum check then refused every content hash an agent uploaded to
+        Comfy Cloud (``'<64hex>.mp4' not in 1 known options for video``) — a
+        whole multi-shot assembly killed at ``run`` preflight. When the catalog
+        declares nothing, the listing itself decides: a list made entirely of
+        media file names is a folder listing (see
+        :data:`_INPUT_FILE_EXTENSIONS`). An explicit ``<kind>_upload: false``
+        still wins over that heuristic.
         """
-        return self.type == "COMBO" and self.options.upload
+        if self.type != "COMBO":
+            return False
+        if self.options.upload_declared:
+            return self.options.upload
+        return _is_input_file_listing(self.enum_values)
 
     def canonical_combo(self, value: Any) -> Any | None:
         """Map a *mangled* COMBO value to the real option it clearly means, or
@@ -656,6 +699,30 @@ def _upload_marked(opts_raw: dict) -> bool:
     return any(isinstance(k, str) and k.endswith("_upload") and bool(v) for k, v in opts_raw.items())
 
 
+def _upload_declared(opts_raw: dict) -> bool:
+    """True when the options dict carries an upload marker key at all — set
+    either way. ``image_upload: false`` is a declaration, not an absence."""
+    return any(isinstance(k, str) and k.endswith("_upload") for k in opts_raw)
+
+
+def _is_input_file_listing(values: list[Any]) -> bool:
+    """True when a COMBO's option list reads as a listing of the server's input
+    folder: non-empty, and EVERY option is a file name carrying one of
+    :data:`_INPUT_FILE_EXTENSIONS`. One non-file option (a ``none`` sentinel,
+    a bare label) makes it a vocabulary that happens to contain file names.
+    """
+    if not values:
+        return False
+    for v in values:
+        if not isinstance(v, str):
+            return False
+        name = v.rsplit("/", 1)[-1]
+        stem, dot, ext = name.rpartition(".")
+        if not dot or not stem or ext.lower() not in _INPUT_FILE_EXTENSIONS:
+            return False
+    return True
+
+
 def _parse_port_options(opts_raw: dict) -> PortOptions:
     template_raw = opts_raw.get("template")
     return PortOptions(
@@ -668,6 +735,7 @@ def _parse_port_options(opts_raw: dict) -> PortOptions:
         force_input=bool(opts_raw.get("forceInput", False)),
         template=template_raw if isinstance(template_raw, dict) else None,
         upload=_upload_marked(opts_raw),
+        upload_declared=_upload_declared(opts_raw),
         upload_flags=tuple(
             sorted(k for k, v in opts_raw.items() if isinstance(k, str) and k.endswith("_upload") and bool(v))
         ),

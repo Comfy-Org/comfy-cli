@@ -15,6 +15,7 @@ import pytest
 from comfy_cli.command.run.loader import _classify_api_workflow
 from comfy_cli.cql.engine import (
     Graph,
+    Port,
     _apply_one_slot,
     _extract_frontend_slots,
     _write_widget,
@@ -2110,6 +2111,124 @@ class TestValidateUploadBackedCombo:
             }
         )
         assert self._port(g, "VAELoader", "vae_name").canonical_combo("vae/ae.safetensors") == "ae.safetensors"
+
+
+class TestValidateUnmarkedInputFileCombo:
+    """A COMBO whose options are the server's INPUT-FOLDER listing is upload-
+    backed even when object_info carries no ``<kind>_upload`` marker.
+
+    Found in prod (Langfuse 2026-08-25, 3 ``run`` failures, one user): the
+    agent uploaded eight ``.mp4`` shots to Comfy Cloud, wired each content hash
+    into a ``VHS_LoadVideo.video`` widget, and ``comfy run`` refused every node
+    with ``unknown_enum_value '<64hex>.mp4' not in 1 known options for video
+    (did you mean: bedroom.mp4?)``. The whole assembly never rendered.
+
+    The marker is the frontend's contract for CORE loaders only. VideoHelperSuite
+    builds ``video`` from ``folder_paths.get_input_directory()`` filtered by its
+    ``video_extensions`` (``load_video_nodes.py``) and ships its OWN upload
+    button keyed on the class name (``VHS.core.js`` ``addUploadWidget``), so the
+    catalog for ``VHS_LoadVideo.video`` is just ``[["bedroom.mp4"]]`` — the same
+    input-folder listing ``LoadVideo.file`` shows with ``video_upload: true``.
+    What identifies the port is therefore the LISTING, not the flag: every
+    option is a media file name, which no install-time vocabulary (model
+    folders list ``.safetensors``, channel enums list ``alpha``/``red``) ever is.
+    """
+
+    @pytest.fixture
+    def graph(self) -> Graph:
+        from pathlib import Path
+
+        fixture = Path(__file__).parent.parent / "fixtures" / "object_info_vhs_loadvideo.json"
+        return Graph.from_object_info(json.loads(fixture.read_text()))
+
+    @staticmethod
+    def _port(g: Graph, class_type: str, name: str) -> Port:
+        return next(p for p in g.node(class_type).inputs if p.name == name)
+
+    def _assembly(self, video: str) -> dict[str, Any]:
+        return {
+            "2923786287638124": {
+                "class_type": "VHS_LoadVideo",
+                "inputs": {
+                    "video": video,
+                    "force_rate": 0,
+                    "custom_width": 0,
+                    "custom_height": 0,
+                    "frame_load_cap": 0,
+                    "skip_first_frames": 0,
+                    "select_every_nth": 1,
+                },
+            },
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["2923786287638124", 0], "filename_prefix": "x"}},
+        }
+
+    def test_real_catalog_entry_carries_no_marker(self, graph):
+        """Pin the shape this exemption exists for: the production catalog's
+        ``VHS_LoadVideo.video`` is a bare option list, no marker of any kind."""
+        port = self._port(graph, "VHS_LoadVideo", "video")
+        assert port.type == "COMBO" and port.enum_values == ["bedroom.mp4"]
+        assert port.options.upload is False and port.options.upload_flags == ()
+
+    def test_uploaded_content_hash_is_accepted_on_unmarked_video_combo(self, graph):
+        port = self._port(graph, "VHS_LoadVideo", "video")
+        assert port.is_upload_backed is True
+        result = graph.validate_workflow(self._assembly("1f7db0ec" + "a" * 52 + "57b65.mp4"))
+        assert result["errors"] == [], result["errors"]
+        assert result["valid"] is True
+
+    def test_uploaded_hash_is_not_rewritten_to_the_sample_file(self, graph):
+        """``canonical_combo`` must not auto-correct the hash to ``bedroom.mp4``
+        either — that would render the sample instead of the user's shot."""
+        port = self._port(graph, "VHS_LoadVideo", "video")
+        assert port.canonical_combo("1f7db0ec" + "a" * 52 + "57b65.mp4") is None
+
+    def test_marked_and_unmarked_input_listings_agree(self, graph):
+        """The V3 core loader (marked) and the VHS loader (unmarked) list the
+        same input folder; they must reach the same verdict."""
+        assert self._port(graph, "LoadVideo", "file").is_upload_backed is True
+        assert self._port(graph, "VHS_LoadVideo", "video").is_upload_backed is True
+
+    def test_model_folder_listing_stays_a_constrained_enum(self, graph):
+        """The exemption keys off media file names. A checkpoint folder lists
+        ``.safetensors`` — install-time, static — and keeps the enum check."""
+        port = self._port(graph, "ImageOnlyCheckpointLoader", "ckpt_name")
+        assert port.is_upload_backed is False
+        assert [w["code"] for w in port.validate_catalog("a" * 64 + ".safetensors")] == ["unknown_enum_value"]
+
+    def test_plain_vocabulary_stays_a_constrained_enum(self, graph):
+        port = self._port(graph, "LoadImageMask", "channel")
+        assert port.is_upload_backed is False
+        assert [w["code"] for w in port.validate_catalog("alpha.png")] == ["unknown_enum_value"]
+
+    def test_explicit_false_marker_still_wins_over_the_listing(self):
+        """``image_upload: false`` is a declaration; the listing heuristic only
+        fills in when the catalog says nothing at all."""
+        g = Graph.from_object_info(
+            {
+                "LoadImage": {
+                    "input": {"required": {"image": [["beach.jpg"], {"image_upload": False}]}},
+                    "output": ["IMAGE"],
+                    "output_name": ["IMAGE"],
+                    "python_module": "nodes",
+                }
+            }
+        )
+        assert self._port(g, "LoadImage", "image").is_upload_backed is False
+
+    def test_listing_must_be_files_all_the_way_down(self):
+        """One non-file option (a sentinel like ``none``) means the list is a
+        vocabulary that happens to contain file names, not a folder listing."""
+        g = Graph.from_object_info(
+            {
+                "Picker": {
+                    "input": {"required": {"choice": [["none", "beach.jpg"]]}},
+                    "output": ["IMAGE"],
+                    "output_name": ["IMAGE"],
+                    "python_module": "nodes",
+                }
+            }
+        )
+        assert self._port(g, "Picker", "choice").is_upload_backed is False
 
 
 class TestValidateDynamicCombo:
