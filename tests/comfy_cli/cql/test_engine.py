@@ -3125,6 +3125,138 @@ class TestMatchTypeWildcard:
         assert not _is_wildcard_type("")
 
 
+class TestMultiTypeEdge:
+    """A socket type is a COMMA-SEPARATED UNION in ComfyUI: ``INT,FLOAT`` on a
+    math node's operand, ``MESH,FILE_3D_GLB,FILE_3D_GLTF,…`` on a 3D importer.
+    The edge check compared the raw strings, so a ``FLOAT`` output feeding an
+    ``INT,FLOAT`` input — a connection the frontend's ``isValidConnection``
+    accepts and the server runs — was reported as ``edge_type_mismatch``.
+
+    Langfuse 2026-08-25..28: 23 ``edge_type_mismatch`` warnings across 55
+    validate calls, 12 of them exactly this shape (``input 'b' expects
+    INT,FLOAT but PrimitiveFloat[0] produces FLOAT``; ``input 'model_3d'
+    expects FILE_3D_GLB,FILE_3D_GLTF,… but MeshyImageToModelNode[2] produces
+    FILE_3D_GLB``). Shapes copied from the cloud catalog (``SimpleMath+``,
+    ``PrimitiveFloat``).
+    """
+
+    @staticmethod
+    def _object_info() -> dict[str, Any]:
+        return {
+            "PrimitiveFloat": {
+                "input": {"required": {"value": ["FLOAT", {"min": -1e9, "max": 1e9, "step": 0.1}]}},
+                "input_order": {"required": ["value"]},
+                "output": ["FLOAT"],
+                "output_name": ["FLOAT"],
+                "name": "PrimitiveFloat",
+            },
+            "LoadImage": {
+                "input": {"required": {"image": [["a.png"]]}},
+                "input_order": {"required": ["image"]},
+                "output": ["IMAGE"],
+                "output_name": ["IMAGE"],
+                "name": "LoadImage",
+            },
+            "SimpleMath+": {
+                "input": {
+                    "required": {"value": ["STRING", {"multiline": False, "default": ""}]},
+                    "optional": {"a": ["INT,FLOAT", {"default": 0.0}], "b": ["INT,FLOAT", {"default": 0.0}]},
+                },
+                "input_order": {"required": ["value"], "optional": ["a", "b"]},
+                "output": ["INT", "FLOAT"],
+                "output_name": ["INT", "FLOAT"],
+                "name": "SimpleMath+",
+            },
+            # A union on the SOURCE side: one output socket typed as a union
+            # feeding a single-type input.
+            "UnionSource": {
+                "input": {"required": {}},
+                "input_order": {"required": []},
+                "output": ["INT,FLOAT"],
+                "output_name": ["number"],
+                "name": "UnionSource",
+            },
+            "IntSink": {
+                "input": {"required": {"n": ["INT", {}]}},
+                "input_order": {"required": ["n"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "name": "IntSink",
+            },
+            "PreviewAny": {
+                "input": {"required": {"source": ["*", {}]}},
+                "input_order": {"required": ["source"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "name": "PreviewAny",
+            },
+        }
+
+    @pytest.fixture
+    def graph(self) -> Graph:
+        return Graph.from_object_info(self._object_info())
+
+    @staticmethod
+    def _mismatches(result: dict) -> list[str]:
+        return [w["message"] for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
+
+    def test_member_of_accept_list_is_not_a_mismatch(self, graph: Graph):
+        result = graph.validate_workflow(
+            {
+                "4": {"class_type": "PrimitiveFloat", "inputs": {"value": 1.5}},
+                "5": {"class_type": "SimpleMath+", "inputs": {"value": "a+b", "a": 1, "b": ["4", 0]}},
+                "6": {"class_type": "PreviewAny", "inputs": {"source": ["5", 1]}},
+            }
+        )
+        assert self._mismatches(result) == []
+
+    def test_union_source_into_member_input_is_not_a_mismatch(self, graph: Graph):
+        result = graph.validate_workflow(
+            {
+                "1": {"class_type": "UnionSource", "inputs": {}},
+                "2": {"class_type": "IntSink", "inputs": {"n": ["1", 0]}},
+            }
+        )
+        assert self._mismatches(result) == []
+
+    def test_type_outside_the_accept_list_still_warns(self, graph: Graph):
+        """The split must not turn the check permissive: IMAGE is in neither
+        half of ``INT,FLOAT``."""
+        result = graph.validate_workflow(
+            {
+                "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+                "5": {"class_type": "SimpleMath+", "inputs": {"value": "a+b", "a": 1, "b": ["1", 0]}},
+                "6": {"class_type": "PreviewAny", "inputs": {"source": ["5", 1]}},
+            }
+        )
+        assert self._mismatches(result) == ["input 'b' expects INT,FLOAT but LoadImage[0] produces IMAGE"]
+
+    def test_hint_names_the_output_whose_type_is_in_the_accept_list(self, graph: Graph):
+        """When the source has a compatible output at another index, the hint
+        must find it through the same union-aware test (``[1]``=FLOAT here,
+        wired wrongly from a STRING)."""
+        oi = self._object_info()
+        oi["Splitter"] = {
+            "input": {"required": {}},
+            "input_order": {"required": []},
+            "output": ["STRING", "FLOAT"],
+            "output_name": ["text", "number"],
+            "name": "Splitter",
+        }
+        g = Graph.from_object_info(oi)
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "Splitter", "inputs": {}},
+                "5": {"class_type": "SimpleMath+", "inputs": {"value": "a+b", "a": 1, "b": ["1", 0]}},
+                "6": {"class_type": "PreviewAny", "inputs": {"source": ["5", 1]}},
+            }
+        )
+        [w] = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
+        assert w["hint"] == "use Splitter[1] instead"
+
+
 class TestUnreachableNodeIsVisible:
     """A node that reaches no output is pruned by the server, and every promoted
     check here skips pruned nodes — so such a graph could validate as
