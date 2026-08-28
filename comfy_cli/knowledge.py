@@ -77,7 +77,7 @@ REASON_SIGNED_OUT = (
     "fetch from the cloud knowledge channel failed and no cached bundle exists; "
     "the usual cause is being signed out (run `comfy cloud login`)"
 )
-REASON_FETCH_FAILED = "fetch failed and no cached bundle exists"
+REASON_FETCH_FAILED = "fetch from COMFY_KNOWLEDGE_URL failed and no cached bundle exists"
 
 
 @dataclass(frozen=True)
@@ -405,7 +405,9 @@ def _http_get(url: str) -> bytes:
     if url.startswith(get_base_url().rstrip("/") + "/"):
         from comfy_cli.target import resolve_target
 
-        opened = authed_urlopen(url, resolve_target(where="cloud"), timeout=FETCH_TIMEOUT_SECONDS)
+        # Best-effort background fetch: a spurious refresh failure must not log the user out.
+        target = resolve_target(where="cloud", allow_clear=False)
+        opened = authed_urlopen(url, target, timeout=FETCH_TIMEOUT_SECONDS)
     else:
         req = urllib.request.Request(url, headers={"User-Agent": "comfy-cli"})
         opened = plain_urlopen(req, timeout=FETCH_TIMEOUT_SECONDS)

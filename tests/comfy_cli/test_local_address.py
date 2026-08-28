@@ -200,6 +200,22 @@ def test_resolve_target_local_flag_beats_env(monkeypatch):
     assert target.port == 8188
 
 
+def test_resolve_target_cloud_forwards_allow_clear(monkeypatch):
+    import comfy_cli.credentials
+    from comfy_cli.target import resolve_target
+
+    seen: dict = {}
+
+    def fake_resolve(**kwargs):
+        seen.update(kwargs)
+        return None
+
+    monkeypatch.setattr(comfy_cli.credentials, "resolve_cloud_credential", fake_resolve)
+    target = resolve_target(where="cloud", allow_clear=False)
+    assert target.kind == "cloud"
+    assert seen["allow_clear"] is False
+
+
 def test_jobs_resolver_honors_env(monkeypatch):
     from comfy_cli.command.jobs import _resolve_host_port
 

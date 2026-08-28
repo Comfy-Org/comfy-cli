@@ -89,7 +89,7 @@ def test_login_warms_the_knowledge_cache_after_saving_the_session(monkeypatch, c
     assert _parse_lines(capsys.readouterr().out)[-1]["ok"] is True
 
 
-def test_login_timeout_does_not_warm_the_knowledge_cache(monkeypatch, capsys, _knowledge_warm):
+def test_login_timeout_does_not_warm_the_knowledge_cache(monkeypatch, _knowledge_warm):
     def fake_run_login(**kwargs):
         kwargs["on_url_ready"](_AUTHORIZE_URL)
         raise oauth.OAuthError("timed out")

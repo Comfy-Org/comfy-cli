@@ -362,13 +362,15 @@ class TestAuthRouting:
         def fake_authed(url, target, **kw):
             seen["url"] = url
             seen["target_kind"] = target.kind
+            # A failed token refresh during this background fetch must not wipe the stored session.
+            seen["allow_clear"] = target.allow_clear
             return self._fake_resp(b'{"models": {}}')
 
         monkeypatch.setattr(knowledge, "authed_urlopen", fake_authed)
         monkeypatch.setattr(knowledge, "plain_urlopen", lambda *a, **kw: pytest.fail("plain opener used"))
         url = f"{get_base_url()}/api/knowledge/knowledge.json"
         assert knowledge._http_get(url) == b'{"models": {}}'
-        assert seen == {"url": url, "target_kind": "cloud"}
+        assert seen == {"url": url, "target_kind": "cloud", "allow_clear": False}
 
     def test_signed_out_401_on_the_default_url_degrades_quietly(self, monkeypatch):
         import comfy_cli.target
@@ -816,6 +818,16 @@ class TestCli:
         rc, env = _run(["resolve", "x"], capsys)
         assert rc == 1
         assert env["error"]["code"] == "knowledge_unavailable"
+        assert "comfy cloud login" in env["error"]["hint"]
+
+    def test_resolve_after_explicit_url_failure_points_at_the_url(self, monkeypatch, capsys):
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
+        rc, env = _run(["resolve", "x"], capsys)
+        assert rc == 1
+        assert env["error"]["code"] == "knowledge_unavailable"
+        assert knowledge.REASON_FETCH_FAILED in env["error"]["message"]
+        assert "COMFY_KNOWLEDGE_URL" in env["error"]["hint"]
+        assert "comfy cloud login" not in env["error"]["hint"]
 
     def test_pick_hit(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)

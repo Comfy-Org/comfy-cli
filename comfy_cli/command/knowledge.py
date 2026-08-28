@@ -41,13 +41,22 @@ def _text(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+_UNAVAILABLE_HINTS = {
+    knowledge.REASON_SIGNED_OUT: "sign in with `comfy cloud login` so the bundle can be fetched, or set COMFY_KNOWLEDGE_FILE to a knowledge.json",
+    knowledge.REASON_FETCH_FAILED: "check COMFY_KNOWLEDGE_URL, or set COMFY_KNOWLEDGE_FILE to a knowledge.json",
+    knowledge.REASON_ENV_FILE: "check the COMFY_KNOWLEDGE_FILE path",
+}
+
+
 def _require_bundle(renderer) -> knowledge.Bundle:
     bundle = knowledge.load_bundle()
     if bundle is None:
+        reason = knowledge.last_reason()
+        hint = _UNAVAILABLE_HINTS.get(reason, "set COMFY_KNOWLEDGE_FILE to a knowledge.json")
         renderer.error(
             code="knowledge_unavailable",
-            message="no knowledge bundle is loaded",
-            hint="sign in with `comfy cloud login` so the bundle can be fetched, or set COMFY_KNOWLEDGE_FILE to a knowledge.json; see `comfy knowledge status`",
+            message=f"no knowledge bundle is loaded: {reason}",
+            hint=f"{hint}; see `comfy knowledge status`",
         )
         raise typer.Exit(code=1)
     return bundle
@@ -58,7 +67,10 @@ def _require_bundle(renderer) -> knowledge.Bundle:
 def status_cmd(
     refresh: Annotated[
         bool,
-        typer.Option("--refresh", help="Re-fetch the bundle, ignoring the cache TTL."),
+        typer.Option(
+            "--refresh",
+            help="Reload the bundle, ignoring the cache TTL (re-reads COMFY_KNOWLEDGE_FILE when set, else re-fetches).",
+        ),
     ] = False,
 ):
     renderer = get_renderer()

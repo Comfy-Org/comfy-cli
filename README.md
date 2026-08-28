@@ -633,7 +633,7 @@ Discovery commands can attach a `knowledge` block to their `--json` output: whic
 model a name refers to, whether it is deprecated, ranked picks per capability,
 and known pitfalls. A signed-in install (`comfy cloud login`) fetches the bundle
 from the cloud knowledge channel on its own. Signed out, the fetch fails quietly
-and no block is emitted.
+and no block is emitted unless a bundle is already cached.
 
 Point the CLI at a different bundle with either of:
 
