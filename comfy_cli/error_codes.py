@@ -718,6 +718,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "see `details.close_matches` or run `comfy nodes search`",
     ),
     ErrorCode(
+        "node_deprecated",
+        "`workflow add-node` (or an `add_node` op in a batch) named a class the catalog marks deprecated. "
+        "Nothing was added. `details.replacement` names the live class with the same display name when "
+        "one exists.",
+        "add `details.replacement` instead, or pass --allow-deprecated "
+        '(`"allow_deprecated": true` on the op) when the user asked for that exact node',
+    ),
+    ErrorCode(
         "path_bounds_invalid",
         "`comfy nodes path` was given `--max-depth` or `--max-paths` below 1. Such a bound admits no "
         "path at all, so the search is refused rather than returning an empty result that would read "

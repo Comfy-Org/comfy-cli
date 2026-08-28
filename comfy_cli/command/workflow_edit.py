@@ -144,6 +144,12 @@ def add_node_cmd(
         str | None,
         typer.Option("--at", show_default=False, help="Canvas position 'x,y' for the new node."),
     ] = None,
+    allow_deprecated: Annotated[
+        bool,
+        typer.Option(
+            "--allow-deprecated", show_default=False, help="Add the node even though the catalog marks it deprecated."
+        ),
+    ] = False,
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
@@ -169,8 +175,22 @@ def add_node_cmd(
             raise typer.Exit(code=1) from e
     try:
         workflow, op = workflow_ops.add_node(
-            workflow, graph, class_type, pos=pos, actor=actor, base_version=base_version
+            workflow,
+            graph,
+            class_type,
+            pos=pos,
+            actor=actor,
+            base_version=base_version,
+            allow_deprecated=allow_deprecated,
         )
+    except workflow_ops.DeprecatedNodeType as e:
+        renderer.error(
+            code=e.code,
+            message=str(e),
+            hint=e.hint,
+            details={"requested": e.class_type, "replacement": e.replacement},
+        )
+        raise typer.Exit(code=1) from e
     except workflow_ops.UnknownNodeType as e:
         # Same envelope shape as `nodes show` so a caller can self-correct from
         # the error alone. (The old hint pointed at `comfy nodes types`, which
@@ -693,6 +713,14 @@ def apply_cmd(
         # with the hint naming the standalone command to run instead.
         renderer.error(code=e.code, message=f"batch failed: {e}", hint=e.hint)
         raise typer.Exit(code=1) from e
+    except workflow_ops.DeprecatedNodeType as e:
+        renderer.error(
+            code=e.code,
+            message=f"batch failed: {e}",
+            hint=e.hint,
+            details={"requested": e.class_type, "replacement": e.replacement},
+        )
+        raise typer.Exit(code=1) from e
     except (ValueError, KeyError) as e:
         # Atomic batch: nothing is written if any spec fails. Same error code
         # and exit in both ack modes — `--ack summary` only ADDS a structured
@@ -862,6 +890,19 @@ def foreach_cmd(
                 else ""
             ),
             details={"written": written} if written else None,
+        )
+        raise typer.Exit(code=1) from e
+    except workflow_ops.DeprecatedNodeType as e:
+        renderer.error(
+            code=e.code,
+            message=f"foreach failed: {e}",
+            hint=e.hint
+            + (
+                f" ({len(written)} workflow(s) were already written to {out} — delete them or re-run)"
+                if written
+                else ""
+            ),
+            details={"requested": e.class_type, "replacement": e.replacement, "written": written},
         )
         raise typer.Exit(code=1) from e
     except (workflow_ops.RecipeError, ValueError, KeyError) as e:

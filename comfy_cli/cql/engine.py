@@ -840,11 +840,17 @@ class Graph:
                 continue
             m = _parse_morphism(node_id, raw)
             g._nodes[m.id] = m
+            # A deprecated class stays addressable by name (show, validate,
+            # edits on a graph that already holds it) but is never a
+            # discovery answer: upstream/downstream/path/free-producer all
+            # read these indexes.
             for t in m.output_types():
-                g._producers[t].append(m)
+                if not m.deprecated:
+                    g._producers[t].append(m)
                 g._types.add(t)
             for t in m.input_link_types():
-                g._consumers[t].append(m)
+                if not m.deprecated:
+                    g._consumers[t].append(m)
                 g._types.add(t)
         # Sort indexes for deterministic output
         for t in g._producers:

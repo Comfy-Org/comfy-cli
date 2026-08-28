@@ -251,7 +251,7 @@ def test_nodes_ls_is_inert(pretty, hostile_object_info):
         cloud_disabled=False,
         api_only=False,
         output_only=False,
-        exclude_deprecated=False,
+        include_deprecated=False,
         limit=None,
         input_path=None,
         host=None,

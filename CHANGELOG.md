@@ -17,6 +17,14 @@ history.
 
 ### Added
 
+- `comfy workflow add-node` and an `add_node` op in `comfy workflow apply`
+  refuse a class the catalog marks deprecated (`node_deprecated`), naming the
+  live class with the same display name when there is one. Pass
+  `--allow-deprecated` (or `"allow_deprecated": true` on the op) to add it
+  anyway.
+- `comfy nodes search` and `comfy nodes ls` hide deprecated classes by
+  default; `--include-deprecated` shows them.
+
 - `comfy-build`, the skill for building a custom ComfyUI environment on the
   developer platform, is now bundled with the CLI. `comfy skills show
   comfy-build` works, and an argument-free `comfy skills install` writes it on a
