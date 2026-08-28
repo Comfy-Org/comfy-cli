@@ -414,7 +414,7 @@ Current contract, pinned:
   never random — and the instance's `type` is repointed, so two replicas
   replaying the same op produce byte-identical graphs and sibling instances
   are never aliased.
-* **Promoted widgets are HOST writes** (BE-10305; `cql.promoted`). A
+* **Promoted widgets are HOST writes** (`cql.promoted`). A
   `set_widget` on a promoted input carries `promoted: {instance_path,
   value_index}` instead of `path`, and its LWW target is the host register
   `("widget", "57", "text")` — the flat form, the nested interior form of the
