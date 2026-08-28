@@ -361,26 +361,36 @@ def _is_fresh(path: Path) -> bool:
 
 
 def _read_cached_pair(*, require_fresh: bool) -> dict[str, bytes] | None:
-    """The cached pair, if it is complete and (optionally) fresh.
+    """The cached pair, if it is complete, valid, and (optionally) fresh.
 
     Returns ``None`` on anything short of that — missing file, unreadable,
-    non-JSON, wrong schema, or an absent entry. A cache written by an older
-    comfy-cli (per-file, pre-validation) lands in that bucket too, so it is
-    simply re-fetched rather than trusted. Every ``None`` hands the decision
-    back to the caller's next fallback, which eventually reaches the bundled
-    snapshot — never a silent blank annotation.
+    oversized, non-JSON, wrong schema, an absent entry, or (for a pair not
+    already vouched for below) a body that fails its validator. A cache written by an
+    older comfy-cli (per-file, pre-validation) lands in that bucket too, so it
+    is simply re-fetched rather than trusted. Every ``None`` hands the
+    decision back to the caller's next fallback, which eventually reaches the
+    bundled snapshot — never a silent blank annotation.
 
-    The bodies are not re-validated here: ``_persist_pair`` only ever writes a
-    pair that passed ``_VALIDATORS`` in ``_fetch_one``, and the file lands in
-    one ``os.replace``, so a schema-matching file is valid by construction.
-    Skipping the YAML parse is what keeps this read cheap.
+    ``_persist_pair`` only ever writes a pair that passed ``_VALIDATORS`` in
+    ``_fetch_one``, so a *freshly written* file is valid by construction. But
+    ``COMFY_CACHE_DIR`` makes this file easy to point at or hand-edit, so that
+    guarantee doesn't hold forever. The full YAML validation this used to run
+    on every read is skipped only once ``parsed_annotations`` has already
+    parsed this exact pair successfully — its cache file existing on disk is
+    proof the bytes are good — so the hot path stays cheap while a poisoned
+    cache is still caught the first time it's seen.
     """
     cache = _cache_file()
     if require_fresh and not _is_fresh(cache):
         return None
     try:
+        # Same reasoning as ``_read_parsed``'s size cap: this path isn't even
+        # digest-derived, so anything able to write the cache dir can plant an
+        # arbitrarily large or deeply-nested file here.
+        if cache.stat().st_size > _MAX_ANNOTATION_BYTES:
+            return None
         payload = json.loads(cache.read_bytes())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(payload, dict) or payload.get("schema") != _CACHE_SCHEMA:
         return None
@@ -394,6 +404,11 @@ def _read_cached_pair(*, require_fresh: bool) -> dict[str, bytes] | None:
         if not isinstance(text, str):
             return None
         out[filename] = text.encode("utf-8")
+
+    if not _parsed_cache_path(out[_SUPPORTED_NODES], out[_CLOUD_DISABLE]).exists():
+        for filename in _FILES:
+            if not _VALIDATORS[filename](out[filename]):
+                return None
     return out
 
 
@@ -414,38 +429,61 @@ def _parsed_cache_path(sup: bytes, dis: bytes) -> Path:
 
 def _read_parsed(path: Path) -> ParsedAnnotations | None:
     try:
+        # The filename is a predictable digest over public upstream YAML, so
+        # anything able to write the cache dir can plant a huge file at the
+        # exact path this will read; cap it the same way network reads are
+        # capped rather than handing an unbounded read to ``json.loads``.
+        if path.stat().st_size > _MAX_ANNOTATION_BYTES:
+            return None
         payload = json.loads(path.read_bytes())
         node_pack = payload["node_pack"]
         node_labels = payload["node_labels"]
         disable_labels = payload["disable_labels"]
-        if not (isinstance(node_pack, dict) and isinstance(node_labels, dict) and isinstance(disable_labels, list)):
-            return None
-        if not all(isinstance(labels, list) for labels in node_labels.values()):
+        if not (
+            isinstance(node_pack, dict)
+            and isinstance(node_labels, dict)
+            and isinstance(disable_labels, list)
+            and all(isinstance(pack, str) for pack in node_pack.values())
+            and all(
+                isinstance(labels, list) and all(isinstance(label, str) for label in labels)
+                for labels in node_labels.values()
+            )
+            and all(isinstance(label, str) for label in disable_labels)
+        ):
             return None
         return node_pack, node_labels, set(disable_labels)
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
         return None
 
 
 def _write_parsed(path: Path, parsed: ParsedAnnotations) -> None:
-    """Persist ``parsed`` at ``path``, evicting every other parsed file first.
+    """Persist ``parsed`` at ``path``, evicting every other parsed file after.
 
     Newest-only keeps the cache dir from accumulating one file per annotation
-    generation and disposes of a corrupt file in the same sweep. Best-effort.
+    generation. Writing first and evicting siblings afterward means a failed
+    write leaves the previous good entry in place instead of an empty dir.
+    Best-effort throughout.
     """
     node_pack, node_labels, disable_labels = parsed
+    # ``json.dumps`` coerces a non-str dict key (int, float, bool, None) to a
+    # string instead of raising, which would silently change what a later
+    # cache hit returns compared to this cache miss. Treat it like any other
+    # unserialisable result: skip the write, keep re-parsing.
+    if not (all(isinstance(k, str) for k in node_pack) and all(isinstance(k, str) for k in node_labels)):
+        return
     try:
         blob = json.dumps(
             {"node_pack": node_pack, "node_labels": node_labels, "disable_labels": sorted(disable_labels)}
         )
-        for sibling in path.parent.glob(_PARSED_GLOB):
+        atomic_write_text(path, blob)
+    except (OSError, TypeError, ValueError):
+        return
+    for sibling in path.parent.glob(_PARSED_GLOB):
+        if sibling != path:
             try:
                 sibling.unlink()
             except OSError:
                 pass
-        atomic_write_text(path, blob)
-    except (OSError, TypeError, ValueError):
-        pass
 
 
 def parsed_annotations(

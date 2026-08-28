@@ -1136,6 +1136,26 @@ def test_spawn_background_refresh_is_fully_detached(monkeypatch, isolated_cache)
     assert kwargs["env"]["DO_NOT_TRACK"] == "1"
 
 
+def test_spawn_background_refresh_pins_child_to_a_resolved_cache_dir(monkeypatch, isolated_cache):
+    """The child's cwd is already inside the cache dir (see ``_refresh_cwd``),
+    so it must inherit an absolute ``COMFY_CACHE_DIR`` rather than re-resolving
+    a relative one against that cwd and nesting a second tree under it."""
+    monkeypatch.setattr(templates_cmd, "_spawn_background_refresh", _REAL_SPAWN_BACKGROUND_REFRESH)
+    monkeypatch.setenv("COMFY_CACHE_DIR", "relative-cache-dir")
+    captured = {}
+
+    def _fake_popen(argv, **kwargs):
+        captured["kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(templates_cmd.subprocess, "Popen", _fake_popen)
+    assert templates_cmd._spawn_background_refresh() is True
+
+    child_cache_dir = captured["kwargs"]["env"]["COMFY_CACHE_DIR"]
+    assert os.path.isabs(child_cache_dir)
+    assert child_cache_dir == str(templates_cmd.cache_dir())
+
+
 def test_spawn_background_refresh_swallows_spawn_failure(monkeypatch, isolated_cache):
     # If the OS can't spawn the refresher (no fork, exec denied), the foreground
     # command has already served stale — the failure must be swallowed and

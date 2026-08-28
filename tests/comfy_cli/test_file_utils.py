@@ -555,3 +555,20 @@ def test_cache_dir_blank_comfy_cache_dir_falls_through(tmp_path, monkeypatch):
     monkeypatch.setenv("COMFY_CACHE_DIR", "   ")
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
     assert cache_dir() == tmp_path / "xdg" / "comfy-cli"
+
+
+def test_cache_dir_resolves_relative_comfy_cache_dir_against_cwd(tmp_path, monkeypatch):
+    """A relative override must not resolve differently in every process — a
+    detached background refresher launches its child from inside the cache
+    dir itself, so a relative value there would nest a second tree under it."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COMFY_CACHE_DIR", "relative-cache")
+    assert cache_dir() == tmp_path / "relative-cache"
+
+
+def test_cache_dir_survives_unresolvable_home(monkeypatch):
+    """`pathlib.Path.expanduser` raises when the home dir can't be determined;
+    `os.path.expanduser` returns the path unchanged instead, so this must not
+    raise."""
+    monkeypatch.setenv("COMFY_CACHE_DIR", "~nosuchuser1234/cache")
+    cache_dir()

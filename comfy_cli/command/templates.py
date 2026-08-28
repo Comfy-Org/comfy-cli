@@ -357,7 +357,17 @@ def _spawn_background_refresh() -> bool:
     # *non-atomic* config.ini rewrite — racing the foreground process and risking
     # a corrupt config. `_refresh-cache` is contractually 'no telemetry,
     # best-effort', so opt the child out of consent entirely.
-    child_env = {**os.environ, "COMFY_NO_TELEMETRY": "1", "DO_NOT_TRACK": "1"}
+    # Pin the child to the cache dir *this* process resolved, not a raw
+    # `COMFY_CACHE_DIR` value: the child's cwd is `_refresh_cwd()`, already
+    # inside that dir, so re-resolving a relative override there would nest a
+    # second cache tree under the first and the foreground cache would never
+    # see the refresh.
+    child_env = {
+        **os.environ,
+        "COMFY_CACHE_DIR": str(cache_dir()),
+        "COMFY_NO_TELEMETRY": "1",
+        "DO_NOT_TRACK": "1",
+    }
 
     kwargs: dict[str, Any] = dict(
         stdout=subprocess.DEVNULL,
