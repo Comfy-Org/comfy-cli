@@ -17,6 +17,14 @@ history.
 
 ### Added
 
+- `comfy workflow add-node` and an `add_node` op in `comfy workflow apply`
+  refuse a class the catalog marks deprecated (`node_deprecated`), naming the
+  live class with the same display name when there is one. Pass
+  `--allow-deprecated` (or `"allow_deprecated": true` on the op) to add it
+  anyway.
+- `comfy nodes search` and `comfy nodes ls` hide deprecated classes by
+  default; `--include-deprecated` shows them.
+
 - `comfy knowledge pick` attaches each pick's model `fits` block (VRAM per
   variant, credit rate, max refs) when the bundle carries one, so a size or
   price constraint can be checked against a number rather than the caveat text.

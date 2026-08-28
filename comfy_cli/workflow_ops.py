@@ -198,6 +198,41 @@ class UnknownNodeType(ValueError):
         super().__init__(msg)
 
 
+class DeprecatedNodeType(ValueError):
+    """add_node was given a class the catalog marks ``deprecated``.
+
+    ``replacement`` is the live class with the same display name, when one
+    exists (ComfyUI retires a node by suffixing its display name with
+    "(DEPRECATED)" or "(Legacy)" and registering the successor under the
+    bare name).
+    """
+
+    code = "node_deprecated"
+
+    def __init__(self, class_type: str, *, replacement: str | None):
+        self.class_type = class_type
+        self.replacement = replacement
+        use = f"use {replacement!r} instead" if replacement else "run `comfy nodes search <text>` for a live class"
+        self.hint = (
+            f'{use}; to add {class_type!r} anyway set "allow_deprecated": true on the add_node op '
+            "(or pass --allow-deprecated to `comfy workflow add-node`)"
+        )
+        super().__init__(f"{class_type!r} is deprecated")
+
+
+_DEPRECATED_DISPLAY_SUFFIX = re.compile(r"\s*\((?:deprecated|legacy)\)\s*$", re.I)
+
+
+def _deprecated_replacement(graph, m) -> str | None:
+    want = _DEPRECATED_DISPLAY_SUFFIX.sub("", m.display_name).strip().lower()
+    # A free node and a paid partner node can share a display name; never
+    # answer a free class with one that bills credits (or vice versa).
+    for n in graph.all_nodes():
+        if not n.deprecated and n.is_api_node == m.is_api_node and n.display_name.strip().lower() == want:
+            return n.id
+    return None
+
+
 def _find(workflow: dict, node_id: Any) -> dict | None:
     for n in workflow.get("nodes") or []:
         if isinstance(n, dict) and n.get("id") == node_id:
@@ -477,6 +512,7 @@ def add_node(
     mode: int = 0,
     actor: str = "cli",
     base_version: int = 0,
+    allow_deprecated: bool = False,
 ) -> tuple[dict, dict]:
     m = graph.node(class_type)
     if m is None:
@@ -488,6 +524,8 @@ def add_node(
 
         names = [n.id for n in graph.all_nodes()]
         raise UnknownNodeType(class_type, close_matches=difflib.get_close_matches(class_type, names, n=5, cutoff=0.6))
+    if m.deprecated and not allow_deprecated:
+        raise DeprecatedNodeType(class_type, replacement=_deprecated_replacement(graph, m))
     size = layout.estimate_size(
         len([p for p in m.inputs if p.is_link]),
         len(m.outputs),
@@ -1060,8 +1098,8 @@ def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int =
                 class_type=original.get("type"),
                 pos=pos,
                 node=node,
-                # spec keys
-                **{"at": pos, "as": alias},
+                # spec keys; the node already existed, so a deprecated class replays
+                **{"at": pos, "as": alias, "allow_deprecated": True},
             )
         )
 
@@ -1379,6 +1417,9 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
         alias = alias_by_sid[str(n["id"])]
         class_type = n.get("type")
         add: dict[str, Any] = {"op": "add_node", "class_type": class_type, "as": alias}
+        m = graph.node(class_type)
+        if m is not None and m.deprecated:
+            add["allow_deprecated"] = True
         if n.get("pos"):
             add["at"] = n["pos"]
         if n.get("mode"):
@@ -1516,6 +1557,7 @@ def apply_specs(
                         mode=spec.get("mode") or 0,
                         actor=actor,
                         base_version=base_version,
+                        allow_deprecated=bool(spec.get("allow_deprecated")),
                     )
                     alias = spec.get("as")
                     if alias:
@@ -1554,9 +1596,9 @@ def apply_specs(
             except KeyError as e:
                 raise ValueError(f"spec #{i} ({kind}) is missing required field {e}") from e
             ops.append(op)
-    except NotBatchableError:
-        # Already carries the registered code, the standalone command, and the
-        # nothing-was-applied statement — don't wrap it into a generic hint.
+    except (NotBatchableError, DeprecatedNodeType):
+        # Already carries a registered code and a hint that says what to do
+        # instead — don't wrap it into a generic hint.
         raise
     except (ValueError, KeyError) as e:
         err = _rehint_discarded_batch(e, pre_batch_hint)
