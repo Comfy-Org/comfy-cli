@@ -212,3 +212,25 @@ def test_slots_do_not_report_a_dangling_link_as_linked_from(graph):
     assert "linked_from" not in slots["37.caption"]
     assert slots["37.caption"]["current_value"].startswith("Global Metadata")
     assert promoted.live_external_link(wf, inst, "caption") is None
+
+
+def test_effective_value_for_skips_the_name_lookup(graph):
+    """``effective_value_for`` is ``effective_value`` for a caller that already
+    holds the ``PromotedInput`` and the definition index: host value when
+    materialized, else the interior source value — and it never re-walks
+    ``promoted_inputs`` (``find_promoted``) to relocate what it was handed."""
+    from unittest import mock
+
+    wf = json.loads((_FIXTURES / "gallery" / "image_z_image_turbo.json").read_text())
+    inst = next(n for n in wf["nodes"] if n["id"] == 57)
+    defs = promoted.defs_by_id(wf)
+    sg = defs[inst["type"]]
+    width = next(p for p in promoted.promoted_inputs(sg, defs) if p.name == "width")
+    with mock.patch.object(promoted, "promoted_inputs", side_effect=AssertionError("re-walked")):
+        assert promoted.effective_value_for(wf, inst, sg, width, graph, defs) == 1024  # interior default
+    promoted.set_host_value(wf, inst, "width", 768, graph)
+    with mock.patch.object(promoted, "promoted_inputs", side_effect=AssertionError("re-walked")):
+        assert promoted.effective_value_for(wf, inst, sg, width, graph, defs) == 768  # host wins
+    assert promoted.effective_value_for(wf, inst, sg, width, graph, defs) == promoted.effective_value(
+        wf, inst, "width", graph
+    )
