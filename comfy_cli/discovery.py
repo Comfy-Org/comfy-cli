@@ -37,6 +37,16 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy build create": "build_create",
     "comfy build list": "build_list",
     "comfy build get": "build_get",
+    # `comfy build release` is the canonical subgroup; `comfy build version` is
+    # its hidden deprecated alias. Alias envelopes carry the canonical `build
+    # release ...` labels, but both spellings register here so an agent that
+    # looks up the old path still finds the contract (schema files keep their
+    # build_version_* names because user scripts pin them).
+    "comfy build release create": "build_version_create",
+    "comfy build release list": "build_version_list",
+    "comfy build release get": "build_version_get",
+    "comfy build release logs": "build_version_logs",
+    "comfy build release manifest": "build_version_manifest",
     "comfy build version create": "build_version_create",
     "comfy build version list": "build_version_list",
     "comfy build version get": "build_version_get",
@@ -53,6 +63,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy build blob list": "build_blob_list",
     "comfy build blob upload": "build_blob_upload",
     "comfy build from-snapshot": "build_from_snapshot",
+    "comfy build from-workflow": "build_from_workflow",
     "comfy jobs ls": "jobs",
     "comfy jobs status": "jobs",
     "comfy jobs watch": "jobs",
@@ -84,6 +95,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow set-slot": "workflow",
     "comfy workflow vary": "workflow",
     "comfy workflow notes": "workflow",
+    "comfy workflow print": "workflow",
     # structured edit primitives + recipes (CRDT op-based authoring)
     "comfy workflow add-node": "workflow",
     "comfy workflow connect": "workflow",

@@ -545,15 +545,24 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "in ComfyUI, use the regular save (File > Save Workflow) — the API export is for `comfy run`, not for editing",
     ),
     ErrorCode(
+        "workflow_print_unsupported",
+        "`comfy workflow print` refused: the workflow contains something it cannot render faithfully "
+        "(legacy group node, duplicate node id, link to a missing node/slot, non-integer link slot, "
+        "link cycle, unknown `--format`). `details.reasons` lists every reason.",
+        "fix the listed reasons, or read the graph with `comfy workflow slots` / `comfy workflow ls-nodes`",
+    ),
+    ErrorCode(
         "workflow_slot_invalid",
         "A slot override failed validation (bad shape, unknown address, etc.).",
-        "see `details` — addresses follow `<instance_id>.<input_name>`",
+        "see `details` — addresses follow `<instance_id>.<input_name>`; "
+        "`comfy workflow print <file>` shows every node with its id and widget names",
     ),
     ErrorCode(
         "workflow_edit_invalid",
         "A structured edit (add-node/connect/set-widget/delete-node) failed: "
         "unknown class_type, missing node, bad slot/widget name, or malformed address.",
-        "run `comfy workflow slots <file>` for widget addresses or `comfy nodes types` for class_types",
+        "run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read "
+        "(`comfy workflow slots <file>` for exact `<node_id>.<input>` addresses, `comfy nodes search` for class names)",
     ),
     ErrorCode(
         "workflow_clear_not_batchable",
@@ -707,6 +716,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "node_not_found",
         "Requested node class isn't in the loaded environment.",
         "see `details.close_matches` or run `comfy nodes search`",
+    ),
+    ErrorCode(
+        "node_deprecated",
+        "`workflow add-node` (or an `add_node` op in a batch) named a class the catalog marks deprecated. "
+        "Nothing was added. `details.replacement` names the live class with the same display name when "
+        "one exists.",
+        "add `details.replacement` instead, or pass --allow-deprecated "
+        '(`"allow_deprecated": true` on the op) when the user asked for that exact node',
     ),
     ErrorCode(
         "path_bounds_invalid",
@@ -1043,6 +1060,25 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     # --- build (the serverless builder) --------------------------------------
     ErrorCode(
+        "build_spec_invalid",
+        "A build spec or legacy scan definition could not be read, has an unsupported schema, or is invalid. "
+        "`details.path` carries the path when one is available.",
+        "fix the named field, or regenerate the file",
+    ),
+    ErrorCode(
+        "build_spec_write_error",
+        "`comfy build` could not write the build spec or legacy scan definition. `details` carries the "
+        "path and the underlying OS error.",
+        "check the directory exists and is writable",
+    ),
+    ErrorCode(
+        "build_spec_not_found",
+        "A `comfy build` command found no spec at the path `PATH` resolved to — `<dir>/comfy-build.yaml` for "
+        "a directory, or the file itself for a `.yaml`/`.json` `PATH`. `details.path` carries the exact "
+        "absolute path probed.",
+        "create a comfy-build.yaml at that path, or pass the PATH that holds the spec",
+    ),
+    ErrorCode(
         "build_models_dir_missing",
         "`comfy build scan` could not find a models/ directory to scan. `details.path` carries the "
         "resolved path. Either no workspace is selected or the given `--models-dir` doesn't exist.",
@@ -1057,8 +1093,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "build_definition_invalid",
         "`comfy build create --from <path>` could not read the definition file, or it isn't a "
-        "distribution definition (missing/invalid JSON or no `models` key). `details.path` carries the path.",
+        "build definition (missing/invalid JSON or no `models` key). `details.path` carries the path.",
         "pass a file produced by `comfy build scan -o <path>`",
+    ),
+    ErrorCode(
+        "build_workflow_invalid",
+        "`comfy build from-workflow --from <path>` could not read the workflow file, or it is not a JSON "
+        "object. `details.path` carries the path.",
+        "pass a workflow saved from ComfyUI (either the editing format or the API export)",
     ),
     ErrorCode(
         "build_not_signed_in",
@@ -1087,7 +1129,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "build_missing_comfy_version",
         "`comfy build create` was given a definition with no `baseComfyVersion`. The builder can create "
-        "the distribution but cannot cut a build without a pinned ComfyUI version, so create fails fast here "
+        "the build but cannot cut a release without a pinned ComfyUI version, so create fails fast here "
         "instead of surfacing a raw builder 400 after doing work. `details.path` carries the definition path.",
         "re-scan with `--comfy-version <ref>` (a tag, branch, or commit), or add a `baseComfyVersion` to the definition JSON",
     ),
@@ -1115,11 +1157,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "knowledge_unknown_model",
         "`comfy knowledge resolve` found no row for the alias or id. `details.close_matches` lists near names.",
         "try one of `details.close_matches`",
-    ),
-    ErrorCode(
-        "knowledge_unknown_capability",
-        "`comfy knowledge pick` found no capability with that id. `details.known` lists them all.",
-        "pick one of `details.known`",
     ),
 )
 

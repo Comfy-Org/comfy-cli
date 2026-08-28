@@ -27,6 +27,18 @@ from comfy_cli.command.install import (
 from comfy_cli.git_utils import checkout_pr, git_checkout_tag
 
 
+def _env_without_github_token() -> dict[str, str]:
+    """Everything cleared except ``$PATH``, for the no-ambient-credential tests.
+
+    They only need ``GITHUB_TOKEN`` gone (``install._github_get`` reads it).
+    Clearing ``$PATH`` too makes ``shutil.which("git")`` fall back to
+    ``os.defpath`` (``/bin:/usr/bin``), which happens to hold git on FHS
+    distros but not on NixOS and friends — there every real git call in these
+    tests dies with "'git' was not found on PATH".
+    """
+    return {"PATH": os.environ.get("PATH", "")}
+
+
 @pytest.fixture(scope="function")
 def runner():
     g_exclusivity.reset_for_testing()
@@ -605,7 +617,7 @@ class TestGetLatestRelease:
         }
         mock_get.return_value = mock_response
 
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", _env_without_github_token(), clear=True):
             get_latest_release("comfyanonymous", "ComfyUI")
 
         headers = mock_get.call_args.kwargs.get("headers", {})
@@ -988,7 +1000,7 @@ class TestCheckoutStableComfyUI:
         rate_limited.headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1777415867"}
         mock_get.return_value = rate_limited
 
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", _env_without_github_token(), clear=True):
             with pytest.raises(GitHubRateLimitError, match="1777415867"):
                 checkout_stable_comfyui("latest", str(tmp_path))
 
@@ -1001,7 +1013,7 @@ class TestCheckoutStableComfyUI:
         GitHub API call should be made even when the network is hostile."""
         TestResolveLatestTagFromLocal._make_repo(tmp_path, ["v0.19.5", "v0.20.0", "v0.20.1"])
 
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", _env_without_github_token(), clear=True):
             checkout_stable_comfyui("latest", str(tmp_path))
 
         # Resolved locally; never touched the API
@@ -1055,7 +1067,7 @@ class TestInstallExecuteWithLatest:
             )
 
         with (
-            patch.dict("os.environ", {}, clear=True),
+            patch.dict("os.environ", _env_without_github_token(), clear=True),
             patch("requests.get", side_effect=crash_on_api),
             patch("comfy_cli.command.install.clone_comfyui") as mock_clone,
             patch("comfy_cli.command.install.ensure_workspace_python", return_value=sys.executable),
@@ -1098,7 +1110,7 @@ class TestInstallExecuteWithLatest:
         self._make_comfy_repo(repo_dir)
 
         with (
-            patch.dict("os.environ", {}, clear=True),
+            patch.dict("os.environ", _env_without_github_token(), clear=True),
             patch(
                 "requests.get",
                 side_effect=AssertionError("API must not be called for specific versions"),

@@ -185,10 +185,30 @@ same trimmed package.
 
 ## Adding a new command
 
-- Register it under `comfy_cli/cmdline.py`
+Top-level commands are registered in the `_RootGroup.lazy_subcommands` table in
+`comfy_cli/cmdline.py`, not with `app.add_typer(...)`. The table maps the command
+name to the module that holds it; the module is imported the first time the
+command is looked up, so `comfy --help` and `comfy --version` stay fast no matter
+how heavy the module is. Entries are listed in the order `comfy --help` shows
+them, so put a new entry where it should appear, not at the end.
 
-If it's contains subcommand, create folder under comfy_cli/command/[new_command] and
-add the following boilerplate
+A command group (a command with subcommands) is a `LazySubcommand`:
+
+```
+"mything": LazySubcommand("comfy_cli.command.mything", help="One line for --help."),
+```
+
+`attr` (default `"app"`) names the `typer.Typer` in that module; `hidden` and
+`callback` map to the same `add_typer` keyword arguments.
+
+A single top-level command is a `LazyCommand` naming the function:
+
+```
+"do-thing": LazyCommand("comfy_cli.command.mything", attr="do_thing_cmd", help="One line for --help."),
+```
+
+For the group, create the folder `comfy_cli/command/[new_command]/` with this
+boilerplate:
 
 `comfy_cli/command/[new_command]/__init__.py`
 
@@ -196,7 +216,7 @@ add the following boilerplate
 from .command import app
 ```
 
-`comfy_cli/command/[new_command]command.py`
+`comfy_cli/command/[new_command]/command.py`
 
 ```
 import typer
@@ -215,6 +235,11 @@ def remove(name: str):
   print(f"Removing a custom node: {name}")
 
 ```
+
+Keep heavy imports (`torch`, `psutil`, the HTTP client, ...) out of module
+scope in the command module, or import them inside the command function.
+`tests/comfy_cli/test_import_budget.py` fails if `comfy --version` starts
+importing them.
 
 ## Important notes
 

@@ -7,7 +7,6 @@ import sys
 from typing import TypedDict
 from urllib.parse import urlparse
 
-import git
 import requests
 import semver
 import typer
@@ -19,6 +18,10 @@ from comfy_cli import constants, ui
 from comfy_cli._safe_exec import BinaryNotFoundError, resolve_required_binary
 from comfy_cli.command.custom_nodes.command import update_node_id_cache
 from comfy_cli.command.github.pr_info import PRInfo
+from comfy_cli.command.version_validators import (  # noqa: F401 — re-exported; moved out so cmdline's decorators don't import this module
+    validate_optional_version,
+    validate_version,
+)
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG
 from comfy_cli.git_utils import checkout_pr, git_checkout_tag, reject_option_like_ref
@@ -210,6 +213,8 @@ def execute(
 
     elif not check_comfy_repo(repo_dir)[0]:
         # Get actual remote URL for better error message
+        import git
+
         try:
             repo = git.Repo(repo_dir)
             remote_urls = [r.url for r in repo.remotes]
@@ -380,53 +385,6 @@ def handle_pr_checkout(pr_ref: str, comfy_path: str) -> str:
     rprint(f"[bold yellow]Note:[/bold yellow] You are now on branch pr-{pr_info.number}")
 
     return pr_info.base_repo_url
-
-
-def validate_version(version: str) -> str | None:
-    """
-    Validates the version string as 'latest', 'nightly', or a semantically version number.
-
-    Args:
-    version (str): The version string to validate.
-
-    Returns:
-    Optional[str]: The validated version string, or None if invalid.
-
-    Raises:
-    ValueError: If the version string is invalid.
-    """
-    if version.lower() in ["nightly", "latest"]:
-        return version.lower()
-
-    # Remove 'v' prefix if present
-    if version.startswith("v"):
-        version = version[1:]
-
-    try:
-        semver.VersionInfo.parse(version)
-        return version
-    except ValueError as exc:
-        raise ValueError(
-            f"Invalid version format: {version}. "
-            "Please use 'nightly', 'latest', or a valid semantic version (e.g., '1.2.3')."
-        ) from exc
-
-
-def validate_optional_version(version: str | None) -> str | None:
-    """Typer callback for an *optional* ``--version`` flag.
-
-    ``validate_version`` is written for a flag that always has a value (``comfy
-    install --version`` defaults to ``nightly``). ``comfy update`` treats the
-    flag as opt-in, so ``None`` must pass through untouched. Invalid input is
-    re-raised as ``typer.BadParameter`` so a headless caller gets the standard
-    CLI usage error instead of a traceback.
-    """
-    if version is None:
-        return None
-    try:
-        return validate_version(version)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
 
 
 class GitHubRateLimitError(Exception):

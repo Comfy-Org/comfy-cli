@@ -64,7 +64,9 @@ the node is minted with — `0` always (default, omitted), `1` on-event, `2` mut
 dropped them rebuilt a different API prompt. Minted op fields beyond the
 envelope: `node_id` (mint_id int), `class_type`, `pos`, `node` (the complete
 node object — replay inserts it verbatim; a nonzero mode is stamped into it and
-echoed as an op-level `mode` field).
+echoed as an op-level `mode` field). `allow_deprecated` is optional and spec-only
+(never minted into the op): a `class_type` the catalog marks `deprecated` is
+refused with `node_deprecated` unless it is `true`.
 
 * Idempotency: re-applying the same `op_id` is a no-op; independently, replaying
   an `add_node` whose `node_id` already exists in the graph is a no-op.

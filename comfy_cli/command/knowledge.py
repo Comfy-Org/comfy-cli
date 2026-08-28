@@ -2,7 +2,7 @@
 
     comfy knowledge status [--refresh]
     comfy knowledge resolve <alias-or-id>
-    comfy knowledge pick <capability>
+    comfy knowledge pick [capability]
 
 Backed by :mod:`comfy_cli.knowledge`. JSON mode is the contract; pretty mode
 is a short courtesy view.
@@ -103,8 +103,10 @@ def resolve_cmd(
 ):
     renderer = get_renderer()
     bundle = _require_bundle(renderer)
+    logged = [query.strip()[: knowledge.MAX_QUERY_CHARS]]
     model_id = knowledge.resolve_id(bundle, query)
     if model_id is None:
+        knowledge.log_query("knowledge resolve", logged, hit_ids=[], zero_hit=True, bundle=bundle)
         q = query.strip().lower()
         renderer.error(
             code="knowledge_unknown_model",
@@ -116,6 +118,7 @@ def resolve_cmd(
             },
         )
         raise typer.Exit(code=1)
+    knowledge.log_query("knowledge resolve", logged, hit_ids=[model_id], zero_hit=False, bundle=bundle)
     row = bundle.models[model_id]
     payload = {
         "query": query,
@@ -136,40 +139,75 @@ def resolve_cmd(
     renderer.emit(payload, command="knowledge resolve")
 
 
-@app.command("pick", help="Ranked model picks for a capability (e.g. lipsync, text-to-video).")
+def _emit_capabilities(renderer, bundle: knowledge.Bundle, *, query: str | None = None) -> None:
+    """The capability list, either as the bare listing or as ``query``'s miss.
+
+    A miss is an answer, not a failure: it reports the same ``zero_hit`` and
+    ``nudge`` an enrichment block uses, so one concept keeps one shape.
+    """
+    caps = [
+        {"id": cid, "description": _text((bundle.capabilities.get(cid) or {}).get("description"))}
+        for cid in sorted(bundle.capabilities)
+    ]
+    payload: dict[str, Any] = {
+        "capabilities": caps,
+        "zero_hit": query is not None,
+        "bundle_version": bundle.version,
+        "stale": bundle.stale,
+    }
+    if query is not None:
+        payload["query"] = query
+        payload["nudge"] = f"no curated knowledge for {query!r}; query one of the listed capability ids"
+    if renderer.is_pretty():
+        if query is not None:
+            rprint(f"[yellow]no curated knowledge for[/yellow] {sanitize_markup(query)}")
+        for cap in caps:
+            tail = f"  {sanitize_markup(cap['description'])}" if cap["description"] else ""
+            rprint(f"[bold]{sanitize_markup(cap['id'])}[/bold]{tail}")
+    renderer.emit(payload, command="knowledge pick")
+
+
+@app.command("pick", help="Ranked model picks for a capability; omit it to list every capability.")
 @tracking.track_command("knowledge")
 def pick_cmd(
-    capability: Annotated[str, typer.Argument(help="Capability id; see `details.known` on a miss.")],
+    capability: Annotated[
+        str | None,
+        typer.Argument(help="Capability id (e.g. lipsync, text-to-video). Omit to list every capability."),
+    ] = None,
 ):
     renderer = get_renderer()
     bundle = _require_bundle(renderer)
+    if capability is None or not capability.strip():
+        _emit_capabilities(renderer, bundle)
+        return
+    logged = [capability.strip()[: knowledge.MAX_QUERY_CHARS]]
     cap = knowledge.pick(bundle, capability)
     if cap is None:
-        renderer.error(
-            code="knowledge_unknown_capability",
-            message=f"no knowledge capability matches {capability!r}",
-            hint="pick one of the listed capabilities",
-            details={"capability": capability, "known": sorted(bundle.capabilities)},
-        )
-        raise typer.Exit(code=1)
+        knowledge.log_query("knowledge pick", logged, hit_ids=[], zero_hit=True, bundle=bundle)
+        _emit_capabilities(renderer, bundle, query=logged[0])
+        return
+    capability_id = _text(cap.get("id")) or capability.strip().lower()
+    knowledge.log_query("knowledge pick", logged, hit_ids=[f"cap:{capability_id}"], zero_hit=False, bundle=bundle)
     picks = []
     for p in cap["picks"]:
         model_id = p.get("model")
         model_id = model_id if isinstance(model_id, str) else None
         row = bundle.models.get(model_id) or {}
-        picks.append(
-            {
-                "rank": knowledge.pick_rank(p),
-                "model": model_id,
-                "route": _text(p.get("route")),
-                "template": _text(p.get("template")),
-                "caveat": _text(p.get("caveat")),
-                "status": _text(row.get("status")),
-                "superseded_by": _text(row.get("superseded_by")),
-            }
-        )
+        entry = {
+            "rank": knowledge.pick_rank(p),
+            "model": model_id,
+            "route": _text(p.get("route")),
+            "template": _text(p.get("template")),
+            "caveat": _text(p.get("caveat")),
+            "status": _text(row.get("status")),
+            "superseded_by": _text(row.get("superseded_by")),
+        }
+        if "fits" in p:
+            entry["fits"] = p["fits"]
+        picks.append(entry)
     payload = {
-        "capability": _text(cap.get("id")) or capability.strip().lower(),
+        "capability": capability_id,
+        "zero_hit": False,
         "description": _text(cap.get("description")),
         "as_of": _text(cap.get("as_of")),
         "picks": picks,

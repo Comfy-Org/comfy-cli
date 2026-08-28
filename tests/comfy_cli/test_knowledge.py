@@ -15,6 +15,7 @@ with a guard that fails the test if reached.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -385,6 +386,44 @@ class TestAuthRouting:
             knowledge._http_get("https://example.com/knowledge.json")
 
 
+class TestRefreshIfStale:
+    """The warm-path refresh. `attach` never calls it: a discovery turn must not
+    wait on the network, which left the TTL decorative on a local install."""
+
+    def test_stale_cache_is_refetched(self, tmp_path, monkeypatch):
+        _seed_cache(age_seconds=10 * 24 * 60 * 60)
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
+        calls = _fake_http(
+            monkeypatch,
+            knowledge_bytes=FIXTURE_KNOWLEDGE.read_bytes(),
+            manifest_bytes=FIXTURE_MANIFEST.read_bytes(),
+        )
+        knowledge.refresh_if_stale()
+        assert "https://example.com/knowledge.json" in calls
+
+    def test_fresh_cache_is_left_alone(self, monkeypatch):
+        _seed_cache()
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
+        calls = _fake_http(monkeypatch, knowledge_bytes=FIXTURE_KNOWLEDGE.read_bytes())
+        knowledge.refresh_if_stale()
+        assert calls == []
+
+    def test_env_file_is_authoritative_and_never_refetched(self, tmp_path, monkeypatch):
+        _env_bundle(tmp_path, monkeypatch)
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
+        calls = _fake_http(monkeypatch, knowledge_bytes=FIXTURE_KNOWLEDGE.read_bytes())
+        knowledge.refresh_if_stale()
+        assert calls == []
+
+    def test_a_failed_refresh_is_silent(self, monkeypatch, capsys):
+        _seed_cache(age_seconds=10 * 24 * 60 * 60)
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
+        _fake_http(monkeypatch)  # every body None: the fetch raises
+        knowledge.refresh_if_stale()
+        out = capsys.readouterr()
+        assert out.out == "" and out.err == ""
+
+
 class TestIndex:
     @pytest.fixture
     def bundle(self, tmp_path, monkeypatch) -> knowledge.Bundle:
@@ -394,7 +433,7 @@ class TestIndex:
         return b
 
     def test_tolerant_reader(self, bundle, tmp_path, monkeypatch):
-        assert "future_field" in bundle.models["kling"]
+        assert "future_field" in bundle.models["testvid"]
         assert len(bundle.models) == 5
         knowledge._reset_for_testing()
         p = tmp_path / "min.json"
@@ -426,38 +465,38 @@ class TestIndex:
         assert b.templates == {} and b.nodes == {}
 
     def test_alias_index(self, bundle):
-        assert bundle.aliases["hailuo 03"] == "minimax-h3"
-        assert bundle.aliases["minimax h3"] == "minimax-h3"
-        assert bundle.aliases["minimax-h3"] == "minimax-h3"
-        assert bundle.aliases["kling"] == "kling"
-        assert bundle.aliases["h3"] == "minimax-h3"
+        assert bundle.aliases["halo 03"] == "acme-h3"
+        assert bundle.aliases["acme h3"] == "acme-h3"
+        assert bundle.aliases["acme-h3"] == "acme-h3"
+        assert bundle.aliases["testvid"] == "testvid"
+        assert bundle.aliases["h3"] == "acme-h3"
 
     def test_template_and_node_index(self, bundle):
-        assert bundle.templates["video_minimax_h3_t2v"] == ["minimax-h3"]
-        assert bundle.templates["api_sync_so_lip_sync_video"] == ["sync-3"]
+        assert bundle.templates["video_acme_h3_t2v"] == ["acme-h3"]
+        assert bundle.templates["api_lipco_lip_sync_video"] == ["lipco-3"]
         # Capability pick template for a model outside the trimmed set still maps.
-        assert bundle.templates["video_ltx2_3_ia2v"] == ["ltx"]
-        assert bundle.nodes["KlingLipSyncAudioToVideoNode"] == ["kling"]
+        assert bundle.templates["video_testlx_ia2v"] == ["testlx"]
+        assert bundle.nodes["TestvidLipSyncAudioToVideoNode"] == ["testvid"]
         assert all(len(v) == len(set(v)) for v in bundle.templates.values())
 
     def test_deprecations_keyed_by_id(self, bundle):
-        assert bundle.deprecations["kling-avatar-2"]["superseded_by"] == "sync-3"
-        assert set(bundle.deprecations) == {"kling-avatar-2", "sora-2"}
+        assert bundle.deprecations["testvid-avatar-2"]["superseded_by"] == "lipco-3"
+        assert set(bundle.deprecations) == {"testvid-avatar-2", "retired-model-2"}
 
     def test_resolve(self, bundle):
-        assert knowledge.resolve(bundle, "  HAILUO 03 ")["id"] == "minimax-h3"
-        assert knowledge.resolve(bundle, "Kling-Avatar-2")["id"] == "kling-avatar-2"
+        assert knowledge.resolve(bundle, "  HALO 03 ")["id"] == "acme-h3"
+        assert knowledge.resolve(bundle, "Testvid-Avatar-2")["id"] == "testvid-avatar-2"
         assert knowledge.resolve(bundle, "nope-xyz") is None
 
     @pytest.mark.parametrize(
         ("query", "expected"),
         [
-            ("Hailuo 3", "minimax-h3"),
-            ("hailuo3", "minimax-h3"),
-            ("HAILUO-03", "minimax-h3"),
-            ("Mini Max H3", "minimax-h3"),
-            ("sync.3", "sync-3"),
-            ("klingg", None),
+            ("Halo 3", "acme-h3"),
+            ("halo3", "acme-h3"),
+            ("HALO-03", "acme-h3"),
+            ("Ac Me H3", "acme-h3"),
+            ("lipco.3", "lipco-3"),
+            ("testvidg", None),
         ],
     )
     def test_resolve_accepts_spelling_variants(self, bundle, query, expected):
@@ -465,11 +504,49 @@ class TestIndex:
         assert (row["id"] if row else None) == expected
         assert knowledge.resolve_id(bundle, query) == expected
 
-    def test_model_id_beats_colliding_alias(self):
-        data = {"models": {"kling": {"id": "kling"}, "kling-3": {"id": "kling-3"}}, "aliases": {"Kling": "kling-3"}}
+    def test_two_ids_sharing_a_normalized_key_cancel(self):
+        """`model-1` and `model01` both normalize to `model1`. Letting the last one
+        win would answer a spelling neither id owns; the exact spellings still work."""
+        data = {"models": {"model-1": {"id": "model-1"}, "model01": {"id": "model01"}}}
         b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
-        assert b.aliases["kling"] == "kling"
-        assert knowledge.resolve(b, "KLING")["id"] == "kling"
+        assert knowledge.resolve_id(b, "model 1") is None
+        assert knowledge.resolve_id(b, "model-1") == "model-1"
+        assert knowledge.resolve_id(b, "model01") == "model01"
+
+    def test_capability_id_beats_a_colliding_alias(self):
+        """One capability's alias spelled like another capability's id used to
+        delete both normalized keys, so `pick` stopped resolving either."""
+        data = {
+            "models": {},
+            "capabilities": {
+                "text-to-video": {"id": "text-to-video", "picks": []},
+                "lipsync": {"id": "lipsync", "aliases": ["Text to Video"], "picks": []},
+            },
+        }
+        b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
+        for spelling in ("text-to-video", "text to video", "Text To Video"):
+            assert knowledge.pick(b, spelling)["id"] == "text-to-video", spelling
+        assert knowledge.pick(b, "lipsync")["id"] == "lipsync"
+
+    def test_manifest_version_is_bounded(self):
+        b = knowledge._index(
+            {"models": {}},
+            {"schema_version": 1, "version": "v" * 5000},
+            source="env",
+            stale=False,
+            path="p",
+            mtime=0.0,
+        )
+        assert len(b.version) == knowledge.MAX_VERSION_CHARS
+
+    def test_model_id_beats_colliding_alias(self):
+        data = {
+            "models": {"testvid": {"id": "testvid"}, "testvid-3": {"id": "testvid-3"}},
+            "aliases": {"Testvid": "testvid-3"},
+        }
+        b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
+        assert b.aliases["testvid"] == "testvid"
+        assert knowledge.resolve(b, "TESTVID")["id"] == "testvid"
 
     def test_resolve_id_requires_a_row(self):
         data = {"models": {"a": {"id": "a"}}, "aliases": {"ghost": "missing"}}
@@ -479,7 +556,7 @@ class TestIndex:
         assert knowledge.resolve_id(b, " A ") == "a"
 
     def test_normalize(self):
-        assert knowledge._normalize("Hailuo 03") == "hailuo3"
+        assert knowledge._normalize("Halo 03") == "halo3"
         assert knowledge._normalize("image to video") == "imagetovideo"
         assert knowledge._normalize("Flux 1.10") == "flux110"
         assert knowledge._normalize("v2.0") == "v20"
@@ -504,6 +581,14 @@ class TestIndex:
         assert knowledge.pick(bundle, "Lip Sync")["id"] == "lipsync"
         assert knowledge.pick(bundle, "audio generation")["id"] == "audio-generation"
 
+    def test_pick_keeps_the_resolved_id_when_the_row_omits_it(self, bundle):
+        # The reader is tolerant, so a row need not repeat its own key. The id
+        # the caller reports must still be what spelling and wording resolved to,
+        # never the raw phrase.
+        bundle.capabilities["lipsync"].pop("id", None)
+        assert knowledge.pick(bundle, "Lip Sync")["id"] == "lipsync"
+        assert knowledge.pick(bundle, "make me a talking head clip")["id"] == "lipsync"
+
     def test_pick_sorts_missing_rank_last(self):
         b = knowledge._index(
             {
@@ -520,6 +605,42 @@ class TestIndex:
         )
         assert [p["model"] for p in knowledge.pick(b, "c")["picks"]] == ["z", "y", "x"]
         assert b.as_of == "1970-01-01T00:00:00Z"
+
+    def test_pick_attaches_the_model_fits(self):
+        fits = {"vram_gb": {"fp8": 12, "bf16": 24}, "credits_per_image": 0.5, "max_refs": 3, "source": "measured"}
+        data = {
+            "models": {"a": {"id": "a", "fits": fits}, "b": {"id": "b"}, "c": {"id": "c", "fits": "12 GB"}},
+            "capabilities": {
+                "cap": {
+                    "picks": [
+                        {"model": "a", "rank": 1, "caveat": "fits"},
+                        {"model": "b", "rank": 2},
+                        {"model": "c", "rank": 3},
+                        {"model": "ghost", "rank": 4},
+                    ]
+                }
+            },
+        }
+        b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
+        picks = knowledge.pick(b, "cap")["picks"]
+        assert [p["model"] for p in picks] == ["a", "b", "c", "ghost"]
+        assert picks[0] == {"model": "a", "rank": 1, "caveat": "fits", "fits": fits}
+        # No fits on the row, a non-dict fits, and a model the bundle lacks all pass through untouched.
+        assert picks[1:] == data["capabilities"]["cap"]["picks"][1:]
+        assert all("fits" not in p for p in picks[1:])
+
+    def test_pick_copies_fits_instead_of_touching_the_bundle(self):
+        data = {
+            "models": {"a": {"id": "a", "fits": {"vram_gb": {"fp8": 12}}}},
+            "capabilities": {"cap": {"picks": [{"model": "a", "rank": 1}]}},
+        }
+        snapshot = copy.deepcopy(data)
+        b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
+        top = knowledge.pick(b, "cap")["picks"][0]
+        top["fits"]["vram_gb"]["fp8"] = 0
+        top["fits"]["extra"] = True
+        assert data == snapshot
+        assert "fits" not in b.capabilities["cap"]["picks"][0]
 
 
 # ---------------------------------------------------------------------------
@@ -575,7 +696,7 @@ class TestCli:
         assert data["env_file"] == str(path)
         assert data["url"] is None
         assert data["ttl_seconds"] == knowledge.DEFAULT_TTL_SECONDS
-        assert data["counts"] == {"models": 5, "capabilities": 2, "aliases": 22, "deprecations": 2}
+        assert data["counts"] == {"models": 5, "capabilities": 2, "aliases": 23, "deprecations": 2}
         _validate(data)
 
     def test_status_with_nothing(self, capsys):
@@ -605,13 +726,13 @@ class TestCli:
 
     def test_resolve_hit(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
-        rc, env = _run(["resolve", "Hailuo 03"], capsys)
+        rc, env = _run(["resolve", "Halo 03"], capsys)
         assert rc == 0
         assert env["command"] == "knowledge resolve"
         data = env["data"]
-        assert data["query"] == "Hailuo 03"
-        assert data["id"] == "minimax-h3"
-        assert data["model"]["id"] == "minimax-h3"
+        assert data["query"] == "Halo 03"
+        assert data["id"] == "acme-h3"
+        assert data["model"]["id"] == "acme-h3"
         assert data["deprecation"] is None
         assert data["bundle_version"] == "0.1.0-fixture"
         assert data["stale"] is False
@@ -619,9 +740,9 @@ class TestCli:
 
     def test_resolve_deprecated(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
-        _rc, env = _run(["resolve", "kling-avatar-2"], capsys)
+        _rc, env = _run(["resolve", "testvid-avatar-2"], capsys)
         data = env["data"]
-        assert data["deprecation"]["superseded_by"] == "sync-3"
+        assert data["deprecation"]["superseded_by"] == "lipco-3"
         _validate(data)
 
     def test_resolve_miss(self, tmp_path, monkeypatch, capsys):
@@ -635,17 +756,17 @@ class TestCli:
 
     def test_resolve_spelling_variant_is_a_hit(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
-        rc, env = _run(["resolve", "Hailuo 3"], capsys)
+        rc, env = _run(["resolve", "Halo 3"], capsys)
         assert rc == 0
-        assert env["data"]["id"] == "minimax-h3"
-        assert env["data"]["query"] == "Hailuo 3"
+        assert env["data"]["id"] == "acme-h3"
+        assert env["data"]["query"] == "Halo 3"
         _validate(env["data"])
 
     def test_resolve_close_matches(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
-        _rc, env = _run(["resolve", "klingg"], capsys)
+        _rc, env = _run(["resolve", "testvidg"], capsys)
         assert env["error"]["code"] == "knowledge_unknown_model"
-        assert "kling" in env["error"]["details"]["close_matches"]
+        assert "testvid" in env["error"]["details"]["close_matches"]
 
     def test_resolve_without_bundle(self, capsys):
         rc, env = _run(["resolve", "x"], capsys)
@@ -663,10 +784,10 @@ class TestCli:
         assert ranks == sorted(ranks) and len(ranks) == 7
         assert all("status" in p and "superseded_by" in p for p in data["picks"])
         by_model = {p["model"]: p for p in data["picks"]}
-        assert by_model["kling"]["status"] == "available"
-        assert by_model["ltx"]["status"] is None
-        assert by_model["ltx"]["template"] == "video_ltx2_3_ia2v"
-        assert by_model["kling"]["template"] is None
+        assert by_model["testvid"]["status"] == "available"
+        assert by_model["testlx"]["status"] is None
+        assert by_model["testlx"]["template"] == "video_testlx_ia2v"
+        assert by_model["testvid"]["template"] is None
         _validate(data)
 
     def test_pick_spelling_variant(self, tmp_path, monkeypatch, capsys):
@@ -676,12 +797,62 @@ class TestCli:
         assert env["data"]["capability"] == "audio-generation"
         _validate(env["data"])
 
-    def test_pick_miss(self, tmp_path, monkeypatch, capsys):
+    def test_pick_miss_is_a_zero_hit_answer_not_an_error(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
         rc, env = _run(["pick", "nope"], capsys)
+        assert rc == 0
+        assert env["ok"] is True
+        data = env["data"]
+        assert data["zero_hit"] is True
+        assert data["query"] == "nope"
+        assert "nope" in data["nudge"]
+        assert [c["id"] for c in data["capabilities"]] == ["audio-generation", "lipsync"]
+        _validate(data)
+
+    def test_pick_miss_clips_a_long_query(self, tmp_path, monkeypatch, capsys):
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick", "x" * 500], capsys)
+        assert rc == 0
+        assert len(env["data"]["query"]) == knowledge.MAX_QUERY_CHARS
+
+    def test_pick_hit_reports_zero_hit_false(self, tmp_path, monkeypatch, capsys):
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick", "lipsync"], capsys)
+        assert rc == 0
+        assert env["data"]["zero_hit"] is False
+
+    def test_pick_resolves_a_phrased_request(self, tmp_path, monkeypatch, capsys):
+        # Rule 1 sends the user's own words here, so a sentence must reach the
+        # capability its alias is worded inside.
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick", "make me a talking head clip"], capsys)
+        assert rc == 0
+        assert env["data"]["capability"] == "lipsync"
+        assert env["data"]["zero_hit"] is False
+
+    def test_pick_with_a_blank_capability_lists_them(self, tmp_path, monkeypatch, capsys):
+        # A blank argument means "no capability given", not a curation gap.
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick", "   "], capsys)
+        assert rc == 0
+        assert env["data"]["zero_hit"] is False
+        assert "query" not in env["data"]
+
+    def test_pick_without_a_capability_lists_them(self, tmp_path, monkeypatch, capsys):
+        _env_bundle(tmp_path, monkeypatch)
+        rc, env = _run(["pick"], capsys)
+        assert rc == 0
+        assert env["command"] == "knowledge pick"
+        data = env["data"]
+        assert [c["id"] for c in data["capabilities"]] == ["audio-generation", "lipsync"]
+        assert all("description" in c for c in data["capabilities"])
+        assert data["zero_hit"] is False
+        _validate(data)
+
+    def test_pick_without_a_capability_needs_a_bundle(self, capsys):
+        rc, env = _run(["pick"], capsys)
         assert rc == 1
-        assert env["error"]["code"] == "knowledge_unknown_capability"
-        assert env["error"]["details"]["known"] == ["audio-generation", "lipsync"]
+        assert env["error"]["code"] == "knowledge_unavailable"
 
     def test_pick_payload_normalizes_rank_and_model(self, tmp_path, monkeypatch, capsys):
         picks = [
@@ -703,6 +874,20 @@ class TestCli:
         assert [top[k] for k in ("route", "template", "caveat", "status", "superseded_by")] == [None] * 5
         _validate(env["data"])
 
+    def test_pick_payload_carries_fits_verbatim(self, tmp_path, monkeypatch, capsys):
+        fits = {"vram_gb": {"fp8": 12}, "credits_per_sec": 0.02, "max_refs": 1, "source": "measured"}
+        models = {"x": {"id": "x", "fits": fits}, "y": {"id": "y"}}
+        cap = {"id": "c", "picks": [{"model": "x", "rank": 1}, {"model": "y", "rank": 2}]}
+        p = tmp_path / "k.json"
+        p.write_text(json.dumps({"models": models, "capabilities": {"c": cap}}))
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+        rc, env = _run(["pick", "c"], capsys)
+        assert rc == 0
+        x, y = env["data"]["picks"]
+        assert x["fits"] == fits
+        assert "fits" not in y
+        _validate(env["data"])
+
     def test_resolve_pretty_tolerates_malformed_row_fields(self, tmp_path, monkeypatch, pretty_no_stdout):
         p = tmp_path / "k.json"
         p.write_text(json.dumps({"models": {"m": {"id": "m", "best_for": 5, "pitfalls": "ouch"}}}))
@@ -717,14 +902,14 @@ class TestCli:
 
     def test_pretty_mode_writes_nothing_to_stdout(self, tmp_path, monkeypatch, pretty_no_stdout):
         _env_bundle(tmp_path, monkeypatch)
-        for args in (["status"], ["resolve", "kling"], ["pick", "lipsync"]):
+        for args in (["status"], ["resolve", "testvid"], ["pick", "lipsync"]):
             result = CliRunner().invoke(knowledge_cmd.app, args, standalone_mode=False)
             assert result.exception is None, result.exception
 
     def test_error_codes_registered(self):
         from comfy_cli import error_codes
 
-        for code in ("knowledge_unavailable", "knowledge_unknown_model", "knowledge_unknown_capability"):
+        for code in ("knowledge_unavailable", "knowledge_unknown_model"):
             assert error_codes.is_registered(code)
 
     def test_fixture_manifest_matches_fixture(self):
@@ -732,3 +917,63 @@ class TestCli:
         raw = FIXTURE_KNOWLEDGE.read_bytes()
         assert manifest["files"]["knowledge.json"]["sha256"] == hashlib.sha256(raw).hexdigest()
         assert manifest["files"]["knowledge.json"]["bytes"] == len(raw)
+
+
+class TestVerbQueryLog:
+    """SKILL.md rule 1 tells the agent a miss records the gap. The verbs are
+    what it runs, so they have to feed the same log enrichment feeds."""
+
+    @pytest.fixture
+    def queries(self, monkeypatch):
+        """Only the miss log. `track_command` fires its own event either way."""
+        from comfy_cli import tracking
+
+        seen: list[dict] = []
+        monkeypatch.setattr(
+            tracking,
+            "track_event",
+            lambda name, props=None, **kw: seen.append(props) if name == "knowledge_query" else None,
+        )
+        return seen
+
+    def test_pick_logs_a_hit_as_a_namespaced_capability(self, tmp_path, monkeypatch, capsys, queries):
+        _env_bundle(tmp_path, monkeypatch)
+        _run(["pick", "lipsync"], capsys)
+        assert len(queries) == 1
+        assert queries[0]["command"] == "knowledge pick"
+        assert queries[0]["queries"] == ["lipsync"]
+        assert queries[0]["hit_ids"] == ["cap:lipsync"]
+        assert queries[0]["zero_hit"] is False
+
+    def test_pick_logs_a_phrase_under_the_capability_it_resolved_to(self, tmp_path, monkeypatch, capsys, queries):
+        # The curation feed wants the phrase verbatim, filed under the id it
+        # reached. Filing it under the phrase would make every wording its own row.
+        _env_bundle(tmp_path, monkeypatch)
+        _, env = _run(["pick", "make me a talking head clip"], capsys)
+        assert env["data"]["capability"] == "lipsync"
+        assert queries[0]["queries"] == ["make me a talking head clip"]
+        assert queries[0]["hit_ids"] == ["cap:lipsync"]
+        assert queries[0]["zero_hit"] is False
+
+    def test_pick_logs_a_miss_with_the_clipped_query(self, tmp_path, monkeypatch, capsys, queries):
+        _env_bundle(tmp_path, monkeypatch)
+        _run(["pick", "z" * 500], capsys)
+        assert queries[0]["hit_ids"] == []
+        assert queries[0]["zero_hit"] is True
+        assert queries[0]["queries"] == ["z" * knowledge.MAX_QUERY_CHARS]
+
+    def test_resolve_logs_both_a_hit_and_a_miss(self, tmp_path, monkeypatch, capsys, queries):
+        _env_bundle(tmp_path, monkeypatch)
+        _run(["resolve", "testvid"], capsys)
+        _run(["resolve", "zzzz"], capsys)
+        assert len(queries) == 2
+        assert queries[0]["command"] == "knowledge resolve"
+        assert queries[0]["hit_ids"] == ["testvid"]
+        assert queries[0]["zero_hit"] is False
+        assert queries[1]["hit_ids"] == []
+        assert queries[1]["zero_hit"] is True
+
+    def test_the_bare_listing_asks_nothing_so_logs_nothing(self, tmp_path, monkeypatch, capsys, queries):
+        _env_bundle(tmp_path, monkeypatch)
+        _run(["pick"], capsys)
+        assert queries == []
