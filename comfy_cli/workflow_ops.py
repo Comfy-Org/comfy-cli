@@ -1944,8 +1944,14 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
     if grow is not None:
         # Autogrow is NOT a shared register: every grow mints its own slot keyed
         # by ``grow_id``, so two concurrent grows onto one base both survive and
-        # there is nothing to gate (§1.2 / amendment v1.2's carve-out).
-        if _find_by_str(workflow, op["from_node"]) is None:
+        # there is nothing to gate (§1.2 / amendment v1.2's carve-out) — a
+        # deleted source simply means nothing to wire. A PROMOTED grow IS a
+        # register (§14.2), so it must reach the gate below even when its
+        # source is gone: bailing here would make the incumbent depend on
+        # whether the concurrent delete of this op's source had arrived yet.
+        # Delete wins over the LINK, not over the claim — the entry is left
+        # empty at the ``src is None`` check further down.
+        if not grow.get("promoted") and _find_by_str(workflow, op["from_node"]) is None:
             return
         # Autogrow: grow a concrete slot and wire it. Keyed by ``grow_id`` (the
         # link id) so replay is idempotent AND non-clobbering — a concurrent
@@ -2600,7 +2606,7 @@ def _resolve_input_target(
     # (a concrete ``to_slot`` op would find no slot, be dropped, and never
     # replay). Apply reuses the entry by name; type-checked against the
     # declared input type.
-    if workflow is not None and isinstance(slot, str):
+    if workflow is not None and isinstance(slot, (str, int)) and not isinstance(slot, bool):
         promoted_grow = _resolve_promoted_target(workflow, node, slot, elem_type)
         if promoted_grow is not None:
             return None, promoted_grow
@@ -2710,10 +2716,14 @@ def _resolve_input_target(
     raise ValueError(f"input {slot!r} not found on node {node.get('id')}; inputs: {names}")
 
 
-def _resolve_promoted_target(workflow: dict, node: dict, slot: str, elem_type: str | None) -> dict | None:
+def _resolve_promoted_target(workflow: dict, node: dict, slot: Any, elem_type: str | None) -> dict | None:
     """The input to materialize on subgraph instance ``node`` for a connect to
     its declared input ``slot`` (see ``cql.promoted``). ``None`` when ``node``
-    is not an instance or ``slot`` is not one of its definition's inputs."""
+    is not an instance or ``slot`` is not one of its definition's inputs.
+
+    An INDEX (``57.1``) that lands on an already-materialized entry for a
+    declared input is the same input as its name (``57.width``): it maps onto
+    the name so both addresses share one register (§14.2)."""
     from comfy_cli.cql import engine as _engine
     from comfy_cli.cql import promoted as _promoted
 
@@ -2721,6 +2731,13 @@ def _resolve_promoted_target(workflow: dict, node: dict, slot: str, elem_type: s
     sg = defs.get(str(node.get("type", "")))
     if sg is None:
         return None
+    if isinstance(slot, int) or (isinstance(slot, str) and slot.lstrip("-").isdigit()):
+        ins = node.get("inputs") or []
+        idx = int(slot)
+        entry = ins[idx] if 0 <= idx < len(ins) and isinstance(ins[idx], dict) else None
+        if entry is None or not entry.get("name"):
+            return None
+        slot = str(entry["name"])
     pi = _promoted.find_promoted(sg, defs, slot)
     if pi is None:
         return None

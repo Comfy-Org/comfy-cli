@@ -752,9 +752,12 @@ inputs (socket-only inputs own no slot); `instance_path` is one segment for a
 top-level instance and the interior node path for a nested host, resolved and
 forked exactly like an interior `path`; `host_widgets_values` is the array
 after the write, seeded from each input's current effective value so the
-positional array stays aligned with the definition. Apply writes ONE slot,
-extending a shorter stored array from the payload. The register is the
-ordinary `("widget", node_id, widget)` (§11.2 string identity), so the flat
+positional array stays aligned with the definition. Apply writes ONE slot;
+a shorter stored array is extended from the payload as **best-effort
+repair** — only the written index is under the register, so two concurrent
+writes carrying different tails settle the tail by apply order (an accepted
+limitation: a truncated replica is no longer left truncated). The register is
+the ordinary `("widget", node_id, widget)` (§11.2 string identity), so the flat
 address and the interior address that backs it (`57/13.width`, which the
 minting side redirects to the host — `redirected_from` records the given
 address, informational) share one register. The host-write register and an
@@ -781,10 +784,18 @@ loser's link is retired, and the claim is unconditional once the gate passes.
 Apply reuses an existing entry by name (a concurrent materialization shares
 it) and otherwise appends `{name, type, link, grow_id[, widget:{name}]}`
 verbatim — no numbering. Every connect to a declared promoted input is this
-promoted grow, even once the entry exists: the register is the declared name
-for the life of the input, so a replica that receives a later connect before
-the materializing one still lands it (a concrete `to_slot` op would find no
-slot, be dropped with its `op_id` consumed, and never replay).
+promoted grow, even once the entry exists and even when addressed by INDEX
+(`57.1` landing on the materialized `width` entry maps onto the name at mint
+time): the register is the declared name for the life of the input, so a
+replica that receives a later connect before the materializing one still
+lands it (a concrete `to_slot` op would find no slot, be dropped with its
+`op_id` consumed, and never replay). The claim is unconditional once the
+gate passes: a promoted grow whose source was concurrently deleted still
+claims the register and leaves the entry empty (delete wins over the link,
+not over the claim — §11.1), so every interleaving converges. Scope: an op
+minted by a pre-v1.5 replica as a concrete `to_slot` onto such an input does
+not gate against the promoted register; both replicas must run v1.5 for the
+register to be shared.
 
 ### 14.3 Opaque positional writes: frontend-only `PrimitiveNode`
 

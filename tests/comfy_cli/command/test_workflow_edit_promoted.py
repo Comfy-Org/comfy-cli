@@ -495,3 +495,57 @@ def test_positional_replay_extends_a_partially_present_array_from_the_payload(gr
     _, op = workflow_ops.set_widget(wf, graph, 57, "width", 512)
     replayed = workflow_ops.apply_op(receiver, op, graph)
     assert _node(replayed, legacy)["widgets_values"] == [512, "fixed"]
+
+
+# --------------------------------------------------------------------------- #
+# Review (annehe9) on #818
+# --------------------------------------------------------------------------- #
+
+
+def _apply_all(base: dict, ops: list[dict], graph) -> dict:
+    wf = copy.deepcopy(base)
+    for op in ops:
+        wf = workflow_ops.apply_op(wf, op, graph)
+    return wf
+
+
+def test_promoted_connect_claims_its_register_even_when_its_source_was_deleted(graph):
+    """Two promoted connects into ``57.width`` (stamps lo < hi) plus a delete
+    of the hi op's source, in all six orders: the hi op must claim the
+    register whether or not the delete arrived first (delete wins over the
+    LINK, not over the claim), so every order converges on one state —
+    one ``width`` entry, ``link=None``, ``grow_id=<hi>``."""
+    import itertools
+
+    base = _load("image_z_image_turbo.json")
+    base, a = workflow_ops.add_node(base, graph, "PrimitiveInt")
+    base, b = workflow_ops.add_node(base, graph, "PrimitiveInt")
+    a, b = a["node_id"], b["node_id"]
+    _, op_lo = workflow_ops.connect(copy.deepcopy(base), graph, a, "INT", 57, "width", actor="a", base_version=0)
+    _, op_hi = workflow_ops.connect(copy.deepcopy(base), graph, b, "INT", 57, "width", actor="b", base_version=1)
+    _, op_del = workflow_ops.delete_node(copy.deepcopy(base), graph, b, actor="c", base_version=2)
+    states = set()
+    for order in itertools.permutations((op_lo, op_hi, op_del)):
+        wf = _apply_all(base, list(order), graph)
+        states.add(json.dumps(workflow_ops.canonical(wf), sort_keys=True, default=str))
+        entries = [i for i in _node(wf, 57)["inputs"] if i["name"] == "width"]
+        assert len(entries) == 1
+        assert entries[0]["link"] is None
+        assert entries[0]["grow_id"] == op_hi["link_id"]
+    assert len(states) == 1
+
+
+def test_index_address_of_a_materialized_promoted_input_shares_the_name_register(graph):
+    """``57.width`` and ``57.<index>`` name the same materialized input, so
+    they must gate against each other: the higher stamp wins in either order."""
+    base, prim = _with_primitive(graph)
+    base, _ = workflow_ops.connect(base, graph, prim, "INT", 57, "width")
+    base, other = workflow_ops.add_node(base, graph, "PrimitiveInt")
+    other = other["node_id"]
+    idx = next(k for k, i in enumerate(_node(base, 57)["inputs"]) if i["name"] == "width")
+    _, by_name = workflow_ops.connect(copy.deepcopy(base), graph, other, "INT", 57, "width", actor="a", base_version=1)
+    _, by_index = workflow_ops.connect(copy.deepcopy(base), graph, prim, "INT", 57, idx, actor="b", base_version=2)
+    assert workflow_ops._write_target(by_index) == workflow_ops._write_target(by_name)
+    for order in ((by_name, by_index), (by_index, by_name)):
+        wf = _apply_all(base, list(order), graph)
+        assert _input(_node(wf, 57), "width")["link"] == by_index["link_id"]
