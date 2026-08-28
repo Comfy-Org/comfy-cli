@@ -59,6 +59,7 @@ import uuid
 from typing import Any
 
 from comfy_cli import layout
+from comfy_cli.cql.engine import FRONTEND_MARKER_SLOTS
 
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
@@ -2166,7 +2167,7 @@ def _widget_index(graph, class_type: str, widget: str, widgets_values=None) -> i
     # index stays aligned to ``widgets_values`` for the node's real selection.
     order = graph.widget_order_for_node(class_type, widgets_values)
     if widget not in order:
-        avail = [w for w in order if w != "control_after_generate"]
+        avail = [w for w in order if w not in FRONTEND_MARKER_SLOTS]
         raise ValueError(
             f"widget {widget!r} not found on {class_type}; "
             f"available: {', '.join(avail) if avail else '(none — all inputs are links)'}"

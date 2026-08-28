@@ -15,6 +15,22 @@ history.
 
 ## [Unreleased]
 
+### Fixed
+
+- The widget order (`comfy nodes widget-catalog`, `set-widget` indexing, the
+  UI→API converter) now names every slot the frontend serializes: the
+  `upload` button frontend extensions inject on media loaders (`LoadImage`,
+  `LoadImageMask`, `LoadVideo`, `LoadAudio`, ...), the `audioUI` player on
+  the audio family, the `PREVIEW_3D` `image` on `SaveGLB`/`Preview3D`, DOM
+  widgets declared under an uppercase custom type (`Load3D.image`), and
+  inputs whose `widgetType` overrides a link-shaped socket type
+  (`LTXVEmptyLatentAudio.frame_rate`, the "Basic data handling" math nodes).
+  Before, a workflow with any of these nodes carried more `widgets_values`
+  than the catalog could name, so the cloud doc host refused to mint it
+  (`createNodeMap(LoadImage): widgets_values has 2 entries but widget_order
+  names only 1`) and `set-widget`/conversion read the values after such a
+  slot one position off.
+
 ### Added
 
 - `comfy workflow add-node` and an `add_node` op in `comfy workflow apply`

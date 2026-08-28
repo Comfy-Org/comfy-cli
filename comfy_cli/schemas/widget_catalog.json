@@ -22,7 +22,7 @@
           "widget_order": {
             "type": "array",
             "items": { "type": "string" },
-            "description": "Widget names in the exact positional order of the node's widgets_values array — index i in this list IS index i in widgets_values. Includes the synthetic 'control_after_generate' slot the frontend injects after a seed, and dynamic-combo sub-widgets flattened as '<selector>.<sub>'. Computed by cql.engine.Graph.widget_order, the same call every set-widget in this CLI resolves against."
+            "description": "Widget names in the exact positional order of the node's widgets_values array — index i in this list IS index i in widgets_values. Includes the synthetic 'control_after_generate' slot the frontend injects after a seed, dynamic-combo sub-widgets flattened as '<selector>.<sub>', and the trailing inputs frontend extensions inject ('upload' on media loaders, 'audioUI' on the audio family, 'image' on SaveGLB/Preview3D) so a widgets_values written by any frontend version decomposes. Computed by cql.engine.Graph.widget_order, the same call every set-widget in this CLI resolves against."
           },
           "autogrow_templates": {
             "type": "object",

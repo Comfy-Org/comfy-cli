@@ -30,6 +30,42 @@ from comfy_cli.http import NoRedirectHandler, build_http_only_opener
 
 _IMPLICIT_WIDGET_TYPES = frozenset({"STRING", "INT", "FLOAT", "NUMBER", "BOOLEAN", "COMBO"})
 
+# Uppercase custom types the frontend renders as a DOM widget that SERIALIZES
+# into ``widgets_values`` (``ComponentWidgetImpl`` / ``DOMWidget``), so they
+# occupy a positional slot exactly like an INT. Every other uppercase custom
+# type is a link. Kept to types verified against saved workflows:
+# ``Load3D.image`` / ``Load3DAdvanced.viewport_state`` (``LOAD_3D``),
+# ``SaveGLB``/``Preview3D``'s injected ``image`` (``PREVIEW_3D``),
+# ``LoadAudioUI.audioUI`` (``AUDIO_UI``). ``LOAD3D_CAMERA`` is deliberately
+# absent: ``camera_info`` is ``serialize: false`` and writes no slot.
+_FRONTEND_DOM_WIDGET_TYPES = frozenset(
+    {"LOAD_3D", "LOAD_3D_ADVANCED", "PREVIEW_3D", "AUDIO_UI", "IMAGEUPLOAD", "AUDIOUPLOAD"}
+)
+
+# What a fresh node serializes in a DOM-widget slot. ``add_node`` must emit
+# these for NON-trailing slots (``Load3D.image`` sits before ``width``), or the
+# frontend reads ``width`` into the viewport slot.
+_FRONTEND_DOM_WIDGET_DEFAULTS: dict[str, Any] = {"LOAD_3D": "", "LOAD_3D_ADVANCED": "", "PREVIEW_3D": ""}
+
+# Widget names the FRONTEND injects into a node's inputs after object_info
+# (``beforeRegisterNodeDef`` in ``uploadImage.ts``/``uploadAudio.ts``/
+# ``load3d.ts``/``saveMesh.ts``). They have no schema port and are never
+# ``set-widget`` targets. Listed with ``control_after_generate`` because all
+# three are marker slots a name<->index consumer must be able to name.
+FRONTEND_MARKER_SLOTS = frozenset({"control_after_generate", "upload", "audioUI"})
+
+# ``Comfy.AudioWidget`` appends an ``audioUI`` player to exactly these classes.
+_AUDIO_UI_CLASSES = frozenset(
+    {"LoadAudio", "SaveAudio", "PreviewAudio", "SaveAudioMP3", "SaveAudioOpus", "SaveAudioAdvanced"}
+)
+# ``Comfy.UploadImage`` attaches its upload button to the first required media
+# COMBO carrying one of these flags (``isMediaUploadComboInput``). Audio has
+# its own extension keyed on the ``audio`` input; ``file_upload`` (3D loaders)
+# and ``mesh_upload`` attach nothing.
+_IMAGE_UPLOAD_FLAGS = frozenset({"image_upload", "animated_image_upload", "video_upload"})
+# ``Comfy.Preview3D`` / ``Comfy.SaveGLB`` inject a ``PREVIEW_3D`` ``image`` widget.
+_PREVIEW_3D_CLASSES = frozenset({"SaveGLB", "Preview3D"})
+
 # Work budget for ``Graph.search_paths``: the number of frontier states it will
 # expand before giving up and reporting ``truncated``. A full cloud catalog has
 # thousands of nodes, so an unreachable target must fail fast rather than walk
@@ -58,6 +94,15 @@ class PortOptions:
     # an upload button and the declared options are the server's *installed input
     # files*, not an install-time enum. See ``Port.is_upload_backed``.
     upload: bool = False
+    # The ``<kind>_upload`` flag names that were set (``("image_upload",)``),
+    # so callers can tell WHICH frontend upload extension claims the input.
+    upload_flags: tuple[str, ...] = ()
+    # ``widgetType``: the frontend renders the widget for THIS type instead of
+    # the declared socket type (``inputSpec.widgetType ?? inputSpec.type`` in
+    # litegraphService), so a ``FLOAT,INT`` or ``STRING,FILE_3D_*`` input with
+    # ``widgetType`` set is a widget slot even though its own type reads as a
+    # link. None when the schema does not set it.
+    widget_type: str | None = None
 
 
 @dataclass
@@ -477,13 +522,53 @@ def _has_control_after_generate_slot(port: Port) -> bool:
     return port.type == "INT" and "seed" in leaf_name.lower()
 
 
-def _is_link(type_id: str, is_enum: bool, force_input: bool) -> bool:
+def frontend_extra_widget_names(m: Morphism) -> list[str]:
+    """Widget names the frontend injects into ``m``'s inputs AFTER object_info.
+
+    ``getOrderedInputSpecs`` walks ``input_order.required``, then
+    ``input_order.optional``, then every input not listed there — so an
+    extension-injected input always serializes after every declared widget,
+    optional ones included. Registration order decides the order among them:
+    ``Comfy.AudioWidget`` (``audioUI``) before ``Comfy.UploadAudio`` /
+    ``Comfy.UploadImage`` (``upload``); the lazily loaded 3D extensions
+    (``PREVIEW_3D`` ``image``) last. A name the server already declares
+    (``Load3DAdvanced.viewport_state``) is never injected twice.
+    """
+    declared = {p.name for p in m.inputs}
+    class_id = getattr(m, "id", "")
+    extras: list[str] = []
+    if class_id in _AUDIO_UI_CLASSES:
+        extras.append("audioUI")
+    upload = False
+    for p in m.inputs:
+        if not p.required or p.is_link:
+            continue
+        flags = set(p.options.upload_flags)
+        if p.name == "audio" and "audio_upload" in flags:
+            upload = True
+        elif p.is_upload_backed and flags & _IMAGE_UPLOAD_FLAGS:
+            upload = True
+    if upload:
+        extras.append("upload")
+    if class_id in _PREVIEW_3D_CLASSES:
+        extras.append("image")
+    return [e for e in extras if e not in declared]
+
+
+def _is_link(type_id: str, is_enum: bool, force_input: bool, widget_type: str | None = None) -> bool:
     """Determine if an input participates in typed wiring (link) or is inline (widget)."""
     if is_enum:
+        return False
+    # ``widgetType`` overrides the socket type for widget selection (a
+    # ``FLOAT,INT`` math input with ``widgetType: "STRING"``, Preview3D's
+    # ``STRING,FILE_3D_*`` model_file with ``widgetType: "STRING"``).
+    if widget_type and not force_input:
         return False
     # A dynamic combo is a widget port even when its options block is missing
     # or malformed — the frontend always renders the selector inline.
     if _is_dynamic_combo_type(type_id):
+        return False
+    if type_id in _FRONTEND_DOM_WIDGET_TYPES and not force_input:
         return False
     if type_id in _IMPLICIT_WIDGET_TYPES and not force_input and type_id != "*":
         return False
@@ -530,6 +615,12 @@ def _parse_port_options(opts_raw: dict) -> PortOptions:
         force_input=bool(opts_raw.get("forceInput", False)),
         template=template_raw if isinstance(template_raw, dict) else None,
         upload=_upload_marked(opts_raw),
+        upload_flags=tuple(
+            sorted(k for k, v in opts_raw.items() if isinstance(k, str) and k.endswith("_upload") and bool(v))
+        ),
+        widget_type=opts_raw.get("widgetType")
+        if isinstance(opts_raw.get("widgetType"), str) and opts_raw.get("widgetType")
+        else None,
     )
 
 
@@ -682,7 +773,7 @@ def _port_from_spec(name: str, spec: Any, required: bool) -> Port:
         name=name,
         type=type_id,
         required=required,
-        is_link=_is_link(type_id, is_enum, opts.force_input),
+        is_link=_is_link(type_id, is_enum, opts.force_input, opts.widget_type),
         enum_values=enum_values,
         enum_declared=enum_declared,
         options=opts,
@@ -1200,6 +1291,7 @@ class Graph:
             order.append(p.name)
             if _has_control_after_generate_slot(p):
                 order.append("control_after_generate")
+        order.extend(frontend_extra_widget_names(m))
         return order
 
     def widget_order_default(self, class_name: str) -> list[str]:
@@ -1225,6 +1317,7 @@ class Graph:
                 order.extend(_dynamic_sub_widget_names(p.name, p.dynamic_options))
             if _has_control_after_generate_slot(p):
                 order.append("control_after_generate")
+        order.extend(frontend_extra_widget_names(m))
         return order
 
     def widget_order_for_node(self, class_name: str, widgets_values: list[Any] | None) -> list[str]:
@@ -1256,10 +1349,14 @@ class Graph:
                 out[p.name] = p.options.default
             elif p.enum_values:
                 out[p.name] = p.enum_values[0]
+            elif p.type in _FRONTEND_DOM_WIDGET_TYPES:
+                out[p.name] = _FRONTEND_DOM_WIDGET_DEFAULTS.get(p.type)
             else:
                 out[p.name] = None
             if _has_control_after_generate_slot(p):
                 out["control_after_generate"] = "fixed"
+        # Frontend-injected marker slots (``upload``, ``audioUI``) are trailing
+        # and ``serialize: false`` on current frontends: no default, no value.
         return out
 
     # -- Validation --
@@ -2385,6 +2482,8 @@ def _expand_widget_entries(m: Morphism, widgets_values: list[Any]) -> list[_Widg
         if p.is_link:
             continue
         emit(p.name, p, None, 0)
+    for name in frontend_extra_widget_names(m):
+        entries.append(_WidgetEntry(name=name, port=None, owner=None))
     return entries
 
 
