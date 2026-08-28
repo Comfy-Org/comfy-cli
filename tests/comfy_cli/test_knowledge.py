@@ -15,6 +15,7 @@ with a guard that fails the test if reached.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -605,6 +606,42 @@ class TestIndex:
         assert [p["model"] for p in knowledge.pick(b, "c")["picks"]] == ["z", "y", "x"]
         assert b.as_of == "1970-01-01T00:00:00Z"
 
+    def test_pick_attaches_the_model_fits(self):
+        fits = {"vram_gb": {"fp8": 12, "bf16": 24}, "credits_per_image": 0.5, "max_refs": 3, "source": "measured"}
+        data = {
+            "models": {"a": {"id": "a", "fits": fits}, "b": {"id": "b"}, "c": {"id": "c", "fits": "12 GB"}},
+            "capabilities": {
+                "cap": {
+                    "picks": [
+                        {"model": "a", "rank": 1, "caveat": "fits"},
+                        {"model": "b", "rank": 2},
+                        {"model": "c", "rank": 3},
+                        {"model": "ghost", "rank": 4},
+                    ]
+                }
+            },
+        }
+        b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
+        picks = knowledge.pick(b, "cap")["picks"]
+        assert [p["model"] for p in picks] == ["a", "b", "c", "ghost"]
+        assert picks[0] == {"model": "a", "rank": 1, "caveat": "fits", "fits": fits}
+        # No fits on the row, a non-dict fits, and a model the bundle lacks all pass through untouched.
+        assert picks[1:] == data["capabilities"]["cap"]["picks"][1:]
+        assert all("fits" not in p for p in picks[1:])
+
+    def test_pick_copies_fits_instead_of_touching_the_bundle(self):
+        data = {
+            "models": {"a": {"id": "a", "fits": {"vram_gb": {"fp8": 12}}}},
+            "capabilities": {"cap": {"picks": [{"model": "a", "rank": 1}]}},
+        }
+        snapshot = copy.deepcopy(data)
+        b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
+        top = knowledge.pick(b, "cap")["picks"][0]
+        top["fits"]["vram_gb"]["fp8"] = 0
+        top["fits"]["extra"] = True
+        assert data == snapshot
+        assert "fits" not in b.capabilities["cap"]["picks"][0]
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -835,6 +872,20 @@ class TestCli:
         assert env["data"]["description"] is None and env["data"]["as_of"] is None
         top = env["data"]["picks"][0]
         assert [top[k] for k in ("route", "template", "caveat", "status", "superseded_by")] == [None] * 5
+        _validate(env["data"])
+
+    def test_pick_payload_carries_fits_verbatim(self, tmp_path, monkeypatch, capsys):
+        fits = {"vram_gb": {"fp8": 12}, "credits_per_sec": 0.02, "max_refs": 1, "source": "measured"}
+        models = {"x": {"id": "x", "fits": fits}, "y": {"id": "y"}}
+        cap = {"id": "c", "picks": [{"model": "x", "rank": 1}, {"model": "y", "rank": 2}]}
+        p = tmp_path / "k.json"
+        p.write_text(json.dumps({"models": models, "capabilities": {"c": cap}}))
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+        rc, env = _run(["pick", "c"], capsys)
+        assert rc == 0
+        x, y = env["data"]["picks"]
+        assert x["fits"] == fits
+        assert "fits" not in y
         _validate(env["data"])
 
     def test_resolve_pretty_tolerates_malformed_row_fields(self, tmp_path, monkeypatch, pretty_no_stdout):
