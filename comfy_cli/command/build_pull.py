@@ -9,7 +9,7 @@ from typing import Final, Literal, TypeAlias
 from typing_extensions import assert_never
 
 from comfy_cli.command.build_push import normalize_repository_identity
-from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, JsonValue
+from comfy_cli.command.build_spec import BuildSpecError, BuildSpecInvalidError, JsonObject, JsonValue
 
 IdentityTier: TypeAlias = Literal["sha256", "model_location", "blobId", "id", "repository", "name"]
 
@@ -36,8 +36,23 @@ _DEFINITION_KNOWN_FIELDS: Final = frozenset(
         "environment",
         "modelPolicy",
         "partnerNodePolicy",
+        "customNodePolicy",
     }
 )
+# `schema` names the definition's own format, not build state: the builder has no
+# concept of it, so it is the one field exempt from the round-trip check below.
+_UNSYNCED_DEFINITION_FIELDS: Final = frozenset({"schema"})
+
+
+class UnsyncedDefinitionError(BuildSpecError):
+    code = "build_pull_unsynced_definition"
+
+    def __init__(self, fields: tuple[str, ...]) -> None:
+        self.fields = fields
+        super().__init__(
+            f"the fetched Build's definition omits {', '.join(fields)}, which the local spec sets; "
+            "pulling would delete them"
+        )
 
 
 def _entries(definition: JsonObject, collection: str, *, side: str) -> list[JsonObject]:
@@ -223,6 +238,11 @@ def merge_pull_definition(local: JsonObject, server: JsonObject) -> JsonObject:
             merged[key] = deepcopy(value)
     merged["models"] = _merge_collection(local, server, "models")
     merged["customNodes"] = _merge_collection(local, server, "customNodes")
+    for key in _UNSYNCED_DEFINITION_FIELDS & set(local):
+        merged.setdefault(key, deepcopy(local[key]))
+    dropped = tuple(sorted(set(local) - set(merged)))
+    if dropped:
+        raise UnsyncedDefinitionError(dropped)
     return merged
 
 
@@ -233,7 +253,11 @@ def merge_pulled_spec(local_spec: JsonObject, remote: JsonObject, build_id: str)
     if not isinstance(local_definition, dict) or not isinstance(server_definition, dict):
         raise BuildSpecInvalidError("both the local spec and fetched Build need a definition mapping")
     name = remote.get("name")
+    # `description` is `*string` + `omitempty` on the builder, so an empty one
+    # arrives absent, not as `""`. Same state on the wire; default, don't refuse.
     description = remote.get("description")
+    if description is None:
+        description = ""
     revision = remote.get("updatedAt")
     if not isinstance(name, str) or not isinstance(description, str) or not isinstance(revision, str) or not revision:
         raise BuildSpecInvalidError("the fetched Build needs string name, description and updatedAt fields")

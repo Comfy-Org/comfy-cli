@@ -1149,6 +1149,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "pass `--yes` to overwrite the local spec with the fetched Build",
     ),
     ErrorCode(
+        "build_pull_unsynced_definition",
+        "`comfy build pull` refused a merge that would silently delete definition fields the local spec "
+        "sets and the fetched Build omits. The builder stores the definition verbatim, so a field the spec "
+        "has and the Build lacks never round-tripped. `details.fields` names them. A Build that carries the "
+        "field as an empty value is an intentional clear and is applied normally; only an absent field is "
+        "refused. `definition.schema` is exempt because it names the file format, not build state.",
+        "run `comfy build push` so the Build carries these fields, or delete them from the spec if the Build is authoritative",
+    ),
+    ErrorCode(
         "build_spec_stale",
         "`comfy build push` refused to overwrite a Build whose remote revision differs from the spec's "
         "`syncedRevision`, or exhausted the bounded `--force` overwrite retries.",

@@ -61,7 +61,7 @@ from comfy_cli.command.build_paths import (
     resolve_build_paths,
     resolve_local_path,
 )
-from comfy_cli.command.build_pull import merge_pulled_spec
+from comfy_cli.command.build_pull import UnsyncedDefinitionError, merge_pulled_spec
 from comfy_cli.command.build_push import (
     SkippedSymlink,
     pending_uploads,
@@ -2074,6 +2074,13 @@ def pull_cmd(
         pulled = merge_pulled_spec(prepared.spec, remote, target_id)
     except NodePackageError as error:
         _raise_node_package_error(renderer, error)
+    except UnsyncedDefinitionError as error:
+        renderer.error(
+            code=error.code,
+            message=str(error),
+            details={"path": str(paths.spec_file), "id": target_id, "fields": list(error.fields)},
+        )
+        raise typer.Exit(code=1) from error
     except BuildSpecInvalidError as error:
         renderer.error(code=error.code, message=str(error), details={"path": str(paths.spec_file)})
         raise typer.Exit(code=1) from error

@@ -365,3 +365,105 @@ def test_cross_id_pull_rebinds_and_the_next_plain_push_targets_the_new_build(
     assert COMMAND_SCHEMAS["comfy build pull"] == "build_pull"
     schema = json.loads((SCHEMAS_DIR / "build_pull.json").read_text(encoding="utf-8"))
     jsonschema.Draft202012Validator(schema).validate(envelope(pulled)["data"])
+
+
+def test_a_build_whose_description_is_empty_arrives_without_the_key_and_still_pulls(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_spec(workspace, build_id="build-a", models=[], nodes=[])
+    client = PullBuilder()
+    serve(client, "build-a", remote_definition())
+    del client.remote_builds["build-a"]["description"]
+    install_client(monkeypatch, client)
+
+    result = invoke_pull(workspace, "-y")
+
+    assert result.exit_code == 0, result.stderr
+    assert reloaded(workspace)["description"] == ""
+
+
+def test_a_definition_field_the_fetched_build_never_carried_refuses_the_pull(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = write_spec(
+        workspace,
+        build_id="build-a",
+        models=[],
+        nodes=[],
+        definition_extra={"environment": {"os": "Windows"}, "pipDependencies": "torch==2.0.0\n"},
+    )
+    before = path.read_bytes()
+    client = PullBuilder()
+    serve(client, "build-a", remote_definition())
+    install_client(monkeypatch, client)
+
+    result = invoke_pull(workspace, "-y")
+
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_pull_unsynced_definition"
+    assert error["details"]["fields"] == ["environment", "pipDependencies"]
+    assert path.read_bytes() == before
+
+
+def test_the_definition_schema_marker_is_exempt_from_the_round_trip_check(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_spec(workspace, build_id="build-a", models=[], nodes=[])
+    client = PullBuilder()
+    serve(client, "build-a", {"models": [], "customNodes": []})
+    install_client(monkeypatch, client)
+
+    result = invoke_pull(workspace, "-y")
+
+    assert result.exit_code == 0, result.stderr
+    assert reloaded(workspace)["definition"]["schema"] == "distribution-definition/0"
+
+
+def test_a_build_that_clears_a_field_is_applied_while_one_that_omits_it_is_refused(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_spec(
+        workspace,
+        build_id="build-a",
+        models=[],
+        nodes=[],
+        definition_extra={"pipDependencies": "torch==2.0.0\n"},
+    )
+    client = PullBuilder()
+    serve(client, "build-a", {**remote_definition(), "pipDependencies": ""})
+    install_client(monkeypatch, client)
+
+    cleared = invoke_pull(workspace, "-y")
+
+    assert cleared.exit_code == 0, cleared.stderr
+    assert reloaded(workspace)["definition"]["pipDependencies"] == ""
+
+
+def test_every_policy_field_is_server_authoritative_not_just_two_of_the_three(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    allowlist = {"mode": "allowlist", "list": ["only-this"]}
+    write_spec(
+        workspace,
+        build_id="build-a",
+        models=[],
+        nodes=[],
+        definition_extra={
+            "modelPolicy": allowlist,
+            "partnerNodePolicy": allowlist,
+            "customNodePolicy": allowlist,
+        },
+    )
+    client = PullBuilder()
+    serve(client, "build-a", remote_definition())
+    install_client(monkeypatch, client)
+
+    result = invoke_pull(workspace, "-y")
+
+    assert result.exit_code == 1
+    assert envelope(result)["error"]["details"]["fields"] == [
+        "customNodePolicy",
+        "modelPolicy",
+        "partnerNodePolicy",
+    ]
