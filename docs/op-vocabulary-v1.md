@@ -742,7 +742,7 @@ A write to a promoted input is a top-level `set_widget` on the INSTANCE
 (`node_id`, `widget` = the declared input name; no `path`/`inner_widget`)
 carrying
 
-```
+```json
 "promoted": {"value_index": <int>, "instance_path": [<id>, …],
              "host_widgets_values": [<full materialized array>]}
 ```
@@ -767,7 +767,7 @@ time); a merge consumer treats them as distinct targets.
 A `connect` whose target is a declared subgraph input the instance does not
 yet carry an `inputs[]` entry for carries
 
-```
+```json
 "grow": {"name": <declared input name>, "type": <declared type>,
          "promoted": true, "widget": <name, only when the input backs a widget>}
 ```
@@ -780,9 +780,11 @@ stamp owns the entry in either apply order, `grow_id` follows the winner, the
 loser's link is retired, and the claim is unconditional once the gate passes.
 Apply reuses an existing entry by name (a concurrent materialization shares
 it) and otherwise appends `{name, type, link, grow_id[, widget:{name}]}`
-verbatim — no numbering. Once materialized, a later connect to the same name
-resolves it as a concrete slot (`to_slot`) on the concrete register; both
-sides agree, and this is not drift.
+verbatim — no numbering. Every connect to a declared promoted input is this
+promoted grow, even once the entry exists: the register is the declared name
+for the life of the input, so a replica that receives a later connect before
+the materializing one still lands it (a concrete `to_slot` op would find no
+slot, be dropped with its `op_id` consumed, and never replay).
 
 ### 14.3 Opaque positional writes: frontend-only `PrimitiveNode`
 
