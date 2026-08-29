@@ -31,6 +31,15 @@ from comfy_cli.output.sanitize import sanitize_markup
 
 app = typer.Typer(no_args_is_help=True, help="Introspect ComfyUI node classes (inputs, outputs, categories).")
 
+IncludeDeprecatedOpt = Annotated[
+    bool,
+    typer.Option(
+        "--include-deprecated/--exclude-deprecated",
+        show_default=False,
+        help="Include classes the catalog marks deprecated (hidden by default, like the frontend's node library).",
+    ),
+]
+
 
 # ---------------------------------------------------------------------------
 # graph resolution — shared across ls/show/search
@@ -185,10 +194,7 @@ def ls_cmd(
         bool,
         typer.Option("--output-only", show_default=False, help="Only terminal output nodes."),
     ] = False,
-    exclude_deprecated: Annotated[
-        bool,
-        typer.Option("--exclude-deprecated", show_default=False, help="Exclude deprecated nodes."),
-    ] = False,
+    include_deprecated: IncludeDeprecatedOpt = False,
     limit: Annotated[
         int | None,
         typer.Option(show_default=False, help="Cap output to N rows."),
@@ -245,7 +251,7 @@ def ls_cmd(
             continue
         if output_only and not m.is_output_node:
             continue
-        if exclude_deprecated and m.deprecated:
+        if m.deprecated and not include_deprecated:
             continue
         nodes.append(m)
 
@@ -273,7 +279,7 @@ def ls_cmd(
             "cloud_disabled": cloud_disabled if cloud_disabled else None,
             "api_only": api_only if api_only else None,
             "output_only": output_only if output_only else None,
-            "exclude_deprecated": exclude_deprecated if exclude_deprecated else None,
+            "include_deprecated": include_deprecated if include_deprecated else None,
         },
         "total": total_matched,
         "count": len(nodes),
@@ -287,6 +293,7 @@ def ls_cmd(
                 # Paid partner-API node vs free open-weights node. JSON only —
                 # the pretty table is deliberately left unchanged.
                 "is_api_node": m.is_api_node,
+                **({"deprecated": True} if m.deprecated else {}),
             }
             for m in nodes
         ],
@@ -506,6 +513,7 @@ def search_cmd(
             ),
         ),
     ] = 0,
+    include_deprecated: IncludeDeprecatedOpt = False,
     input_path: Annotated[
         str | None,
         typer.Option("--input", show_default=False, help="Path to a local object_info JSON (offline mode)."),
@@ -547,8 +555,9 @@ def search_cmd(
     q = query.lower()
     tokens = q.split()
     q_joined = "".join(tokens)
+    catalog = [m for m in graph.all_nodes() if include_deprecated or not m.deprecated]
     scored: list[tuple[int, Any]] = []
-    for m in graph.all_nodes() if tokens else ():
+    for m in catalog if tokens else ():
         name_l = m.id.lower()
         display_l = m.display_name.lower()
         desc_l = m.description.lower()
@@ -583,7 +592,7 @@ def search_cmd(
         # in a colliding bucket is surfaced — a pack may register both
         # 'LoadImage' and 'loadimage', and dropping one hides a real suggestion.
         by_lower: dict[str, list[Any]] = {}
-        for m in graph.all_nodes():
+        for m in catalog:
             by_lower.setdefault(m.id.lower(), []).append(m)
         close = difflib.get_close_matches(q_joined, list(by_lower), n=max(1, limit), cutoff=0.6) if q_joined else []
         candidates = [m for name_l in close for m in by_lower[name_l]]
@@ -614,6 +623,7 @@ def search_cmd(
                 # share a display name and differ only here (MiniMax H3). JSON
                 # only; the pretty table is deliberately left unchanged.
                 "is_api_node": m.is_api_node,
+                **({"deprecated": True} if m.deprecated else {}),
                 **({"close_match": True} if close_match else {}),
             }
             for m in matched

@@ -718,6 +718,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "see `details.close_matches` or run `comfy nodes search`",
     ),
     ErrorCode(
+        "node_deprecated",
+        "`workflow add-node` (or an `add_node` op in a batch) named a class the catalog marks deprecated. "
+        "Nothing was added. `details.replacement` names the live class with the same display name when "
+        "one exists.",
+        "add `details.replacement` instead, or pass --allow-deprecated "
+        '(`"allow_deprecated": true` on the op) when the user asked for that exact node',
+    ),
+    ErrorCode(
         "path_bounds_invalid",
         "`comfy nodes path` was given `--max-depth` or `--max-paths` below 1. Such a bound admits no "
         "path at all, so the search is refused rather than returning an empty result that would read "
@@ -764,6 +772,27 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "the destination, they would interleave into the same file.",
         "track it with `comfy model download-status <id>`; a background download can be stopped "
         "with `comfy model download-cancel <id>`, a foreground one with Ctrl-C in its own terminal",
+    ),
+    ErrorCode(
+        "model_download_claim_contested",
+        "`comfy model download --background` lost the race for a destination it had just judged "
+        "free: the stale claim it cleared was re-taken by another submitter before its own retry, "
+        "and that new claim does not (yet) resolve to a live download record. `details.path` is the "
+        "destination; `details.download_id` names the new claim's holder when its claim file was "
+        "readable, and is null otherwise. Unlike `model_download_in_flight` there is no `status`/"
+        "`kind` to report — the competitor's record was not visible at refusal time.",
+        "check `comfy model downloads`, then retry",
+    ),
+    ErrorCode(
+        "model_download_claim_unclearable",
+        "`comfy model download --background` found a stale destination claim it could not remove "
+        "(`details.claim_file`): the file is not deletable by this user, or something else (e.g. a "
+        "directory) sits at the claim path. Every submission to `details.path` will be refused "
+        "until the claim file is cleared, so the command reports the real obstacle rather than a "
+        "phantom in-flight download. `details.download_id` is the stale claim's recorded holder, "
+        "null when the claim was unreadable.",
+        "remove the claim file by hand (check its ownership and the permissions on the `claims/` "
+        "directory), then retry",
     ),
     ErrorCode(
         "model_download_foreground_cancel",

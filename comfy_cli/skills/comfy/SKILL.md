@@ -211,7 +211,7 @@ mechanism by complexity and reuse — not as a quality ranking:
    before choosing (swap `video`/`VIDEO` for the media type at hand):
    ```bash
    comfy --json templates ls --type video --limit 10        # working exemplar graphs
-   comfy --json nodes ls --produces VIDEO --exclude-deprecated
+   comfy --json nodes ls --produces VIDEO
    comfy --json nodes ls --category "partner/video*"       # partner providers
    ```
 
@@ -512,7 +512,7 @@ comfy --json nodes ls --category "loaders*"      # glob on category path
 comfy --json nodes ls --pack comfyui-impact-pack # nodes from a specific pack
 comfy --json nodes ls --api-only                 # only partner-API nodes
 comfy --json nodes ls --output-only              # terminal output nodes (SaveImage, etc.)
-comfy --json nodes ls --exclude-deprecated       # skip deprecated nodes
+comfy --json nodes ls --include-deprecated       # deprecated nodes are hidden by default
 comfy --json nodes ls --cloud-disabled           # what cloud refuses to run
 comfy --json nodes upstream KSampler             # what feeds in
 comfy --json nodes downstream CheckpointLoaderSimple  # what follows
@@ -524,7 +524,7 @@ comfy --json nodes categories                    # full category tree
 Combine flags to narrow results:
 
 ```bash
-comfy --json nodes ls --produces VIDEO --exclude-deprecated --limit 10
+comfy --json nodes ls --produces VIDEO --limit 10
 comfy --json nodes ls --pack core --produces MASK --limit 5
 ```
 
@@ -1131,7 +1131,7 @@ Hard-won lessons per domain. Not a tutorial — a reference card.
   speech. Concatenating such clips raw drifts the voice progressively out of sync
   — trim each clip to its own audio length (+ a small freeze-held breath beat)
   before concat; never butt-join the raw clips.
-- Survey first: `comfy nodes ls --produces VIDEO --exclude-deprecated`, `comfy nodes ls --category "partner/video*"`, `comfy templates ls --type video` — compare OSS, partner-API, and gallery before choosing
+- Survey first: `comfy nodes ls --produces VIDEO`, `comfy nodes ls --category "partner/video*"`, `comfy templates ls --type video` — compare OSS, partner-API, and gallery before choosing
 
 ## Audio
 

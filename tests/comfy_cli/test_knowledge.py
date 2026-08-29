@@ -2,7 +2,8 @@
 
 Contract under test:
   * load order: ``COMFY_KNOWLEDGE_FILE`` (authoritative, never cached) >
-    fresh cache > ``COMFY_KNOWLEDGE_URL`` fetch > stale cache > nothing.
+    fresh cache > fetch (``COMFY_KNOWLEDGE_URL``, else the cloud default) >
+    stale cache > nothing.
   * a broken or missing bundle returns ``None``; nothing here raises.
   * manifest ``schema_version`` and ``sha256`` reject a mismatched bundle.
   * the index is a tolerant reader: unknown keys/fields are ignored.
@@ -15,11 +16,13 @@ with a guard that fails the test if reached.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
 import shutil
 import time
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -217,15 +220,39 @@ class TestLoadOrder:
         monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
         assert knowledge.load_bundle().source == "stale-cache"
 
-    def test_no_cache_no_url_is_none(self):
+    def test_no_cache_and_no_url_fetches_the_default_and_reports_signed_out(self, monkeypatch):
+        calls = _fake_http(monkeypatch, knowledge_bytes=None)
         assert knowledge.load_bundle() is None
-        assert knowledge.last_reason() == knowledge.REASON_NO_URL
+        assert knowledge.last_reason() == knowledge.REASON_SIGNED_OUT
+        assert calls == [knowledge.default_url()]
 
     def test_no_cache_failed_fetch_is_none(self, monkeypatch):
         _fake_http(monkeypatch, knowledge_bytes=None)
         monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
         assert knowledge.load_bundle() is None
         assert knowledge.last_reason() == knowledge.REASON_FETCH_FAILED
+
+    def test_default_url_follows_the_cloud_base_url(self, monkeypatch):
+        monkeypatch.setenv("COMFY_CLOUD_BASE_URL", "https://staging.example/")
+        calls = _fake_http(monkeypatch, knowledge_bytes=FIXTURE_KNOWLEDGE.read_bytes(), manifest_bytes=None)
+        assert knowledge.load_bundle().source == "fetch"
+        assert calls == [
+            "https://staging.example/api/knowledge/knowledge.json",
+            "https://staging.example/api/knowledge/manifest.json",
+        ]
+
+    def test_explicit_url_overrides_the_default(self, monkeypatch):
+        monkeypatch.setenv("COMFY_CLOUD_BASE_URL", "https://staging.example")
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/k/knowledge.json")
+        calls = _fake_http(monkeypatch, knowledge_bytes=FIXTURE_KNOWLEDGE.read_bytes(), manifest_bytes=None)
+        assert knowledge.load_bundle().source == "fetch"
+        assert calls == ["https://example.com/k/knowledge.json", "https://example.com/k/manifest.json"]
+
+    def test_env_file_skips_the_default_fetch(self, tmp_path, monkeypatch):
+        _env_bundle(tmp_path, monkeypatch)
+        calls = _fake_http(monkeypatch, knowledge_bytes=FIXTURE_KNOWLEDGE.read_bytes())
+        assert knowledge.load_bundle().source == "env"
+        assert calls == []
 
     def test_unsafe_url_is_a_fetch_failure(self, monkeypatch):
         calls = _fake_http(monkeypatch, knowledge_bytes=FIXTURE_KNOWLEDGE.read_bytes())
@@ -335,13 +362,32 @@ class TestAuthRouting:
         def fake_authed(url, target, **kw):
             seen["url"] = url
             seen["target_kind"] = target.kind
+            # A failed token refresh during this background fetch must not wipe the stored session.
+            seen["allow_clear"] = target.allow_clear
             return self._fake_resp(b'{"models": {}}')
 
         monkeypatch.setattr(knowledge, "authed_urlopen", fake_authed)
         monkeypatch.setattr(knowledge, "plain_urlopen", lambda *a, **kw: pytest.fail("plain opener used"))
         url = f"{get_base_url()}/api/knowledge/knowledge.json"
         assert knowledge._http_get(url) == b'{"models": {}}'
-        assert seen == {"url": url, "target_kind": "cloud"}
+        assert seen == {"url": url, "target_kind": "cloud", "allow_clear": False}
+
+    def test_signed_out_401_on_the_default_url_degrades_quietly(self, monkeypatch):
+        import comfy_cli.target
+
+        monkeypatch.setattr(knowledge, "_http_get", _REAL_HTTP_GET)
+        monkeypatch.setattr(comfy_cli.target, "resolve_target", lambda **kw: SimpleNamespace(kind="cloud", **kw))
+        seen: list[str] = []
+
+        def unauthorized(url, target, **kw):
+            seen.append(url)
+            raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, None)
+
+        monkeypatch.setattr(knowledge, "authed_urlopen", unauthorized)
+        monkeypatch.setattr(knowledge, "plain_urlopen", lambda *a, **kw: pytest.fail("plain opener used"))
+        assert knowledge.load_bundle() is None
+        assert knowledge.last_reason() == knowledge.REASON_SIGNED_OUT
+        assert seen == [knowledge.default_url()]
 
     def test_lookalike_host_does_not_get_credentials(self, monkeypatch):
         from comfy_cli.cloud import get_base_url
@@ -605,6 +651,42 @@ class TestIndex:
         assert [p["model"] for p in knowledge.pick(b, "c")["picks"]] == ["z", "y", "x"]
         assert b.as_of == "1970-01-01T00:00:00Z"
 
+    def test_pick_attaches_the_model_fits(self):
+        fits = {"vram_gb": {"fp8": 12, "bf16": 24}, "credits_per_image": 0.5, "max_refs": 3, "source": "measured"}
+        data = {
+            "models": {"a": {"id": "a", "fits": fits}, "b": {"id": "b"}, "c": {"id": "c", "fits": "12 GB"}},
+            "capabilities": {
+                "cap": {
+                    "picks": [
+                        {"model": "a", "rank": 1, "caveat": "fits"},
+                        {"model": "b", "rank": 2},
+                        {"model": "c", "rank": 3},
+                        {"model": "ghost", "rank": 4},
+                    ]
+                }
+            },
+        }
+        b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
+        picks = knowledge.pick(b, "cap")["picks"]
+        assert [p["model"] for p in picks] == ["a", "b", "c", "ghost"]
+        assert picks[0] == {"model": "a", "rank": 1, "caveat": "fits", "fits": fits}
+        # No fits on the row, a non-dict fits, and a model the bundle lacks all pass through untouched.
+        assert picks[1:] == data["capabilities"]["cap"]["picks"][1:]
+        assert all("fits" not in p for p in picks[1:])
+
+    def test_pick_copies_fits_instead_of_touching_the_bundle(self):
+        data = {
+            "models": {"a": {"id": "a", "fits": {"vram_gb": {"fp8": 12}}}},
+            "capabilities": {"cap": {"picks": [{"model": "a", "rank": 1}]}},
+        }
+        snapshot = copy.deepcopy(data)
+        b = knowledge._index(data, None, source="env", stale=False, path="p", mtime=0.0)
+        top = knowledge.pick(b, "cap")["picks"][0]
+        top["fits"]["vram_gb"]["fp8"] = 0
+        top["fits"]["extra"] = True
+        assert data == snapshot
+        assert "fits" not in b.capabilities["cap"]["picks"][0]
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -657,7 +739,7 @@ class TestCli:
         assert data["version"] == "0.1.0-fixture"
         assert data["schema_version"] == 1
         assert data["env_file"] == str(path)
-        assert data["url"] is None
+        assert data["url"] == knowledge.default_url()
         assert data["ttl_seconds"] == knowledge.DEFAULT_TTL_SECONDS
         assert data["counts"] == {"models": 5, "capabilities": 2, "aliases": 23, "deprecations": 2}
         _validate(data)
@@ -668,7 +750,8 @@ class TestCli:
         assert env["ok"] is True
         data = env["data"]
         assert data["loaded"] is False
-        assert data["reason"]
+        assert data["reason"] == knowledge.REASON_SIGNED_OUT
+        assert data["url"] == knowledge.default_url()
         assert data["cache_path"].endswith(os.path.join("knowledge", "knowledge.json"))
         _validate(data)
 
@@ -735,6 +818,16 @@ class TestCli:
         rc, env = _run(["resolve", "x"], capsys)
         assert rc == 1
         assert env["error"]["code"] == "knowledge_unavailable"
+        assert "comfy cloud login" in env["error"]["hint"]
+
+    def test_resolve_after_explicit_url_failure_points_at_the_url(self, monkeypatch, capsys):
+        monkeypatch.setenv(knowledge.ENV_URL, "https://example.com/knowledge.json")
+        rc, env = _run(["resolve", "x"], capsys)
+        assert rc == 1
+        assert env["error"]["code"] == "knowledge_unavailable"
+        assert knowledge.REASON_FETCH_FAILED in env["error"]["message"]
+        assert "COMFY_KNOWLEDGE_URL" in env["error"]["hint"]
+        assert "comfy cloud login" not in env["error"]["hint"]
 
     def test_pick_hit(self, tmp_path, monkeypatch, capsys):
         _env_bundle(tmp_path, monkeypatch)
@@ -817,6 +910,39 @@ class TestCli:
         assert rc == 1
         assert env["error"]["code"] == "knowledge_unavailable"
 
+    def test_pick_carries_the_row_best_for_capped(self, tmp_path, monkeypatch, capsys):
+        # A routing opinion written only in the model row must reach the caller
+        # of `knowledge pick`, since the pick's caveat is per capability.
+        picks = [{"model": "x", "rank": 1}, {"model": "y", "rank": 2}, {"model": "z", "rank": 3}]
+        models = {
+            "x": {"id": "x", "best_for": ["multi-ref identity", "product shots", 7, "brand consistency"]},
+            "y": {"id": "y", "status": "available"},
+            "z": {"id": "z", "best_for": "not a list"},
+        }
+        p = tmp_path / "k.json"
+        p.write_text(json.dumps({"models": models, "capabilities": {"c": {"id": "c", "picks": picks}}}))
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+        rc, env = _run(["pick", "c"], capsys)
+        assert rc == 0
+        by_model = {q["model"]: q for q in env["data"]["picks"]}
+        assert by_model["x"]["best_for"] == ["multi-ref identity"]
+        assert "best_for" not in by_model["y"]
+        assert "best_for" not in by_model["z"]
+        _validate(env["data"])
+
+    def test_pick_superseded_by_reads_the_deprecations_list(self, tmp_path, monkeypatch, capsys):
+        data = {
+            "models": {},
+            "deprecations": [{"id": "x", "superseded_by": "y"}],
+            "capabilities": {"c": {"id": "c", "picks": [{"model": "x", "rank": 1}]}},
+        }
+        p = tmp_path / "k.json"
+        p.write_text(json.dumps(data))
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+        _rc, env = _run(["pick", "c"], capsys)
+        assert env["data"]["picks"][0]["superseded_by"] == "y"
+        _validate(env["data"])
+
     def test_pick_payload_normalizes_rank_and_model(self, tmp_path, monkeypatch, capsys):
         picks = [
             {"model": "x", "rank": "1"},
@@ -835,6 +961,20 @@ class TestCli:
         assert env["data"]["description"] is None and env["data"]["as_of"] is None
         top = env["data"]["picks"][0]
         assert [top[k] for k in ("route", "template", "caveat", "status", "superseded_by")] == [None] * 5
+        _validate(env["data"])
+
+    def test_pick_payload_carries_fits_verbatim(self, tmp_path, monkeypatch, capsys):
+        fits = {"vram_gb": {"fp8": 12}, "credits_per_sec": 0.02, "max_refs": 1, "source": "measured"}
+        models = {"x": {"id": "x", "fits": fits}, "y": {"id": "y"}}
+        cap = {"id": "c", "picks": [{"model": "x", "rank": 1}, {"model": "y", "rank": 2}]}
+        p = tmp_path / "k.json"
+        p.write_text(json.dumps({"models": models, "capabilities": {"c": cap}}))
+        monkeypatch.setenv(knowledge.ENV_FILE, str(p))
+        rc, env = _run(["pick", "c"], capsys)
+        assert rc == 0
+        x, y = env["data"]["picks"]
+        assert x["fits"] == fits
+        assert "fits" not in y
         _validate(env["data"])
 
     def test_resolve_pretty_tolerates_malformed_row_fields(self, tmp_path, monkeypatch, pretty_no_stdout):

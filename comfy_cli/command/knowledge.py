@@ -24,11 +24,10 @@ app = typer.Typer(no_args_is_help=True, help="Inspect the curated model-knowledg
 
 
 def _env_context() -> dict[str, Any]:
-    url = os.environ.get(knowledge.ENV_URL, "").strip()
     return {
         "env_file": os.environ.get(knowledge.ENV_FILE, "").strip() or None,
         # Userinfo, query and fragment can carry a token; the path still shows which bundle is configured.
-        "url": tracking._scrub_value(url) if url else None,
+        "url": tracking._scrub_value(knowledge.bundle_url()),
         "ttl_seconds": knowledge.ttl_seconds(),
         "cache_path": str(knowledge.cache_paths()[0]),
     }
@@ -42,13 +41,22 @@ def _text(value: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+_UNAVAILABLE_HINTS = {
+    knowledge.REASON_SIGNED_OUT: "sign in with `comfy cloud login` so the bundle can be fetched, or set COMFY_KNOWLEDGE_FILE to a knowledge.json",
+    knowledge.REASON_FETCH_FAILED: "check COMFY_KNOWLEDGE_URL, or set COMFY_KNOWLEDGE_FILE to a knowledge.json",
+    knowledge.REASON_ENV_FILE: "check the COMFY_KNOWLEDGE_FILE path",
+}
+
+
 def _require_bundle(renderer) -> knowledge.Bundle:
     bundle = knowledge.load_bundle()
     if bundle is None:
+        reason = knowledge.last_reason()
+        hint = _UNAVAILABLE_HINTS.get(reason, "set COMFY_KNOWLEDGE_FILE to a knowledge.json")
         renderer.error(
             code="knowledge_unavailable",
-            message="no knowledge bundle is loaded",
-            hint="set COMFY_KNOWLEDGE_FILE to a knowledge.json, or COMFY_KNOWLEDGE_URL to fetch one; see `comfy knowledge status`",
+            message=f"no knowledge bundle is loaded: {reason}",
+            hint=f"{hint}; see `comfy knowledge status`",
         )
         raise typer.Exit(code=1)
     return bundle
@@ -59,7 +67,10 @@ def _require_bundle(renderer) -> knowledge.Bundle:
 def status_cmd(
     refresh: Annotated[
         bool,
-        typer.Option("--refresh", help="Re-fetch from COMFY_KNOWLEDGE_URL, ignoring the cache TTL."),
+        typer.Option(
+            "--refresh",
+            help="Reload the bundle, ignoring the cache TTL (re-reads COMFY_KNOWLEDGE_FILE when set, else re-fetches).",
+        ),
     ] = False,
 ):
     renderer = get_renderer()
@@ -190,20 +201,10 @@ def pick_cmd(
     knowledge.log_query("knowledge pick", logged, hit_ids=[f"cap:{capability_id}"], zero_hit=False, bundle=bundle)
     picks = []
     for p in cap["picks"]:
-        model_id = p.get("model")
-        model_id = model_id if isinstance(model_id, str) else None
-        row = bundle.models.get(model_id) or {}
-        picks.append(
-            {
-                "rank": knowledge.pick_rank(p),
-                "model": model_id,
-                "route": _text(p.get("route")),
-                "template": _text(p.get("template")),
-                "caveat": _text(p.get("caveat")),
-                "status": _text(row.get("status")),
-                "superseded_by": _text(row.get("superseded_by")),
-            }
-        )
+        entry = knowledge.pick_entry(bundle, p)
+        if "fits" in p:
+            entry["fits"] = p["fits"]
+        picks.append(entry)
     payload = {
         "capability": capability_id,
         "zero_hit": False,
@@ -216,11 +217,12 @@ def pick_cmd(
     if renderer.is_pretty():
         from rich.table import Table
 
-        columns = ("rank", "model", "route", "template", "status", "caveat")
+        columns = ("rank", "model", "route", "template", "status", "caveat", "best_for")
         tbl = Table(show_header=True, header_style="bold")
         for col in columns:
             tbl.add_column(col)
         for p in picks:
-            tbl.add_row(*(sanitize_markup("" if p[c] is None else p[c]) for c in columns))
+            cells = {**p, "best_for": ", ".join(p.get("best_for") or [])}
+            tbl.add_row(*(sanitize_markup("" if cells[c] is None else cells[c]) for c in columns))
         renderer.console().print(tbl)
     renderer.emit(payload, command="knowledge pick")

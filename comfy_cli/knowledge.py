@@ -3,7 +3,8 @@
 The bundle (``knowledge.json`` + optional ``manifest.json``) is produced by
 the curated knowledge bundle repo. It reaches this process by one of three routes,
 tried in order: an explicit ``COMFY_KNOWLEDGE_FILE``, the per-user cache, or a
-fetch from ``COMFY_KNOWLEDGE_URL``. A missing or broken bundle is a normal
+fetch from ``COMFY_KNOWLEDGE_URL``, which defaults to the knowledge channel
+under the cloud base URL. A missing or broken bundle is a normal
 state: every entry point here returns ``None`` rather than raising, and nothing
 is written to stdout or stderr. :func:`attach` is how discovery commands add a
 capped ``knowledge`` block to their payload; it is fail-open for the same reason.
@@ -13,6 +14,7 @@ disturbing the explicit ``comfy knowledge`` verbs.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -21,6 +23,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
+from collections import defaultdict
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -28,8 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from comfy_cli.cloud import get_base_url
-from comfy_cli.cql.loader import _cache_dir
-from comfy_cli.file_utils import atomic_write_bytes
+from comfy_cli.file_utils import atomic_write_bytes, cache_dir
 from comfy_cli.http import assert_safe_url, authed_urlopen, plain_urlopen, read_capped
 
 SCHEMA_VERSION = 1
@@ -37,6 +39,7 @@ ENV_FILE = "COMFY_KNOWLEDGE_FILE"
 ENV_URL = "COMFY_KNOWLEDGE_URL"
 ENV_TTL = "COMFY_KNOWLEDGE_TTL"
 ENV_DISABLE = "COMFY_KNOWLEDGE_DISABLE"
+DEFAULT_URL_PATH = "/api/knowledge/knowledge.json"
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
 FETCH_TIMEOUT_SECONDS = 10.0
 MAX_BUNDLE_BYTES = 16 * 1024 * 1024
@@ -45,6 +48,12 @@ MAX_MODELS = 3
 MAX_MODELS_BRIEF = 20
 MAX_PICKS = 8
 MAX_LIST_ITEMS = 8
+# best_for items per pick. Bounds item count, not bytes: with today's bundle, 1
+# keeps every capability's `knowledge pick` envelope under the 4096 bytes the
+# cloud agent admits verbatim (2, or not_for alongside, sends image-edit over),
+# but a bundle recompile with longer best_for text isn't guaranteed to stay
+# under that.
+MAX_PICK_BEST_FOR = 1
 MAX_BLOCK_BYTES = 8192
 MAX_QUERY_CHARS = 200  # CLI text is unbounded; the clip bounds the lookup key and the nudge echo
 MAX_VERSION_CHARS = 64
@@ -54,14 +63,26 @@ UNAVAILABLE_LOCALLY = "the templates or nodes this row resolves to are absent fr
 # Grammatical filler dropped before subset matching. Deliberately generic English:
 # naming a capability, model or gallery tag here would be a second copy of the
 # bundle's vocabulary, which then drifts every time comfy-knowledge is recompiled.
-_FILLER = frozenset("a an the of to for from with and or in on my me some this that into make create generate".split())
+_FILLER = frozenset(
+    "a an the of to for from with and or in on at by as is are be do it which where while "
+    "my me some this that into make create generate".split()
+)
+# A description counts as match context only up to its first sentence end or
+# negator, whichever comes first: what follows says what the row is *not*, or
+# how it routes. "e.g." and "No.1" are not ends.
+_CONTEXT_END = re.compile(
+    r"(?<=[a-z]{2}[.;])\s|\b(?:no|not|never|neither|nor|without|except)\b(?![.\d])", re.IGNORECASE
+)
 # A one-word key must be at least this long to match on its own. Guards against a
 # future alias like "3d" dragging a capability into every query mentioning it.
 MIN_SINGLE_TOKEN_CHARS = 4
 
 REASON_ENV_FILE = "COMFY_KNOWLEDGE_FILE is set but could not be loaded"
-REASON_NO_URL = "no cache and COMFY_KNOWLEDGE_URL is not set"
-REASON_FETCH_FAILED = "fetch failed and no cached bundle exists"
+REASON_SIGNED_OUT = (
+    "fetch from the cloud knowledge channel failed and no cached bundle exists; "
+    "the usual cause is being signed out (run `comfy cloud login`)"
+)
+REASON_FETCH_FAILED = "fetch from COMFY_KNOWLEDGE_URL failed and no cached bundle exists"
 
 
 @dataclass(frozen=True)
@@ -82,9 +103,10 @@ class Bundle:
     # exact path decides it; a real id always keeps its own key.
     normalized_aliases: dict[str, str] = field(default_factory=dict)
     normalized_capabilities: dict[str, str] = field(default_factory=dict)
-    # (word set, capability id) for every capability id and alias, so an intent
-    # phrase reaches the row its own wording names. See :func:`_resolve_tokens`.
-    capability_tokens: tuple[tuple[frozenset[str], str], ...] = ()
+    # (word set, normalized key, capability id) for every capability id and alias,
+    # so an intent phrase reaches the row its own wording names. See :func:`_resolve_tokens`.
+    capability_tokens: tuple[tuple[frozenset[str], str, str], ...] = ()
+    capability_context: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
 # One-element tuple so a memoized ``None`` is distinguishable from "not loaded yet".
@@ -104,7 +126,7 @@ def last_reason() -> str | None:
 
 
 def cache_paths() -> tuple[Path, Path]:
-    base = _cache_dir() / "knowledge"
+    base = cache_dir() / "knowledge"
     return base / "knowledge.json", base / "manifest.json"
 
 
@@ -119,11 +141,27 @@ def ttl_seconds() -> float:
     return max(ttl, 0.0) if math.isfinite(ttl) else DEFAULT_TTL_SECONDS
 
 
+def default_url() -> str:
+    """``knowledge.json`` under the cloud base URL, derived on every call.
+
+    Never stored: :func:`_http_get` attaches credentials only under
+    ``get_base_url()``, which resolves per invocation, so a remembered
+    production URL would silently fetch unauthenticated for anyone pointed at
+    another environment.
+    """
+    return get_base_url().rstrip("/") + DEFAULT_URL_PATH
+
+
+def bundle_url() -> str:
+    """``COMFY_KNOWLEDGE_URL`` when set, else :func:`default_url`."""
+    return os.environ.get(ENV_URL, "").strip() or default_url()
+
+
 def load_bundle(*, force_fetch: bool = False, cache_only: bool = False) -> Bundle | None:
     """Return the indexed bundle, or ``None`` when no usable bundle exists.
 
     Memoized per process; ``force_fetch=True`` re-runs the load and skips the
-    cache TTL gate so a fetch happens whenever ``COMFY_KNOWLEDGE_URL`` is set.
+    cache TTL gate so a fetch happens unless ``COMFY_KNOWLEDGE_FILE`` is set.
     ``cache_only=True`` never touches the network: env file, then any cache
     (fresh or stale), else ``None``. The memo is shared, except that a
     cache-only miss is not memoized so a later full load can still fetch.
@@ -144,13 +182,44 @@ def _normalize(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", s)
 
 
-def _tokens(s: str) -> frozenset[str]:
-    """Word set for subset matching, with grammatical filler dropped.
+def _stem(word: str) -> str:
+    """Suffix strip, repeated until nothing matches, so "editing", "edits" and "edit" agree.
 
-    Only generic English is listed here — no capability, model or tag name — so
-    this stays put while the bundle changes underneath it.
+    Only inflections: "-al" is left alone so "musical" never lands on the alias "Music".
     """
-    return frozenset(t for t in re.split(r"[^a-z0-9]+", s.lower()) if t and t not in _FILLER)
+    stripped = True
+    while stripped:
+        stripped = False
+        for suffix in ("ing", "ed", "s", "e"):
+            if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+                word = word[: -len(suffix)]
+                stripped = True
+                break
+    return word
+
+
+_FILLER_STEMS = frozenset(map(_stem, _FILLER))
+
+
+def _split(s: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", s.lower())
+
+
+def _tokens(s: str) -> frozenset[str]:
+    """Stemmed word set of a key or description, with grammatical filler dropped."""
+    return frozenset(w for w in map(_stem, _split(s)) if w not in _FILLER_STEMS)
+
+
+def _short_key(key: str) -> bool:
+    """A one-word key (filler aside) under MIN_SINGLE_TOKEN_CHARS never matches on wording."""
+    raw = {w for w in _split(key) if _stem(w) not in _FILLER_STEMS}
+    return len(raw) == 1 and len(next(iter(raw))) < MIN_SINGLE_TOKEN_CHARS
+
+
+def _query_tokens(s: str) -> frozenset[str]:
+    """:func:`_tokens` plus each adjacent pair joined, so "lip sync" reaches the key ``lipsync``."""
+    words = _split(s)
+    return _tokens(s) | frozenset(_stem(a + b) for a, b in zip(words, words[1:]))
 
 
 def _normalized_map(keys: dict[str, str], *, ids: Collection[str] = ()) -> dict[str, str]:
@@ -220,8 +289,18 @@ def pick(bundle: Bundle, capability: str) -> dict | None:
     # The key resolved through spelling and wording is the answer; a row that
     # omits its own ``id`` must not send the caller back to the raw phrase.
     out["id"] = cap_id
-    out["picks"] = sorted(picks, key=_rank_key)
+    out["picks"] = [_with_fits(bundle, p) for p in sorted(picks, key=_rank_key)]
     return out
+
+
+def _with_fits(bundle: Bundle, p: dict) -> dict:
+    """The pick plus its model row's ``fits`` block, copied so the bundle stays untouched."""
+    model = p.get("model")
+    row = bundle.models.get(model) if isinstance(model, str) else None
+    fits = row.get("fits") if row is not None else None
+    if not isinstance(fits, dict):
+        return p
+    return {**p, "fits": copy.deepcopy(fits)}
 
 
 def pick_rank(p: dict) -> int | float | None:
@@ -256,9 +335,9 @@ def _load(*, force_fetch: bool, cache_only: bool = False) -> tuple[Bundle | None
         if bundle is not None:
             return bundle, None
 
-    url = os.environ.get(ENV_URL, "").strip()
-    if url and not cache_only:
-        bundle = _fetch(url, knowledge_path, manifest_path)
+    explicit_url = os.environ.get(ENV_URL, "").strip()
+    if not cache_only:
+        bundle = _fetch(explicit_url or default_url(), knowledge_path, manifest_path)
         if bundle is not None:
             return bundle, None
 
@@ -266,7 +345,7 @@ def _load(*, force_fetch: bool, cache_only: bool = False) -> tuple[Bundle | None
     bundle = _load_file(knowledge_path, manifest_path, source=source, stale=not fresh)
     if bundle is not None:
         return bundle, None
-    return None, (REASON_FETCH_FAILED if url else REASON_NO_URL)
+    return None, (REASON_FETCH_FAILED if explicit_url else REASON_SIGNED_OUT)
 
 
 def _cache_is_fresh(path: Path) -> bool:
@@ -331,7 +410,9 @@ def _http_get(url: str) -> bytes:
     if url.startswith(get_base_url().rstrip("/") + "/"):
         from comfy_cli.target import resolve_target
 
-        opened = authed_urlopen(url, resolve_target(where="cloud"), timeout=FETCH_TIMEOUT_SECONDS)
+        # Best-effort background fetch: a spurious refresh failure must not log the user out.
+        target = resolve_target(where="cloud", allow_clear=False)
+        opened = authed_urlopen(url, target, timeout=FETCH_TIMEOUT_SECONDS)
     else:
         req = urllib.request.Request(url, headers={"User-Agent": "comfy-cli"})
         opened = plain_urlopen(req, timeout=FETCH_TIMEOUT_SECONDS)
@@ -478,6 +559,20 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
             if alias:
                 capability_keys.setdefault(alias, cid)
 
+    capability_tokens = tuple(
+        (words, _normalize(key), cid)
+        for key, cid in capability_keys.items()
+        if (words := _tokens(key)) and not _short_key(key)
+    )
+    key_words: dict[str, set[str]] = defaultdict(set)
+    for words, _, cid in capability_tokens:
+        key_words[cid] |= words
+    capability_context = {
+        cid: _tokens(_CONTEXT_END.split(desc, maxsplit=1)[0]) - key_words[cid]
+        for cid, cap in capabilities.items()
+        if isinstance(desc := cap.get("description"), str)
+    }
+
     version = manifest.get("version") if manifest is not None else None
     return Bundle(
         version=version[:MAX_VERSION_CHARS] if isinstance(version, str) else "unknown",
@@ -494,7 +589,8 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         model_capabilities=model_capabilities,
         normalized_aliases=_normalized_map(aliases, ids=models),
         normalized_capabilities=_normalized_map(capability_keys, ids=capabilities),
-        capability_tokens=tuple((words, cid) for key, cid in capability_keys.items() if (words := _tokens(key))),
+        capability_tokens=capability_tokens,
+        capability_context=capability_context,
     )
 
 
@@ -531,28 +627,40 @@ def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
 
     Callers ask in sentences ("image to 3d model mesh") while the bundle is keyed
     on tags and ids ("Image to Model", "image-to-3d"), and :func:`_normalize`
-    only strips punctuation, so the exact path misses everything phrased. A key
-    matches when all of its words appear in the query, and the longest key wins
-    so a more specific capability is not outvoted by a broader one.
+    only strips punctuation, so the exact path misses everything phrased.
+
+    Each key scores by the share of its words the query contains. A full match
+    always counts. A partial one counts only when the query shares more words
+    with the capability's description than the key words it lacks, so "poster
+    with readable text" reaches ``text-in-image`` while "4K video generation"
+    reaches nothing. Among capabilities that score the same, the key spelled
+    out literally in the query wins ("text to image" over ``text-in-image``),
+    then the one whose description the query echoes.
 
     Ambiguity resolves to nothing rather than to a guess, matching
     :func:`_normalized_map`: a tie between two capabilities is not an answer.
     """
-    words = _tokens(query)
+    words = _query_tokens(query)
     if not words:
         return None
-    best: set[str] = set()
-    best_len = 0
-    for key_words, cid in bundle.capability_tokens:
-        if len(key_words) < best_len or not key_words <= words:
+    literal = _normalize(query)
+    scored: dict[str, tuple[float, int, int, int]] = {}
+    for key_words, key_norm, cid in bundle.capability_tokens:
+        hit = key_words & words
+        if not hit:
             continue
-        if len(key_words) == 1 and len(next(iter(key_words))) < MIN_SINGLE_TOKEN_CHARS:
+        context = len(bundle.capability_context.get(cid, frozenset()) & words)
+        missing = len(key_words) - len(hit)
+        if missing and context <= missing:
             continue
-        if len(key_words) > best_len:
-            best, best_len = {cid}, len(key_words)
-        else:
-            best.add(cid)
-    return next(iter(best)) if len(best) == 1 else None
+        score = (len(hit) / len(key_words), len(hit), len(key_norm) if key_norm in literal else 0, context)
+        if score > scored.get(cid, (0.0, 0, 0, 0)):
+            scored[cid] = score
+    if not scored:
+        return None
+    best = max(scored.values())
+    winners = [cid for cid, score in scored.items() if score == best]
+    return winners[0] if len(winners) == 1 else None
 
 
 def _text(value: Any) -> str | None:
@@ -606,26 +714,39 @@ def _model_entry(bundle: Bundle, model_id: str, row: dict, *, matched_on: str, b
     return entry
 
 
+def pick_entry(bundle: Bundle, p: dict) -> dict:
+    """One pick as emitted, plus the status and routing opinion of its model row.
+
+    ``best_for`` is the head of the row's list, omitted when the row has none.
+    The pick's ``caveat`` is written for one capability; the row's ``best_for``
+    says what the model is for across all of them, which is what a routing
+    decision reads.
+    """
+    model_id = _text(p.get("model"))
+    row = (bundle.models.get(model_id) or {}) if model_id is not None else {}
+    dep = (bundle.deprecations.get(model_id) or {}) if model_id is not None else {}
+    entry = {
+        "rank": pick_rank(p),
+        "model": model_id,
+        "route": _text(p.get("route")),
+        "template": _text(p.get("template")),
+        "caveat": _text(p.get("caveat")),
+        "status": _text(row.get("status")),
+        "superseded_by": _text(dep.get("superseded_by")) or _text(row.get("superseded_by")),
+    }
+    if best_for := [x for x in _str_list(row.get("best_for")) if x][:MAX_PICK_BEST_FOR]:
+        entry["best_for"] = best_for
+    return entry
+
+
 def _pick_entries(bundle: Bundle, capability_id: str, *, catalog_templates: Collection[str] | None) -> list[dict]:
     cap = pick(bundle, capability_id)
     if cap is None:
         return []
     out: list[dict] = []
     for p in cap["picks"]:
-        template = p.get("template") if isinstance(p.get("template"), str) else None
-        model_id = p.get("model")
-        row = bundle.models.get(model_id, {}) if isinstance(model_id, str) else {}
-        dep = bundle.deprecations.get(model_id, {}) if isinstance(model_id, str) else {}
-        entry = {
-            "capability": capability_id,
-            "rank": pick_rank(p),
-            "model": _text(model_id),
-            "route": _text(p.get("route")),
-            "template": template,
-            "caveat": _text(p.get("caveat")),
-            "status": _text(row.get("status")),
-            "superseded_by": _text(dep.get("superseded_by") or row.get("superseded_by")),
-        }
+        entry = {"capability": capability_id, **pick_entry(bundle, p)}
+        template = entry["template"]
         if catalog_templates is not None and template is not None and template not in catalog_templates:
             entry["available_locally"] = False
             entry["unavailable_reason"] = UNAVAILABLE_LOCALLY
@@ -823,9 +944,9 @@ def attach(
     exactly as it was.
 
     ``COMFY_KNOWLEDGE_DISABLE`` suppresses the block entirely. A cached bundle
-    keeps being read once it exists, stale or not, so clearing
-    ``COMFY_KNOWLEDGE_URL`` is not an off switch and this is. Following
-    ``DO_NOT_TRACK``, any value but empty or ``"0"`` disables.
+    keeps being read once it exists, stale or not, and the default URL means a
+    signed-in install fetches one without being asked, so this is the only off
+    switch. Following ``DO_NOT_TRACK``, any value but empty or ``"0"`` disables.
     """
     try:
         disable = os.environ.get(ENV_DISABLE, "")
