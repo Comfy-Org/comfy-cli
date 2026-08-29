@@ -294,7 +294,7 @@ def test_generate_sync_with_download(runner, api_key, tmp_path, monkeypatch):
     download = str(tmp_path / "out.png")
     # --no-json pins pretty mode (CliRunner has no TTY, so the renderer would
     # otherwise pick JSON and emit the envelope instead of the "Saved" line).
-    r = runner.invoke(cli_app, ["generate", "dalle", "--prompt", "x", "--download", download, "--no-json"])
+    r = runner.invoke(cli_app, ["--no-json", "generate", "dalle", "--prompt", "x", "--download", download])
     assert r.exit_code == 0, r.stdout
     assert Path(download).exists()
     assert Path(download).read_bytes() == b"png-bytes"
@@ -314,7 +314,7 @@ def test_generate_json_flag(runner, api_key, monkeypatch):
 def test_generate_download_no_urls(runner, api_key, monkeypatch):
     resp = httpx.Response(200, json={"data": []})
     monkeypatch.setattr(gen_app.client.httpx, "post", lambda *a, **kw: resp)
-    r = runner.invoke(cli_app, ["generate", "dalle", "--prompt", "x", "--no-json", "--download", "/tmp/x.png"])
+    r = runner.invoke(cli_app, ["--no-json", "generate", "dalle", "--prompt", "x", "--download", "/tmp/x.png"])
     assert r.exit_code == 0
     assert "no image urls" in r.stdout.lower()
 
