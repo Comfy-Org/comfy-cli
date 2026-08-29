@@ -1806,8 +1806,19 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                 name = _next_inputcount_name(ins, grow["name"])
             else:
                 base = _autogrow_base(str(grow["name"]))
-                template = None if grow.get("widget") else _autogrow_template(graph, dst, base)
+                port = None if grow.get("widget") else _autogrow_group_port(graph, dst, base)
+                template = None if port is None else port.autogrow_template
                 name = _next_autogrow_name(ins, grow["name"], template)
+                if port is not None and name != grow["name"]:
+                    # A replay collision renamed the slot: never mint one past
+                    # the schema's max. The group is full, so this op is dropped
+                    # (no-op) — which slot the concurrent race keeps is
+                    # arrival-ordered, the same accepted limitation the
+                    # inputcount family documents below; the schema bound is not.
+                    _lo, hi = port.autogrow_limits
+                    occupied = sum(1 for i in ins if str(i.get("name", "")).startswith(base + "."))
+                    if hi is not None and occupied >= hi:
+                        return
             entry = {
                 "name": name,
                 "type": grow["type"],

@@ -272,7 +272,7 @@ def test_group_max_from_the_schema_is_enforced(graph):
         "model.reference_videos.video_2",
         "model.reference_videos.video_3",
     ]
-    with pytest.raises(ValueError, match=r"(?i)max(imum)? .*3|3 slots|full"):
+    with pytest.raises(ValueError, match=r"at most 3 slots"):
         workflow_ops.connect(wf, graph, v, "VIDEO", 4, "model.reference_videos")
 
 
@@ -427,7 +427,7 @@ def test_cli_built_top_level_group_enforces_max(graph):
     for _ in range(50):
         wf, _ = workflow_ops.connect(wf, graph, a, "IMAGE", batch, "images")
     assert "images.image49" in _inputs(wf, batch)
-    with pytest.raises(ValueError, match=r"(?i)max(imum)? .*50|50 slots|full"):
+    with pytest.raises(ValueError, match=r"at most 50 slots"):
         workflow_ops.connect(wf, graph, a, "IMAGE", batch, "images")
 
 
@@ -444,14 +444,36 @@ def test_full_group_reports_full_before_the_next_key_hint(graph):
     assert "next free key" not in str(e.value)
 
 
-def test_a_real_widget_name_outranks_the_bare_element_guess(graph):
+def test_a_real_widget_name_outranks_the_bare_element_guess():
     """A node whose group's bare element vocabulary collides with a real
     widget name keeps the widget→input conversion (the existing precedence)."""
     oi = json.loads(FIXTURE.read_text())
     oi["BatchImagesNode"]["input"]["required"]["image0"] = ["STRING", {"default": ""}]
     oi["BatchImagesNode"]["input_order"]["required"].append("image0")
     g = Graph.from_object_info(oi)
-    wf, prim = _add_loader(_empty(), g, "LoadImage")
-    wf, batch = _add_loader(wf, g, "BatchImagesNode")
+    wf, batch = _add_loader(_empty(), g, "BatchImagesNode")
     _idx, grow = workflow_ops._resolve_input_target(_node(wf, batch), g, "image0", "STRING")
     assert grow == {"name": "image0", "type": "STRING", "widget": "image0"}
+
+
+def test_replay_collision_never_grows_past_the_schema_max(graph):
+    """Two replicas each mint the LAST free slot of a 3-slot group. On
+    replay the second arrival collides on ``video_3``; renaming it must not
+    mint ``video_4`` past the schema max — the op is dropped instead."""
+    wf = _minimax_ui_workflow()
+    wf, v = _add_loader(wf, graph, "LoadVideo")
+    wf, _ = workflow_ops.connect(wf, graph, v, "VIDEO", 4, "model.reference_videos")
+    wf, _ = workflow_ops.connect(wf, graph, v, "VIDEO", 4, "model.reference_videos")
+    _, op_a = workflow_ops.connect(copy.deepcopy(wf), graph, v, "VIDEO", 4, "model.reference_videos", actor="a")
+    _, op_b = workflow_ops.connect(copy.deepcopy(wf), graph, v, "VIDEO", 4, "model.reference_videos", actor="b")
+    assert op_a["grow"]["name"] == op_b["grow"]["name"] == "model.reference_videos.video_3"
+    for order in ((op_a, op_b), (op_b, op_a)):
+        replica = copy.deepcopy(wf)
+        for op in order:
+            replica = workflow_ops.apply_op(replica, op, graph)
+        videos = [n for n in _inputs(replica, 4) if n.startswith("model.reference_videos.")]
+        assert videos == [
+            "model.reference_videos.video_1",
+            "model.reference_videos.video_2",
+            "model.reference_videos.video_3",
+        ]
