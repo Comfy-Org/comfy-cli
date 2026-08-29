@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from comfy_cli.command.build_package import NodePackageError, package_node
+from comfy_cli.command.build_package import NodePackageError, _copy_declared, package_node
 
 posix_permissions = pytest.mark.skipif(
     sys.platform == "win32" or getattr(os, "geteuid", lambda: -1)() == 0,
@@ -139,8 +139,6 @@ def test_package_has_exact_members_and_fixed_metadata(tmp_path: Path) -> None:
     (node / "__pycache__" / "cached.pyc").write_bytes(b"cache")
     (node / "root.pyc").write_bytes(b"cache")
     (node / "target.txt").write_text("target", encoding="utf-8")
-    os.symlink(node / "target.txt", node / "linked.txt")
-    os.symlink(node / "nested", node / "linked-dir")
 
     # When
     archive = _archive_bytes(node, tmp_path / "node.zip")
@@ -155,6 +153,66 @@ def test_package_has_exact_members_and_fixed_metadata(tmp_path: Path) -> None:
             assert stat.S_IMODE(member.external_attr >> 16) == 0o644
 
 
+def test_a_destination_inside_the_root_is_not_packaged_into_itself(tmp_path: Path) -> None:
+    # Given a stale archive from a previous run sitting in the node's own tree
+    node = _node_tree(tmp_path)
+    destination = node / "dist.zip"
+    destination.write_bytes(b"STALE" * 1000)
+
+    # When
+    package = package_node(node, destination)
+
+    # Then it packages the node's content, never the archive it is writing
+    with zipfile.ZipFile(destination) as archive:
+        assert archive.namelist() == ["__init__.py", "nested/data.txt"]
+    assert package.size_bytes == destination.stat().st_size
+
+
+def test_repeated_packaging_into_the_root_is_idempotent(tmp_path: Path) -> None:
+    # Given
+    node = _node_tree(tmp_path)
+    destination = node / "dist.zip"
+
+    # When the same destination is packaged twice, the second run sees the first
+    first = package_node(node, destination).sha256
+    second = package_node(node, destination).sha256
+
+    # Then
+    assert first == second
+
+
+def test_a_leftover_archive_does_not_change_the_nodes_identity(tmp_path: Path) -> None:
+    # Given the digest `push` mints, packaging a clean tree into a temp dir
+    node = _node_tree(tmp_path)
+    expected = package_node(node, tmp_path / "outside.zip").sha256
+
+    # When a previous run left its archive inside the node and it is packaged again
+    destination = node / "dist.zip"
+    destination.write_bytes(b"STALE" * 1000)
+
+    # Then the node still hashes to what `push` would compute for it
+    assert package_node(node, destination).sha256 == expected
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privileges on Windows")
+def test_a_destination_symlinked_out_of_the_root_is_not_reported_as_skipped(tmp_path: Path) -> None:
+    # Given a destination lexically inside the node but pointing outside it
+    node = _node_tree(tmp_path)
+    outside = tmp_path / "elsewhere.zip"
+    outside.write_bytes(b"SEED")
+    destination = node / "dist.zip"
+    os.symlink(outside, destination)
+
+    # When
+    package = package_node(node, destination)
+
+    # Then the archive it is writing is not vendored content it left behind
+    assert package.skipped_symlinks == ()
+    with zipfile.ZipFile(outside) as archive:
+        assert archive.namelist() == ["__init__.py", "nested/data.txt"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privileges on Windows")
 def test_symlinked_node_root_is_rejected(tmp_path: Path) -> None:
     # Given
     node = _node_tree(tmp_path)
@@ -180,6 +238,7 @@ def test_identity_describes_the_archive_it_is_returned_with(tmp_path: Path) -> N
     assert package.size_bytes == len(written)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs privileges on Windows")
 def test_skipped_symlinks_are_reported_rather_than_dropped_in_silence(tmp_path: Path) -> None:
     # Given
     node = _node_tree(tmp_path)
@@ -196,6 +255,71 @@ def test_skipped_symlinks_are_reported_rather_than_dropped_in_silence(tmp_path: 
     with zipfile.ZipFile(destination) as archive:
         assert "linked.txt" not in archive.namelist()
         assert "vendor/data.txt" not in archive.namelist()
+
+
+def test_the_member_copy_stops_at_the_declared_length(tmp_path: Path) -> None:
+    """The bound is what terminates a read against a file still being written.
+
+    An archive member that aliases the archive itself — a hardlink defeats the
+    path-based exclusion — reads back every byte the writer just appended and
+    never reaches EOF. Only the declared length ends it; the size check that
+    follows can never run otherwise.
+    """
+
+    # Given a source that never reports EOF, as a growing member does not.
+    # Capped so an unbounded reader fails the test instead of wedging the run.
+    class _Endless(io.RawIOBase):
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def readable(self) -> bool:
+            return True
+
+        def read(self, size: int = -1) -> bytes:
+            self.reads += 1
+            assert self.reads <= 8, "the copy read past the declared length"
+            return b"X" * (size if size and size > 0 else 1)
+
+    target = io.BytesIO()
+
+    # When
+    copied = _copy_declared(_Endless(), target, 4096)
+
+    # Then
+    assert copied == 4096
+    assert target.getvalue() == b"X" * 4096
+
+
+@pytest.mark.parametrize(("declared", "actual"), [(50, 100), (200, 100)], ids=["grew", "shrank"])
+def test_a_member_that_changes_size_while_packaging_aborts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declared: int, actual: int
+) -> None:
+    """A member whose length moved under packaging aborts rather than landing torn.
+
+    A digest taken over a torn read is not reproducible, which is the whole
+    point of ``localDigest``. This pins only the size comparison — the bound that
+    lets the comparison run at all is pinned by
+    ``test_the_member_copy_stops_at_the_declared_length``.
+    """
+    # Given a file whose real length disagrees with the one packaging recorded
+    node = _node_tree(tmp_path)
+    moving = node / "moving.bin"
+    moving.write_bytes(b"X" * actual)
+    real_stat = Path.stat
+
+    def fake_stat(self: Path, *args: object, **kwargs: object) -> os.stat_result:
+        result = real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+        if self == moving:
+            fields = list(result)
+            fields[6] = declared
+            return os.stat_result(fields)
+        return result
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+
+    # When / Then
+    with pytest.raises(NodePackageError, match="moving.bin changed size while it was being packaged"):
+        package_node(node, tmp_path / "node.zip")
 
 
 @posix_permissions

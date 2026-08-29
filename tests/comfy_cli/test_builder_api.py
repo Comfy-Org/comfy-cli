@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 
 from comfy_cli.builder_api import BuilderClient
+from comfy_cli.builder_pagination import PAGE_LIMIT
 
 # Transcribed from the pre-rename source, NOT imported from builder_api — an
 # imported constant would make the cap assertions recompute themselves.
@@ -135,7 +136,7 @@ _WIRE = [
         new_name="list_builds",
         legacy_name="list_distributions",
         http_method="GET",
-        url=f"{_BASE}/v1/builds",
+        url=f"{_BASE}/v1/builds?limit=100",
     ),
     Wire(
         new_name="get_build",
@@ -149,7 +150,7 @@ _WIRE = [
         legacy_name="list_distribution_versions",
         args=("d1",),
         http_method="GET",
-        url=f"{_BASE}/v1/builds/d1/releases",
+        url=f"{_BASE}/v1/builds/d1/releases?limit=100",
     ),
     Wire(
         new_name="get_release_logs",
@@ -302,7 +303,41 @@ def test_a_paged_list_read_follows_the_cursor_to_the_end(monkeypatch, method, ar
     client = BuilderClient(_BASE_URL, "jwt-token")
 
     assert getattr(client, method)(*args) == [{"id": "a"}, {"id": "b"}, {"id": "c"}]
-    assert seen == [f"{_BASE}{path}", f"{_BASE}{path}?cursor=c1", f"{_BASE}{path}?cursor=c2"]
+    assert seen == [
+        f"{_BASE}{path}?limit=100",
+        f"{_BASE}{path}?cursor=c1&limit=100",
+        f"{_BASE}{path}?cursor=c2&limit=100",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("method", "args", "path", "key"),
+    [
+        pytest.param("list_builds", (), "/v1/builds", "builds", id="list_builds"),
+        pytest.param("list_releases", ("d1",), "/v1/builds/d1/releases", "releases", id="list_releases"),
+    ],
+)
+def test_a_paged_list_read_asks_for_the_servers_largest_page(monkeypatch, method, args, path, key):
+    """Naming no limit is not the same as asking for the maximum.
+
+    ``httpkit.ClampLimit`` falls back to 20 rows rather than to its 100-row
+    ceiling, so an unset limit pages at a fifth of what ``_MAX_LIST_PAGES`` was
+    sized against — five times the round trips, and a hard "listing did not end"
+    failure at 4,000 rows instead of 20,000.
+    """
+    seen: list[str] = []
+
+    def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
+        seen.append(url)
+        return 200, {key: []}
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", fake_request_json)
+    client = BuilderClient(_BASE_URL, "jwt-token")
+
+    getattr(client, method)(*args)
+
+    assert seen == [f"{_BASE}{path}?limit={PAGE_LIMIT}"]
+    assert PAGE_LIMIT == 100
 
 
 # --- older-generation builder fallbacks (pre-#770 response spellings) ---------

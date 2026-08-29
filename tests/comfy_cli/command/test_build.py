@@ -599,11 +599,13 @@ def test_builder_client_read_endpoints(monkeypatch):
 
     def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
         calls.append((method, url))
-        if url.endswith("/v1/builds"):
+        # The paged reads carry a `?limit=`, so route on the path, not the URL.
+        path = url.split("?", 1)[0]
+        if path.endswith("/v1/builds"):
             return 200, {"builds": [{"id": "d1", "name": "n"}]}
-        if url.endswith("/v1/builds/d1"):
+        if path.endswith("/v1/builds/d1"):
             return 200, {"id": "d1", "name": "n", "definition": {"models": []}}
-        if url.endswith("/v1/builds/d1/releases"):
+        if path.endswith("/v1/builds/d1/releases"):
             # A not-yet-upgraded builder still keys the list `versions`; the
             # client parses that spelling as well as `releases`.
             return 200, {"versions": [{"id": "v1", "status": "complete"}]}
@@ -621,7 +623,7 @@ def test_builder_client_read_endpoints(monkeypatch):
     logs = c.get_release_logs("v1", os="linux", gpu="nvidia")
     assert logs["log"] == "hello" and logs["truncated"] is False
     # reads are GETs under /v1, and the log target selector rides as query params
-    assert ("GET", "https://builder.test/v1/builds") in calls
+    assert ("GET", "https://builder.test/v1/builds?limit=100") in calls
     assert any("/logs?" in u and "os=linux" in u and "gpu=nvidia" in u for _, u in calls)
 
 
@@ -1610,9 +1612,11 @@ class _FakeBuilderHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler's spelling)
-        if self.path == "/v1/builds":
+        # The paged reads carry a `?limit=`, so route the listings on the path.
+        route = self.path.split("?", 1)[0]
+        if route == "/v1/builds":
             return self._reply(200, {"builds": [{"id": "dist-1", "name": "portrait"}]})
-        if self.path == "/v1/builds/dist-1/releases":
+        if route == "/v1/builds/dist-1/releases":
             return self._reply(200, {"releases": [{"id": "rel-9", "status": "complete"}]})
         if self.path.startswith("/v1/releases/rel-9/logs"):
             return self._reply(200, {"releaseId": "rel-9", "os": "linux", "log": "pip install ok", "truncated": False})

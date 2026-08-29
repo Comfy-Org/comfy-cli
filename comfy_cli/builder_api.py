@@ -22,7 +22,7 @@ from pathlib import Path
 import requests
 
 from comfy_cli import credentials
-from comfy_cli.builder_pagination import cursor_pages
+from comfy_cli.builder_pagination import PAGE_LIMIT, cursor_pages
 from comfy_cli.http import request_json
 from comfy_cli.target import Target
 
@@ -193,7 +193,9 @@ class BuilderClient:
         The builder pages this read, so a workspace past one page silently lost
         its tail when only the first was taken."""
         builds: list[dict] = []
-        for page in cursor_pages(lambda cursor: self._get(("builds",), {"cursor": cursor}), "builds"):
+        for page in cursor_pages(
+            lambda cursor: self._get(("builds",), {"cursor": cursor, "limit": PAGE_LIMIT}), "builds"
+        ):
             builds.extend(page.get("builds", []))
         return builds
 
@@ -206,7 +208,10 @@ class BuilderClient:
         releases. A server that predates the version-to-release rename keys the
         list ``versions``, so both spellings parse."""
         releases: list[dict] = []
-        pages = cursor_pages(lambda cursor: self._get(("builds", build_id, "releases"), {"cursor": cursor}), "releases")
+        pages = cursor_pages(
+            lambda cursor: self._get(("builds", build_id, "releases"), {"cursor": cursor, "limit": PAGE_LIMIT}),
+            "releases",
+        )
         for page in pages:
             releases.extend(page.get("releases") or page.get("versions") or [])
         return releases
