@@ -137,6 +137,24 @@ def test_list_honors_filters_and_echoes_them():
     assert {row["partner"] for row in data["models"]} == {"bfl"}
 
 
+def test_list_rows_say_whether_emit_workflow_supports_them():
+    """`--emit-workflow` renders only the handful of models that have a partner
+    node mapping, while `generate list` advertises the whole proxy catalog. An
+    agent that read the list and asked for `--emit-workflow` on `flux-pro` got
+    `emit_workflow_failed` with no way to know beforehand (Langfuse 2026-08-27).
+    Each row must carry the answer so the agent never has to try and see."""
+    from comfy_cli.command.generate import emit
+
+    data = _envelope(["--json", "generate", "list"])["data"]
+    for row in data["models"]:
+        assert isinstance(row["emit_supported"], bool), row
+    supported = {row["alias"] for row in data["models"] if row["emit_supported"]}
+    assert supported == set(emit.supported_models())
+    by_alias = {row["alias"]: row for row in data["models"]}
+    assert by_alias["flux-pro"]["emit_supported"] is False  # the prod case: no ComfyUI node for BFL Flux Pro 1.1
+    assert by_alias["flux-2"]["emit_supported"] is True
+
+
 def test_list_with_no_matches_is_an_empty_success_not_an_error():
     result = _run(["--json", "generate", "list", "--partner", "no-such-partner"])
     envelope = json.loads(result.stdout.splitlines()[-1])

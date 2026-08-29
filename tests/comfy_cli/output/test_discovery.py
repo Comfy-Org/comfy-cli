@@ -128,6 +128,12 @@ def test_models_and_templates_registered():
     from comfy_cli.discovery import COMMAND_SCHEMAS
 
     for cmd in (
+        # Canonical singular `model` noun.
+        "comfy model search",
+        "comfy model show",
+        "comfy model list-folders",
+        "comfy model list-folder",
+        # Deprecated plural alias — still registered (envelopes carry `models …`).
         "comfy models search",
         "comfy models show",
         "comfy models list-folders",

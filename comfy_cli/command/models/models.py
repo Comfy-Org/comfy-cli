@@ -1,4 +1,6 @@
 import contextlib
+import errno
+import logging
 import ntpath
 import os
 import pathlib
@@ -14,6 +16,7 @@ import typer
 from rich.markup import escape
 
 from comfy_cli import constants, download_state, tracking, ui
+from comfy_cli.command.models import search as models_search_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
 from comfy_cli.file_utils import (
@@ -28,6 +31,8 @@ from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as print  # context-aware: stderr in JSON mode
 from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.workspace_manager import WorkspaceManager
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer()
 
@@ -721,7 +726,7 @@ def download(
         # `download_state.reconcile` already handles: a record whose pid and
         # pid_create_time no longer match a live process demotes to `failed`, so a
         # hard-killed foreground run self-clears just like a dead worker.
-        _persist_foreground(claim)
+        _persist_record(claim)
 
     elapsed = time.monotonic() - start_time
     print(f"Done in {_format_elapsed(elapsed)}")
@@ -860,25 +865,47 @@ def _submit_background_download(
         )
         raise typer.Exit(code=1) from e
 
-    # Claim, then re-check. The pre-flight scan in `download()` is check-then-act:
-    # between it and the `write` above sit the `--background` split and, for a
-    # Hugging Face url, a whole `check_unauthorized` network round trip — wide
-    # enough for two near-simultaneous submissions to both pass it, both stream a
-    # full copy, and the later `os.replace` to silently overwrite the earlier. The
-    # state record just written *is* the claim, so re-scanning now sees any
-    # competitor that also claimed `dest`. The foreground path does the same thing
-    # with the same helper, so the two now claim against each other as well.
+    # Claim `dest` atomically. Creating the claim file with `O_CREAT | O_EXCL`
+    # *is* the decision: the kernel serializes the create, exactly one of any
+    # number of simultaneous submitters gets the file, and there is no
+    # write-then-re-scan window for the losers to slip through. That window is
+    # what the previous guard could only narrow — a re-scan cannot see a claim
+    # that has not been written yet, and nothing ordered a competitor's `write`
+    # before our scan, so when we scanned first and lost the `_claim_order` tie
+    # neither side withdrew and both streamed a full copy (reproduced at 12
+    # simultaneous submits; `started_at` is second-resolution, so the tie that
+    # makes it likely is the common case rather than an exotic one).
     #
-    # This *narrows* the race; it does not close it. A re-scan cannot see a claim
-    # that has not been written yet, and nothing orders a competitor's `write`
-    # before our scan — so a competitor whose record lands after we look is still
-    # missed and both submissions proceed (reproduced at 12 simultaneous submits;
-    # 4 and 8 came out clean). What changed is the width of the window: from
-    # `[pre-flight scan -> write]`, which spans the `--background` split and an HF
-    # round trip, down to `[write -> re-scan]`. Closing it needs an atomic claim —
-    # an `O_EXCL` sibling or an `flock` — which is a design call this guard does
-    # not make.
+    # The record is written *before* the claim, never after: the claim is only a
+    # pointer, and a competitor probing it for liveness must never find it
+    # pointing at a record of ours that does not exist yet — it would read as
+    # stale and be cleared out from under us.
+    #
+    # Unchanged non-goals. A *foreground* transfer still writes no claim file —
+    # it claims with its state record only — and the claim lives under
+    # `get_workspace()`, so two invocations run from different workspaces at one
+    # destination still consult different claim directories (the documented
+    # cross-workspace residual).
+    #
+    # Which is why the advisory re-scan survives, and runs *first*, before the
+    # claim. It is the only thing that sees a competitor writing no claim file —
+    # live foreground transfer, or a background record written by a version that
+    # predates this code — and running it before the claim is what keeps it from
+    # undoing the claim: after the claim, the records of the submitters we just
+    # beat are still on disk for the moment it takes them to withdraw, and a
+    # winner that re-scanned then would withdraw against its own losers (every
+    # submitter backing off, nothing downloading). It cannot deadlock the other
+    # way either: withdrawal here is only ever against a strictly earlier
+    # `_claim_order`, so the earliest record never withdraws.
     _enforce_claim(state, dest)
+
+    claim_file = _dest_claim_path(dest)
+    if claim_file is not None:
+        _acquire_dest_claim(state, dest, claim_file)
+    # else: the claims directory is unusable (a read-only state dir, or
+    # something sitting where `claims/` should be). Bookkeeping must not turn a
+    # download that used to work into an error, so that degrades to the advisory
+    # guard above — which is exactly the behavior that shipped before this.
 
     try:
         pid = _spawn_download_worker(state_file, log_file)
@@ -887,6 +914,12 @@ def _submit_background_download(
         state.error = f"could not start the background worker: {e}"
         with contextlib.suppress(OSError):
             download_state.write(workspace, state)
+        if claim_file is not None:
+            # No worker will ever reach a terminal transition for this record, so
+            # nothing else would ever release the claim. It would still read
+            # stale (the record is `failed`) and self-clear on the next submit,
+            # but leaving it is a needless round of cleanup for the next caller.
+            download_state.release_claim(claim_file, owner_id=state.id)
         renderer.error(
             code="download_worker_spawn_failed",
             message=f"Could not start the background download worker: {e}",
@@ -939,6 +972,31 @@ def _download_worker(
 
     cancel_marker = download_state.cancel_marker_for(path)
 
+    # The submitter took an `O_EXCL` claim on this destination and we are the
+    # only thing that reaches a terminal transition for it, so releasing it is
+    # ours: everything past the cancel-sentinel check runs under a
+    # `try/finally: release()`, so no exit — including an OSError out of the
+    # very first `write_path` — can strand the claim. Derived, never carried in
+    # the record — the claim is addressed by destination, not by download.
+    # `release_claim` no-ops unless the claim still names us, so a claim a later
+    # submitter already cleared and replaced is never unlinked from under it.
+    #
+    # Derived defensively: `state.dest` is read back off disk, so `_dest_key`
+    # (`realpath`) is being handed untrusted text and can raise on a shape the
+    # submitter's own `dest` never had. Releasing a claim must never be what
+    # stops the transfer from recording its result — a claim we cannot address
+    # is left behind and self-clears on the next submit, exactly like the SIGKILL
+    # case.
+    claim_file: pathlib.Path | None
+    try:
+        claim_file = download_state.claim_marker_for(path, _dest_key(state.dest))
+    except (OSError, ValueError):
+        claim_file = None
+
+    def release() -> None:
+        if claim_file is not None:
+            download_state.release_claim(claim_file, owner_id=state.id)
+
     def cancelled() -> bool:
         return cancel_marker.exists()
 
@@ -952,77 +1010,84 @@ def _download_worker(
             state.error = None
             with contextlib.suppress(OSError):
                 download_state.write_path(path, state)
+        # This is the `download-cancel`-before-the-worker-starts path: cancel
+        # itself never touches the claim, the worker boots, sees the sentinel and
+        # releases it here on the way out.
+        release()
         raise typer.Exit(code=0)
 
-    state.pid = os.getpid()
-    state.pid_create_time = download_state.process_create_time(os.getpid())
-    state.status = "downloading"
-    download_state.write_path(path, state)
-
-    last_write = 0.0
-
-    def on_progress(completed: int, total: int | None) -> None:
-        nonlocal last_write
-        state.completed_bytes = completed
-        if total is not None:
-            state.total_bytes = total
-        now = time.monotonic()
-        if now - last_write < download_state.PROGRESS_THROTTLE_S:
-            return
-        last_write = now
-        # Poll for cancellation on the same tick as the progress write, so a
-        # cancelled download is never resurrected to `downloading` by a write
-        # that raced it.
-        if cancelled():
-            raise DownloadCancelled()
-        with contextlib.suppress(OSError):
-            download_state.write_path(path, state)
-
     try:
-        download_file(
-            state.url,
-            pathlib.Path(state.dest),
-            _worker_headers(state),
-            downloader=state.downloader,
-            progress_callback=on_progress,
-        )
-    except DownloadCancelled:
-        state.status = "cancelled"
-        state.error = None
-        # Same split as `download_cancel`: only aria2 wrote to the destination, so
-        # only aria2's leftovers are ours to delete. The httpx path raises this
-        # from inside the transfer loop, before the rename, and unwinds through
-        # `_download_file_httpx`'s own cleanup — the `.part` is already gone and
-        # anything at `dest` predates this download.
-        if state.downloader == "aria2":
-            with contextlib.suppress(OSError):
-                pathlib.Path(state.dest).unlink(missing_ok=True)
-        state.completed_bytes = 0
-        with contextlib.suppress(OSError):
-            download_state.write_path(path, state)
-        raise typer.Exit(code=0) from None
-    except BaseException as e:  # noqa: BLE001 — any failure must reach the state file
-        state.status = "failed"
-        state.error = _friendly_network_error(e) if isinstance(e, Exception) else f"{type(e).__name__}"
-        with contextlib.suppress(OSError):
-            download_state.write_path(path, state)
-        raise typer.Exit(code=1) from None
-
-    # A transfer that beat the cancel to the finish line stays `completed` and
-    # keeps its file — `download-cancel` re-reads this record before deciding
-    # what to delete, so both sides agree that a fully-downloaded model is not
-    # something to throw away.
-    state.status = "completed"
-    state.error = None
-    actual = pathlib.Path(state.dest)
-    try:
-        state.completed_bytes = actual.stat().st_size
-    except OSError:
-        pass
-    if state.total_bytes is None:
-        state.total_bytes = state.completed_bytes
-    with contextlib.suppress(OSError):
+        state.pid = os.getpid()
+        state.pid_create_time = download_state.process_create_time(os.getpid())
+        state.status = "downloading"
         download_state.write_path(path, state)
+
+        last_write = 0.0
+
+        def on_progress(completed: int, total: int | None) -> None:
+            nonlocal last_write
+            state.completed_bytes = completed
+            if total is not None:
+                state.total_bytes = total
+            now = time.monotonic()
+            if now - last_write < download_state.PROGRESS_THROTTLE_S:
+                return
+            last_write = now
+            # Poll for cancellation on the same tick as the progress write, so a
+            # cancelled download is never resurrected to `downloading` by a write
+            # that raced it.
+            if cancelled():
+                raise DownloadCancelled()
+            with contextlib.suppress(OSError):
+                download_state.write_path(path, state)
+
+        try:
+            download_file(
+                state.url,
+                pathlib.Path(state.dest),
+                _worker_headers(state),
+                downloader=state.downloader,
+                progress_callback=on_progress,
+            )
+        except DownloadCancelled:
+            state.status = "cancelled"
+            state.error = None
+            # Same split as `download_cancel`: only aria2 wrote to the destination, so
+            # only aria2's leftovers are ours to delete. The httpx path raises this
+            # from inside the transfer loop, before the rename, and unwinds through
+            # `_download_file_httpx`'s own cleanup — the `.part` is already gone and
+            # anything at `dest` predates this download.
+            if state.downloader == "aria2":
+                with contextlib.suppress(OSError):
+                    pathlib.Path(state.dest).unlink(missing_ok=True)
+            state.completed_bytes = 0
+            with contextlib.suppress(OSError):
+                download_state.write_path(path, state)
+            raise typer.Exit(code=0) from None
+        except BaseException as e:  # noqa: BLE001 — any failure must reach the state file
+            state.status = "failed"
+            state.error = _friendly_network_error(e) if isinstance(e, Exception) else f"{type(e).__name__}"
+            with contextlib.suppress(OSError):
+                download_state.write_path(path, state)
+            raise typer.Exit(code=1) from None
+
+        # A transfer that beat the cancel to the finish line stays `completed` and
+        # keeps its file — `download-cancel` re-reads this record before deciding
+        # what to delete, so both sides agree that a fully-downloaded model is not
+        # something to throw away.
+        state.status = "completed"
+        state.error = None
+        actual = pathlib.Path(state.dest)
+        try:
+            state.completed_bytes = actual.stat().st_size
+        except OSError:
+            pass
+        if state.total_bytes is None:
+            state.total_bytes = state.completed_bytes
+        with contextlib.suppress(OSError):
+            download_state.write_path(path, state)
+    finally:
+        release()
 
 
 def _render_download_rows(rows: list[dict]) -> None:
@@ -1097,16 +1162,24 @@ def _dest_key(path: pathlib.Path | str) -> str:
 
 
 def _claim_order(state: download_state.DownloadState) -> tuple[str, str]:
-    """Total order over competing claims on one destination: first writer wins.
+    """Total order over competing claims on one destination — advisory only.
 
     ``started_at`` is second-resolution so ties are common; ``id`` (12 random hex
     chars) breaks them, and because both racers compute the same order over the
     same two records they always agree on who won.
 
-    Agreeing on the winner requires both records to be *visible* to both racers,
-    which the re-scan in :func:`_submit_background_download` cannot guarantee — a
-    racer that scans before the other's record lands sees no competitor at all, so
-    this order is never consulted and both proceed. See that call site.
+    It no longer decides a background submit. Ordering records can only rank the
+    ones a racer happens to *see*, and a racer that scans before the other's
+    record lands sees no competitor at all — so two submits could rank each other
+    into a pair of winners. What decides a background submit now is the `O_EXCL`
+    claim file (:func:`_acquire_dest_claim`), where the kernel's create is the
+    order and nobody has to see anybody.
+
+    This order survives for the readers that are still advisory and still want a
+    deterministic pick: :func:`_active_download_for`'s winner-pick (one live
+    claim reported out of several), and :func:`_enforce_claim`, which is the
+    whole guard on the *foreground* path — a foreground transfer writes a record
+    but no claim file, so its two racers still have nothing else to agree on.
     """
     return (state.started_at or "", state.id)
 
@@ -1147,15 +1220,16 @@ def _active_download_for(
     this scan *after* writing its own claim and must not find itself.
 
     The scan is scoped to ``get_workspace()``'s state directory, and that is the
-    one residual no claim written here can close. A destination can sit outside
-    the workspace (``--relative-path`` is only ``expanduser``-ed, so it accepts
+    residual neither this nor the `O_EXCL` claim file closes — the claim lives in
+    the same per-workspace state directory. A destination can sit outside the
+    workspace (``--relative-path`` is only ``expanduser``-ed, so it accepts
     ``..`` and absolute paths), so two invocations run against *different*
     workspaces but aimed at the same file consult disjoint
     ``<workspace>/.comfy-downloads`` directories and are invisible to each other
     — both claim, both win, both write. Closing it needs a claim that lives next
-    to the destination rather than next to the workspace (an ``O_EXCL`` sidecar),
-    or a refusal of workspace-escaping ``--relative-path``; both are design calls
-    with their own tradeoffs and neither is made here.
+    to the destination rather than next to the workspace, or a refusal of
+    workspace-escaping ``--relative-path``; both are design calls with their own
+    tradeoffs and neither is made here.
     """
     wanted = _dest_key(dest)
     winner: download_state.DownloadState | None = None
@@ -1210,6 +1284,212 @@ def _in_flight_failure(competitor: download_state.DownloadState, dest: pathlib.P
     )
 
 
+def _dest_claim_path(dest: pathlib.Path) -> pathlib.Path | None:
+    """Where ``dest``'s claim file lives, or None when claims are unavailable.
+
+    Inside the state directory rather than next to the model file: the state dir
+    is already owner-only, and a sidecar in `models/loras` would be something
+    users (and `comfy model downloads`) trip over. Keyed by :func:`_dest_key`,
+    the same canonical spelling `_active_download_for` compares on, so a symlink
+    and its target hash to one claim.
+
+    None rather than a raise when the directory cannot be made: claims are
+    bookkeeping, and the caller degrades to the advisory guard.
+    """
+    try:
+        return download_state.claim_path(get_workspace(), _dest_key(dest))
+    except (OSError, ValueError):
+        return None
+
+
+def _claim_holder(claim_file: pathlib.Path) -> tuple[str | None, download_state.DownloadState | None]:
+    """Resolve a claim file to ``(recorded id, live record)``.
+
+    A claim is live iff its ``download_id`` resolves to a state record whose
+    *reconciled* status is still active, or whose worker process is still
+    provably running. The first arm delegates the liveness question to the
+    record's existing `pid` + `pid_create_time` identity proof and
+    `STARTUP_GRACE_S` window: a SIGKILLed worker's record demotes to `failed`
+    on reconcile, so its claim reads stale here and the next submitter clears
+    it — which is why a SIGKILL needs no sweeper. The second arm covers the
+    gap the first cannot: a terminal status does not prove the process exited
+    (a cancelled worker is still mid-write until its own terminal transition
+    lands, and it releases the claim itself right after), so while
+    `worker_alive` still proves the recorded process is that worker, the claim
+    is its to release, not ours to clear.
+
+    An unreadable or corrupt claim, and a claim whose record is gone, both come
+    back with no live record: stale. The id is still returned when it could be
+    read, because the retry path words its refusal from it.
+    """
+    download_id = download_state.read_claim(claim_file)
+    if download_id is None:
+        return None, None
+    record = download_state.read(get_workspace(), download_id)
+    if record is None:
+        return download_id, None
+    fresh, _ = _reconciled(record)
+    if fresh.status not in download_state.ACTIVE_STATUSES and not download_state.worker_alive(fresh):
+        return download_id, None
+    return download_id, fresh
+
+
+def _withdraw_record(state: download_state.DownloadState, dest: pathlib.Path, winner_id: str | None) -> None:
+    """Take our own just-written record back off disk, having lost the claim.
+
+    Same fallback as :func:`_enforce_claim`'s withdrawal: if the unlink fails,
+    a terminal status is the next best thing, because the `starting` record we
+    wrote would otherwise read as a live claim to `_active_download_for` and to
+    `download-cancel` and refuse every later submission to this destination.
+    """
+    if download_state.delete(get_workspace(), state.id):
+        return
+    state.status = "failed"
+    state.error = f"withdrew this claim; {winner_id or 'another download'} won {dest}"
+    _persist_record(state)
+
+
+# `os.link` is what makes the claim atomic, and a filesystem without hard links
+# (exFAT, FAT32, some network and container mounts) refuses it outright rather
+# than transiently. Told apart from a transient failure only to word the warning
+# accurately: both degrade identically, because a download that used to work must
+# not become an error over bookkeeping.
+_CLAIMS_UNSUPPORTED_ERRNOS = frozenset(
+    getattr(errno, name) for name in ("ENOTSUP", "EOPNOTSUPP", "EPERM", "ENOSYS") if hasattr(errno, name)
+)
+# ERROR_INVALID_FUNCTION / ERROR_NOT_SUPPORTED — what Windows returns for
+# `CreateHardLinkW` on a volume that has no hard links.
+_CLAIMS_UNSUPPORTED_WINERRORS = frozenset((1, 50))
+
+_claims_degraded_reported = False
+
+
+def _report_claim_degraded(exc: OSError, dest: pathlib.Path) -> None:
+    """Warn once per process that destination claims are not atomic here.
+
+    Once, because the alternative is a line per submit for a condition that is a
+    property of the filesystem and will not change under a running CLI. It is a
+    warning rather than a hard failure for the reason `_dest_claim_path` returns
+    None rather than raising: claims are bookkeeping, and the advisory guard
+    still catches every competitor it caught before this code existed.
+    """
+    global _claims_degraded_reported
+    if _claims_degraded_reported:
+        return
+    _claims_degraded_reported = True
+    unsupported = exc.errno in _CLAIMS_UNSUPPORTED_ERRNOS or (
+        getattr(exc, "winerror", None) in _CLAIMS_UNSUPPORTED_WINERRORS
+    )
+    why = (
+        "this filesystem does not support the hard link that publishes them"
+        if unsupported
+        else "the claim could not be written"
+    )
+    logger.warning(
+        "atomic destination claims are unavailable (%s: %s); falling back to the "
+        "advisory in-flight scan for %s, which cannot arbitrate between simultaneous "
+        "submissions",
+        why,
+        exc,
+        dest,
+    )
+
+
+def _acquire_dest_claim(
+    state: download_state.DownloadState,
+    dest: pathlib.Path,
+    claim_file: pathlib.Path,
+) -> None:
+    """Take the `O_EXCL` claim on ``dest``, or withdraw and refuse.
+
+    Returns None when the claim is ours. Otherwise the destination belongs to
+    someone else: our own record comes back off disk (so we leave no phantom
+    claim) and the caller gets the usual `model_download_in_flight` refusal.
+
+    A claim we lose to is only decisive while it is *live*. A stale one — its
+    record demoted by reconcile, deleted, or the file corrupt — is unlinked and
+    the create retried exactly ONCE. Once, not in a loop: a second collision
+    means another submitter won the retry race rather than that the claim is
+    wedged, and that submitter is a competitor to refuse to, not a lock to keep
+    fighting for.
+    """
+    for attempt in (1, 2):
+        try:
+            if download_state.acquire_claim(claim_file, download_id=state.id, dest=str(dest)):
+                return
+        except OSError as e:
+            # Anything other than the collision (a read-only state dir, a
+            # vanished claims directory, a filesystem with no hard links).
+            # Degrade to the advisory guard, exactly as an unavailable claims
+            # directory does — but say so first: the advisory guard re-scans
+            # rather than arbitrates, so this silently gives up the atomicity
+            # this whole path exists to provide, and a destination on such a
+            # filesystem can be raced again.
+            _report_claim_degraded(e, dest)
+            _enforce_claim(state, dest)
+            return
+
+        holder_id, holder = _claim_holder(claim_file)
+        if holder is not None:
+            _withdraw_record(state, dest, holder.id)
+            raise _in_flight_failure(holder, dest)
+
+        if attempt == 1:
+            # Stale: the claim outlived the download it points at. Clear it and
+            # try once more. Another submitter may clear it first and win the
+            # create — that is the second pass below, not a problem here.
+            #
+            # Cleared *conditionally*, by the id we just read: between reading a
+            # claim and deciding it is stale sits a state-file read and a
+            # `reconcile`, and in that gap its worker may finish, release it, and
+            # a fresh submitter take a live claim at the same path. An
+            # unconditional unlink would delete that live claim and leave two
+            # downloads owning one destination. `release_claim` re-reads and only
+            # unlinks while the id still matches, which narrows the window to the
+            # compare-and-unlink inside it — it does not close it (the filesystem
+            # offers no conditional unlink), but the surviving window no longer
+            # spans a reconcile. If the claim did change under us, the retry
+            # below collides with the new holder and refuses, which is right.
+            if not download_state.release_claim(claim_file, owner_id=holder_id):
+                # False for two very different reasons, told apart by a re-read.
+                # The claim changing hands under us is the takeover race above —
+                # fall through and collide with the new holder. The claim still
+                # naming the id we judged stale means the unlink itself failed
+                # (a claim file we cannot remove, or a directory sitting at the
+                # claim path): retrying would collide with the same corpse
+                # forever and report a phantom in-flight download, so name the
+                # real problem instead.
+                if download_state.read_claim(claim_file) == holder_id:
+                    _withdraw_record(state, dest, holder_id)
+                    raise _download_failure(
+                        code="model_download_claim_unclearable",
+                        message=f"A stale download claim on {dest} could not be cleared.",
+                        hint=f"remove the claim file at {claim_file} and retry, or check its permissions",
+                        details={
+                            "path": str(dest),
+                            "claim_file": str(claim_file),
+                            "download_id": holder_id,
+                        },
+                    )
+            continue
+
+        # Second collision: somebody else took the claim we just cleared. Back
+        # off rather than clear theirs too — a retry loop over a contested claim
+        # is how two submitters livelock each other. Their id, when the claim was
+        # readable, is all we can honestly report: this claim did not resolve to
+        # a live record, so quoting a status or kind from one would be inventing
+        # it — hence a distinct code rather than a `model_download_in_flight`
+        # missing the fields that code documents.
+        _withdraw_record(state, dest, holder_id)
+        named = f" ({holder_id})" if holder_id else ""
+        raise _download_failure(
+            code="model_download_claim_contested",
+            message=f"Another download{named} claimed {dest} first.",
+            hint="check `comfy model downloads`, then retry",
+            details={"path": str(dest), "download_id": holder_id},
+        )
+
+
 def _enforce_claim(state: download_state.DownloadState, dest: pathlib.Path) -> None:
     """Re-scan for a competing claim on ``dest`` and withdraw ours if we lost.
 
@@ -1219,6 +1499,12 @@ def _enforce_claim(state: download_state.DownloadState, dest: pathlib.Path) -> N
     :func:`download` structurally cannot: it runs before the claim exists, with
     the ``--background`` split and (for a Hugging Face url) a whole
     ``check_unauthorized`` round trip between it and the write.
+
+    It is check-then-act and cannot be otherwise — hence the `O_EXCL` claim file
+    that now decides the background path (:func:`_acquire_dest_claim`). This
+    stays because it is the only guard the *foreground* path has (a foreground
+    transfer writes no claim file), and because it is what lets a background
+    submit that already holds its claim still notice a live foreground competitor.
 
     Both racers run this over the same two records and rank them with the same
     :func:`_claim_order`, so they agree on the winner instead of both backing off
@@ -1243,7 +1529,7 @@ def _enforce_claim(state: download_state.DownloadState, dest: pathlib.Path) -> N
         # reconciled it away.
         state.status = "failed"
         state.error = f"withdrew this claim; {competitor.id} won {dest}"
-        _persist_foreground(state)
+        _persist_record(state)
     raise _in_flight_failure(competitor, dest)
 
 
@@ -1311,12 +1597,14 @@ def _claim_foreground(url: str, dest: pathlib.Path, downloader: str) -> download
     return state
 
 
-def _persist_foreground(state: download_state.DownloadState | None) -> None:
-    """Write a foreground claim to disk. Never raises.
+def _persist_record(state: download_state.DownloadState | None) -> None:
+    """Write a download record to disk. Never raises.
 
-    Used for both the progress writes and the terminal one: the state directory
-    is bookkeeping, and a download that is otherwise fine must not die because a
-    record could not be updated.
+    Kind-agnostic, and named that way because it is: the foreground path uses it
+    for both the progress writes and the terminal one, and the background
+    arbitration path uses it in :func:`_withdraw_record`. The state directory is
+    bookkeeping either way, and a download that is otherwise fine must not die
+    because a record could not be updated.
     """
     if state is None:
         return
@@ -1356,7 +1644,7 @@ def _foreground_progress(state: download_state.DownloadState) -> Callable[[int, 
         if not learned_total and now - last_write < download_state.PROGRESS_THROTTLE_S:
             return
         last_write = now
-        _persist_foreground(state)
+        _persist_record(state)
 
     return on_progress
 
@@ -1653,7 +1941,11 @@ def list_models(path: pathlib.Path) -> list[pathlib.Path]:
     return sorted(f for f in path.rglob("*") if f.is_file())
 
 
-@app.command("list", help="List the models downloaded into this workspace, as a table.")
+@app.command(
+    "list",
+    help="List local models on disk (files already downloaded into the current workspace). "
+    "For backend/cloud discovery use `comfy model list-folders` / `list-folder`.",
+)
 @tracking.track_command("model")
 def list_command(
     ctx: typer.Context,
@@ -1679,3 +1971,22 @@ def list_command(
         data.append((model.name, model_type, f"{model.stat().st_size // 1024} KB"))
     column_names = ["Model Name", "Type", "Size"]
     ui.display_table(data, column_names)
+
+
+# The `model` noun owns BOTH the local-filesystem ops defined above
+# (download/remove/list) and the backend/cloud discovery leaves
+# (list-folders/list-folder/search/show). The discovery leaves are implemented
+# on `models_search_command.app`; surface them under `model` by borrowing
+# their command registrations (same CommandInfo objects — no logic
+# duplication). Done here rather than in `cmdline.py` so the `model` lazy
+# subcommand entry there stays a plain `getattr(module, "app")` — it only
+# needs to import this module to get the fully-merged tree.
+# Mirror the deprecated alias built in `search.py`: carry BOTH the discovery
+# leaves and any nested discovery sub-groups so `comfy model …` and the
+# `comfy models …` alias stay in lockstep as the discovery tree grows (both
+# are empty of sub-groups today). A group callback is deliberately NOT carried
+# over here: on the alias it scopes to discovery-only leaves, but `model` also
+# owns the local ops (download/remove/list), so mounting discovery's group
+# setup on the whole noun would leak it onto those.
+app.registered_commands.extend(models_search_command.app.registered_commands)
+app.registered_groups.extend(models_search_command.app.registered_groups)

@@ -176,11 +176,16 @@ class TestLookup:
             "caveat",
             "status",
             "superseded_by",
+            "best_for",
         }
         assert by_model["testvid"]["status"] == "available"
         assert by_model["testvid"]["template"] is None
-        # A pick naming a model the trimmed fixture lacks still ships, with nulls.
+        # The row's routing opinion rides along, capped; lipco-3's row lists two.
+        assert by_model["lipco-3"]["best_for"] == ["paid talking image: a portrait plus a voiceover"]
+        # A pick naming a model the trimmed fixture lacks still ships, with nulls
+        # and no best_for key at all.
         assert by_model["testlx"]["status"] is None
+        assert "best_for" not in by_model["testlx"]
 
     def test_reverse_index_templates_and_nodes(self):
         p = _attach(templates=["video_acme_h3_i2v"])

@@ -24,6 +24,8 @@ import random
 import re
 from typing import Any
 
+from comfy_cli.cql.engine import _FRONTEND_DOM_WIDGET_TYPES
+
 logger = logging.getLogger(__name__)
 
 # C-style comments stripped from dynamic-prompt strings before group parsing.
@@ -176,7 +178,65 @@ def convert_ui_to_api(workflow: dict, object_info: dict) -> dict:
             logger.exception("Failed to convert node id=%s type=%s; skipping", node_id_str, node_type)
 
     _strip_orphan_link_inputs(api_prompt)
+    _overlay_promoted_host_values(api_prompt, workflow, subgraph_defs)
     return api_prompt
+
+
+def _overlay_promoted_host_values(api_prompt: dict, workflow: dict, subgraph_defs: dict[str, dict]) -> None:
+    """Apply host-owned promoted widget values onto the expanded interior nodes.
+
+    A promoted widget's value lives on the HOST instance (``widgets_values``
+    positional over the widget-backed subgraph inputs — ADR 0009); the
+    interior widget is only its default. Expansion above copied the interior
+    default, so a post-migration save (host prompt filled in, interior
+    ``caption`` still ``''``) would submit the wrong prompt. Precedence, as the
+    frontend serializes it: a link feeding the instance input wins (already
+    reattached), else the host value when materialized, else the interior.
+    Inner instances are visited first so an outer host wins over an inner one;
+    an inner input promoted further (linked from ``-10``) is left to the outer.
+    """
+    from comfy_cli.cql import promoted as _promoted
+
+    def visit(instance: dict, sg: dict, scope: dict, prefix: str, depth: int) -> None:
+        # ``scope`` holds the links that can feed THIS instance's inputs: the
+        # workflow for a top-level instance, the containing definition for a
+        # nested one. A serialized link id that no longer exists there is one
+        # the frontend drops on load — the input is unlinked and the host value
+        # runs, exactly as ``resolve_write`` and ``slots`` treat it.
+        if depth > _MAX_SUBGRAPH_ITERATIONS or instance.get("mode") in (_MODE_MUTED, _MODE_BYPASS):
+            return
+        for inner in sg.get("nodes") or []:
+            if not isinstance(inner, dict):
+                continue
+            inner_def = subgraph_defs.get(str(inner.get("type", "")))
+            if inner_def is not None:
+                visit(inner, inner_def, sg, f"{prefix}:{inner.get('id')}", depth + 1)
+        for pi in _promoted.promoted_inputs(sg, subgraph_defs):
+            if not pi.is_widget or _promoted.live_external_link(scope, instance, pi.name) is not None:
+                continue
+            value = _promoted.host_value(instance, pi)
+            if value is _promoted.UNSET:
+                continue
+            # Every interior widget the input feeds — a repaired primitive
+            # fan-out links one host value into several targets.
+            for path, widget in _promoted.boundary_widget_targets(sg, pi, subgraph_defs):
+                entry = api_prompt.get(":".join([prefix, *path]))
+                if not isinstance(entry, dict):
+                    continue
+                inputs = entry.setdefault("inputs", {})
+                current = inputs.get(widget)
+                if isinstance(current, list) and len(current) == 2:
+                    continue  # wired from inside the definition: the link wins
+                # Same wrapping every widget value gets, so a two-item list
+                # host value is never read back as a ``[node, slot]`` link.
+                inputs[widget] = _wrap_widget_value(value)
+
+    for node in workflow.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        sg = subgraph_defs.get(str(node.get("type", "")))
+        if sg is not None:
+            visit(node, sg, workflow, str(node.get("id")), 0)
 
 
 def _has_group_nodes(workflow: dict) -> bool:
@@ -1028,6 +1088,11 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
     if options.get("forceInput") or options.get("defaultInput"):
         return False, False
     input_type = input_spec[0]
+    # ``widgetType`` overrides the socket type for widget selection
+    # (``inputSpec.widgetType ?? inputSpec.type`` in the frontend), so a
+    # ``FLOAT,INT`` input with ``widgetType: "FLOAT"`` owns a slot.
+    if isinstance(options.get("widgetType"), str) and options.get("widgetType"):
+        return True, False
     if isinstance(input_type, (list, tuple)):
         return True, False  # combo of choices
     if isinstance(input_type, str):
@@ -1040,6 +1105,10 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
         if input_type in ("", "*"):
             return False, False
         if input_type in {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"}:
+            return True, False
+        if input_type in _FRONTEND_DOM_WIDGET_TYPES:
+            # Uppercase DOM widgets that serialize a slot (Load3D.image);
+            # same set the engine's widget order uses, so the two walks agree.
             return True, False
         if input_type.startswith("COMFY_") and "COMBO" in input_type:
             return True, True

@@ -824,7 +824,7 @@ def update_node_id_cache():
 
 
 # `update, disable, enable, fix` allows `all` param
-@app.command(help="Update custom nodes or ComfyUI")
+@app.command(help="Update custom nodes or ComfyUI. To update ComfyUI itself or the CLI, use `comfy update`.")
 @tracking.track_command("node")
 def update(
     nodes: list[str] = typer.Argument(

@@ -3,7 +3,8 @@
 The bundle (``knowledge.json`` + optional ``manifest.json``) is produced by
 the curated knowledge bundle repo. It reaches this process by one of three routes,
 tried in order: an explicit ``COMFY_KNOWLEDGE_FILE``, the per-user cache, or a
-fetch from ``COMFY_KNOWLEDGE_URL``. A missing or broken bundle is a normal
+fetch from ``COMFY_KNOWLEDGE_URL``, which defaults to the knowledge channel
+under the cloud base URL. A missing or broken bundle is a normal
 state: every entry point here returns ``None`` rather than raising, and nothing
 is written to stdout or stderr. :func:`attach` is how discovery commands add a
 capped ``knowledge`` block to their payload; it is fail-open for the same reason.
@@ -30,8 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from comfy_cli.cloud import get_base_url
-from comfy_cli.cql.loader import _cache_dir
-from comfy_cli.file_utils import atomic_write_bytes
+from comfy_cli.file_utils import atomic_write_bytes, cache_dir
 from comfy_cli.http import assert_safe_url, authed_urlopen, plain_urlopen, read_capped
 
 SCHEMA_VERSION = 1
@@ -39,6 +39,7 @@ ENV_FILE = "COMFY_KNOWLEDGE_FILE"
 ENV_URL = "COMFY_KNOWLEDGE_URL"
 ENV_TTL = "COMFY_KNOWLEDGE_TTL"
 ENV_DISABLE = "COMFY_KNOWLEDGE_DISABLE"
+DEFAULT_URL_PATH = "/api/knowledge/knowledge.json"
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
 FETCH_TIMEOUT_SECONDS = 10.0
 MAX_BUNDLE_BYTES = 16 * 1024 * 1024
@@ -47,6 +48,12 @@ MAX_MODELS = 3
 MAX_MODELS_BRIEF = 20
 MAX_PICKS = 8
 MAX_LIST_ITEMS = 8
+# best_for items per pick. Bounds item count, not bytes: with today's bundle, 1
+# keeps every capability's `knowledge pick` envelope under the 4096 bytes the
+# cloud agent admits verbatim (2, or not_for alongside, sends image-edit over),
+# but a bundle recompile with longer best_for text isn't guaranteed to stay
+# under that.
+MAX_PICK_BEST_FOR = 1
 MAX_BLOCK_BYTES = 8192
 MAX_QUERY_CHARS = 200  # CLI text is unbounded; the clip bounds the lookup key and the nudge echo
 MAX_VERSION_CHARS = 64
@@ -71,8 +78,11 @@ _CONTEXT_END = re.compile(
 MIN_SINGLE_TOKEN_CHARS = 4
 
 REASON_ENV_FILE = "COMFY_KNOWLEDGE_FILE is set but could not be loaded"
-REASON_NO_URL = "no cache and COMFY_KNOWLEDGE_URL is not set"
-REASON_FETCH_FAILED = "fetch failed and no cached bundle exists"
+REASON_SIGNED_OUT = (
+    "fetch from the cloud knowledge channel failed and no cached bundle exists; "
+    "the usual cause is being signed out (run `comfy cloud login`)"
+)
+REASON_FETCH_FAILED = "fetch from COMFY_KNOWLEDGE_URL failed and no cached bundle exists"
 
 
 @dataclass(frozen=True)
@@ -116,7 +126,7 @@ def last_reason() -> str | None:
 
 
 def cache_paths() -> tuple[Path, Path]:
-    base = _cache_dir() / "knowledge"
+    base = cache_dir() / "knowledge"
     return base / "knowledge.json", base / "manifest.json"
 
 
@@ -131,11 +141,27 @@ def ttl_seconds() -> float:
     return max(ttl, 0.0) if math.isfinite(ttl) else DEFAULT_TTL_SECONDS
 
 
+def default_url() -> str:
+    """``knowledge.json`` under the cloud base URL, derived on every call.
+
+    Never stored: :func:`_http_get` attaches credentials only under
+    ``get_base_url()``, which resolves per invocation, so a remembered
+    production URL would silently fetch unauthenticated for anyone pointed at
+    another environment.
+    """
+    return get_base_url().rstrip("/") + DEFAULT_URL_PATH
+
+
+def bundle_url() -> str:
+    """``COMFY_KNOWLEDGE_URL`` when set, else :func:`default_url`."""
+    return os.environ.get(ENV_URL, "").strip() or default_url()
+
+
 def load_bundle(*, force_fetch: bool = False, cache_only: bool = False) -> Bundle | None:
     """Return the indexed bundle, or ``None`` when no usable bundle exists.
 
     Memoized per process; ``force_fetch=True`` re-runs the load and skips the
-    cache TTL gate so a fetch happens whenever ``COMFY_KNOWLEDGE_URL`` is set.
+    cache TTL gate so a fetch happens unless ``COMFY_KNOWLEDGE_FILE`` is set.
     ``cache_only=True`` never touches the network: env file, then any cache
     (fresh or stale), else ``None``. The memo is shared, except that a
     cache-only miss is not memoized so a later full load can still fetch.
@@ -309,9 +335,9 @@ def _load(*, force_fetch: bool, cache_only: bool = False) -> tuple[Bundle | None
         if bundle is not None:
             return bundle, None
 
-    url = os.environ.get(ENV_URL, "").strip()
-    if url and not cache_only:
-        bundle = _fetch(url, knowledge_path, manifest_path)
+    explicit_url = os.environ.get(ENV_URL, "").strip()
+    if not cache_only:
+        bundle = _fetch(explicit_url or default_url(), knowledge_path, manifest_path)
         if bundle is not None:
             return bundle, None
 
@@ -319,7 +345,7 @@ def _load(*, force_fetch: bool, cache_only: bool = False) -> tuple[Bundle | None
     bundle = _load_file(knowledge_path, manifest_path, source=source, stale=not fresh)
     if bundle is not None:
         return bundle, None
-    return None, (REASON_FETCH_FAILED if url else REASON_NO_URL)
+    return None, (REASON_FETCH_FAILED if explicit_url else REASON_SIGNED_OUT)
 
 
 def _cache_is_fresh(path: Path) -> bool:
@@ -384,7 +410,9 @@ def _http_get(url: str) -> bytes:
     if url.startswith(get_base_url().rstrip("/") + "/"):
         from comfy_cli.target import resolve_target
 
-        opened = authed_urlopen(url, resolve_target(where="cloud"), timeout=FETCH_TIMEOUT_SECONDS)
+        # Best-effort background fetch: a spurious refresh failure must not log the user out.
+        target = resolve_target(where="cloud", allow_clear=False)
+        opened = authed_urlopen(url, target, timeout=FETCH_TIMEOUT_SECONDS)
     else:
         req = urllib.request.Request(url, headers={"User-Agent": "comfy-cli"})
         opened = plain_urlopen(req, timeout=FETCH_TIMEOUT_SECONDS)
@@ -686,26 +714,39 @@ def _model_entry(bundle: Bundle, model_id: str, row: dict, *, matched_on: str, b
     return entry
 
 
+def pick_entry(bundle: Bundle, p: dict) -> dict:
+    """One pick as emitted, plus the status and routing opinion of its model row.
+
+    ``best_for`` is the head of the row's list, omitted when the row has none.
+    The pick's ``caveat`` is written for one capability; the row's ``best_for``
+    says what the model is for across all of them, which is what a routing
+    decision reads.
+    """
+    model_id = _text(p.get("model"))
+    row = (bundle.models.get(model_id) or {}) if model_id is not None else {}
+    dep = (bundle.deprecations.get(model_id) or {}) if model_id is not None else {}
+    entry = {
+        "rank": pick_rank(p),
+        "model": model_id,
+        "route": _text(p.get("route")),
+        "template": _text(p.get("template")),
+        "caveat": _text(p.get("caveat")),
+        "status": _text(row.get("status")),
+        "superseded_by": _text(dep.get("superseded_by")) or _text(row.get("superseded_by")),
+    }
+    if best_for := [x for x in _str_list(row.get("best_for")) if x][:MAX_PICK_BEST_FOR]:
+        entry["best_for"] = best_for
+    return entry
+
+
 def _pick_entries(bundle: Bundle, capability_id: str, *, catalog_templates: Collection[str] | None) -> list[dict]:
     cap = pick(bundle, capability_id)
     if cap is None:
         return []
     out: list[dict] = []
     for p in cap["picks"]:
-        template = p.get("template") if isinstance(p.get("template"), str) else None
-        model_id = p.get("model")
-        row = bundle.models.get(model_id, {}) if isinstance(model_id, str) else {}
-        dep = bundle.deprecations.get(model_id, {}) if isinstance(model_id, str) else {}
-        entry = {
-            "capability": capability_id,
-            "rank": pick_rank(p),
-            "model": _text(model_id),
-            "route": _text(p.get("route")),
-            "template": template,
-            "caveat": _text(p.get("caveat")),
-            "status": _text(row.get("status")),
-            "superseded_by": _text(dep.get("superseded_by") or row.get("superseded_by")),
-        }
+        entry = {"capability": capability_id, **pick_entry(bundle, p)}
+        template = entry["template"]
         if catalog_templates is not None and template is not None and template not in catalog_templates:
             entry["available_locally"] = False
             entry["unavailable_reason"] = UNAVAILABLE_LOCALLY
@@ -903,9 +944,9 @@ def attach(
     exactly as it was.
 
     ``COMFY_KNOWLEDGE_DISABLE`` suppresses the block entirely. A cached bundle
-    keeps being read once it exists, stale or not, so clearing
-    ``COMFY_KNOWLEDGE_URL`` is not an off switch and this is. Following
-    ``DO_NOT_TRACK``, any value but empty or ``"0"`` disables.
+    keeps being read once it exists, stale or not, and the default URL means a
+    signed-in install fetches one without being asked, so this is the only off
+    switch. Following ``DO_NOT_TRACK``, any value but empty or ``"0"`` disables.
     """
     try:
         disable = os.environ.get(ENV_DISABLE, "")

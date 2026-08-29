@@ -15,6 +15,81 @@ history.
 
 ## [Unreleased]
 
+### Fixed
+
+- Promoted subgraph widgets are edited where the frontend reads them. The
+  frontend (ADR 0009) keeps a promoted widget's value on the HOST instance
+  (`widgets_values` positional over the widget-backed subgraph inputs) and
+  runs that value over the interior default; `set-widget 57.width` used to
+  follow the legacy `proxyWidgets` route into the interior node, so the edit
+  neither ran nor showed on the canvas. `set-widget`, `set-slot` and `vary`
+  now write the host value for `<instance>.<input>`, redirect an interior
+  address that backs a promotion (`57/13.width`) to the same host value
+  (`redirected_from` on the op), follow an outside link feeding the promoted
+  input to its primitive (`PrimitiveInt`/`PrimitiveString*`/legacy
+  `PrimitiveNode`, through `Reroute`s) and refuse — naming the driver — when
+  a non-primitive node computes the value. Unpromoted interior widgets still
+  write the definition. The op carries `promoted.value_index` and the
+  materialized `host_widgets_values`.
+- `comfy workflow connect` wires an outside node to a promoted widget
+  (`PrimitiveInt.INT → 57.width`): the definition declares the input, so it
+  is materialized on the instance (with the frontend's `widget` marker) and
+  linked, type-checked against the declared input type.
+- `comfy workflow slots` advertises promoted widgets at the instance address
+  with the value the frontend runs (host value, else interior default), flags
+  widgets fed by a link (`linked_from`), keeps unpromoted interior widgets
+  reachable at `<instance>/<inner>.<widget>` (nested instances included), and
+  no longer advertises the interior address behind a promotion.
+- `convert_ui_to_api` (`comfy run`, `validate`) applies host-owned promoted
+  values onto the expanded interior nodes — a post-migration template whose
+  host prompt differs from the interior default (`audio_minimax_music_3`:
+  interior caption `''`) was submitted with the interior value. Precedence
+  matches the frontend: outside link, then host value, then interior.
+- `comfy workflow connect` can wire a Load Image / Load Video / Load Audio
+  into an auto-grow group nested under a dynamic combo (`GeminiNanoBanana2V2`
+  `model.images`, `MinimaxHailuo03ReferenceNode` / `ByteDance2ReferenceNodeV2`
+  `model.reference_images` / `reference_videos` / `reference_audios`, and the
+  other 27 partner nodes shaped that way). Slots are resolved from the node's
+  schema for its current selection — not from a pre-existing input — so an
+  agent-built node grows `model.images.image_1`, `image_2`, … by name or by
+  addressing the group base, a UI-built node reuses its free pre-created slot
+  and then keeps growing, a UI-built top-level group (`BatchImagesNode`) can
+  be base-addressed and grown past its free slot, a wrong element type is
+  refused (`type mismatch`), and a group never grows past the schema's
+  `names` length / `max`. `comfy nodes show` now lists every dynamic-combo
+  option's sub-inputs and names each auto-grow group's element type, slot
+  vocabulary and first keys to wire.
+- The widget order no longer counts a dynamic combo's link-only sub-inputs
+  (auto-grow groups, `GEMINI_INPUT_FILES`, …) as `widgets_values` slots.
+  `add-node` wrote them as phantom `null` values and the published widget
+  catalog named them, so every widget after the groups was one or more slots
+  off: an agent-built Nano Banana 2 converted with `seed` in
+  `response_modalities`, and through the CRDT doc host a UI-built MiniMax H3
+  node's `seed` position mapped onto `model.reference_images`. `add-node`,
+  the catalog and `set-widget` now share one walk, so a fresh node's layout
+  is exactly what `set-widget` indexes and what the frontend serializes (41
+  classes in the cloud catalog change width).
+- The widget order (`comfy nodes widget-catalog`, `set-widget` indexing, the
+  UI→API converter) now names every slot the frontend serializes: the
+  `upload` button frontend extensions inject on media loaders (`LoadImage`,
+  `LoadImageMask`, `LoadVideo`, `LoadAudio`, ...), the `audioUI` player on
+  the audio family, the `PREVIEW_3D` `image` on `SaveGLB`/`Preview3D`, DOM
+  widgets declared under an uppercase custom type (`Load3D.image`), and
+  inputs whose `widgetType` overrides a link-shaped socket type
+  (`LTXVEmptyLatentAudio.frame_rate`, the "Basic data handling" math nodes).
+  Before, a workflow with any of these nodes carried more `widgets_values`
+  than the catalog could name, so the cloud doc host refused to mint it
+  (`createNodeMap(LoadImage): widgets_values has 2 entries but widget_order
+  names only 1`) and `set-widget`/conversion read the values after such a
+  slot one position off.
+- `comfy generate <model>`, `comfy generate resume` and sync-mode creates now
+  emit the `envelope/1` contract in `--output json` / `ndjson` modes instead
+  of a bare partner blob: the partner payload is wrapped as `data.result`
+  (verbatim) with `data.saved` listing `--download` artifacts, and the
+  payload schema is registered as `comfy generate` → `generate_result.json`
+  so `comfy discover` advertises it. Pretty mode with a tail `--json` keeps
+  the legacy raw blob.
+
 ### Added
 
 - `comfy workflow add-node` and an `add_node` op in `comfy workflow apply`

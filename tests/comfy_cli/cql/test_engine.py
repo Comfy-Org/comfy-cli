@@ -15,6 +15,7 @@ import pytest
 from comfy_cli.command.run.loader import _classify_api_workflow
 from comfy_cli.cql.engine import (
     Graph,
+    Port,
     _apply_one_slot,
     _extract_frontend_slots,
     _write_widget,
@@ -2124,6 +2125,124 @@ class TestValidateUploadBackedCombo:
         assert self._port(g, "VAELoader", "vae_name").canonical_combo("vae/ae.safetensors") == "ae.safetensors"
 
 
+class TestValidateUnmarkedInputFileCombo:
+    """A COMBO whose options are the server's INPUT-FOLDER listing is upload-
+    backed even when object_info carries no ``<kind>_upload`` marker.
+
+    Found in prod (Langfuse 2026-08-25, 3 ``run`` failures, one user): the
+    agent uploaded eight ``.mp4`` shots to Comfy Cloud, wired each content hash
+    into a ``VHS_LoadVideo.video`` widget, and ``comfy run`` refused every node
+    with ``unknown_enum_value '<64hex>.mp4' not in 1 known options for video
+    (did you mean: bedroom.mp4?)``. The whole assembly never rendered.
+
+    The marker is the frontend's contract for CORE loaders only. VideoHelperSuite
+    builds ``video`` from ``folder_paths.get_input_directory()`` filtered by its
+    ``video_extensions`` (``load_video_nodes.py``) and ships its OWN upload
+    button keyed on the class name (``VHS.core.js`` ``addUploadWidget``), so the
+    catalog for ``VHS_LoadVideo.video`` is just ``[["bedroom.mp4"]]`` — the same
+    input-folder listing ``LoadVideo.file`` shows with ``video_upload: true``.
+    What identifies the port is therefore the LISTING, not the flag: every
+    option is a media file name, which no install-time vocabulary (model
+    folders list ``.safetensors``, channel enums list ``alpha``/``red``) ever is.
+    """
+
+    @pytest.fixture
+    def graph(self) -> Graph:
+        from pathlib import Path
+
+        fixture = Path(__file__).parent.parent / "fixtures" / "object_info_vhs_loadvideo.json"
+        return Graph.from_object_info(json.loads(fixture.read_text()))
+
+    @staticmethod
+    def _port(g: Graph, class_type: str, name: str) -> Port:
+        return next(p for p in g.node(class_type).inputs if p.name == name)
+
+    def _assembly(self, video: str) -> dict[str, Any]:
+        return {
+            "2923786287638124": {
+                "class_type": "VHS_LoadVideo",
+                "inputs": {
+                    "video": video,
+                    "force_rate": 0,
+                    "custom_width": 0,
+                    "custom_height": 0,
+                    "frame_load_cap": 0,
+                    "skip_first_frames": 0,
+                    "select_every_nth": 1,
+                },
+            },
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["2923786287638124", 0], "filename_prefix": "x"}},
+        }
+
+    def test_real_catalog_entry_carries_no_marker(self, graph):
+        """Pin the shape this exemption exists for: the production catalog's
+        ``VHS_LoadVideo.video`` is a bare option list, no marker of any kind."""
+        port = self._port(graph, "VHS_LoadVideo", "video")
+        assert port.type == "COMBO" and port.enum_values == ["bedroom.mp4"]
+        assert port.options.upload is False and port.options.upload_flags == ()
+
+    def test_uploaded_content_hash_is_accepted_on_unmarked_video_combo(self, graph):
+        port = self._port(graph, "VHS_LoadVideo", "video")
+        assert port.is_upload_backed is True
+        result = graph.validate_workflow(self._assembly("1f7db0ec" + "a" * 52 + "57b65.mp4"))
+        assert result["errors"] == [], result["errors"]
+        assert result["valid"] is True
+
+    def test_uploaded_hash_is_not_rewritten_to_the_sample_file(self, graph):
+        """``canonical_combo`` must not auto-correct the hash to ``bedroom.mp4``
+        either — that would render the sample instead of the user's shot."""
+        port = self._port(graph, "VHS_LoadVideo", "video")
+        assert port.canonical_combo("1f7db0ec" + "a" * 52 + "57b65.mp4") is None
+
+    def test_marked_and_unmarked_input_listings_agree(self, graph):
+        """The V3 core loader (marked) and the VHS loader (unmarked) list the
+        same input folder; they must reach the same verdict."""
+        assert self._port(graph, "LoadVideo", "file").is_upload_backed is True
+        assert self._port(graph, "VHS_LoadVideo", "video").is_upload_backed is True
+
+    def test_model_folder_listing_stays_a_constrained_enum(self, graph):
+        """The exemption keys off media file names. A checkpoint folder lists
+        ``.safetensors`` — install-time, static — and keeps the enum check."""
+        port = self._port(graph, "ImageOnlyCheckpointLoader", "ckpt_name")
+        assert port.is_upload_backed is False
+        assert [w["code"] for w in port.validate_catalog("a" * 64 + ".safetensors")] == ["unknown_enum_value"]
+
+    def test_plain_vocabulary_stays_a_constrained_enum(self, graph):
+        port = self._port(graph, "LoadImageMask", "channel")
+        assert port.is_upload_backed is False
+        assert [w["code"] for w in port.validate_catalog("alpha.png")] == ["unknown_enum_value"]
+
+    def test_explicit_false_marker_still_wins_over_the_listing(self):
+        """``image_upload: false`` is a declaration; the listing heuristic only
+        fills in when the catalog says nothing at all."""
+        g = Graph.from_object_info(
+            {
+                "LoadImage": {
+                    "input": {"required": {"image": [["beach.jpg"], {"image_upload": False}]}},
+                    "output": ["IMAGE"],
+                    "output_name": ["IMAGE"],
+                    "python_module": "nodes",
+                }
+            }
+        )
+        assert self._port(g, "LoadImage", "image").is_upload_backed is False
+
+    def test_listing_must_be_files_all_the_way_down(self):
+        """One non-file option (a sentinel like ``none``) means the list is a
+        vocabulary that happens to contain file names, not a folder listing."""
+        g = Graph.from_object_info(
+            {
+                "Picker": {
+                    "input": {"required": {"choice": [["none", "beach.jpg"]]}},
+                    "output": ["IMAGE"],
+                    "output_name": ["IMAGE"],
+                    "python_module": "nodes",
+                }
+            }
+        )
+        assert self._port(g, "Picker", "choice").is_upload_backed is False
+
+
 class TestValidateDynamicCombo:
     """Validate expands a ``COMFY_DYNAMICCOMBO_V3`` selector's chosen option and
     checks the dotted sub-inputs the server will actually require.
@@ -3665,6 +3784,138 @@ class TestMatchTypeWildcard:
         assert _is_wildcard_type("COMFY_MATCHTYPE_V4")
         assert not _is_wildcard_type("IMAGE")
         assert not _is_wildcard_type("")
+
+
+class TestMultiTypeEdge:
+    """A socket type is a COMMA-SEPARATED UNION in ComfyUI: ``INT,FLOAT`` on a
+    math node's operand, ``MESH,FILE_3D_GLB,FILE_3D_GLTF,…`` on a 3D importer.
+    The edge check compared the raw strings, so a ``FLOAT`` output feeding an
+    ``INT,FLOAT`` input — a connection the frontend's ``isValidConnection``
+    accepts and the server runs — was reported as ``edge_type_mismatch``.
+
+    Langfuse 2026-08-25..28: 23 ``edge_type_mismatch`` warnings across 55
+    validate calls, 12 of them exactly this shape (``input 'b' expects
+    INT,FLOAT but PrimitiveFloat[0] produces FLOAT``; ``input 'model_3d'
+    expects FILE_3D_GLB,FILE_3D_GLTF,… but MeshyImageToModelNode[2] produces
+    FILE_3D_GLB``). Shapes copied from the cloud catalog (``SimpleMath+``,
+    ``PrimitiveFloat``).
+    """
+
+    @staticmethod
+    def _object_info() -> dict[str, Any]:
+        return {
+            "PrimitiveFloat": {
+                "input": {"required": {"value": ["FLOAT", {"min": -1e9, "max": 1e9, "step": 0.1}]}},
+                "input_order": {"required": ["value"]},
+                "output": ["FLOAT"],
+                "output_name": ["FLOAT"],
+                "name": "PrimitiveFloat",
+            },
+            "LoadImage": {
+                "input": {"required": {"image": [["a.png"]]}},
+                "input_order": {"required": ["image"]},
+                "output": ["IMAGE"],
+                "output_name": ["IMAGE"],
+                "name": "LoadImage",
+            },
+            "SimpleMath+": {
+                "input": {
+                    "required": {"value": ["STRING", {"multiline": False, "default": ""}]},
+                    "optional": {"a": ["INT,FLOAT", {"default": 0.0}], "b": ["INT,FLOAT", {"default": 0.0}]},
+                },
+                "input_order": {"required": ["value"], "optional": ["a", "b"]},
+                "output": ["INT", "FLOAT"],
+                "output_name": ["INT", "FLOAT"],
+                "name": "SimpleMath+",
+            },
+            # A union on the SOURCE side: one output socket typed as a union
+            # feeding a single-type input.
+            "UnionSource": {
+                "input": {"required": {}},
+                "input_order": {"required": []},
+                "output": ["INT,FLOAT"],
+                "output_name": ["number"],
+                "name": "UnionSource",
+            },
+            "IntSink": {
+                "input": {"required": {"n": ["INT", {}]}},
+                "input_order": {"required": ["n"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "name": "IntSink",
+            },
+            "PreviewAny": {
+                "input": {"required": {"source": ["*", {}]}},
+                "input_order": {"required": ["source"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "name": "PreviewAny",
+            },
+        }
+
+    @pytest.fixture
+    def graph(self) -> Graph:
+        return Graph.from_object_info(self._object_info())
+
+    @staticmethod
+    def _mismatches(result: dict) -> list[str]:
+        return [w["message"] for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
+
+    def test_member_of_accept_list_is_not_a_mismatch(self, graph: Graph):
+        result = graph.validate_workflow(
+            {
+                "4": {"class_type": "PrimitiveFloat", "inputs": {"value": 1.5}},
+                "5": {"class_type": "SimpleMath+", "inputs": {"value": "a+b", "a": 1, "b": ["4", 0]}},
+                "6": {"class_type": "PreviewAny", "inputs": {"source": ["5", 1]}},
+            }
+        )
+        assert self._mismatches(result) == []
+
+    def test_union_source_into_member_input_is_not_a_mismatch(self, graph: Graph):
+        result = graph.validate_workflow(
+            {
+                "1": {"class_type": "UnionSource", "inputs": {}},
+                "2": {"class_type": "IntSink", "inputs": {"n": ["1", 0]}},
+            }
+        )
+        assert self._mismatches(result) == []
+
+    def test_type_outside_the_accept_list_still_warns(self, graph: Graph):
+        """The split must not turn the check permissive: IMAGE is in neither
+        half of ``INT,FLOAT``."""
+        result = graph.validate_workflow(
+            {
+                "1": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+                "5": {"class_type": "SimpleMath+", "inputs": {"value": "a+b", "a": 1, "b": ["1", 0]}},
+                "6": {"class_type": "PreviewAny", "inputs": {"source": ["5", 1]}},
+            }
+        )
+        assert self._mismatches(result) == ["input 'b' expects INT,FLOAT but LoadImage[0] produces IMAGE"]
+
+    def test_hint_names_the_output_whose_type_is_in_the_accept_list(self, graph: Graph):
+        """When the source has a compatible output at another index, the hint
+        must find it through the same union-aware test (``[1]``=FLOAT here,
+        wired wrongly from a STRING)."""
+        oi = self._object_info()
+        oi["Splitter"] = {
+            "input": {"required": {}},
+            "input_order": {"required": []},
+            "output": ["STRING", "FLOAT"],
+            "output_name": ["text", "number"],
+            "name": "Splitter",
+        }
+        g = Graph.from_object_info(oi)
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "Splitter", "inputs": {}},
+                "5": {"class_type": "SimpleMath+", "inputs": {"value": "a+b", "a": 1, "b": ["1", 0]}},
+                "6": {"class_type": "PreviewAny", "inputs": {"source": ["5", 1]}},
+            }
+        )
+        [w] = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
+        assert w["hint"] == "use Splitter[1] instead"
 
 
 class TestUnreachableNodeIsVisible:

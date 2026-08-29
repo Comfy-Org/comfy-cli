@@ -678,7 +678,7 @@ def _refresh_node_id_cache() -> None:
         rprint(f"[yellow]Failed to update node id cache: {e}[/yellow]")
 
 
-@app.command(help="Update ComfyUI Environment [all|comfy|cli]")
+@app.command(help="Update ComfyUI Environment \\[all|comfy|cli]. To update custom nodes, use `comfy node update`.")
 @tracking.track_command()
 def update(
     target: str = typer.Argument(
@@ -1926,7 +1926,10 @@ def dependency():
     depComp.install_deps()
 
 
-@app.command(help="Download a standalone Python interpreter and dependencies based on an existing comfyui workspace")
+@app.command(
+    help="Download a standalone Python interpreter and dependencies based on an existing comfyui workspace. "
+    "This bundles an interpreter; it does not update ComfyUI or custom nodes."
+)
 @tracking.track_command()
 def standalone(
     cli_spec: Annotated[
@@ -2019,13 +2022,20 @@ _RootGroup.lazy_subcommands = {
         attr="preview_cmd",
         help="Render a previewable PNG from a media file (image → thumb, video → contact sheet, audio → waveform).",
     ),
+    # The `model` noun owns BOTH the local-filesystem ops (download/remove/list)
+    # and the backend/cloud discovery leaves (list-folders/list-folder/search/
+    # show) — `models.py` merges the latter in from `search.py` at import time.
+    # `models` (plural) is a hidden, deprecated alias for the discovery leaves
+    # only, built alongside them in `search.py` so resolving it stays lazy —
+    # see the `deprecated_alias_app` built there.
     "model": LazySubcommand(
         "comfy_cli.command.models.models",
-        help="Manage the model files in this workspace — download, list, remove. (Search/discovery lives under `comfy models`.)",
+        help="Manage models — local files on disk plus backend/cloud discovery.",
     ),
     "models": LazySubcommand(
         "comfy_cli.command.models.search",
-        help="Discover models — folders, files, and the cloud asset catalog.",
+        attr="deprecated_alias_app",
+        hidden=True,
     ),
     "node": LazySubcommand("comfy_cli.command.custom_nodes", help="Manage custom nodes."),
     "nodes": LazySubcommand(
@@ -2039,7 +2049,11 @@ _RootGroup.lazy_subcommands = {
     "workflow": LazySubcommand(
         "comfy_cli.command.workflow", help="Slot-based editing of frontend-format ComfyUI workflows."
     ),
-    "manager": LazySubcommand("comfy_cli.command.custom_nodes", attr="manager_app", help="Manage ComfyUI-Manager."),
+    "manager": LazySubcommand(
+        "comfy_cli.command.custom_nodes",
+        attr="manager_app",
+        help="Enable/disable and configure ComfyUI-Manager (lifecycle, not updates).",
+    ),
     "pr-cache": LazySubcommand("comfy_cli.command.pr_command", help="Manage PR cache."),
     "code-search": LazySubcommand("comfy_cli.command.code_search", help="Search code across ComfyUI repositories."),
     "cs": LazySubcommand("comfy_cli.command.code_search", hidden=True),

@@ -102,13 +102,20 @@ class TestGalleryTemplateSlots:
         interior = [s for s in qwen_schema["slots"] if "/" in s["address"]]
         assert interior, f"no subgraph-interior slots surfaced; got {[s['address'] for s in qwen_schema['slots']]}"
 
-    def test_interior_prompt_and_seed_are_addressable(self, qwen_schema):
-        """The slots an agent actually edits: the prompt + seed inside the
-        opaque 'Qwen Image Edit 2509' subgraph instance (node 141)."""
+    def test_promoted_prompt_and_seed_are_addressed_at_the_host(self, qwen_schema):
+        """The slots an agent actually edits: the prompt + seed of the opaque
+        'Qwen Image Edit 2509' subgraph instance (node 141). Both are promoted
+        widgets, so they live at the instance address with the HOST value —
+        the interior KSampler still carries a stale seed (1118877715456453)
+        the frontend never runs (ADR 0009)."""
         by_addr = {s["address"]: s for s in qwen_schema["slots"]}
-        assert "141/132.prompt" in by_addr, f"missing interior prompt slot; got {sorted(by_addr)}"
-        assert by_addr["141/132.prompt"]["current_value"].startswith("Change the style")
-        assert by_addr["141/137.seed"]["current_value"] == 1118877715456453
+        assert "141.prompt" in by_addr, f"missing promoted prompt slot; got {sorted(by_addr)}"
+        assert by_addr["141.prompt"]["current_value"].startswith("Change the style")
+        assert by_addr["141.seed"]["current_value"] == 392667428726572
+        assert "141/132.prompt" not in by_addr
+        assert "141/137.seed" not in by_addr
+        # unpromoted interior widgets stay reachable
+        assert by_addr["141/137.steps"]["current_value"] == 4
 
     def test_top_level_slots_still_present(self, qwen_schema):
         by_addr = {s["address"]: s for s in qwen_schema["slots"]}

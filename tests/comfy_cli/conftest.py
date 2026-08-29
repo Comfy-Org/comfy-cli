@@ -80,6 +80,7 @@ def _isolate_object_info_cache_dir(tmp_path, monkeypatch):
     fake = tmp_path / "comfy-cli-cache"
     fake.mkdir(mode=0o700, parents=True, exist_ok=True)
     monkeypatch.setenv("XDG_CACHE_HOME", str(fake))
+    monkeypatch.delenv("COMFY_CACHE_DIR", raising=False)
     yield fake
 
 

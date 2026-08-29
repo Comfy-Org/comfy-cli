@@ -17,6 +17,18 @@ as an indented block addressed as ``<first instance address>/<inner id>`` —
 fully qualified through every nesting level, matching
 ``workflow_ops._navigate_subgraph_path``.
 
+Two rules keep the printed names the ones the editors take:
+
+* a regular node's widgets print by their value-aware names
+  (``Graph.widget_order_for_node``: ``model``, ``model.resolution``, …); an
+  auto-grow group (``COMFY_AUTOGROW_V3``) owns no widget slot — its grown
+  slots print as links, one open slot stays visible, and the line comment
+  names the group with its element type;
+* a subgraph instance's promoted widgets (``cql.promoted``) print their
+  EFFECTIVE value — the host's, else the interior default — under the
+  instance address (``57.width``); the interior line keeps ``IN.width`` and
+  the definition header says where that value lives.
+
 See the design: decisions D1-D13 (Obsidian, "workflow print (design, 2026-08-25)").
 """
 
@@ -28,7 +40,8 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from comfy_cli.cql.engine import _expand_widget_entries, _widgets_as_positional
+from comfy_cli.cql import promoted as _promoted
+from comfy_cli.cql.engine import _UNRESOLVED, _expand_widget_entries, _resolve_proxy_value, _widgets_as_positional
 from comfy_cli.workflow_to_api import is_subgraph_uuid
 
 if TYPE_CHECKING:
@@ -528,6 +541,57 @@ def _place_arg(name: str, text: str, args: list[str], extra: dict[str, str]) -> 
         extra[name] = text
 
 
+def _autogrow_annotation(group: Any, inputs: list[dict]) -> str:
+    """The line-comment marker for one auto-grow group: its name, the socket
+    type every grown slot carries, and the schema's capacity — so a reader
+    knows the group exists (and what to wire into it) even before anything is
+    connected. The element type comes from the schema template; a catalog
+    that omits it falls back to the type litegraph stamped on a grown slot."""
+    elem = group.autogrow_element_type
+    if not elem:
+        prefix = f"{group.name}."
+        elem = next(
+            (
+                str(inp["type"])
+                for inp in inputs
+                if str(inp.get("name") or "").startswith(prefix) and isinstance(inp.get("type"), str) and inp["type"]
+            ),
+            "any",
+        )
+    _lo, hi = group.autogrow_limits
+    return f" {group.name} grows {elem}" + (f" (max {hi})" if hi is not None else "")
+
+
+def _ensure_open_autogrow_slot(group: Any, inputs: list[dict], extra: dict[str, str]) -> None:
+    """Show ONE open slot for ``group`` when none of its serialized slots is
+    free and the schema allows another — the frontend keeps exactly that free
+    trailing slot on a loaded node, so a UI-built and an agent-built node
+    (whose ``inputs[]`` only carry what ``connect`` grew) print alike, and the
+    printed name is the one ``connect`` accepts next. Inserted right after the
+    group's last existing slot so the group stays contiguous. Never touches the
+    workflow itself."""
+    from comfy_cli.workflow_ops import _autogrow_elem_name, _first_free_autogrow_index
+
+    prefix = f"{group.name}."
+    members = [str(inp.get("name") or "") for inp in inputs if str(inp.get("name") or "").startswith(prefix)]
+    if any(extra.get(name) == "None" for name in members):
+        return
+    _lo, hi = group.autogrow_limits
+    if hi is not None and len(members) >= hi:
+        return
+    template = group.autogrow_template
+    n = _first_free_autogrow_index(set(members), group.name, template)
+    slot = f"{group.name}.{_autogrow_elem_name(group.name, n, template)}"
+    items = list(extra.items())
+    last = max((i for i, (k, _v) in enumerate(items) if k in members), default=None)
+    if last is None:
+        extra[slot] = "None"
+        return
+    items.insert(last + 1, (slot, "None"))
+    extra.clear()
+    extra.update(items)
+
+
 def _build_args(
     node: dict, m: Any, ctx: _RenderCtx, warnings: list[str]
 ) -> tuple[list[str], bool, list[str], list[tuple]]:
@@ -537,7 +601,16 @@ def _build_args(
     ``unknown`` is True when the class isn't in the catalog (or there is no
     catalog), ``annotations`` are suffix strings to append to the line
     comment, and ``prim_hits`` are ``(qualified_primitive_id, qualified_skip_reason)``
-    pairs for PrimitiveNode-into-widget splices found here."""
+    pairs for PrimitiveNode-into-widget splices found here.
+
+    Widgets print by their VALUE-AWARE names (``Graph.widget_order_for_node``):
+    a dynamic combo's selector followed by the selected option's sub-widgets
+    (``model.resolution``…), read at the frontend's positions. A link-only
+    sub-input (a ``COMFY_AUTOGROW_V3`` group) owns no widget slot, so it never
+    prints as a value: its grown slots print as links, one open slot is kept
+    visible (``_ensure_open_autogrow_slot``), and the group itself is named in
+    the line comment with its element type (``_autogrow_annotation``).
+    """
     nid = str(node.get("id"))
     args: list[str] = []
     extra: dict[str, str] = {}
@@ -553,6 +626,20 @@ def _build_args(
             warnings.append(f"node {ctx.qualify(nid)}: ignoring malformed input entry {inp!r}")
             continue
         inputs.append(inp)
+
+    class_type = node.get("type", "")
+    widgets_values = node.get("widgets_values")
+    unknown = m is None
+    if unknown:
+        positional = widgets_values if isinstance(widgets_values, list) else []
+        groups: list = []
+    else:
+        positional = _widgets_as_positional(widgets_values, ctx.graph, class_type)
+        # The auto-grow groups this node exposes for its CURRENT selection —
+        # a group nested under a dynamic combo disappears when the selector
+        # moves to an option without it.
+        groups = ctx.graph.autogrow_groups(class_type, positional)
+    group_names = {g.name for g in groups}
 
     # Pre-pass: widget-backed inputs. A LIVE link to a real, printable node is
     # the truth — it's printed as a ref in the link pass below and skipped in
@@ -604,6 +691,11 @@ def _build_args(
                 _place_arg(name, live_link_refs[name], args, extra)
             continue  # otherwise: printed in the widget pass instead
         link_id = inp.get("link")
+        # An auto-grow group's BASE entry (``images`` on an agent-built
+        # BatchImagesNode) is the group itself, not a wireable slot: its slots
+        # are the grown ``images.image0`` entries, handled with the group below.
+        if link_id is None and name in group_names:
+            continue
         if link_id is None:
             _place_arg(name, "None", args, extra)
             continue
@@ -619,19 +711,24 @@ def _build_args(
             annotations.append(ann)
         _place_arg(name, ref if ref is not None else "None", args, extra)
 
-    class_type = node.get("type", "")
-    widgets_values = node.get("widgets_values")
-    unknown = m is None
+    for group in groups:
+        _ensure_open_autogrow_slot(group, inputs, extra)
+        annotations.append(_autogrow_annotation(group, inputs))
+
     if unknown:
-        positional = widgets_values if isinstance(widgets_values, list) else []
         if positional:
             args.append(f"widgets={py_literal(positional)}")
         warnings.append(f"node {ctx.qualify(nid)}: class {class_type!r} not in catalog; widgets printed positionally")
     else:
-        positional = _widgets_as_positional(widgets_values, ctx.graph, class_type)
         entries = _expand_widget_entries(m, positional)
         for idx, entry in enumerate(entries):
-            arg_name = "control_after_generate" if entry.port is None else entry.name
+            if entry.frontend_injected:
+                # ``upload`` / ``audioUI`` / PREVIEW_3D ``image``: a frontend
+                # button or DOM slot with no schema port and no editable
+                # value (``slots`` omits it, every write surface refuses it).
+                # It owns a positional slot, so it is walked — never printed.
+                continue
+            arg_name = entry.name
             if arg_name in live_link_refs:
                 continue  # already printed in the link pass above
             if arg_name in widget_overrides:
@@ -676,17 +773,75 @@ def _subgraph_instance_name(node: dict, sg_def: dict | None, type_uuid: str) -> 
     return type_uuid
 
 
+def _promoted_widget_link_text(
+    iname: str,
+    link_id: Any,
+    nid: str,
+    ctx: _RenderCtx,
+    annotations: list[str],
+    prim_hits: list[tuple],
+    warnings: list[str],
+) -> str | None:
+    """What an outside link into a promoted WIDGET input prints as — the same
+    rules a regular node's widget-backed input follows (``_build_args``'s
+    pre-pass): a live link to a printable node is the value (its ref), the
+    enclosing definition's input proxy is ``IN.<name>``, a PrimitiveNode keeps
+    the stored value with a ``from primitive`` marker, and a dead-end Reroute
+    keeps it with an ``unlinked`` marker. ``None`` means "print the value"."""
+    link = ctx.link_map.get(str(link_id))
+    if link is None:
+        return None
+    src_id, src_slot, _tgt_id, _tgt_slot = link
+    outcome = _resolve_source(
+        src_id, src_slot, ctx.nodes_by_id, ctx.reroute_sources, ctx.set_sources, ctx.get_vars, ctx.proxy_in_id
+    )
+    if outcome[0] == "ok":
+        rid_s = str(outcome[1])
+        if rid_s not in ctx.printable_ids:
+            return None
+        src_node = ctx.nodes_by_id.get(rid_s)
+        binding = ctx.binding_by_id.get(rid_s)
+        if src_node is None or binding is None:
+            return None
+        ref, edge_warning = _edge_ref(binding, src_node, src_node.get("type", ""), outcome[2], ctx)
+        if edge_warning:
+            warnings.append(edge_warning)
+        if src_node.get("mode") == 4:
+            annotations.append(f" {iname} via bypassed {rid_s}")
+        return ref
+    if outcome[0] == "in_proxy":
+        return ctx.in_ref(outcome[1])
+    if outcome[0] == "primitive_no_widget":
+        annotations.append(f" {iname} from primitive {outcome[1]}")
+        prim_hits.append((ctx.qualify(outcome[1]), f"inlined into {ctx.qualify(nid)}.{iname}"))
+    elif outcome[0] == "dead_reroute":
+        annotations.append(f" {iname} unlinked via reroute {outcome[1]}")
+    return None
+
+
 def _render_subgraph_instance_line(
-    node: dict, type_uuid: str, sg_def: dict, binding: str, ctx: _RenderCtx, warnings: list[str]
+    node: dict, type_uuid: str, sg_def: dict, binding: str, ctx: _RenderCtx, state: _State
 ) -> tuple:
-    """A subgraph instance's own line: exposed link inputs by name (or, when
-    the name isn't a Python identifier, collected into a trailing ``**{}``);
-    widget-backed exposed inputs print positionally from ``widgets_values``
-    (subgraphs are never in the catalog) unless their link resolves to the
-    enclosing definition's own input proxy, in which case that ref is used.
-    Gets the same ``mode=bypass``/``mode=mute`` suffix as a regular node.
-    Any D9 annotation from resolving a link input (e.g. a dead-end Reroute)
-    is appended to the line, same as a regular node. Returns ``(line, prim_hits)``."""
+    """A subgraph instance's own line, argument per declared subgraph input in
+    declaration order (non-identifier names collected into a trailing
+    ``**{}``):
+
+    * a promoted WIDGET input (``cql.promoted``: a declared input a boundary
+      link feeds into an interior widget) prints its EFFECTIVE value — the
+      host instance's own value when materialized, else the interior default
+      — under the name ``set-widget <instance>.<name>`` takes. The host's
+      positional ``widgets_values`` are read the way the frontend reads them
+      (one slot per widget-backed input, in declaration order), never by the
+      instance's serialized ``inputs[]``, which only lists what the UI showed.
+      An outside link into it prints as that link instead (the link is what
+      runs), with the same PrimitiveNode/Reroute markers a regular node gets;
+    * a socket input prints its link (or ``None``).
+
+    A declared input no boundary link backs falls back to the legacy
+    ``proxyWidgets`` route, exactly as ``slots`` does. Any instance
+    ``inputs[]`` entry the definition does not declare prints last, by link.
+    Gets the same ``mode=`` suffix and D9 annotations as a regular node.
+    Returns ``(line, prim_hits)``."""
     nid = str(node.get("id"))
     name_str = _subgraph_instance_name(node, sg_def, type_uuid)
     bracket = json.dumps(name_str, ensure_ascii=False)
@@ -694,54 +849,65 @@ def _render_subgraph_instance_line(
     annotations: list[str] = []
     args: list[str] = []
     extra: dict[str, str] = {}
+    warnings = state.warnings
 
     inputs = [inp for inp in node.get("inputs") or [] if isinstance(inp, dict)]
-    link_inputs = [inp for inp in inputs if "widget" not in inp]
-    widget_inputs = [inp for inp in inputs if "widget" in inp]
+    by_name: dict[str, dict] = {}
+    for inp in inputs:
+        iname = inp.get("name")
+        if isinstance(iname, str) and iname not in by_name:
+            by_name[iname] = inp
+    rendered: set[str] = set()
 
-    for inp in link_inputs:
-        iname = inp.get("name") or ""
-        ref = None
-        link_id = inp.get("link")
-        if link_id is not None:
-            link = ctx.link_map.get(str(link_id))
-            if link is not None:
-                src_id, src_slot, _tgt_id, _tgt_slot = link
-                ref, ann, warn = _resolve_edge_text(src_id, src_slot, iname, nid, ctx)
-                if warn:
-                    warnings.append(warn)
-                if ann:
-                    annotations.append(ann)
-        _place_arg(iname, ref if ref is not None else "None", args, extra)
+    def socket_text(iname: str, link_id: Any) -> str:
+        link = ctx.link_map.get(str(link_id)) if link_id is not None else None
+        if link is None:
+            return "None"
+        src_id, src_slot, _tgt_id, _tgt_slot = link
+        ref, ann, warn = _resolve_edge_text(src_id, src_slot, iname, nid, ctx)
+        if warn:
+            warnings.append(warn)
+        if ann:
+            annotations.append(ann)
+        return ref if ref is not None else "None"
 
-    widgets_values = node.get("widgets_values")
-    positional = widgets_values if isinstance(widgets_values, list) else []
-    for k, inp in enumerate(widget_inputs):
+    for pi in _promoted.promoted_inputs(sg_def, state.promoted_defs):
+        rendered.add(pi.name)
+        entry = by_name.get(pi.name)
+        link_id = entry.get("link") if entry is not None else None
+        text = None
+        if pi.is_widget:
+            if link_id is not None:
+                text = _promoted_widget_link_text(pi.name, link_id, nid, ctx, annotations, prim_hits, warnings)
+            if text is None:
+                # ``pi`` and the definition index are this loop's own; the
+                # name-lookup entry point would re-derive both per widget.
+                value = _promoted.effective_value_for(state.workflow, node, sg_def, pi, ctx.graph, state.promoted_defs)
+                text = py_literal(None if value is _promoted.UNSET else value)
+        elif pi.source_node is None and link_id is None and ctx.graph is not None:
+            # Declared but backed by no boundary link: a legacy template still
+            # routes it through ``proxyWidgets`` to an interior widget — the
+            # same fallback ``slots`` applies (``_declared_subgraph_slots``).
+            value = _resolve_proxy_value(node, sg_def, pi.name, ctx.graph)
+            if value is not _UNRESOLVED:
+                text = py_literal(value)
+        if text is None:
+            text = socket_text(pi.name, link_id)
+        _place_arg(pi.name, text, args, extra)
+
+    for inp in inputs:
         iname = inp.get("name") or ""
-        override = None
+        if iname in rendered:
+            continue
+        rendered.add(iname)
         link_id = inp.get("link")
-        if link_id is not None:
-            link = ctx.link_map.get(str(link_id))
-            if link is not None:
-                src_id, src_slot, _tgt_id, _tgt_slot = link
-                outcome = _resolve_source(
-                    src_id,
-                    src_slot,
-                    ctx.nodes_by_id,
-                    ctx.reroute_sources,
-                    ctx.set_sources,
-                    ctx.get_vars,
-                    ctx.proxy_in_id,
-                )
-                if outcome[0] == "in_proxy":
-                    override = ctx.in_ref(outcome[1])
-                elif outcome[0] == "primitive_no_widget":
-                    prim_hits.append((ctx.qualify(outcome[1]), f"inlined into {ctx.qualify(nid)}.{iname}"))
-        if override is not None:
-            text = override
+        text = None
+        if "widget" in inp and link_id is not None:
+            text = _promoted_widget_link_text(iname, link_id, nid, ctx, annotations, prim_hits, warnings)
+            if text is None:
+                text = "None"
         else:
-            value = positional[k] if k < len(positional) else None
-            text = py_literal(value)
+            text = socket_text(iname, link_id)
         _place_arg(iname, text, args, extra)
 
     if extra:
@@ -826,6 +992,24 @@ def _definition_header(def_id: str, sg_def: dict, state: _State) -> str:
     )
 
 
+def _promoted_header_line(def_id: str, sg_def: dict, state: _State) -> str | None:
+    """The line under a definition's header that names its promoted WIDGETS —
+    the ``IN.<name>`` references the interior lines below carry. Their values
+    live on the instance (``cql.promoted``), so it spells out the address to
+    edit (``57.<name>``) and the one NOT to (``57/<id>.<name>``, the interior
+    widget the host value overrides). ``None`` when nothing is promoted as a
+    widget (socket-only inputs are links, not values)."""
+    pis = [p for p in _promoted.promoted_inputs(sg_def, state.promoted_defs) if p.is_widget]
+    if not pis:
+        return None
+    first = state.first_instance_by_def.get(def_id, def_id)
+    names = ", ".join(_member_ref("IN", p.name) for p in pis)
+    return (
+        f"#   promoted widgets: {names} — each is the instance's own value: "
+        f"edit {first}.<name>, never {first}/<id>.<name>"
+    )
+
+
 def _def_links(sg_def: dict) -> dict[str, tuple]:
     """Normalise a definition's dict-shaped links into the array-tuple form
     used everywhere else: ``{str(link_id): (origin_id, origin_slot, target_id, target_slot)}``."""
@@ -847,9 +1031,19 @@ class _State:
     that end up on the returned ``PrintResult``."""
 
     def __init__(
-        self, defs_by_id: dict[str, dict], warnings: list[str], skipped: list[dict], bindings: dict[str, str]
+        self,
+        defs_by_id: dict[str, dict],
+        warnings: list[str],
+        skipped: list[dict],
+        bindings: dict[str, str],
+        workflow: dict | None = None,
     ) -> None:
         self.defs_by_id = defs_by_id
+        # The whole workflow and cql.promoted's own definition index: a
+        # promoted widget's effective value is resolved from the HOST instance
+        # against its definition (``promoted.effective_value_for``), at any depth.
+        self.workflow: dict = workflow if workflow is not None else {}
+        self.promoted_defs: dict[str, dict] = _promoted.defs_by_id(self.workflow)
         self.warnings = warnings
         self.skipped = skipped
         self.bindings = bindings
@@ -943,7 +1137,7 @@ def _render_nodes(
             sg_def = defs_by_id.get(t)
             addr = ctx.qualify(nid)
             if sg_def is not None:
-                line, prim_hits = _render_subgraph_instance_line(n, t, sg_def, name, ctx, state.warnings)
+                line, prim_hits = _render_subgraph_instance_line(n, t, sg_def, name, ctx, state)
                 for prim_id, reason in prim_hits:
                     state.primitive_reason.setdefault(prim_id, reason)
                 state.register_instance(t, ctx.owner_def, nid, addr, depth)
@@ -1081,9 +1275,12 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
     links = workflow.get("links") or []
 
     definitions = workflow.get("definitions")
+    promoted_workflow = workflow
     if definitions is not None and not isinstance(definitions, dict):
         warnings.append("workflow: ignoring non-object definitions block")
         definitions = None
+        # cql.promoted indexes the same block; hand it the sanitized view.
+        promoted_workflow = {**workflow, "definitions": None}
     subgraphs = definitions.get("subgraphs") if definitions else None
     defs_by_id = {sg.get("id"): sg for sg in (subgraphs or []) if isinstance(sg, dict) and sg.get("id")}
 
@@ -1126,7 +1323,7 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
     )
 
     skipped: list[dict] = []
-    state = _State(defs_by_id, warnings, skipped, bindings)
+    state = _State(defs_by_id, warnings, skipped, bindings, promoted_workflow)
 
     lines = _render_nodes(order, ctx, graph, defs_by_id, binding_by_id, state, depth=1)
 
@@ -1152,6 +1349,9 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         node_count += block_count
     for def_id in state.def_order:
         lines.append(_definition_header(def_id, defs_by_id[def_id], state))
+        promoted_line = _promoted_header_line(def_id, defs_by_id[def_id], state)
+        if promoted_line is not None:
+            lines.append(promoted_line)
         lines.extend("    " + bl for bl in block_lines_by_def[def_id])
 
     source = "\n".join(lines) + "\n"

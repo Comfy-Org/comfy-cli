@@ -59,6 +59,7 @@ import uuid
 from typing import Any
 
 from comfy_cli import layout
+from comfy_cli.cql.engine import frontend_injected_widget_error
 
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
@@ -400,23 +401,35 @@ def _lww_commit(workflow: dict, op: dict) -> None:
     workflow.setdefault("_widget_stamps", {})[json.dumps(_write_target(op), default=str)] = _stamp_key(op)
 
 
-def _autogrow_template(graph, node_type: str, base: str) -> dict | None:
-    """The schema-declared element-naming template for the ``base`` autogrow
-    input on ``node_type`` — looked up from the same object_info-derived
-    ``graph`` the connect path already resolves node schemas from (see
-    ``cql.engine.Port.autogrow_template``). None when ``graph`` is unavailable,
-    ``node_type`` isn't in the catalog (offline edit), or the catalog entry
-    carries no template — callers then fall back to the historical
-    pluralization heuristic in :func:`_autogrow_elem_name`."""
+def _autogrow_group_port(graph, node: dict, base: str):
+    """The schema :class:`~comfy_cli.cql.engine.Port` for autogrow group
+    ``base`` on ``node`` — a top-level group (``BatchImagesNode.images``) or
+    one nested under the option ``node`` currently selects at a dynamic combo
+    (``MinimaxHailuo03ReferenceNode`` → ``model.reference_images``). The
+    selection is read from the node's own ``widgets_values`` the same way
+    ``set-widget`` indexes them, so a node switched to an option without the
+    group stops resolving it. None when ``graph`` is unavailable, the class
+    isn't in the catalog (offline edit), or no such group exists."""
     if graph is None:
         return None
-    m = graph.node(node_type)
-    if m is None:
-        return None
-    for p in m.inputs:
-        if p.name == base and p.is_autogrow:
-            return p.autogrow_template
+    from comfy_cli.cql import engine as _engine
+
+    node_type = node.get("type", "")
+    values = _engine._widgets_as_positional(node.get("widgets_values"), graph, node_type)
+    for port in graph.autogrow_groups(node_type, values):
+        if port.name == base:
+            return port
     return None
+
+
+def _autogrow_template(graph, node: dict, base: str) -> dict | None:
+    """The schema-declared element-naming template for the ``base`` autogrow
+    group on ``node`` (see :func:`_autogrow_group_port` and
+    ``cql.engine.Port.autogrow_template``). None when the schema is
+    unavailable or carries no template — callers then fall back to the
+    historical pluralization heuristic in :func:`_autogrow_elem_name`."""
+    port = _autogrow_group_port(graph, node, base)
+    return None if port is None else port.autogrow_template
 
 
 def _autogrow_elem_name(base: str, n: int, template: dict | None) -> str:
@@ -466,9 +479,17 @@ def _next_autogrow_name(ins: list, requested: str, template: dict | None = None)
     taken = {i.get("name") for i in ins}
     if requested not in taken:
         return requested
-    base = requested.split(".", 1)[0]
+    base = _autogrow_base(requested)
     n = _first_free_autogrow_index(taken, base, template)
     return f"{base}.{_autogrow_elem_name(base, n, template)}"
+
+
+def _autogrow_base(slot_name: str) -> str:
+    """The group a grown slot name belongs to: everything before the LAST
+    dot. Element names never contain a dot, but a group nested under a
+    dynamic combo does (``model.images.image_1`` → ``model.images``), so
+    splitting on the first dot would name the combo, not the group."""
+    return slot_name.rsplit(".", 1)[0]
 
 
 def _next_inputcount_name(ins: list, requested: str) -> str:
@@ -616,16 +637,111 @@ def _set_widget_impl(
     base_version: int = 0,
 ) -> tuple[dict, dict]:
     from comfy_cli.cql import engine as _engine
+    from comfy_cli.cql import promoted as _promoted
 
-    # Subgraph-aware: a subgraph instance's *promoted* input (flat ``57.text`` —
-    # exactly what ``comfy workflow slots`` advertises) or an interior node
-    # (nested ``57/27.text``) resolves INTO the subgraph definition. Both forms
-    # reuse the CQL engine's slot resolver so set-widget and slots agree. The op
-    # carries the resolved interior ``path`` + ``inner_widget`` so apply/replay is
-    # deterministic and writes back into the definition (the change persists).
-    sub = _subgraph_write_target(workflow, node_id, widget)
-    if sub is not None:
-        segments, inner_widget = sub
+    # Subgraph-aware. A promoted widget's value lives on the HOST instance
+    # (ADR 0009: the host value wins over the interior default at run time),
+    # and when an outside node feeds the promoted input, on THAT node — never
+    # on the interior node the legacy ``proxyWidgets`` route pointed at. So a
+    # flat ``57.width``, the interior ``57/13.width`` it backs, and a primitive
+    # wired into ``57.width`` all resolve to the one place the frontend runs.
+    # Unpromoted interior widgets (``57/3.cfg``) still write the definition.
+    target = _resolve_widget_write(workflow, graph, node_id, widget)
+    extra: dict[str, Any] = {}
+    if target.redirected_from is not None:
+        extra["redirected_from"] = target.redirected_from
+    if target.kind == "host":
+        instance = target.node
+        widget = str(target.widget)
+        defs = _engine._subgraph_defs_by_id(workflow)
+        sg = defs[str(instance.get("type", ""))]
+        promoted_meta: dict[str, Any] = {"instance_path": list(target.segments)}
+        if target.repair is not None:
+            # A legacy ``proxyWidgets`` promotion (see ``cql.promoted``
+            # "forward migration"): apply repairs the instance's definition
+            # first — with ids DERIVED from the instance path and the entry,
+            # carried here so any replica mints the same input and links —
+            # and only then writes the host value. The schema/old value come
+            # from the interior widget the repair will link.
+            entry = target.repair
+            plan = _promoted.plan_proxy_migration(workflow, instance, graph, defs)
+            promoted_meta["repair"] = {
+                "entry": list(entry.original),
+                "ids": _promoted.plan_repair_ids(list(target.segments), plan),
+            }
+            pi = entry.as_promoted_input(sg)
+            old = _promoted.entry_effective_value(workflow, sg, entry, graph, defs)
+        else:
+            pi = _promoted.find_promoted(sg, defs, widget)
+            promoted_meta["value_index"] = pi.value_index
+            old = _promoted.effective_value(workflow, instance, widget, graph)
+        inner_type, port = _engine.promoted_source_port(sg, pi, defs, graph)
+        value, norm_note = _normalize_combo(graph, inner_type, port.name if port else widget, value)
+        warnings: list[dict] = []
+        if port is not None:
+            err = port.validate_shape(value)
+            if err:
+                raise ValueError(err)
+            warnings = [dict(w, field=f"{'/'.join(target.segments)}.{widget}") for w in port.validate_catalog(value)]
+            _refuse_fatal(warnings)
+        if norm_note:
+            warnings = [norm_note, *warnings]
+        op = _new_op(
+            "set_widget",
+            actor,
+            base_version,
+            node_id=instance.get("id") if len(target.segments) == 1 else "/".join(target.segments),
+            widget=widget,
+            value=value,
+            old=None if old is _promoted.UNSET else old,
+            promoted=promoted_meta,
+            **extra,
+        )
+        if warnings:
+            op["warnings"] = warnings
+        workflow = apply_op(workflow, op, graph)
+        if target.repair is not None:
+            # The slot only exists after the repair (and the instance may sit
+            # on a freshly forked definition): read it back from the document.
+            repaired = _engine._subgraph_defs_by_id(workflow)
+            sg = repaired[str(instance.get("type", ""))]
+            op["promoted"]["value_index"] = _promoted.find_promoted(sg, repaired, widget).value_index
+        # The materialized host array, for an applier that stores the instance
+        # opaquely (no catalog entry for a subgraph type): it can replace the
+        # positional array wholesale instead of decomposing it by name. Read
+        # from the instance apply WROTE — a nested host inside a shared
+        # definition was forked on the way down, so the dict captured during
+        # resolution is the pre-fork sibling, not the written one.
+        written = _engine._resolve_node_path(workflow, list(target.segments), _engine._subgraph_defs_by_id(workflow))
+        op["promoted"]["host_widgets_values"] = _promoted.host_widgets_values(written)
+        return workflow, op
+    if target.kind == "legacy_primitive":
+        # A frontend-only PrimitiveNode has no catalog entry, so every
+        # replica stores it opaquely (positional): carry the same positional
+        # payload a host write carries, and apply it the same way.
+        src = target.node
+        values = src.get("widgets_values")
+        old = values[0] if isinstance(values, list) and values else None
+        op = _new_op(
+            "set_widget",
+            actor,
+            base_version,
+            node_id=src.get("id"),
+            widget=target.widget,
+            value=value,
+            old=old,
+            legacy_primitive=True,
+            promoted={"value_index": 0, "instance_path": [str(src.get("id"))]},
+            **extra,
+        )
+        workflow = apply_op(workflow, op, graph)
+        op["promoted"]["host_widgets_values"] = list(src.get("widgets_values") or [])
+        return workflow, op
+    if target.kind == "top" and target.redirected_from is not None:
+        node_id = target.node.get("id")
+        widget = target.widget
+    if target.kind == "interior":
+        segments, inner_widget = target.segments, target.widget
         target = _navigate_subgraph_path(workflow, segments)  # read-only: current value + schema
         inner_type = target.get("type", "")
         value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value)
@@ -648,6 +764,7 @@ def _set_widget_impl(
             old=old,
             path=[str(s) for s in segments],
             inner_widget=inner_widget,
+            **extra,
         )
         if warnings:
             op["warnings"] = warnings
@@ -670,10 +787,38 @@ def _set_widget_impl(
         widget=widget,
         value=value,
         old=old,
+        **extra,
     )
     if warnings:
         op["warnings"] = warnings
     return apply_op(workflow, op, graph), op
+
+
+def _refuse_fatal(warnings: list[dict]) -> None:
+    from comfy_cli.cql.engine import FATAL_FINDING_CODES
+
+    for w in warnings:
+        if w.get("code") in FATAL_FINDING_CODES:
+            raise FatalFindingError(w)
+
+
+def _resolve_widget_write(workflow: dict, graph, node_id: Any, widget: str):
+    """Where a set-widget address lands — see ``cql.promoted.resolve_write``.
+    The ``<outer>:<inner>`` alias UI→API lowering mints is accepted like the
+    editable ``<outer>/<inner>`` path."""
+    from comfy_cli.cql import engine as _engine
+    from comfy_cli.cql import promoted as _promoted
+
+    node_str = str(node_id)
+    if _engine._SUBGRAPH_PATH_SEP in node_str:
+        segments = node_str.split(_engine._SUBGRAPH_PATH_SEP)
+    elif ":" in node_str and _find_by_str(workflow, node_str) is None:
+        segments = node_str.split(":")
+    else:
+        if _find(workflow, node_id) is None and _find_by_str(workflow, node_str) is None:
+            _require(workflow, node_id)  # canonical not-found error
+        segments = [node_str]
+    return _promoted.resolve_write(workflow, graph, segments, widget)
 
 
 def _subgraph_write_target(workflow: dict, node_id: Any, widget: str) -> tuple[list[str], str] | None:
@@ -833,8 +978,17 @@ def _promoted_widget_error(workflow: dict, node: dict, slot: Any) -> ValueError 
 
     if not isinstance(slot, str):
         return None
-    if _engine._subgraph_defs_by_id(workflow).get(str(node.get("type", ""))) is None:
+    defs = _engine._subgraph_defs_by_id(workflow)
+    sg = defs.get(str(node.get("type", "")))
+    if sg is None:
         return None
+    from comfy_cli.cql import promoted as _promoted
+
+    pi = _promoted.find_promoted(sg, defs, slot)
+    if pi is not None and (
+        pi.is_widget or pi.source_node is not None or _promoted.legacy_proxy_interior(node, slot) is None
+    ):
+        return None  # a declared input: connect handles it (materialize + wire)
     try:
         target = _subgraph_write_target(workflow, node.get("id"), slot)
     except ValueError:
@@ -889,7 +1043,7 @@ def _connect_impl(
     dst = _require(workflow, to_node)
     out_idx, link_type = _resolve_output_slot(src, graph, from_slot)
     try:
-        in_idx, grow = _resolve_input_target(dst, graph, to_slot, link_type)
+        in_idx, grow = _resolve_input_target(dst, graph, to_slot, link_type, workflow=workflow)
     except ValueError as e:
         promoted = _promoted_widget_error(workflow, dst, to_slot)
         if promoted is not None:
@@ -1292,8 +1446,10 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
             raise RecipeError(
                 f"--param target node {node_id} is a UI-only {node.get('type')} — capture skips it (it never reaches the API)"
             )
-        if widget not in graph.widget_order_default(node.get("type", "")):
-            raise RecipeError(f"--param target {node_id}.{widget!r}: not a widget on {node.get('type')}")
+        # Editable names only: an injected slot (``upload``) owns a position
+        # but no value, and apply would refuse it anyway — say so up front.
+        if widget not in graph.editable_widget_names(node.get("type", "")):
+            raise RecipeError(f"--param target {node_id}.{widget!r}: not an editable widget on {node.get('type')}")
 
     warnings: list[dict] = []
     for n in ui_nodes:
@@ -1682,6 +1838,48 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
     # dropped, so the surviving value is the same in any apply order.
     if not _lww_gate(workflow, op):
         return
+    promoted_write = op.get("promoted")
+    if promoted_write:
+        # Host-owned value of a promoted subgraph input (cql.promoted). The
+        # instance path is one segment for a top-level instance; a nested host
+        # descends (forking shared definitions en route, like interior writes).
+        from comfy_cli.cql import engine as _engine
+        from comfy_cli.cql import promoted as _promoted
+
+        instance_path = [str(s) for s in promoted_write.get("instance_path") or [str(op["node_id"])]]
+        if _find_by_str(workflow, instance_path[0]) is None:
+            return  # instance concurrently deleted => no-op (delete wins)
+        defs_by_id = _engine._subgraph_defs_by_id(workflow)
+        instance = _engine._resolve_node_path(workflow, instance_path, defs_by_id)
+        repair = promoted_write.get("repair")
+        if repair:
+            # Legacy ``proxyWidgets`` promotion: repair the instance's
+            # definition (the frontend's forward migration) before the host
+            # write. The definition is MUTATED, so a shared one is forked
+            # first (deterministic fork id), and the input/link ids come from
+            # the op — replay anywhere yields the same document. Re-resolved
+            # against the current graph: an entry another replica already
+            # repaired is consumed as already linked.
+            _engine._isolate_shared_subgraph(workflow, instance, _engine._subgraph_defs_by_id(workflow))
+            _promoted.flush_proxy_migration(
+                workflow, instance, graph, ids=repair.get("ids") or None, instance_path=instance_path
+            )
+        if _engine._subgraph_defs_by_id(workflow).get(str(instance.get("type", ""))) is not None:
+            _promoted.set_host_value(workflow, instance, op["widget"], op["value"], graph)
+        else:
+            # Not a subgraph instance (a frontend-only PrimitiveNode): a plain
+            # positional write, aligned from the op's materialized array.
+            _apply_positional_write(instance, promoted_write, op["value"])
+        _lww_commit(workflow, op)
+        return
+    if op.get("legacy_primitive"):
+        # Pre-payload shape (no ``promoted`` block): widgets_values[0].
+        node = _find_by_str(workflow, op["node_id"])
+        if node is None:
+            return
+        _apply_positional_write(node, {"value_index": 0}, op["value"])
+        _lww_commit(workflow, op)
+        return
     path = op.get("path")
     if path:
         # Subgraph interior write. A concurrently-deleted instance => no-op
@@ -1710,6 +1908,28 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
         widgets.extend([None] * (idx + 1 - len(widgets)))
     widgets[idx] = op["value"]
     _lww_commit(workflow, op)
+
+
+def _apply_positional_write(node: dict, positional: dict, value: Any) -> None:
+    """Write ``value`` at ``positional["value_index"]`` of an opaquely stored
+    node's ``widgets_values``, extending a shorter array from the op's own
+    ``host_widgets_values`` so alignment is preserved (the same rule the
+    doc-host applier follows for a node without a catalog entry)."""
+    idx = positional.get("value_index")
+    if not isinstance(idx, int) or isinstance(idx, bool) or idx < 0:
+        return
+    values = node.get("widgets_values")
+    values = list(values) if isinstance(values, list) else []
+    seed = positional.get("host_widgets_values")
+    # A receiver holding a truncated array takes the payload's tail whether or
+    # not the written index is inside it — otherwise replicas keep different
+    # opaque state for the same node.
+    if isinstance(seed, list) and len(seed) > len(values):
+        values.extend(seed[len(values) :])
+    while len(values) <= idx:
+        values.append(None)
+    values[idx] = value
+    node["widgets_values"] = values
 
 
 def _apply_inputcount_bump(workflow: dict, dst: dict, op: dict, graph, widget: str, value: Any) -> None:
@@ -1762,8 +1982,14 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
     if grow is not None:
         # Autogrow is NOT a shared register: every grow mints its own slot keyed
         # by ``grow_id``, so two concurrent grows onto one base both survive and
-        # there is nothing to gate (§1.2 / amendment v1.2's carve-out).
-        if _find_by_str(workflow, op["from_node"]) is None:
+        # there is nothing to gate (§1.2 / amendment v1.2's carve-out) — a
+        # deleted source simply means nothing to wire. A PROMOTED grow IS a
+        # register (§14.2), so it must reach the gate below even when its
+        # source is gone: bailing here would make the incumbent depend on
+        # whether the concurrent delete of this op's source had arrived yet.
+        # Delete wins over the LINK, not over the claim — the entry is left
+        # empty at the ``src is None`` check further down.
+        if not grow.get("promoted") and _find_by_str(workflow, op["from_node"]) is None:
             return
         # Autogrow: grow a concrete slot and wire it. Keyed by ``grow_id`` (the
         # link id) so replay is idempotent AND non-clobbering — a concurrent
@@ -1774,17 +2000,47 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
         # schema's own element names, when the catalog carries a template).
         ins = dst.setdefault("inputs", [])
         to_idx = next((k for k, i in enumerate(ins) if i.get("grow_id") == op["link_id"]), None)
+        if grow.get("promoted"):
+            # A promoted subgraph input is ONE register named by the definition
+            # (``("input", to_node, "grow", name)``), not a fresh slot per
+            # connect: gate it exactly like a concrete input so the occupant is
+            # decided by stamp, not arrival order, and the doc-host applier
+            # (comfy-multi-player) converges with this replica. The claim is
+            # unconditional once the gate passes (see the concrete branch).
+            if to_idx is None and not _lww_gate(workflow, op):
+                return
+            _lww_commit(workflow, op)
+            if to_idx is None:
+                to_idx = next((k for k, i in enumerate(ins) if i.get("name") == grow["name"]), None)
+            if to_idx is not None:
+                prev = ins[to_idx].get("link")
+                if prev is not None and prev != op["link_id"]:
+                    _remove_link(workflow, prev)
+                ins[to_idx]["grow_id"] = op["link_id"]  # the register follows the winner
         if to_idx is None:
             inputcount = grow.get("inputcount")
-            if inputcount is not None:
+            if grow.get("promoted"):
+                name = grow["name"]
+            elif inputcount is not None:
                 # Bare-key family (see _next_inputcount_name): a collision must
                 # still grow the next free BARE key, never autogrow's dotted
                 # base.elemN fallback — that name is meaningless for this family.
                 name = _next_inputcount_name(ins, grow["name"])
             else:
-                base = str(grow["name"]).split(".", 1)[0]
-                template = None if grow.get("widget") else _autogrow_template(graph, dst.get("type", ""), base)
+                base = _autogrow_base(str(grow["name"]))
+                port = None if grow.get("widget") else _autogrow_group_port(graph, dst, base)
+                template = None if port is None else port.autogrow_template
                 name = _next_autogrow_name(ins, grow["name"], template)
+                if port is not None and name != grow["name"]:
+                    # A replay collision renamed the slot: never mint one past
+                    # the schema's max. The group is full, so this op is dropped
+                    # (no-op) — which slot the concurrent race keeps is
+                    # arrival-ordered, the same accepted limitation the
+                    # inputcount family documents below; the schema bound is not.
+                    _lo, hi = port.autogrow_limits
+                    occupied = sum(1 for i in ins if str(i.get("name", "")).startswith(base + "."))
+                    if hi is not None and occupied >= hi:
+                        return
             entry = {
                 "name": name,
                 "type": grow["type"],
@@ -1986,7 +2242,14 @@ def _write_target(op: dict) -> tuple:
             # Two autogrow connects onto the same base share a target (their
             # relative order in the batch is the sequence decision the merge
             # consumer must make); distinct bases don't collide.
-            return ("input", str(op["to_node"]), "grow", str(grow["name"]).split(".", 1)[0])
+            if grow.get("promoted"):
+                # A promoted subgraph input is one register per declared NAME
+                # (names may contain dots: ``images.image0``), never per base.
+                return ("input", str(op["to_node"]), "grow", str(grow["name"]))
+            # The group is everything before the LAST dot: a group nested
+            # under a dynamic combo (``model.reference_images.image_1``) must
+            # not share a target with its sibling (``model.reference_videos``).
+            return ("input", str(op["to_node"]), "grow", _autogrow_base(str(grow["name"])))
         return ("input", str(op["to_node"]), op["to_slot"])
     return (kind,)
 
@@ -2144,7 +2407,13 @@ def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list) 
     # Widget values in positional order, including dynamic-combo selectors and
     # their sub-widgets — sourced from the engine so add-node matches the converter.
     defaults = graph.widget_defaults(class_type)
-    widgets = [defaults.get(name) for name in graph.widget_order_default(class_type)]
+    order = graph.widget_order_default(class_type)
+    # A trailing name with no default is a frontend-injected ``serialize:
+    # false`` slot (``upload``, ``audioUI``): the frontend writes nothing for
+    # it, so neither does a fresh node — no phantom trailing ``null``.
+    while order and order[-1] not in defaults:
+        order = order[:-1]
+    widgets = [defaults.get(name) for name in order]
     return {
         "id": node_id,
         "type": class_type,
@@ -2165,11 +2434,20 @@ def _widget_index(graph, class_type: str, widget: str, widgets_values=None) -> i
     # selected key (from ``widgets_values``), not the schema's first key, so the
     # index stays aligned to ``widgets_values`` for the node's real selection.
     order = graph.widget_order_for_node(class_type, widgets_values)
+    # A frontend-injected slot (``upload``/``audioUI``/``PREVIEW_3D`` ``image``)
+    # sits in ``order`` — it owns a position — but has no schema port to
+    # validate against and ``slots`` never advertises it; refuse it by name so
+    # it can't become a ghost target. ``control_after_generate`` is also
+    # unadvertised but stays writable (it carries a real user value).
+    if widget in graph.frontend_injected_widget_names(class_type):
+        raise frontend_injected_widget_error(
+            class_type, widget, graph.editable_widget_names(class_type, widgets_values)
+        )
     if widget not in order:
-        avail = [w for w in order if w != "control_after_generate"]
+        avail = graph.editable_widget_names(class_type, widgets_values)
         raise ValueError(
             f"widget {widget!r} not found on {class_type}; "
-            f"available: {', '.join(avail) if avail else '(none — all inputs are links)'}"
+            f"available widgets: {', '.join(avail) if avail else '(none — all inputs are links)'}"
         )
     return order.index(widget)
 
@@ -2340,7 +2618,9 @@ def _inputcount_family_match(graph, node_type: str, slot: str) -> tuple[str, int
     return elem, n
 
 
-def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -> tuple[int | None, dict | None]:
+def _resolve_input_target(
+    node: dict, graph, slot: Any, elem_type: str | None, workflow: dict | None = None
+) -> tuple[int | None, dict | None]:
     """Resolve a connect target. Returns ``(index, None)`` for a concrete input,
     or ``(None, grow)`` where ``grow`` is the input slot to append (autogrow slot,
     or a widget converted to an input).
@@ -2355,13 +2635,31 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
       the API converter reads the link and skips the widget by name.
     """
     ins = node.get("inputs") or []
-    node_type = node.get("type", "")
+    # Promoted subgraph input (``57.width``): the definition declares it, so it
+    # is a link input on the instance even before the instance carries an
+    # ``inputs[]`` entry for it — the frontend rebuilds those from the
+    # definition on load. ALWAYS addressed as a promoted grow, even once the
+    # entry exists: the register is the declared name, so a replica that
+    # receives a later connect before the materializing one still lands it
+    # (a concrete ``to_slot`` op would find no slot, be dropped, and never
+    # replay). Apply reuses the entry by name; type-checked against the
+    # declared input type.
+    if workflow is not None and isinstance(slot, (str, int)) and not isinstance(slot, bool):
+        promoted_grow = _resolve_promoted_target(workflow, node, slot, elem_type)
+        if promoted_grow is not None:
+            return None, promoted_grow
     # Concrete slot (index or exact name) that is NOT an autogrow base.
     try:
         idx = _resolve_input_slot(node, None, slot)
         if str(ins[idx].get("type", "")).startswith("COMFY_AUTOGROW"):
             base = ins[idx].get("name")
-            template = _autogrow_template(graph, node_type, base)
+            # The CLI's own add-node writes this base entry; the schema-aware
+            # resolver applies the declared element type and ``max`` exactly
+            # as it does for a UI-built node (which carries no base entry).
+            resolved = _resolve_schema_autogrow(node, graph, str(base), elem_type) if graph is not None else None
+            if resolved is not None:
+                return resolved
+            template = _autogrow_template(graph, node, base)
             return None, _plan_autogrow(ins, base, elem_type, template)
         return idx, None
     except ValueError:
@@ -2373,7 +2671,10 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
             (i for i in ins if i.get("name") == base and str(i.get("type", "")).startswith("COMFY_AUTOGROW")), None
         )
         if ag is not None:
-            template = _autogrow_template(graph, node_type, base)
+            resolved = _resolve_schema_autogrow(node, graph, slot, elem_type) if graph is not None else None
+            if resolved is not None:
+                return resolved
+            template = _autogrow_template(graph, node, base)
             grow = _plan_autogrow(ins, base, elem_type, template)  # canonical next sequential slot
             # Addressing the bare base auto-appends. A dotted key is accepted ONLY if
             # it names that exact next slot; an index gap (images.image4), a doubled
@@ -2388,9 +2689,20 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
                     f"or use the next free key {grow['name']!r}"
                 )
             return None, grow
-    # Widget-backed input: convert the widget to a linked input.
+    # Schema-declared autogrow group — the slot exists in object_info even
+    # when the node's ``inputs`` carry no trace of it: a group nested under a
+    # dynamic combo (``model.images``), or a top-level group on a UI-built node
+    # (the frontend writes the grown ``images.imageN`` slots, never the base).
+    # Widget-backed input: convert the widget to a linked input. Checked before
+    # the schema group resolution so a real widget name always outranks the
+    # bare-element guess (``image0``) a group's vocabulary might also match.
+    node_type = node.get("type", "")
     if graph is not None and isinstance(slot, str) and slot in graph.widget_order(node_type):
         return None, {"name": slot, "type": elem_type or "*", "widget": slot}
+    if graph is not None and isinstance(slot, str):
+        resolved = _resolve_schema_autogrow(node, graph, slot, elem_type)
+        if resolved is not None:
+            return resolved
     # Bare autogrow ELEMENT name (`image1` for base `images`) — the guess agents
     # make on classic batch nodes, and the top workflow-edit failure in alpha
     # traffic. Map it onto the dotted key it implies and hold it to the same
@@ -2402,7 +2714,7 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
             base = ag.get("name")
             if not base or not str(ag.get("type", "")).startswith("COMFY_AUTOGROW"):
                 continue
-            template = _autogrow_template(graph, node_type, base)
+            template = _autogrow_template(graph, node, base)
             if not _autogrow_bare_slot_pattern(base, template).fullmatch(slot):
                 continue
             grow = _plan_autogrow(ins, base, elem_type, template)
@@ -2440,6 +2752,121 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
             )
     names = [i.get("name") for i in ins]
     raise ValueError(f"input {slot!r} not found on node {node.get('id')}; inputs: {names}")
+
+
+def _resolve_promoted_target(workflow: dict, node: dict, slot: Any, elem_type: str | None) -> dict | None:
+    """The input to materialize on subgraph instance ``node`` for a connect to
+    its declared input ``slot`` (see ``cql.promoted``). ``None`` when ``node``
+    is not an instance or ``slot`` is not one of its definition's inputs.
+
+    An INDEX (``57.1``) that lands on an already-materialized entry for a
+    declared input is the same input as its name (``57.width``): it maps onto
+    the name so both addresses share one register (§14.2)."""
+    from comfy_cli.cql import engine as _engine
+    from comfy_cli.cql import promoted as _promoted
+
+    defs = _engine._subgraph_defs_by_id(workflow)
+    sg = defs.get(str(node.get("type", "")))
+    if sg is None:
+        return None
+    if isinstance(slot, int) or (isinstance(slot, str) and slot.lstrip("-").isdigit()):
+        ins = node.get("inputs") or []
+        idx = int(slot)
+        entry = ins[idx] if 0 <= idx < len(ins) and isinstance(ins[idx], dict) else None
+        if entry is None or not entry.get("name"):
+            return None
+        slot = str(entry["name"])
+    pi = _promoted.find_promoted(sg, defs, slot)
+    if pi is None:
+        return None
+    if not pi.is_widget and pi.source_node is None and _promoted.legacy_proxy_interior(node, slot) is not None:
+        # Declared but unbacked, and a legacy proxy routes the name to an
+        # interior widget: still a value, not a link (the frontend repairs it
+        # into a linked input on load). set-widget owns it.
+        return None
+    # A declared input with no usable type (missing or non-string in the
+    # save) is reachable, not a mismatch: skip the check and stamp the slot
+    # with the source type, as the frontend would infer it.
+    if elem_type and pi.type and not _types_compatible(elem_type, pi.type):
+        raise ValueError(
+            f"type mismatch: {elem_type} output cannot connect to {pi.type} input {slot!r} "
+            f"of subgraph node {node.get('id')}"
+        )
+    grow: dict[str, Any] = {"name": slot, "type": pi.type or elem_type or "*", "promoted": True}
+    if pi.is_widget:
+        grow["widget"] = slot
+    return grow
+
+
+def _resolve_schema_autogrow(
+    node: dict, graph, slot: str, elem_type: str | None
+) -> tuple[int | None, dict | None] | None:
+    """Resolve ``slot`` against the autogrow groups the node's SCHEMA declares
+    for its current selection (:func:`_autogrow_group_port`), mirroring what
+    the frontend does when a noodle is dropped on the group:
+
+    * the group base (``model.reference_images``) wires the lowest free slot
+      the node already carries (the frontend pre-creates one), else appends
+      the next schema-named slot;
+    * a dotted key (``model.reference_images.image_3``) or a bare element
+      name (``image_3``) must name that exact next slot — an index gap would
+      mint a key the server can't map, so it is rejected with the next free
+      key instead;
+    * the source type must match the group's declared element type, and the
+      group never grows past the schema's ``max`` (``names`` length).
+
+    Returns ``None`` when ``slot`` addresses no schema group, so the caller
+    keeps falling through its other resolutions.
+    """
+    from comfy_cli.cql import engine as _engine
+
+    ins = node.get("inputs") or []
+    node_type = node.get("type", "")
+    values = _engine._widgets_as_positional(node.get("widgets_values"), graph, node_type)
+    for port in graph.autogrow_groups(node_type, values):
+        base = port.name
+        template = port.autogrow_element_template
+        if slot == base:
+            target = None
+        elif slot.startswith(base + "."):
+            target = slot
+        elif _autogrow_bare_slot_pattern(base, template).fullmatch(slot):
+            target = f"{base}.{slot}"
+        else:
+            continue
+        declared = port.autogrow_element_type
+        if elem_type and declared and not _types_compatible(elem_type, declared):
+            raise ValueError(
+                f"type mismatch: {elem_type} output cannot connect to autogrow input {base!r} of node "
+                f"{node.get('id')} — its slots take {declared}"
+            )
+        _lo, hi = port.autogrow_limits
+        n = 0
+        while True:
+            name = f"{base}.{_autogrow_elem_name(base, n, template)}"
+            idx = next((k for k, i in enumerate(ins) if i.get("name") == name), None)
+            if idx is None:
+                break
+            if target == name or (target is None and ins[idx].get("link") is None):
+                return idx, None
+            n += 1
+        grown = [i.get("name") for i in ins if str(i.get("name", "")).startswith(base + ".")]
+        # A full group is reported as full FIRST: a gapped key on a full group
+        # must not be handed a "next free key" the next call would refuse.
+        if hi is not None and n >= hi:
+            raise ValueError(
+                f"autogrow input {base!r} on node {node.get('id')} is full: the schema allows at most "
+                f"{hi} slots (existing: {grown})"
+            )
+        if target is not None and target != name:
+            raise ValueError(
+                f"input {slot!r} is not a valid autogrow slot on node {node.get('id')}; "
+                f"autogrow input {base!r} appends one sequential slot per connection "
+                f"(existing: {grown}) — connect to the base {base!r} to auto-append, "
+                f"or use the next free key {name!r}"
+            )
+        return None, {"name": name, "type": declared or elem_type or "*"}
+    return None
 
 
 def _autogrow_bare_slot_pattern(base: str, template: dict | None) -> re.Pattern:

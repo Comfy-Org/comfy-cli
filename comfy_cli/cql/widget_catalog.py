@@ -16,6 +16,17 @@ against, including the two shapes a naive projection gets wrong:
   seed. It occupies a real ``widgets_values`` slot and is in no ``input_order``.
 * ``COMFY_DYNAMICCOMBO_V3`` — one declared selector that expands into
   key-dependent sub-widgets (``model`` → ``model``, ``model.resolution``).
+* Frontend-injected inputs — ``upload`` (the upload button on every media
+  loader), ``audioUI`` (the audio player), ``image`` (the ``PREVIEW_3D``
+  viewport on ``SaveGLB``/``Preview3D``). Extensions add them to the node
+  definition after ``object_info``; they serialize AFTER every declared
+  widget, optional ones included, and are ``serialize: false`` on current
+  frontends (older ones wrote ``"image"``/``null``). The order names them so
+  a workflow saved by either frontend decomposes, and a fresh node omits them.
+* DOM-widget inputs the schema declares under an uppercase custom type
+  (``Load3D.image`` is ``LOAD_3D``, ``LoadAudioUI.audioUI`` is ``AUDIO_UI``)
+  and inputs whose ``widgetType`` option overrides a link-shaped socket type
+  (``FLOAT,INT`` with ``widgetType: "STRING"``) — both occupy a slot.
 
 So the catalog is exported from here rather than recomputed by each consumer:
 a second implementation of widget order is a second answer, and the two would

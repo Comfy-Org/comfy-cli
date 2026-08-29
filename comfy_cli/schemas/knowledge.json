@@ -13,7 +13,7 @@
     "as_of": { "type": ["string", "null"], "description": "ISO-8601 UTC timestamp: file mtime (status) or the capability's as_of, null when the capability has none (pick)." },
     "path": { "type": "string", "description": "File the bundle bytes were read from (status)." },
     "env_file": { "type": ["string", "null"], "description": "Value of COMFY_KNOWLEDGE_FILE (status)." },
-    "url": { "type": ["string", "null"], "description": "Value of COMFY_KNOWLEDGE_URL with userinfo, query and fragment removed (status)." },
+    "url": { "type": ["string", "null"], "description": "URL a fetch uses: COMFY_KNOWLEDGE_URL, else knowledge.json under the cloud base URL; userinfo, query and fragment removed (status)." },
     "ttl_seconds": { "type": "number", "description": "Cache TTL in effect (status)." },
     "cache_path": { "type": "string", "description": "Where a fetched bundle is cached (status)." },
     "counts": {
@@ -53,7 +53,8 @@
           "template": { "type": ["string", "null"] },
           "caveat": { "type": ["string", "null"] },
           "status": { "type": ["string", "null"], "description": "Copied from the pick's model row when that row exists." },
-          "superseded_by": { "type": ["string", "null"], "description": "Copied from the pick's model row when that row exists." },
+          "superseded_by": { "type": ["string", "null"], "description": "From the deprecations list or the pick's model row." },
+          "best_for": { "type": "array", "items": { "type": "string" }, "maxItems": 1, "description": "Head of the model row's best_for list, present only when the row has one. The caveat is per capability; this is the row's own routing opinion." },
           "fits": { "type": "object", "description": "The model row's fits block (vram_gb per variant, a credit rate, max_refs, source), present only when the row carries one." }
         }
       }

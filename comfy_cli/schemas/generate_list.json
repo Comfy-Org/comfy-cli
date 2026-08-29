@@ -11,7 +11,7 @@
       "description": "One record per model, ordered by (partner, id) — the same order the human table renders.",
       "items": {
         "type": "object",
-        "required": ["alias", "id", "partner", "category", "mode", "summary"],
+        "required": ["alias", "id", "partner", "category", "mode", "summary", "emit_supported"],
         "properties": {
           "alias": {
             "type": "string",
@@ -37,6 +37,10 @@
           "summary": {
             "type": "string",
             "description": "Full one-line description from the openapi spec — never truncated."
+          },
+          "emit_supported": {
+            "type": "boolean",
+            "description": "Whether `comfy generate <alias> --emit-workflow <path>` can render this model as a ComfyUI partner node (a runnable workflow) instead of calling the proxy. False for most of the catalog: asking for --emit-workflow on such a model fails with `emit_workflow_unsupported_model`, whose `details.supported` lists the aliases that can."
           }
         }
       }

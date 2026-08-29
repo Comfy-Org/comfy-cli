@@ -414,6 +414,20 @@ Current contract, pinned:
   never random — and the instance's `type` is repointed, so two replicas
   replaying the same op produce byte-identical graphs and sibling instances
   are never aliased.
+* **Promoted widgets are HOST writes** (`cql.promoted`). A
+  `set_widget` on a promoted input carries `promoted: {instance_path,
+  value_index}` instead of `path`, and its LWW target is the host register
+  `("widget", "57", "text")` — the flat form, the nested interior form of the
+  widget the input links, and the flattened alias all converge there. A
+  legacy `properties.proxyWidgets` entry the definition does not back with a
+  linked input is first repaired the way the frontend's forward migration
+  repairs it on load (`promoted.flush_proxy_migration`): the op additionally
+  carries `promoted.repair = {entry, ids}` where `ids` maps every repairable
+  entry of that instance to the subgraph-input uuid and boundary-link ids the
+  repair mints, derived with SHA-256 from `(instance path, source node,
+  widget)` — deterministic, never random — so replay on any replica produces
+  a byte-identical document. The repair mutates the definition, so a shared
+  one is forked first exactly like an interior write.
 * OPEN: the shared-definition forking semantics above are apply-time behavior
   that rewrites `instance.type` without an explicit op saying so. A full
   specification (fork visibility, interaction with concurrent interior writes
@@ -723,3 +737,94 @@ rebuilds the executable graph — the API prompt — not the canvas decoration.
 
 **No change to §§2-8.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.
+
+## 14. Amendment v1.5 — 2026-08-28 (promoted subgraph inputs: host writes, one register per declared input, opaque positional writes)
+
+The frontend (ComfyUI_frontend ADR 0009) keeps a promoted subgraph widget's
+value on the HOST instance — `widgets_values[i]` on the instance, positional
+over the definition's inputs that resolve to an interior widget — and runs
+that value over the interior default. Interior `path` writes (§8.7) therefore
+never reached the canvas for a promoted widget. Both sides (this repo,
+comfy-multi-player Amendment A15) now speak the shapes below; a subgraph
+instance's `type` is a definition UUID with no catalog entry, so every replica
+stores its widgets opaquely (positional) and these ops carry what an opaque
+store needs.
+
+### 14.1 `set_widget` host write: the `promoted` payload
+
+A write to a promoted input is a top-level `set_widget` on the INSTANCE
+(`node_id`, `widget` = the declared input name; no `path`/`inner_widget`)
+carrying
+
+```json
+"promoted": {"value_index": <int>, "instance_path": [<id>, …],
+             "host_widgets_values": [<full materialized array>]}
+```
+
+`value_index` is the input's position among the definition's widget-backed
+inputs (socket-only inputs own no slot); `instance_path` is one segment for a
+top-level instance and the interior node path for a nested host, resolved and
+forked exactly like an interior `path`; `host_widgets_values` is the array
+after the write, seeded from each input's current effective value so the
+positional array stays aligned with the definition. Apply writes ONE slot;
+a shorter stored array is extended from the payload as **best-effort
+repair** — only the written index is under the register, so two concurrent
+writes carrying different tails settle the tail by apply order (an accepted
+limitation: a truncated replica is no longer left truncated). The register is
+the ordinary `("widget", node_id, widget)` (§11.2 string identity), so the flat
+address and the interior address that backs it (`57/13.width`, which the
+minting side redirects to the host — `redirected_from` records the given
+address, informational) share one register. The host-write register and an
+interior `path` register for the interior widget behind the same promotion
+are deliberately NOT unified (that would need the promotion table at apply
+time); a merge consumer treats them as distinct targets.
+
+### 14.2 `connect` onto a promoted input: one register per declared name
+
+A `connect` whose target is a declared subgraph input the instance does not
+yet carry an `inputs[]` entry for carries
+
+```json
+"grow": {"name": <declared input name>, "type": <declared type>,
+         "promoted": true, "widget": <name, only when the input backs a widget>}
+```
+
+Unlike autogrow (§1.2 carve-out), a promoted input is ONE register named by the
+definition — `("input", to_node, "grow", <full name>)`, never split on a dot
+(declared names such as `images.image0` contain one) — and is gated by
+`_lww_gate`/`_lww_commit` exactly like a concrete input (§11.1): the higher
+stamp owns the entry in either apply order, `grow_id` follows the winner, the
+loser's link is retired, and the claim is unconditional once the gate passes.
+Apply reuses an existing entry by name (a concurrent materialization shares
+it) and otherwise appends `{name, type, link, grow_id[, widget:{name}]}`
+verbatim — no numbering. Every connect to a declared promoted input is this
+promoted grow, even once the entry exists and even when addressed by INDEX
+(`57.1` landing on the materialized `width` entry maps onto the name at mint
+time): the register is the declared name for the life of the input, so a
+replica that receives a later connect before the materializing one still
+lands it (a concrete `to_slot` op would find no slot, be dropped with its
+`op_id` consumed, and never replay). The claim is unconditional once the
+gate passes: a promoted grow whose source was concurrently deleted still
+claims the register and leaves the entry empty (delete wins over the link,
+not over the claim — §11.1), so every interleaving converges. Scope: an op
+minted by a pre-v1.5 replica as a concrete `to_slot` onto such an input does
+not gate against the promoted register; both replicas must run v1.5 for the
+register to be shared.
+
+### 14.3 Opaque positional writes: frontend-only `PrimitiveNode`
+
+A write that resolves to a frontend-only `PrimitiveNode` (no catalog entry;
+`widgets_values[0]` holds the value) carries `legacy_primitive: true` AND the
+§14.1 `promoted` payload with `value_index: 0` and `instance_path` = the node
+id, so an opaque store applies it as a plain positional write. Apply treats a
+`promoted` payload on a non-instance node as that positional write.
+
+### 14.4 Legacy `proxyWidgets` entries are repaired before the host write
+
+A `properties.proxyWidgets` entry the definition does not back with a linked
+input is repaired first — the frontend's own forward migration
+(`proxyWidgetMigration.ts`), ported as `promoted.flush_proxy_migration` — and
+the op additionally carries `promoted.repair = {entry, ids}` with the
+subgraph-input and boundary-link ids the repair mints, derived by SHA-256 from
+`(instance path, source node, widget)` so replay anywhere is byte-identical.
+The pinned contract text in §8.7 states the full rule.

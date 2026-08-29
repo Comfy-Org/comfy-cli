@@ -362,6 +362,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "sign in with `comfy cloud login` and re-run with `--where cloud`",
     ),
     ErrorCode(
+        "asset_not_found",
+        "Comfy Cloud has no asset with the content hash passed to `assets library ensure` "
+        "(`details.hash`). A file NAME is not a hash: the library is keyed by the sha256 the "
+        "upload computed, which `assets library ls` reports per asset.",
+        "pass the `hash` from `comfy --json assets library ls --name <file>`, or upload the file "
+        "first with `comfy upload <file> --where cloud`",
+    ),
+    ErrorCode(
         "template_fetch_failed",
         "Fetching the per-template workflow JSON from `Comfy-Org/workflow_templates` failed.",
         "check network; if 404, the gallery and templates dir are out of sync — report upstream",
@@ -774,6 +782,27 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "with `comfy model download-cancel <id>`, a foreground one with Ctrl-C in its own terminal",
     ),
     ErrorCode(
+        "model_download_claim_contested",
+        "`comfy model download --background` lost the race for a destination it had just judged "
+        "free: the stale claim it cleared was re-taken by another submitter before its own retry, "
+        "and that new claim does not (yet) resolve to a live download record. `details.path` is the "
+        "destination; `details.download_id` names the new claim's holder when its claim file was "
+        "readable, and is null otherwise. Unlike `model_download_in_flight` there is no `status`/"
+        "`kind` to report — the competitor's record was not visible at refusal time.",
+        "check `comfy model downloads`, then retry",
+    ),
+    ErrorCode(
+        "model_download_claim_unclearable",
+        "`comfy model download --background` found a stale destination claim it could not remove "
+        "(`details.claim_file`): the file is not deletable by this user, or something else (e.g. a "
+        "directory) sits at the claim path. Every submission to `details.path` will be refused "
+        "until the claim file is cleared, so the command reports the real obstacle rather than a "
+        "phantom in-flight download. `details.download_id` is the stale claim's recorded holder, "
+        "null when the claim was unreadable.",
+        "remove the claim file by hand (check its ownership and the permissions on the `claims/` "
+        "directory), then retry",
+    ),
+    ErrorCode(
         "model_download_foreground_cancel",
         "`comfy model download-cancel` refused to cancel a download that is running in the "
         "foreground of another terminal (`details.id`, `details.pid`). A background download runs in "
@@ -914,9 +943,18 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check COMFY_API_BASE_URL points at the Comfy API; the existing cached catalog is still usable",
     ),
     ErrorCode(
+        "emit_workflow_unsupported_model",
+        "`generate --emit-workflow` has no ComfyUI partner-node mapping for the requested model "
+        "(`details.model`); most of the proxy catalog is proxy-only. `details.supported` lists the "
+        "aliases that can be emitted — the same set `generate list` flags with `emit_supported: true`.",
+        "pick a model with `emit_supported: true` in `comfy --json generate list`, or drop "
+        "--emit-workflow and call the model through the proxy",
+    ),
+    ErrorCode(
         "emit_workflow_failed",
-        "`generate --emit-workflow` could not build the partner-node workflow.",
-        "check the model name and that all required inputs are provided",
+        "`generate --emit-workflow` could not build the partner-node workflow for a supported model "
+        "(missing/invalid inputs, or the destination path could not be written).",
+        "check that all required inputs are provided and the destination path is writable",
     ),
     # --- custom node registry ------------------------------------------------
     ErrorCode(

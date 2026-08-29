@@ -1,0 +1,2790 @@
+{
+ "CLIPTextEncode": {
+  "input": {
+   "required": {
+    "text": [
+     "STRING",
+     {
+      "multiline": true,
+      "dynamicPrompts": true
+     }
+    ],
+    "clip": [
+     "CLIP",
+     {}
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "text",
+    "clip"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "CONDITIONING"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "CONDITIONING"
+  ],
+  "name": "CLIPTextEncode",
+  "display_name": "CLIP Text Encode (Prompt)",
+  "description": "Encodes a text prompt using a CLIP model into an embedding that can be used to guide the diffusion model towards generating specific images.",
+  "python_module": "nodes",
+  "category": "model/conditioning",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "output_tooltips": [
+   "A conditioning containing the embedded text used to guide the diffusion model."
+  ],
+  "search_aliases": [
+   "text",
+   "prompt",
+   "text prompt",
+   "positive prompt",
+   "negative prompt",
+   "encode text",
+   "text encoder",
+   "encode prompt"
+  ]
+ },
+ "ComfySwitchNode": {
+  "input": {
+   "required": {
+    "switch": [
+     "BOOLEAN",
+     {}
+    ],
+    "on_false": [
+     "COMFY_MATCHTYPE_V3",
+     {
+      "lazy": true,
+      "template": {
+       "template_id": "switch",
+       "allowed_types": "*"
+      }
+     }
+    ],
+    "on_true": [
+     "COMFY_MATCHTYPE_V3",
+     {
+      "lazy": true,
+      "template": {
+       "template_id": "switch",
+       "allowed_types": "*"
+      }
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "switch",
+    "on_false",
+    "on_true"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "COMFY_MATCHTYPE_V3"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "output"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": [
+   "switch"
+  ],
+  "name": "ComfySwitchNode",
+  "display_name": "If/Else Switch",
+  "description": "",
+  "python_module": "comfy_extras.nodes_logic",
+  "category": "utilities/logic",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": true,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "if",
+   "then",
+   "switch",
+   "conditional",
+   "branch"
+  ],
+  "essentials_category": null,
+  "has_intermediate_output": false
+ },
+ "ConditioningZeroOut": {
+  "input": {
+   "required": {
+    "conditioning": [
+     "CONDITIONING"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "conditioning"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "CONDITIONING"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "CONDITIONING"
+  ],
+  "name": "ConditioningZeroOut",
+  "display_name": "Conditioning Zero Out",
+  "description": "",
+  "python_module": "nodes",
+  "category": "model/conditioning/transform",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": [
+   "null conditioning",
+   "clear conditioning"
+  ]
+ },
+ "CreateVideo": {
+  "input": {
+   "required": {
+    "images": [
+     "IMAGE",
+     {}
+    ],
+    "fps": [
+     "FLOAT",
+     {
+      "default": 30.0,
+      "min": 1.0,
+      "max": 120.0,
+      "step": 1.0
+     }
+    ]
+   },
+   "optional": {
+    "audio": [
+     "AUDIO",
+     {}
+    ],
+    "bit_depth": [
+     "COMBO",
+     {
+      "default": "auto",
+      "multiselect": false,
+      "options": [
+       "auto",
+       8,
+       10
+      ]
+     }
+    ],
+    "color_space": [
+     "COMBO",
+     {
+      "default": "sRGB",
+      "multiselect": false,
+      "options": [
+       "sRGB",
+       "HDR",
+       "HDR PQ"
+      ]
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "images",
+    "fps"
+   ],
+   "optional": [
+    "audio",
+    "bit_depth",
+    "color_space"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VIDEO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "CreateVideo",
+  "display_name": "Create Video",
+  "description": "Create a video from images.",
+  "python_module": "comfy_extras.nodes_video",
+  "category": "video",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "images to video"
+  ],
+  "essentials_category": "Video Tools",
+  "has_intermediate_output": false
+ },
+ "CustomCombo": {
+  "input": {
+   "required": {
+    "choice": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": []
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "choice"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "STRING",
+   "INT"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_name": [
+   "STRING",
+   "INDEX"
+  ],
+  "output_tooltips": [
+   null,
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "CustomCombo",
+  "display_name": "Custom Combo",
+  "description": "",
+  "python_module": "comfy_extras.nodes_logic",
+  "category": "utilities",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": true,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false
+ },
+ "DualCLIPLoader": {
+  "input": {
+   "required": {
+    "clip_name1": [
+     [
+      "clip-vit-large-patch14/put_clip__clip-vit-large-patch14.safetensors",
+      "gemma_3_12b_it_hf/put_text_encoders__gemma_3_12b_it_hf.safetensors",
+      "put_text_encoders.safetensors",
+      "siglip-so400m-patch14-384/put_clip__siglip-so400m-patch14-384.safetensors"
+     ]
+    ],
+    "clip_name2": [
+     [
+      "clip-vit-large-patch14/put_clip__clip-vit-large-patch14.safetensors",
+      "gemma_3_12b_it_hf/put_text_encoders__gemma_3_12b_it_hf.safetensors",
+      "put_text_encoders.safetensors",
+      "siglip-so400m-patch14-384/put_clip__siglip-so400m-patch14-384.safetensors"
+     ]
+    ],
+    "type": [
+     [
+      "sdxl",
+      "sd3",
+      "flux",
+      "hunyuan_video",
+      "hidream",
+      "hunyuan_image",
+      "hunyuan_video_15",
+      "kandinsky5",
+      "kandinsky5_image",
+      "ltxv",
+      "newbie",
+      "ace"
+     ]
+    ]
+   },
+   "optional": {
+    "device": [
+     [
+      "default",
+      "cpu"
+     ],
+     {
+      "advanced": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "clip_name1",
+    "clip_name2",
+    "type"
+   ],
+   "optional": [
+    "device"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "CLIP"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "CLIP"
+  ],
+  "name": "DualCLIPLoader",
+  "display_name": "Load CLIP (Dual)",
+  "description": "Recipes:\nsdxl: clip-l, clip-g\nsd3: clip-l, clip-g / clip-l, t5 / clip-g, t5\nflux: clip-l, t5\nhidream: at least one of t5 or llama, recommended t5 and llama\nhunyuan_image: qwen2.5vl 7b and byt5 small\nnewbie: gemma-3-4b-it, jina clip v2",
+  "python_module": "nodes",
+  "category": "model/loaders",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": []
+ },
+ "EmptySD3LatentImage": {
+  "input": {
+   "required": {
+    "width": [
+     "INT",
+     {
+      "default": 1024,
+      "min": 16,
+      "max": 16384,
+      "step": 16
+     }
+    ],
+    "height": [
+     "INT",
+     {
+      "default": 1024,
+      "min": 16,
+      "max": 16384,
+      "step": 16
+     }
+    ],
+    "batch_size": [
+     "INT",
+     {
+      "default": 1,
+      "min": 1,
+      "max": 4096
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "width",
+    "height",
+    "batch_size"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "LATENT"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "LATENT"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "EmptySD3LatentImage",
+  "display_name": null,
+  "description": "",
+  "python_module": "comfy_extras.nodes_sd3",
+  "category": "model/latent/stable diffusion",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false
+ },
+ "GeminiImage2Node": {
+  "input": {
+   "required": {
+    "prompt": [
+     "STRING",
+     {
+      "default": "",
+      "multiline": true
+     }
+    ],
+    "model": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": [
+       "gemini-3-pro-image-preview",
+       "Nano Banana 2 (Gemini 3.1 Flash Image)"
+      ]
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "default": 42,
+      "min": 0,
+      "max": 18446744073709551615,
+      "control_after_generate": true
+     }
+    ],
+    "aspect_ratio": [
+     "COMBO",
+     {
+      "default": "auto",
+      "multiselect": false,
+      "options": [
+       "auto",
+       "1:1",
+       "2:3",
+       "3:2",
+       "3:4",
+       "4:3",
+       "4:5",
+       "5:4",
+       "9:16",
+       "16:9",
+       "21:9"
+      ]
+     }
+    ],
+    "resolution": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": [
+       "1K",
+       "2K",
+       "4K"
+      ]
+     }
+    ],
+    "response_modalities": [
+     "COMBO",
+     {
+      "advanced": true,
+      "multiselect": false,
+      "options": [
+       "IMAGE+TEXT",
+       "IMAGE"
+      ]
+     }
+    ]
+   },
+   "optional": {
+    "images": [
+     "IMAGE",
+     {}
+    ],
+    "files": [
+     "GEMINI_INPUT_FILES",
+     {}
+    ],
+    "system_prompt": [
+     "STRING",
+     {
+      "advanced": true,
+      "default": "You are an expert image-generation engine. You must ALWAYS produce an image.\nInterpret all user input\u2014regardless of format, intent, or abstraction\u2014as literal visual directives for image composition.\nIf a prompt is conversational or lacks specific visual details, you must creatively invent a concrete visual scenario that depicts the concept.\nPrioritize generating the visual representation above any text, formatting, or conversational requests.",
+      "multiline": true
+     }
+    ]
+   },
+   "hidden": {
+    "auth_token_comfy_org": [
+     "AUTH_TOKEN_COMFY_ORG"
+    ],
+    "api_key_comfy_org": [
+     "API_KEY_COMFY_ORG"
+    ],
+    "unique_id": [
+     "UNIQUE_ID"
+    ],
+    "comfy_usage_source": [
+     "COMFY_USAGE_SOURCE"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "prompt",
+    "model",
+    "seed",
+    "aspect_ratio",
+    "resolution",
+    "response_modalities"
+   ],
+   "optional": [
+    "images",
+    "files",
+    "system_prompt"
+   ],
+   "hidden": [
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "unique_id",
+    "comfy_usage_source"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE",
+   "STRING"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_name": [
+   "IMAGE",
+   "STRING"
+  ],
+  "output_tooltips": [
+   null,
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "GeminiImage2Node",
+  "display_name": "Nano Banana Pro (Google Gemini Image)",
+  "description": "Generate or edit images synchronously via Google Vertex API.",
+  "python_module": "comfy_api_nodes.nodes_gemini",
+  "category": "partner/image/Gemini",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": true,
+  "price_badge": {
+   "engine": "jsonata",
+   "depends_on": {
+    "widgets": [
+     {
+      "name": "model",
+      "type": "COMBO"
+     },
+     {
+      "name": "resolution",
+      "type": "COMBO"
+     }
+    ],
+    "inputs": [],
+    "input_groups": []
+   },
+   "expr": "\n    (\n      $m := widgets.model;\n      $r := widgets.resolution;\n      $isFlash := $contains($m, \"nano banana 2\");\n      $flashPrices := {\"1k\": 0.0835, \"2k\": 0.1217, \"4k\": 0.1848};\n      $proPrices := {\"1k\": 0.1608, \"2k\": 0.1608, \"4k\": 0.288};\n      $prices := $isFlash ? $flashPrices : $proPrices;\n      {\"type\":\"usd\",\"usd\": $lookup($prices, $r), \"format\":{\"suffix\":\"/Image\",\"approximate\":true}}\n    )\n    "
+  },
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false
+ },
+ "GeminiNanoBanana2V2": {
+  "input": {
+   "required": {
+    "prompt": [
+     "STRING",
+     {
+      "default": "",
+      "multiline": true
+     }
+    ],
+    "model": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "options": [
+       {
+        "key": "Nano Banana 2 (Gemini 3.1 Flash Image)",
+        "inputs": {
+         "required": {
+          "aspect_ratio": [
+           "COMBO",
+           {
+            "default": "auto",
+            "multiselect": false,
+            "options": [
+             "auto",
+             "1:1",
+             "2:3",
+             "3:2",
+             "3:4",
+             "4:3",
+             "4:5",
+             "5:4",
+             "9:16",
+             "16:9",
+             "21:9",
+             "1:4",
+             "4:1",
+             "8:1",
+             "1:8"
+            ]
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "1K",
+             "2K",
+             "4K"
+            ]
+           }
+          ],
+          "thinking_level": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "MINIMAL",
+             "HIGH"
+            ]
+           }
+          ],
+          "images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9",
+              "image_10",
+              "image_11",
+              "image_12",
+              "image_13",
+              "image_14"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         },
+         "optional": {
+          "files": [
+           "GEMINI_INPUT_FILES",
+           {}
+          ]
+         }
+        }
+       },
+       {
+        "key": "Nano Banana 2 Lite",
+        "inputs": {
+         "required": {
+          "aspect_ratio": [
+           "COMBO",
+           {
+            "default": "auto",
+            "multiselect": false,
+            "options": [
+             "auto",
+             "1:1",
+             "2:3",
+             "3:2",
+             "3:4",
+             "4:3",
+             "4:5",
+             "5:4",
+             "9:16",
+             "16:9",
+             "21:9",
+             "1:4",
+             "4:1",
+             "8:1",
+             "1:8"
+            ]
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "1K"
+            ]
+           }
+          ],
+          "thinking_level": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "MINIMAL",
+             "HIGH"
+            ]
+           }
+          ],
+          "images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9",
+              "image_10",
+              "image_11",
+              "image_12",
+              "image_13",
+              "image_14"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         },
+         "optional": {
+          "files": [
+           "GEMINI_INPUT_FILES",
+           {}
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "default": 42,
+      "min": 0,
+      "max": 18446744073709551615,
+      "control_after_generate": true
+     }
+    ],
+    "response_modalities": [
+     "COMBO",
+     {
+      "advanced": true,
+      "multiselect": false,
+      "options": [
+       "IMAGE",
+       "IMAGE+TEXT"
+      ]
+     }
+    ]
+   },
+   "optional": {
+    "system_prompt": [
+     "STRING",
+     {
+      "advanced": true,
+      "default": "You are an expert image-generation engine. You must ALWAYS produce an image.\nInterpret all user input\u2014regardless of format, intent, or abstraction\u2014as literal visual directives for image composition.\nIf a prompt is conversational or lacks specific visual details, you must creatively invent a concrete visual scenario that depicts the concept.\nPrioritize generating the visual representation above any text, formatting, or conversational requests.",
+      "multiline": true
+     }
+    ],
+    "temperature": [
+     "FLOAT",
+     {
+      "advanced": true,
+      "default": 1.0,
+      "min": 0.0,
+      "max": 2.0,
+      "step": 0.01
+     }
+    ],
+    "top_p": [
+     "FLOAT",
+     {
+      "advanced": true,
+      "default": 0.95,
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01
+     }
+    ]
+   },
+   "hidden": {
+    "auth_token_comfy_org": [
+     "AUTH_TOKEN_COMFY_ORG"
+    ],
+    "api_key_comfy_org": [
+     "API_KEY_COMFY_ORG"
+    ],
+    "unique_id": [
+     "UNIQUE_ID"
+    ],
+    "comfy_usage_source": [
+     "COMFY_USAGE_SOURCE"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "prompt",
+    "model",
+    "seed",
+    "response_modalities"
+   ],
+   "optional": [
+    "system_prompt",
+    "temperature",
+    "top_p"
+   ],
+   "hidden": [
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "unique_id",
+    "comfy_usage_source"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE",
+   "STRING",
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false,
+   false,
+   false
+  ],
+  "output_name": [
+   "IMAGE",
+   "STRING",
+   "thought_image"
+  ],
+  "output_tooltips": [
+   null,
+   null,
+   "First image from the model's thinking process. Only available with thinking_level HIGH and IMAGE+TEXT modality."
+  ],
+  "output_matchtypes": null,
+  "name": "GeminiNanoBanana2V2",
+  "display_name": "Nano Banana 2",
+  "description": "Generate or edit images synchronously via Google Vertex API.",
+  "python_module": "comfy_api_nodes.nodes_gemini",
+  "category": "partner/image/Gemini",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": true,
+  "price_badge": {
+   "engine": "jsonata",
+   "depends_on": {
+    "widgets": [
+     {
+      "name": "model",
+      "type": "COMFY_DYNAMICCOMBO_V3"
+     },
+     {
+      "name": "model.resolution",
+      "type": "COMBO"
+     }
+    ],
+    "inputs": [],
+    "input_groups": []
+   },
+   "expr": "\n                (\n                  $contains(widgets.model, \"lite\")\n                    ? {\"type\":\"usd\",\"usd\": 0.0408, \"format\":{\"suffix\":\"/Image\",\"approximate\":true}}\n                    : (\n                        $r := $lookup(widgets, \"model.resolution\");\n                        $prices := {\"1k\": 0.0835, \"2k\": 0.1217, \"4k\": 0.1848};\n                        {\"type\":\"usd\",\"usd\": $lookup($prices, $r), \"format\":{\"suffix\":\"/Image\",\"approximate\":true}}\n                      )\n                )\n                "
+  },
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false
+ },
+ "Get Image Size": {
+  "input": {
+   "required": {
+    "image": [
+     "IMAGE"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "image"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "INT",
+   "INT"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_name": [
+   "width",
+   "height"
+  ],
+  "name": "Get Image Size",
+  "display_name": "Get Image Size",
+  "description": "",
+  "python_module": "custom_nodes.masquerade-nodes-comfyui",
+  "category": "Masquerade Nodes",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": []
+ },
+ "GetVideoComponents": {
+  "input": {
+   "required": {
+    "video": [
+     "VIDEO",
+     {}
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "video"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE",
+   "AUDIO",
+   "FLOAT",
+   "COMBO",
+   "COMBO"
+  ],
+  "output_is_list": [
+   false,
+   false,
+   false,
+   false,
+   false
+  ],
+  "output_name": [
+   "images",
+   "audio",
+   "fps",
+   "bit_depth",
+   "color_space"
+  ],
+  "output_tooltips": [
+   null,
+   null,
+   null,
+   null,
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "GetVideoComponents",
+  "display_name": "Get Video Components",
+  "description": "Extracts video frames, audio, frame rate, bit depth, and color space.",
+  "python_module": "comfy_extras.nodes_video",
+  "category": "video",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "extract frames",
+   "split video",
+   "video to images",
+   "demux"
+  ],
+  "essentials_category": null,
+  "has_intermediate_output": false
+ },
+ "ImageRemoveAlpha+": {
+  "input": {
+   "required": {
+    "image": [
+     "IMAGE"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "image"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "IMAGE"
+  ],
+  "name": "ImageRemoveAlpha+",
+  "display_name": "\ud83d\udd27 Image Remove Alpha",
+  "description": "",
+  "python_module": "custom_nodes.comfyui_essentials",
+  "category": "essentials/image utils",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": []
+ },
+ "ImageToMask": {
+  "input": {
+   "required": {
+    "image": [
+     "IMAGE",
+     {}
+    ],
+    "channel": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": [
+       "red",
+       "green",
+       "blue",
+       "alpha"
+      ]
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "image",
+    "channel"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "MASK"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "MASK"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "ImageToMask",
+  "display_name": "Convert Image to Mask",
+  "description": "",
+  "python_module": "comfy_extras.nodes_mask",
+  "category": "image/mask",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "extract channel",
+   "channel to mask"
+  ],
+  "essentials_category": null,
+  "has_intermediate_output": false
+ },
+ "JWImageResizeByShorterSide": {
+  "input": {
+   "required": {
+    "image": [
+     "IMAGE"
+    ],
+    "size": [
+     "INT",
+     {
+      "default": 512,
+      "min": 0,
+      "step": 1,
+      "max": 99999
+     }
+    ],
+    "interpolation_mode": [
+     [
+      "bicubic",
+      "bilinear",
+      "nearest",
+      "nearest exact"
+     ]
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "image",
+    "size",
+    "interpolation_mode"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "IMAGE"
+  ],
+  "name": "JWImageResizeByShorterSide",
+  "display_name": "Image Resize by Shorter Side",
+  "description": "",
+  "python_module": "custom_nodes.comfyui-various",
+  "category": "jamesWalker55",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": []
+ },
+ "KSampler": {
+  "input": {
+   "required": {
+    "model": [
+     "MODEL",
+     {}
+    ],
+    "seed": [
+     "INT",
+     {
+      "default": 0,
+      "min": 0,
+      "max": 18446744073709551615,
+      "control_after_generate": true
+     }
+    ],
+    "steps": [
+     "INT",
+     {
+      "default": 20,
+      "min": 1,
+      "max": 10000
+     }
+    ],
+    "cfg": [
+     "FLOAT",
+     {
+      "default": 8.0,
+      "min": 0.0,
+      "max": 100.0,
+      "step": 0.1,
+      "round": 0.01
+     }
+    ],
+    "sampler_name": [
+     [
+      "euler",
+      "euler_cfg_pp",
+      "euler_ancestral",
+      "euler_ancestral_cfg_pp",
+      "heun",
+      "heunpp2",
+      "exp_heun_2_x0",
+      "exp_heun_2_x0_sde",
+      "dpm_2",
+      "dpm_2_ancestral",
+      "lms",
+      "dpm_fast",
+      "dpm_adaptive",
+      "dpmpp_2s_ancestral",
+      "dpmpp_2s_ancestral_cfg_pp",
+      "dpmpp_sde",
+      "dpmpp_sde_gpu",
+      "dpmpp_2m",
+      "dpmpp_2m_cfg_pp",
+      "dpmpp_2m_sde",
+      "dpmpp_2m_sde_gpu",
+      "dpmpp_2m_sde_heun",
+      "dpmpp_2m_sde_heun_gpu",
+      "dpmpp_3m_sde",
+      "dpmpp_3m_sde_gpu",
+      "ddpm",
+      "lcm",
+      "ipndm",
+      "ipndm_v",
+      "deis",
+      "res_multistep",
+      "res_multistep_cfg_pp",
+      "res_multistep_ancestral",
+      "res_multistep_ancestral_cfg_pp",
+      "gradient_estimation",
+      "gradient_estimation_cfg_pp",
+      "er_sde",
+      "seeds_2",
+      "seeds_3",
+      "sa_solver",
+      "sa_solver_pece",
+      "ddim",
+      "uni_pc",
+      "uni_pc_bh2",
+      "legacy_rk",
+      "rk",
+      "rk_beta",
+      "deis_3m_ode",
+      "deis_2m_ode",
+      "deis_3m",
+      "deis_2m",
+      "res_6s_ode",
+      "res_5s_ode",
+      "res_3s_ode",
+      "res_2s_ode",
+      "res_3m_ode",
+      "res_2m_ode",
+      "res_6s",
+      "res_5s",
+      "res_3s",
+      "res_2s",
+      "res_3m",
+      "res_2m"
+     ],
+     {}
+    ],
+    "scheduler": [
+     [
+      "simple",
+      "sgm_uniform",
+      "karras",
+      "exponential",
+      "ddim_uniform",
+      "beta",
+      "normal",
+      "linear_quadratic",
+      "kl_optimal",
+      "bong_tangent",
+      "beta57"
+     ],
+     {}
+    ],
+    "positive": [
+     "CONDITIONING",
+     {}
+    ],
+    "negative": [
+     "CONDITIONING",
+     {}
+    ],
+    "latent_image": [
+     "LATENT",
+     {}
+    ],
+    "denoise": [
+     "FLOAT",
+     {
+      "default": 1.0,
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "model",
+    "seed",
+    "steps",
+    "cfg",
+    "sampler_name",
+    "scheduler",
+    "positive",
+    "negative",
+    "latent_image",
+    "denoise"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "LATENT"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "LATENT"
+  ],
+  "name": "KSampler",
+  "display_name": "KSampler",
+  "description": "Uses the provided model, positive and negative conditioning to denoise the latent image.",
+  "python_module": "nodes",
+  "category": "model/sampling",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "output_tooltips": [
+   "The denoised latent."
+  ],
+  "search_aliases": [
+   "sampler",
+   "sample",
+   "generate",
+   "denoise",
+   "diffuse",
+   "txt2img",
+   "img2img"
+  ]
+ },
+ "KlingOmniProEditVideoNode": {
+  "input": {
+   "required": {
+    "model_name": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": [
+       "kling-v3-omni",
+       "kling-video-o1"
+      ]
+     }
+    ],
+    "prompt": [
+     "STRING",
+     {
+      "multiline": true
+     }
+    ],
+    "video": [
+     "VIDEO",
+     {}
+    ],
+    "keep_original_sound": [
+     "BOOLEAN",
+     {
+      "default": true
+     }
+    ]
+   },
+   "optional": {
+    "reference_images": [
+     "IMAGE",
+     {}
+    ],
+    "resolution": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": [
+       "1080p",
+       "720p"
+      ]
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "default": 0,
+      "min": 0,
+      "max": 2147483647,
+      "control_after_generate": true,
+      "display": "number"
+     }
+    ]
+   },
+   "hidden": {
+    "auth_token_comfy_org": [
+     "AUTH_TOKEN_COMFY_ORG"
+    ],
+    "api_key_comfy_org": [
+     "API_KEY_COMFY_ORG"
+    ],
+    "unique_id": [
+     "UNIQUE_ID"
+    ],
+    "comfy_usage_source": [
+     "COMFY_USAGE_SOURCE"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "model_name",
+    "prompt",
+    "video",
+    "keep_original_sound"
+   ],
+   "optional": [
+    "reference_images",
+    "resolution",
+    "seed"
+   ],
+   "hidden": [
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "unique_id",
+    "comfy_usage_source"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VIDEO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "KlingOmniProEditVideoNode",
+  "display_name": "Kling 3.0 Omni Edit Video",
+  "description": "Edit an existing video with the latest model from Kling.",
+  "python_module": "comfy_api_nodes.nodes_kling",
+  "category": "partner/video/Kling",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": true,
+  "price_badge": {
+   "engine": "jsonata",
+   "depends_on": {
+    "widgets": [
+     {
+      "name": "resolution",
+      "type": "COMBO"
+     }
+    ],
+    "inputs": [],
+    "input_groups": []
+   },
+   "expr": "\n                (\n                  $mode := (widgets.resolution = \"720p\") ? \"std\" : \"pro\";\n                  $rates := {\"std\": 0.126, \"pro\": 0.168};\n                  {\"type\":\"usd\",\"usd\": $lookup($rates, $mode), \"format\":{\"suffix\":\"/second\"}}\n                )\n                "
+  },
+  "search_aliases": null,
+  "essentials_category": "Video Generation",
+  "has_intermediate_output": false
+ },
+ "LayerUtility: ColorImage V2": {
+  "input": {
+   "required": {
+    "size": [
+     [
+      "custom",
+      "1024 x 1024",
+      "768 x 512",
+      "512 x 768",
+      "1280 x 720",
+      "720 x 1280",
+      "1344 x 768",
+      "768 x 1344",
+      "1536 x 640",
+      "640 x 1536"
+     ]
+    ],
+    "custom_width": [
+     "INT",
+     {
+      "default": 512,
+      "min": 4,
+      "max": 99999,
+      "step": 1
+     }
+    ],
+    "custom_height": [
+     "INT",
+     {
+      "default": 512,
+      "min": 4,
+      "max": 99999,
+      "step": 1
+     }
+    ],
+    "color": [
+     "STRING",
+     {
+      "default": "#000000"
+     }
+    ]
+   },
+   "optional": {
+    "size_as": [
+     "*",
+     {}
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "size",
+    "custom_width",
+    "custom_height",
+    "color"
+   ],
+   "optional": [
+    "size_as"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "image"
+  ],
+  "name": "LayerUtility: ColorImage V2",
+  "display_name": "LayerUtility: ColorImage V2",
+  "description": "",
+  "python_module": "custom_nodes.comfyui_layerstyle",
+  "category": "\ud83d\ude3adzNodes/LayerUtility",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": []
+ },
+ "LoadImage": {
+  "input": {
+   "required": {
+    "image": [
+     [
+      "beach.jpg",
+      "eth3d.png",
+      "example.png",
+      "example_image.jpg",
+      "groceries.jpg",
+      "image.png",
+      "middlebury.jpg"
+     ],
+     {
+      "image_upload": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "image"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE",
+   "MASK"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_name": [
+   "IMAGE",
+   "MASK"
+  ],
+  "name": "LoadImage",
+  "display_name": "Load Image",
+  "description": "",
+  "python_module": "nodes",
+  "category": "image",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": [
+   "load image",
+   "open image",
+   "import image",
+   "image input",
+   "upload image",
+   "read image",
+   "image loader"
+  ],
+  "essentials_category": "Basics"
+ },
+ "LoadVideo": {
+  "input": {
+   "required": {
+    "file": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": [
+       "bedroom.mp4"
+      ],
+      "video_upload": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "file"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VIDEO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "LoadVideo",
+  "display_name": "Load Video",
+  "description": "",
+  "python_module": "comfy_extras.nodes_video",
+  "category": "video",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "import video",
+   "open video",
+   "video file"
+  ],
+  "essentials_category": "Basics",
+  "has_intermediate_output": false
+ },
+ "Paste By Mask": {
+  "input": {
+   "required": {
+    "image_base": [
+     "IMAGE"
+    ],
+    "image_to_paste": [
+     "IMAGE"
+    ],
+    "mask": [
+     "IMAGE"
+    ],
+    "resize_behavior": [
+     [
+      "resize",
+      "keep_ratio_fill",
+      "keep_ratio_fit",
+      "source_size",
+      "source_size_unmasked"
+     ]
+    ]
+   },
+   "optional": {
+    "mask_mapping_optional": [
+     "MASK_MAPPING"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "image_base",
+    "image_to_paste",
+    "mask",
+    "resize_behavior"
+   ],
+   "optional": [
+    "mask_mapping_optional"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "IMAGE"
+  ],
+  "name": "Paste By Mask",
+  "display_name": "Paste By Mask",
+  "description": "",
+  "python_module": "custom_nodes.masquerade-nodes-comfyui",
+  "category": "Masquerade Nodes",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": []
+ },
+ "PreviewImage": {
+  "input": {
+   "required": {
+    "images": [
+     "IMAGE"
+    ]
+   },
+   "hidden": {
+    "prompt": "PROMPT",
+    "extra_pnginfo": "EXTRA_PNGINFO"
+   }
+  },
+  "input_order": {
+   "required": [
+    "images"
+   ],
+   "hidden": [
+    "prompt",
+    "extra_pnginfo"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "images"
+  ],
+  "name": "PreviewImage",
+  "display_name": "Preview Image",
+  "description": "Preview the images without saving them to the ComfyUI output directory.",
+  "python_module": "nodes",
+  "category": "image",
+  "output_node": true,
+  "has_intermediate_output": false,
+  "search_aliases": [
+   "preview",
+   "preview image",
+   "show image",
+   "view image",
+   "display image",
+   "image viewer"
+  ],
+  "essentials_category": "Basics"
+ },
+ "PrimitiveStringMultiline": {
+  "input": {
+   "required": {
+    "value": [
+     "STRING",
+     {
+      "multiline": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "value"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "STRING"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "STRING"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "PrimitiveStringMultiline",
+  "display_name": "Text (Multiline)",
+  "description": "",
+  "python_module": "comfy_extras.nodes_primitive",
+  "category": "utilities/primitive",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "text",
+   "string",
+   "text multiline",
+   "string multiline",
+   "text box",
+   "prompt"
+  ],
+  "essentials_category": "Basics",
+  "has_intermediate_output": false
+ },
+ "ResolutionSelector": {
+  "input": {
+   "required": {
+    "aspect_ratio": [
+     "COMBO",
+     {
+      "default": "1:1 (Square)",
+      "multiselect": false,
+      "options": [
+       "1:1 (Square)",
+       "2:3 (Portrait Photo)",
+       "3:2 (Photo)",
+       "3:4 (Portrait Standard)",
+       "4:3 (Standard)",
+       "9:16 (Portrait Widescreen)",
+       "16:9 (Widescreen)",
+       "21:9 (Ultrawide)"
+      ]
+     }
+    ],
+    "megapixels": [
+     "FLOAT",
+     {
+      "default": 1.0,
+      "min": 0.1,
+      "max": 16.0,
+      "step": 0.1
+     }
+    ],
+    "multiple": [
+     "INT",
+     {
+      "advanced": true,
+      "default": 8,
+      "min": 8,
+      "max": 128,
+      "step": 4
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "aspect_ratio",
+    "megapixels",
+    "multiple"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "INT",
+   "INT"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_name": [
+   "width",
+   "height"
+  ],
+  "output_tooltips": [
+   "Calculated width in pixels multiplied by the selected multiple.",
+   "Calculated height in pixels multiplied by the selected multiple."
+  ],
+  "output_matchtypes": null,
+  "name": "ResolutionSelector",
+  "display_name": "Resolution Selector",
+  "description": "Calculate width and height from aspect ratio and megapixel target. Useful for setting up Empty Latent Image dimensions.",
+  "python_module": "comfy_extras.nodes_resolution",
+  "category": "utilities",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false
+ },
+ "SaveImage": {
+  "input": {
+   "required": {
+    "images": [
+     "IMAGE",
+     {}
+    ],
+    "filename_prefix": [
+     "STRING",
+     {
+      "default": "ComfyUI"
+     }
+    ]
+   },
+   "hidden": {
+    "prompt": "PROMPT",
+    "extra_pnginfo": "EXTRA_PNGINFO"
+   }
+  },
+  "input_order": {
+   "required": [
+    "images",
+    "filename_prefix"
+   ],
+   "hidden": [
+    "prompt",
+    "extra_pnginfo"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "images"
+  ],
+  "name": "SaveImage",
+  "display_name": "Save Image",
+  "description": "Saves the input images to your ComfyUI output directory.",
+  "python_module": "nodes",
+  "category": "image",
+  "output_node": true,
+  "has_intermediate_output": false,
+  "search_aliases": [
+   "save",
+   "save image",
+   "export image",
+   "output image",
+   "write image",
+   "download"
+  ],
+  "essentials_category": "Basics"
+ },
+ "SaveVideo": {
+  "input": {
+   "required": {
+    "video": [
+     "VIDEO",
+     {}
+    ],
+    "filename_prefix": [
+     "STRING",
+     {
+      "default": "video/ComfyUI",
+      "multiline": false
+     }
+    ],
+    "format": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "options": [
+       {
+        "key": "auto",
+        "inputs": {
+         "required": {
+          "codec": [
+           "COMFY_DYNAMICCOMBO_V3",
+           {
+            "options": [
+             {
+              "key": "auto",
+              "inputs": {
+               "required": {}
+              }
+             },
+             {
+              "key": "h264",
+              "inputs": {
+               "required": {},
+               "optional": {
+                "encoding": [
+                 "COMFY_DYNAMICCOMBO_V3",
+                 {
+                  "display_name": "encoding mode",
+                  "options": [
+                   {
+                    "key": "auto",
+                    "inputs": {
+                     "required": {}
+                    }
+                   },
+                   {
+                    "key": "re-encode",
+                    "inputs": {
+                     "required": {
+                      "crf": [
+                       "FLOAT",
+                       {
+                        "default": 23.0,
+                        "min": 0.0,
+                        "max": 51.0,
+                        "step": 1.0
+                       }
+                      ]
+                     }
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              }
+             },
+             {
+              "key": "av1",
+              "inputs": {
+               "required": {},
+               "optional": {
+                "encoding": [
+                 "COMFY_DYNAMICCOMBO_V3",
+                 {
+                  "display_name": "encoding mode",
+                  "options": [
+                   {
+                    "key": "auto",
+                    "inputs": {
+                     "required": {}
+                    }
+                   },
+                   {
+                    "key": "re-encode",
+                    "inputs": {
+                     "required": {
+                      "crf": [
+                       "FLOAT",
+                       {
+                        "default": 30.0,
+                        "min": 0.0,
+                        "max": 63.0,
+                        "step": 1.0
+                       }
+                      ]
+                     }
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              }
+             }
+            ]
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "mp4",
+        "inputs": {
+         "required": {
+          "codec": [
+           "COMFY_DYNAMICCOMBO_V3",
+           {
+            "options": [
+             {
+              "key": "auto",
+              "inputs": {
+               "required": {}
+              }
+             },
+             {
+              "key": "h264",
+              "inputs": {
+               "required": {},
+               "optional": {
+                "encoding": [
+                 "COMFY_DYNAMICCOMBO_V3",
+                 {
+                  "display_name": "encoding mode",
+                  "options": [
+                   {
+                    "key": "auto",
+                    "inputs": {
+                     "required": {}
+                    }
+                   },
+                   {
+                    "key": "re-encode",
+                    "inputs": {
+                     "required": {
+                      "crf": [
+                       "FLOAT",
+                       {
+                        "default": 23.0,
+                        "min": 0.0,
+                        "max": 51.0,
+                        "step": 1.0
+                       }
+                      ]
+                     }
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              }
+             },
+             {
+              "key": "av1",
+              "inputs": {
+               "required": {},
+               "optional": {
+                "encoding": [
+                 "COMFY_DYNAMICCOMBO_V3",
+                 {
+                  "display_name": "encoding mode",
+                  "options": [
+                   {
+                    "key": "auto",
+                    "inputs": {
+                     "required": {}
+                    }
+                   },
+                   {
+                    "key": "re-encode",
+                    "inputs": {
+                     "required": {
+                      "crf": [
+                       "FLOAT",
+                       {
+                        "default": 30.0,
+                        "min": 0.0,
+                        "max": 63.0,
+                        "step": 1.0
+                       }
+                      ]
+                     }
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              }
+             }
+            ]
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "mkv",
+        "inputs": {
+         "required": {
+          "codec": [
+           "COMFY_DYNAMICCOMBO_V3",
+           {
+            "options": [
+             {
+              "key": "auto",
+              "inputs": {
+               "required": {}
+              }
+             },
+             {
+              "key": "h264",
+              "inputs": {
+               "required": {},
+               "optional": {
+                "encoding": [
+                 "COMFY_DYNAMICCOMBO_V3",
+                 {
+                  "display_name": "encoding mode",
+                  "options": [
+                   {
+                    "key": "auto",
+                    "inputs": {
+                     "required": {}
+                    }
+                   },
+                   {
+                    "key": "re-encode",
+                    "inputs": {
+                     "required": {
+                      "crf": [
+                       "FLOAT",
+                       {
+                        "default": 23.0,
+                        "min": 0.0,
+                        "max": 51.0,
+                        "step": 1.0
+                       }
+                      ]
+                     }
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              }
+             },
+             {
+              "key": "av1",
+              "inputs": {
+               "required": {},
+               "optional": {
+                "encoding": [
+                 "COMFY_DYNAMICCOMBO_V3",
+                 {
+                  "display_name": "encoding mode",
+                  "options": [
+                   {
+                    "key": "auto",
+                    "inputs": {
+                     "required": {}
+                    }
+                   },
+                   {
+                    "key": "re-encode",
+                    "inputs": {
+                     "required": {
+                      "crf": [
+                       "FLOAT",
+                       {
+                        "default": 30.0,
+                        "min": 0.0,
+                        "max": 63.0,
+                        "step": 1.0
+                       }
+                      ]
+                     }
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              }
+             }
+            ]
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "webm",
+        "inputs": {
+         "required": {
+          "codec": [
+           "COMFY_DYNAMICCOMBO_V3",
+           {
+            "options": [
+             {
+              "key": "auto",
+              "inputs": {
+               "required": {}
+              }
+             },
+             {
+              "key": "av1",
+              "inputs": {
+               "required": {},
+               "optional": {
+                "encoding": [
+                 "COMFY_DYNAMICCOMBO_V3",
+                 {
+                  "display_name": "encoding mode",
+                  "options": [
+                   {
+                    "key": "auto",
+                    "inputs": {
+                     "required": {}
+                    }
+                   },
+                   {
+                    "key": "re-encode",
+                    "inputs": {
+                     "required": {
+                      "crf": [
+                       "FLOAT",
+                       {
+                        "default": 30.0,
+                        "min": 0.0,
+                        "max": 63.0,
+                        "step": 1.0
+                       }
+                      ]
+                     }
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              }
+             }
+            ]
+           }
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "optional": {
+    "codec": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "hidden": true,
+      "options": [
+       {
+        "key": "auto",
+        "inputs": {
+         "required": {}
+        }
+       },
+       {
+        "key": "h264",
+        "inputs": {
+         "required": {},
+         "optional": {
+          "encoding": [
+           "COMFY_DYNAMICCOMBO_V3",
+           {
+            "display_name": "encoding mode",
+            "options": [
+             {
+              "key": "auto",
+              "inputs": {
+               "required": {}
+              }
+             },
+             {
+              "key": "re-encode",
+              "inputs": {
+               "required": {
+                "crf": [
+                 "FLOAT",
+                 {
+                  "default": 23.0,
+                  "min": 0.0,
+                  "max": 51.0,
+                  "step": 1.0
+                 }
+                ]
+               }
+              }
+             }
+            ]
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "av1",
+        "inputs": {
+         "required": {},
+         "optional": {
+          "encoding": [
+           "COMFY_DYNAMICCOMBO_V3",
+           {
+            "display_name": "encoding mode",
+            "options": [
+             {
+              "key": "auto",
+              "inputs": {
+               "required": {}
+              }
+             },
+             {
+              "key": "re-encode",
+              "inputs": {
+               "required": {
+                "crf": [
+                 "FLOAT",
+                 {
+                  "default": 30.0,
+                  "min": 0.0,
+                  "max": 63.0,
+                  "step": 1.0
+                 }
+                ]
+               }
+              }
+             }
+            ]
+           }
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "hidden": {
+    "prompt": [
+     "PROMPT"
+    ],
+    "extra_pnginfo": [
+     "EXTRA_PNGINFO"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "video",
+    "filename_prefix",
+    "format"
+   ],
+   "optional": [
+    "codec"
+   ],
+   "hidden": [
+    "prompt",
+    "extra_pnginfo"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "video"
+  ],
+  "output_tooltips": [
+   "The input video, unchanged."
+  ],
+  "output_matchtypes": null,
+  "name": "SaveVideo",
+  "display_name": "Save Video",
+  "description": "Saves the input videos to your ComfyUI output directory.",
+  "python_module": "comfy_extras.nodes_video",
+  "category": "video",
+  "output_node": true,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "export video"
+  ],
+  "essentials_category": "Basics",
+  "has_intermediate_output": false
+ },
+ "StringCompare": {
+  "input": {
+   "required": {
+    "string_a": [
+     "STRING",
+     {
+      "multiline": true
+     }
+    ],
+    "string_b": [
+     "STRING",
+     {
+      "multiline": true
+     }
+    ],
+    "mode": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": [
+       "Starts With",
+       "Ends With",
+       "Equal"
+      ]
+     }
+    ],
+    "case_sensitive": [
+     "BOOLEAN",
+     {
+      "advanced": true,
+      "default": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "string_a",
+    "string_b",
+    "mode",
+    "case_sensitive"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "BOOLEAN"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "BOOLEAN"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "StringCompare",
+  "display_name": "Compare Text",
+  "description": "",
+  "python_module": "comfy_extras.nodes_string",
+  "category": "text",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "compare",
+   "text match",
+   "string equals",
+   "starts with",
+   "ends with"
+  ],
+  "essentials_category": null,
+  "has_intermediate_output": false
+ },
+ "UNETLoader": {
+  "input": {
+   "required": {
+    "unet_name": [
+     [
+      "put_diffusion_models.safetensors"
+     ]
+    ],
+    "weight_dtype": [
+     [
+      "default",
+      "fp8_e4m3fn",
+      "fp8_e4m3fn_fast",
+      "fp8_e5m2"
+     ],
+     {
+      "advanced": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "unet_name",
+    "weight_dtype"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "MODEL"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "MODEL"
+  ],
+  "name": "UNETLoader",
+  "display_name": "Load Diffusion Model",
+  "description": "",
+  "python_module": "nodes",
+  "category": "model/loaders",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": []
+ },
+ "VAEDecode": {
+  "input": {
+   "required": {
+    "samples": [
+     "LATENT",
+     {}
+    ],
+    "vae": [
+     "VAE",
+     {}
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "samples",
+    "vae"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "IMAGE"
+  ],
+  "name": "VAEDecode",
+  "display_name": "VAE Decode",
+  "description": "Decodes latent images back into pixel space images.",
+  "python_module": "nodes",
+  "category": "model/latent",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "output_tooltips": [
+   "The decoded image."
+  ],
+  "search_aliases": [
+   "decode",
+   "decode latent",
+   "latent to image",
+   "render latent"
+  ]
+ },
+ "VAELoader": {
+  "input": {
+   "required": {
+    "vae_name": [
+     [
+      "put_vae.safetensors",
+      "pixel_space"
+     ]
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "vae_name"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VAE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VAE"
+  ],
+  "name": "VAELoader",
+  "display_name": "Load VAE",
+  "description": "",
+  "python_module": "nodes",
+  "category": "model/loaders",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": []
+ },
+ "Video Slice": {
+  "input": {
+   "required": {
+    "video": [
+     "VIDEO",
+     {}
+    ],
+    "start_time": [
+     "FLOAT",
+     {
+      "default": 0.0,
+      "min": -100000.0,
+      "max": 100000.0,
+      "step": 0.001
+     }
+    ],
+    "duration": [
+     "FLOAT",
+     {
+      "default": 0.0,
+      "min": 0.0,
+      "step": 0.001
+     }
+    ],
+    "strict_duration": [
+     "BOOLEAN",
+     {
+      "default": false
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "video",
+    "start_time",
+    "duration",
+    "strict_duration"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VIDEO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "Video Slice",
+  "display_name": "Trim Video",
+  "description": "",
+  "python_module": "comfy_extras.nodes_video",
+  "category": "video",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "trim video duration",
+   "skip first frames",
+   "frame load cap",
+   "start time"
+  ],
+  "essentials_category": "Video Tools",
+  "has_intermediate_output": false
+ }
+}

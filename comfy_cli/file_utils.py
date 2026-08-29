@@ -20,6 +20,27 @@ from comfy_cli.output.sanitize import sanitize_value
 
 logger = logging.getLogger(__name__)
 
+
+def cache_dir() -> pathlib.Path:
+    """comfy-cli's per-user cache root.
+
+    ``COMFY_CACHE_DIR`` wins; else ``$XDG_CACHE_HOME/comfy-cli``; else ``~/.cache/comfy-cli``.
+
+    Both env vars are resolved with ``os.path.expanduser`` (never raises, unlike
+    ``pathlib.Path.expanduser``, when the home directory can't be determined —
+    e.g. no ``HOME`` and no passwd entry, routine in a container) and made
+    absolute, so the result doesn't depend on the calling process's cwd. That
+    matters because a relative override would otherwise resolve differently in
+    every process — including a background refresher that launches its child
+    from inside this very directory.
+    """
+    explicit = os.environ.get("COMFY_CACHE_DIR", "").strip()
+    if explicit:
+        return pathlib.Path(os.path.abspath(os.path.expanduser(explicit)))
+    base = os.environ.get("XDG_CACHE_HOME", "").strip() or os.path.expanduser("~/.cache")
+    return pathlib.Path(os.path.abspath(os.path.expanduser(base))) / "comfy-cli"
+
+
 # ---------------------------------------------------------------------------
 # Atomic writes — the write policy
 # ---------------------------------------------------------------------------
