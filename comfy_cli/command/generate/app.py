@@ -340,37 +340,14 @@ def _spinner() -> Progress:
 
 
 def _emit_result(result: poll.PollResult, *, request_id: str, download: str | None, as_json: bool) -> None:
-    if as_json:
-        # Honor --download in JSON mode too. Previously this returned before
-        # saving, so `--json --download` printed the URL but wrote no file,
-        # forcing callers to curl the URL by hand. Save first, then surface the
-        # local path alongside the response.
-        saved: list[str] = []
-        if download and result.status == "succeeded" and result.image_urls:
-            saved = [str(p) for p in output.save_urls(result.image_urls, download, request_id)]
-        renderer = get_renderer()
-        if renderer.is_json():
-            # JSON/NDJSON modes get the envelope/1 contract every other
-            # machine-readable command speaks: data.result wraps the partner
-            # payload, data.saved lists --download artifacts. Registered as
-            # COMMAND_SCHEMAS["comfy generate"] -> generate_result.json.
-            data: dict[str, Any] = {"result": result.raw}
-            if saved:
-                data["saved"] = saved
-            renderer.emit(data, ok=True, command="generate")
-            return
-        # Pretty mode with an explicit tail --json keeps the legacy raw blob.
-        if saved:
-            output.print_json({"result": result.raw, "saved": saved})
-        else:
-            output.print_json(result.raw)
-        return
+    renderer = get_renderer()
+    # One failure path for every output mode, checked FIRST: a terminally
+    # failed job is never a result. In JSON/NDJSON modes it is an ok=false
+    # envelope with a registered code (the generate_result schema promises
+    # exactly that); in pretty mode it is a red line plus the partner's raw
+    # response. Either way the exit code is 1 — a consumer that trusts ``ok``
+    # (or the exit code) must never read a failure as success.
     if result.status != "succeeded":
-        # A terminal non-succeeded job is a FAILURE, not a result, so it owes the
-        # caller an envelope even though the success paths above deliberately
-        # bypass the renderer. (The `as_json` branch returned already: that is
-        # the command-local `--json` raw-response contract, left untouched.)
-        renderer = get_renderer()
         message = f"Job {result.status}: {result.error or 'unknown error'}"
         if renderer.is_json():
             renderer.error(
@@ -386,6 +363,31 @@ def _emit_result(result: poll.PollResult, *, request_id: str, download: str | No
             rprint(f"[bold red]{sanitize_markup(message)}[/bold red]")
             output.print_json(result.raw)
         raise typer.Exit(code=1)
+    if renderer.is_json() or as_json:
+        # Honor --download in machine modes too. Previously this returned
+        # before saving, so `--json --download` printed the URL but wrote no
+        # file, forcing callers to curl the URL by hand. Save first, then
+        # surface the local path alongside the response.
+        saved: list[str] = []
+        if download and result.image_urls:
+            saved = [str(p) for p in output.save_urls(result.image_urls, download, request_id)]
+        if renderer.is_json():
+            # JSON/NDJSON modes (the global ``--output json``, a redirected
+            # stdout, or the tail ``--json``) get the envelope/1 contract every
+            # other machine-readable command speaks: data.result wraps the
+            # partner payload, data.saved lists --download artifacts.
+            # Registered as COMMAND_SCHEMAS["comfy generate"] -> generate_result.json.
+            data: dict[str, Any] = {"result": result.raw}
+            if saved:
+                data["saved"] = saved
+            renderer.emit(data, ok=True, command="generate")
+            return
+        # Pretty mode with an explicit tail --json keeps the legacy raw blob.
+        if saved:
+            output.print_json({"result": result.raw, "saved": saved})
+        else:
+            output.print_json(result.raw)
+        return
     if download and result.image_urls:
         saved = output.save_urls(result.image_urls, download, request_id)
         output.print_urls(result.image_urls, request_id=request_id)

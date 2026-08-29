@@ -251,11 +251,23 @@ class TestInjectedUploadSlot:
         # own upload and the frontend attaches no IMAGEUPLOAD button.
         assert "upload" not in graph.widget_order("Load3D")
 
-    def test_upload_has_no_add_node_default(self, graph: Graph):
-        # Current frontends mark the button ``serialize: false``; a fresh node
-        # must not carry a phantom trailing value for it.
+    def test_fresh_node_carries_no_phantom_value_for_the_upload_button(self, graph: Graph):
+        # Current frontends mark the button ``serialize: false``: a fresh node
+        # from add_node must end at the last serialized value — not carry a
+        # trailing ``null`` for the injected slot. Asserted on the BUILT node,
+        # the layer the claim is about (the defaults dict alone is not).
         assert "upload" not in graph.widget_defaults("LoadImage")
-        assert graph.widget_defaults("LoadImage") == {"image": "beach.jpg"}
+        wf, _ = workflow_ops.add_node(_empty_workflow(), graph, "LoadImage")
+        assert wf["nodes"][0]["widgets_values"] == ["beach.jpg"]
+
+    def test_fresh_3d_nodes_carry_the_frontends_empty_preview_slot(self, graph: Graph):
+        # The injected PREVIEW_3D ``image`` IS serialized (as ``""``) — the
+        # captured shapes are SaveGLB ["mesh/ComfyUI", ""], Preview3D
+        # ["out/mesh.glb", ""] — so add_node must write it, not ``null``.
+        glb_prefix = graph.widget_defaults("SaveGLB")["filename_prefix"]
+        for cls, expected in (("SaveGLB", [glb_prefix, ""]), ("Preview3D", ["", ""])):
+            wf, _ = workflow_ops.add_node(_empty_workflow(), graph, cls)
+            assert wf["nodes"][0]["widgets_values"] == expected, cls
 
 
 class TestAudioFamily:
@@ -273,6 +285,20 @@ class TestAudioFamily:
 
     def test_marker_slots_have_no_defaults(self, graph: Graph):
         assert graph.widget_defaults("LoadAudio") == {"audio": "a.wav"}
+        wf, _ = workflow_ops.add_node(_empty_workflow(), graph, "LoadAudio")
+        assert wf["nodes"][0]["widgets_values"] == ["a.wav"]
+
+
+def _empty_workflow() -> dict[str, Any]:
+    return {"last_node_id": 0, "last_link_id": 0, "nodes": [], "links": [], "groups": [], "version": 0.4}
+
+
+class TestCaptureRefusesInjectedSlots:
+    def test_capture_recipe_refuses_an_injected_slot_as_a_param_up_front(self, graph: Graph):
+        wf, op = workflow_ops.add_node(_empty_workflow(), graph, "LoadImage")
+        nid = op["node_id"]
+        with pytest.raises(workflow_ops.RecipeError, match="upload"):
+            workflow_ops.capture_recipe(wf, graph, lift={(nid, "upload"): "up"})
 
 
 class TestDomWidgetInputs:

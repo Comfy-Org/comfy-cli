@@ -139,3 +139,46 @@ def test_pretty_mode_tail_json_keeps_legacy_raw_blob(pinned_renderer, capsys):
     generate_app._emit_result(_succeeded(), request_id="req1", download=None, as_json=True)
     doc = json.loads(capsys.readouterr().out)
     assert doc["status"] == "succeeded"
+
+
+# --------------------------------------------------------------------------- #
+# Review (annehe9) on #809
+# --------------------------------------------------------------------------- #
+
+
+def _failed(**overrides) -> poll.PollResult:
+    fields = {
+        "status": "failed",
+        "error": "partner blew up",
+        "image_urls": [],
+        "raw": {"status": "failed", "error": "partner blew up"},
+    }
+    fields.update(overrides)
+    return poll.PollResult(**fields)
+
+
+def test_failed_job_is_an_ok_false_envelope_and_exit_1_in_json_mode(pinned_renderer):
+    """A terminally failed job must never be reported as ``ok: true`` — the
+    registered ``generate_result`` schema promises failures arrive as an
+    ok=false envelope with ``error.code``, and machine consumers trust ``ok``."""
+    import typer
+
+    _, machine, _ = pinned_renderer(OutputMode.JSON)
+    with pytest.raises(typer.Exit) as e:
+        generate_app._emit_result(_failed(), request_id="req1", download=None, as_json=True)
+    assert e.value.exit_code == 1
+    envelope = json.loads(machine.getvalue().splitlines()[-1])
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "generate_job_failed"
+    assert envelope["data"] is None
+
+
+def test_output_json_alone_gets_the_envelope_not_colored_text(pinned_renderer, capsys):
+    """``comfy --output json generate …`` (no tail ``--json``) must emit the
+    envelope on the machine stream, never ANSI-colored URLs on stdout."""
+    _, machine, _ = pinned_renderer(OutputMode.JSON)
+    generate_app._emit_result(_succeeded(), request_id="req1", download=None, as_json=False)
+    envelope = json.loads(machine.getvalue().splitlines()[-1])
+    assert envelope["schema"] == "envelope/1" and envelope["ok"] is True
+    assert envelope["data"]["result"] == {"status": "succeeded", "urls": ["https://cdn.example/img.png"]}
+    assert "\x1b[" not in capsys.readouterr().out

@@ -1293,8 +1293,10 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
             raise RecipeError(
                 f"--param target node {node_id} is a UI-only {node.get('type')} — capture skips it (it never reaches the API)"
             )
-        if widget not in graph.widget_order_default(node.get("type", "")):
-            raise RecipeError(f"--param target {node_id}.{widget!r}: not a widget on {node.get('type')}")
+        # Editable names only: an injected slot (``upload``) owns a position
+        # but no value, and apply would refuse it anyway — say so up front.
+        if widget not in graph.editable_widget_names(node.get("type", "")):
+            raise RecipeError(f"--param target {node_id}.{widget!r}: not an editable widget on {node.get('type')}")
 
     warnings: list[dict] = []
     for n in ui_nodes:
@@ -2145,7 +2147,13 @@ def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list) 
     # Widget values in positional order, including dynamic-combo selectors and
     # their sub-widgets — sourced from the engine so add-node matches the converter.
     defaults = graph.widget_defaults(class_type)
-    widgets = [defaults.get(name) for name in graph.widget_order_default(class_type)]
+    order = graph.widget_order_default(class_type)
+    # A trailing name with no default is a frontend-injected ``serialize:
+    # false`` slot (``upload``, ``audioUI``): the frontend writes nothing for
+    # it, so neither does a fresh node — no phantom trailing ``null``.
+    while order and order[-1] not in defaults:
+        order = order[:-1]
+    widgets = [defaults.get(name) for name in order]
     return {
         "id": node_id,
         "type": class_type,

@@ -1376,8 +1376,15 @@ class Graph:
                 out[p.name] = None
             if _has_control_after_generate_slot(p):
                 out["control_after_generate"] = "fixed"
-        # Frontend-injected marker slots (``upload``, ``audioUI``) are trailing
-        # and ``serialize: false`` on current frontends: no default, no value.
+        # Frontend-injected slots: the ``upload``/``audioUI`` buttons are
+        # ``serialize: false`` on current frontends — no default, no value, so
+        # a fresh node ends before them (``_build_node`` drops trailing names
+        # with no default). The injected PREVIEW_3D ``image`` (SaveGLB /
+        # Preview3D) IS a DOM widget the frontend serializes as ``""`` — the
+        # captured shape is ``["mesh/ComfyUI", ""]`` — so it gets the same
+        # default a declared PREVIEW_3D port gets.
+        if m.id in _PREVIEW_3D_CLASSES and "image" not in out and "image" in frontend_extra_widget_names(m):
+            out["image"] = _FRONTEND_DOM_WIDGET_DEFAULTS["PREVIEW_3D"]
         return out
 
     # -- Validation --
