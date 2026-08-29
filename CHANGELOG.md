@@ -15,8 +15,70 @@ history.
 
 ## [Unreleased]
 
+### Fixed
+
+- `comfy workflow connect` can wire a Load Image / Load Video / Load Audio
+  into an auto-grow group nested under a dynamic combo (`GeminiNanoBanana2V2`
+  `model.images`, `MinimaxHailuo03ReferenceNode` / `ByteDance2ReferenceNodeV2`
+  `model.reference_images` / `reference_videos` / `reference_audios`, and the
+  other 27 partner nodes shaped that way). Slots are resolved from the node's
+  schema for its current selection — not from a pre-existing input — so an
+  agent-built node grows `model.images.image_1`, `image_2`, … by name or by
+  addressing the group base, a UI-built node reuses its free pre-created slot
+  and then keeps growing, a UI-built top-level group (`BatchImagesNode`) can
+  be base-addressed and grown past its free slot, a wrong element type is
+  refused (`type mismatch`), and a group never grows past the schema's
+  `names` length / `max`. `comfy nodes show` now lists every dynamic-combo
+  option's sub-inputs and names each auto-grow group's element type, slot
+  vocabulary and first keys to wire.
+- The widget order no longer counts a dynamic combo's link-only sub-inputs
+  (auto-grow groups, `GEMINI_INPUT_FILES`, …) as `widgets_values` slots.
+  `add-node` wrote them as phantom `null` values and the published widget
+  catalog named them, so every widget after the groups was one or more slots
+  off: an agent-built Nano Banana 2 converted with `seed` in
+  `response_modalities`, and through the CRDT doc host a UI-built MiniMax H3
+  node's `seed` position mapped onto `model.reference_images`. `add-node`,
+  the catalog and `set-widget` now share one walk, so a fresh node's layout
+  is exactly what `set-widget` indexes and what the frontend serializes (41
+  classes in the cloud catalog change width).
+- The widget order (`comfy nodes widget-catalog`, `set-widget` indexing, the
+  UI→API converter) now names every slot the frontend serializes: the
+  `upload` button frontend extensions inject on media loaders (`LoadImage`,
+  `LoadImageMask`, `LoadVideo`, `LoadAudio`, ...), the `audioUI` player on
+  the audio family, the `PREVIEW_3D` `image` on `SaveGLB`/`Preview3D`, DOM
+  widgets declared under an uppercase custom type (`Load3D.image`), and
+  inputs whose `widgetType` overrides a link-shaped socket type
+  (`LTXVEmptyLatentAudio.frame_rate`, the "Basic data handling" math nodes).
+  Before, a workflow with any of these nodes carried more `widgets_values`
+  than the catalog could name, so the cloud doc host refused to mint it
+  (`createNodeMap(LoadImage): widgets_values has 2 entries but widget_order
+  names only 1`) and `set-widget`/conversion read the values after such a
+  slot one position off.
+- `comfy generate <model>`, `comfy generate resume` and sync-mode creates now
+  emit the `envelope/1` contract in `--output json` / `ndjson` modes instead
+  of a bare partner blob: the partner payload is wrapped as `data.result`
+  (verbatim) with `data.saved` listing `--download` artifacts, and the
+  payload schema is registered as `comfy generate` → `generate_result.json`
+  so `comfy discover` advertises it. Pretty mode with a tail `--json` keeps
+  the legacy raw blob.
+
 ### Added
 
+- `comfy workflow add-node` and an `add_node` op in `comfy workflow apply`
+  refuse a class the catalog marks deprecated (`node_deprecated`), naming the
+  live class with the same display name when there is one. Pass
+  `--allow-deprecated` (or `"allow_deprecated": true` on the op) to add it
+  anyway.
+- `comfy nodes search` and `comfy nodes ls` hide deprecated classes by
+  default; `--include-deprecated` shows them.
+
+- `comfy knowledge pick` attaches each pick's model `fits` block (VRAM per
+  variant, credit rate, max refs) when the bundle carries one, so a size or
+  price constraint can be checked against a number rather than the caveat text.
+- `comfy-build`, the skill for building a custom ComfyUI environment on the
+  developer platform, is now bundled with the CLI. `comfy skills show
+  comfy-build` works, and an argument-free `comfy skills install` writes it on a
+  machine with no network.
 - `comfy build from-workflow --from <workflow.json> --name <name>` creates a
   build from a ComfyUI workflow, in the editing format or the API export.
 - A workflow import prints its full report: the node classes nothing provides,
@@ -26,6 +88,11 @@ history.
 - `CONTRIBUTING.md` (renamed from `DEV_README.md`) and this changelog.
 
 ### Changed
+
+- `comfy skills install` no longer fetches any skill over the network.
+  `comfy-build` was the only one it fetched, and it now ships in the wheel and
+  is versioned with the CLI release, so the skill and the commands it describes
+  can no longer drift apart.
 
 - The builder client module is now `comfy_cli.builder_api` (was
   `comfy_cli.distribution_api`), and its methods say build and release

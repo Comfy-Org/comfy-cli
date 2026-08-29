@@ -545,15 +545,24 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "in ComfyUI, use the regular save (File > Save Workflow) — the API export is for `comfy run`, not for editing",
     ),
     ErrorCode(
+        "workflow_print_unsupported",
+        "`comfy workflow print` refused: the workflow contains something it cannot render faithfully "
+        "(legacy group node, duplicate node id, link to a missing node/slot, non-integer link slot, "
+        "link cycle, unknown `--format`). `details.reasons` lists every reason.",
+        "fix the listed reasons, or read the graph with `comfy workflow slots` / `comfy workflow ls-nodes`",
+    ),
+    ErrorCode(
         "workflow_slot_invalid",
         "A slot override failed validation (bad shape, unknown address, etc.).",
-        "see `details` — addresses follow `<instance_id>.<input_name>`",
+        "see `details` — addresses follow `<instance_id>.<input_name>`; "
+        "`comfy workflow print <file>` shows every node with its id and widget names",
     ),
     ErrorCode(
         "workflow_edit_invalid",
         "A structured edit (add-node/connect/set-widget/delete-node) failed: "
         "unknown class_type, missing node, bad slot/widget name, or malformed address.",
-        "run `comfy workflow slots <file>` for widget addresses or `comfy nodes types` for class_types",
+        "run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read "
+        "(`comfy workflow slots <file>` for exact `<node_id>.<input>` addresses, `comfy nodes search` for class names)",
     ),
     ErrorCode(
         "workflow_clear_not_batchable",
@@ -709,6 +718,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "see `details.close_matches` or run `comfy nodes search`",
     ),
     ErrorCode(
+        "node_deprecated",
+        "`workflow add-node` (or an `add_node` op in a batch) named a class the catalog marks deprecated. "
+        "Nothing was added. `details.replacement` names the live class with the same display name when "
+        "one exists.",
+        "add `details.replacement` instead, or pass --allow-deprecated "
+        '(`"allow_deprecated": true` on the op) when the user asked for that exact node',
+    ),
+    ErrorCode(
         "path_bounds_invalid",
         "`comfy nodes path` was given `--max-depth` or `--max-paths` below 1. Such a bound admits no "
         "path at all, so the search is refused rather than returning an empty result that would read "
@@ -755,6 +772,27 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "the destination, they would interleave into the same file.",
         "track it with `comfy model download-status <id>`; a background download can be stopped "
         "with `comfy model download-cancel <id>`, a foreground one with Ctrl-C in its own terminal",
+    ),
+    ErrorCode(
+        "model_download_claim_contested",
+        "`comfy model download --background` lost the race for a destination it had just judged "
+        "free: the stale claim it cleared was re-taken by another submitter before its own retry, "
+        "and that new claim does not (yet) resolve to a live download record. `details.path` is the "
+        "destination; `details.download_id` names the new claim's holder when its claim file was "
+        "readable, and is null otherwise. Unlike `model_download_in_flight` there is no `status`/"
+        "`kind` to report — the competitor's record was not visible at refusal time.",
+        "check `comfy model downloads`, then retry",
+    ),
+    ErrorCode(
+        "model_download_claim_unclearable",
+        "`comfy model download --background` found a stale destination claim it could not remove "
+        "(`details.claim_file`): the file is not deletable by this user, or something else (e.g. a "
+        "directory) sits at the claim path. Every submission to `details.path` will be refused "
+        "until the claim file is cleared, so the command reports the real obstacle rather than a "
+        "phantom in-flight download. `details.download_id` is the stale claim's recorded holder, "
+        "null when the claim was unreadable.",
+        "remove the claim file by hand (check its ownership and the permissions on the `claims/` "
+        "directory), then retry",
     ),
     ErrorCode(
         "model_download_foreground_cancel",
@@ -1043,6 +1081,25 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     # --- build (the serverless builder) --------------------------------------
     ErrorCode(
+        "build_spec_invalid",
+        "A build spec or legacy scan definition could not be read, has an unsupported schema, or is invalid. "
+        "`details.path` carries the path when one is available.",
+        "fix the named field, or regenerate the file",
+    ),
+    ErrorCode(
+        "build_spec_write_error",
+        "`comfy build` could not write the build spec or legacy scan definition. `details` carries the "
+        "path and the underlying OS error.",
+        "check the directory exists and is writable",
+    ),
+    ErrorCode(
+        "build_spec_not_found",
+        "A `comfy build` command found no spec at the path `PATH` resolved to — `<dir>/comfy-build.yaml` for "
+        "a directory, or the file itself for a `.yaml`/`.json` `PATH`. `details.path` carries the exact "
+        "absolute path probed.",
+        "create a comfy-build.yaml at that path, or pass the PATH that holds the spec",
+    ),
+    ErrorCode(
         "build_models_dir_missing",
         "`comfy build scan` could not find a models/ directory to scan. `details.path` carries the "
         "resolved path. Either no workspace is selected or the given `--models-dir` doesn't exist.",
@@ -1121,11 +1178,6 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "knowledge_unknown_model",
         "`comfy knowledge resolve` found no row for the alias or id. `details.close_matches` lists near names.",
         "try one of `details.close_matches`",
-    ),
-    ErrorCode(
-        "knowledge_unknown_capability",
-        "`comfy knowledge pick` found no capability with that id. `details.known` lists them all.",
-        "pick one of `details.known`",
     ),
 )
 

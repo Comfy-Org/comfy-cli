@@ -31,7 +31,7 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import knowledge, tracking, workflow_ops
-from comfy_cli.file_utils import atomic_write_bytes
+from comfy_cli.file_utils import atomic_write_bytes, cache_dir
 from comfy_cli.http import ResponseTooLarge, plain_urlopen, read_capped
 from comfy_cli.output import get_renderer, rprint
 
@@ -80,9 +80,8 @@ _REFRESH_DEBOUNCE_SECONDS = 60.0
 
 
 def _cache_path() -> Path:
-    """Where the gallery index lives on disk. XDG-respecting."""
-    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return Path(base) / "comfy-cli" / "gallery" / "index.json"
+    """Where the gallery index lives on disk."""
+    return cache_dir() / "gallery" / "index.json"
 
 
 def _fetch_gallery(url: str = GALLERY_URL, timeout: float = 15.0) -> bytes:
@@ -358,7 +357,17 @@ def _spawn_background_refresh() -> bool:
     # *non-atomic* config.ini rewrite — racing the foreground process and risking
     # a corrupt config. `_refresh-cache` is contractually 'no telemetry,
     # best-effort', so opt the child out of consent entirely.
-    child_env = {**os.environ, "COMFY_NO_TELEMETRY": "1", "DO_NOT_TRACK": "1"}
+    # Pin the child to the cache dir *this* process resolved, not a raw
+    # `COMFY_CACHE_DIR` value: the child's cwd is `_refresh_cwd()`, already
+    # inside that dir, so re-resolving a relative override there would nest a
+    # second cache tree under the first and the foreground cache would never
+    # see the refresh.
+    child_env = {
+        **os.environ,
+        "COMFY_CACHE_DIR": str(cache_dir()),
+        "COMFY_NO_TELEMETRY": "1",
+        "DO_NOT_TRACK": "1",
+    }
 
     kwargs: dict[str, Any] = dict(
         stdout=subprocess.DEVNULL,
@@ -1214,9 +1223,8 @@ def _template_workflow_cache_path(name: str) -> Path:
     ``quote(..., safe="")`` turns any ``/`` or ``..`` segment into ``%2F``/``..``
     with no path separators, keeping the file strictly inside ``gallery/templates``.
     """
-    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
     safe_name = urllib.parse.quote(name, safe="")
-    return Path(base) / "comfy-cli" / "gallery" / "templates" / f"{safe_name}.json"
+    return cache_dir() / "gallery" / "templates" / f"{safe_name}.json"
 
 
 def _iter_workflow_nodes(wf: dict[str, Any]):
