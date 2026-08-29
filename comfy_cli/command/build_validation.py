@@ -12,8 +12,8 @@ from comfy_cli.command.build_paths import BuildPaths, resolve_local_path
 from comfy_cli.command.build_spec import SPEC_SCHEMA, BuildSpecInvalidError, JsonObject, JsonValue
 
 _AUTHORING_FIELDS: Final = frozenset({"source", "localPath", "localDigest", "localSizeBytes"})
-_MODEL_SOURCES: Final = ("blobId", "sourceUri")
-_NODE_SOURCES: Final = ("blobId", "registryVersion", "repository")
+MODEL_SOURCES: Final = ("blobId", "sourceUri")
+NODE_SOURCES: Final = ("blobId", "registryVersion", "repository")
 MODEL_RESOLVE_BATCH_SIZE: Final = 32
 
 
@@ -82,11 +82,11 @@ def _set_sources(entry: JsonObject, fields: tuple[str, ...], *, location: str) -
 
 
 def _project_model(entry: JsonObject, *, location: str) -> JsonObject:
-    sources = _set_sources(entry, _MODEL_SOURCES, location=location)
+    sources = _set_sources(entry, MODEL_SOURCES, location=location)
     projected = deepcopy(entry)
-    for field in (*_AUTHORING_FIELDS, *_MODEL_SOURCES):
+    for field in (*_AUTHORING_FIELDS, *MODEL_SOURCES):
         projected.pop(field, None)
-    for winner in _MODEL_SOURCES:
+    for winner in MODEL_SOURCES:
         if winner in sources:
             projected[winner] = sources[winner]
             break
@@ -94,11 +94,11 @@ def _project_model(entry: JsonObject, *, location: str) -> JsonObject:
 
 
 def _project_node(entry: JsonObject, *, location: str) -> JsonObject:
-    sources = _set_sources(entry, _NODE_SOURCES, location=location)
+    sources = _set_sources(entry, NODE_SOURCES, location=location)
     projected = deepcopy(entry)
-    for field in (*_AUTHORING_FIELDS, *_NODE_SOURCES):
+    for field in (*_AUTHORING_FIELDS, *NODE_SOURCES):
         projected.pop(field, None)
-    for winner in _NODE_SOURCES:
+    for winner in NODE_SOURCES:
         if winner not in sources:
             continue
         projected[winner] = sources[winner]
@@ -180,7 +180,7 @@ def _validate_authoring_definition(definition: JsonObject, paths: BuildPaths) ->
 
 
 def _validate_wire_sources(original: JsonObject, projected: JsonObject, collection: str) -> None:
-    fields = _MODEL_SOURCES if collection == "models" else _NODE_SOURCES
+    fields = MODEL_SOURCES if collection == "models" else NODE_SOURCES
     originals = _entries(original, collection)
     wire_entries = _entries(projected, collection)
     for index, (authoring_entry, wire_entry) in enumerate(zip(originals, wire_entries)):
