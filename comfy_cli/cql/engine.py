@@ -154,11 +154,60 @@ class Port:
         return self.type.startswith("COMFY_") and "COMBO" in self.type
 
     def autogrow_slot_example(self) -> str:
-        """Best-effort slot-key example for hints. The element name comes from
-        the node's V3 definition and isn't in object_info; the observed server
-        convention is the singular of the input name (images → image0)."""
-        stem = self.name[:-1] if self.name.endswith("s") else self.name
-        return f"{self.name}.{stem}0, {self.name}.{stem}1, …"
+        """Slot-key example for hints: the first two slot names this group
+        grows, from the schema template when the catalog carries one
+        (``model.images.image_1, model.images.image_2, …``), else the
+        historical singular-of-the-input-name guess (``images.image0, …``)."""
+        template = self.autogrow_element_template or {}
+        names = template.get("names")
+        if names:
+            first = [f"{self.name}.{n}" for n in names[:2]]
+        else:
+            prefix = template.get("prefix") or (self.name[:-1] if self.name.endswith("s") else self.name)
+            first = [f"{self.name}.{prefix}0", f"{self.name}.{prefix}1"]
+        return ", ".join(first) + ", …"
+
+    @property
+    def autogrow_element_type(self) -> str | None:
+        """The socket type every grown slot of this autogrow input carries —
+        the single input the schema ``template`` declares (``IMAGE`` for
+        ``model.images``, ``VIDEO`` for ``model.reference_videos``). Every
+        group in the production catalog declares exactly one template input;
+        a template with none (or a non-autogrow port) reads as ``None``, which
+        callers treat as "accept the source type".
+        """
+        t = self.options.template
+        if not self.is_autogrow or not isinstance(t, dict):
+            return None
+        inputs = t.get("input")
+        if not isinstance(inputs, dict):
+            return None
+        for section in ("required", "optional"):
+            section_def = inputs.get(section)
+            if not isinstance(section_def, dict):
+                continue
+            for spec in section_def.values():
+                type_id = spec[0] if isinstance(spec, (list, tuple)) and spec else spec
+                if isinstance(type_id, str) and type_id:
+                    return type_id
+        return None
+
+    @property
+    def autogrow_limits(self) -> tuple[int, int | None]:
+        """``(min, max)`` slots for this autogrow input, exactly as the frontend
+        derives them (``applyAutogrow``): ``min`` defaults to 1, ``max`` is the
+        length of ``names`` when the template enumerates them, else the
+        template's ``max`` (``None`` when the schema leaves it open — the
+        frontend's own default there is 100, but that is a UI choice, not a
+        server limit, so it is not asserted here)."""
+        t = self.options.template if isinstance(self.options.template, dict) else {}
+        lo = t.get("min")
+        lo = int(lo) if isinstance(lo, (int, float)) and not isinstance(lo, bool) else 1
+        names = t.get("names")
+        if isinstance(names, list) and names:
+            return lo, len(names)
+        hi = t.get("max")
+        return lo, (int(hi) if isinstance(hi, (int, float)) and not isinstance(hi, bool) else None)
 
     @property
     def autogrow_template(self) -> dict | None:
@@ -704,49 +753,6 @@ def _parse_input_spec(spec: Any) -> tuple[str, bool, list[Any], PortOptions, boo
         return "COMBO", True, list(first), port_opts, True, []
 
     return "UNKNOWN", False, [], port_opts, False, []
-
-
-_FIRST_KEY = object()  # sentinel: expand the first/default dynamic-combo key
-
-
-def _dynamic_sub_widget_names(base: str, options: list, selected: Any = _FIRST_KEY) -> list[str]:
-    """Sub-widget names a dynamic combo expands to for the ``selected`` key
-    (default: the first/default key) — e.g. ``model`` → ``["model.resolution"]``.
-    Static mirror of the converter's value-driven ``_dynamic_combo_sub_inputs``."""
-    return [name for name, _ in _dynamic_sub_widget_defaults(base, options, selected).items()]
-
-
-def _dynamic_sub_widget_defaults(base: str, options: list, selected: Any = _FIRST_KEY) -> dict[str, Any]:
-    """``{f"{base}.{sub}": default}`` for the ``selected`` key's sub-inputs.
-
-    Defaults to the first key (fresh nodes select it). Passing the node's actual
-    selected key — as ``widget_order_for_node`` does — keeps the widget order
-    aligned to ``widgets_values`` when a node picks an option whose sub-widget
-    count differs from the default. An unknown key expands to nothing, matching
-    the converter's ``_dynamic_combo_sub_inputs``."""
-    if not options:
-        return {}
-    if selected is _FIRST_KEY:
-        option = options[0] if isinstance(options[0], dict) else None
-    else:
-        option = next((o for o in options if isinstance(o, dict) and o.get("key") == selected), None)
-    if option is None:
-        return {}
-    sub_def = option.get("inputs")
-    if not isinstance(sub_def, dict):
-        return {}
-    out: dict[str, Any] = {}
-    for section in ("required", "optional"):
-        section_def = sub_def.get(section) or {}
-        if not isinstance(section_def, dict):
-            continue
-        for sub_name, spec in section_def.items():
-            _t, _e, enum_values, opts, _declared, _dyn = _parse_input_spec(spec)
-            default = opts.default
-            if default is None and enum_values:
-                default = enum_values[0]
-            out[f"{base}.{sub_name}"] = default
-    return out
 
 
 def _is_scalar_choice(v: Any) -> bool:
@@ -1309,17 +1315,7 @@ class Graph:
         m = self._nodes.get(class_name)
         if m is None:
             return []
-        order: list[str] = []
-        for p in m.inputs:
-            if p.is_link:
-                continue
-            order.append(p.name)
-            if p.dynamic_options:
-                order.extend(_dynamic_sub_widget_names(p.name, p.dynamic_options))
-            if _has_control_after_generate_slot(p):
-                order.append("control_after_generate")
-        order.extend(frontend_extra_widget_names(m))
-        return order
+        return [e.name for e in _expand_widget_entries(m, [], first_key=True)]
 
     def widget_order_for_node(self, class_name: str, widgets_values: list[Any] | None) -> list[str]:
         """Value-aware widget order: like ``widget_order`` but at each dynamic
@@ -1357,22 +1353,18 @@ class Graph:
         if m is None:
             return {}
         out: dict[str, Any] = {}
-        for p in m.inputs:
-            if p.is_link:
+        # Same walk as ``widget_order_default`` (first key at every dynamic
+        # combo, link-only sub-inputs skipped), so the two can never disagree
+        # about which names own a slot.
+        for entry in _expand_widget_entries(m, [], first_key=True):
+            if entry.port is None:
+                if entry.name == "control_after_generate":
+                    out[entry.name] = "fixed"
+                # Frontend-injected marker slots (``upload``, ``audioUI``) are
+                # trailing and ``serialize: false`` on current frontends: no
+                # default, no value.
                 continue
-            if p.dynamic_options:
-                out[p.name] = p.enum_values[0] if p.enum_values else None  # selected key
-                out.update(_dynamic_sub_widget_defaults(p.name, p.dynamic_options))
-            elif p.options.default is not None:
-                out[p.name] = p.options.default
-            elif p.enum_values:
-                out[p.name] = p.enum_values[0]
-            elif p.type in _FRONTEND_DOM_WIDGET_TYPES:
-                out[p.name] = _FRONTEND_DOM_WIDGET_DEFAULTS.get(p.type)
-            else:
-                out[p.name] = None
-            if _has_control_after_generate_slot(p):
-                out["control_after_generate"] = "fixed"
+            out[entry.name] = _widget_default(entry.port)
         # Frontend-injected slots: the ``upload``/``audioUI`` buttons are
         # ``serialize: false`` on current frontends — no default, no value, so
         # a fresh node ends before them (``_build_node`` drops trailing names
@@ -1383,6 +1375,26 @@ class Graph:
         if m.id in _PREVIEW_3D_CLASSES and "image" not in out and "image" in frontend_extra_widget_names(m):
             out["image"] = _FRONTEND_DOM_WIDGET_DEFAULTS["PREVIEW_3D"]
         return out
+
+    def autogrow_groups(self, class_name: str, widgets_values: list[Any] | None) -> list[Port]:
+        """Every ``COMFY_AUTOGROW_V3`` group a node of ``class_name`` exposes
+        for its CURRENT selection, in declaration order: top-level groups
+        (``BatchImagesNode.images``) and those nested under the option each
+        dynamic combo currently selects, named the way the frontend names
+        them — dotted under the combo (``model.reference_images``).
+
+        ``widgets_values`` supplies the selectors (read positionally, exactly
+        as ``widget_order_for_node`` does), so a node switched to an option
+        without the group stops exposing it. Unknown class → ``[]``.
+        """
+        m = self._nodes.get(class_name)
+        if m is None:
+            return []
+        sub_links: list[Port] = []
+        _expand_widget_entries(m, widgets_values or [], sub_links=sub_links)
+        top = [p for p in m.inputs if p.is_autogrow]
+        nested = [p for p in sub_links if p.is_autogrow]
+        return top + nested
 
     # -- Validation --
 
@@ -1782,28 +1794,64 @@ class Graph:
             "pack": m.pack,
             "labels": m.labels,
             "cloud_disabled": m.cloud_disabled,
-            "inputs": [
-                {
-                    "name": p.name,
-                    "type": p.type,
-                    "required": p.required,
-                    "is_link": p.is_link,
-                    "section": "required" if p.required else "optional",
-                    "choices": p.enum_values,
-                    "options": {
-                        "min": p.options.min,
-                        "max": p.options.max,
-                        "step": p.options.step,
-                        "default": p.options.default,
-                    },
-                    # Autogrow inputs wire as one slot key per connection;
-                    # surface that here so `nodes show` is self-documenting.
-                    **({"autogrow": True, "wire_as": p.autogrow_slot_example()} if p.is_autogrow else {}),
-                }
-                for p in m.inputs
-            ],
+            "inputs": [_input_payload(p, 0) for p in m.inputs],
             "outputs": [{"name": p.name, "type": p.type} for p in m.outputs],
         }
+
+
+def _widget_default(p: Port) -> Any:
+    """The value a fresh node carries for widget port ``p`` — a dynamic
+    combo's first key, else the schema default, else the first choice, else
+    the DOM-widget placeholder, else ``None``."""
+    if p.dynamic_options:
+        return p.enum_values[0] if p.enum_values else None
+    if p.options.default is not None:
+        return p.options.default
+    if p.enum_values:
+        return p.enum_values[0]
+    if p.type in _FRONTEND_DOM_WIDGET_TYPES:
+        return _FRONTEND_DOM_WIDGET_DEFAULTS.get(p.type)
+    return None
+
+
+def _input_payload(p: Port, depth: int) -> dict[str, Any]:
+    """One ``nodes show`` input entry. A dynamic combo lists every option
+    with that option's sub-inputs (dotted, recursively); an autogrow input —
+    top-level or nested — names its element type, its slot vocabulary and the
+    first keys to wire, so an agent can address ``model.images.image_1``
+    without first failing a connect to learn the name."""
+    entry: dict[str, Any] = {
+        "name": p.name,
+        "type": p.type,
+        "required": p.required,
+        "is_link": p.is_link,
+        "section": "required" if p.required else "optional",
+        "choices": p.enum_values,
+        "options": {
+            "min": p.options.min,
+            "max": p.options.max,
+            "step": p.options.step,
+            "default": p.options.default,
+        },
+    }
+    if p.is_autogrow:
+        lo, hi = p.autogrow_limits
+        template = p.autogrow_element_template or {}
+        entry["autogrow"] = True
+        entry["element_type"] = p.autogrow_element_type
+        entry["slots"] = {**template, "min": lo, "max": hi}
+        entry["wire_as"] = p.autogrow_slot_example()
+    if p.dynamic_options and _is_dynamic_combo_type(p.type) and depth < _MAX_DYNAMIC_COMBO_DEPTH:
+        entry["dynamic_options"] = [
+            {
+                "key": key,
+                "inputs": [
+                    _input_payload(sub, depth + 1) for sub in _dynamic_combo_sub_ports(p.dynamic_options, key, p.name)
+                ],
+            }
+            for key in p.enum_values
+        ]
+    return entry
 
 
 # ---------------------------------------------------------------------------
@@ -2505,7 +2553,13 @@ def _dynamic_combo_sub_ports(dynamic_options: list[dict], selector: Any, prefix:
     return ports
 
 
-def _expand_widget_entries(m: Morphism, widgets_values: list[Any]) -> list[_WidgetEntry]:
+def _expand_widget_entries(
+    m: Morphism,
+    widgets_values: list[Any],
+    *,
+    first_key: bool = False,
+    sub_links: list[Port] | None = None,
+) -> list[_WidgetEntry]:
     """Flatten a node's widget ports into one entry per ``widgets_values`` slot.
 
     Walks declared ports in order; at a dynamic combo it reads the current
@@ -2514,6 +2568,16 @@ def _expand_widget_entries(m: Morphism, widgets_values: list[Any]) -> list[_Widg
     combos; connection sub-inputs contribute no slot). A control-flagged input
     — top-level or sub — is followed by its ``control_after_generate`` marker
     slot, exactly as the frontend serializes it.
+
+    ``first_key=True`` selects every dynamic combo's first option instead of
+    reading ``widgets_values`` — the layout of a FRESH node, which is what the
+    static catalog (``widget_order_default``) and ``add_node``
+    (``widget_defaults``) publish. One walk for both keeps them from ever
+    disagreeing with the value-aware order ``set-widget`` indexes by.
+
+    ``sub_links`` collects the connection-only sub-inputs the selected options
+    contribute (``COMFY_AUTOGROW_V3`` groups, ``GEMINI_INPUT_FILES``…) — they
+    own no slot, but the wiring side needs to know they exist.
     """
     entries: list[_WidgetEntry] = []
 
@@ -2523,9 +2587,14 @@ def _expand_widget_entries(m: Morphism, widgets_values: list[Any]) -> list[_Widg
             if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
                 return
             idx = len(entries) - 1
-            selector = widgets_values[idx] if idx < len(widgets_values) else port.options.default
+            if first_key:
+                selector = port.enum_values[0] if port.enum_values else None
+            else:
+                selector = widgets_values[idx] if idx < len(widgets_values) else port.options.default
             for sub in _dynamic_combo_sub_ports(port.dynamic_options, selector, name):
                 if sub.is_link:
+                    if sub_links is not None:
+                        sub_links.append(sub)
                     continue
                 emit(sub.name, sub, name, depth + 1)
         elif _has_control_after_generate_slot(port):

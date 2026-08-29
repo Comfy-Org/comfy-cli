@@ -17,6 +17,30 @@ history.
 
 ### Fixed
 
+- `comfy workflow connect` can wire a Load Image / Load Video / Load Audio
+  into an auto-grow group nested under a dynamic combo (`GeminiNanoBanana2V2`
+  `model.images`, `MinimaxHailuo03ReferenceNode` / `ByteDance2ReferenceNodeV2`
+  `model.reference_images` / `reference_videos` / `reference_audios`, and the
+  other 27 partner nodes shaped that way). Slots are resolved from the node's
+  schema for its current selection — not from a pre-existing input — so an
+  agent-built node grows `model.images.image_1`, `image_2`, … by name or by
+  addressing the group base, a UI-built node reuses its free pre-created slot
+  and then keeps growing, a UI-built top-level group (`BatchImagesNode`) can
+  be base-addressed and grown past its free slot, a wrong element type is
+  refused (`type mismatch`), and a group never grows past the schema's
+  `names` length / `max`. `comfy nodes show` now lists every dynamic-combo
+  option's sub-inputs and names each auto-grow group's element type, slot
+  vocabulary and first keys to wire.
+- The widget order no longer counts a dynamic combo's link-only sub-inputs
+  (auto-grow groups, `GEMINI_INPUT_FILES`, …) as `widgets_values` slots.
+  `add-node` wrote them as phantom `null` values and the published widget
+  catalog named them, so every widget after the groups was one or more slots
+  off: an agent-built Nano Banana 2 converted with `seed` in
+  `response_modalities`, and through the CRDT doc host a UI-built MiniMax H3
+  node's `seed` position mapped onto `model.reference_images`. `add-node`,
+  the catalog and `set-widget` now share one walk, so a fresh node's layout
+  is exactly what `set-widget` indexes and what the frontend serializes (41
+  classes in the cloud catalog change width).
 - The widget order (`comfy nodes widget-catalog`, `set-widget` indexing, the
   UI→API converter) now names every slot the frontend serializes: the
   `upload` button frontend extensions inject on media loaders (`LoadImage`,

@@ -401,23 +401,35 @@ def _lww_commit(workflow: dict, op: dict) -> None:
     workflow.setdefault("_widget_stamps", {})[json.dumps(_write_target(op), default=str)] = _stamp_key(op)
 
 
-def _autogrow_template(graph, node_type: str, base: str) -> dict | None:
-    """The schema-declared element-naming template for the ``base`` autogrow
-    input on ``node_type`` — looked up from the same object_info-derived
-    ``graph`` the connect path already resolves node schemas from (see
-    ``cql.engine.Port.autogrow_template``). None when ``graph`` is unavailable,
-    ``node_type`` isn't in the catalog (offline edit), or the catalog entry
-    carries no template — callers then fall back to the historical
-    pluralization heuristic in :func:`_autogrow_elem_name`."""
+def _autogrow_group_port(graph, node: dict, base: str):
+    """The schema :class:`~comfy_cli.cql.engine.Port` for autogrow group
+    ``base`` on ``node`` — a top-level group (``BatchImagesNode.images``) or
+    one nested under the option ``node`` currently selects at a dynamic combo
+    (``MinimaxHailuo03ReferenceNode`` → ``model.reference_images``). The
+    selection is read from the node's own ``widgets_values`` the same way
+    ``set-widget`` indexes them, so a node switched to an option without the
+    group stops resolving it. None when ``graph`` is unavailable, the class
+    isn't in the catalog (offline edit), or no such group exists."""
     if graph is None:
         return None
-    m = graph.node(node_type)
-    if m is None:
-        return None
-    for p in m.inputs:
-        if p.name == base and p.is_autogrow:
-            return p.autogrow_template
+    from comfy_cli.cql import engine as _engine
+
+    node_type = node.get("type", "")
+    values = _engine._widgets_as_positional(node.get("widgets_values"), graph, node_type)
+    for port in graph.autogrow_groups(node_type, values):
+        if port.name == base:
+            return port
     return None
+
+
+def _autogrow_template(graph, node: dict, base: str) -> dict | None:
+    """The schema-declared element-naming template for the ``base`` autogrow
+    group on ``node`` (see :func:`_autogrow_group_port` and
+    ``cql.engine.Port.autogrow_template``). None when the schema is
+    unavailable or carries no template — callers then fall back to the
+    historical pluralization heuristic in :func:`_autogrow_elem_name`."""
+    port = _autogrow_group_port(graph, node, base)
+    return None if port is None else port.autogrow_template
 
 
 def _autogrow_elem_name(base: str, n: int, template: dict | None) -> str:
@@ -467,9 +479,17 @@ def _next_autogrow_name(ins: list, requested: str, template: dict | None = None)
     taken = {i.get("name") for i in ins}
     if requested not in taken:
         return requested
-    base = requested.split(".", 1)[0]
+    base = _autogrow_base(requested)
     n = _first_free_autogrow_index(taken, base, template)
     return f"{base}.{_autogrow_elem_name(base, n, template)}"
+
+
+def _autogrow_base(slot_name: str) -> str:
+    """The group a grown slot name belongs to: everything before the LAST
+    dot. Element names never contain a dot, but a group nested under a
+    dynamic combo does (``model.images.image_1`` → ``model.images``), so
+    splitting on the first dot would name the combo, not the group."""
+    return slot_name.rsplit(".", 1)[0]
 
 
 def _next_inputcount_name(ins: list, requested: str) -> str:
@@ -1785,9 +1805,20 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                 # base.elemN fallback — that name is meaningless for this family.
                 name = _next_inputcount_name(ins, grow["name"])
             else:
-                base = str(grow["name"]).split(".", 1)[0]
-                template = None if grow.get("widget") else _autogrow_template(graph, dst.get("type", ""), base)
+                base = _autogrow_base(str(grow["name"]))
+                port = None if grow.get("widget") else _autogrow_group_port(graph, dst, base)
+                template = None if port is None else port.autogrow_template
                 name = _next_autogrow_name(ins, grow["name"], template)
+                if port is not None and name != grow["name"]:
+                    # A replay collision renamed the slot: never mint one past
+                    # the schema's max. The group is full, so this op is dropped
+                    # (no-op) — which slot the concurrent race keeps is
+                    # arrival-ordered, the same accepted limitation the
+                    # inputcount family documents below; the schema bound is not.
+                    _lo, hi = port.autogrow_limits
+                    occupied = sum(1 for i in ins if str(i.get("name", "")).startswith(base + "."))
+                    if hi is not None and occupied >= hi:
+                        return
             entry = {
                 "name": name,
                 "type": grow["type"],
@@ -1989,7 +2020,10 @@ def _write_target(op: dict) -> tuple:
             # Two autogrow connects onto the same base share a target (their
             # relative order in the batch is the sequence decision the merge
             # consumer must make); distinct bases don't collide.
-            return ("input", str(op["to_node"]), "grow", str(grow["name"]).split(".", 1)[0])
+            # The group is everything before the LAST dot: a group nested
+            # under a dynamic combo (``model.reference_images.image_1``) must
+            # not share a target with its sibling (``model.reference_videos``).
+            return ("input", str(op["to_node"]), "grow", _autogrow_base(str(grow["name"])))
         return ("input", str(op["to_node"]), op["to_slot"])
     return (kind,)
 
@@ -2373,13 +2407,18 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
       the API converter reads the link and skips the widget by name.
     """
     ins = node.get("inputs") or []
-    node_type = node.get("type", "")
     # Concrete slot (index or exact name) that is NOT an autogrow base.
     try:
         idx = _resolve_input_slot(node, None, slot)
         if str(ins[idx].get("type", "")).startswith("COMFY_AUTOGROW"):
             base = ins[idx].get("name")
-            template = _autogrow_template(graph, node_type, base)
+            # The CLI's own add-node writes this base entry; the schema-aware
+            # resolver applies the declared element type and ``max`` exactly
+            # as it does for a UI-built node (which carries no base entry).
+            resolved = _resolve_schema_autogrow(node, graph, str(base), elem_type) if graph is not None else None
+            if resolved is not None:
+                return resolved
+            template = _autogrow_template(graph, node, base)
             return None, _plan_autogrow(ins, base, elem_type, template)
         return idx, None
     except ValueError:
@@ -2391,7 +2430,10 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
             (i for i in ins if i.get("name") == base and str(i.get("type", "")).startswith("COMFY_AUTOGROW")), None
         )
         if ag is not None:
-            template = _autogrow_template(graph, node_type, base)
+            resolved = _resolve_schema_autogrow(node, graph, slot, elem_type) if graph is not None else None
+            if resolved is not None:
+                return resolved
+            template = _autogrow_template(graph, node, base)
             grow = _plan_autogrow(ins, base, elem_type, template)  # canonical next sequential slot
             # Addressing the bare base auto-appends. A dotted key is accepted ONLY if
             # it names that exact next slot; an index gap (images.image4), a doubled
@@ -2406,9 +2448,20 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
                     f"or use the next free key {grow['name']!r}"
                 )
             return None, grow
-    # Widget-backed input: convert the widget to a linked input.
+    # Schema-declared autogrow group — the slot exists in object_info even
+    # when the node's ``inputs`` carry no trace of it: a group nested under a
+    # dynamic combo (``model.images``), or a top-level group on a UI-built node
+    # (the frontend writes the grown ``images.imageN`` slots, never the base).
+    # Widget-backed input: convert the widget to a linked input. Checked before
+    # the schema group resolution so a real widget name always outranks the
+    # bare-element guess (``image0``) a group's vocabulary might also match.
+    node_type = node.get("type", "")
     if graph is not None and isinstance(slot, str) and slot in graph.widget_order(node_type):
         return None, {"name": slot, "type": elem_type or "*", "widget": slot}
+    if graph is not None and isinstance(slot, str):
+        resolved = _resolve_schema_autogrow(node, graph, slot, elem_type)
+        if resolved is not None:
+            return resolved
     # Bare autogrow ELEMENT name (`image1` for base `images`) — the guess agents
     # make on classic batch nodes, and the top workflow-edit failure in alpha
     # traffic. Map it onto the dotted key it implies and hold it to the same
@@ -2420,7 +2473,7 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
             base = ag.get("name")
             if not base or not str(ag.get("type", "")).startswith("COMFY_AUTOGROW"):
                 continue
-            template = _autogrow_template(graph, node_type, base)
+            template = _autogrow_template(graph, node, base)
             if not _autogrow_bare_slot_pattern(base, template).fullmatch(slot):
                 continue
             grow = _plan_autogrow(ins, base, elem_type, template)
@@ -2458,6 +2511,77 @@ def _resolve_input_target(node: dict, graph, slot: Any, elem_type: str | None) -
             )
     names = [i.get("name") for i in ins]
     raise ValueError(f"input {slot!r} not found on node {node.get('id')}; inputs: {names}")
+
+
+def _resolve_schema_autogrow(
+    node: dict, graph, slot: str, elem_type: str | None
+) -> tuple[int | None, dict | None] | None:
+    """Resolve ``slot`` against the autogrow groups the node's SCHEMA declares
+    for its current selection (:func:`_autogrow_group_port`), mirroring what
+    the frontend does when a noodle is dropped on the group:
+
+    * the group base (``model.reference_images``) wires the lowest free slot
+      the node already carries (the frontend pre-creates one), else appends
+      the next schema-named slot;
+    * a dotted key (``model.reference_images.image_3``) or a bare element
+      name (``image_3``) must name that exact next slot — an index gap would
+      mint a key the server can't map, so it is rejected with the next free
+      key instead;
+    * the source type must match the group's declared element type, and the
+      group never grows past the schema's ``max`` (``names`` length).
+
+    Returns ``None`` when ``slot`` addresses no schema group, so the caller
+    keeps falling through its other resolutions.
+    """
+    from comfy_cli.cql import engine as _engine
+
+    ins = node.get("inputs") or []
+    node_type = node.get("type", "")
+    values = _engine._widgets_as_positional(node.get("widgets_values"), graph, node_type)
+    for port in graph.autogrow_groups(node_type, values):
+        base = port.name
+        template = port.autogrow_element_template
+        if slot == base:
+            target = None
+        elif slot.startswith(base + "."):
+            target = slot
+        elif _autogrow_bare_slot_pattern(base, template).fullmatch(slot):
+            target = f"{base}.{slot}"
+        else:
+            continue
+        declared = port.autogrow_element_type
+        if elem_type and declared and not _types_compatible(elem_type, declared):
+            raise ValueError(
+                f"type mismatch: {elem_type} output cannot connect to autogrow input {base!r} of node "
+                f"{node.get('id')} — its slots take {declared}"
+            )
+        _lo, hi = port.autogrow_limits
+        n = 0
+        while True:
+            name = f"{base}.{_autogrow_elem_name(base, n, template)}"
+            idx = next((k for k, i in enumerate(ins) if i.get("name") == name), None)
+            if idx is None:
+                break
+            if target == name or (target is None and ins[idx].get("link") is None):
+                return idx, None
+            n += 1
+        grown = [i.get("name") for i in ins if str(i.get("name", "")).startswith(base + ".")]
+        # A full group is reported as full FIRST: a gapped key on a full group
+        # must not be handed a "next free key" the next call would refuse.
+        if hi is not None and n >= hi:
+            raise ValueError(
+                f"autogrow input {base!r} on node {node.get('id')} is full: the schema allows at most "
+                f"{hi} slots (existing: {grown})"
+            )
+        if target is not None and target != name:
+            raise ValueError(
+                f"input {slot!r} is not a valid autogrow slot on node {node.get('id')}; "
+                f"autogrow input {base!r} appends one sequential slot per connection "
+                f"(existing: {grown}) — connect to the base {base!r} to auto-append, "
+                f"or use the next free key {name!r}"
+            )
+        return None, {"name": name, "type": declared or elem_type or "*"}
+    return None
 
 
 def _autogrow_bare_slot_pattern(base: str, template: dict | None) -> re.Pattern:
