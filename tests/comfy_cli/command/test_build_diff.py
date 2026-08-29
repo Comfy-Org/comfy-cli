@@ -122,6 +122,63 @@ def test_an_unknown_definition_key_survives_the_rescan() -> None:
     assert diff_definitions(stored, merged).is_empty
 
 
+def test_an_incoming_commit_outranks_the_stored_one() -> None:
+    """The entry-level shape of the same carry. A snapshot resolves each pack's
+    `commit`, which no scan reports, so the stored SHA outranked the imported one
+    and the entry then read as unchanged."""
+    # Given
+    stored = _definition(nodes=[_node(source="git", repository="https://g/x", commit="OLDSHA")])
+
+    # When
+    merged = merge_definition(stored, _definition(nodes=[_node(source="git", repository="https://g/x", commit="NEW")]))
+
+    # Then
+    assert merged["customNodes"][0]["commit"] == "NEW"
+    assert not diff_definitions(stored, merged).is_empty
+
+
+def test_a_scan_that_reports_no_commit_leaves_the_stored_one_alone() -> None:
+    # Given a pushed reference no scan reports, beside a commit no scan reports
+    stored = _definition(nodes=[_node(commit="OLDSHA", blobId="b1")])
+
+    # When
+    merged = merge_definition(stored, _definition(nodes=[_node()]))
+
+    # Then
+    assert merged["customNodes"][0]["commit"] == "OLDSHA"
+    assert merged["customNodes"][0]["blobId"] == "b1"
+
+
+def test_an_incoming_base_image_outranks_the_stored_one() -> None:
+    """An importer resolves a base image deliberately; a scan reports none.
+
+    Carrying the stored value over an incoming one kept `update --from-snapshot`
+    building on the old runtime while the advisory reported the new image's
+    Python as satisfied — and the diff called it unchanged, so nothing said so.
+    """
+    # Given
+    stored = _definition(baseImage="cuda12-py311")
+
+    # When
+    merged = merge_definition(stored, _definition(baseImage="cuda12-py312"))
+
+    # Then
+    assert merged["baseImage"] == "cuda12-py312"
+    assert diff_definitions(stored, merged).scalars["baseImage"] == "changed"
+
+
+def test_a_scan_that_reports_no_base_image_leaves_the_stored_one_alone() -> None:
+    # Given
+    stored = _definition(baseImage="cuda12-py311")
+
+    # When a plain rescan, which states no base image at all
+    merged = merge_definition(stored, _definition())
+
+    # Then
+    assert merged["baseImage"] == "cuda12-py311"
+    assert diff_definitions(stored, merged).is_empty
+
+
 def test_counts_and_entries_name_every_affected_row() -> None:
     # Given
     stored = _definition(models=[_model("gone.safetensors"), _model("kept.safetensors", sha256="old")])
