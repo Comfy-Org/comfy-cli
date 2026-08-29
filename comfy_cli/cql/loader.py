@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from comfy_cli.cql.errors import CQLRuntimeError
-from comfy_cli.file_utils import atomic_write_text
+from comfy_cli.file_utils import atomic_write_text, cache_dir
 
 # ---- normalization --------------------------------------------------------
 
@@ -196,19 +196,6 @@ def _from_api_workflow(data: dict[str, Any]) -> dict[str, Any]:
 # An explicit ``--input <object_info.json>`` always wins and is never cached.
 
 
-def _cache_dir() -> Path:
-    """Return the per-user cache directory for comfy-cli object_info dumps.
-
-    Honors ``XDG_CACHE_HOME`` (Linux/freedesktop convention) and falls back to
-    ``~/.cache/comfy-cli`` everywhere else. We deliberately use a plain cache
-    dir rather than the config dir: this data is reconstructible and safe to
-    delete at any time.
-    """
-    xdg = os.environ.get("XDG_CACHE_HOME")
-    base = Path(xdg) if xdg else Path.home() / ".cache"
-    return base / "comfy-cli"
-
-
 def _host_key_digest(host_key: str) -> str:
     """Short, filesystem-safe hash of the target identity.
 
@@ -221,7 +208,7 @@ def _host_key_digest(host_key: str) -> str:
 
 def object_info_cache_path(host_key: str) -> Path:
     """Cache-file path for a given target identity."""
-    return _cache_dir() / f"object_info-{_host_key_digest(host_key)}.json"
+    return cache_dir() / f"object_info-{_host_key_digest(host_key)}.json"
 
 
 def write_object_info_cache(host_key: str, data: dict[str, Any]) -> None:
