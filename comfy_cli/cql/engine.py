@@ -2219,7 +2219,7 @@ def _check_dynamic_combos(
 
     Also flags present dotted keys that match no sub-input of the resolved
     selection — a warning, not an error, because the server ignores extra
-    keys. Returns ``(errors, warnings, valid_keys, unresolved)`` — the caller
+    keys; that pass lives in ``_unknown_dotted_key_warnings``. Returns ``(errors, warnings, valid_keys, unresolved)`` — the caller
     uses ``valid_keys``/``unresolved`` to exempt stale (server-ignored)
     dynamic sub-keys from the generic edge checks, which would otherwise
     hard-error on e.g. a dangling link left over from a previous selection.
@@ -2243,15 +2243,39 @@ def _check_dynamic_combos(
         valid_keys |= v
         unresolved |= u
 
-    # Unknown dotted keys under a RESOLVED selection → warning. Under an
-    # unresolved prefix (selection absent/invalid/link-valued) the sub-keys
-    # can't be judged — the primary error already covers it, so don't pile on.
-    dyn_port_names = {p.name for p in dynamic_ports}
+    warnings.extend(_unknown_dotted_key_warnings(node_id, present, dynamic_ports, valid_keys, unresolved, resolved))
+    return errors, warnings, valid_keys, unresolved
+
+
+def _unknown_dotted_key_warnings(
+    node_id: str,
+    present: dict,
+    dynamic_ports: list[Port],
+    valid_keys: set[str],
+    unresolved: set[str],
+    resolved: dict[str, Any],
+) -> list[dict]:
+    """Dotted keys on the node that no resolved selection accepts.
+
+    Split out of ``_check_dynamic_combos`` so its two distinct jobs — driving
+    per-port validation, and judging the dotted keys left over afterwards —
+    stay separately readable and testable.
+
+    Warnings only, never errors: the server silently drops keys outside the
+    expanded schema, so the run still proceeds — what the user loses is the
+    stale value, which is worth saying out loud but is not a failure.
+
+    Under an unresolved prefix (a required selector that's absent, or one
+    that's invalid or link-valued) the sub-keys can't be judged at all — the
+    primary error already covers it, so don't pile on.
+    """
+    warnings: list[dict] = []
+    port_specs = {p.name: p.raw_spec for p in dynamic_ports}
     for key in present:
         if "." not in key or key in valid_keys:
             continue
         base = key.split(".", 1)[0]
-        if base not in dyn_port_names:
+        if base not in port_specs:
             continue
         if any(key.startswith(prefix) for prefix in unresolved):
             continue
@@ -2259,26 +2283,45 @@ def _check_dynamic_combos(
         # stray `model.mode.bogus` under a resolved `model.mode` names
         # `model.mode`'s selection (and lists ITS sub-keys), not `model`'s.
         anchor = max((n for n in resolved if key.startswith(f"{n}.")), key=len, default=base)
-        selection = resolved.get(anchor, present.get(anchor))
-        known = sorted(k for k in valid_keys if k.startswith(f"{anchor}."))
-        # Same truncation as the sibling required/unknown-enum hints — an
-        # autogrow sub-input's slot count is workflow-specific and can run
-        # long, so don't dump the whole list into one line.
-        known_hint = ", ".join(known[:8]) + (f" (and {len(known) - 8} more)" if len(known) > 8 else "")
+        if anchor not in resolved and anchor not in present:
+            # An OPTIONAL selector nobody set — the one path that reaches here
+            # with no `resolved` entry (a required one exits as an error with
+            # its prefix unresolved, and is skipped above). The schema never
+            # expanded, so say exactly that: rendering the missing selection
+            # as `anchor=None` reads as "you set it to null" and sends the
+            # reader hunting for a value they never wrote.
+            opts = [str(k) for o in _dynamic_combo_options(port_specs.get(anchor)) if (k := o.get("key")) is not None]
+            message = f"input {key!r} sits under {anchor!r}, which is not set — the server will ignore it"
+            hint = (
+                f"set {anchor!r} to the option declaring this sub-input: "
+                + ", ".join(opts[:8])
+                + (f" (and {len(opts) - 8} more)" if len(opts) > 8 else "")
+                if opts
+                else f"set {anchor!r} for this sub-input to apply"
+            )
+        else:
+            selection = resolved.get(anchor, present.get(anchor))
+            known = sorted(k for k in valid_keys if k.startswith(f"{anchor}."))
+            # Same truncation as the sibling required/unknown-enum hints — an
+            # autogrow sub-input's slot count is workflow-specific and can run
+            # long, so don't dump the whole list into one line.
+            known_hint = ", ".join(known[:8]) + (f" (and {len(known) - 8} more)" if len(known) > 8 else "")
+            message = f"input {key!r} matches no sub-input of {anchor}={selection!r} — the server will ignore it"
+            hint = (
+                f"valid sub-keys for this selection: {known_hint}"
+                if known
+                else f"selection {selection!r} takes no sub-inputs"
+            )
         warnings.append(
             {
                 "node_id": node_id,
                 "field": key,
                 "code": "unknown_input",
-                "message": (
-                    f"input {key!r} matches no sub-input of {anchor}={selection!r} — the server will ignore it"
-                ),
-                "hint": f"valid sub-keys for this selection: {known_hint}"
-                if known
-                else f"selection {selection!r} takes no sub-inputs",
+                "message": message,
+                "hint": hint,
             }
         )
-    return errors, warnings, valid_keys, unresolved
+    return warnings
 
 
 def _check_dynamic_combo_input(

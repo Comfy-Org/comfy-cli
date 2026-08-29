@@ -3475,6 +3475,72 @@ class TestDynamicComboInputs:
         warn = next(w for w in result["warnings"] if w["code"] == "unknown_input")
         assert warn["field"] == "mode.a"
 
+    def test_unset_optional_selector_warning_says_unset_not_none(self):
+        """An absent optional selector has no entry in `resolved` OR in the
+        node's inputs, so formatting its selection would render `mode=None` —
+        which reads as "you set it to null" and sends the reader looking for a
+        value they never wrote. The warning must name the selector as UNSET,
+        and point at the options that would make the sub-key apply."""
+        info = {
+            "OptDyn": {
+                "input": {
+                    "optional": {
+                        "mode": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {"key": "go", "inputs": {"required": {"a": ["INT", {}]}}},
+                                    {"key": "stop", "inputs": {"required": {}}},
+                                ]
+                            },
+                        ]
+                    }
+                },
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+        }
+        g = Graph.from_object_info(info)
+        result = g.validate_workflow({"1": {"class_type": "OptDyn", "inputs": {"mode.a": 5}}})
+        warn = next(w for w in result["warnings"] if w["code"] == "unknown_input")
+        assert warn["field"] == "mode.a"
+        assert "not set" in warn["message"]
+        # The old wording; a regression here is exactly the confusion this guards.
+        assert "None" not in warn["message"]
+        assert "None" not in warn["hint"]
+        assert "go, stop" in warn["hint"]
+
+    def test_selector_explicitly_set_to_none_still_reports_the_value(self):
+        """The unset-selector wording must NOT swallow a selector the user
+        really did set to null: that key IS present, so it keeps the
+        `mode=None` phrasing (an unmatched selection), not "not set"."""
+        info = {
+            "OptDyn": {
+                "input": {
+                    "optional": {
+                        "mode": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {"options": [{"key": "go", "inputs": {"required": {"a": ["INT", {}]}}}]},
+                        ]
+                    }
+                },
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+        }
+        g = Graph.from_object_info(info)
+        result = g.validate_workflow({"1": {"class_type": "OptDyn", "inputs": {"mode": None, "mode.a": 5}}})
+        # An unmatched selection is a hard error on the selector itself, and
+        # its prefix goes unresolved -> the sub-key warning is suppressed as
+        # redundant. Either way, nothing claims the selector was "not set".
+        assert "not set" not in " ".join(w["message"] for w in result["warnings"])
+        err = next(e for e in result["errors"] if e["code"] == "unknown_enum_value")
+        assert err["field"] == "mode"
+
     def test_unknown_input_hint_truncates_many_valid_sub_keys(self):
         """The `valid sub-keys for this selection` hint on an unknown_input
         warning must truncate like its sibling required/unknown-enum hints —
