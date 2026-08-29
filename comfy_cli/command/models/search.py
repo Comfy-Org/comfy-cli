@@ -36,6 +36,7 @@ from typing import Annotated, Any, NoReturn
 import typer
 
 from comfy_cli import knowledge, tracking
+from comfy_cli.deprecation import add_deprecated_alias
 from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.output.sanitize import sanitize_markup
@@ -200,7 +201,9 @@ def _resolve_and_stamp(renderer, where: str | None):
 
 @app.command(
     "list-folders",
-    help="List model folders available to the resolved backend (cloud: /api/experiment/models, local: /models).",
+    help="List model folders on the backend/cloud — the resolved server "
+    "(cloud: /api/experiment/models, local server: /models). For files already "
+    "on disk in your workspace, use `comfy model list`.",
 )
 @tracking.track_command("models")
 def list_folders_cmd(
@@ -268,7 +271,9 @@ def list_folders_cmd(
 
 @app.command(
     "list-folder",
-    help="List model files in a specific folder. Returns name + pathIndex per entry — no enrichment.",
+    help="List model files in a specific folder on the backend/cloud (the resolved "
+    "server). Returns name + pathIndex per entry — no enrichment. For files already "
+    "on disk in your workspace, use `comfy model list`.",
 )
 @tracking.track_command("models")
 def list_folder_cmd(
@@ -822,3 +827,17 @@ def show_cmd(
         if trained:
             rprint(f"  trained:     {sanitize_markup(', '.join(trained))}")
     renderer.emit(payload, command="models show")
+
+
+# `models` (plural) is now a hidden, deprecated alias for these discovery
+# leaves only — the canonical mount is `comfy model`, which also merges in the
+# local-filesystem ops from `models.py`. Built here, not in
+# `cmdline.py`, so the `models` lazy subcommand entry stays a plain
+# `getattr(module, "deprecated_alias_app")`: resolving it only imports this
+# module, not the (heavier) `models.py` local-ops module the canonical `model`
+# mount needs. Declared after every `@app.command` above so the alias borrows
+# the fully-populated command list — `add_deprecated_alias` snapshots
+# `app.registered_commands` at call time. `add_deprecated_alias` also requires
+# a `parent` Typer to mount the alias onto; that mount is discarded here —
+# only the returned alias app is used, by the `models` lazy-subcommand entry.
+deprecated_alias_app = add_deprecated_alias(typer.Typer(), app, old_name="models", new_name="model")

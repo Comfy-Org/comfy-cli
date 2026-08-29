@@ -16,6 +16,7 @@ import typer
 from rich.markup import escape
 
 from comfy_cli import constants, download_state, tracking, ui
+from comfy_cli.command.models import search as models_search_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
 from comfy_cli.file_utils import (
@@ -1940,7 +1941,11 @@ def list_models(path: pathlib.Path) -> list[pathlib.Path]:
     return sorted(f for f in path.rglob("*") if f.is_file())
 
 
-@app.command("list", help="List the models downloaded into this workspace, as a table.")
+@app.command(
+    "list",
+    help="List local models on disk (files already downloaded into the current workspace). "
+    "For backend/cloud discovery use `comfy model list-folders` / `list-folder`.",
+)
 @tracking.track_command("model")
 def list_command(
     ctx: typer.Context,
@@ -1966,3 +1971,22 @@ def list_command(
         data.append((model.name, model_type, f"{model.stat().st_size // 1024} KB"))
     column_names = ["Model Name", "Type", "Size"]
     ui.display_table(data, column_names)
+
+
+# The `model` noun owns BOTH the local-filesystem ops defined above
+# (download/remove/list) and the backend/cloud discovery leaves
+# (list-folders/list-folder/search/show). The discovery leaves are implemented
+# on `models_search_command.app`; surface them under `model` by borrowing
+# their command registrations (same CommandInfo objects — no logic
+# duplication). Done here rather than in `cmdline.py` so the `model` lazy
+# subcommand entry there stays a plain `getattr(module, "app")` — it only
+# needs to import this module to get the fully-merged tree.
+# Mirror the deprecated alias built in `search.py`: carry BOTH the discovery
+# leaves and any nested discovery sub-groups so `comfy model …` and the
+# `comfy models …` alias stay in lockstep as the discovery tree grows (both
+# are empty of sub-groups today). A group callback is deliberately NOT carried
+# over here: on the alias it scopes to discovery-only leaves, but `model` also
+# owns the local ops (download/remove/list), so mounting discovery's group
+# setup on the whole noun would leak it onto those.
+app.registered_commands.extend(models_search_command.app.registered_commands)
+app.registered_groups.extend(models_search_command.app.registered_groups)
