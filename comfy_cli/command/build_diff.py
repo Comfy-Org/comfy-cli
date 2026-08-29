@@ -204,8 +204,18 @@ def _index(entries: Sequence[JsonObject], collection: str) -> dict[tuple[str, ..
 
 
 def _merge_entry(stored: JsonObject, scanned: JsonObject, collection: str) -> JsonObject:
-    """The scanned entry, plus every key the scanner does not own."""
-    carried = {key: value for key, value in stored.items() if key not in _SCANNED_KEYS[collection]}
+    """The scanned entry, plus every key the scanner does not own and it does not state.
+
+    Tests the incoming entry for the same reason ``merge_definition`` does: a
+    local scan reports only the keys in ``_SCANNED_KEYS``, so the carry is what
+    preserves a pushed ``blobId`` or a pulled ``id`` — but an importer also
+    resolves keys outside that set. A snapshot carries each pack's ``commit``,
+    and keying the carry on the set alone let the stored SHA outrank the
+    imported one and then report the entry as unchanged.
+    """
+    carried = {
+        key: value for key, value in stored.items() if key not in _SCANNED_KEYS[collection] and scanned.get(key) is None
+    }
     identity_field = _CONTENT_IDENTITY[collection]
     if stored.get(identity_field) != scanned.get(identity_field):
         for field in _INVALIDATED_BY_CONTENT[collection]:
@@ -237,8 +247,19 @@ def merge_definition(stored: Mapping[str, JsonValue], scanned: Mapping[str, Json
     derived and unknown keys it alone knows about. An entry present only in the
     scan is added verbatim; an entry the scan no longer sees is dropped, since
     the whole command means "recompute the spec from the local installation".
+
+    "Keys it alone knows about" is why the carry tests *incoming* rather than
+    only the scanned-key set. The two producers do not report the same facts: a
+    local scan states no ``baseImage``, so carrying the stored one forward is
+    what stops every plain ``update`` resetting the build to the catalog
+    default, while an importer resolves one deliberately. Keying the carry on
+    the key set alone let the stored value outrank an imported one, so
+    ``update --from-snapshot`` kept building on the old runtime and reported no
+    change at all.
     """
-    carried = {key: value for key, value in stored.items() if key not in _SCANNED_DEFINITION_KEYS}
+    carried = {
+        key: value for key, value in stored.items() if key not in _SCANNED_DEFINITION_KEYS and scanned.get(key) is None
+    }
     merged: JsonObject = {**scanned, **carried}
     for collection in _IDENTITY:
         merged[collection] = list(
