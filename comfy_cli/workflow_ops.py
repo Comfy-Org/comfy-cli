@@ -59,6 +59,7 @@ import uuid
 from typing import Any
 
 from comfy_cli import layout
+from comfy_cli.cql.engine import frontend_injected_widget_error
 
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
@@ -1292,8 +1293,10 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
             raise RecipeError(
                 f"--param target node {node_id} is a UI-only {node.get('type')} — capture skips it (it never reaches the API)"
             )
-        if widget not in graph.widget_order_default(node.get("type", "")):
-            raise RecipeError(f"--param target {node_id}.{widget!r}: not a widget on {node.get('type')}")
+        # Editable names only: an injected slot (``upload``) owns a position
+        # but no value, and apply would refuse it anyway — say so up front.
+        if widget not in graph.editable_widget_names(node.get("type", "")):
+            raise RecipeError(f"--param target {node_id}.{widget!r}: not an editable widget on {node.get('type')}")
 
     warnings: list[dict] = []
     for n in ui_nodes:
@@ -2144,7 +2147,13 @@ def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list) 
     # Widget values in positional order, including dynamic-combo selectors and
     # their sub-widgets — sourced from the engine so add-node matches the converter.
     defaults = graph.widget_defaults(class_type)
-    widgets = [defaults.get(name) for name in graph.widget_order_default(class_type)]
+    order = graph.widget_order_default(class_type)
+    # A trailing name with no default is a frontend-injected ``serialize:
+    # false`` slot (``upload``, ``audioUI``): the frontend writes nothing for
+    # it, so neither does a fresh node — no phantom trailing ``null``.
+    while order and order[-1] not in defaults:
+        order = order[:-1]
+    widgets = [defaults.get(name) for name in order]
     return {
         "id": node_id,
         "type": class_type,
@@ -2165,11 +2174,20 @@ def _widget_index(graph, class_type: str, widget: str, widgets_values=None) -> i
     # selected key (from ``widgets_values``), not the schema's first key, so the
     # index stays aligned to ``widgets_values`` for the node's real selection.
     order = graph.widget_order_for_node(class_type, widgets_values)
+    # A frontend-injected slot (``upload``/``audioUI``/``PREVIEW_3D`` ``image``)
+    # sits in ``order`` — it owns a position — but has no schema port to
+    # validate against and ``slots`` never advertises it; refuse it by name so
+    # it can't become a ghost target. ``control_after_generate`` is also
+    # unadvertised but stays writable (it carries a real user value).
+    if widget in graph.frontend_injected_widget_names(class_type):
+        raise frontend_injected_widget_error(
+            class_type, widget, graph.editable_widget_names(class_type, widgets_values)
+        )
     if widget not in order:
-        avail = [w for w in order if w != "control_after_generate"]
+        avail = graph.editable_widget_names(class_type, widgets_values)
         raise ValueError(
             f"widget {widget!r} not found on {class_type}; "
-            f"available: {', '.join(avail) if avail else '(none — all inputs are links)'}"
+            f"available widgets: {', '.join(avail) if avail else '(none — all inputs are links)'}"
         )
     return order.index(widget)
 

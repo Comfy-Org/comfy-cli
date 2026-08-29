@@ -145,6 +145,11 @@ COMMAND_SCHEMAS: dict[str, str] = {
     # the help tree; agents resolve them through `command_schemas`).
     "comfy generate list": "generate_list",
     "comfy generate schema": "generate_schema",
+    # Terminal result of `comfy generate <model>` / `generate resume` /
+    # sync-mode creates: the partner payload wrapped as
+    # ``data.result`` (+ ``data.saved`` under --download). These are
+    # argv-tail paths too, so they have no help-tree node.
+    "comfy generate": "generate_result",
     # curated model-knowledge bundle
     "comfy knowledge status": "knowledge",
     "comfy knowledge resolve": "knowledge",

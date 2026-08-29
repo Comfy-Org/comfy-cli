@@ -24,6 +24,8 @@ import random
 import re
 from typing import Any
 
+from comfy_cli.cql.engine import _FRONTEND_DOM_WIDGET_TYPES
+
 logger = logging.getLogger(__name__)
 
 # C-style comments stripped from dynamic-prompt strings before group parsing.
@@ -1028,6 +1030,11 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
     if options.get("forceInput") or options.get("defaultInput"):
         return False, False
     input_type = input_spec[0]
+    # ``widgetType`` overrides the socket type for widget selection
+    # (``inputSpec.widgetType ?? inputSpec.type`` in the frontend), so a
+    # ``FLOAT,INT`` input with ``widgetType: "FLOAT"`` owns a slot.
+    if isinstance(options.get("widgetType"), str) and options.get("widgetType"):
+        return True, False
     if isinstance(input_type, (list, tuple)):
         return True, False  # combo of choices
     if isinstance(input_type, str):
@@ -1040,6 +1047,10 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
         if input_type in ("", "*"):
             return False, False
         if input_type in {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"}:
+            return True, False
+        if input_type in _FRONTEND_DOM_WIDGET_TYPES:
+            # Uppercase DOM widgets that serialize a slot (Load3D.image);
+            # same set the engine's widget order uses, so the two walks agree.
             return True, False
         if input_type.startswith("COMFY_") and "COMBO" in input_type:
             return True, True
