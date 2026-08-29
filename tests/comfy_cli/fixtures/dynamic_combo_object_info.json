@@ -58,7 +58,7 @@
     "output_name": ["text"],
     "category": "api/text",
     "display_name": "Claude",
-    "description": "Synthetic BE-3349-shaped dynamic-combo node for validator tests.",
+    "description": "Synthetic dynamic-combo node for validator tests.",
     "output_node": true,
     "api_node": true,
     "python_module": "nodes"
