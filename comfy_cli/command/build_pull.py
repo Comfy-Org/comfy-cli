@@ -50,9 +50,14 @@ _DEFINITION_KNOWN_FIELDS: Final = frozenset(
         "customNodePolicy",
     }
 )
-# `schema` names the definition's own format, not build state: the builder has no
-# concept of it, so it is the one field exempt from the round-trip check below.
-_UNSYNCED_DEFINITION_FIELDS: Final = frozenset({"schema"})
+# Authoring-only fields. The builder has no typed field for either — zero
+# references in its `definition/` package — so no builder-owned write path can
+# produce one, and their absence says nothing about build state. It *can* echo
+# them: `Definition` is a free-form map stored and returned verbatim, so a Build
+# last written by `comfy build push` carries both back. The exemption is for the
+# other case — a Build last written by a client that has no field for them, from
+# which they return absent and would otherwise read as a missed round trip.
+_UNSYNCED_DEFINITION_FIELDS: Final = frozenset({"schema", "environment"})
 
 
 class UnsyncedDefinitionError(BuildSpecError):
@@ -310,6 +315,28 @@ def _merge_collection(
     ]
 
 
+def _carries_data(value: JsonValue) -> bool:
+    """Whether losing *value* would actually lose anything.
+
+    An empty value is not evidence the build was never synced. The two create
+    paths that build a definition server-side — ``from_snapshot`` and
+    ``from_workflow`` — store it through ``ToMap``, which is ``json.Marshal`` of
+    a typed struct with ``omitempty``, so a pin-less snapshot's empty
+    ``pipDependencies`` is stored *absent* rather than blank. A local ``""``
+    against that Build then read as a missed round trip while there was nothing
+    to lose.
+
+    Non-empty values still refuse, which is the guard doing its job: scan-
+    captured pins are real data, and a Build that lacks them has not carried
+    them. Adopting such a Build still requires pushing first.
+    """
+    if value is None:
+        return False
+    if isinstance(value, (str, list, dict, tuple)):
+        return bool(value)
+    return True
+
+
 def merge_pull_definition(local: JsonObject, server: JsonObject) -> JsonObject:
     """Merge a server-owned definition onto local authoring/cache fields by identity."""
     merged = deepcopy(server)
@@ -320,7 +347,7 @@ def merge_pull_definition(local: JsonObject, server: JsonObject) -> JsonObject:
     merged["customNodes"] = _merge_collection(local, server, "customNodes")
     for key in _UNSYNCED_DEFINITION_FIELDS & set(local):
         merged.setdefault(key, deepcopy(local[key]))
-    dropped = tuple(sorted(set(local) - set(merged)))
+    dropped = tuple(sorted(key for key in set(local) - set(merged) if _carries_data(local[key])))
     if dropped:
         raise UnsyncedDefinitionError(dropped)
     return merged

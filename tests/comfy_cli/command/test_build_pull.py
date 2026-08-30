@@ -402,8 +402,78 @@ def test_a_definition_field_the_fetched_build_never_carried_refuses_the_pull(
     assert result.exit_code == 1
     error = envelope(result)["error"]
     assert error["code"] == "build_pull_unsynced_definition"
-    assert error["details"]["fields"] == ["environment", "pipDependencies"]
+    # `environment` is exempt: the builder has no concept of it, so its absence
+    # is not evidence of a missed round trip. The pins are real data.
+    assert error["details"]["fields"] == ["pipDependencies"]
     assert path.read_bytes() == before
+
+
+def test_an_exempt_field_and_an_empty_scalar_are_not_a_missed_round_trip(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither absence proves the Build never carried the field.
+
+    The builder has no typed `environment`, so a Build last written by a client
+    without one returns it absent. And `from_snapshot`/`from_workflow` store
+    through `ToMap`, whose `omitempty` writes a pin-less snapshot's empty
+    `pipDependencies` as absent rather than blank. Refusing on either deleted
+    nothing and blocked the pull.
+    """
+    # Given
+    write_spec(
+        workspace,
+        build_id="build-a",
+        models=[],
+        nodes=[],
+        definition_extra={"environment": {"os": "Linux", "arch": "x86_64"}, "pipDependencies": ""},
+    )
+    client = PullBuilder()
+    serve(client, "build-a", remote_definition())
+    install_client(monkeypatch, client)
+
+    # When
+    result = invoke_pull(workspace, "-y")
+
+    # Then the exempt field survives and the empty one is simply dropped
+    assert result.exit_code == 0, result.stderr
+    written = read_build_spec(workspace / "comfy-build.yaml")["definition"]
+    assert written["environment"] == {"os": "Linux", "arch": "x86_64"}
+    assert "pipDependencies" not in written
+
+
+def test_scan_captured_pins_still_refuse_a_build_that_lacks_them(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard's whole purpose, pinned against real scan output.
+
+    `capture_pip_provenance` prefixes an unconditional header, so a spec
+    `comfy build init` produced never holds an empty `pipDependencies` — the
+    relaxation above cannot reach it. Adopting a Build that does not carry those
+    pins is still refused, and pushing first is the recovery.
+    """
+    # Given the shape `init`'s scan path actually writes
+    write_spec(
+        workspace,
+        build_id="build-a",
+        models=[],
+        nodes=[],
+        definition_extra={
+            "environment": {"os": "Linux", "arch": "x86_64"},
+            "pipDependencies": "# captured by comfy build init\n# from the active interpreter\ntorch==2.0.0\n",
+        },
+    )
+    client = PullBuilder()
+    serve(client, "build-a", remote_definition())
+    install_client(monkeypatch, client)
+
+    # When
+    result = invoke_pull(workspace, "-y")
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_pull_unsynced_definition"
+    assert error["details"]["fields"] == ["pipDependencies"]
 
 
 def test_the_definition_schema_marker_is_exempt_from_the_round_trip_check(

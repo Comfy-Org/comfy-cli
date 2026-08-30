@@ -1152,10 +1152,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "build_pull_unsynced_definition",
         "`comfy build pull` refused a merge that would silently delete definition fields the local spec "
-        "sets and the fetched Build omits. The builder stores the definition verbatim, so a field the spec "
-        "has and the Build lacks never round-tripped. `details.fields` names them. A Build that carries the "
-        "field as an empty value is an intentional clear and is applied normally; only an absent field is "
-        "refused. `definition.schema` is exempt because it names the file format, not build state.",
+        "sets to a non-empty value and the fetched Build omits. `details.fields` names them. A Build that "
+        "carries the field as an empty value is an intentional clear and is applied normally; so is an "
+        "absent field whose local value is already empty, because the builder's server-side create paths drop "
+        "empty fields on store and their absence is therefore not evidence of a missed round trip. "
+        "`definition.schema` and `definition.environment` are exempt: the builder has no typed field for "
+        "either, so no builder-owned write path can produce one. The check covers definition fields other "
+        "than `models` and `customNodes`, which are reconciled entry by entry -- a Build that omits a "
+        "collection still empties it locally.",
         "run `comfy build push` so the Build carries these fields, or delete them from the spec if the Build is authoritative",
     ),
     ErrorCode(
