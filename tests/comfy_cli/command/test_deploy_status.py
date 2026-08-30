@@ -4,6 +4,7 @@ import importlib
 import json
 from pathlib import Path
 
+import jsonschema
 from deploy_up_support import FakeBuilder, FakeDeploy, deployment, option_names, write_spec
 from typer.testing import CliRunner
 
@@ -90,8 +91,49 @@ def test_deploy_status_is_a_registered_real_command() -> None:
     assert result.exit_code == 0
     options = option_names("status")
     assert "--watch" in options
-    assert "--deployment" not in options
+    # `status` reaches the same ambiguous-deployment refusal the lifecycle verbs
+    # do, and that error's hint names `--deployment`, so it has to accept one.
+    assert "--deployment" in options
     assert "--release" not in options
+
+
+def _schema(name: str) -> JsonObject:
+    path = Path(__file__).parent.parent.parent.parent / "comfy_cli" / "schemas" / name
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_a_bounds_free_deployment_validates_against_the_published_status_schema(tmp_path, monkeypatch) -> None:
+    """A deployment the web UI created stores no `min`/`max`, and `compute_config`
+    carries only what the service stored. Requiring the bounds in the schema made
+    `deploy status --json` fail its own contract on a perfectly ordinary row."""
+    # Given
+    row = _status_deployment()
+    row["computeConfig"] = {"gpuClass": "l4", "region": "US-MO-2"}
+    _install_clients(monkeypatch, FakeBuilder([_release(5)]), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _json_envelope(result)["data"]
+    assert data["deployment"]["computeConfig"] == {"gpuClass": "l4", "region": "US-MO-2"}
+    jsonschema.Draft202012Validator(_schema("deploy_status.json")).validate(data)
+
+
+def test_a_named_deployment_is_the_one_status_reports_on(tmp_path, monkeypatch) -> None:
+    # Given two live deployments of the same Build
+    rows = [_status_deployment(), _status_deployment()]
+    rows[1]["id"] = "dep-other"
+    rows[1]["createdAt"] = "2026-08-24T12:00:00Z"
+    _install_clients(monkeypatch, FakeBuilder([_release(5)]), RecordingDeploy(rows), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path), "--deployment", "dep-status")
+
+    # Then the named row wins over the newer one the ranking would have picked
+    assert result.exit_code == 0, result.stderr
+    assert _json_envelope(result)["data"]["deployment"]["id"] == "dep-status"
 
 
 def test_no_deployment_exits_zero_with_nullable_payload_and_up_hint(tmp_path, monkeypatch) -> None:
@@ -211,7 +253,7 @@ def test_stop_failed_is_loud_and_names_retry_stop_remedy(tmp_path, monkeypatch) 
     assert result.exit_code == 1
     assert _json_envelope(result)["data"]["deployment"]["status"] == "stop_failed"
     assert "may still be billing" in result.stderr.lower()
-    assert "comfy deploy stop" in result.stderr
+    assert "comfy deploy stop --deployment" in result.stderr
 
 
 def test_credit_stop_is_not_attributed_to_the_user(tmp_path, monkeypatch) -> None:
@@ -259,7 +301,7 @@ def test_watch_exits_promptly_on_stop_failed_with_retry_stop_hint(tmp_path, monk
     # Then
     assert result.exit_code == 1
     assert _json_envelope(result)["data"]["deployment"]["status"] == "stop_failed"
-    assert "comfy deploy stop" in result.stderr
+    assert "comfy deploy stop --deployment" in result.stderr
     assert client.get_calls == ["dep-status"]
     assert client.get_statuses == ["ready"]
     assert sleeps == []

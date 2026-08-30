@@ -1182,9 +1182,19 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "pass `--deployment <id>` to select one deployment explicitly",
     ),
     ErrorCode(
+        "deploy_unrelated_deployment",
+        "`--deployment` named an id that is not in the set the command searched. That set differs by verb -- "
+        "`details.scope` names it, since `status` searches every live deployment of the Build while `up` searches "
+        "only those on the release it is reconciling, so an id can be refused by one and accepted by the other. "
+        "`details.candidateIds` lists the ids that are in scope, and `details.deploymentId` echoes the one asked for.",
+        "pick one of `details.candidateIds`, which lists every deployment this command can act on -- or when that list is empty, drop `--deployment` to let the command pick or create one",
+    ),
+    ErrorCode(
         "deploy_missing_input",
-        "A deploy command is missing required interactive input. `comfy deploy up` uses this for immutable compute "
-        "choices; `details.missing` lists every required option.",
+        "A deploy command is missing a required option. `comfy deploy up` uses this for immutable compute choices, "
+        "and `up`/`scale` for one worker bound named without the other: `--min` and `--max` are set as a pair, so a "
+        "floor is never sent against a ceiling the caller did not choose. `details.missing` lists every required "
+        "option.",
         "pass every option named in `details.missing`, then retry",
     ),
     ErrorCode(

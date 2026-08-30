@@ -35,6 +35,9 @@ class UpRequest:
     # the scale a previous `comfy deploy scale` set on a live deployment.
     minimum: int | None
     maximum: int | None
+    # The deployment `--deployment` named, when the Build has more than one the
+    # ranking cannot separate.
+    deployment_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
