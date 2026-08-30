@@ -199,6 +199,25 @@ def test_queue_full_retries_same_key_then_maps_rate_limit(monkeypatch):
     assert {call["headers"]["Idempotency-Key"] for call in transport.calls} == {_KEY}
 
 
+def test_an_extravagant_retry_after_is_clamped_rather_than_obeyed(monkeypatch):
+    """A `Retry-After` is a hint, not custody of the process.
+
+    Obeyed literally, `86400` parks a foreground `submit_job` for a day with no
+    output. `deploy_events` already clamps its own; this is the same ceiling.
+    """
+    # Given a server asking for a day of backoff
+    transport = _Transport(*[_retryable_error("queue_full", "86400") for _ in range(3)])
+    sleeps: list[float] = []
+    monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", transport)
+
+    # When
+    with pytest.raises(DeployAPIError):
+        DeployJobClient(_BASE_URL, "jwt-token", sleep=sleeps.append).submit_job(_request(), _ControlPlane())
+
+    # Then it still retries, but bounded
+    assert sleeps == [10.0, 10.0]
+
+
 @pytest.mark.parametrize(
     ("server_code", "client_code"),
     [("deployment_not_ready", "deploy_not_ready"), ("queue_full", "deploy_rate_limited")],

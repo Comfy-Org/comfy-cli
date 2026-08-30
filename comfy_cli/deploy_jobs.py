@@ -18,6 +18,9 @@ from comfy_cli.target import Target
 _MAX_JSON: Final = 5 * 1024 * 1024
 _MAX_ATTEMPTS: Final = 3
 _RETRIABLE_CODES: Final = frozenset({"deployment_not_ready", "queue_full"})
+# Matches `deploy_events.MAX_IDLE_INTERVAL_SECONDS`: the ceiling on how long a
+# server-sent `Retry-After` may hold a foreground command.
+_MAX_RETRY_AFTER_SECONDS: Final = 10.0
 _UNKNOWN_MESSAGE: Final = (
     "The job may exist, but the API has no job-list endpoint, no lookup by idempotency key, "
     "and no client-supplied job id, so there is no way to find the possibly-created job."
@@ -113,6 +116,14 @@ def _server_error(error: urllib.error.HTTPError, url: str, secret: str | None) -
 
 
 def _retry_after(error: urllib.error.HTTPError) -> float | None:
+    """The server's requested backoff, bounded.
+
+    A `Retry-After` is a hint, not an instruction to hand the process over: an
+    unbounded one parks a foreground command for as long as the header says —
+    `Retry-After: 86400` on a 429 would sleep a day inside `submit_job`, with no
+    output and nothing to interrupt but the terminal. `deploy_events` already
+    clamps its own; this is the same ceiling.
+    """
     value = error.headers.get("Retry-After") if error.headers is not None else None
     if value is None:
         return None
@@ -120,7 +131,7 @@ def _retry_after(error: urllib.error.HTTPError) -> float | None:
         seconds = int(value)
     except ValueError:
         return None
-    return float(seconds) if seconds >= 0 else None
+    return min(float(seconds), _MAX_RETRY_AFTER_SECONDS) if seconds >= 0 else None
 
 
 class DeployJobClient:
