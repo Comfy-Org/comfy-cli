@@ -99,6 +99,11 @@ and optionally `grow` (autogrow slot descriptor: `{name, type, widget?, inputcou
   tuple, no out-link entry. Autogrow connects are non-clobbering and therefore
   **not** gated: each grows a fresh slot keyed by `grow_id` (the link id), so
   both survive.
+  Independently, every connect claims the normalized link-identity register
+  `("link", String(link_id))`. The greatest embedded
+  `[base_version, actor, op_id]` owns the complete tuple and coherent endpoint
+  references; no field or endpoint reference merges across writers (amendment
+  v1.6).
 * Invalid: type-mismatched slots are rejected at mint time; a link cannot cross
   a subgraph boundary (rejected with the boundary explanation).
 
@@ -828,3 +833,14 @@ the op additionally carries `promoted.repair = {entry, ids}` with the
 subgraph-input and boundary-link ids the repair mints, derived by SHA-256 from
 `(instance path, source node, widget)` so replay anywhere is byte-identical.
 The pinned contract text in §8.7 states the full rule.
+
+## 15. Amendment v1.6 — 2026-08-30 (normalized stamped link identity)
+
+Distinct `connect` ops whose raw ids normalize to the same `String(link_id)`
+contend for one scalar register `("link", String(link_id))`. The greatest
+embedded `[base_version, actor, op_id]` stamp owns the complete LiteGraph link
+tuple and all coherent input/output references. The loser is dropped before
+any endpoint mutation. A new winner first removes the prior normalized tuple
+and every endpoint reference with that normalized id, then installs its own
+tuple and exactly its own references. This is option B of RUL-104 and matches
+comfy-multi-player schema Amendment A18.

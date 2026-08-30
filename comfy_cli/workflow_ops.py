@@ -1980,6 +1980,8 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
         return
     grow = op.get("grow")
     if grow is not None:
+        if not _claim_link_identity(workflow, op):
+            return
         # Autogrow is NOT a shared register: every grow mints its own slot keyed
         # by ``grow_id``, so two concurrent grows onto one base both survive and
         # there is nothing to gate (§1.2 / amendment v1.2's carve-out) — a
@@ -2086,6 +2088,8 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
             or not isinstance(ins[to_idx], dict)
         ):
             return
+        if not _claim_link_identity(workflow, op):
+            return
         # --- The concrete-input LWW register (op-vocabulary-v1.md amendment v1.2)
         #
         # A concrete input holds at most one link, so "who occupies this slot" is
@@ -2154,6 +2158,32 @@ def _remove_link(workflow: dict, link_id: Any) -> None:
         for out in n.get("outputs") or []:
             if link_id in (out.get("links") or []):
                 out["links"] = [lid for lid in out["links"] if lid != link_id]
+
+
+def _claim_link_identity(workflow: dict, op: dict) -> bool:
+    """Claim one normalized complete-tuple link register (amendment v1.6).
+
+    The greatest embedded ``[base_version, actor, op_id]`` stamp for
+    ``str(link_id)`` owns the tuple and all endpoint references. A replacement
+    scrubs the prior normalized identity whole; a loser mutates no endpoint.
+    """
+    normalized = str(op["link_id"])
+    target = json.dumps(("link", normalized), default=str)
+    stamps = workflow.setdefault("_widget_stamps", {})
+    prior = stamps.get(target)
+    if prior is not None and _stamp_key(op) <= list(prior):
+        return False
+
+    workflow["links"] = [ln for ln in workflow.get("links") or [] if str(ln[0]) != normalized]
+    for node in workflow.get("nodes") or []:
+        for inp in node.get("inputs") or []:
+            candidate = inp.get("link")
+            if candidate is not None and str(candidate) == normalized:
+                inp["link"] = None
+        for out in node.get("outputs") or []:
+            out["links"] = [lid for lid in out.get("links") or [] if str(lid) != normalized]
+    stamps[target] = _stamp_key(op)
+    return True
 
 
 def _apply_delete_node(workflow: dict, op: dict) -> None:
