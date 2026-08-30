@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Final, Literal, Protocol
 from urllib.parse import urlsplit
 
+from typing_extensions import assert_never
+
 from comfy_cli.command.build_package import package_node
 from comfy_cli.command.build_paths import BuildPaths, resolve_local_path
 from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, JsonValue
@@ -187,23 +189,45 @@ def prepare_push(
 
 
 def pending_uploads(preparation: PushPreparation) -> tuple[PushUpload, ...]:
-    models = _entries(preparation.definition, "models")
+    """The planned uploads whose bytes the builder does not already hold.
+
+    Read against the *current* definition rather than the plan, because
+    ``upload_assets`` writes each ``blobId`` back into it as the blob lands. A
+    node archive was previously exempt from that re-read, so asking a second
+    time — after a partial run, or simply to count what is left — reported every
+    completed node as still pending.
+    """
+    definition = preparation.definition
+    entries = {collection: _entries(definition, collection) for collection in ("models", "customNodes")}
     return tuple(
         upload
         for upload in preparation.uploads
-        if upload.kind == "node_zip"
-        or (not _has_text(models[upload.index], "blobId") and not _has_text(models[upload.index], "sourceUri"))
+        if _still_unresolved(entries[upload.collection][upload.index], upload.kind)
     )
+
+
+def _still_unresolved(entry: JsonObject, kind: Literal["model", "node_zip"]) -> bool:
+    """Whether *entry* still needs its bytes uploaded.
+
+    The two kinds resolve differently, exactly as ``prepare_push`` plans them: a
+    model is satisfied by a public ``sourceUri`` as well as a ``blobId``, while a
+    packaged node archive is only ever satisfied by a ``blobId``.
+    """
+    if _has_text(entry, "blobId"):
+        return False
+    match kind:
+        case "model":
+            return not _has_text(entry, "sourceUri")
+        case "node_zip":
+            return True
+        case unreachable:
+            assert_never(unreachable)
 
 
 def unresolved_models(preparation: PushPreparation) -> list[JsonObject]:
     models = _entries(preparation.definition, "models")
     indexes = {upload.index for upload in preparation.uploads if upload.kind == "model"}
-    return [
-        model
-        for index, model in enumerate(models)
-        if index in indexes and not _has_text(model, "blobId") and not _has_text(model, "sourceUri")
-    ]
+    return [model for index, model in enumerate(models) if index in indexes and _still_unresolved(model, "model")]
 
 
 def spec_without_stale_source_uris(original: JsonObject, preparation: PushPreparation) -> JsonObject:

@@ -27,7 +27,7 @@
         "endpointUrl": {"type": ["string", "null"], "minLength": 1},
         "computeConfig": {
           "type": "object",
-          "required": ["gpuClass", "region", "min", "max"],
+          "required": ["gpuClass", "region"],
           "additionalProperties": false,
           "properties": {
             "gpuClass": {"type": "string", "minLength": 1},

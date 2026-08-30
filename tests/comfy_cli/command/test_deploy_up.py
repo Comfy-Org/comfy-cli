@@ -4,8 +4,10 @@ import importlib
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import ModuleType
 
+import jsonschema
 import pytest
 from deploy_up_support import FakeBuilder, FakeDeploy, deployment, option_names, write_spec
 from typer.testing import CliRunner
@@ -44,7 +46,127 @@ def test_deploy_up_is_a_registered_real_command() -> None:
 
     # Then
     assert result.exit_code == 0
-    assert {"--gpu", "--region"} <= option_names("up")
+    assert {"--gpu", "--region", "--deployment"} <= option_names("up")
+
+
+@pytest.mark.parametrize(("flag", "missing"), [("--min", "--max"), ("--max", "--min")], ids=["min_alone", "max_alone"])
+def test_up_refuses_one_worker_bound_without_the_other(tmp_path, monkeypatch, flag: str, missing: str) -> None:
+    """Refused before any client is built, so a bad pair costs no round trip."""
+    # Given
+    module = _deploy()
+
+    def _unreachable():
+        raise AssertionError("the refusal must precede any API call")
+
+    monkeypatch.setattr(module, "_command_clients", _unreachable)
+
+    # When
+    result = CliRunner(mix_stderr=False).invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path)), flag, "3"])
+
+    # Then
+    error = _json_envelope(result)["error"]
+    assert result.exit_code == 1
+    assert error["code"] == "deploy_missing_input"
+    assert error["details"]["missing"] == [missing]
+
+
+def _schema(name: str) -> dict:
+    path = Path(__file__).parent.parent.parent.parent / "comfy_cli" / "schemas" / name
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_a_bounds_free_deployment_validates_against_the_published_up_schema(tmp_path, monkeypatch) -> None:
+    """`up` reconciling a web-UI deployment emits the bounds the service stored,
+    which for that row is neither. Requiring them made `deploy up --json` fail
+    its own published contract on an otherwise ordinary reconcile."""
+    # Given a live deployment the service stored without worker bounds
+    module = _deploy()
+    row = deployment("dep-live", status="ready")
+    row["computeConfig"] = {"gpuClass": "l4", "region": "US-MO-2"}
+    client = FakeDeploy([row])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+
+    # When
+    result = CliRunner(mix_stderr=False).invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path))])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _json_envelope(result)["data"]
+    assert data["computeConfig"] == {"gpuClass": "l4", "region": "US-MO-2"}
+    jsonschema.Draft202012Validator(_schema("deploy_up.json")).validate(data)
+
+
+def test_up_edits_the_named_deployment_not_the_highest_ranked_one(tmp_path, monkeypatch) -> None:
+    """`--deployment` has to reach the selection, not merely be accepted.
+
+    Two live deployments on one release is exactly the state
+    `deploy_ambiguous_deployment` tells the user to resolve this way. If the id
+    stops being forwarded, ranking silently picks the newer row and the edit
+    lands on a deployment the user did not name, at exit 0.
+    """
+    # Given two ready deployments on the reconciled release, `dep-2` the newer
+    module = _deploy()
+    client = FakeDeploy(
+        [
+            deployment("dep-1", status="ready", minimum=0, maximum=1),
+            deployment("dep-2", status="ready", minimum=0, maximum=1),
+        ]
+    )
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+
+    # When the older one is named explicitly
+    result = CliRunner(mix_stderr=False).invoke(
+        app,
+        ["--json", "deploy", "up", str(write_spec(tmp_path)), "--deployment", "dep-1", "--min", "2", "--max", "4"],
+    )
+
+    # Then the edit lands on it, and the ranking's pick is untouched
+    assert result.exit_code == 0, result.stderr
+    assert _json_envelope(result)["data"]["deployment"]["id"] == "dep-1"
+    assert client.update_calls == ["dep-1"]
+    assert client.rows["dep-2"]["computeConfig"] == {"gpuClass": "l4", "region": "US-MO-2", "min": 0, "max": 1}
+
+
+def test_a_named_deployment_that_matches_nothing_never_creates_one(tmp_path, monkeypatch) -> None:
+    """Naming a deployment is not a request to make one.
+
+    The release filter can be empty while `--deployment` still names something,
+    and returning "no deployment" there fell through to the create branch — so a
+    typo'd or stale id answered with a second, billable deployment at exit 0.
+    """
+    # Given a Build whose selected release has no live deployment
+    module = _deploy()
+    client = FakeDeploy([])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+
+    # When
+    # When compute is supplied, so the create branch would otherwise succeed
+    result = CliRunner(mix_stderr=False).invoke(
+        app,
+        [
+            "--json",
+            "deploy",
+            "up",
+            str(write_spec(tmp_path)),
+            "--deployment",
+            "dep-typo",
+            "--gpu",
+            "l4",
+            "--region",
+            "US-MO-2",
+        ],
+    )
+
+    # Then
+    error = _json_envelope(result)["error"]
+    assert result.exit_code == 1
+    assert error["code"] == "deploy_unrelated_deployment"
+    assert error["details"]["deploymentId"] == "dep-typo"
+    assert error["details"]["scope"] == "the live deployments of release release-5 of Build build-1"
+    assert error["details"]["candidateIds"] == []
+    assert "drop `--deployment`" in error["hint"]
+    assert client.create_keys == []
+    assert client.rows == {}
 
 
 def test_idempotency_key_is_pinned_for_a_known_generation() -> None:
@@ -236,10 +358,12 @@ def test_a_created_deployment_falls_back_to_the_documented_bounds() -> None:
 
 
 def test_a_created_deployment_lifts_the_default_ceiling_to_the_requested_floor() -> None:
-    """A create supplies both bounds, so `_validate_compute_config` has neither to
-    skip and its min <= max rule always applies. An omitted --max must therefore
-    clear the requested floor, or the create is refused against a placeholder
-    ceiling the caller never set."""
+    """The library-level contract behind the CLI's paired bounds.
+
+    `_require_paired_bounds` stops a lone `--min` reaching `reconcile_up` from
+    the command line, so this pins the guarantee for direct callers: an omitted
+    ceiling clears the requested floor rather than letting the create be refused
+    against the placeholder maximum of 1."""
     # Given
     module = _deploy()
     client = FakeDeploy()
@@ -320,12 +444,12 @@ def test_the_dropped_bound_warning_reaches_a_json_caller_on_stderr(tmp_path, mon
 
     # When
     result = CliRunner(mix_stderr=False).invoke(
-        app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3"]
+        app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3", "--max", "8"]
     )
 
     # Then
     assert "--min had no effect" in result.stderr
-    assert "comfy deploy scale" in result.stderr
+    assert "comfy deploy scale --deployment" in result.stderr
     assert _json_envelope(result)["data"]["computeConfig"]["min"] == 2
 
 
@@ -340,13 +464,13 @@ def test_a_stop_failed_deployment_is_not_pointed_at_a_scale_that_would_bounce(tm
 
     # When
     result = CliRunner(mix_stderr=False).invoke(
-        app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3"]
+        app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3", "--max", "8"]
     )
 
     # Then
     assert "--min had no effect" in result.stderr
     assert "comfy deploy scale" not in result.stderr
-    assert "comfy deploy stop" in result.stderr
+    assert "comfy deploy stop --deployment" in result.stderr
 
 
 def test_reconcile_rejects_an_immutable_gpu_change() -> None:
@@ -455,7 +579,7 @@ def test_watch_exits_immediately_on_stop_failed_with_stop_remedy(tmp_path, monke
     # Then
     assert result.exit_code == 1
     assert _json_envelope(result)["data"]["deployment"]["status"] == "stop_failed"
-    assert "comfy deploy stop" in result.stderr
+    assert "comfy deploy stop --deployment" in result.stderr
     assert sleeps == []
 
 

@@ -94,6 +94,60 @@ class AmbiguousDeploymentError(DeployResolveError):
         super().__init__(f"Build {build_id} has indistinguishable deployments: {', '.join(ordered_ids)}")
 
 
+class UnrelatedDeploymentError(DeployResolveError):
+    code = "deploy_unrelated_deployment"
+    hint = "pick one of `details.candidateIds`, which lists every deployment this command can act on"
+
+    def __init__(self, build_id: str, deployment_id: str, candidate_ids: list[str], scope: str) -> None:
+        ordered_ids = sorted(candidate_ids)
+        candidate_values: list[JsonValue] = [*ordered_ids]
+        self.details = {
+            "buildId": build_id,
+            "deploymentId": deployment_id,
+            "candidateIds": candidate_values,
+            "scope": scope,
+        }
+        # Naming the valid set is a dead end when the valid set is empty, and
+        # empty is an ordinary first-use state here: a freshly cut release, or a
+        # Build nothing has deployed yet.
+        if not ordered_ids:
+            self.hint = f"{scope} holds no deployment yet; drop `--deployment` to let the command pick or create one"
+        super().__init__(f"Deployment {deployment_id} is not among {scope}")
+
+
+def select_deployment(
+    candidates: list[JsonObject], build_id: str, deployment_id: str | None, *, scope: str
+) -> JsonObject:
+    """The one deployment the user meant, out of the candidates in *scope*.
+
+    Named explicitly, it is looked up rather than ranked — that selection is the
+    whole point of ``--deployment``, and silently ranking past an id the user
+    typed would act on a different deployment than the one they asked for. An id
+    that matches nothing refuses here rather than returning "no deployment",
+    which on the ``up`` path would fall through and *create* a second, billable
+    deployment on a typo. Otherwise the highest status rank and newest creation
+    time win, and a tie is reported rather than broken arbitrarily.
+
+    ``scope`` names the set actually searched, because the callers search
+    different ones — every deployment of the Build, or only those on the release
+    being reconciled — and a refusal that named the wrong one sent the user to a
+    ``comfy deploy ls`` that lists the very id it just called unrelated.
+    """
+    if deployment_id is not None:
+        for deployment in candidates:
+            if required_string(deployment, "id") == deployment_id:
+                return deployment
+        raise UnrelatedDeploymentError(
+            build_id, deployment_id, [required_string(deployment, "id") for deployment in candidates], scope
+        )
+    ranked = [(deployment, deployment_selection_key(deployment)) for deployment in candidates]
+    winning_key = max(key for _, key in ranked)
+    tied = [deployment for deployment, key in ranked if key == winning_key]
+    if len(tied) > 1:
+        raise AmbiguousDeploymentError(build_id, [required_string(deployment, "id") for deployment in tied])
+    return tied[0]
+
+
 def _release_version(release: JsonObject) -> int:
     version = release.get("version")
     if not isinstance(version, int) or isinstance(version, bool):
@@ -153,6 +207,7 @@ def resolve_deployment(
     build_id: str,
     *,
     include_deleted: bool = False,
+    deployment_id: str | None = None,
 ) -> JsonObject | None:
     """Return the preferred deployment joined to every release of the Build.
 
@@ -171,12 +226,7 @@ def resolve_deployment(
         if required_string(deployment, "releaseId") in release_ids
         and (include_deleted or deployment.get("deletedAt") is None)
     ]
-    if not candidates:
+    if deployment_id is None and not candidates:
         return None
-
-    ranked = [(deployment, deployment_selection_key(deployment)) for deployment in candidates]
-    winning_key = max(key for _, key in ranked)
-    tied = [deployment for deployment, key in ranked if key == winning_key]
-    if len(tied) > 1:
-        raise AmbiguousDeploymentError(build_id, [required_string(deployment, "id") for deployment in tied])
-    return tied[0]
+    scope = "the deployments" if include_deleted else "the live deployments"
+    return select_deployment(candidates, build_id, deployment_id, scope=f"{scope} of Build {build_id}")

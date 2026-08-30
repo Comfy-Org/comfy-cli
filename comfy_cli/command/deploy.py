@@ -56,16 +56,44 @@ DeployPath = Annotated[
 DeploymentOption = Annotated[str | None, typer.Option("--deployment", help="Select this deployment id.")]
 
 
+def _require_paired_bounds(renderer, minimum: int | None, maximum: int | None) -> None:
+    """Refuse one worker bound without the other.
+
+    The service measures an omitted bound against the effective default the
+    provider applies (``min``->0, ``max``->1), not against the stored value, so
+    ``--min 3`` alone is compared to a ceiling of 1 and refused — against a
+    limit nobody set, on a deployment that legitimately stores no bounds because
+    the web UI created it. Naming both is the only shape that means what it
+    says, and refusing here says so in the user's own vocabulary rather than
+    relaying a 400 about a `max` they never typed.
+    """
+    supplied = [flag for flag, value in (("--min", minimum), ("--max", maximum)) if value is not None]
+    if len(supplied) != 1:
+        return
+    missing = "--max" if supplied[0] == "--min" else "--min"
+    renderer.error(
+        code="deploy_missing_input",
+        message=f"{supplied[0]} requires {missing}: worker bounds are set as a pair.",
+        details={"missing": [missing]},
+    )
+    raise typer.Exit(code=1)
+
+
 @app.command("scale", help="Edit a deployment's worker bounds or stopped compute configuration.")
 @tracking.track_command("deploy")
 def scale_cmd(
     path: DeployPath = None,
     deployment_id: DeploymentOption = None,
-    minimum: Annotated[int | None, typer.Option("--min", min=0, max=20, help="Minimum warm workers.")] = None,
-    maximum: Annotated[int | None, typer.Option("--max", min=1, max=20, help="Maximum workers.")] = None,
+    minimum: Annotated[
+        int | None, typer.Option("--min", min=0, max=20, help="Minimum warm workers. Requires --max.")
+    ] = None,
+    maximum: Annotated[
+        int | None, typer.Option("--max", min=1, max=20, help="Maximum workers. Requires --min.")
+    ] = None,
     gpu: Annotated[str | None, typer.Option("--gpu", help="GPU class; deployment must be stopped.")] = None,
     region: Annotated[str | None, typer.Option("--region", help="Region; deployment must be stopped.")] = None,
 ) -> None:
+    _require_paired_bounds(get_renderer(), minimum, maximum)
     target = _deploy_read.ReadRequest(path, deployment_id)
     _deploy_lifecycle.run_scale(_deploy_lifecycle.ScaleRequest(target, minimum, maximum, gpu, region))
 
@@ -138,9 +166,10 @@ def status_cmd(
         str | None,
         typer.Argument(help="ComfyUI install directory or build spec path. Default: the current directory."),
     ] = None,
+    deployment_id: DeploymentOption = None,
     watch: Annotated[bool, typer.Option("--watch", help="Poll until the deployment reaches a terminal state.")] = False,
 ) -> None:
-    _run_status(path, watch=watch)
+    _run_status(path, deployment_id=deployment_id, watch=watch)
 
 
 @app.command("up", help="Create or reconcile a deployment for the selected Build release.")
@@ -155,7 +184,9 @@ def up_cmd(
     region: Annotated[str | None, typer.Option("--region", help="Region for a new deployment.")] = None,
     minimum: Annotated[
         int | None,
-        typer.Option("--min", min=0, max=20, help="Minimum warm workers. Default: keep the current value, or 0."),
+        typer.Option(
+            "--min", min=0, max=20, help="Minimum warm workers. Requires --max. Default: keep the current value, or 0."
+        ),
     ] = None,
     maximum: Annotated[
         int | None,
@@ -163,13 +194,15 @@ def up_cmd(
             "--max",
             min=1,
             max=20,
-            help="Maximum workers. Default: keep the current value, else whichever is greater of --min and 1.",
+            help="Maximum workers. Requires --min. Default: keep the current value, else 1.",
         ),
     ] = None,
     release: Annotated[str | None, typer.Option("--release", help="Deploy this release id.")] = None,
+    deployment_id: DeploymentOption = None,
     watch: Annotated[bool, typer.Option("--watch", help="Poll until the deployment reaches a terminal state.")] = False,
 ) -> None:
     renderer = get_renderer()
+    _require_paired_bounds(renderer, minimum, maximum)
     try:
         builder, client = _command_clients()
         request = replace(
@@ -178,6 +211,7 @@ def up_cmd(
             region=region,
             minimum=minimum,
             maximum=maximum,
+            deployment_id=deployment_id,
         )
         try:
             result = reconcile_up(builder, client, request)

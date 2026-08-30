@@ -115,7 +115,9 @@ def _normalized_serving(deployment: JsonObject) -> JsonObject | None:
     }
 
 
-def resolve_status(builder: BuilderReleaseClient, client: DeployUpClient, path: str | None) -> StatusTarget:
+def resolve_status(
+    builder: BuilderReleaseClient, client: DeployUpClient, path: str | None, deployment_id: str | None = None
+) -> StatusTarget:
     paths = resolve_build_paths(path)
     spec = read_build_spec(paths.spec_file)
     build_id = spec.get("id")
@@ -124,7 +126,8 @@ def resolve_status(builder: BuilderReleaseClient, client: DeployUpClient, path: 
     build_name = spec.get("name")
     if not isinstance(build_name, str) or not build_name:
         raise KeyError("name")
-    return StatusTarget(build_id, build_name, resolve_deployment(builder, client, build_id))
+    deployment = resolve_deployment(builder, client, build_id, deployment_id=deployment_id)
+    return StatusTarget(build_id, build_name, deployment)
 
 
 def _release_by_id(releases: list[JsonObject], release_id: str) -> JsonObject:
@@ -201,7 +204,7 @@ def _render_deployment(renderer: Renderer, deployment: JsonObject) -> str:
         case "stop_failed":
             renderer.warn(
                 f"Deployment {deployment_id} could not stop and may still be billing.",
-                hint=f"run `comfy deploy stop {deployment_id}` again",
+                hint=f"run `comfy deploy stop --deployment {deployment_id}` again",
             )
         case "failed":
             if renderer.is_pretty():
@@ -251,11 +254,11 @@ def render_status(renderer: Renderer, result: StatusResult) -> None:
         raise typer.Exit(code=1)
 
 
-def run_status(path: str | None, *, watch: bool) -> None:
+def run_status(path: str | None, *, deployment_id: str | None = None, watch: bool) -> None:
     renderer = get_renderer()
     try:
         builder, client = _command_clients()
-        target = resolve_status(builder, client, path)
+        target = resolve_status(builder, client, path, deployment_id)
         if watch and target.deployment is not None:
             watched = poll_deployment(client, required_string(target.deployment, "id"), _sleep)
             target = replace(target, deployment=watched)
