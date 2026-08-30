@@ -16,6 +16,10 @@ import requests
 # builds — orders of magnitude past any real workspace. It bounds a *server*
 # that keeps handing back a cursor, not a listing anyone actually has.
 _MAX_LIST_PAGES: Final = 200
+# Sent explicitly: httpkit.ClampLimit falls back to 20 rows, not to its 100-row
+# ceiling, when the caller names no limit — so an unset limit pages at a fifth of
+# what `_MAX_LIST_PAGES` above was sized against, and fails at 4,000 rows.
+PAGE_LIMIT: Final = 100
 # `list_blobs` is served as a single page with no cursor, so a clamped listing is
 # indistinguishable from a complete one except by its length: the builder returns
 # httpkit.DefaultPageLimit rows when the caller names no limit, and this client

@@ -150,7 +150,9 @@ def prepare_deploy(kind: DeployFixtureKind, root: Path) -> list[str]:
         case DeployFixtureKind.SHOW | DeployFixtureKind.LOGS | DeployFixtureKind.EVENTS:
             return ["deploy", kind.value, "--deployment", DEPLOYMENT_ID]
         case DeployFixtureKind.SCALE:
-            return ["deploy", "scale", "--deployment", DEPLOYMENT_ID, "--max", "1"]
+            # Both bounds: `scale` refuses one without the other before it looks
+            # at credentials, which would answer this auth case with the wrong code.
+            return ["deploy", "scale", "--deployment", DEPLOYMENT_ID, "--min", "0", "--max", "1"]
         case DeployFixtureKind.STOP | DeployFixtureKind.START:
             return ["deploy", kind.value, "--deployment", DEPLOYMENT_ID]
         case DeployFixtureKind.DELETE:

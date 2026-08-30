@@ -109,6 +109,7 @@ _SENSITIVE_EXACT = frozenset(
         "set_overrides",
         "from_",
         "from_snapshot",
+        "from_workflow",
         "workflow",
         "capability",
     }

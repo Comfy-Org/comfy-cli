@@ -363,6 +363,53 @@ def test_resolve_asset_roots_includes_the_tracked_workspace(tmp_path: Path, monk
     assert roots == tuple(workspace / dirname for dirname in ASSET_DIRNAMES)
 
 
+def test_an_unnamed_cwd_contributes_no_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`resolve_build_paths` falls back to the cwd, which this allowlist excludes.
+
+    Taking that fallback unconditionally re-admitted the directory the module
+    docstring says is never a root: `comfy deploy run --deployment <id>` from any
+    project holding an `output/` would upload `output/results.csv` if the
+    workflow named it, and in `--json` mode nothing announces it beforehand.
+    """
+    # Given a project directory that merely looks like an install
+    project = tmp_path / "project"
+    for dirname in ASSET_DIRNAMES:
+        (project / dirname).mkdir(parents=True)
+    (project / "output" / "results.csv").write_text("secret", encoding="utf-8")
+    monkeypatch.chdir(project)
+
+    class UntrackedWorkspace:
+        workspace_path = None
+
+    monkeypatch.setattr(deploy_workflow, "WorkspaceManager", UntrackedWorkspace)
+
+    # When no PATH is given and no spec sits in the cwd
+    roots = deploy_workflow.resolve_asset_roots(None)
+
+    # Then
+    assert roots == ()
+
+
+def test_a_spec_in_the_cwd_still_names_that_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given the same directory, but one the user actually authored a build in
+    project = tmp_path / "project"
+    for dirname in ASSET_DIRNAMES:
+        (project / dirname).mkdir(parents=True)
+    (project / "comfy-build.yaml").write_text("schema: build-spec/1\n", encoding="utf-8")
+    monkeypatch.chdir(project)
+
+    class UntrackedWorkspace:
+        workspace_path = None
+
+    monkeypatch.setattr(deploy_workflow, "WorkspaceManager", UntrackedWorkspace)
+
+    # When
+    roots = deploy_workflow.resolve_asset_roots(None)
+
+    # Then
+    assert roots == tuple(project / dirname for dirname in ASSET_DIRNAMES)
+
+
 def test_resolve_asset_roots_needs_no_build_spec(install: Path) -> None:
     """Given no `comfy-build.yaml`, When roots resolve, Then resolution still succeeds."""
     # Given / When

@@ -10,9 +10,20 @@ from typing_extensions import assert_never
 
 from comfy_cli.command.build_push import normalize_repository_identity
 from comfy_cli.command.build_spec import BuildSpecError, BuildSpecInvalidError, JsonObject, JsonValue
+from comfy_cli.command.build_validation import MODEL_SOURCES, NODE_SOURCES
 
 IdentityTier: TypeAlias = Literal["sha256", "model_location", "blobId", "id", "repository", "name"]
 
+_SIZE_FIELDS: Final = frozenset({"sizeBytes", "localSizeBytes"})
+# Metadata describing whatever the entry's source resolves to, rather than the
+# entry itself, and which the builder therefore enforces against it. `sizeBytes`
+# is deliberately absent: the builder's Model carries no size column, so pairing
+# it with a source states nothing, and restricting it would only delete a size
+# the scanner knew. A node's git coordinates *are* such a claim — `_project_node`
+# keeps them on the wire when `repository` wins — though nothing fills them
+# today, both sitting outside `_NODE_LOCAL_FIELDS`.
+_MODEL_SOURCE_DEPENDENT: Final = frozenset({"sha256"})
+_NODE_SOURCE_DEPENDENT: Final = frozenset({"gitRef", "commit"})
 _MODEL_LOCAL_FIELDS: Final = frozenset({"source", "localPath", "blobId", "sha256", "sizeBytes"})
 _NODE_LOCAL_FIELDS: Final = frozenset({"source", "localPath", "blobId", "localDigest", "localSizeBytes"})
 _MODEL_KNOWN_FIELDS: Final = _MODEL_LOCAL_FIELDS | {"type", "filename", "sourceUri"}
@@ -103,6 +114,11 @@ class _Candidates:
 class _FieldPolicy:
     known: frozenset[str]
     local: frozenset[str]
+    sources: frozenset[str]
+    # Metadata that describes the bytes a source points at rather than the entry
+    # itself, and so is only meaningful paired with the source it was taken from.
+    source_dependent: frozenset[str]
+    fillable: frozenset[str]
 
 
 class _TieredMatcher:
@@ -187,24 +203,72 @@ def _match_nodes(local: list[JsonObject], server: list[JsonObject]) -> dict[int,
     return matcher.local_by_server
 
 
+def _states(entry: JsonObject, field: str) -> bool:
+    """Whether *entry* makes a usable statement about *field*.
+
+    A text field has to be a non-blank string — the guard the pre-merge
+    ``sourceUri`` handling already applied. Carrying a ``"   "`` or a stray
+    number through a pull writes a spec that fails ``project_wire_definition``
+    on the very next push, which is a worse outcome than dropping it here.
+    """
+    value = entry.get(field)
+    if field in _SIZE_FIELDS:
+        return isinstance(value, int) and not isinstance(value, bool)
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _merge_entry(
     local: JsonObject,
     server: JsonObject,
     policy: _FieldPolicy,
 ) -> JsonObject:
+    """Merge one server entry onto its local match, by who owns the entry.
+
+    Only a ``source: "local"`` entry is described by bytes on this machine, so
+    only there do the local ``blobId``/digest/size fields outrank the server's.
+    For any other source the server holds the entry's content identity, and
+    letting local win reverted a server-side switch from a private blob to a
+    public ``sourceUri`` on the next push, or dropped the server's blob
+    reference and hash under a local public entry.
+
+    The non-local side *fills* rather than replaces, so re-owning these fields
+    cannot itself delete authoring data — with one exclusion that matters. The
+    source fields are a precedence group, not independent values:
+    ``project_wire_definition`` emits the first of ``MODEL_SOURCES`` /
+    ``NODE_SOURCES`` an entry names and drops the rest. Filling a stale local
+    ``blobId`` beside a server ``sourceUri`` would therefore not merely add a
+    field, it would *outrank* the server's and reinstate the exact revert this
+    merge exists to prevent. So once the server names any source, local fills
+    none of them; a server that names no source at all is the only case where
+    absence is not a statement.
+
+    ``source_dependent`` travels in that same group. ``sha256`` describes the
+    bytes a source points at, not the entry, so pairing a local hash with a
+    source the server has since changed states an integrity claim that was never
+    true — and the builder enforces it, failing the pull's damage at deploy
+    staging with a checksum mismatch rather than here. Dropping a hash is safe
+    (it is optional); keeping a wrong one is not.
+    """
     merged = deepcopy(server)
     for key, value in local.items():
         if key not in merged and (key not in policy.known or value is None):
             merged[key] = deepcopy(value)
-    for field in policy.local:
-        if field in local:
+    if local.get("source") == "local":
+        for field in policy.local:
+            if field in local:
+                merged[field] = deepcopy(local[field])
+            else:
+                merged.pop(field, None)
+        merged.pop("sourceUri", None)
+        if _states(local, "sourceUri"):
+            merged["sourceUri"] = deepcopy(local["sourceUri"])
+        return merged
+    fillable = policy.fillable
+    if any(_states(merged, field) for field in policy.sources):
+        fillable -= policy.sources | policy.source_dependent
+    for field in sorted(fillable):
+        if _states(local, field) and not _states(merged, field):
             merged[field] = deepcopy(local[field])
-        else:
-            merged.pop(field, None)
-    merged.pop("sourceUri", None)
-    local_source_uri = local.get("sourceUri")
-    if isinstance(local_source_uri, str) and local_source_uri.strip():
-        merged["sourceUri"] = local_source_uri
     return merged
 
 
@@ -216,10 +280,26 @@ def _merge_collection(
     match collection:
         case "models":
             matches = _match_models(local_entries, server_entries)
-            policy = _FieldPolicy(_MODEL_KNOWN_FIELDS, _MODEL_LOCAL_FIELDS)
+            policy = _FieldPolicy(
+                _MODEL_KNOWN_FIELDS,
+                _MODEL_LOCAL_FIELDS,
+                frozenset(MODEL_SOURCES),
+                _MODEL_SOURCE_DEPENDENT,
+                # `sourceUri` is fillable for both, though only a model's is a
+                # *source*: a node has no public resolution path, so nothing here
+                # writes one and it can outrank nothing. It stays fillable so a
+                # hand-authored one is carried rather than silently deleted.
+                _MODEL_LOCAL_FIELDS | {"sourceUri"},
+            )
         case "customNodes":
             matches = _match_nodes(local_entries, server_entries)
-            policy = _FieldPolicy(_NODE_KNOWN_FIELDS, _NODE_LOCAL_FIELDS)
+            policy = _FieldPolicy(
+                _NODE_KNOWN_FIELDS,
+                _NODE_LOCAL_FIELDS,
+                frozenset(NODE_SOURCES),
+                _NODE_SOURCE_DEPENDENT,
+                _NODE_LOCAL_FIELDS | {"sourceUri"},
+            )
         case unreachable:
             assert_never(unreachable)
     return [

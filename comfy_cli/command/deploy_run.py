@@ -24,7 +24,9 @@ from comfy_cli.command.deploy_runtime import render_spec_error
 from comfy_cli.command.deploy_types import required_string, server_shape_error
 from comfy_cli.command.deploy_workflow import (
     DeployWorkflowAssetError,
+    DeployWorkflowEmptyError,
     DeployWorkflowFormatUIError,
+    DeployWorkflowNotApiFormatError,
     load_deploy_workflow,
     resolve_asset_roots,
 )
@@ -130,6 +132,23 @@ def _cancel_once(state: _RunState, renderer: Renderer) -> None:
         renderer.warn(f"Failed to cancel deploy job: {error}")
 
 
+def _emit_cancelled(renderer: Renderer, state: _RunState) -> None:
+    """Report the interrupt, carrying the job id there is still work behind.
+
+    `typer.Exit(130)` alone bypasses cmdline's global `cancelled` envelope, so a
+    `--json` caller got exit 130 with empty stdout *and* empty stderr — no
+    outcome, and no id to reconcile against a job that was already submitted and
+    may still be settling.
+    """
+    job_id = state.job.get("id") if state.job is not None else None
+    renderer.error(
+        code="cancelled",
+        message="Interrupted by user",
+        details={"job_id": job_id, "cancel_requested": state.cancel_attempted},
+        exit_code=130,
+    )
+
+
 def _emit_result(renderer: Renderer, result: _RunResult) -> None:
     payload = result.payload()
     if renderer.is_pretty():
@@ -215,7 +234,9 @@ def run_deploy(ctx: typer.Context, request: DeployRunRequest) -> None:
         try:
             _cancel_once(state, renderer)
         except KeyboardInterrupt:
+            _emit_cancelled(renderer, state)
             raise typer.Exit(code=130) from None
+        _emit_cancelled(renderer, state)
         raise typer.Exit(code=130) from error
     except DeployRunTimeoutError as error:
         _cancel_once(state, renderer)
@@ -226,6 +247,9 @@ def run_deploy(ctx: typer.Context, request: DeployRunRequest) -> None:
         )
         raise typer.Exit(code=1) from error
     except DeployWorkflowFormatUIError as error:
+        renderer.error(code=error.code, message=str(error), hint=error.hint)
+        raise typer.Exit(code=1) from error
+    except (DeployWorkflowEmptyError, DeployWorkflowNotApiFormatError) as error:
         renderer.error(code=error.code, message=str(error), hint=error.hint)
         raise typer.Exit(code=1) from error
     except DeployWorkflowAssetError as error:

@@ -24,7 +24,7 @@ from typing_extensions import assert_never
 
 from comfy_cli.command.build_paths import resolve_build_paths
 from comfy_cli.command.build_spec import JsonObject, JsonValue
-from comfy_cli.command.run.loader import _load_workflow_file, is_ui_workflow
+from comfy_cli.command.run.loader import _classify_api_workflow, _load_workflow_file, is_ui_workflow
 from comfy_cli.constants import (
     DEFAULT_COMFY_INPUT_PATH,
     DEFAULT_COMFY_MODEL_PATH,
@@ -64,6 +64,43 @@ class DeployWorkflowFormatUIError(Exception):
 
     def __init__(self) -> None:
         super().__init__("deploy run accepts API-format workflows only")
+
+
+class DeployWorkflowEmptyError(Exception):
+    """The file is a well-formed JSON object holding no nodes.
+
+    Distinct from a malformed one because the remedy differs: this file parsed
+    and is the right *shape*, it just has nothing to submit. Mirrors the
+    ``workflow_empty`` / ``workflow_not_api_format`` split `comfy run` already
+    routes the same classifier outcomes to.
+    """
+
+    code = "deploy_workflow_empty"
+    hint = "export a workflow that contains at least one node"
+
+    def __init__(self) -> None:
+        super().__init__("the workflow file holds no nodes")
+
+
+class DeployWorkflowNotApiFormatError(Exception):
+    """The file parsed as JSON but is not an API workflow at all.
+
+    ``_load_workflow_file`` returns whatever ``json.load`` produced, so a list,
+    a string, a number or ``null`` reached the node scan and met ``.items()``.
+    That surfaced as an `AttributeError` traceback on stderr with no envelope,
+    which is the one outcome a `--json` caller cannot act on.
+
+    Deliberately *not* ``deploy_workflow_invalid``: that code is registered for
+    the data plane rejecting a submitted workflow's nodes, and its remedy — fix
+    the nodes in ``details.node_errors`` and resubmit with a fresh idempotency
+    key — is the opposite of the one here, where nothing was ever submitted.
+    """
+
+    code = "deploy_workflow_not_api_format"
+    hint = "pass a ComfyUI API-format workflow: a JSON object whose values carry `class_type`"
+
+    def __init__(self) -> None:
+        super().__init__("the workflow file is not an API-format workflow")
 
 
 class DeployWorkflowAssetError(Exception):
@@ -153,9 +190,19 @@ def resolve_asset_roots(path: str | Path | None = None, *, extra_roots: Sequence
 
     ``extra_roots`` is ``--asset-root``. Without it the allowlist would be a
     hard usability break for anyone who keeps assets outside either layout.
+
+    The install half is derived only when the caller actually named an install —
+    a PATH, or a spec in the directory they ran from. ``resolve_build_paths``
+    falls back to ``Path.cwd()``, so taking it unconditionally re-admitted the
+    cwd this allowlist exists to exclude: `comfy deploy run --deployment <id>`
+    from any project holding an ``output/`` would upload
+    ``output/results.csv`` if the workflow named it, and in ``--json`` mode
+    nothing announces the upload beforehand.
     """
     paths = resolve_build_paths(path, require_spec=False)
-    candidates = [paths.models_dir, paths.input_dir, paths.output_dir]
+    candidates: list[Path] = []
+    if path or paths.spec_file.is_file():
+        candidates = [paths.models_dir, paths.input_dir, paths.output_dir]
     workspace = WorkspaceManager().workspace_path
     if workspace:
         workspace_root = Path(workspace)
@@ -289,7 +336,16 @@ def scan_workflow_inputs(workflow: JsonObject, *, asset_roots: AssetRoots) -> Wo
     """Return a pure placeholder rewrite plan for local files in node inputs."""
     if is_ui_workflow(workflow):
         raise DeployWorkflowFormatUIError
-    return _scan_api_workflow(workflow, asset_roots)
+    kind, classified = _classify_api_workflow(workflow)
+    match kind:
+        case "ok":
+            return _scan_api_workflow(classified, asset_roots)
+        case "empty":
+            raise DeployWorkflowEmptyError
+        case "invalid":
+            raise DeployWorkflowNotApiFormatError
+        case unreachable:
+            assert_never(unreachable)
 
 
 def load_deploy_workflow(workflow_file: Path, *, asset_roots: AssetRoots) -> WorkflowAssetPlan:

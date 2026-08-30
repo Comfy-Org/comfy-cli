@@ -264,7 +264,7 @@ def test_every_deferred_build_code_landed_with_a_call_site(raised_codes):
     assert not unraised, f"deferred build codes registered but raised nowhere under comfy_cli/: {unraised}"
 
 
-def test_deploy_error_codes_are_the_exact_final_thirty() -> None:
+def test_deploy_error_codes_are_the_exact_final_set() -> None:
     # Given
     expected = set(
         """deploy_not_signed_in deploy_not_found deploy_build_not_pushed deploy_no_deployable_release
@@ -274,14 +274,15 @@ def test_deploy_error_codes_are_the_exact_final_thirty() -> None:
         deploy_job_canceled deploy_rate_limited deploy_ambiguous_deployment deploy_job_submit_unknown deploy_bad_request
         deploy_server_error deploy_idempotency_reuse deploy_workflow_format_ui
         deploy_workflow_asset_outside_root deploy_workflow_asset_marker_reserved
-        deploy_insecure_url""".split()
+        deploy_insecure_url deploy_unrelated_deployment deploy_workflow_empty
+        deploy_workflow_not_api_format""".split()
     )
 
     # When
     actual = {code for code in error_codes.all_codes() if code.startswith("deploy_")}
 
     # Then
-    assert len(actual) == 30
+    assert len(actual) == 33
     assert actual == expected
 
 
