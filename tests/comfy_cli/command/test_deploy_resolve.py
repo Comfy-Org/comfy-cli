@@ -11,6 +11,7 @@ from comfy_cli.command.deploy_resolve import (
     NoDeployableReleaseError,
     ReleaseReference,
     ReleaseResolveRequest,
+    UnrelatedDeploymentError,
     resolve_deployment,
     resolve_release,
 )
@@ -286,6 +287,65 @@ def test_identical_rank_and_created_at_raise_structured_ambiguity() -> None:
         assert "--deployment" in error.hint
     else:
         raise AssertionError("expected deploy_ambiguous_deployment")
+
+
+def test_a_named_deployment_settles_an_otherwise_ambiguous_build() -> None:
+    """The hint on `deploy_ambiguous_deployment` promises this exact recovery."""
+    # Given the tie that raises the ambiguity
+    builder = RecordingBuilder(pages=[[{"id": "release-1"}]])
+    deployments = RecordingDeployments([[_deployment("deployment-b"), _deployment("deployment-a")]])
+
+    # When
+    resolved = resolve_deployment(builder, deployments, "build-1", deployment_id="deployment-a")
+
+    # Then
+    assert resolved == _deployment("deployment-a")
+
+
+def test_a_named_deployment_is_taken_over_the_ranking() -> None:
+    # Given a build whose ranking would pick the newer row
+    builder = RecordingBuilder(pages=[[{"id": "release-1"}]])
+    newest = _deployment("deployment-new", created_at="2026-08-23T13:00:00Z")
+    deployments = RecordingDeployments([[newest, _deployment("deployment-old")]])
+
+    # When
+    resolved = resolve_deployment(builder, deployments, "build-1", deployment_id="deployment-old")
+
+    # Then ranking past an id the user typed would act on the wrong deployment
+    assert resolved == _deployment("deployment-old")
+
+
+def test_a_deployment_from_another_build_is_refused_rather_than_acted_on() -> None:
+    # Given
+    builder = RecordingBuilder(pages=[[{"id": "release-1"}]])
+    deployments = RecordingDeployments([[_deployment("deployment-a")]])
+
+    # When / Then
+    with pytest.raises(UnrelatedDeploymentError) as caught:
+        resolve_deployment(builder, deployments, "build-1", deployment_id="deployment-elsewhere")
+    error = caught.value
+    assert error.code == "deploy_unrelated_deployment"
+    assert error.details["deploymentId"] == "deployment-elsewhere"
+    assert error.details["candidateIds"] == ["deployment-a"]
+    assert error.details["scope"] == "the live deployments of Build build-1"
+
+
+def test_a_named_deployment_is_refused_when_the_build_has_none() -> None:
+    """Naming an id must not be answered with "no deployment".
+
+    On the `up` path that answer falls through to the create branch; here it
+    exits 0 with a null payload, so a typo reads as an undeployed Build.
+    """
+    # Given a Build with no live deployment at all
+    builder = RecordingBuilder(pages=[[{"id": "release-1"}]])
+    deployments = RecordingDeployments([[]])
+
+    # When / Then
+    with pytest.raises(UnrelatedDeploymentError) as caught:
+        resolve_deployment(builder, deployments, "build-1", deployment_id="deployment-elsewhere")
+    error = caught.value
+    assert error.details["candidateIds"] == []
+    assert "drop `--deployment`" in error.hint
 
 
 def test_deleted_rows_are_excluded_by_default() -> None:

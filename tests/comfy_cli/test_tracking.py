@@ -559,6 +559,25 @@ class TestTrackCommandRedaction:
         assert properties["name"] == "demo"
         assert "ComfyUI-Installs" not in str(properties)
 
+    def test_the_rival_import_path_is_redacted_the_same_way(self, tracking_module):
+        """`--from-workflow` is the sibling of `--from-snapshot`, keyed on its own
+        parameter name. Naming only one of a pair of interchangeable flags leaves
+        the other shipping the user's path verbatim.
+        """
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+
+        @tracking_module.track_command("build")
+        def init(name=None, from_workflow=None):
+            return None
+
+        init(name="demo", from_workflow="/Users/someone/ComfyUI/private/portrait.json")
+
+        tracking_module.provider.track.assert_called_once()
+        _, _, properties = _last_track_call(tracking_module.provider)
+        assert properties["from_workflow"] == "<redacted>"
+        assert properties["name"] == "demo"
+        assert "portrait" not in str(properties)
+
     def test_workflow_paths_are_redacted(self, tracking_module):
         """Every `--workflow` option is typed `str`, not `Path`, so unlike a
         `Path` option it survives `_is_trackable` and ships verbatim unless named
@@ -592,6 +611,9 @@ class TestTrackCommandRedaction:
         assert filter_command_kwargs({"from_snapshot": None})["from_snapshot"] is None
         assert "from_snapshot" not in filter_command_kwargs({"name": "demo"})
         assert filter_command_kwargs({"from_": "/Users/someone/definition.json"})["from_"] == "<redacted>"
+        assert filter_command_kwargs({"from_workflow": None})["from_workflow"] is None
+        assert "from_workflow" not in filter_command_kwargs({"name": "demo"})
+        assert filter_command_kwargs({"from_workflow": "/Users/someone/wf.json"})["from_workflow"] == "<redacted>"
 
     def test_underscore_ctx_is_excluded(self, tracking_module):
         import click

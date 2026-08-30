@@ -121,7 +121,7 @@ def test_scale_merges_unsupplied_compute_fields_and_lowers_without_a_gate(monkey
     _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
 
     # When
-    result = _invoke("scale", "--deployment", "dep-1", "--max", "2")
+    result = _invoke("scale", "--deployment", "dep-1", "--min", "2", "--max", "2")
 
     # Then
     assert result.exit_code == 0
@@ -160,7 +160,7 @@ def test_midflight_scale_conflict_names_the_fetched_status(monkeypatch) -> None:
     _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
 
     # When
-    result = _invoke("scale", "--deployment", "dep-1", "--max", "2")
+    result = _invoke("scale", "--deployment", "dep-1", "--min", "1", "--max", "2")
 
     # Then
     error = _object(_envelope(result), "error")
@@ -181,7 +181,7 @@ def test_raising_bounds_maps_server_gates(status: int, code: str, monkeypatch) -
     _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
 
     # When
-    result = _invoke("scale", "--deployment", "dep-1", "--max", "2")
+    result = _invoke("scale", "--deployment", "dep-1", "--min", "1", "--max", "2")
 
     # Then
     assert result.exit_code == 1
@@ -337,21 +337,80 @@ def _bounds_free(deployment_id: str = "dep-1") -> JsonObject:
     return row
 
 
-def test_scale_sets_only_the_bound_that_was_asked_for_on_a_bounds_free_deployment(monkeypatch) -> None:
-    """Reading `min`/`max` as required refused this deployment outright, before
-    any edit could be attempted. The unsupplied bound stays absent rather than
-    being invented — the service treats absence and a value as different."""
+def test_scale_carries_stored_bounds_forward_when_neither_is_named(monkeypatch) -> None:
+    """Naming no bound must not unscale a live deployment.
+
+    `run_scale` merges `current.get(bound)` for anything the flags omit, and
+    this is the only test that reads a request body produced by that merge —
+    every other success case now names both bounds, so they prove pass-through
+    of their own arguments rather than the merge.
+    """
+    # Given a deployment the service already stores bounds for
+    responder = APIResponder(deployment("dep-1", minimum=2, maximum=4))
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", responder)
+    _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
+
+    # When only the compute fields are edited
+    result = _invoke("scale", "--deployment", "dep-1")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert responder.bodies == [{"computeConfig": {"gpuClass": "l4", "region": "US-MO-2", "min": 2, "max": 4}}]
+
+
+def test_scale_invents_no_bound_the_deployment_never_had(monkeypatch) -> None:
+    """Absence and a value are different to the service, so an unstored bound
+    stays unstored rather than being defaulted into the request."""
     # Given
     responder = APIResponder(_bounds_free())
     monkeypatch.setattr("comfy_cli.deploy_api.request_json", responder)
     _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
 
     # When
-    result = _invoke("scale", "--deployment", "dep-1", "--max", "3")
+    result = _invoke("scale", "--deployment", "dep-1")
 
     # Then
     assert result.exit_code == 0, result.stderr
-    assert responder.bodies == [{"computeConfig": {"gpuClass": "l4", "region": "US-MO-2", "max": 3}}]
+    assert responder.bodies == [{"computeConfig": {"gpuClass": "l4", "region": "US-MO-2"}}]
+
+
+def test_scale_sets_both_bounds_on_a_bounds_free_deployment(monkeypatch) -> None:
+    """Reading `min`/`max` as required refused this deployment outright, before
+    any edit could be attempted. It is editable — the pair just has to be named,
+    because the service measures an omitted bound against its own default."""
+    # Given
+    responder = APIResponder(_bounds_free())
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", responder)
+    _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
+
+    # When
+    result = _invoke("scale", "--deployment", "dep-1", "--min", "0", "--max", "3")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert responder.bodies == [{"computeConfig": {"gpuClass": "l4", "region": "US-MO-2", "min": 0, "max": 3}}]
+
+
+@pytest.mark.parametrize(("flag", "missing"), [("--min", "--max"), ("--max", "--min")], ids=["min_alone", "max_alone"])
+def test_scale_refuses_one_worker_bound_without_the_other(monkeypatch, flag: str, missing: str) -> None:
+    """`--min 3` alone reached the service as a floor with no ceiling, which it
+    compares against an effective `max` of 1 and rejects — a limit nobody set.
+    Refusing here names the flag the user has to add instead of relaying a 400
+    about a bound they never typed."""
+    # Given
+    responder = APIResponder(_bounds_free())
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", responder)
+    _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
+
+    # When
+    result = _invoke("scale", "--deployment", "dep-1", flag, "3")
+
+    # Then
+    error = _object(_envelope(result), "error")
+    assert result.exit_code == 1
+    assert error["code"] == "deploy_missing_input"
+    assert _object(error, "details")["missing"] == [missing]
+    assert responder.bodies == []
 
 
 def test_scale_of_a_bounds_free_deployment_validates_against_its_schema(monkeypatch) -> None:
@@ -361,7 +420,7 @@ def test_scale_of_a_bounds_free_deployment_validates_against_its_schema(monkeypa
     _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
 
     # When
-    result = _invoke("scale", "--deployment", "dep-1", "--max", "3")
+    result = _invoke("scale", "--deployment", "dep-1", "--min", "0", "--max", "3")
 
     # Then
     assert result.exit_code == 0, result.stderr

@@ -8,9 +8,8 @@ import typer
 
 from comfy_cli.command.build_spec import JsonObject
 from comfy_cli.command.deploy_resolve import (
-    AmbiguousDeploymentError,
     BuilderReleaseClient,
-    deployment_selection_key,
+    select_deployment,
 )
 from comfy_cli.command.deploy_types import ComputeRequiredError, DeployUpClient, UpRequest, UpResult
 from comfy_cli.command.deploy_types import compute_config as _compute_config
@@ -39,20 +38,26 @@ def _soft_deleted_generation(deployments: Sequence[JsonObject], release_id: str)
     )
 
 
-def _existing_deployment(deployments: Sequence[JsonObject], release_id: str, build_id: str) -> JsonObject | None:
+def _existing_deployment(
+    deployments: Sequence[JsonObject], release_id: str, build_id: str, deployment_id: str | None = None
+) -> JsonObject | None:
     candidates = [
         deployment
         for deployment in deployments
         if deployment.get("releaseId") == release_id and deployment.get("deletedAt") is None
     ]
-    if not candidates:
+    # A named deployment is resolved even when the release has none, so an id
+    # that matches nothing refuses instead of reporting "no deployment" and
+    # falling through to the create branch below with a second billable
+    # deployment as the result.
+    if deployment_id is None and not candidates:
         return None
-    ranked = [(deployment, deployment_selection_key(deployment)) for deployment in candidates]
-    best = max(key for _, key in ranked)
-    tied = [deployment for deployment, key in ranked if key == best]
-    if len(tied) > 1:
-        raise AmbiguousDeploymentError(build_id, [_required_string(item, "id") for item in tied])
-    return tied[0]
+    return select_deployment(
+        list(candidates),
+        build_id,
+        deployment_id,
+        scope=f"the live deployments of release {release_id} of Build {build_id}",
+    )
 
 
 def _supersedes(
@@ -129,14 +134,16 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
     releases = builder.list_releases(request.build_id)
     deployments = client.list_all_deployments()
     supersedes = _supersedes(deployments, releases, release_id)
-    existing = _existing_deployment(deployments, release_id, request.build_id)
+    existing = _existing_deployment(deployments, release_id, request.build_id, request.deployment_id)
     if existing is None:
         if request.gpu is None or request.region is None:
             raise ComputeRequiredError
         minimum = _DEFAULT_MINIMUM if request.minimum is None else request.minimum
-        # A create sends both bounds, so the API's min <= max check has neither
-        # one to skip: an omitted `--max` has to clear the requested floor, or
-        # `--min 3` would be refused against the placeholder ceiling of 1.
+        # A library-level contract, not a CLI one: `_require_paired_bounds`
+        # refuses a lone `--min` before this runs, so the command line cannot
+        # reach a floor without a ceiling. A direct `reconcile_up` caller can,
+        # and an omitted ceiling has to clear the requested floor or the create
+        # is refused against the placeholder maximum of 1.
         maximum = max(_DEFAULT_MAXIMUM, minimum) if request.maximum is None else request.maximum
         compute = {
             "gpuClass": request.gpu,
@@ -184,7 +191,7 @@ def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
     if status == "stop_failed":
         renderer.warn(
             f"Deployment {deployment_id} could not stop and may still be billing.",
-            hint=f"run `comfy deploy stop {deployment_id}` again",
+            hint=f"run `comfy deploy stop --deployment {deployment_id}` again",
         )
     elif watch and status in {"failed", "stopped"}:
         renderer.warn(f"Deployment {deployment_id} reached terminal status {status}.")
@@ -196,7 +203,9 @@ def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
             # rejects an edit unless it is ready or stopped (`run_scale` re-wraps
             # that as `deploy_conflict`), so a `stop_failed` deployment is sent
             # to the stop remedy warned about just above instead.
-            hint=None if status == "stop_failed" else f"run `comfy deploy scale {deployment_id}` to change them",
+            hint=None
+            if status == "stop_failed"
+            else f"run `comfy deploy scale --deployment {deployment_id} --min <n> --max <n>` to change them",
         )
     renderer.emit(
         result.payload(),
