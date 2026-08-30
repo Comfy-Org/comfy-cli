@@ -1284,6 +1284,19 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "fix the nodes named in `details.node_errors`, then submit again with a new idempotency key",
     ),
     ErrorCode(
+        "deploy_workflow_empty",
+        "The `--workflow` file is a JSON object but holds no nodes, so there is nothing to submit. Raised locally, "
+        "before any deployment is contacted.",
+        "export a workflow that contains at least one node",
+    ),
+    ErrorCode(
+        "deploy_workflow_not_api_format",
+        "The `--workflow` file parsed as JSON but is not an API-format workflow -- its root is not an object whose "
+        "values carry `class_type`. Raised locally, before any deployment is contacted; distinct from "
+        "`deploy_workflow_invalid`, which is the data plane rejecting a workflow that was submitted.",
+        "pass a ComfyUI API-format workflow: a JSON object whose values carry `class_type`",
+    ),
+    ErrorCode(
         "deploy_workflow_format_ui",
         "`comfy deploy run` received a UI-format workflow carrying `nodes` and `links`. Deployment releases expose "
         "no node-schema endpoint, so the CLI cannot convert that graph safely and refuses it before any request.",

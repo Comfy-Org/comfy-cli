@@ -63,6 +63,30 @@ def test_sigint_after_submission_issues_exactly_one_cancel(tmp_path: Path, monke
     assert cancels == [("https://dep-id.run.comfy.app/api/v2/jobs/job-1/cancel", "POST")]
 
 
+def test_sigint_reports_an_envelope_carrying_the_job_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exit 130 alone leaves a `--json` caller with nothing to reconcile.
+
+    `typer.Exit` bypasses cmdline's global `cancelled` envelope, so stdout and
+    stderr were both empty — no outcome, and no id for a job that was already
+    submitted and may still be settling server-side.
+    """
+    # Given
+    workflow = write_workflow(tmp_path / "workflow.json")
+    install_run(monkeypatch, FakeControl("https://dep-id.run.comfy.app"), FakeJobClient(job()))
+    monkeypatch.setattr(deploy_run, "watch_job", lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt))
+    monkeypatch.setattr(deploy_run, "request_json", lambda *_args, **_kwargs: (202, {}))
+
+    # When
+    result = invoke(workflow, "--deployment", "dep-id")
+
+    # Then
+    assert result.exit_code == 130
+    error = envelope_error(result)
+    assert error["code"] == "cancelled"
+    assert error["details"]["job_id"] == "job-1"
+    assert error["details"]["cancel_requested"] is True
+
+
 def test_failed_cancel_warns_but_keeps_sigint_exit_130(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Given
     workflow = write_workflow(tmp_path / "workflow.json")

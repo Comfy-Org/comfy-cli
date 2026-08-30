@@ -165,3 +165,42 @@ def test_ui_workflow_maps_to_the_deploy_format_error_before_any_plane_request(
     # Then
     assert result.exit_code == 1
     assert envelope_error(result)["code"] == "deploy_workflow_format_ui"
+
+
+@pytest.mark.parametrize(
+    ("payload", "code"),
+    [
+        ("[1, 2]", "deploy_workflow_not_api_format"),
+        ('"a string"', "deploy_workflow_not_api_format"),
+        ("42", "deploy_workflow_not_api_format"),
+        ("null", "deploy_workflow_not_api_format"),
+        ("true", "deploy_workflow_not_api_format"),
+        ("{}", "deploy_workflow_empty"),
+    ],
+    ids=lambda value: str(value).replace(" ", ""),
+)
+def test_a_workflow_that_is_not_an_object_of_nodes_is_refused_with_an_envelope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: str,
+    code: str,
+) -> None:
+    """`_load_workflow_file` returns whatever `json.load` produced.
+
+    The node scan then met `.items()` on a list, a string or `None`, so an
+    `AttributeError` escaped with no envelope at all — the one outcome a
+    `--json` caller cannot act on. `{}` is the neighbouring case: a valid empty
+    object, which used to scan to an empty plan and proceed to submit nothing.
+    """
+    # Given
+    workflow = tmp_path / "not-a-workflow.json"
+    workflow.write_text(payload, encoding="utf-8")
+    monkeypatch.setattr(deploy_run, "_command_clients", lambda: pytest.fail("plane client constructed"))
+
+    # When
+    result = invoke(workflow, "--deployment", "dep-id")
+
+    # Then
+    assert result.exit_code == 1
+    assert envelope_error(result)["code"] == code
+    assert not isinstance(result.exception, AttributeError)
