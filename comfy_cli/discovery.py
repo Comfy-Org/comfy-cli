@@ -62,6 +62,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy deploy stop": "deploy_stop",
     "comfy deploy start": "deploy_start",
     "comfy deploy delete": "deploy_delete",
+    "comfy deploy run": "deploy_run",
     "comfy deploy refs compute": "deploy_refs_compute",
     "comfy jobs ls": "jobs",
     "comfy jobs status": "jobs",

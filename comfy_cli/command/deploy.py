@@ -2,6 +2,7 @@
 
 import urllib.error
 from dataclasses import replace
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -12,6 +13,7 @@ from comfy_cli.command import deploy_lifecycle as _deploy_lifecycle
 from comfy_cli.command import deploy_ls as _deploy_ls
 from comfy_cli.command import deploy_read as _deploy_read
 from comfy_cli.command import deploy_refs as _deploy_refs
+from comfy_cli.command import deploy_run as _deploy_run
 from comfy_cli.command.build_paths import BuildSpecNotFoundError
 from comfy_cli.command.build_spec import BuildSpecInvalidError
 from comfy_cli.command.deploy_compute import prompt_gpu as _prompt_gpu
@@ -77,6 +79,39 @@ def _require_paired_bounds(renderer, minimum: int | None, maximum: int | None) -
         details={"missing": [missing]},
     )
     raise typer.Exit(code=1)
+
+
+@app.command("run", help="Submit an API-format workflow to a ready deployment.")
+@tracking.track_command("deploy")
+def run_cmd(
+    ctx: typer.Context,
+    path: DeployPath = None,
+    workflow: Annotated[str | None, typer.Option("--workflow", help="API-format workflow JSON file.")] = None,
+    deployment_id: DeploymentOption = None,
+    wait: Annotated[bool, typer.Option("--wait/--no-wait", help="Wait for the job and download outputs.")] = True,
+    output_dir: Annotated[Path, typer.Option("--output-dir", help="Directory for completed outputs.")] = Path(
+        "outputs"
+    ),
+    timeout: Annotated[float | None, typer.Option("--timeout", min=0.001, help="Maximum wait in seconds.")] = None,
+    no_upload: Annotated[bool, typer.Option("--no-upload", help="Fail when a local asset is not deduped.")] = False,
+    asset_root: Annotated[
+        list[Path] | None,
+        typer.Option("--asset-root", help="Extra directory workflow inputs may name files inside. Repeatable."),
+    ] = None,
+) -> None:
+    _deploy_run.run_deploy(
+        ctx,
+        _deploy_run.DeployRunRequest(
+            path,
+            workflow,
+            deployment_id,
+            wait,
+            output_dir,
+            timeout,
+            no_upload,
+            tuple(asset_root or ()),
+        ),
+    )
 
 
 @app.command("scale", help="Edit a deployment's worker bounds or stopped compute configuration.")
