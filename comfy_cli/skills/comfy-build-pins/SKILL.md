@@ -84,11 +84,10 @@ nothing asked for.
 Three shapes in that text are worth a build each:
 
 - **Two names for one import.** `opencv-python` and `opencv-python-headless` both
-  install `cv2`; `pyyaml` and `ruamel.yaml` both answer to `yaml`; `pillow` and
-  the abandoned `pil` both answer to `PIL`. A real install had four packs asking
-  for both `cv2` names. One loses, and whichever loses, something breaks. A
-  failing import names the module, never the pip package, so pick between them
-  from what the packs declare and not from the log.
+  install `cv2`; `pillow` and the abandoned `pil` both answer to `PIL`. A real
+  install had four packs asking for both `cv2` names. One loses, and whichever
+  loses, something breaks. A failing import names the module, never the pip
+  package, so pick between them from what the packs declare and not from the log.
 - **A ceiling on a shared package.** A line like
   `opencv-python-headless[ffmpeg]<=4.7.0.72` holds everyone at a 2023 build. That
   single line is the most common cause of a failed first build here, because that

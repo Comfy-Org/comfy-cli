@@ -11,8 +11,8 @@ The commands here are the `comfy deploy` group from
 usable session.
 
 **Deploying spends money continuously, not once.** A build costs minutes and
-stops. A deployment holds compute until something stops it, and the two commands
-that create one — `up` and `run` — are the only ones in this skill that spend.
+stops. A deployment holds compute until something stops it: `up` and `run` create
+paid compute, `start` resumes it, and `scale --min` sets the standing charge.
 Every other verb reads, or gives compute back.
 
 ## What you are working with

@@ -48,9 +48,10 @@ refs      resolve · base-images · build-targets · model-dirs
 blob      ls                                    (hidden; workspace private blobs)
 ```
 
-- **Every command takes the install directory or the spec path** as its
-  argument, defaulting to the current directory. Once the spec exists it carries
-  the Build id, so nothing after `init` needs an id from you. `--id` overrides it.
+- **Every command that reads the spec takes the install directory or the spec
+  path** as its argument, defaulting to the current directory. `ls`, `refs` and
+  `blob` are workspace-level and take none. Once the spec exists it carries the
+  Build id, so nothing after `init` needs an id from you. `--id` overrides it.
 - **`comfy which` names the install** when the user has not said where it is.
 - **Only sign in when told to.** Run `comfy cloud login` if a command answers
   `build_not_signed_in`, and not before. Everything under `refs`, both importers
@@ -146,8 +147,8 @@ carries **no models**, so use the scan whenever private weights have to travel.
 comfy --json build init <dir> --name <name> --from-workflow <workflow>.json
 ```
 
-- **It writes a local spec and creates no Build.** `push` is still the only line
-  that spends anything.
+- **It writes a local spec and creates no Build.** `push` only uploads; `release
+  create` is the line that starts billable build minutes.
 - **Hand it the file unchanged.** It reads both the editing format and the API
   export, so converting first only refuses files it would have taken.
 - **Save the report.** The importer's findings arrive as `advisories` in the
