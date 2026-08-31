@@ -892,7 +892,9 @@ def execute_create(plan: dict, *, client, name: str, locate_bytes, targets=None)
     ``locate_bytes(upload) -> Path`` finds the local file for a model upload.
     node_zip uploads (hand-dropped local nodes) aren't packaged yet — raises
     NotImplementedError so the caller can surface a clear message. Returns
-    ``{buildId, distributionId, releaseId, versionId, statusUrl, uploaded}``."""
+    ``{buildId, distributionId, releaseId, versionId, statusUrl, uploaded}``,
+    where ``uploaded`` counts the blobs whose bytes actually moved — content the
+    workspace already holds is stitched in without a transfer."""
     definition = plan["definition"]
     # Preflight the whole upload list before any bytes move: an unsupported local
     # node, or a model whose file can't be found (missing --models-dir), must fail
@@ -906,13 +908,17 @@ def execute_create(plan: dict, *, client, name: str, locate_bytes, targets=None)
     uploaded = 0
     for u, path in prepared:
         blob_id, upload_url = client.create_blob("model", u["filename"], u["sha256"], u["sizeBytes"])
-        client.upload_blob(upload_url, path)
+        # No URL means the builder already holds these bytes and deduplicated the
+        # blob; PUTting to `None` raises MissingSchema and would fail the create
+        # over content already stored. The id still stitches in, only bytes skip.
+        if upload_url is not None:
+            client.upload_blob(upload_url, path)
+            uploaded += 1
         section, idx = u["slot"]
         definition[section][idx]["blobId"] = blob_id
-        uploaded += 1
     build_id = client.create_build(name, definition)
     try:
-        version_id, status_url = client.cut_version(build_id, targets)
+        version_id, status_url = client.create_release(build_id, targets)
     except Exception as e:
         # The build now exists server-side; carry its id on the error so the
         # command can surface it (the user can then delete or retry it, not orphan it).
@@ -1510,7 +1516,7 @@ def version_create(
 ):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    release_id, status_url = _builder_call(renderer, lambda: client.cut_version(build_id))
+    release_id, status_url = _builder_call(renderer, lambda: client.create_release(build_id))
     if renderer.is_pretty():
         renderer.success(f"Cut release {release_id}")
         renderer.print(f"  status: {status_url}")
@@ -1546,7 +1552,7 @@ def version_get(
 ):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    version = _builder_call(renderer, lambda: client.get_version(version_id))
+    version = _builder_call(renderer, lambda: client.get_release(version_id))
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(version))
     renderer.emit(version, command="build release get")
@@ -1564,7 +1570,7 @@ def version_logs(
 ):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    content = _builder_call(renderer, lambda: client.get_version_logs(version_id, os=os_target, gpu=gpu))
+    content = _builder_call(renderer, lambda: client.get_release_logs(version_id, os=os_target, gpu=gpu))
     # Mirror whichever spelling the builder returned, so either server generation
     # yields both keys.
     log_id = content.get("releaseId") or content.get("versionId")
@@ -1841,16 +1847,24 @@ def blob_upload_cmd(
     size_bytes = file_path.stat().st_size
     sha256 = _sha256_file(file_path)
     blob_id, upload_url = _builder_call(renderer, lambda: client.create_blob(kind, file_path.name, sha256, size_bytes))
-    _builder_call(renderer, lambda: client.upload_blob(upload_url, file_path))
+    # No URL means the builder already holds these bytes and deduplicated the blob.
+    # Re-running this command on a file already stored is the ordinary case, so it
+    # answers with the usable id rather than failing on a `None` URL.
+    transferred = upload_url is not None
+    if transferred:
+        _builder_call(renderer, lambda: client.upload_blob(upload_url, file_path))
     if renderer.is_pretty():
-        renderer.success(f"Uploaded {file_path.name} as {blob_id}")
+        if transferred:
+            renderer.success(f"Uploaded {file_path.name} as {blob_id}")
+        else:
+            renderer.success(f"{file_path.name} was already stored as {blob_id}")
         # A model entry needs the hash as well as the id, and the cut refuses one
         # that is not a real sha256, so both are printed rather than just the id.
         renderer.info(f'reference it as "blobId": "{blob_id}", "sha256": "{sha256}"')
     renderer.emit(
         {"blobId": blob_id, "kind": kind, "filename": file_path.name, "sha256": sha256, "sizeBytes": size_bytes},
         command="build blob upload",
-        changed=True,
+        changed=transferred,
     )
 
 
@@ -1915,7 +1929,7 @@ def version_manifest(
 ):
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    manifest = _builder_call(renderer, lambda: client.get_version_manifest(version_id))
+    manifest = _builder_call(renderer, lambda: client.get_release_manifest(version_id))
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(manifest))
     renderer.emit(manifest, command="build release manifest")

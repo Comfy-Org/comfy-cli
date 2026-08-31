@@ -384,15 +384,28 @@ class _FakeBuilder:
         return f"blob-{filename}", f"https://put.example/{filename}"
 
     def upload_blob(self, upload_url, path):
+        # The real client hands the URL to `requests.put`, which rejects `None`.
+        # A fake that accepted it would let a deduplicated blob regress silently.
+        if upload_url is None:
+            raise requests.exceptions.MissingSchema("Invalid URL 'None': No scheme supplied.")
         self.uploaded.append((upload_url, str(path)))
 
     def create_build(self, name, definition, description=None):
         self.created = (name, definition)
         return "dist-123"
 
-    def cut_version(self, build_id, targets=None):
+    def create_release(self, build_id, targets=None):
         self.cut = (build_id, targets)
         return "ver-456", "https://status.example/ver-456"
+
+
+class _DeduplicatingBuilder(_FakeBuilder):
+    """A builder that already holds every blob offered to it, so ``create_blob``
+    answers with the existing id and no upload URL."""
+
+    def create_blob(self, kind, filename, sha256, size_bytes):
+        self.blobs_created.append(filename)
+        return f"blob-{filename}", None
 
 
 def test_execute_create_uploads_stitches_and_cuts():
@@ -440,6 +453,42 @@ def test_execute_create_preflights_uploads_before_moving_bytes():
         build.execute_create(plan, client=fake, name="demo", locate_bytes=lambda u: Path("/tmp/x"))
     assert fake.blobs_created == [], "no model should upload when a later node makes the create unsupported"
     assert fake.created is None
+
+
+def test_execute_create_stitches_a_deduplicated_blob_without_uploading_it():
+    """A builder that already holds the bytes answers with the id it has and no
+    upload URL. Sending them anyway PUTs to ``None`` — ``requests`` raises
+    ``MissingSchema`` — and fails the whole create over content already stored,
+    which is exactly the retry this deduplication exists to make cheap."""
+    scan_def = {
+        "models": [{"type": "vae", "filename": "ae.safetensors", "sha256": "h", "sizeBytes": 5, "source": "local"}],
+        "customNodes": [],
+    }
+    plan = build.plan_create(scan_def)
+    fake = _DeduplicatingBuilder()
+
+    result = build.execute_create(plan, client=fake, name="demo", locate_bytes=lambda u: Path("/tmp/ae.safetensors"))
+
+    assert fake.uploaded == [], "a blob the builder already holds has nothing to transfer"
+    assert result["uploaded"] == 0, "`uploaded` counts bytes that moved, not blobs stitched"
+    assert plan["definition"]["models"][0]["blobId"] == "blob-ae.safetensors"
+    assert fake.cut[0] == "dist-123", "the create must still reach the release"
+
+
+def test_blob_upload_reports_the_id_when_the_builder_already_holds_the_bytes(monkeypatch, tmp_path, capsys):
+    """Re-running `comfy build blob upload` on a stored file is the ordinary case:
+    it must answer with the usable id rather than fail on a ``None`` upload URL."""
+    target = tmp_path / "ae.safetensors"
+    target.write_bytes(b"VAE")
+    client = _DeduplicatingBuilder()
+    monkeypatch.setattr(build, "_builder_client", lambda renderer, url: client)
+
+    build.blob_upload_cmd(path=str(target))
+
+    assert client.uploaded == [], "nothing to PUT when the builder deduplicated the blob"
+    out = capsys.readouterr().out
+    assert "blob-ae.safetensors" in out
+    assert "None" not in out, "a None upload URL must never reach the user"
 
 
 class _FakeResolver:
@@ -535,7 +584,7 @@ def test_builder_client_endpoints_and_parsing(monkeypatch):
     c = BuilderClient("https://builder.test/", "jwt-token")
     assert c.create_blob("model", "f.safetensors", "hash", 5) == ("b1", "https://put")
     assert c.create_build("n", {"models": [], "customNodes": []}) == "d1"
-    assert c.cut_version("d1") == ("v1", "https://s")
+    assert c.create_release("d1") == ("v1", "https://s")
     results = c.resolve_models(["a.safetensors"])
     assert results[0]["candidates"][0]["sourceUri"] == "https://u"
     # URLs carry the /v1 prefix, and the JWT rides on the cloud target
@@ -550,11 +599,13 @@ def test_builder_client_read_endpoints(monkeypatch):
 
     def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
         calls.append((method, url))
-        if url.endswith("/v1/builds"):
+        # The paged reads carry a `?limit=`, so route on the path, not the URL.
+        path = url.split("?", 1)[0]
+        if path.endswith("/v1/builds"):
             return 200, {"builds": [{"id": "d1", "name": "n"}]}
-        if url.endswith("/v1/builds/d1"):
+        if path.endswith("/v1/builds/d1"):
             return 200, {"id": "d1", "name": "n", "definition": {"models": []}}
-        if url.endswith("/v1/builds/d1/releases"):
+        if path.endswith("/v1/builds/d1/releases"):
             # A not-yet-upgraded builder still keys the list `versions`; the
             # client parses that spelling as well as `releases`.
             return 200, {"versions": [{"id": "v1", "status": "complete"}]}
@@ -569,10 +620,10 @@ def test_builder_client_read_endpoints(monkeypatch):
     assert c.list_builds() == [{"id": "d1", "name": "n"}]
     assert c.get_build("d1")["definition"] == {"models": []}
     assert c.list_releases("d1") == [{"id": "v1", "status": "complete"}]
-    logs = c.get_version_logs("v1", os="linux", gpu="nvidia")
+    logs = c.get_release_logs("v1", os="linux", gpu="nvidia")
     assert logs["log"] == "hello" and logs["truncated"] is False
     # reads are GETs under /v1, and the log target selector rides as query params
-    assert ("GET", "https://builder.test/v1/builds") in calls
+    assert ("GET", "https://builder.test/v1/builds?limit=100") in calls
     assert any("/logs?" in u and "os=linux" in u and "gpu=nvidia" in u for _, u in calls)
 
 
@@ -625,7 +676,7 @@ def test_builder_client_reference_and_update_endpoints(monkeypatch):
     assert c.list_model_directories() == ["checkpoints", "vae"]
     assert c.list_blobs() == [{"blobId": "b1", "filename": "m.safetensors"}]
     assert c.update_build("d1", {"models": []}, "2026-08-01T00:00:00Z")["id"] == "d1"
-    assert c.get_version_manifest("v1")["models"][0]["filename"] == "ae"
+    assert c.get_release_manifest("v1")["models"][0]["filename"] == "ae"
     assert c.get_artifact_download("a1")["downloadUrl"] == "https://dl"
     # update is a PATCH carrying the definition AND the expectedUpdatedAt guard the
     # builder requires (a missing one 409s STALE); the rest are GETs under /v1
@@ -779,7 +830,7 @@ def test_upload_blob_sends_generation_match_header(monkeypatch, tmp_path):
     assert captured["allow_redirects"] is False
 
 
-def test_get_version_logs_uses_large_cap(monkeypatch):
+def test_get_release_logs_uses_large_cap(monkeypatch):
     seen = {}
 
     def fake_request_json(url, target, *, method="GET", body=None, max_bytes, timeout=30.0):
@@ -789,7 +840,7 @@ def test_get_version_logs_uses_large_cap(monkeypatch):
     monkeypatch.setattr("comfy_cli.builder_api.request_json", fake_request_json)
     from comfy_cli.builder_api import BuilderClient
 
-    BuilderClient("https://builder.test/", "jwt").get_version_logs("v1")
+    BuilderClient("https://builder.test/", "jwt").get_release_logs("v1")
     # the builder caps a served log at 8 MiB; the client cap must sit above that
     assert seen["max_bytes"] > 8 * 1024 * 1024
 
@@ -1165,7 +1216,7 @@ class _ImportingBuilder:
         self.created_with = definition
         return "dist-1"
 
-    def cut_version(self, build_id, targets=None):
+    def create_release(self, build_id, targets=None):
         return ("ver-1", "status-url")
 
 
@@ -1561,9 +1612,11 @@ class _FakeBuilderHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):  # noqa: N802 (BaseHTTPRequestHandler's spelling)
-        if self.path == "/v1/builds":
+        # The paged reads carry a `?limit=`, so route the listings on the path.
+        route = self.path.split("?", 1)[0]
+        if route == "/v1/builds":
             return self._reply(200, {"builds": [{"id": "dist-1", "name": "portrait"}]})
-        if self.path == "/v1/builds/dist-1/releases":
+        if route == "/v1/builds/dist-1/releases":
             return self._reply(200, {"releases": [{"id": "rel-9", "status": "complete"}]})
         if self.path.startswith("/v1/releases/rel-9/logs"):
             return self._reply(200, {"releaseId": "rel-9", "os": "linux", "log": "pip install ok", "truncated": False})
@@ -1669,7 +1722,7 @@ def test_build_version_alias_hidden_from_build_help():
     assert "version" not in listed
 
 
-def test_cut_version_falls_back_to_buildversionid(monkeypatch):
+def test_create_release_falls_back_to_buildversionid(monkeypatch):
     """A not-yet-upgraded builder answers the cut with buildVersionId; the
     client still parses the id so the CLI works against either generation."""
 
@@ -1681,7 +1734,7 @@ def test_cut_version_falls_back_to_buildversionid(monkeypatch):
     from comfy_cli.builder_api import BuilderClient
 
     c = BuilderClient("https://builder.test/", "jwt")
-    assert c.cut_version("d1") == ("v1", "https://s")
+    assert c.create_release("d1") == ("v1", "https://s")
 
 
 # --- review follow-ups --------------------------------------------------------

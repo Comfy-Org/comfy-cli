@@ -22,6 +22,7 @@ from pathlib import Path
 import requests
 
 from comfy_cli import credentials
+from comfy_cli.builder_pagination import PAGE_LIMIT, cursor_pages
 from comfy_cli.http import request_json
 from comfy_cli.target import Target
 
@@ -76,10 +77,22 @@ class BuilderClient:
         )
         return parsed or {}
 
-    def create_blob(self, kind: str, filename: str, sha256: str, size_bytes: int) -> tuple[str, str]:
-        """Mint a presigned upload. Returns (blobId, uploadUrl)."""
+    def create_blob(self, kind: str, filename: str, sha256: str, size_bytes: int) -> tuple[str, str | None]:
+        """Claim a blob id for these bytes. Returns ``(blobId, uploadUrl)``.
+
+        ``uploadUrl`` is ``None`` when the workspace already held these exact
+        bytes: the builder returns the id it already has and there is nothing
+        to transfer, which is what makes an interrupted multi-GB push cheap to
+        retry. Branch on the server's ``deduplicated`` flag rather than on the
+        URL being absent — a presigned PUT is signed create-only, so replaying
+        one against content that already exists fails rather than harmlessly
+        re-uploading.
+        """
         r = self._post(("blobs",), {"kind": kind, "filename": filename, "sha256": sha256, "sizeBytes": size_bytes})
-        return r["blobId"], r["uploadUrl"]
+        blob_id = r["blobId"]
+        if r.get("deduplicated") is True:
+            return blob_id, None
+        return blob_id, r["uploadUrl"]
 
     def upload_blob(self, upload_url: str, path: Path) -> None:
         """Stream a file to its presigned PUT URL (bytes go straight to storage).
@@ -119,7 +132,7 @@ class BuilderClient:
             body["description"] = description
         return self._post(("builds", "from-workflow"), body, timeout=_WORKFLOW_IMPORT_TIMEOUT)
 
-    def cut_version(self, build_id: str, targets: list[dict] | None = None) -> tuple[str, str]:
+    def create_release(self, build_id: str, targets: list[dict] | None = None) -> tuple[str, str]:
         """POST /v1/builds/{id}/releases: freeze the definition and enqueue a
         build. Returns (releaseId, statusUrl). A server that predates the
         version-to-release rename still answers with ``buildVersionId``, so
@@ -130,10 +143,10 @@ class BuilderClient:
         r = self._post(("builds", build_id, "releases"), body)
         return r.get("releaseId") or r["buildVersionId"], r["statusUrl"]
 
-    def get_version(self, version_id: str) -> dict:
+    def get_release(self, release_id: str) -> dict:
         """GET /v1/releases/{id}: poll a release's build status."""
         _, parsed = request_json(
-            self.target.url("releases", version_id), self.target, method="GET", max_bytes=_MAX_JSON
+            self.target.url("releases", release_id), self.target, method="GET", max_bytes=_MAX_JSON
         )
         return parsed or {}
 
@@ -175,31 +188,45 @@ class BuilderClient:
         return parsed or {}
 
     def list_builds(self) -> list[dict]:
-        """GET /v1/builds -> the caller's builds (summaries)."""
-        return self._get(("builds",)).get("builds", [])
+        """GET every cursor page from /v1/builds -> the caller's builds (summaries).
+
+        The builder pages this read, so a workspace past one page silently lost
+        its tail when only the first was taken."""
+        builds: list[dict] = []
+        for page in cursor_pages(
+            lambda cursor: self._get(("builds",), {"cursor": cursor, "limit": PAGE_LIMIT}), "builds"
+        ):
+            builds.extend(page.get("builds", []))
+        return builds
 
     def get_build(self, build_id: str) -> dict:
         """GET /v1/builds/{id} -> a build with its full definition."""
         return self._get(("builds", build_id))
 
     def list_releases(self, build_id: str) -> list[dict]:
-        """GET /v1/builds/{id}/releases -> the build's releases. A server
-        that predates the version-to-release rename keys the list ``versions``,
-        so both spellings parse."""
-        body = self._get(("builds", build_id, "releases"))
-        return body.get("releases") or body.get("versions") or []
+        """GET every cursor page from /v1/builds/{id}/releases -> the build's
+        releases. A server that predates the version-to-release rename keys the
+        list ``versions``, so both spellings parse."""
+        releases: list[dict] = []
+        pages = cursor_pages(
+            lambda cursor: self._get(("builds", build_id, "releases"), {"cursor": cursor, "limit": PAGE_LIMIT}),
+            "releases",
+        )
+        for page in pages:
+            releases.extend(page.get("releases") or page.get("versions") or [])
+        return releases
 
-    def get_version_logs(self, version_id: str, *, os: str | None = None, gpu: str | None = None) -> dict:
+    def get_release_logs(self, release_id: str, *, os: str | None = None, gpu: str | None = None) -> dict:
         """GET /v1/releases/{id}/logs -> the build log for one target
         (``os``/``gpu`` select which; the builder picks a target when omitted).
-        Returns ``{versionId, os?, gpu?, log, truncated}``. Uses a larger response
+        Returns ``{releaseId, os?, gpu?, log, truncated}``. Uses a larger response
         cap than other reads because a build log can be several MiB."""
-        return self._get(("releases", version_id, "logs"), {"os": os, "gpu": gpu}, max_bytes=_MAX_LOG_JSON)
+        return self._get(("releases", release_id, "logs"), {"os": os, "gpu": gpu}, max_bytes=_MAX_LOG_JSON)
 
     def delete_build(self, build_id: str) -> None:
         """DELETE /v1/builds/{id} -> soft-delete. Idempotent (204 even when
         already gone); the builder returns 409 while a deployment still runs one of
-        its versions."""
+        its releases."""
         request_json(self.target.url("builds", build_id), self.target, method="DELETE", max_bytes=_MAX_JSON)
 
     def validate_build(self, build_id: str) -> dict:
@@ -214,12 +241,28 @@ class BuilderClient:
         )
         return parsed or {}
 
-    def update_build(self, build_id: str, definition: dict, expected_updated_at: str | None) -> dict:
+    def update_build(
+        self,
+        build_id: str,
+        definition: dict,
+        expected_updated_at: str | None,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> dict:
         """PATCH /v1/builds/{id} -> replace the stored definition. Returns
         the updated build. ``expected_updated_at`` is the ``updatedAt`` the
         caller last saw (optimistic concurrency); the builder rejects the save with
-        409 STALE if it is stale or missing, so pass the value from a fresh GET."""
+        409 STALE if it is stale or missing, so pass the value from a fresh GET.
+
+        ``name`` and ``description`` are the server's own existing fields: a
+        local spec owns them too, so a sync that could not carry them would leave
+        the two copies disagreeing with no way to reconcile."""
         body = {"definition": definition, "expectedUpdatedAt": expected_updated_at}
+        if name is not None:
+            body["name"] = name
+        if description is not None:
+            body["description"] = description
         _, parsed = request_json(
             self.target.url("builds", build_id),
             self.target,
@@ -229,10 +272,10 @@ class BuilderClient:
         )
         return parsed or {}
 
-    def get_version_manifest(self, version_id: str) -> dict:
+    def get_release_manifest(self, release_id: str) -> dict:
         """GET /v1/releases/{id}/manifest -> the release's models and
         runtime policies."""
-        return self._get(("releases", version_id, "manifest"))
+        return self._get(("releases", release_id, "manifest"))
 
     def get_artifact_download(self, artifact_id: str) -> dict:
         """GET /v1/build-artifacts/{id}/download -> ``{downloadUrl, expiresAt?}``."""
@@ -240,7 +283,12 @@ class BuilderClient:
 
     def list_blobs(self, kind: str | None = None) -> list[dict]:
         """GET /v1/blobs -> the workspace's private uploaded content (summaries),
-        optionally filtered by ``kind`` (model | node_zip)."""
+        optionally filtered by ``kind`` (model | node_zip).
+
+        One page, no walk: this endpoint mints no cursor, so there is nothing to
+        follow. Pass the result through
+        :func:`comfy_cli.builder_pagination.blob_listing_is_clamped` to tell a
+        complete listing from one the server cut off at its page limit."""
         return self._get(("blobs",), {"kind": kind}).get("blobs", [])
 
     def list_base_images(self) -> list[dict]:
@@ -248,7 +296,7 @@ class BuilderClient:
         return self._get(("base-images",)).get("baseImages", [])
 
     def list_build_targets(self) -> list[dict]:
-        """GET /v1/build-targets -> the build targets a version can be cut for."""
+        """GET /v1/build-targets -> the build targets a release can be cut for."""
         return self._get(("build-targets",)).get("targets", [])
 
     def list_model_directories(self) -> list[str]:
