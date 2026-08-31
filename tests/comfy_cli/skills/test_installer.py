@@ -182,8 +182,12 @@ def test_comfy_skill_routes_to_every_sibling():
 
 
 def test_comfy_build_skill_covers_the_build_group():
+    """The three verbs a build cannot be produced without: write the spec, send
+    it, cut it. `test_no_mentions_of_nonexistent_commands` resolves every
+    mention against the live Typer tree, so these two guards together mean the
+    skill names the real path and only the real path."""
     text = skill_content("comfy-build")
-    for needle in ("comfy build scan", "comfy build create", "comfy build release"):
+    for needle in ("comfy build init", "comfy build push", "comfy build release"):
         assert needle in text, f"comfy-build skill should mention {needle}"
 
 

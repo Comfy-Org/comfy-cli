@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://comfy.org/schemas/build_resolve.json",
-  "title": "comfy build resolve --json data payload",
+  "$id": "https://comfy.org/schemas/build_refs_resolve.json",
+  "title": "comfy build refs resolve --json data payload",
   "type": "object",
   "required": ["results"],
   "additionalProperties": true,

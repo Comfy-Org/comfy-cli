@@ -9,7 +9,8 @@ URL and never transit the builder.
 Field names match services/comfy-builder/openapi.yaml exactly:
   POST /v1/blobs {kind, filename, sizeBytes, sha256}     -> {blobId, uploadUrl, expiresAt}
   POST /v1/builds {name, definition}              -> {id, ...}
-  POST /v1/builds/from-workflow {name, workflow}  -> {build, report}
+  POST /v1/snapshots/resolve {snapshot}           -> {definition, report}
+  POST /v1/workflows/resolve {workflow}           -> {definition, report, format}
   POST /v1/builds/{id}/releases {targets?}        -> {releaseId, statusUrl}
   GET  /v1/releases/{id}                          -> {status, ...}
 """
@@ -37,9 +38,9 @@ _MAX_LOG_JSON = 32 * 1024 * 1024
 _UPLOAD_TIMEOUT = (10, 600)
 # The shared HTTP layer's own default, named here so one call can raise it.
 _POST_TIMEOUT = 30.0
-# Importing a workflow looks every distinct node class up in the registry behind
-# a 20 second budget of the builder's own, then matches models and writes the
-# build row, so the default leaves a large graph nothing to spare.
+# Reading a workflow looks every distinct node class up in the registry behind a
+# 20 second budget of the builder's own, then matches models, so the shared
+# default leaves a large graph nothing to spare.
 _WORKFLOW_IMPORT_TIMEOUT = 90.0
 
 
@@ -124,22 +125,20 @@ class BuilderClient:
             body["description"] = description
         return self._post(("builds",), body)["id"]
 
-    def create_build_from_workflow(self, name: str, workflow: dict, *, description: str | None = None) -> dict:
-        """POST /v1/builds/from-workflow: read a workflow and store what it
-        maps to, in one call. Returns ``{build, report}``."""
-        body: dict = {"name": name, "workflow": workflow}
-        if description:
-            body["description"] = description
-        return self._post(("builds", "from-workflow"), body, timeout=_WORKFLOW_IMPORT_TIMEOUT)
-
     def create_release(self, build_id: str, targets: list[dict] | None = None) -> tuple[str, str]:
         """POST /v1/builds/{id}/releases: freeze the definition and enqueue a
-        build. Returns (releaseId, statusUrl). A server that predates the
-        version-to-release rename still answers with ``buildVersionId``, so
-        that key is the fallback and the CLI works against either generation."""
-        body: dict = {}
-        if targets:
-            body["targets"] = targets
+        build for ``targets``. Returns (releaseId, statusUrl).
+
+        ``targets`` is required and must be non-empty: an implicit target spends
+        build minutes the caller never asked for, so a missing or empty list is a
+        caller error raised here, before any request is issued.
+
+        A server that predates the version-to-release rename still answers with
+        ``buildVersionId``, so that key is the fallback and the CLI works against
+        either generation."""
+        if not isinstance(targets, list) or not targets:
+            raise ValueError("create_release requires a non-empty list of targets (e.g. [{'os': ..., 'gpu': ...}])")
+        body: dict = {"targets": targets}
         r = self._post(("builds", build_id, "releases"), body)
         return r.get("releaseId") or r["buildVersionId"], r["statusUrl"]
 
@@ -166,17 +165,21 @@ class BuilderClient:
         did not translate rather than leaving it to fail inside a build."""
         return self._post(("snapshots", "resolve"), {"snapshot": snapshot})
 
-    def create_build_from_snapshot(
-        self, name: str, snapshot: dict, *, description: str | None = None, base_image_id: str | None = None
-    ) -> dict:
-        """POST /v1/builds/from-snapshot — read a snapshot and store what it
-        maps to, in one call. Returns ``{build, report}``."""
-        body: dict = {"name": name, "snapshot": snapshot}
-        if description:
-            body["description"] = description
-        if base_image_id:
-            body["baseImageId"] = base_image_id
-        return self._post(("builds", "from-snapshot"), body)
+    def resolve_workflow(self, workflow: dict) -> dict:
+        """POST /v1/workflows/resolve — read a workflow graph as a definition,
+        writing nothing. Returns ``{definition, report, format}``.
+
+        The sibling of :meth:`resolve_snapshot`, and the reason both stay
+        resolves rather than the builder's one-call ``from-workflow`` creator:
+        the spec `build init` writes is a local file, and `build update` amends
+        a build that already exists — neither has anywhere to put a build row
+        the server minted on its own.
+
+        A workflow is a poorer input than a snapshot: it names no versions, no
+        Python and no model sources, so every distinct node class is resolved
+        against the registry and every model comes back in the report instead of
+        the definition. That registry sweep is what earns the raised timeout."""
+        return self._post(("workflows", "resolve"), {"workflow": workflow}, timeout=_WORKFLOW_IMPORT_TIMEOUT)
 
     def _get(self, parts: tuple[str, ...], params: dict | None = None, *, max_bytes: int = _MAX_JSON) -> dict:
         url = self.target.url(*parts)

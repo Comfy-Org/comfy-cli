@@ -69,7 +69,7 @@ class TestRunHappyPath:
         assert start_kwargs["mixpanel_name"] == "run"
         assert success_kwargs["mixpanel_name"] is None
 
-    def test_properties_carry_workflow_and_other_kwargs(self, runner, tracked_run):
+    def test_properties_carry_kwargs_with_the_workflow_path_redacted(self, runner, tracked_run):
         from comfy_cli.cmdline import app
 
         with patch("comfy_cli.cmdline.run_inner.execute"):
@@ -92,7 +92,7 @@ class TestRunHappyPath:
 
         for name, props in _events(tracked_run):
             if name == "execution_start":
-                assert props["workflow"] == "wf.json"
+                assert props["workflow"] == "<redacted>"
                 assert props["timeout"] == 60
                 assert props["host"] == "1.2.3.4"
                 assert props["port"] == 9000

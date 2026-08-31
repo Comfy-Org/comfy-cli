@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_push.json",
+  "title": "comfy build push --json data payload",
+  "type": "object",
+  "required": [
+    "spec_file",
+    "id",
+    "syncedRevision",
+    "created",
+    "dry_run",
+    "upload_count",
+    "upload_bytes",
+    "uploaded",
+    "deduped"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "spec_file": {"type": "string"},
+    "id": {"type": ["string", "null"]},
+    "syncedRevision": {"type": ["string", "null"]},
+    "created": {"type": "boolean"},
+    "dry_run": {"type": "boolean"},
+    "upload_count": {"type": "integer", "minimum": 0},
+    "upload_bytes": {"type": "integer", "minimum": 0},
+    "uploaded": {"description": "Blobs whose bytes were transferred. Never exceeds `upload_count`: the builder answers with an id it already holds, and no upload URL, when the workspace already stored those exact bytes.", "type": "integer", "minimum": 0},
+    "deduped": {"description": "Blobs the builder already held, so `upload_count` was planned but not transferred. Always `upload_count - uploaded`.", "type": "integer", "minimum": 0},
+    "skipped_symlinks": {
+      "description": "Symlinks excluded from a packaged custom node; present only when packaging skipped at least one. `location` points into the definition of the spec at `spec_file` (this payload carries no definition of its own), `localPath` names the node under custom_nodes/, and `member` is the symlink's path inside that node.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["location", "localPath", "member"],
+        "additionalProperties": false,
+        "properties": {
+          "location": {"type": "string", "minLength": 1},
+          "localPath": {"type": "string", "minLength": 1},
+          "member": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["os", "gpu"],
+        "additionalProperties": false,
+        "properties": {
+          "os": {"type": "string", "minLength": 1},
+          "gpu": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "release": {
+      "type": "object",
+      "required": ["releaseId", "statusUrl"],
+      "additionalProperties": false,
+      "properties": {
+        "releaseId": {"type": "string"},
+        "statusUrl": {"type": "string"}
+      }
+    }
+  },
+  "dependentRequired": {
+    "release": ["targets"],
+    "targets": ["release"]
+  }
+}

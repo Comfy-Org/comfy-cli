@@ -89,11 +89,30 @@ _SENSITIVE_SUFFIXES = ("_token", "_api_key", "_secret", "_password")
 # ships them clipped, under `knowledge_query`, where curation reads them.
 # Sensitive values become "<redacted>" (the key is kept so we can still tell the
 # option was supplied).
-# `from_` is the `--from` path: a local filesystem path naming the user's home
-# directory and their install layout, with no analytics value beyond having been
-# supplied.
+# `from_` (the retired `--from`), `from_snapshot` (`comfy build init/update
+# --from-snapshot`) and `workflow` (every `--workflow` option, on every command
+# that takes one) are local filesystem paths naming the user's home directory
+# and their install layout, with no analytics value beyond having been supplied.
+# `_scrub_value` cannot help here: it only strips credentials out of URLs and
+# returns a bare path verbatim by design, so a path is only ever redacted by
+# being named here. Any future path-valued option typed `str` (rather than
+# `Path`, which `_is_trackable` drops wholesale) must be added here too.
 _SENSITIVE_EXACT = frozenset(
-    {"api_key", "key", "token", "password", "secret", "changelog", "prompt", "set_overrides", "from_", "capability"}
+    {
+        "api_key",
+        "key",
+        "token",
+        "password",
+        "secret",
+        "changelog",
+        "prompt",
+        "set_overrides",
+        "from_",
+        "from_snapshot",
+        "from_workflow",
+        "workflow",
+        "capability",
+    }
 )
 
 

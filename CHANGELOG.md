@@ -107,11 +107,16 @@ history.
   developer platform, is now bundled with the CLI. `comfy skills show
   comfy-build` works, and an argument-free `comfy skills install` writes it on a
   machine with no network.
-- `comfy build from-workflow --from <workflow.json> --name <name>` creates a
-  build from a ComfyUI workflow, in the editing format or the API export.
+- `comfy build init --from-workflow <workflow.json>` and `comfy build update
+  --from-workflow <workflow.json>` read a ComfyUI workflow, in the editing
+  format or the API export, into the local spec.
+- `comfy build init --base-image <id>` and `comfy build update --base-image
+  <id>` choose the curated base image a build is built on — the CUDA, Python
+  and torch runtime — instead of leaving it to the catalog default.
+  `comfy build refs base-images` lists the ids.
 - A workflow import prints its full report: the node classes nothing provides,
   the closest pack the registry named for each one, every model the graph loads
-  (a workflow build carries none of them), the classes served by a partner API,
+  (a workflow import carries none of them), the classes served by a partner API,
   and whether a ComfyUI version still has to be pinned.
 - `CONTRIBUTING.md` (renamed from `DEV_README.md`) and this changelog.
 
@@ -121,35 +126,69 @@ history.
   `comfy-build` was the only one it fetched, and it now ships in the wheel and
   is versioned with the CLI release, so the skill and the commands it describes
   can no longer drift apart.
-
 - The builder client module is now `comfy_cli.builder_api` (was
   `comfy_cli.distribution_api`), and its methods say build and release
   (`create_build`, `create_release`, `list_releases`, ...), matching the
   builder's public API. The `distribution-definition/0` schema id is unchanged.
-- `comfy build --json` payloads carry the builder's vocabulary: `buildId`,
-  `releaseId`, and `builds` and `releases` arrays. The retired `distributionId`,
-  `versionId`, `distributions` and `versions` keys are emitted alongside them
-  with identical values, so a pinned script keeps parsing. The shipped schema
-  filenames are unchanged.
-
-### Deprecated
-
-- `import comfy_cli.distribution_api` still works for one release and warns;
-  import `comfy_cli.builder_api` instead.
-- The `distributionId`, `versionId`, `distributions` and `versions` keys in
-  `comfy build` `--json` output will be removed after one release; read
-  `buildId`, `releaseId`, `builds` and `releases` instead. The six schemas that
-  declare them mark each retired key deprecated in its description.
+- **Breaking:** `comfy build --json` payloads say `buildId`, `releaseId`,
+  `builds` and `releases`, and nothing else: the retired `distributionId`,
+  `versionId`, `distributions` and `versions` keys are gone from every payload,
+  every error `details`, and every shipped schema rather than being carried
+  alongside. Read the builder's own spelling.
+- **Breaking:** `import comfy_cli.distribution_api` no longer works. The
+  deprecation shim is removed together with the surface it shimmed; import
+  `comfy_cli.builder_api`.
+- **Breaking:** `comfy build` is restructured around a local `comfy-build.yaml`
+  spec — `init`, `push`, `pull`, `status`, `ls`, `show`, `validate`, `update`,
+  `delete`, plus `release`, `refs`, and `blob` subgroups. The `comfy distribution`
+  alias and the `scan` / `create` / `version` / `artifact download` /
+  `from-snapshot` commands it fronted are removed.
+- **Breaking:** the read verbs are renamed, with no aliases left behind:
+  `comfy build list` → `comfy build ls`, `comfy build get` → `comfy build show`,
+  and `comfy build blob list` → `comfy build blob ls`. The reference lookups
+  (`resolve`, `base-images`, `build-targets`, `model-dirs`) move under
+  `comfy build refs`, and `comfy build blob upload` is removed — `comfy build push`
+  uploads local models and nodes from the spec.
+- **Breaking:** the `build_upload_unavailable` error code is retired. It was only
+  ever raised by the removed `create` path, so nothing emits it and it no longer
+  appears in `comfy discover`. This is the one exception to the append-only rule
+  in `comfy_cli/schemas/error_codes.md`: the code is retired, never reused.
+- **Breaking:** a `--json` run of `comfy build` is never
+  prompted, even from a terminal. A confirmation or missing required option now
+  returns the matching refusal envelope — `*_needs_confirm`, `*_missing_input`,
+  or `build_id_unknown` where a Build id could not be resolved — and exits 1,
+  where it previously opened a TUI prompt on the same stream the envelope is
+  written to. Pass `--yes` or the option itself to proceed non-interactively.
+  Other command families still prompt under `--json`; they do not route through
+  `comfy_cli.interaction`, and `--skip-prompt` remains the way to suppress them.
+- **Breaking:** the global `--skip-prompt` now applies to `comfy build delete`,
+  which previously ignored it. Combined with a non-agentic caller it accepts the
+  delete confirmation, matching `build pull` and `build update`.
+- **Breaking:** packaging a local custom node is all-or-nothing. Anything under
+  `custom_nodes/<node>/` that cannot be read now fails `init` / `update` /
+  `status` / `push` / `pull` with one `build_spec_invalid` envelope naming the
+  node directory. Previously the two failure modes diverged and neither was
+  usable: an unreadable **directory** was silently dropped from the archive
+  whose digest becomes the node's committed `localDigest`, while an unreadable
+  **file** escaped as an uncaught `PermissionError` — a traceback with no
+  envelope at all, even under `--json`.
+- Symlinks inside a custom node are still excluded from its archive, but are no
+  longer excluded in silence: `init`, `update`, `push` and `pull` name them on
+  stderr and carry them in a `skipped_symlinks` payload key, including on a
+  `--dry-run` that writes nothing. `status` rescans but publishes no definition
+  to point into, so for it the stderr warning is the whole report.
 
 ### Fixed
 
-- The shipped `build_from_snapshot.json` schema now requires the `build` key
-  the builder actually serves; it still required the pre-rename `distribution`
-  key, so a valid `comfy build from-snapshot --json` payload failed validation.
-- `comfy build list` and `comfy build release list` show every row again. The
-  builder pages both reads, and the client took only the first page, so a
-  workspace or a build past one page lost its tail — silently, with no error
-  and nothing in the output to say rows were missing.
+- `comfy build ls` and `comfy build release ls` show every row. The builder
+  pages both reads, and the client took only the first page, so a workspace or
+  a build past one page lost its tail — silently, with no error and nothing in
+  the output to say rows were missing.
+- The `--from-snapshot` path is no longer sent to analytics. It is a local
+  filesystem path naming the user's home directory and their install layout,
+  and it was shipped verbatim: the URL scrubber only strips credentials out of
+  URLs and returns a bare path untouched, so the key has to be named in the
+  redaction set, and the rename from `--from` had left it out.
 
 ## [1.16.0] - 2026-08-10
 

@@ -238,6 +238,34 @@ def test_every_build_code_has_a_first_call_site(raised_codes):
     )
 
 
+def test_every_deferred_build_code_landed_with_a_call_site(raised_codes):
+    """The build design deferred seven codes to the commands that would raise them.
+
+    The two generic guards above cannot see a deferral that was simply forgotten:
+    a code that was never added, together with the call site that never landed,
+    leaves both of them green. Naming the seven is what turns "we meant to add
+    this" into a red test.
+
+    If this fails: the command that owes this code was never finished, or its
+    only call site was deleted. Wire it up — do not delete the name from here.
+    """
+    deferred = {
+        "build_spec_exists",
+        "build_missing_input",
+        "build_update_needs_confirm",
+        "build_spec_stale",
+        "build_pull_needs_confirm",
+        "build_id_unknown",
+        "build_release_not_found",
+    }
+
+    unregistered = sorted(code for code in deferred if not error_codes.is_registered(code))
+    assert not unregistered, f"deferred build codes missing from comfy_cli/error_codes.REGISTRY: {unregistered}"
+
+    unraised = sorted(code for code in deferred if code not in raised_codes)
+    assert not unraised, f"deferred build codes registered but raised nowhere under comfy_cli/: {unraised}"
+
+
 def test_codes_match_pattern():
     """Every registered code is snake_case matching the documented pattern."""
     bad = [ec.code for ec in error_codes.REGISTRY if not error_codes.CODE_PATTERN.match(ec.code)]

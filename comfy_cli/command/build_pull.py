@@ -1,4 +1,4 @@
-"""Identity-preserving reconciliation for the build pull path."""
+"""Identity-preserving reconciliation for ``comfy build pull``."""
 
 from __future__ import annotations
 

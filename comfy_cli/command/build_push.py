@@ -1,4 +1,4 @@
-"""Local cache reconciliation and upload planning for the build push path."""
+"""Local cache reconciliation and upload planning for ``comfy build push``."""
 
 from __future__ import annotations
 
