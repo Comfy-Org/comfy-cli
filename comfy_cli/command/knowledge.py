@@ -84,6 +84,7 @@ def status_cmd(
             "stale": bundle.stale,
             "version": bundle.version,
             "schema_version": knowledge.SCHEMA_VERSION,
+            "compiled_at": bundle.compiled_at,
             "as_of": bundle.as_of,
             "path": bundle.path,
             **_env_context(),
@@ -137,6 +138,7 @@ def resolve_cmd(
         "model": row,
         "deprecation": bundle.deprecations.get(model_id),
         "bundle_version": bundle.version,
+        "compiled_at": bundle.compiled_at,
         "stale": bundle.stale,
     }
     if renderer.is_pretty():
@@ -164,6 +166,7 @@ def _emit_capabilities(renderer, bundle: knowledge.Bundle, *, query: str | None 
         "capabilities": caps,
         "zero_hit": query is not None,
         "bundle_version": bundle.version,
+        "compiled_at": bundle.compiled_at,
         "stale": bundle.stale,
     }
     if query is not None:
@@ -212,6 +215,7 @@ def pick_cmd(
         "as_of": _text(cap.get("as_of")),
         "picks": picks,
         "bundle_version": bundle.version,
+        "compiled_at": bundle.compiled_at,
         "stale": bundle.stale,
     }
     if renderer.is_pretty():
