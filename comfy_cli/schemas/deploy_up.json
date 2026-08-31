@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_up.json",
+  "title": "comfy deploy up --json data payload",
+  "type": "object",
+  "required": ["deployment", "release", "computeConfig", "supersedes"],
+  "additionalProperties": false,
+  "properties": {
+    "deployment": {
+      "type": "object",
+      "required": ["id", "status", "created"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "status": {
+          "enum": ["queued", "provisioning", "starting", "ready", "unhealthy", "stopping", "stop_failed", "stopped", "failed"]
+        },
+        "created": {"type": "boolean"}
+      }
+    },
+    "release": {
+      "type": "object",
+      "required": ["id", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "integer", "minimum": 1}
+      }
+    },
+    "computeConfig": {
+      "type": "object",
+      "required": ["gpuClass", "region"],
+      "additionalProperties": false,
+      "properties": {
+        "gpuClass": {"type": "string", "minLength": 1},
+        "region": {"type": "string", "minLength": 1},
+        "min": {"type": "integer", "minimum": 0},
+        "max": {"type": "integer", "minimum": 1}
+      }
+    },
+    "supersedes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "release"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "status": {"enum": ["queued", "provisioning", "starting", "ready", "unhealthy"]},
+          "release": {
+            "type": "object",
+            "required": ["version"],
+            "additionalProperties": false,
+            "properties": {"version": {"type": "integer", "minimum": 1}}
+          }
+        }
+      }
+    }
+  }
+}

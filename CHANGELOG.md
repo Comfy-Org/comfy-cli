@@ -119,6 +119,9 @@ history.
   (a workflow import carries none of them), the classes served by a partner API,
   and whether a ComfyUI version still has to be pinned.
 - `CONTRIBUTING.md` (renamed from `DEV_README.md`) and this changelog.
+- `comfy deploy` — run a Build release as a serverless endpoint: `up`, `status`,
+  `ls`, `show`, `logs`, `events`, `scale`, `stop`, `start`, `delete`, and
+  `refs compute`.
 
 ### Changed
 
@@ -153,7 +156,7 @@ history.
   ever raised by the removed `create` path, so nothing emits it and it no longer
   appears in `comfy discover`. This is the one exception to the append-only rule
   in `comfy_cli/schemas/error_codes.md`: the code is retired, never reused.
-- **Breaking:** a `--json` run of `comfy build` is never
+- **Breaking:** a `--json` run of `comfy build` or `comfy deploy` is never
   prompted, even from a terminal. A confirmation or missing required option now
   returns the matching refusal envelope — `*_needs_confirm`, `*_missing_input`,
   or `build_id_unknown` where a Build id could not be resolved — and exits 1,
