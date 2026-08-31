@@ -47,6 +47,28 @@ BUNDLED_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy-relay", "comfy-relay"),
     ("comfy-director", "comfy-director"),
     ("comfy-build", "comfy-build"),
+    ("comfy-deploy", "comfy-deploy"),
+)
+
+
+# Reference skills: resolvable by `comfy skills show`, and deliberately outside
+# `default_skill_names()`, so no plain `install` writes one. A parent skill cites
+# one by name so its depth loads on demand instead of sitting in every agent's
+# context on every task. An explicit request — a path token, or `skills=` here —
+# still installs one, and `uninstall` accepts these names so it can come back off.
+#
+# This exists because the usual progressive-disclosure pattern — a short
+# SKILL.md pointing at sibling `references/*.md` — cannot work here. Only
+# `SKILL.md` is ever read (see `skill_content`), and two of the three install
+# targets are single files with no directory to hold a sibling: a relative
+# pointer would resolve in this repo and dangle on every machine that installed
+# it. Routing through the CLI keeps the loader and the shipped artifact the same
+# thing.
+REFERENCE_SKILLS: tuple[tuple[str, str], ...] = (
+    ("comfy-build-authoring", "comfy-build-authoring"),
+    ("comfy-build-pins", "comfy-build-pins"),
+    ("comfy-build-failures", "comfy-build-failures"),
+    ("comfy-deploy-failures", "comfy-deploy-failures"),
 )
 
 
@@ -68,11 +90,20 @@ def bundled_skill_names() -> tuple[str, ...]:
     return tuple(name for name, _ in BUNDLED_SKILLS)
 
 
+def reference_skill_names() -> tuple[str, ...]:
+    return tuple(name for name, _ in REFERENCE_SKILLS)
+
+
+def readable_skill_names() -> tuple[str, ...]:
+    """Every bundled name ``skill_content`` resolves, installed or not."""
+    return bundled_skill_names() + reference_skill_names()
+
+
 def _resolve_subdir(skill_name: str) -> str:
-    for name, subdir in BUNDLED_SKILLS:
+    for name, subdir in (*BUNDLED_SKILLS, *REFERENCE_SKILLS):
         if name == skill_name:
             return subdir
-    raise ValueError(f"unknown bundled skill {skill_name!r}; choices: {', '.join(n for n, _ in BUNDLED_SKILLS)}")
+    raise ValueError(f"unknown bundled skill {skill_name!r}; choices: {', '.join(readable_skill_names())}")
 
 
 TargetKind = Literal["claude-code", "cursor", "agents-md"]

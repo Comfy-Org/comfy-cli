@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -18,10 +19,14 @@ from comfy_cli.skills import (
     install,
     plan_install,
     prune_retired,
+    readable_skill_names,
+    reference_skill_names,
     skill_content,
     uninstall,
 )
 from comfy_cli.skills.command import app
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _force_json_renderer():
@@ -49,14 +54,125 @@ def test_bundles_expected_skills():
     assert "comfy-relay" in names
     assert "comfy-director" in names
     assert "comfy-build" in names
+    assert "comfy-deploy" in names
 
 
 def test_bundled_skills_have_required_frontmatter():
-    for name in bundled_skill_names():
+    for name in readable_skill_names():
         text = skill_content(name)
         assert text.startswith("---\n"), f"{name}: missing frontmatter"
         assert f"name: {name}" in text, f"{name}: frontmatter name doesn't match"
         assert "description:" in text, f"{name}: frontmatter missing description"
+
+
+# ---------------------------------------------------------------------------
+# Reference skills: resolvable by `show`, never written by `install`
+# ---------------------------------------------------------------------------
+
+
+def test_reference_skills_are_readable():
+    """`comfy skills show <reference>` is the only way to reach the material."""
+    for name in reference_skill_names():
+        assert skill_content(name).strip(), f"{name}: resolved to empty content"
+
+
+def test_a_default_install_writes_no_reference_skill(tmp_path: Path):
+    """The whole point of the split.
+
+    A reference skill written to a target would sit in every agent's context on
+    every task — the cost this mechanism exists to avoid. This is the default
+    set, not an absolute bar: an explicit `skills=[<name>]` or a path token does
+    install one, and `test_uninstalling_a_reference_skill_by_name_is_accepted`
+    covers taking it back off. Checked across all three targets rather than one,
+    because each is written by a different code path.
+    """
+    results = install(scope="project", project_root=tmp_path)
+    written = {r.skill for r in results}
+    leaked = written & set(reference_skill_names())
+    assert not leaked, f"reference skills must not be installed, but install wrote: {sorted(leaked)}"
+
+    for name in reference_skill_names():
+        assert not (tmp_path / f".claude/skills/{name}/SKILL.md").exists()
+        assert not (tmp_path / f".cursor/rules/{name}.mdc").exists()
+    agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    for name in reference_skill_names():
+        assert f"<!-- {name}:start -->" not in agents
+
+
+def test_reference_skills_are_not_in_the_default_install_set():
+    """`default_skill_names()` is what install, uninstall, status and prune all
+    walk, so keeping reference skills out of it is what makes them uninstallable
+    by construction rather than by four separate filters."""
+    assert set(default_skill_names()).isdisjoint(reference_skill_names())
+
+
+def test_reference_skills_are_disjoint_from_retired():
+    """A name in both would be pruned from disk while still being served by
+    `show` — two subsystems disagreeing about whether it exists."""
+    assert set(RETIRED_SKILLS).isdisjoint(reference_skill_names())
+
+
+def test_every_reference_skill_is_cited_by_an_installed_skill():
+    """A reference skill nobody names is unreachable.
+
+    Only installed skills reach an agent's context, so the citation has to come
+    from one of those — a reference skill citing another would be a chain whose
+    first link nothing pulls.
+    """
+    corpus = "\n".join(skill_content(name) for name in bundled_skill_names())
+    for name in reference_skill_names():
+        assert name in corpus, f"{name} is never cited by an installed skill, so nothing would load it"
+
+
+def test_installing_a_reference_skill_by_name_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Refused with the command that does work, rather than silently accepted.
+
+    An agent that reaches for `--skill <reference>` has the right intent and the
+    wrong verb, so the refusal has to name `show` or it just looks like the
+    material is unavailable.
+
+    `install_cmd` takes its project root from `Path.cwd()`, which `CliRunner`
+    does not change, so the chdir is what makes the containment assertion mean
+    anything: without it a regression writes into the checkout being tested.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "AGENTS.md").touch()
+    target = reference_skill_names()[0]
+    runner = CliRunner()
+    result = runner.invoke(app, ["install", "--scope", "project", "--skill", target], catch_exceptions=False)
+
+    assert result.exit_code != 0
+    # Rich wraps the refusal inside a bordered panel, so the message is only a
+    # contiguous string once the borders and wrap points are collapsed away.
+    # The colour codes have to go with them: under a colour-enabled terminal the
+    # border carries its own escapes, which survive collapsing whitespace and
+    # land mid-phrase at exactly the wrap point this assertion spans.
+    flattened = " ".join(_ANSI_RE.sub("", result.output).replace("│", " ").split())
+    assert f"comfy skills show {target}" in flattened, result.output
+    assert not (tmp_path / f".claude/skills/{target}").exists()
+    assert not (tmp_path / f".cursor/rules/{target}.mdc").exists()
+    assert f"<!-- {target}:start -->" not in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_uninstalling_a_reference_skill_by_name_is_accepted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The install-side refusal must not strand what an explicit install put down.
+
+    A reference skill only reaches disk when something asked for it by path or
+    through `install()`, and a bare `uninstall` walks `default_skill_names()`,
+    which excludes it — so naming it is the only route left. Refusing the name on
+    both verbs would leave the file there permanently.
+    """
+    monkeypatch.chdir(tmp_path)
+    name = reference_skill_names()[0]
+    install(scope="project", project_root=tmp_path, skills=[name], targets=["claude-code"])
+    installed = tmp_path / ".claude" / "skills" / name / "SKILL.md"
+    assert installed.exists(), "an explicit install() should have written the reference skill"
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["uninstall", "--scope", "project", "--skill", name], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    assert not installed.exists()
 
 
 def test_comfy_skill_content_has_required_sections():
@@ -110,7 +226,7 @@ def test_bundled_description_reads_back_unquoted():
     a synthetic fixture would not notice.
     """
     desc = frontmatter_description(skill_content("comfy-build"))
-    assert desc.startswith("Create a Comfy Build"), desc
+    assert desc.startswith("Build a custom ComfyUI environment"), desc
     assert not desc.startswith('"'), "the frontmatter quotes leaked into the description"
 
 
@@ -189,6 +305,33 @@ def test_comfy_build_skill_covers_the_build_group():
     text = skill_content("comfy-build")
     for needle in ("comfy build init", "comfy build push", "comfy build release"):
         assert needle in text, f"comfy-build skill should mention {needle}"
+
+
+def test_comfy_deploy_skill_covers_the_deploy_group():
+    """The verbs a deployment cannot be created, inspected, or ended without.
+
+    `stop` earns its place here rather than being one verb among many: a
+    deployment bills until something ends it, so a skill that can raise compute
+    and not give it back is the one shape of incompleteness that costs money.
+    `test_no_mentions_of_nonexistent_commands` resolves every mention against the
+    live Typer tree, so these two guards together mean the skill names the real
+    path and only the real path.
+    """
+    text = skill_content("comfy-deploy")
+    for needle in ("comfy deploy up", "comfy deploy run", "comfy deploy status", "comfy deploy stop"):
+        assert needle in text, f"comfy-deploy skill should mention {needle}"
+
+
+def test_build_and_deploy_skills_hand_off_to_each_other():
+    """Splitting one skill in two only works if each names the other.
+
+    The build skill stops at a green release and the deploy skill assumes one, so
+    the seam between them is the exact point an agent needs the pointer — and it
+    is invisible to `test_comfy_skill_routes_to_every_sibling`, which only checks
+    the driver skill.
+    """
+    assert "comfy-deploy" in skill_content("comfy-build"), "comfy-build should hand off to comfy-deploy"
+    assert "comfy-build" in skill_content("comfy-deploy"), "comfy-deploy should point back at comfy-build"
 
 
 def test_skill_content_rejects_unknown_name():
