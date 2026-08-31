@@ -2056,6 +2056,31 @@ class TestOpModel:
         # ...and the two orders converge.
         assert ops.canonical(ab) == ops.canonical(ba)
 
+    def test_p9_autogrow_display_order_uses_total_stamp_rank(self):
+        """Concurrent grows get identical names/order in both replay orders."""
+        ops = self._ops()
+        g = _graph()
+        base = _autogrow_workflow()
+        _, lower = ops.connect(copy.deepcopy(base), g, 20, "IMAGE", 10, "images", actor="a", base_version=4)
+        _, higher = ops.connect(copy.deepcopy(base), g, 21, "IMAGE", 10, "images", actor="a", base_version=4)
+        lower["op_id"] = "0" * 32
+        higher["op_id"] = "f" * 32
+
+        ab = ops.apply_op(ops.apply_op(copy.deepcopy(base), lower, g), higher, g)
+        ba = ops.apply_op(ops.apply_op(copy.deepcopy(base), higher, g), lower, g)
+
+        def display(workflow):
+            node = next(n for n in workflow["nodes"] if n["id"] == 10)
+            return [(i["name"], i.get("grow_id"), i.get("link")) for i in node["inputs"]]
+
+        assert display(ab) == display(ba)
+        assert [name for name, grow_id, _ in display(ab) if grow_id is not None] == [
+            "images.image0",
+            "images.image1",
+        ]
+        assert ops.canonical(ab) == ops.canonical(ba)
+        assert ops.detect_conflict(lower, higher) is False
+
     def test_autogrow_uses_schema_prefix_zero_based(self):
         """A ``{"prefix": "frame"}`` template names grown slots verbatim from
         the schema, 0-based (images.frame0, images.frame1) — a prefix that
