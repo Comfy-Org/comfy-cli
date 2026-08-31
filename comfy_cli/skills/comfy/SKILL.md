@@ -19,9 +19,10 @@ halves are independent — you can scan only what's relevant to the task.
 know what exists, and reach for the right one rather than improvising its job:**
 `comfy-director` (multi-shot narrative video — story, continuity, conform),
 `comfy-build` (build a custom ComfyUI environment on the developer platform),
-`comfy-debug` (any failed job: error code → fix), `comfy-relay` (surface a
-workflow/result in chat, never leave it in /tmp). When a task spans several,
-load them up front instead of discovering the gap mid-render.
+`comfy-deploy` (run a build release as a serverless deployment, and stop it
+costing money), `comfy-debug` (any failed job: error code → fix), `comfy-relay`
+(surface a workflow/result in chat, never leave it in /tmp). When a task spans
+several, load them up front instead of discovering the gap mid-render.
 
 ---
 
