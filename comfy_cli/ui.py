@@ -43,7 +43,7 @@ def show_progress(iterable, total, description="Downloading..."):
 
 
 def prompt_autocomplete(
-    question: str, choices: list[ChoiceType], default: ChoiceType = "", force_prompting: bool = False
+    question: str, choices: list[ChoiceType], default: ChoiceType | None = None, force_prompting: bool = False
 ) -> ChoiceType | None:
     """
     Asks a single select question using questionary and returns the selected response.
@@ -65,7 +65,7 @@ def prompt_autocomplete(
 
 
 def prompt_select(
-    question: str, choices: list[ChoiceType], default: ChoiceType = "", force_prompting: bool = False
+    question: str, choices: list[ChoiceType], default: ChoiceType | None = None, force_prompting: bool = False
 ) -> ChoiceType | None:
     """
     Asks a single select question using questionary and returns the selected response.
