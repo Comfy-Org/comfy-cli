@@ -58,18 +58,21 @@ app = typer.Typer(no_args_is_help=True, help="List, inspect, and live-watch Comf
 def _is_pid_alive(pid: int) -> bool:
     """Check if a process with the given PID is still running.
 
-    Uses ``psutil.pid_exists`` — never ``os.kill(pid, 0)``, which on Windows
+    Uses ``psutil.Process.is_running`` — never ``os.kill(pid, 0)``, which on Windows
     routes through ``GenerateConsoleCtrlEvent`` (0 == CTRL_C_EVENT) and, on
     Python <= 3.13.1, can fall through to ``TerminateProcess`` and kill the
-    probed process (python/cpython gh-58689).
+    probed process (python/cpython gh-58689). ``pid_exists`` alone is not
+    sufficient on Windows because an exited process remains addressable while
+    another process still holds an open handle to it.
     """
     if pid <= 0:
         return False
     import psutil
 
     try:
-        return psutil.pid_exists(pid)
-    except (OverflowError, ValueError, OSError):
+        process = psutil.Process(pid)
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except (psutil.Error, OverflowError, ValueError, OSError):
         # `watcher_pid` comes off a deliberately tolerant JSON load with no
         # range check, so a corrupt or hand-edited state file can carry a pid
         # psutil can't even look up (out-of-range -> OverflowError; Windows
