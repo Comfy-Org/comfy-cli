@@ -20,7 +20,7 @@ def _split_stream_runner() -> CliRunner:
     """A runner that keeps stdout and stderr separate, so tests can assert the
     JSON-mode contract that stdout carries ONLY the envelope."""
     try:
-        return CliRunner(mix_stderr=False)  # click < 8.2
+        return CliRunner()  # click < 8.2
     except TypeError:
         return CliRunner()  # click >= 8.2 always separates
 

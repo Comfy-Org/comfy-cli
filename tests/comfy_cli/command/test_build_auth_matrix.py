@@ -198,7 +198,7 @@ def _prepare(kind: FixtureKind, root: Path) -> list[str]:
 
 
 def _invoke(args: list[str], token: str | None):
-    return CliRunner(mix_stderr=False).invoke(
+    return CliRunner().invoke(
         cli_app,
         args,
         env={

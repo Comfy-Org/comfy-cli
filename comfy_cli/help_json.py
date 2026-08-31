@@ -94,8 +94,13 @@ def _param_to_dict(param: click.Parameter) -> dict[str, Any]:
 def _type_to_dict(t: click.ParamType) -> dict[str, Any]:
     name = getattr(t, "name", t.__class__.__name__).lower()
     out: dict[str, Any] = {"type": name}
-    if isinstance(t, click.Choice):
-        out["choices"] = list(t.choices)
+    # Duck-type the choice list instead of ``isinstance(t, click.Choice)``:
+    # typer >= 0.24 runs on a vendored click, so the param types it builds are
+    # no instance of the installed ``click``'s classes and the isinstance check
+    # silently dropped ``choices`` from every enum option.
+    choices = getattr(t, "choices", None)
+    if choices is not None:
+        out["choices"] = list(choices)
     return out
 
 

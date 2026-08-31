@@ -68,11 +68,11 @@ def _install_clients(monkeypatch, builder: FakeBuilder, client: RecordingDeploy,
 
 
 def _invoke_json(path: Path, *args: str):
-    return CliRunner(mix_stderr=False).invoke(app, ["--json", "deploy", "status", str(path), *args])
+    return CliRunner().invoke(app, ["--json", "deploy", "status", str(path), *args])
 
 
 def _invoke_pretty(path: Path):
-    return CliRunner(mix_stderr=False).invoke(
+    return CliRunner().invoke(
         app,
         ["--no-json", "deploy", "status", str(path)],
         env={"COLUMNS": "400"},

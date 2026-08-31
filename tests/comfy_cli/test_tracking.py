@@ -719,7 +719,6 @@ class TestCliParamNameDriftGate:
     ALLOWLIST = frozenset()
 
     def test_credentialish_cli_params_are_redacted(self):
-        import click
         from typer.main import get_command
 
         import comfy_cli.tracking as tm
@@ -728,8 +727,12 @@ class TestCliParamNameDriftGate:
         suspicious = ("token", "secret", "password", "api_key", "apikey", "credential")
 
         def walk(cmd, path):
-            if isinstance(cmd, click.Group):
-                for name, sub in cmd.commands.items():
+            # Duck-typed rather than ``isinstance(cmd, click.Group)``: typer >= 0.24
+            # runs on a vendored click, so that check is False for every group and
+            # the walk would silently cover nothing at all.
+            subcommands = getattr(cmd, "commands", None)
+            if subcommands is not None:
+                for name, sub in subcommands.items():
                     yield from walk(sub, [*path, name])
                 return
             for param in cmd.params:

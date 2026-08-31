@@ -66,17 +66,19 @@ def _broken_pipe_swallowed_by_click() -> bool:
     """Report whether the `SystemExit` we just caught is click's EPIPE bail-out.
 
     click's `BaseCommand.main` handles EPIPE itself: it swaps `sys.stdout` and
-    `sys.stderr` for `click.utils.PacifyFlushWrapper` and raises
-    `SystemExit(1)`. So on the common path a broken pipe never reaches us as a
-    `BrokenPipeError` at all, and the exit 1 is otherwise indistinguishable
-    from a genuine command failure. That wrapper — which click installs in this
-    branch and nowhere else — is the one reliable in-process signal.
+    `sys.stderr` for a `PacifyFlushWrapper` and raises `SystemExit(1)`. So on
+    the common path a broken pipe never reaches us as a `BrokenPipeError` at
+    all, and the exit 1 is otherwise indistinguishable from a genuine command
+    failure. That wrapper — which click installs in this branch and nowhere
+    else — is the one reliable in-process signal.
+
+    The class is matched by name because there is no single class to point at:
+    typer >= 0.24 runs on a vendored click, so the wrapper the CLI actually
+    meets is `typer._click.utils.PacifyFlushWrapper` rather than the one in the
+    installed `click`, and click 8.5 renamed its own copy to a private name
+    whose public alias warns on access.
     """
-    try:
-        from click.utils import PacifyFlushWrapper
-    except ImportError:  # pragma: no cover — click ships as a typer dependency
-        return False
-    return isinstance(sys.stdout, PacifyFlushWrapper)
+    return type(sys.stdout).__name__.lstrip("_") == "PacifyFlushWrapper"
 
 
 def _flush_stdout(*, unwinding: bool) -> bool:

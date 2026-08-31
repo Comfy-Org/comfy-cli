@@ -80,7 +80,7 @@ def _install_client(monkeypatch, client: LifecycleDeploy | DeployClient) -> None
 
 def _invoke(command: str, *args: str, pretty: bool = False):
     output_flag = "--no-json" if pretty else "--json"
-    return CliRunner(mix_stderr=False).invoke(app, [output_flag, "deploy", command, *args], env={"COLUMNS": "400"})
+    return CliRunner().invoke(app, [output_flag, "deploy", command, *args], env={"COLUMNS": "400"})
 
 
 def _envelope(result) -> JsonObject:
