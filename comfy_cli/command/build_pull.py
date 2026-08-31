@@ -9,7 +9,7 @@ from typing import Final, Literal, TypeAlias
 from typing_extensions import assert_never
 
 from comfy_cli.command.build_push import normalize_repository_identity
-from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, JsonValue
+from comfy_cli.command.build_spec import BuildSpecError, BuildSpecInvalidError, JsonObject, JsonValue
 from comfy_cli.command.build_validation import MODEL_SOURCES, NODE_SOURCES
 
 IdentityTier: TypeAlias = Literal["sha256", "model_location", "blobId", "id", "repository", "name"]
@@ -47,8 +47,28 @@ _DEFINITION_KNOWN_FIELDS: Final = frozenset(
         "environment",
         "modelPolicy",
         "partnerNodePolicy",
+        "customNodePolicy",
     }
 )
+# Authoring-only fields. The builder has no typed field for either — zero
+# references in its `definition/` package — so no builder-owned write path can
+# produce one, and their absence says nothing about build state. It *can* echo
+# them: `Definition` is a free-form map stored and returned verbatim, so a Build
+# last written by `comfy build push` carries both back. The exemption is for the
+# other case — a Build last written by a client that has no field for them, from
+# which they return absent and would otherwise read as a missed round trip.
+_UNSYNCED_DEFINITION_FIELDS: Final = frozenset({"schema", "environment"})
+
+
+class UnsyncedDefinitionError(BuildSpecError):
+    code = "build_pull_unsynced_definition"
+
+    def __init__(self, fields: tuple[str, ...]) -> None:
+        self.fields = fields
+        super().__init__(
+            f"the fetched Build's definition omits {', '.join(fields)}, which the local spec sets; "
+            "pulling would delete them"
+        )
 
 
 def _entries(definition: JsonObject, collection: str, *, side: str) -> list[JsonObject]:
@@ -295,6 +315,28 @@ def _merge_collection(
     ]
 
 
+def _carries_data(value: JsonValue) -> bool:
+    """Whether losing *value* would actually lose anything.
+
+    An empty value is not evidence the build was never synced. The two create
+    paths that build a definition server-side — ``from_snapshot`` and
+    ``from_workflow`` — store it through ``ToMap``, which is ``json.Marshal`` of
+    a typed struct with ``omitempty``, so a pin-less snapshot's empty
+    ``pipDependencies`` is stored *absent* rather than blank. A local ``""``
+    against that Build then read as a missed round trip while there was nothing
+    to lose.
+
+    Non-empty values still refuse, which is the guard doing its job: scan-
+    captured pins are real data, and a Build that lacks them has not carried
+    them. Adopting such a Build still requires pushing first.
+    """
+    if value is None:
+        return False
+    if isinstance(value, (str, list, dict, tuple)):
+        return bool(value)
+    return True
+
+
 def merge_pull_definition(local: JsonObject, server: JsonObject) -> JsonObject:
     """Merge a server-owned definition onto local authoring/cache fields by identity."""
     merged = deepcopy(server)
@@ -303,20 +345,40 @@ def merge_pull_definition(local: JsonObject, server: JsonObject) -> JsonObject:
             merged[key] = deepcopy(value)
     merged["models"] = _merge_collection(local, server, "models")
     merged["customNodes"] = _merge_collection(local, server, "customNodes")
+    for key in _UNSYNCED_DEFINITION_FIELDS & set(local):
+        merged.setdefault(key, deepcopy(local[key]))
+    dropped = tuple(sorted(key for key in set(local) - set(merged) if _carries_data(local[key])))
+    if dropped:
+        raise UnsyncedDefinitionError(dropped)
     return merged
 
 
-def merge_pulled_spec(local_spec: JsonObject, remote: JsonObject, build_id: str) -> JsonObject:
+@dataclass(frozen=True, slots=True)
+class PulledSpec:
+    """The spec `pull` writes. ``definition`` is the very object under
+    ``spec["definition"]``, carried alongside so a caller that has to diff or
+    project it does not have to re-narrow it out of a ``JsonValue``."""
+
+    spec: JsonObject
+    definition: JsonObject
+
+
+def merge_pulled_spec(local_spec: JsonObject, remote: JsonObject, build_id: str) -> PulledSpec:
     """Return the atomically writable local spec for one fetched Build."""
     local_definition = local_spec.get("definition")
     server_definition = remote.get("definition")
     if not isinstance(local_definition, dict) or not isinstance(server_definition, dict):
         raise BuildSpecInvalidError("both the local spec and fetched Build need a definition mapping")
     name = remote.get("name")
+    # `description` is `*string` + `omitempty` on the builder, so an empty one
+    # arrives absent, not as `""`. Same state on the wire; default, don't refuse.
     description = remote.get("description")
+    if description is None:
+        description = ""
     revision = remote.get("updatedAt")
     if not isinstance(name, str) or not isinstance(description, str) or not isinstance(revision, str) or not revision:
         raise BuildSpecInvalidError("the fetched Build needs string name, description and updatedAt fields")
+    definition = merge_pull_definition(local_definition, server_definition)
     merged = deepcopy(local_spec)
     merged.update(
         {
@@ -324,7 +386,7 @@ def merge_pulled_spec(local_spec: JsonObject, remote: JsonObject, build_id: str)
             "name": name,
             "description": description,
             "syncedRevision": revision,
-            "definition": merge_pull_definition(local_definition, server_definition),
+            "definition": definition,
         }
     )
-    return merged
+    return PulledSpec(merged, definition)

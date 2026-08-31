@@ -365,3 +365,274 @@ def test_cross_id_pull_rebinds_and_the_next_plain_push_targets_the_new_build(
     assert COMMAND_SCHEMAS["comfy build pull"] == "build_pull"
     schema = json.loads((SCHEMAS_DIR / "build_pull.json").read_text(encoding="utf-8"))
     jsonschema.Draft202012Validator(schema).validate(envelope(pulled)["data"])
+
+
+def test_a_build_whose_description_is_empty_arrives_without_the_key_and_still_pulls(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_spec(workspace, build_id="build-a", models=[], nodes=[])
+    client = PullBuilder()
+    serve(client, "build-a", remote_definition())
+    del client.remote_builds["build-a"]["description"]
+    install_client(monkeypatch, client)
+
+    result = invoke_pull(workspace, "-y")
+
+    assert result.exit_code == 0, result.stderr
+    assert reloaded(workspace)["description"] == ""
+
+
+def test_a_definition_field_the_fetched_build_never_carried_refuses_the_pull(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = write_spec(
+        workspace,
+        build_id="build-a",
+        models=[],
+        nodes=[],
+        definition_extra={"environment": {"os": "Windows"}, "pipDependencies": "torch==2.0.0\n"},
+    )
+    before = path.read_bytes()
+    client = PullBuilder()
+    serve(client, "build-a", remote_definition())
+    install_client(monkeypatch, client)
+
+    result = invoke_pull(workspace, "-y")
+
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_pull_unsynced_definition"
+    # `environment` is exempt: the builder has no concept of it, so its absence
+    # is not evidence of a missed round trip. The pins are real data.
+    assert error["details"]["fields"] == ["pipDependencies"]
+    assert path.read_bytes() == before
+
+
+def test_an_exempt_field_and_an_empty_scalar_are_not_a_missed_round_trip(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither absence proves the Build never carried the field.
+
+    The builder has no typed `environment`, so a Build last written by a client
+    without one returns it absent. And `from_snapshot`/`from_workflow` store
+    through `ToMap`, whose `omitempty` writes a pin-less snapshot's empty
+    `pipDependencies` as absent rather than blank. Refusing on either deleted
+    nothing and blocked the pull.
+    """
+    # Given
+    write_spec(
+        workspace,
+        build_id="build-a",
+        models=[],
+        nodes=[],
+        definition_extra={"environment": {"os": "Linux", "arch": "x86_64"}, "pipDependencies": ""},
+    )
+    client = PullBuilder()
+    serve(client, "build-a", remote_definition())
+    install_client(monkeypatch, client)
+
+    # When
+    result = invoke_pull(workspace, "-y")
+
+    # Then the exempt field survives and the empty one is simply dropped
+    assert result.exit_code == 0, result.stderr
+    written = read_build_spec(workspace / "comfy-build.yaml")["definition"]
+    assert written["environment"] == {"os": "Linux", "arch": "x86_64"}
+    assert "pipDependencies" not in written
+
+
+def test_scan_captured_pins_still_refuse_a_build_that_lacks_them(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard's whole purpose, pinned against real scan output.
+
+    `capture_pip_provenance` prefixes an unconditional header, so a spec
+    `comfy build init` produced never holds an empty `pipDependencies` — the
+    relaxation above cannot reach it. Adopting a Build that does not carry those
+    pins is still refused, and pushing first is the recovery.
+    """
+    # Given the shape `init`'s scan path actually writes
+    write_spec(
+        workspace,
+        build_id="build-a",
+        models=[],
+        nodes=[],
+        definition_extra={
+            "environment": {"os": "Linux", "arch": "x86_64"},
+            "pipDependencies": "# captured by comfy build init\n# from the active interpreter\ntorch==2.0.0\n",
+        },
+    )
+    client = PullBuilder()
+    serve(client, "build-a", remote_definition())
+    install_client(monkeypatch, client)
+
+    # When
+    result = invoke_pull(workspace, "-y")
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_pull_unsynced_definition"
+    assert error["details"]["fields"] == ["pipDependencies"]
+
+
+def test_the_definition_schema_marker_is_exempt_from_the_round_trip_check(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_spec(workspace, build_id="build-a", models=[], nodes=[])
+    client = PullBuilder()
+    serve(client, "build-a", {"models": [], "customNodes": []})
+    install_client(monkeypatch, client)
+
+    result = invoke_pull(workspace, "-y")
+
+    assert result.exit_code == 0, result.stderr
+    assert reloaded(workspace)["definition"]["schema"] == "distribution-definition/0"
+
+
+def test_a_build_that_clears_a_field_is_applied_while_one_that_omits_it_is_refused(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_spec(
+        workspace,
+        build_id="build-a",
+        models=[],
+        nodes=[],
+        definition_extra={"pipDependencies": "torch==2.0.0\n"},
+    )
+    client = PullBuilder()
+    serve(client, "build-a", {**remote_definition(), "pipDependencies": ""})
+    install_client(monkeypatch, client)
+
+    cleared = invoke_pull(workspace, "-y")
+
+    assert cleared.exit_code == 0, cleared.stderr
+    assert reloaded(workspace)["definition"]["pipDependencies"] == ""
+
+
+def test_every_policy_field_is_server_authoritative_not_just_two_of_the_three(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    allowlist = {"mode": "allowlist", "list": ["only-this"]}
+    write_spec(
+        workspace,
+        build_id="build-a",
+        models=[],
+        nodes=[],
+        definition_extra={
+            "modelPolicy": allowlist,
+            "partnerNodePolicy": allowlist,
+            "customNodePolicy": allowlist,
+        },
+    )
+    client = PullBuilder()
+    serve(client, "build-a", remote_definition())
+    install_client(monkeypatch, client)
+
+    result = invoke_pull(workspace, "-y")
+
+    assert result.exit_code == 1
+    assert envelope(result)["error"]["details"]["fields"] == [
+        "customNodePolicy",
+        "modelPolicy",
+        "partnerNodePolicy",
+    ]
+
+
+def test_a_fetched_build_that_omits_the_collections_reports_every_entry_it_removes(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The round-trip check cannot see an absent `models` / `customNodes` — the
+    merge sets both unconditionally — so the collections are the one way a pull
+    still drops local entries. The diff is what makes that visible."""
+    # Given a spec holding one local model and one local node, and a Build whose
+    # definition omits both collections (what `definition.ToMap` emits for a
+    # from-workflow import: every field is `omitempty`).
+    write_spec(workspace, build_id="build-a")
+    client = PullBuilder()
+    serve(client, "build-a", {"baseComfyVersion": "v0.3.0"})
+    install_client(monkeypatch, client)
+
+    # When
+    result = invoke_pull(workspace, "-y")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = envelope(result)["data"]
+    assert data["diff"]["models"]["removed"] == 1
+    assert data["diff"]["customNodes"]["removed"] == 1
+    assert [entry["change"] for entry in data["diff"]["models"]["entries"]] == ["removed"]
+    assert data["diff"]["models"]["entries"][0]["name"] == "checkpoints/base.safetensors"
+    assert data["diff"]["customNodes"]["entries"][0]["name"] == "local-node"
+    assert reloaded(workspace)["definition"]["models"] == []
+    schema = json.loads((SCHEMAS_DIR / "build_pull.json").read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator(schema).validate(data)
+
+
+def test_the_confirmation_names_what_the_pull_would_change(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`-y` answers this question, so the question has to carry the consequence;
+    `build update` already puts its summary in the prompt for the same reason."""
+    write_spec(workspace, build_id="build-a")
+    client = PullBuilder()
+    serve(client, "build-a", {"baseComfyVersion": "v0.3.0"})
+    install_client(monkeypatch, client)
+    asked: list[str] = []
+
+    def accept(question: str) -> bool:
+        asked.append(question)
+        return True
+
+    monkeypatch.setattr("comfy_cli.interaction.detect_caller", lambda: Caller("user", False, None))
+    monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: False)
+    monkeypatch.setattr("comfy_cli.interaction._ask_confirm", accept)
+
+    result = invoke_pull(workspace, agentic=False)
+
+    assert result.exit_code == 0, result.stderr
+    (question,) = asked
+    assert "models +0 -1 ~0" in question
+    assert "customNodes +0 -1 ~0" in question
+
+
+def test_dry_run_reports_the_diff_without_writing_or_asking(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The preview an agent needs: with `-y` the payload only lands after the
+    write, so `--dry-run` is the only way to read the diff before deciding. It
+    answers no confirmation either — there is no write to confirm."""
+    path = write_spec(workspace, build_id="build-a")
+    before = path.read_bytes()
+    client = PullBuilder()
+    serve(client, "build-a", {"baseComfyVersion": "v0.3.0"})
+    install_client(monkeypatch, client)
+
+    result = invoke_pull(workspace, "--dry-run")
+
+    assert result.exit_code == 0, result.stderr
+    emitted = envelope(result)
+    assert emitted["changed"] is False
+    data = emitted["data"]
+    assert (data["dry_run"], data["written"]) == (True, False)
+    assert data["diff"]["models"]["removed"] == 1
+    assert path.read_bytes() == before
+    schema = json.loads((SCHEMAS_DIR / "build_pull.json").read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator(schema).validate(data)
+
+
+def test_dry_run_does_not_ask_a_human_to_confirm_a_write_it_will_not_make(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agentic case above can never reach a prompt — `--json` refuses one
+    outright — so only a TTY caller proves the `dry_run` branch really does sit
+    ahead of the confirmation rather than behind it."""
+    path = write_spec(workspace, build_id="build-a")
+    before = path.read_bytes()
+    client = PullBuilder()
+    serve(client, "build-a", {"baseComfyVersion": "v0.3.0"})
+    install_client(monkeypatch, client)
+    monkeypatch.setattr("comfy_cli.interaction.detect_caller", lambda: Caller("user", False, None))
+    monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: False)
+    monkeypatch.setattr("comfy_cli.interaction._ask_confirm", lambda question: pytest.fail("--dry-run prompted"))
+
+    result = invoke_pull(workspace, "--dry-run", agentic=False)
+
+    assert result.exit_code == 0, result.stderr
+    assert path.read_bytes() == before

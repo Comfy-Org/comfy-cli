@@ -61,7 +61,7 @@ from comfy_cli.command.build_paths import (
     resolve_build_paths,
     resolve_local_path,
 )
-from comfy_cli.command.build_pull import merge_pulled_spec
+from comfy_cli.command.build_pull import UnsyncedDefinitionError, merge_pulled_spec
 from comfy_cli.command.build_push import (
     SkippedSymlink,
     pending_uploads,
@@ -2038,6 +2038,10 @@ def pull_cmd(
     ] = None,
     build_id: Annotated[str | None, typer.Option("--id", help="Pull this Build id instead of the spec's id.")] = None,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Overwrite the local spec without confirming.")] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Fetch the Build, print the diff, and leave the spec file untouched."),
+    ] = False,
     models_dir: Annotated[
         str | None,
         typer.Option("--models-dir", help="Models folder used to recompute model content identities."),
@@ -2074,28 +2078,55 @@ def pull_cmd(
         pulled = merge_pulled_spec(prepared.spec, remote, target_id)
     except NodePackageError as error:
         _raise_node_package_error(renderer, error)
+    except UnsyncedDefinitionError as error:
+        renderer.error(
+            code=error.code,
+            message=str(error),
+            details={"path": str(paths.spec_file), "id": target_id, "fields": list(error.fields)},
+        )
+        raise typer.Exit(code=1) from error
     except BuildSpecInvalidError as error:
         renderer.error(code=error.code, message=str(error), details={"path": str(paths.spec_file)})
         raise typer.Exit(code=1) from error
 
+    # Baselined on the definition on disk, never `prepared`'s: `prepare_push`
+    # recomputes model `sha256` and node `localDigest`, and this write lands
+    # those too, so diffing the reconciled copy would hide them.
+    diff = diff_definitions(spec["definition"], pulled.definition)
+    summary = summarize_definition_diff(diff)
+    if renderer.is_pretty():
+        render_definition_diff(renderer, diff)
+
     payload = {
         "spec_file": str(paths.spec_file),
         "id": target_id,
-        "syncedRevision": pulled["syncedRevision"],
+        "syncedRevision": pulled.spec["syncedRevision"],
+        "dry_run": dry_run,
         "written": False,
-        "definition": pulled["definition"],
+        "summary": summary,
+        "diff": diff.as_json(),
+        "definition": pulled.definition,
     }
     # `pull` carries the local localDigest forward into the spec it writes
     # (`build_pull._NODE_LOCAL_FIELDS`), so it mints the same committed identity
     # `init`, `update` and `push` do and owes the same skip report — but only
     # for the nodes that survive the merge, renumbered into the merged order.
     reported = _warn_skipped_symlinks(
-        renderer, _relocate_skipped_symlinks(prepared.skipped_symlinks, pulled["definition"])
+        renderer, _relocate_skipped_symlinks(prepared.skipped_symlinks, pulled.definition)
     )
     if reported:
         payload["skipped_symlinks"] = reported
+
+    # Before the confirmation, not after: --dry-run promises to write nothing,
+    # and a prompt whose only outcome is a write it will not perform is noise.
+    if dry_run:
+        if renderer.is_pretty():
+            renderer.info(f"--dry-run: {paths.spec_file} left untouched.")
+        renderer.emit(payload, command="build pull", changed=False)
+        return
+
     if not confirm(
-        f"Pull build {target_id} and overwrite the local spec at {paths.spec_file}?",
+        f"Pull build {target_id} and overwrite the local spec at {paths.spec_file} ({summary})?",
         yes=yes,
         error_code="build_pull_needs_confirm",
         ctx=ctx,
@@ -2106,7 +2137,7 @@ def pull_cmd(
         renderer.info("Aborted.")
         return
 
-    _write_spec(renderer, paths.spec_file, pulled)
+    _write_spec(renderer, paths.spec_file, pulled.spec)
     payload["written"] = True
     if renderer.is_pretty():
         renderer.success(f"Pulled build {target_id} → {paths.spec_file}")
