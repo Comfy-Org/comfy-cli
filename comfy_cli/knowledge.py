@@ -590,7 +590,7 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
         source=source,
         stale=stale,
         as_of=datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        compiled_at=compiled_at[:MAX_VERSION_CHARS] if isinstance(compiled_at, str) else None,
+        compiled_at=(compiled_at if isinstance(compiled_at, str) and len(compiled_at) <= MAX_VERSION_CHARS else None),
         path=path,
         models=models,
         capabilities=capabilities,
@@ -899,6 +899,7 @@ def log_query(
             "hit_ids": hit_ids,
             "zero_hit": zero_hit,
             "bundle_version": bundle.version,
+            "compiled_at": bundle.compiled_at,
         }
         if uncurated is not None:
             props["uncurated_queries"] = uncurated

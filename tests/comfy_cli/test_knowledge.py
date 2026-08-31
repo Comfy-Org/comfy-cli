@@ -668,6 +668,15 @@ class TestIndex:
 
         assert knowledge.load_bundle().compiled_at is None
 
+    def test_an_over_long_compiled_at_is_dropped_not_truncated(self, tmp_path, monkeypatch):
+        manifest = json.loads(FIXTURE_MANIFEST.read_text())
+        manifest["compiled_at"] = "2026-08-31T12:00:00" + "0" * knowledge.MAX_VERSION_CHARS + "+00:00"
+        _env_bundle(tmp_path, monkeypatch, manifest=manifest)
+
+        # Cutting a timestamp to length yields a date that parses to the wrong
+        # instant, which is worse than reporting none.
+        assert knowledge.load_bundle().compiled_at is None
+
     def test_pick_attaches_the_model_fits(self):
         fits = {"vram_gb": {"fp8": 12, "bf16": 24}, "credits_per_image": 0.5, "max_refs": 3, "source": "measured"}
         data = {
@@ -740,6 +749,39 @@ def _run(args: list[str], capsys) -> tuple[int, dict[str, Any]]:
 
 def _validate(data: dict) -> None:
     jsonschema.Draft202012Validator(SCHEMA).validate(data)
+
+
+class TestCompiledAtReachesEveryPayload:
+    """One test per emit site, so removing any single one fails."""
+
+    STAMPED = "2026-08-28T02:44:27Z"
+
+    @pytest.fixture(autouse=True)
+    def _stamped_bundle(self, tmp_path, monkeypatch):
+        manifest = json.loads(FIXTURE_MANIFEST.read_text())
+        manifest["compiled_at"] = self.STAMPED
+        _env_bundle(tmp_path, monkeypatch, manifest=manifest)
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["status"],
+            ["resolve", "acme-h3"],
+            ["pick", "lipsync"],
+            ["pick", "no-such-capability"],
+        ],
+        ids=["status", "resolve", "pick", "pick-miss"],
+    )
+    def test_command_payload_dates_its_bundle(self, args, capsys):
+        _, envelope = _run(args, capsys)
+
+        assert envelope["data"]["compiled_at"] == self.STAMPED
+
+    def test_the_attach_block_dates_its_bundle(self):
+        payload: dict = {}
+        knowledge.attach(payload, command="generate list", queries=["acme-h3"])
+
+        assert payload["knowledge"]["compiled_at"] == self.STAMPED
 
 
 class TestCli:
