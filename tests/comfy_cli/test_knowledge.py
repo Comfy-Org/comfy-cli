@@ -651,6 +651,23 @@ class TestIndex:
         assert [p["model"] for p in knowledge.pick(b, "c")["picks"]] == ["z", "y", "x"]
         assert b.as_of == "1970-01-01T00:00:00Z"
 
+    def test_compiled_at_comes_from_the_manifest_not_the_file(self, tmp_path, monkeypatch):
+        manifest = json.loads(FIXTURE_MANIFEST.read_text())
+        manifest["compiled_at"] = "2026-08-28T02:44:27Z"
+        _env_bundle(tmp_path, monkeypatch, manifest=manifest)
+
+        b = knowledge.load_bundle()
+
+        assert b.compiled_at == "2026-08-28T02:44:27Z"
+        # as_of is when this machine got the file, so the two must not agree
+        # just because one was copied from the other.
+        assert b.as_of != b.compiled_at
+
+    def test_compiled_at_is_none_for_a_bundle_predating_the_key(self, tmp_path, monkeypatch):
+        _env_bundle(tmp_path, monkeypatch)
+
+        assert knowledge.load_bundle().compiled_at is None
+
     def test_pick_attaches_the_model_fits(self):
         fits = {"vram_gb": {"fp8": 12, "bf16": 24}, "credits_per_image": 0.5, "max_refs": 3, "source": "measured"}
         data = {
