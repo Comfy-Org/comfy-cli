@@ -31,6 +31,11 @@ classifiers = [
 ]
 
 dependencies = [
+  # The CA bundle every https call verifies against (comfy_cli.http.trust_store).
+  # Declared rather than inherited from `requests`: a distribution can ship a
+  # Python whose OpenSSL has no compiled-in trust path at all. Floored at the
+  # release that dropped the compromised e-Tugra root.
+  "certifi>=2024.7.4",
   "charset-normalizer>=3",
   "cookiecutter",
   "gitpython>=3.1.50",

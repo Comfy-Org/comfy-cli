@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -268,3 +269,121 @@ def test_drift_reports_the_update_diffs_counts_without_its_entries() -> None:
         "customNodes": {"added": 1, "removed": 0, "changed": 0},
         "pipDependencies": "changed",
     }
+
+
+# --- the two comparisons are independent --------------------------------------
+
+
+def test_a_spec_with_no_install_still_reports_spec_vs_remote(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given no install, When status runs, Then the remote comparison still lands.
+
+    `status` promises drift "from the remote Build AND from the install", but a
+    missing install refused the whole command with `build_models_dir_missing` —
+    so a spec written by hand, which is the workflow the authoring skill
+    documents, had no way to check spec-vs-remote at all. That is the exact
+    comparison the failure skill says to read before choosing between `pull` and
+    `push --force`.
+    """
+    # Given
+    client, build_id = synced_workspace(workspace, monkeypatch)
+    client.remote_revisions[build_id] = "revision-moved"
+    shutil.rmtree(workspace / "models")
+
+    # When
+    result = invoke_status(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    payload = data(result)
+    assert payload["remote"] == {"revision": "revision-moved", "behind": True}
+    assert payload["local"]["scanned"] is False
+    assert payload["local"]["drift"] is None
+    assert str(workspace / "models") in payload["local"]["reason"]
+    assert "comfy build pull" in payload["hint"]
+
+
+def test_no_scan_reports_the_remote_half_without_touching_the_install(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Given --no-scan, When status runs, Then the install is never read."""
+    # Given
+    synced_workspace(workspace, monkeypatch)
+    monkeypatch.setattr(build, "_scan_install", refuse("_scan_install"))
+
+    # When
+    result = invoke_status(workspace, "--no-scan")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert data(result)["local"] == {"scanned": False, "reason": "--no-scan was passed", "drift": None}
+
+
+def test_an_unreadable_python_degrades_the_local_half_only(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given a Python that yields no provenance, When status runs, Then it reports.
+
+    Pointing `status` at directories it could not scan escalated to demanding a
+    working ComfyUI Python and failing outright, which is the same defect one
+    level down: an unusable install must cost the drift half, not the report.
+    """
+    # Given
+    synced_workspace(workspace, monkeypatch)
+    monkeypatch.setattr(build, "capture_pip_provenance", lambda python: None)
+
+    # When
+    result = invoke_status(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    payload = data(result)
+    assert payload["local"]["scanned"] is False
+    assert payload["local"]["drift"] is None
+    assert "provenance" in payload["local"]["reason"]
+
+
+def test_a_skipped_scan_is_not_readable_as_a_clean_one(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given a skipped scan, When compared with a real one, Then the shapes differ.
+
+    `drift: null` beside `scanned: false` is the whole distinction: an absent
+    comparison must never be readable as agreement.
+    """
+    # Given
+    synced_workspace(workspace, monkeypatch)
+
+    # When
+    scanned = data(invoke_status(workspace))["local"]
+    skipped = data(invoke_status(workspace, "--no-scan"))["local"]
+
+    # Then
+    assert scanned["scanned"] is True and scanned["drift"] is not None
+    assert skipped["scanned"] is False and skipped["drift"] is None
+
+
+def test_an_unpackageable_node_directory_degrades_the_local_half_only(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Given a node dir that will not package, When status runs, Then it reports.
+
+    `init` and `push` must fail on this — packaging is all-or-nothing and they
+    exist to package. `status` does not: an unpackageable directory is one more
+    reason the drift half cannot be computed, and it must not take the
+    spec-vs-remote half down with it.
+    """
+    # Given
+    from comfy_cli.command.build_package import NodePackageError
+
+    synced_workspace(workspace, monkeypatch)
+
+    def refuse(*_args, **_kwargs):
+        raise NodePackageError(path=workspace / "custom_nodes" / "local-node", reason="a symlink loop")
+
+    monkeypatch.setattr(build, "scan_custom_nodes", refuse)
+
+    # When
+    result = invoke_status(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    payload = data(result)
+    assert payload["local"]["scanned"] is False
+    assert "cannot package" in payload["local"]["reason"]
+    assert payload["remote"]["behind"] is False

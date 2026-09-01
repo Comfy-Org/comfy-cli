@@ -129,6 +129,10 @@ comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
   for them interactively. Under `--json` an omission is `deploy_missing_input`.
   Take the values from `comfy deploy refs compute`, which lists regions with
   their GPU classes, VRAM and availability — do not invent a class name.
+- **Availability is volatile, so re-read `refs compute` immediately before `up`,
+  never from an earlier plan.** A region offering RTX PRO 6000 at planning time
+  had none an hour later, and `up` refused with `deploy_compute_unavailable`. The
+  reading is a snapshot with a short shelf life, not a catalog.
 - **GPU and region are immutable on a live deployment.** Passing a different one
   is `deploy_immutable_compute`. Changing them is `stop` → `scale --gpu/--region`
   → `start`.

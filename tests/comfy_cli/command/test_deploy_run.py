@@ -378,3 +378,51 @@ def test_each_invocation_uses_a_fresh_job_idempotency_key(tmp_path: Path, monkey
     # Then
     assert first.exit_code == second.exit_code == 0
     assert len({request.idempotency_key for request in job_client.requests}) == 2
+
+
+# --- the partner credential rides with the submission -------------------------
+
+
+def write_partner_workflow(path: Path) -> Path:
+    path.write_text(
+        json.dumps(
+            {
+                "1": {"class_type": "GeminiImage2Node", "inputs": {"prompt": "a fox"}},
+                "2": {"class_type": "PreviewImage", "inputs": {"images": ["1", 0]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.mark.parametrize(
+    "credential",
+    [
+        pytest.param(("auth_token_comfy_org", "session-token"), id="oauth-session"),
+        pytest.param(("api_key_comfy_org", "comfyui-key"), id="api-key"),
+        pytest.param(None, id="none-configured"),
+    ],
+)
+def test_the_resolved_credential_is_carried_into_the_submission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    credential: tuple[str, str] | None,
+) -> None:
+    """Given a resolved credential, When a workflow is submitted, Then it rides along.
+
+    Whichever field the resolver returns is what travels: an interactively
+    signed-in caller holds a session token and no API key.
+    """
+    # Given
+    workflow = write_partner_workflow(tmp_path / "workflow.json")
+    job_client = FakeJobClient(job())
+    install_run(monkeypatch, FakeControl("https://dep-id.run.comfy.app"), job_client)
+    monkeypatch.setattr(deploy_run, "resolve_partner_credential", lambda: credential)
+
+    # When
+    result = invoke(workflow, "--deployment", "dep-id", "--no-wait")
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    assert job_client.requests[0].partner_credential == credential

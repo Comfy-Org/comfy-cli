@@ -104,6 +104,59 @@ the suffix list to make the error go away — the refusal is the feature.
   for the transition messages. If compute could not be allocated the code is
   `deploy_compute_unavailable`, and another GPU/region pair from
   `comfy deploy refs compute` is the move.
+- **`runpod: endpoint <id> staged 0/N models, missing [...]` after the events
+  already said `staged N of N models` is transient.** It reads like a definition
+  error and is not one: the same deployment succeeded on a bare `comfy deploy up`
+  retry, reporting `created: false`. Retry once before touching the definition.
+  Note the missing list prints **bare filenames**, so a multi-file model set looks
+  duplicated — two HuggingFace directories each contributing a `config.json` and a
+  `tokenizer.json` appear as four entries with two names.
+
+## Is a class actually registered in this deployment?
+
+**There is no free way to ask, and no cheap one either. Budget a billed job per
+question.** `GET {deployment}/object_info` answers `401 unauthorized`, and
+`object_info` is not exposed on serverless regardless, so "did pack X load, is
+class Y registered" has no lookup behind it.
+
+**Submit does not check class names.** The data plane's `422`s cover the
+envelope — an empty workflow, a stopped deployment, an idempotency key — and the
+*file inputs* of the loader classes it knows by name: a `LoadImage` whose `image`
+is missing or empty is refused there, for free. Every other class is skipped
+rather than refused, so an unregistered one passes validation, **creates a job,
+and bills**: the deployment cold-starts and ComfyUI rejects the graph at its own
+`/prompt`. That is a start plus a rejection rather than a full generation, but it
+is not zero and it is not free.
+
+That asymmetry is the trap. A free refusal naming a file input is not evidence
+about registration; it means the class is one of the handful the gateway parses,
+and it got there without ever asking whether the deployment loaded it.
+
+So probe deliberately. This is a template — replace the placeholders and the
+`inputs` object with real values, so what you submit is valid JSON:
+
+```json
+{"1": {"class_type": "<ClassName>", "inputs": {"<required_input>": "<value>"}},
+ "2": {"class_type": "PreviewAny", "inputs": {"source": ["1", 0]}}}
+```
+
+**Fill in the required inputs.** With `inputs: {}` a class that *is* registered
+still fails — on its missing arguments — and reads exactly like one that is not.
+
+**Drop node 2 when the class has no output.** ComfyUI validates a link against
+the source node's `RETURN_TYPES`, so wiring `["1", 0]` to a class with no output
+slot 0 — a save or sink node — fails on the link rather than on registration,
+which is the question being asked. A single-node graph is the probe for those.
+
+**Then read the failure, not the exit code.** `comfy deploy run` reports the
+job's error, and ComfyUI distinguishes the two cases in it: an unknown class
+names the class itself, a registered one names the input it wanted. `comfy deploy
+logs` carries the same text when the message alone is ambiguous.
+
+Isolate one variable per probe, and spend the cheapest one first: prove the pack
+loads at all with its simplest node before concluding a specific class is
+missing. A pack whose text node runs while its image node is rejected is not a
+missing pack — it is a different defect, and one more probe would have said so.
 
 ## When the environment itself is wrong
 
