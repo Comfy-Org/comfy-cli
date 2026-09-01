@@ -89,8 +89,18 @@ REASON_FETCH_FAILED = "fetch from COMFY_KNOWLEDGE_URL failed and no cached bundl
 class Bundle:
     version: str
     source: str  # "env" | "cache" | "fetch" | "stale-cache"
+    # Not an age signal. True only on the "stale-cache" path: the TTL expired
+    # and no fetch replaced it. A caller that passes COMFY_KNOWLEDGE_FILE takes
+    # the "env" branch, where this is always False no matter how old the file
+    # is, so a consumer reading it as freshness learns nothing.
     stale: bool
-    as_of: str  # ISO-8601 UTC, from the loaded file's mtime
+    # When this machine got the file, from its mtime. Says nothing about how
+    # old the content is: a bundle fetched at pod start reads as new whatever
+    # it holds. Read compiled_at for the content's date.
+    as_of: str
+    # The content's date, from the manifest's compiled_at. None for a bundle
+    # compiled before the key existed, or one built outside a git checkout.
+    compiled_at: str | None
     path: str
     models: dict[str, dict]
     capabilities: dict[str, dict]
@@ -574,11 +584,13 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
     }
 
     version = manifest.get("version") if manifest is not None else None
+    compiled_at = manifest.get("compiled_at") if manifest is not None else None
     return Bundle(
         version=version[:MAX_VERSION_CHARS] if isinstance(version, str) else "unknown",
         source=source,
         stale=stale,
         as_of=datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        compiled_at=(compiled_at if isinstance(compiled_at, str) and len(compiled_at) <= MAX_VERSION_CHARS else None),
         path=path,
         models=models,
         capabilities=capabilities,
@@ -887,6 +899,7 @@ def log_query(
             "hit_ids": hit_ids,
             "zero_hit": zero_hit,
             "bundle_version": bundle.version,
+            "compiled_at": bundle.compiled_at,
         }
         if uncurated is not None:
             props["uncurated_queries"] = uncurated
@@ -1020,6 +1033,7 @@ def attach(
             "bundle_version": bundle.version,
             "stale": bundle.stale,
             "as_of": bundle.as_of,
+            "compiled_at": bundle.compiled_at,
             "models": entries,
             "picks": picks,
             "capabilities_available": sorted(bundle.capabilities),
@@ -1059,6 +1073,7 @@ def attach(
                 "bundle_version": bundle.version,
                 "stale": bundle.stale,
                 "as_of": bundle.as_of,
+                "compiled_at": bundle.compiled_at,
                 # What matched before _fit, not what survived it. Rows shed to
                 # make the ceiling are curated knowledge that exists, and filing
                 # them as a gap would put a covered term in the curation inbox.

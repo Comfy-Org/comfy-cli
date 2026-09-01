@@ -28,6 +28,7 @@
     "model": { "type": "object", "description": "The full model row as shipped in the bundle (resolve)." },
     "deprecation": { "type": ["object", "null"], "description": "Matching deprecations entry, if any (resolve)." },
     "bundle_version": { "type": "string", "description": "Bundle version the answer came from (resolve, pick)." },
+    "compiled_at": { "type": ["string", "null"], "description": "Committer date of the commit the bundle was compiled from, ISO-8601 UTC. The content's date, unlike `as_of` (when this machine got the file) and `stale` (a fetch-failure flag). Null for a bundle compiled before the manifest carried the key. Treat as an opaque string; it is not validated." },
     "capability": { "type": "string", "description": "Capability id (pick)." },
     "capabilities": {
       "type": "array",

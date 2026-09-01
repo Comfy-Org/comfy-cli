@@ -1,3 +1,4 @@
+import functools
 import json
 import logging
 import os
@@ -10,7 +11,6 @@ import zipfile
 from collections.abc import Callable
 from http import HTTPStatus
 
-import httpx
 from pathspec import PathSpec
 
 from comfy_cli import constants, ui
@@ -471,13 +471,6 @@ _VALID_DOWNLOADERS = {"httpx", "aria2"}
 
 _DOWNLOAD_MAX_RETRIES = 3
 _DOWNLOAD_RETRY_BACKOFF = 2  # seconds multiplier
-_DOWNLOAD_TIMEOUT = httpx.Timeout(10.0, read=300.0)
-_TRANSIENT_EXCEPTIONS = (
-    httpx.TimeoutException,
-    httpx.NetworkError,
-    httpx.ProtocolError,
-    httpx.ProxyError,
-)
 # HTTP statuses that typically indicate a transient server-side or rate-limit
 # problem worth retrying with backoff. Auth/not-found/redirect statuses stay
 # out of this set so they fail fast.
@@ -493,7 +486,25 @@ class _TransientHTTPStatusError(Exception):
         super().__init__(f"HTTP {status_code}: {reason}")
 
 
-_RETRIABLE_EXCEPTIONS = _TRANSIENT_EXCEPTIONS + (_TransientHTTPStatusError,)
+# Built on first use, not at import: httpx costs 11 ms warm to import, more on
+# a cold cache, and most importers of this module only want ``atomic_write_*``.
+@functools.cache
+def _download_timeout():
+    import httpx
+
+    return httpx.Timeout(10.0, read=300.0)
+
+
+@functools.cache
+def _transient_exceptions() -> tuple[type[BaseException], ...]:
+    import httpx
+
+    return (httpx.TimeoutException, httpx.NetworkError, httpx.ProtocolError, httpx.ProxyError)
+
+
+@functools.cache
+def _retriable_exceptions() -> tuple[type[BaseException], ...]:
+    return (*_transient_exceptions(), _TransientHTTPStatusError)
 
 
 def _cleanup_partial(filepath: pathlib.Path) -> None:
@@ -687,6 +698,8 @@ def cleanup_stale_tmp_files(
 
 def _friendly_network_error(exc: Exception) -> str:
     """Return a user-friendly description of a network error."""
+    import httpx
+
     if isinstance(exc, _TransientHTTPStatusError):
         try:
             phrase = HTTPStatus(exc.status_code).phrase
@@ -744,11 +757,13 @@ def _download_file_httpx(
     deliberate exception: a :class:`KeyboardInterrupt` leaves it in place so
     :func:`download_file` can ask the user whether to keep the partial.
     """
-    with httpx.stream("GET", url, follow_redirects=True, headers=headers, timeout=_DOWNLOAD_TIMEOUT) as response:
+    import httpx
+
+    with httpx.stream("GET", url, follow_redirects=True, headers=headers, timeout=_download_timeout()) as response:
         if response.status_code != 200:
             try:
                 error_body = response.read()
-            except _TRANSIENT_EXCEPTIONS:
+            except _transient_exceptions():
                 error_body = ""
             status_reason = guess_status_code_reason(response.status_code, error_body)
             if response.status_code in _RETRIABLE_STATUSES:
@@ -859,6 +874,8 @@ def download_file(
     if downloader == "aria2":
         return _download_file_aria2(url, local_filepath, headers, progress_callback)
 
+    import httpx
+
     last_exc: Exception | None = None
     state: dict = {"file_opened": False, "part_path": None}
 
@@ -868,7 +885,7 @@ def download_file(
         try:
             _download_file_httpx(url, local_filepath, headers, state=state, progress_callback=progress_callback)
             return
-        except _RETRIABLE_EXCEPTIONS as exc:
+        except _retriable_exceptions() as exc:
             last_exc = exc
             # The temp file this attempt was writing is already gone (the helper
             # unlinks it on the way out) and the destination was never touched, so
