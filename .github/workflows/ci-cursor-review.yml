@@ -29,7 +29,7 @@ jobs:
     # SHA-pinned. Bump this SHA to pick up upstream changes; keep
     # `workflows_ref` matching so prompts/scripts load from the same commit as
     # the workflow definition.
-    uses: Comfy-Org/github-workflows/.github/workflows/cursor-review.yml@ffcc3f5b4dfc568e846e769c4f4df4f749c7887b # github-workflows main (ffcc3f5)
+    uses: Comfy-Org/github-workflows/.github/workflows/cursor-review.yml@e203fbcc66ae92a4d492ca9cf6dc6a3d844a9b4b # github-workflows main (ffcc3f5)
     with:
       # Overriding diff_excludes replaces the reusable default wholesale, so
       # this restates the generated/vendored defaults and adds this repo's
