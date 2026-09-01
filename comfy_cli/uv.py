@@ -129,10 +129,15 @@ class DependencyCompiler:
     rocmTorchBackend = "rocm7.2"
     nvidiaTorchBackend = "cu126"
 
+    # `torch` is deliberately absent: a uv --override replaces every requirement
+    # for a package, so listing it here discards torchvision's `torch==<x.y.z>`
+    # pin and lets a torch release land before its matching torchvision exists
+    # (`RuntimeError: operator torchvision::nms does not exist` at import). The
+    # GPU flavor comes from --torch-backend, not from this file, and the core
+    # pass re-pins torch as an override for the extension pass.
     overrideGpu = dedent(
         """
         # ensure usage of {gpu} version of pytorch
-        torch
         torchaudio
         torchsde
         torchvision
