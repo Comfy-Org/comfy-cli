@@ -48,7 +48,7 @@ def _install_client(monkeypatch, client: ComputeClient) -> None:
 
 def _invoke(*args: str, pretty: bool = False):
     output_flag = "--no-json" if pretty else "--json"
-    return CliRunner(mix_stderr=False).invoke(
+    return CliRunner().invoke(
         app,
         [output_flag, "deploy", "refs", "compute", *args],
         env={"COLUMNS": "400"},

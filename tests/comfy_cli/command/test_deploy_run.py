@@ -4,7 +4,6 @@ import copy
 import json
 from pathlib import Path
 
-import click
 import jsonschema
 import pytest
 import typer
@@ -165,7 +164,7 @@ def invoke(
     command = ["--json" if agentic else "--no-json", "deploy", "run", *args]
     if workflow is not None:
         command.extend(["--workflow", str(workflow)])
-    return CliRunner(mix_stderr=False).invoke(
+    return CliRunner().invoke(
         app,
         command,
         input=input_text,
@@ -194,7 +193,7 @@ def test_deploy_run_is_registered_with_the_complete_option_surface() -> None:
 def test_deploy_tree_is_exactly_the_twelve_designed_commands() -> None:
     # Given / When
     command = typer.main.get_command(deploy.app)
-    assert isinstance(command, click.Group)
+    assert hasattr(command, "commands"), command
     command_names = set(command.commands)
 
     # Then

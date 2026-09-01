@@ -42,7 +42,7 @@ def workspace(tmp_path: Path) -> Path:
 
 
 def _invoke(root: Path, args: list[str], *, token: str | None, agentic: bool):
-    return CliRunner(mix_stderr=False).invoke(
+    return CliRunner().invoke(
         cli_app,
         [*args, str(root)],
         env={

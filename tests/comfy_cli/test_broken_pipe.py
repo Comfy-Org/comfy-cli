@@ -6,6 +6,7 @@ what it asked for. These cover both halves of the entrypoint guard in
 and the two in-process signals the guard keys off.
 """
 
+import importlib
 import io
 import os
 import shutil
@@ -135,14 +136,42 @@ class TestBrokenPipeExitCode:
         assert "Exception ignored" not in text, text
 
 
+def _installed_pacify_wrapper() -> type:
+    """The EPIPE stdout wrapper the installed click/typer actually installs.
+
+    typer >= 0.24 vendors its own click, and click 8.5 renamed its copy to a
+    private name, so this pins the guard against the real class rather than a
+    name the test picked itself.
+    """
+    for modname in ("typer._click.utils", "click.utils"):
+        try:
+            mod = importlib.import_module(modname)
+        except ImportError:
+            continue
+        for attr in ("_PacifyFlushWrapper", "PacifyFlushWrapper"):
+            cls = getattr(mod, attr, None)
+            if cls is not None:
+                return cls
+    raise AssertionError("no PacifyFlushWrapper in the installed click/typer")
+
+
 class TestClickPacifySignal:
     """click swallows EPIPE itself, so the guard detects it by the stream swap."""
 
     def test_detects_click_pacified_stdout(self, monkeypatch):
-        from click.utils import PacifyFlushWrapper
-
-        monkeypatch.setattr(sys, "stdout", PacifyFlushWrapper(io.StringIO()))
+        monkeypatch.setattr(sys, "stdout", _installed_pacify_wrapper()(io.StringIO()))
         assert entrypoint._broken_pipe_swallowed_by_click() is True
+
+    @pytest.mark.parametrize("module", ["tests.somewhere", "my_click_adapter", "clicktool.utils"])
+    def test_the_name_alone_is_not_enough(self, monkeypatch, module):
+        """A same-named class from any other package must not read as EPIPE."""
+
+        class PacifyFlushWrapper:
+            pass
+
+        PacifyFlushWrapper.__module__ = module
+        monkeypatch.setattr(sys, "stdout", PacifyFlushWrapper())
+        assert entrypoint._broken_pipe_swallowed_by_click() is False
 
     def test_ordinary_stdout_is_not_a_broken_pipe(self, monkeypatch):
         monkeypatch.setattr(sys, "stdout", io.StringIO())
@@ -241,6 +270,18 @@ class TestFailureIsNeverLaundered:
             entrypoint.main()
 
         assert excinfo.value.code == "nope"
+
+    def test_pacified_stdout_does_not_rescue_a_nonzero_exit(self, monkeypatch):
+        """click's EPIPE branch raises exit 1; any other code is a real failure,
+        even with the pacify wrapper still installed on stdout."""
+        monkeypatch.setattr(sys, "stdout", _installed_pacify_wrapper()(io.StringIO()))
+        monkeypatch.setattr(entrypoint, "_cli_main", lambda: sys.exit(3))
+        self._forbid_exit_zero(monkeypatch)
+
+        with pytest.raises(SystemExit) as excinfo:
+            entrypoint.main()
+
+        assert excinfo.value.code == 3
 
     def test_crash_survives(self, monkeypatch):
         def _crash():

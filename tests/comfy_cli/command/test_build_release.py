@@ -70,7 +70,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> ReleaseBuilder:
 
 
 def invoke_release(*args: str, agentic: bool = True):
-    return CliRunner(mix_stderr=False).invoke(
+    return CliRunner().invoke(
         cli_app,
         ["build", "release", *args],
         env={

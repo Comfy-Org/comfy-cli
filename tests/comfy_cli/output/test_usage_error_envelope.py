@@ -40,7 +40,7 @@ from comfy_cli.cmdline import app
 def test_a_usage_error_ends_the_json_stream_with_an_envelope(argv, message_fragment, detail_command):
     """Given a bad invocation, When --json is on, Then stdout still ends in an envelope."""
     # Given / When
-    result = CliRunner(mix_stderr=False).invoke(app, argv, env={"NO_COLOR": "1", "COLUMNS": "400"})
+    result = CliRunner().invoke(app, argv, env={"NO_COLOR": "1", "COLUMNS": "400"})
 
     # Then
     assert result.exit_code == 2, "a usage error is exit 2, not 1"
@@ -56,7 +56,7 @@ def test_a_usage_error_ends_the_json_stream_with_an_envelope(argv, message_fragm
 def test_a_near_miss_option_carries_clicks_suggestion():
     """Given a typo, When it is a near miss, Then `did_you_mean` names the real option."""
     # Given / When
-    result = CliRunner(mix_stderr=False).invoke(
+    result = CliRunner().invoke(
         app, ["--json", "build", "status", "--models-dirr", "/tmp"], env={"NO_COLOR": "1", "COLUMNS": "400"}
     )
 
@@ -69,9 +69,7 @@ def test_a_near_miss_option_carries_clicks_suggestion():
 def test_a_usage_error_stays_a_single_rich_panel_in_pretty_mode():
     """Given pretty mode, When a usage error happens, Then no envelope doubles it."""
     # Given / When
-    result = CliRunner(mix_stderr=False).invoke(
-        app, ["--no-json", "nosuchgroup"], env={"NO_COLOR": "1", "COLUMNS": "400"}
-    )
+    result = CliRunner().invoke(app, ["--no-json", "nosuchgroup"], env={"NO_COLOR": "1", "COLUMNS": "400"})
 
     # Then
     assert result.exit_code == 2
@@ -93,7 +91,7 @@ def test_an_unknown_root_option_is_answered_about_this_invocation(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["pytest", "--some-unrelated-runner-flag"])
 
     # When
-    result = CliRunner(mix_stderr=False).invoke(
+    result = CliRunner().invoke(
         app, ["--json", "--bogusroot"], env={"NO_COLOR": "1", "COLUMNS": "400", "COMFY_OUTPUT": "pretty"}
     )
 

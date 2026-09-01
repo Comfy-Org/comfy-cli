@@ -12,10 +12,12 @@ docstrings. Phase 2 will hoist this alongside ``comfy discover`` and add a
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import click
 import typer
+
+if TYPE_CHECKING:
+    import click
 
 # One-liner examples per fully-qualified command path. Agents copy/paste.
 # Keys match the full ``path`` we emit (``"comfy <subcommand> ..."``).
@@ -94,8 +96,15 @@ def _param_to_dict(param: click.Parameter) -> dict[str, Any]:
 def _type_to_dict(t: click.ParamType) -> dict[str, Any]:
     name = getattr(t, "name", t.__class__.__name__).lower()
     out: dict[str, Any] = {"type": name}
-    if isinstance(t, click.Choice):
-        out["choices"] = list(t.choices)
+    # Duck-type the choice list instead of ``isinstance(t, click.Choice)``:
+    # typer >= 0.24 runs on a vendored click, so the param types it builds are
+    # no instance of the installed ``click``'s classes and the isinstance check
+    # silently dropped ``choices`` from every enum option.
+    choices = getattr(t, "choices", None)
+    if isinstance(choices, (list, tuple)):
+        # ``schemas/help.json`` requires strings, and click >= 8.2 allows a
+        # ``Choice`` over enum members.
+        out["choices"] = [str(c) for c in choices]
     return out
 
 

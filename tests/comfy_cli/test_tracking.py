@@ -709,6 +709,27 @@ class TestSensitiveNameMatcher:
         assert tm._is_sensitive(name) is False
 
 
+def _walk_cli_params(cmd, path):
+    """Yield every ``(command path, param name)`` in a click/typer command tree.
+
+    A group's own callback params are yielded before recursing, since a group
+    level ``--api-key`` is as trackable as a leaf one. Groups are recognized by
+    capability rather than ``isinstance(cmd, click.Group)``, which is false for
+    every group under typer's vendored click, and traversed through
+    ``get_command`` the way ``help_json._command_to_dict`` does — the root's
+    ``commands`` dict holds only the eagerly registered half, so ``auth``,
+    ``cloud``, ``build`` and ``deploy`` are absent from it.
+    """
+    for param in cmd.params:
+        if param.name:
+            yield " ".join(path), param.name
+    if hasattr(cmd, "list_commands") and hasattr(cmd, "get_command"):
+        for name in cmd.list_commands(None):
+            sub = cmd.get_command(None, name)
+            if sub is not None:
+                yield from _walk_cli_params(sub, [*path, name])
+
+
 class TestCliParamNameDriftGate:
     """The leak happened because credential flags were added after the redaction
     set was written. Walk the real CLI tree so the next one cannot land
@@ -719,7 +740,6 @@ class TestCliParamNameDriftGate:
     ALLOWLIST = frozenset()
 
     def test_credentialish_cli_params_are_redacted(self):
-        import click
         from typer.main import get_command
 
         import comfy_cli.tracking as tm
@@ -727,25 +747,46 @@ class TestCliParamNameDriftGate:
 
         suspicious = ("token", "secret", "password", "api_key", "apikey", "credential")
 
-        def walk(cmd, path):
-            if isinstance(cmd, click.Group):
-                for name, sub in cmd.commands.items():
-                    yield from walk(sub, [*path, name])
-                return
-            for param in cmd.params:
-                if param.name:
-                    yield " ".join(path), param.name
+        visited = list(_walk_cli_params(get_command(app), ["comfy"]))
+        # Zero coverage is the failure this gate has already shipped once, and it
+        # looks exactly like a pass. 23 of the root's 48 commands are lazy.
+        assert len({path for path, _ in visited}) > 100, (
+            f"drift gate walked only {len({p for p, _ in visited})} commands; the tree walk is broken"
+        )
 
         offenders = sorted(
             {
                 (path, pname)
-                for path, pname in walk(get_command(app), ["comfy"])
+                for path, pname in visited
                 if any(s in pname.lower() for s in suspicious)
                 and pname not in self.ALLOWLIST
                 and not tm._is_sensitive(pname)
             }
         )
         assert offenders == [], f"credential-looking CLI params not redacted by _is_sensitive: {offenders}"
+
+    def test_the_walk_reaches_a_group_callback_param(self):
+        """A credential flag declared on a group callback, rather than on a leaf,
+        must still reach the gate above."""
+        import typer
+        from typer.main import get_command
+
+        group = typer.Typer()
+
+        @group.callback()
+        def _group_callback(api_key: str = typer.Option("", "--api-key")):
+            pass
+
+        @group.command("leaf")
+        def _leaf(plain: str = typer.Option("", "--plain")):
+            pass
+
+        root = typer.Typer()
+        root.add_typer(group, name="grp")
+
+        found = set(_walk_cli_params(get_command(root), ["comfy"]))
+        assert ("comfy grp", "api_key") in found
+        assert ("comfy grp leaf", "plain") in found
 
 
 class TestTrackCommandRealTyperWiring:
