@@ -69,9 +69,7 @@ def test_a_near_miss_option_carries_clicks_suggestion():
 def test_a_usage_error_stays_a_single_rich_panel_in_pretty_mode():
     """Given pretty mode, When a usage error happens, Then no envelope doubles it."""
     # Given / When
-    result = CliRunner().invoke(
-        app, ["--no-json", "nosuchgroup"], env={"NO_COLOR": "1", "COLUMNS": "400"}
-    )
+    result = CliRunner().invoke(app, ["--no-json", "nosuchgroup"], env={"NO_COLOR": "1", "COLUMNS": "400"})
 
     # Then
     assert result.exit_code == 2

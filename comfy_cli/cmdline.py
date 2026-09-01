@@ -53,8 +53,7 @@ def _click_error_is(error: BaseException, name: str) -> bool:
     keeps the subclass matching ``isinstance`` gave.
     """
     return any(
-        cls.__name__ == name and cls.__module__.partition(".")[0] in ("click", "typer")
-        for cls in type(error).__mro__
+        cls.__name__ == name and cls.__module__.partition(".")[0] in ("click", "typer") for cls in type(error).__mro__
     )
 
 
