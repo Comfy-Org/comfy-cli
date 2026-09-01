@@ -164,6 +164,18 @@ def test_override_file_has_no_extra_index_url():
     assert "torch" in content
 
 
+def test_gpu_override_does_not_pin_torch_itself():
+    """A uv --override replaces every requirement for the package it names, so a
+    bare `torch` line discards torchvision's `torch==<x.y.z>` pin. A torch release
+    then resolves ahead of its matching torchvision, and ComfyUI fails to import
+    with `RuntimeError: operator torchvision::nms does not exist`. The GPU flavor
+    comes from --torch-backend, not from this override.
+    """
+    lines = {line.strip() for line in DependencyCompiler.overrideGpu.splitlines()}
+    assert "torch" not in lines
+    assert {"torchvision", "torchaudio"} <= lines
+
+
 def test_make_override_does_not_strip_cuda_toolkit_extras():
     """Regression test for #412: override must not pin cuda-toolkit without extras.
 

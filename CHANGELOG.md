@@ -17,6 +17,12 @@ history.
 
 ### Fixed
 
+- `comfy install --fast-deps --nvidia` no longer installs a torch that its
+  torchvision was not built against, which made ComfyUI fail to import with
+  `RuntimeError: operator torchvision::nms does not exist`. The GPU override
+  named `torch` outright, and a uv `--override` replaces every requirement for
+  the package it names, so torchvision's `torch==<x.y.z>` pin was discarded and
+  a same-day torch release resolved ahead of its matching torchvision.
 - Promoted subgraph widgets are edited where the frontend reads them. The
   frontend (ADR 0009) keeps a promoted widget's value on the HOST instance
   (`widgets_values` positional over the widget-backed subgraph inputs) and
