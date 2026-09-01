@@ -72,15 +72,18 @@ def _broken_pipe_swallowed_by_click() -> bool:
     failure. That wrapper — which click installs in this branch and nowhere
     else — is the one reliable in-process signal.
 
-    The class is matched by name and defining module because there is no single
+    The class is matched by name and owning package because there is no single
     class to point at: typer >= 0.24 runs on a vendored click, so the wrapper the
     CLI actually meets is `typer._click.utils.PacifyFlushWrapper` rather than the
     one in the installed `click`, and click 8.5 renamed its own copy to a private
-    name whose public alias warns on access. The module test keeps an unrelated
-    class of the same name from laundering a genuine failure into exit 0.
+    name whose public alias warns on access. The package test keeps a same-named
+    class from anywhere else — `my_click_adapter.PacifyFlushWrapper` — out, since
+    a false positive here reports a failed command as a success.
     """
     cls = type(sys.stdout)
-    return cls.__name__.removeprefix("_") == "PacifyFlushWrapper" and "click" in cls.__module__
+    if cls.__name__.removeprefix("_") != "PacifyFlushWrapper":
+        return False
+    return cls.__module__.partition(".")[0] in ("click", "typer")
 
 
 def _flush_stdout(*, unwinding: bool) -> bool:
@@ -131,7 +134,10 @@ def main() -> None:
         # `BrokenPipeError` reaching here is stdout dying outside that guard.
         _exit_quietly_on_broken_pipe()
     except SystemExit as exc:
-        if _broken_pipe_swallowed_by_click():
+        # `exc.code == 1` narrows the shortcut to the only code click's EPIPE
+        # branch raises, so no other exit status can be laundered into a 0 by a
+        # stdout that merely looks pacified.
+        if exc.code == 1 and _broken_pipe_swallowed_by_click():
             _exit_quietly_on_broken_pipe()
         # stdout is block-buffered when it is a pipe, so the write that actually
         # lands on the closed reader is frequently the interpreter's shutdown
