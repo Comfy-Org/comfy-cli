@@ -268,6 +268,7 @@ version = "0.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "blake3" },
+    { name = "certifi" },
     { name = "charset-normalizer" },
     { name = "cookiecutter" },
     { name = "gitpython" },
@@ -306,6 +307,7 @@ preview = [
 [package.metadata]
 requires-dist = [
     { name = "blake3", specifier = ">=1.0.9" },
+    { name = "certifi", specifier = ">=2024.7.4" },
     { name = "charset-normalizer", specifier = ">=3" },
     { name = "cookiecutter" },
     { name = "gitpython", specifier = ">=3.1.50" },

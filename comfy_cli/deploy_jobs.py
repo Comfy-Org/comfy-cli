@@ -9,13 +9,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final, Protocol
 
-from comfy_cli import credentials
 from comfy_cli.command.build_spec import JsonObject
 from comfy_cli.deploy_api_errors import DeployAPIError, assert_safe_deploy_url
 from comfy_cli.http import ResponseTooLarge, read_capped, request_json
 from comfy_cli.target import Target
 
 _MAX_JSON: Final = 5 * 1024 * 1024
+# Ceiling on the server sentence carried into the envelope: far above the
+# gateway's longest refusal (~140 chars), far below a scrollful.
+_MAX_SERVER_MESSAGE: Final = 2000
 _MAX_ATTEMPTS: Final = 3
 _RETRIABLE_CODES: Final = frozenset({"deployment_not_ready", "queue_full"})
 # Matches `deploy_events.MAX_IDLE_INTERVAL_SECONDS`: the ceiling on how long a
@@ -79,38 +81,68 @@ class DeploymentReader(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class JobSubmitRequest:
+    """One submission, with its credential already resolved by the caller.
+
+    ``partner_credential`` is the ``(extra_data field, value)`` pair from
+    :func:`comfy_cli.credentials.resolve_partner_credential`, or ``None``.
+    Resolved by the command layer rather than here so it can refuse before
+    paying for a job, and so one run costs at most one OAuth refresh.
+    """
+
     workflow: JsonObject
     idempotency_key: str
     deployment_id: str
+    partner_credential: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class _ServerError:
     code: str | None
+    message: str | None
     details: JsonObject
+
+
+_EMPTY_SERVER_ERROR: Final = _ServerError(code=None, message=None, details={})
+
+
+def _server_message(raw: object) -> str | None:
+    """The server's own sentence, bounded, or ``None`` when it said nothing.
+
+    Both data planes explain a refusal only here, so dropping it left the CLI
+    reporting "the workflow is invalid" for a rejection the server had already
+    described. Bounded because the length is the server's to choose and this is
+    rendered into a terminal: a body within ``_MAX_JSON`` is still megabytes.
+    """
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    return text if len(text) <= _MAX_SERVER_MESSAGE else text[:_MAX_SERVER_MESSAGE] + "…"
 
 
 def _server_error(error: urllib.error.HTTPError, url: str, secret: str | None) -> _ServerError:
     try:
         raw = read_capped(error, url, max_bytes=_MAX_JSON)
     except ResponseTooLarge:
-        return _ServerError(code=None, details={})
+        return _EMPTY_SERVER_ERROR
     if not raw:
-        return _ServerError(code=None, details={})
+        return _EMPTY_SERVER_ERROR
     try:
         text = raw.decode("utf-8")
         parsed = json.loads(text.replace(secret, "[redacted]") if secret else text)
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
-        return _ServerError(code=None, details={})
+        return _EMPTY_SERVER_ERROR
     if not isinstance(parsed, dict):
-        return _ServerError(code=None, details={})
+        return _EMPTY_SERVER_ERROR
     payload = parsed.get("error")
     if not isinstance(payload, dict):
-        return _ServerError(code=None, details={})
+        return _EMPTY_SERVER_ERROR
     code = payload.get("code")
     details = payload.get("details")
     return _ServerError(
         code=code if isinstance(code, str) else None,
+        message=_server_message(payload.get("message")),
         details=details if isinstance(details, dict) else {},
     )
 
@@ -144,11 +176,11 @@ class DeployJobClient:
     def submit_job(self, request: JobSubmitRequest, control_plane: DeploymentReader) -> JsonObject:
         if not request.idempotency_key.strip():
             raise DeployAPIError("deploy_bad_request", "Idempotency-Key is required")
-        partner_key = credentials.find_api_key(purpose="partner")
-        api_key = partner_key.value if partner_key is not None else None
         body: JsonObject = {"workflow": request.workflow}
-        if api_key is not None:
-            body["extra_data"] = {"api_key_comfy_org": api_key}
+        secret: str | None = None
+        if request.partner_credential is not None:
+            field, secret = request.partner_credential
+            body["extra_data"] = {field: secret}
         url = self.target.url("jobs")
         headers = {"Idempotency-Key": request.idempotency_key}
 
@@ -165,7 +197,7 @@ class DeployJobClient:
             except urllib.error.HTTPError as error:
                 if 500 <= error.code <= 599:
                     raise self._unknown(request.deployment_id) from error
-                server = _server_error(error, url, api_key)
+                server = _server_error(error, url, secret)
                 delay = _retry_after(error)
                 if delay is not None and error.code == 429 and server.code in _RETRIABLE_CODES:
                     if attempt + 1 < _MAX_ATTEMPTS:
@@ -206,7 +238,7 @@ class DeployJobClient:
         details: JsonObject = {"http_status": status}
         if server.code is not None:
             details["server_code"] = server.code
-        if server.code == "invalid_workflow" and "node_errors" in server.details:
+        if "node_errors" in server.details:
             details["node_errors"] = server.details["node_errors"]
         if status == 429 and server.code == "deployment_not_ready":
             deployment = control_plane.get_deployment(request.deployment_id)
@@ -223,4 +255,4 @@ class DeployJobClient:
         message = rule["message"]
         if not isinstance(code, str) or not isinstance(message, str):
             raise AssertionError("invalid job-submission error rule")
-        return DeployAPIError(code, message, status=status, details=details)
+        return DeployAPIError(code, server.message or message, status=status, details=details)

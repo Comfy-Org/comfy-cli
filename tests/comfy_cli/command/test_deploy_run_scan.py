@@ -523,3 +523,144 @@ def test_uploaded_asset_ids_materialize_into_a_new_submit_ready_workflow(install
     assert isinstance(node, dict)
     assert node["inputs"] == {"image": {"__type": "core/ASSET", "info": {"id": "asset-uuid", "file_path": "input.png"}}}
     assert _rewritten_inputs(plan)["image"] != node["inputs"]
+
+
+# --- DEFECT 3: only file-SHAPED strings are read as file references ----------
+
+
+@pytest.mark.parametrize(
+    ("field", "text"),
+    [
+        pytest.param("filename_prefix", "ComfyUI", id="save-prefix"),
+        pytest.param("text", "a photo of a cat, 4k, dslr", id="caption"),
+        pytest.param("text", "line one\nline two", id="multiline-prompt"),
+        pytest.param("pattern", r".*\.png$", id="regex"),
+        pytest.param("ckpt_name", "v1-5-pruned", id="extensionless-model-name"),
+        pytest.param("style", "watercolour", id="single-word"),
+    ],
+)
+def test_prose_is_not_rewritten_even_when_a_file_of_that_name_exists(install: Path, field: str, text: str) -> None:
+    """Given prose that happens to name a real file, When scanned, Then it stays a literal.
+
+    An asset root holds the user's own content, so "resolves to a real file"
+    alone made any colliding input an upload.
+    """
+    # Given
+    (install / "input" / text).parent.mkdir(parents=True, exist_ok=True)
+    try:
+        (install / "input" / text).write_bytes(b"collision")
+    except OSError:  # a name the filesystem will not take proves the point too
+        pass
+
+    # When
+    plan = _plan(install, {field: text})
+
+    # Then
+    assert _rewritten_inputs(plan)[field] == text
+    assert plan.assets == ()
+
+
+@pytest.mark.parametrize(
+    ("class_type", "field", "reference"),
+    [
+        pytest.param("LoadImage", "image", "outpaint-input.png", id="core-loader"),
+        pytest.param("SwordfishImageInput", "value", "outpaint-input.png", id="custom-node-string-widget"),
+        pytest.param("CustomPackNode", "payload", "graph.payload", id="custom-extension"),
+    ],
+)
+def test_a_file_shaped_reference_is_still_rewritten_for_any_node(
+    install: Path, class_type: str, field: str, reference: str
+) -> None:
+    """Given a file-shaped input on any node, When scanned, Then it becomes an ASSET.
+
+    The gate narrows which STRINGS are read as filenames, never which nodes may
+    carry one: a custom node's plain `STRING` widget stays as eligible as
+    `LoadImage.image`, and an extension no media list would have is still an
+    extension.
+    """
+    # Given
+    (install / "input" / reference).write_bytes(b"bytes")
+    workflow_path = _write_workflow(Path.cwd() / "workflow.json", _workflow({field: reference}, class_type=class_type))
+
+    # When
+    plan = deploy_workflow.load_deploy_workflow(workflow_path, asset_roots=_roots(install))
+
+    # Then
+    assert _rewritten_inputs(plan)[field] == {
+        "__type": "core/ASSET",
+        "info": {"id": plan.assets[0].marker, "file_path": reference},
+    }
+
+
+def test_a_string_longer_than_a_path_is_never_probed(install: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Given a value past PATH_MAX, When scanned, Then the filesystem is not touched.
+
+    Asserting only that it stays a literal would pass with the bound removed —
+    no such file exists either way. The property is that the probe never runs,
+    so the probe is what is watched: past PATH_MAX no string can name a file,
+    and stat-ing megabytes of prose root by root is pure cost.
+    """
+    # Given
+    probed: list[str] = []
+    real = deploy_workflow._candidate_paths
+    monkeypatch.setattr(
+        deploy_workflow,
+        "_candidate_paths",
+        lambda value, roots: (probed.append(value), real(value, roots))[1],
+    )
+    text = "x" * 4097 + ".png"
+
+    # When
+    plan = _plan(install, {"text": text})
+
+    # Then
+    assert probed == [], "an over-long value must be rejected on shape, before any filesystem read"
+    assert _rewritten_inputs(plan)["text"] == text
+    assert plan.assets == ()
+
+
+def test_a_prompt_that_is_exactly_a_filename_is_still_rewritten(install: Path) -> None:
+    """Given a prompt equal to a real filename, When scanned, Then it IS rewritten.
+
+    Pinned as a KNOWN RESIDUAL, not as desired behaviour. `CLIPTextEncode.text`
+    holding `product-input.png` is byte-identical to `LoadImage.image` holding
+    it, so no predicate over the string alone can separate them — and separating
+    them needs the class_type discrimination that would stop a custom node from
+    ever receiving an asset, which is the property the scan exists to keep.
+
+    If a future change closes this, invert the assertion — do not delete the
+    test.
+    """
+    # Given
+    (install / "input" / "product-input.png").write_bytes(b"image")
+
+    # When
+    plan = _plan(install, {"text": "product-input.png"})
+
+    # Then
+    assert _rewritten_inputs(plan)["text"] == {
+        "__type": "core/ASSET",
+        "info": {"id": plan.assets[0].marker, "file_path": "product-input.png"},
+    }
+
+
+def test_an_extensionless_file_no_longer_resolves(install: Path) -> None:
+    """Given a real file with no extension, When scanned, Then it stays a literal.
+
+    The deliberate price of the extension rule, pinned so it is a decision rather
+    than a surprise: nothing distinguishes `photo` from a sampler name or an enum
+    value, and those are the overwhelmingly common case. The server names the
+    reference it could not resolve.
+    """
+    # Given
+    (install / "input" / "photo").write_bytes(b"image")
+
+    # When
+    plan = _plan(
+        install,
+        {"image": "photo"},
+    )
+
+    # Then
+    assert _rewritten_inputs(plan)["image"] == "photo"
+    assert plan.assets == ()

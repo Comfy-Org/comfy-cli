@@ -14,10 +14,11 @@ CLI ran from a project root or ``$HOME``.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Final
 
 from typing_extensions import assert_never
@@ -35,6 +36,16 @@ from comfy_cli.workspace_manager import WorkspaceManager
 _ASSET_TYPE: Final = "core/ASSET"
 _LOCAL_ASSET_MARKER_PREFIX: Final = "local-asset:"
 _ASSET_DIRNAMES: Final = (DEFAULT_COMFY_MODEL_PATH, DEFAULT_COMFY_INPUT_PATH, DEFAULT_COMFY_OUTPUT_PATH)
+
+#: ``PATH_MAX`` on Linux. Past it no string can name a file, so the bound
+#: rejects nothing that could have resolved.
+_MAX_ASSET_REF_LEN: Final = 4096
+
+#: A trailing file extension: a dot, then a short run of the characters
+#: extensions are spelled with. Deliberately open rather than a media
+#: allowlist, so a custom node's own suffix (``.payload``, ``.lut``) still
+#: resolves.
+_EXTENSION_RE: Final = re.compile(r"\.[A-Za-z0-9_]{1,16}\Z")
 
 #: Directories a workflow input may name a file inside. Every member is
 #: absolute, symlink-resolved and known to be a directory — ``resolve_asset_roots``
@@ -227,6 +238,34 @@ def _candidate_paths(value: str, roots: AssetRoots) -> Iterator[Path]:
     yield Path.cwd() / input_path
 
 
+def _is_file_shaped(value: str) -> bool:
+    """True when ``value`` could be naming a file, judged on the string alone.
+
+    Gates the scan so prose colliding with a filename under an asset root is not
+    silently uploaded. Requires an extension on the last component, one line, no
+    control characters, at most ``PATH_MAX``.
+
+    Two non-obvious exclusions:
+
+    - **traversal is not a rule.** Containment is enforced on the *resolved* path
+      in :func:`_resolve_local_file`, so refusing the shape here would only
+      downgrade that loud ``DeployWorkflowAssetOutsideRootError`` to a silent
+      literal;
+    - **node type is not consulted**, so a custom node's own widget stays as
+      eligible for an asset as ``LoadImage.image``.
+
+    Two accepted costs, both pinned by tests: an extensionless file no longer
+    resolves, and a prompt whose whole value is a filename is still rewritten —
+    it is byte-identical to a real reference, so no predicate over the string
+    alone can separate them.
+    """
+    if not value or len(value) > _MAX_ASSET_REF_LEN:
+        return False
+    if any(character < " " or character == "\x7f" for character in value):
+        return False
+    return _EXTENSION_RE.search(PurePath(value).name) is not None
+
+
 def _resolve_local_file(value: str, roots: AssetRoots) -> Path | None:
     """Map one input string to the asset file it names, or ``None`` for a literal.
 
@@ -237,6 +276,8 @@ def _resolve_local_file(value: str, roots: AssetRoots) -> Path | None:
         DeployWorkflowAssetOutsideRootError: the string names a real file that
             no allowed root contains.
     """
+    if not _is_file_shaped(value):
+        return None
     outside: Path | None = None
     for candidate in _candidate_paths(value, roots):
         try:

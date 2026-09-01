@@ -8,9 +8,8 @@ from typing import Any
 
 import pytest
 
-from comfy_cli.credentials import Credential
 from comfy_cli.deploy_api_errors import DeployAPIError
-from comfy_cli.deploy_jobs import DeployJobClient, JobSubmitRequest
+from comfy_cli.deploy_jobs import _MAX_SERVER_MESSAGE, DeployJobClient, JobSubmitRequest
 
 _BASE_URL = "https://dep-1.run.comfy.app"
 _WORKFLOW = {"1": {"class_type": "KSampler", "inputs": {}}}
@@ -60,11 +59,6 @@ class _ControlPlane:
         return {"id": deployment_id, "status": self.status}
 
 
-@pytest.fixture(autouse=True)
-def no_configured_partner_key(monkeypatch) -> None:
-    monkeypatch.setattr("comfy_cli.deploy_jobs.credentials.find_api_key", lambda *, purpose: None)
-
-
 def _error(status: int, code: str, *, message: str = "server prose", details: dict | None = None):
     payload = {"error": {"code": code, "message": message, "details": details}}
     return urllib.error.HTTPError(
@@ -82,8 +76,13 @@ def _retryable_error(code: str, seconds: str = "2"):
     return error
 
 
-def _request() -> JobSubmitRequest:
-    return JobSubmitRequest(workflow=_WORKFLOW, idempotency_key=_KEY, deployment_id="dep-1")
+def _request(partner_credential: tuple[str, str] | None = None) -> JobSubmitRequest:
+    return JobSubmitRequest(
+        workflow=_WORKFLOW,
+        idempotency_key=_KEY,
+        deployment_id="dep-1",
+        partner_credential=partner_credential,
+    )
 
 
 def test_success_issues_exactly_one_post_without_empty_extra_data(monkeypatch):
@@ -105,22 +104,23 @@ def test_success_issues_exactly_one_post_without_empty_extra_data(monkeypatch):
     assert transport.calls[0]["target"].auth_token == "jwt-token"
 
 
-def test_configured_api_key_is_forwarded_without_a_flag(monkeypatch):
+@pytest.mark.parametrize(
+    "field",
+    ["api_key_comfy_org", "auth_token_comfy_org"],
+)
+def test_the_resolved_credential_is_forwarded_under_its_own_field(monkeypatch, field):
+    """An OAuth session and an API key are different credentials and ride different keys."""
     # Given
     transport = _Transport((201, _JOB))
     monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", transport)
-    monkeypatch.setattr(
-        "comfy_cli.deploy_jobs.credentials.find_api_key",
-        lambda *, purpose: Credential(kind="api_key", value="comfy-secret", source="test"),
-    )
 
     # When
-    DeployJobClient(_BASE_URL, "jwt-token").submit_job(_request(), _ControlPlane())
+    DeployJobClient(_BASE_URL, "jwt-token").submit_job(_request((field, "comfy-secret")), _ControlPlane())
 
     # Then
     assert transport.calls[0]["body"] == {
         "workflow": _WORKFLOW,
-        "extra_data": {"api_key_comfy_org": "comfy-secret"},
+        "extra_data": {field: "comfy-secret"},
     }
 
 
@@ -178,7 +178,7 @@ def test_deployment_not_ready_retries_same_key_then_refreshes_status(monkeypatch
     assert control.calls == ["dep-1"]
     assert len(transport.calls) == 3 and sleeps == [2.0, 2.0]
     assert {call["headers"]["Idempotency-Key"] for call in transport.calls} == {_KEY}
-    assert "server prose" not in str(exc_info.value)
+    assert str(exc_info.value) == "server prose"
 
 
 def test_queue_full_retries_same_key_then_maps_rate_limit(monkeypatch):
@@ -305,14 +305,10 @@ def test_configured_api_key_never_appears_in_an_error(monkeypatch):
     secret = "comfy-secret-never-leak"
     transport = _Transport(_error(403, "forbidden", message=secret, details={"echo": secret}))
     monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", transport)
-    monkeypatch.setattr(
-        "comfy_cli.deploy_jobs.credentials.find_api_key",
-        lambda *, purpose: Credential(kind="api_key", value=secret, source="test"),
-    )
 
     # When
     with pytest.raises(DeployAPIError) as exc_info:
-        DeployJobClient(_BASE_URL, "jwt-token").submit_job(_request(), _ControlPlane())
+        DeployJobClient(_BASE_URL, "jwt-token").submit_job(_request(("api_key_comfy_org", secret)), _ControlPlane())
 
     # Then
     assert secret not in str(exc_info.value)
@@ -330,3 +326,64 @@ def test_plaintext_non_loopback_endpoint_is_rejected_before_transport(monkeypatc
     assert exc_info.value.code == "deploy_insecure_url"
     assert "non-https" in str(exc_info.value)
     assert transport.calls == []
+
+
+def test_server_explanation_replaces_the_canned_message(monkeypatch):
+    # Given
+    explanation = (
+        'the asset reference on node "1" is not on a file input this deployment stages; '
+        "set it on a supported loader node's file field"
+    )
+    transport = _Transport(_error(422, "invalid_workflow", message=explanation))
+    monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", transport)
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        DeployJobClient(_BASE_URL, "jwt-token").submit_job(_request(), _ControlPlane())
+
+    # Then
+    assert exc_info.value.code == "deploy_workflow_invalid"
+    assert str(exc_info.value) == explanation
+    assert exc_info.value.details["server_code"] == "invalid_workflow"
+
+
+@pytest.mark.parametrize("message", ["", "   ", None, 42])
+def test_canned_message_survives_a_server_that_explains_nothing(monkeypatch, message):
+    # Given
+    transport = _Transport(_error(422, "invalid_workflow", message=message))
+    monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", transport)
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        DeployJobClient(_BASE_URL, "jwt-token").submit_job(_request(), _ControlPlane())
+
+    # Then
+    assert str(exc_info.value) == "the workflow is invalid"
+
+
+def test_an_unbounded_server_message_is_truncated(monkeypatch):
+    # Given
+    transport = _Transport(_error(422, "invalid_workflow", message="x" * 10_000))
+    monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", transport)
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        DeployJobClient(_BASE_URL, "jwt-token").submit_job(_request(), _ControlPlane())
+
+    # Then
+    rendered = str(exc_info.value)
+    assert len(rendered) == _MAX_SERVER_MESSAGE + 1 and rendered.endswith("…")
+
+
+def test_node_errors_survive_a_server_code_the_client_does_not_enumerate(monkeypatch):
+    # Given
+    node_errors = {"3": [{"field": "image", "reason": "missing_input"}]}
+    transport = _Transport(_error(422, "some_future_code", details={"node_errors": node_errors}))
+    monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", transport)
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        DeployJobClient(_BASE_URL, "jwt-token").submit_job(_request(), _ControlPlane())
+
+    # Then
+    assert exc_info.value.details["node_errors"] == node_errors
