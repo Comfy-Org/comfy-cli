@@ -43,6 +43,21 @@ custom_nodes = LazyModule("comfy_cli.command.custom_nodes")
 logging.setup_logging()
 
 
+def _click_error_is(error: BaseException, name: str) -> bool:
+    """Whether ``error`` is click's ``name`` exception, from either copy of click.
+
+    typer >= 0.24 runs on a vendored click, so ``isinstance`` against the
+    installed ``click`` is false for every exception typer raises and a usage
+    error would leave the ``--json`` stream with no terminating envelope at all.
+    Walking the MRO by class name and owning package covers both copies, and
+    keeps the subclass matching ``isinstance`` gave.
+    """
+    return any(
+        cls.__name__ == name and cls.__module__.partition(".")[0] in ("click", "typer")
+        for cls in type(error).__mro__
+    )
+
+
 def _emit_usage_error_envelope(error: click.UsageError, args: list[str] | None = None) -> None:
     """Write the terminating ``ok:false`` envelope for a click parse failure.
 
@@ -66,7 +81,7 @@ def _emit_usage_error_envelope(error: click.UsageError, args: list[str] | None =
     path = _command_path(error.ctx)
     invocation = f"comfy {path}".strip()
     details: dict[str, object] = {"command": invocation, "exit_code": error.exit_code}
-    if isinstance(error, click.NoSuchOption):
+    if _click_error_is(error, "NoSuchOption"):
         details["option"] = error.option_name
         if error.possibilities:
             details["did_you_mean"] = list(error.possibilities)
@@ -123,8 +138,9 @@ def _command_path(ctx: click.Context | None) -> str:
 def _usage_errors_as_envelopes(args: list[str] | None = None) -> Iterator[None]:
     try:
         yield
-    except click.UsageError as error:
-        _emit_usage_error_envelope(error, args)
+    except Exception as error:
+        if _click_error_is(error, "UsageError"):
+            _emit_usage_error_envelope(error, args)
         raise
 
 
