@@ -72,13 +72,15 @@ def _broken_pipe_swallowed_by_click() -> bool:
     failure. That wrapper — which click installs in this branch and nowhere
     else — is the one reliable in-process signal.
 
-    The class is matched by name because there is no single class to point at:
-    typer >= 0.24 runs on a vendored click, so the wrapper the CLI actually
-    meets is `typer._click.utils.PacifyFlushWrapper` rather than the one in the
-    installed `click`, and click 8.5 renamed its own copy to a private name
-    whose public alias warns on access.
+    The class is matched by name and defining module because there is no single
+    class to point at: typer >= 0.24 runs on a vendored click, so the wrapper the
+    CLI actually meets is `typer._click.utils.PacifyFlushWrapper` rather than the
+    one in the installed `click`, and click 8.5 renamed its own copy to a private
+    name whose public alias warns on access. The module test keeps an unrelated
+    class of the same name from laundering a genuine failure into exit 0.
     """
-    return type(sys.stdout).__name__.lstrip("_") == "PacifyFlushWrapper"
+    cls = type(sys.stdout)
+    return cls.__name__.removeprefix("_") == "PacifyFlushWrapper" and "click" in cls.__module__
 
 
 def _flush_stdout(*, unwinding: bool) -> bool:

@@ -726,23 +726,34 @@ class TestCliParamNameDriftGate:
 
         suspicious = ("token", "secret", "password", "api_key", "apikey", "credential")
 
+        # Walked the way ``help_json._command_to_dict`` walks it, for two reasons:
+        # ``isinstance(cmd, click.Group)`` is false for every group under typer's
+        # vendored click, and the root's ``commands`` dict holds only the eagerly
+        # registered half — ``auth``, ``cloud``, ``build`` and ``deploy``, which
+        # carry the token flags this gate exists to police, are materialized only
+        # by ``get_command``.
         def walk(cmd, path):
-            # Duck-typed rather than ``isinstance(cmd, click.Group)``: typer >= 0.24
-            # runs on a vendored click, so that check is False for every group and
-            # the walk would silently cover nothing at all.
-            subcommands = getattr(cmd, "commands", None)
-            if subcommands is not None:
-                for name, sub in subcommands.items():
-                    yield from walk(sub, [*path, name])
+            if hasattr(cmd, "list_commands") and hasattr(cmd, "get_command"):
+                for name in cmd.list_commands(None):
+                    sub = cmd.get_command(None, name)
+                    if sub is not None:
+                        yield from walk(sub, [*path, name])
                 return
             for param in cmd.params:
                 if param.name:
                     yield " ".join(path), param.name
 
+        visited = list(walk(get_command(app), ["comfy"]))
+        # Zero coverage is the failure this gate has already shipped once, and it
+        # looks exactly like a pass. 23 of the root's 48 commands are lazy.
+        assert len({path for path, _ in visited}) > 100, (
+            f"drift gate walked only {len({p for p, _ in visited})} commands; the tree walk is broken"
+        )
+
         offenders = sorted(
             {
                 (path, pname)
-                for path, pname in walk(get_command(app), ["comfy"])
+                for path, pname in visited
                 if any(s in pname.lower() for s in suspicious)
                 and pname not in self.ALLOWLIST
                 and not tm._is_sensitive(pname)

@@ -19,10 +19,7 @@ runner = CliRunner()
 def _split_stream_runner() -> CliRunner:
     """A runner that keeps stdout and stderr separate, so tests can assert the
     JSON-mode contract that stdout carries ONLY the envelope."""
-    try:
-        return CliRunner()  # click < 8.2
-    except TypeError:
-        return CliRunner()  # click >= 8.2 always separates
+    return CliRunner()
 
 
 @pytest.fixture

@@ -6,6 +6,7 @@ what it asked for. These cover both halves of the entrypoint guard in
 and the two in-process signals the guard keys off.
 """
 
+import importlib
 import io
 import os
 import shutil
@@ -135,18 +136,40 @@ class TestBrokenPipeExitCode:
         assert "Exception ignored" not in text, text
 
 
+def _installed_pacify_wrapper() -> type:
+    """The EPIPE stdout wrapper the installed click/typer actually installs.
+
+    typer >= 0.24 vendors its own click, and click 8.5 renamed its copy to a
+    private name, so this pins the guard against the real class rather than a
+    name the test picked itself.
+    """
+    for modname in ("typer._click.utils", "click.utils"):
+        try:
+            mod = importlib.import_module(modname)
+        except ImportError:
+            continue
+        for attr in ("_PacifyFlushWrapper", "PacifyFlushWrapper"):
+            cls = getattr(mod, attr, None)
+            if cls is not None:
+                return cls
+    raise AssertionError("no PacifyFlushWrapper in the installed click/typer")
+
+
 class TestClickPacifySignal:
     """click swallows EPIPE itself, so the guard detects it by the stream swap."""
 
     def test_detects_click_pacified_stdout(self, monkeypatch):
-        # A stand-in rather than the real class: which module owns it moves with
-        # every typer/click release, and the subprocess cases above already
-        # cover the genuine article end to end.
+        monkeypatch.setattr(sys, "stdout", _installed_pacify_wrapper()(io.StringIO()))
+        assert entrypoint._broken_pipe_swallowed_by_click() is True
+
+    def test_an_unrelated_class_of_the_same_name_is_not_a_broken_pipe(self, monkeypatch):
+        """Name alone must not launder a genuine failure into exit 0."""
+
         class PacifyFlushWrapper:
             pass
 
         monkeypatch.setattr(sys, "stdout", PacifyFlushWrapper())
-        assert entrypoint._broken_pipe_swallowed_by_click() is True
+        assert entrypoint._broken_pipe_swallowed_by_click() is False
 
     def test_ordinary_stdout_is_not_a_broken_pipe(self, monkeypatch):
         monkeypatch.setattr(sys, "stdout", io.StringIO())

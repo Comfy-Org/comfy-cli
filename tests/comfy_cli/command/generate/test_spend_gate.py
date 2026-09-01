@@ -161,7 +161,9 @@ def test_interactive_prompt_accept_proceeds(runner, api_key, post_spy, interacti
     r = runner.invoke(cli_app, ["generate", "dalle", "--prompt", "x"], input="y\n")
     assert r.exit_code == 0, r.stdout
     assert len(post_spy) == 1
-    assert "spends Comfy credits" in r.stdout + r.stderr
+    # Machine stdout (the runner is not a TTY, so the renderer is in JSON mode),
+    # which is exactly the case that routes the human notice to stderr.
+    assert "spends Comfy credits" in r.stderr
 
 
 def test_interactive_prompt_decline_spends_nothing(runner, api_key, post_spy, interactive_tty):
