@@ -61,16 +61,62 @@ to. Then:
 
 ## Predict the conflict instead of buying it
 
-**This section needs an install**, so it applies to the scan and snapshot paths
-only. A hand-authored definition has no requirements files to read, and
-`comfy build validate` is the only check available there.
-
 A build takes minutes to tell you two packages disagree. Most of that answer is
-sitting in text files on disk, so look before you cut.
+sitting in text files, so look before you cut.
 
 ```shell
 cat <install>/requirements.txt <install>/custom_nodes/*/requirements.txt > declared.txt 2>/dev/null
 ```
+
+**A hand-authored definition can do this too — clone the packs.** The
+requirements files are not on this machine, but every pack in the definition
+names a `repository` or a registry slug that resolves to one, and concatenating
+their `requirements.txt` with core's reproduces what the builder resolves. It
+found the real blocker in one port before a single build was spent:
+
+```shell
+# core, plus one shallow clone per pack in customNodes
+git clone --depth 1 -b <baseComfyVersion> https://github.com/comfyanonymous/ComfyUI core
+
+# per pack, when gitRef is a branch or tag:
+git clone --depth 1 -b <gitRef> https://github.com/<org>/<repo> packs/<name>
+
+# per pack, when gitRef is a commit SHA — `--branch` does NOT accept one
+# ("fatal: Remote branch <sha> not found in upstream origin"), so fetch it:
+git init -q packs/<name>
+git -C packs/<name> fetch -q --depth 1 https://github.com/<org>/<repo> <gitRef>
+git -C packs/<name> checkout -q FETCH_HEAD
+
+cat core/requirements.txt packs/*/requirements.txt > declared.txt
+```
+
+**Clone each pack at the ref the definition pins, not its HEAD** — the same
+distinction `comfy-build-authoring` draws about `latest_version`: a `gitRef`
+entry means that commit, and HEAD's requirements are a different pack's. For a
+`registryVersion` entry there is no ref to clone; take that pack's requirements
+from its published archive, or say in the disclosure that its constraints went
+unread.
+
+Then strip the deletions listed above (`torch`, `torchvision`, `torchaudio`,
+`triton`, `xformers`, `nvidia-*`, `comfyui-frontend-package`, …) and resolve.
+
+**Pass the platform tag the build actually uses, because the tag decides which
+conflict surfaces first.** On the same input, the default `manylinux_2_28`
+reported an `open3d` wheel-tag problem — a red herring — while `manylinux_2_34`
+reported the real blocker:
+
+```shell
+uv pip compile declared_clean.txt --python-version 3.12 --python-platform x86_64-manylinux_2_34
+```
+
+That blocker was `Imath>=3.1.0`, unsatisfiable: PyPI's `imath` has only 0.0.1
+and 0.0.2, and the `Imath` *module* ships inside the `OpenEXR` package the same
+pack already requires. Which is the second thing worth knowing:
+
+**`pip install -r req.txt || true` in a source script is a smell.** It hides
+every constraint failure the builder will enforce, so a source environment can
+run happily for months carrying a requirement that has never once been
+satisfied — which is exactly how that `Imath` line survived unnoticed.
 
 **`requirements.txt` is the only file the build reads.** It resolves ComfyUI's
 own plus one per pack, so a dependency declared only in a `pyproject.toml` is

@@ -1840,10 +1840,38 @@ def validate_api_workflow(
                 f"[yellow]⚠ uses partner-API (paid) nodes that spend Comfy credits: "
                 f"{', '.join(escape(n) for n in partner_nodes)}[/yellow]"
             )
-    renderer.emit(payload, command=command, ok=result["valid"])
+    renderer.emit(payload, command=command, ok=result["valid"], error=_invalid_workflow_error(result))
 
     if not result["valid"]:
         raise typer.Exit(code=1)
+
+
+def _invalid_workflow_error(result: dict[str, Any]) -> dict[str, Any] | None:
+    """The error block a failed verdict carries, or ``None`` for a valid graph.
+
+    ``data`` already holds every per-node error, but a consumer branches on
+    ``error.code``, and this envelope carried ``error: null``.
+
+    The hint is built from the errors themselves, as ``run.preflight`` does: the
+    registered hint names the class_type case only, which is wrong advice for a
+    shape mismatch.
+    """
+    if result["valid"]:
+        return None
+    errors = result["errors"]
+    hint_parts = []
+    for error in errors[:5]:
+        line = f"node {error.get('node_id') or '?'}: {error.get('message', '')}"
+        suggestions = error.get("suggestions") or []
+        if suggestions:
+            line += f" (did you mean: {', '.join(str(s) for s in suggestions)}?)"
+        hint_parts.append(line)
+    return {
+        "code": "workflow_unknown_nodes",
+        "message": f"workflow has {len(errors)} validation error(s)",
+        "hint": "\n".join(hint_parts),
+        "details": {"errors": errors, "warnings": result["warnings"]},
+    }
 
 
 @app.command(

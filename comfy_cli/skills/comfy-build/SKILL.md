@@ -228,10 +228,24 @@ a first build fails.
 resolves the packs' own requirements against the base image's torch, which is
 what you want. Path C starts there for free, having no freeze to prune.
 
-There is one exception: a conflict you can already see and state in a sentence
-goes into cut one, disclosed — cutting empty after finding one buys the conflict
-anyway. **`comfy skills show comfy-build-pins`** is how to find one before
-spending a build on it, and what the rules are for any line you keep.
+There is one exception, in two shapes: **a pin you can already justify in a
+sentence goes into cut one, disclosed** — cutting empty and then discovering it
+buys the problem anyway.
+
+- **A conflict you can see** in the packs' requirements.
+- **A version the source environment states on purpose.** Emptying discards a
+  freeze, which is evidence; it must not discard a deliberate pin, which is an
+  instruction. A Modal script carrying
+  `.run_commands("pip install 'transformers==4.57.1'")  # last 4.x, still has OffloadedCache`
+  and `.run_commands("pip install 'kornia==0.7.3'")` is telling you two things
+  that a freeze does not — and emptying them landed the resolve on
+  `transformers 5.16.1`, a major-version jump underneath packs that depend on
+  it. A pin set apart from the bulk install, and above all a **commented** one,
+  is a decision someone made; carry it, and say you did.
+
+**`comfy skills show comfy-build-pins`** is how to find a conflict before
+spending a build on it — including on the hand-authored path — and what the rules
+are for any line you keep.
 
 ## Before you cut
 

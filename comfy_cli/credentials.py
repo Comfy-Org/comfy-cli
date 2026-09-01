@@ -189,3 +189,54 @@ def resolve_cloud_credential(
             return Credential(kind="oauth", value=env_bearer, source=f"env:{CLOUD_BEARER_ENV_VAR}")
 
     return find_api_key(purpose=purpose)
+
+
+def resolve_partner_credential() -> tuple[str, str] | None:
+    """The ``extra_data`` credential partner-API nodes authenticate with.
+
+    Returns ``(field, value)`` — ``auth_token_comfy_org`` for a session,
+    ``api_key_comfy_org`` for a key — or ``None`` when nothing is configured.
+    Shared by the local exec and ``deploy run`` submit paths, so it consults
+    every source either one already read. In precedence order:
+
+    1. a live OAuth session;
+    2. ``COMFY_CLOUD_AUTH_TOKEN`` (:data:`CLOUD_BEARER_ENV_VAR`), forwarded by a
+       trusted caller instead of an interactive login;
+    3. ``COMFY_API_KEY``, then ``COMFY_CLOUD_API_KEY``;
+    4. the stored ``comfy cloud set-key`` key.
+
+    Best-effort: the session is refreshed when possible, but ``allow_clear=False``
+    keeps a fatal refresh error from logging the user out from under a foreground
+    command, and any unexpected error falls through to a network-free read of the
+    env and stored keys rather than aborting the run.
+    """
+    try:
+        cloud = resolve_cloud_credential(purpose="cloud", refresh=True, allow_clear=False)
+    except Exception:  # noqa: BLE001 — best-effort: never abort a run on a refresh hiccup
+        cloud = resolve_cloud_credential(purpose="cloud", refresh=False, allow_clear=False)
+    # A request-scoped credential outranks every ambient key, or the run
+    # authenticates as the wrong account and spends its credits.
+    if cloud is not None and cloud.kind == "oauth":
+        return ("auth_token_comfy_org", cloud.value)
+    key_credential = _partner_api_key()
+    if key_credential is None:
+        return None
+    return ("api_key_comfy_org", key_credential.value)
+
+
+def _partner_api_key() -> Credential | None:
+    """The API key half of :func:`resolve_partner_credential`: env vars, then stored.
+
+    Both env vars are read here rather than through two :func:`find_api_key`
+    calls: that function checks *its* env var and then the stored key, so the
+    first call would let machine state win over the second env var.
+    """
+    import os
+
+    # Stripped, and whitespace-only treated as absent: the "cloud" env var passes
+    # ambient values verbatim, and padding would reach a partner auth header.
+    for env_var in (_PURPOSES["partner"][0], _PURPOSES["cloud"][0]):
+        value = (os.environ.get(env_var) or "").strip()
+        if value:
+            return Credential(kind="api_key", value=value, source=f"env:{env_var}")
+    return find_api_key(purpose="partner")

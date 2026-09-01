@@ -64,7 +64,7 @@ def _run_lifecycle(request: ReadRequest, action: LifecycleAction) -> None:
         renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     except DeployAPIError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     except BuilderAuthError as error:
         renderer.error(code="deploy_not_signed_in", message=str(error))

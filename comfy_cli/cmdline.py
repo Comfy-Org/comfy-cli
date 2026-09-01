@@ -1,10 +1,13 @@
+import contextlib
 import json
 import os
 import subprocess
 import sys
 import webbrowser
+from collections.abc import Iterator
 from typing import Annotated
 
+import click
 import typer
 from rich.console import Console
 
@@ -40,9 +43,110 @@ custom_nodes = LazyModule("comfy_cli.command.custom_nodes")
 logging.setup_logging()
 
 
+def _emit_usage_error_envelope(error: click.UsageError, args: list[str] | None = None) -> None:
+    """Write the terminating ``ok:false`` envelope for a click parse failure.
+
+    Click validates argv before any command body runs, so these never reached a
+    ``renderer.error`` call site and left stdout empty — indistinguishable, to a
+    JSON consumer, from a transport failure. The caller re-raises, so click still
+    prints its panel and still exits 2; only stdout changes.
+
+    The sibling for errors raised *inside* a command body is
+    ``host_port.report_usage_error``.
+    """
+    renderer = get_renderer()
+    if not renderer.is_json():
+        # Click resolves the subcommand BEFORE the root callback runs, so an
+        # unknown command fails while the renderer is still the pretty default.
+        # The root options did parse, so re-run the decision from their values.
+        renderer = Renderer.resolve(version=ConfigManager().get_cli_version(), **_output_flags(error.ctx, args))
+    # Pretty mode already gets click's panel; rendering again would double it.
+    if not renderer.is_json() or renderer._envelope_emitted:
+        return
+    path = _command_path(error.ctx)
+    invocation = f"comfy {path}".strip()
+    details: dict[str, object] = {"command": invocation, "exit_code": error.exit_code}
+    if isinstance(error, click.NoSuchOption):
+        details["option"] = error.option_name
+        if error.possibilities:
+            details["did_you_mean"] = list(error.possibilities)
+    renderer.error(
+        code="usage_error",
+        message=error.format_message(),
+        hint=f"run `{invocation} --help` for the accepted arguments and options",
+        details=details,
+        exit_code=error.exit_code,
+        command=path,
+    )
+
+
+def _output_flags(ctx: click.Context | None, args: list[str] | None = None) -> dict[str, bool]:
+    """The root ``--json`` / ``--json-stream`` / ``--no-json`` values, as parsed.
+
+    Read off the root context, not ``sys.argv``, so an in-process caller is
+    answered about ITS arguments. An unknown ROOT option is the exception: it
+    raises inside ``parse_args`` before click binds a parameter, leaving
+    ``ctx.params`` empty, so ``args`` is the only record of what was asked for.
+    """
+    while ctx is not None and ctx.parent is not None:
+        ctx = ctx.parent
+    params = ctx.params if ctx is not None else {}
+    if not params:
+        supplied = args if args is not None else sys.argv[1:]
+        params = {
+            "json_output": "--json" in supplied,
+            "json_stream": "--json-stream" in supplied,
+            "no_json": "--no-json" in supplied,
+        }
+    return {
+        "json_flag": bool(params.get("json_output")),
+        "json_stream_flag": bool(params.get("json_stream")),
+        "no_json_flag": bool(params.get("no_json")),
+    }
+
+
+def _command_path(ctx: click.Context | None) -> str:
+    """The subcommand path, root excluded — ``build release show``.
+
+    Not ``ctx.command_path``: that leads with ``info_name``, which is however the
+    CLI was launched, so it would not match the ``command`` on the success line.
+    """
+    names: list[str] = []
+    while ctx is not None and ctx.parent is not None:
+        if ctx.info_name:
+            names.append(ctx.info_name)
+        ctx = ctx.parent
+    return " ".join(reversed(names))
+
+
+@contextlib.contextmanager
+def _usage_errors_as_envelopes(args: list[str] | None = None) -> Iterator[None]:
+    try:
+        yield
+    except click.UsageError as error:
+        _emit_usage_error_envelope(error, args)
+        raise
+
+
 class _RootGroup(LazyTyperGroup):
     """Root click group. Subcommand groups are declared in ``lazy_subcommands``
-    (assigned at the bottom of this module) and imported on first use."""
+    (assigned at the bottom of this module) and imported on first use.
+
+    ``make_context`` and ``invoke`` are both wrapped so a usage error anywhere in
+    the tree ends the ``--json`` stream with an envelope: the first covers
+    root-level argv, the second every nested command, since click builds a
+    subcommand's context inside the parent group's ``invoke``.
+    """
+
+    def make_context(self, info_name, args, parent=None, **kwargs):
+        # A COPY, taken before parsing: click's parser consumes `args` IN PLACE,
+        # so by the time the error propagates the original is empty.
+        with _usage_errors_as_envelopes(list(args)):
+            return super().make_context(info_name, args, parent=parent, **kwargs)
+
+    def invoke(self, ctx: click.Context):
+        with _usage_errors_as_envelopes():
+            return super().invoke(ctx)
 
 
 app = typer.Typer(cls=_RootGroup)

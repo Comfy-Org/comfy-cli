@@ -11,6 +11,7 @@ from comfy_cli.command.deploy_resolve import (
     BuilderReleaseClient,
     select_deployment,
 )
+from comfy_cli.command.deploy_runtime import terminal_status_error
 from comfy_cli.command.deploy_types import ComputeRequiredError, DeployUpClient, UpRequest, UpResult
 from comfy_cli.command.deploy_types import compute_config as _compute_config
 from comfy_cli.command.deploy_types import release_summary as _release_summary
@@ -207,11 +208,13 @@ def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
             if status == "stop_failed"
             else f"run `comfy deploy scale --deployment {deployment_id} --min <n> --max <n>` to change them",
         )
+    terminal = status in {"failed", "stopped", "stop_failed"}
     renderer.emit(
         result.payload(),
         command="deploy up",
         changed=result.changed,
-        ok=status not in {"failed", "stopped", "stop_failed"},
+        ok=not terminal,
+        error=terminal_status_error(deployment_id, status) if terminal else None,
     )
-    if status in {"failed", "stopped", "stop_failed"}:
+    if terminal:
         raise typer.Exit(code=1)
