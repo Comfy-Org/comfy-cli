@@ -17,11 +17,17 @@ history.
 
 ### Fixed
 
+- `comfy install --fast-deps --nvidia` no longer installs a torch that its
+  torchvision was not built against, which made ComfyUI fail to import with
+  `RuntimeError: operator torchvision::nms does not exist`. The GPU override
+  named `torch` outright, and a uv `--override` replaces every requirement for
+  the package it names, so torchvision's `torch==<x.y.z>` pin was discarded and
+  a same-day torch release resolved ahead of its matching torchvision.
 - `comfy … | head` exits 0 again, and `--json` keeps stderr clean, on typer
   >= 0.24. typer now runs on a vendored copy of click, so the broken-pipe guard
   no longer recognized the stdout wrapper click installs on EPIPE and reported a
-  genuine failure instead. The wrapper is now matched by class name and defining
-  module, which also stops the deprecated `click.utils.PacifyFlushWrapper`
+  genuine failure instead. The wrapper is now matched by class name and owning
+  package, which also stops the deprecated `click.utils.PacifyFlushWrapper`
   import from printing a warning onto stderr.
 - `comfy --help-json` lists `choices` for enum options again, for the same
   reason: the vendored param types are not instances of the installed click's
