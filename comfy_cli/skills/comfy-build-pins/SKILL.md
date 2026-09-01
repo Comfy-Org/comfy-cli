@@ -77,7 +77,16 @@ found the real blocker in one port before a single build was spent:
 ```shell
 # core, plus one shallow clone per pack in customNodes
 git clone --depth 1 -b <baseComfyVersion> https://github.com/comfyanonymous/ComfyUI core
-git clone --depth 1 -b <gitRef> https://github.com/<org>/<repo> packs/<name>   # per pack
+
+# per pack, when gitRef is a branch or tag:
+git clone --depth 1 -b <gitRef> https://github.com/<org>/<repo> packs/<name>
+
+# per pack, when gitRef is a commit SHA — `--branch` does NOT accept one
+# ("fatal: Remote branch <sha> not found in upstream origin"), so fetch it:
+git init -q packs/<name>
+git -C packs/<name> fetch -q --depth 1 https://github.com/<org>/<repo> <gitRef>
+git -C packs/<name> checkout -q FETCH_HEAD
+
 cat core/requirements.txt packs/*/requirements.txt > declared.txt
 ```
 

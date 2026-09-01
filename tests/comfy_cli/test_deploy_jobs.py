@@ -315,6 +315,48 @@ def test_configured_api_key_never_appears_in_an_error(monkeypatch):
     assert secret not in json.dumps(exc_info.value.details)
 
 
+def _json_body(secret: str) -> str:
+    """A well-formed body echoing the secret, escaped as `json.dumps` sees fit."""
+    return json.dumps({"error": {"code": "invalid_workflow", "message": f"rejected {secret}", "details": {}}})
+
+
+def _unicode_escaped_body(secret: str) -> str:
+    """The same echo, with the secret written as `\\u` escapes."""
+    escaped = "".join(f"\\u{ord(character):04x}" for character in secret)
+    return '{"error":{"code":"invalid_workflow","message":"rejected ' + escaped + '","details":{}}}'
+
+
+@pytest.mark.parametrize(
+    ("secret", "build_body"),
+    [
+        pytest.param("comfyui-supersecret", _json_body, id="plain-echo"),
+        pytest.param('a"b-secret', _json_body, id="secret-containing-a-quote"),
+        pytest.param("back\\slash-secret", _json_body, id="secret-containing-a-backslash"),
+        pytest.param("comfyui-supersecret", _unicode_escaped_body, id="server-echoes-it-unicode-escaped"),
+    ],
+)
+def test_a_credential_is_redacted_however_the_server_encoded_it(monkeypatch, secret, build_body):
+    """Given a server that echoes the credential, When it is parsed, Then it is redacted.
+
+    Redacting the raw document text only catches an echo whose bytes match the
+    credential literally. A `\\u`-escaped one, or a secret carrying a quote or a
+    backslash, is restored intact by `json.loads` and would otherwise reach the
+    rendered envelope.
+    """
+    # Given
+    error = urllib.error.HTTPError(f"{_BASE_URL}/jobs", 422, "err", {}, io.BytesIO(build_body(secret).encode()))
+    transport = _Transport(error)
+    monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", transport)
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        DeployJobClient(_BASE_URL, "jwt-token").submit_job(_request(("api_key_comfy_org", secret)), _ControlPlane())
+
+    # Then
+    assert secret not in str(exc_info.value)
+    assert "[redacted]" in str(exc_info.value)
+
+
 def test_plaintext_non_loopback_endpoint_is_rejected_before_transport(monkeypatch):
     # Given
     transport = _Transport((201, _JOB))

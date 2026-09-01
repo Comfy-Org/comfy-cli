@@ -121,6 +121,23 @@ def _server_message(raw: object) -> str | None:
     return text if len(text) <= _MAX_SERVER_MESSAGE else text[:_MAX_SERVER_MESSAGE] + "…"
 
 
+def _redacted(value: object, secret: str) -> object:
+    """Replace ``secret`` everywhere it appears in a PARSED JSON value.
+
+    Redacting the raw document text instead misses every occurrence the server
+    encoded differently from the credential's literal bytes — a ``\\u0063``
+    escape, or a secret containing a quote or backslash — which ``json.loads``
+    then restores in full, into a message this module renders.
+    """
+    if isinstance(value, str):
+        return value.replace(secret, "[redacted]")
+    if isinstance(value, dict):
+        return {_redacted(key, secret): _redacted(item, secret) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redacted(item, secret) for item in value]
+    return value
+
+
 def _server_error(error: urllib.error.HTTPError, url: str, secret: str | None) -> _ServerError:
     try:
         raw = read_capped(error, url, max_bytes=_MAX_JSON)
@@ -129,8 +146,9 @@ def _server_error(error: urllib.error.HTTPError, url: str, secret: str | None) -
     if not raw:
         return _EMPTY_SERVER_ERROR
     try:
-        text = raw.decode("utf-8")
-        parsed = json.loads(text.replace(secret, "[redacted]") if secret else text)
+        parsed = json.loads(raw.decode("utf-8"))
+        if secret:
+            parsed = _redacted(parsed, secret)
     except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return _EMPTY_SERVER_ERROR
     if not isinstance(parsed, dict):

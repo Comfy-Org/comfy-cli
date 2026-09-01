@@ -132,15 +132,21 @@ That asymmetry is the trap. A free refusal naming a file input is not evidence
 about registration; it means the class is one of the handful the gateway parses,
 and it got there without ever asking whether the deployment loaded it.
 
-So probe deliberately:
+So probe deliberately. This is a template — replace the placeholders and the
+`inputs` object with real values, so what you submit is valid JSON:
 
 ```json
-{"1": {"class_type": "<ClassName>", "inputs": {<every required input>}},
+{"1": {"class_type": "<ClassName>", "inputs": {"<required_input>": "<value>"}},
  "2": {"class_type": "PreviewAny", "inputs": {"source": ["1", 0]}}}
 ```
 
 **Fill in the required inputs.** With `inputs: {}` a class that *is* registered
 still fails — on its missing arguments — and reads exactly like one that is not.
+
+**Drop node 2 when the class has no output.** ComfyUI validates a link against
+the source node's `RETURN_TYPES`, so wiring `["1", 0]` to a class with no output
+slot 0 — a save or sink node — fails on the link rather than on registration,
+which is the question being asked. A single-node graph is the probe for those.
 
 **Then read the failure, not the exit code.** `comfy deploy run` reports the
 job's error, and ComfyUI distinguishes the two cases in it: an unknown class
