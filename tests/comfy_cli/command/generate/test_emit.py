@@ -2,7 +2,7 @@
 ``emit`` module: model→node-class mapping, param translation, and the emitted
 frontend-format workflow + op-stream shape.
 
-BE-11131 / ecw-57: ``build_workflow`` used to hand-construct a raw API-format
+``build_workflow`` used to hand-construct a raw API-format
 dict (``workflow["1"] = {"class_type": ..., "inputs": ...}``). It now routes
 through ``workflow_ops.py``'s CRDT-ready primitives (``add_node``/``connect``/
 ``set_widget``), so the output is frontend-format (``nodes``/``links``) plus a

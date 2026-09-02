@@ -306,9 +306,9 @@ def build_workflow(
     ``links``, minted via ``workflow_ops.add_node``/``connect``/``set_widget``
     — the same CRDT-ready primitives ``comfy workflow`` slot-editing commands
     require), and ``ops`` is the replayable op stream those primitives emitted,
-    in apply order (BE-11131: this is what makes the result editable downstream
-    instead of a raw API-format dict `list_slots`/`set_widget`/`connect` reject
-    as ``workflow_not_frontend_format``).
+    in apply order. This is what makes the result editable downstream instead
+    of a raw API-format dict `list_slots`/`set_widget`/`connect` reject as
+    ``workflow_not_frontend_format``.
 
     The partner node classes in ``MODEL_NODE_MAP`` are addressed by name
     against the bundled snapshot regardless of that snapshot's own
