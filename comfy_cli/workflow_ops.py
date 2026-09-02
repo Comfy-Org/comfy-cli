@@ -40,13 +40,10 @@ Convergence guarantees ``apply_op`` upholds, so any replay order reaches the sam
   (the link id). Two concurrent autogrow connects both survive and ``canonical``
   compares grown slots by ``grow_id``, not by list position.
 
-The one thing a leaderless writer genuinely *cannot* converge is a *sequence
-decision*: the human-visible ordering/numbering of concurrently-grown autogrow
-slots (a batch's element order) and of concurrent interior writes to the same
-shared subgraph definition. Those are surfaced by :func:`detect_conflict` for the
-merge consumer / ask-to-merge to resolve — the ops still never lose data, and
-``canonical`` treats the order as immaterial, so the semantic graph converges even
-while the display order does not.
+Concurrent autogrow display order is resolved by the same total op rank used for
+LWW writes: ``[base_version, actor, op_id]``. Concurrent interior writes to the
+same shared subgraph definition remain a sequence decision and are surfaced by
+:func:`detect_conflict` for the merge consumer / ask-to-merge to resolve.
 """
 
 from __future__ import annotations
@@ -482,6 +479,40 @@ def _next_autogrow_name(ins: list, requested: str, template: dict | None = None)
     base = _autogrow_base(requested)
     n = _first_free_autogrow_index(taken, base, template)
     return f"{base}.{_autogrow_elem_name(base, n, template)}"
+
+
+def _rank_autogrow_group(workflow: dict, dst: dict, base: str, template: dict | None) -> None:
+    """Give replayed grows stable names and positions by their total op rank."""
+    ins = dst.get("inputs") or []
+    ranks = workflow.get("_autogrow_ranks") or {}
+    indexed = [
+        (idx, inp)
+        for idx, inp in enumerate(ins)
+        if isinstance(inp, dict)
+        and str(inp.get("grow_id")) in ranks
+        and _autogrow_base(str(inp.get("name", ""))) == base
+    ]
+    if not indexed:
+        return
+
+    ranked = sorted((inp for _, inp in indexed), key=lambda inp: ranks[str(inp["grow_id"])])
+    fixed_names = {inp.get("name") for inp in ins if inp not in ranked}
+    names: list[str] = []
+    n = 0
+    while len(names) < len(ranked):
+        name = f"{base}.{_autogrow_elem_name(base, n, template)}"
+        if name not in fixed_names:
+            names.append(name)
+        n += 1
+    for inp, name in zip(ranked, names, strict=True):
+        inp["name"] = name
+    for (idx, _), inp in zip(indexed, ranked, strict=True):
+        ins[idx] = inp
+
+    slot_by_link = {inp.get("link"): idx for idx, inp in enumerate(ins) if inp.get("link") is not None}
+    for link in workflow.get("links") or []:
+        if len(link) >= 5 and str(link[3]) == str(dst.get("id")) and link[0] in slot_by_link:
+            link[4] = slot_by_link[link[0]]
 
 
 def _autogrow_base(slot_name: str) -> str:
@@ -1791,6 +1822,7 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # the poison state: a retry of the identical op loses to the failed
     # attempt's own stamp and is silently dropped forever.
     stamps_before = dict(workflow.get("_widget_stamps") or {})
+    autogrow_ranks_before = dict(workflow.get("_autogrow_ranks") or {})
     try:
         if kind == "add_node":
             _apply_add_node(workflow, op)
@@ -1809,6 +1841,8 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     except BaseException:
         if stamps_before or "_widget_stamps" in workflow:
             workflow["_widget_stamps"] = stamps_before
+        if autogrow_ranks_before or "_autogrow_ranks" in workflow:
+            workflow["_autogrow_ranks"] = autogrow_ranks_before
         raise
     # NOT ``applied.append`` — ``_apply_reset_doc`` REPLACES ``_applied_ops``
     # with a fresh list (that is what makes it a history barrier), so the local
@@ -2000,6 +2034,13 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
         # schema's own element names, when the catalog carries a template).
         ins = dst.setdefault("inputs", [])
         to_idx = next((k for k, i in enumerate(ins) if i.get("grow_id") == op["link_id"]), None)
+        inputcount = grow.get("inputcount")
+        port = None
+        template = None
+        if not grow.get("promoted") and not grow.get("widget") and inputcount is None:
+            base = _autogrow_base(str(grow["name"]))
+            port = _autogrow_group_port(graph, dst, base)
+            template = None if port is None else port.autogrow_template
         if grow.get("promoted"):
             # A promoted subgraph input is ONE register named by the definition
             # (``("input", to_node, "grow", name)``), not a fresh slot per
@@ -2018,7 +2059,6 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                     _remove_link(workflow, prev)
                 ins[to_idx]["grow_id"] = op["link_id"]  # the register follows the winner
         if to_idx is None:
-            inputcount = grow.get("inputcount")
             if grow.get("promoted"):
                 name = grow["name"]
             elif inputcount is not None:
@@ -2027,9 +2067,6 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                 # base.elemN fallback — that name is meaningless for this family.
                 name = _next_inputcount_name(ins, grow["name"])
             else:
-                base = _autogrow_base(str(grow["name"]))
-                port = None if grow.get("widget") else _autogrow_group_port(graph, dst, base)
-                template = None if port is None else port.autogrow_template
                 name = _next_autogrow_name(ins, grow["name"], template)
                 if port is not None and name != grow["name"]:
                     # A replay collision renamed the slot: never mint one past
@@ -2053,6 +2090,8 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                 entry["widget"] = {"name": grow["widget"]}
             ins.append(entry)
             to_idx = len(ins) - 1
+            if not grow.get("promoted") and not grow.get("widget") and inputcount is None:
+                workflow.setdefault("_autogrow_ranks", {})[str(op["link_id"])] = _stamp_key(op)
             if inputcount is not None:
                 # Bump using the op's mint-time-planned value (NOT re-derived
                 # from a post-collision-renamed slot number): every op's
@@ -2142,6 +2181,8 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
     out_links = out_port["links"]
     if op["link_id"] not in out_links:
         out_links.append(op["link_id"])
+    if grow is not None and not grow.get("promoted") and not grow.get("widget") and grow.get("inputcount") is None:
+        _rank_autogrow_group(workflow, dst, _autogrow_base(str(grow["name"])), template)
 
 
 def _remove_link(workflow: dict, link_id: Any) -> None:
@@ -2207,6 +2248,7 @@ def _apply_reset_doc(workflow: dict, op: dict) -> None:
     workflow["last_link_id"] = 0
     workflow["_applied_ops"] = []
     workflow["_widget_stamps"] = {}
+    workflow["_autogrow_ranks"] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -2256,12 +2298,17 @@ def _write_target(op: dict) -> tuple:
 
 def detect_conflict(a: dict, b: dict) -> bool:
     """True iff two ops write the same target incompatibly — the signal V0's
-    ask-to-merge raises instead of silently clobbering. Two autogrow connects to
-    the same base conflict here (their batch order is undecidable leaderlessly)
-    even though :func:`apply_op` keeps both connections and ``canonical`` treats
-    their order as immaterial."""
+    ask-to-merge raises instead of silently clobbering. Ordinary autogrow
+    connects are not conflicts: their names and positions use ``_stamp_key``'s
+    deterministic total order."""
     if _write_target(a) != _write_target(b):
         return False
+    if all(op.get("op") == "connect" and op.get("grow") for op in (a, b)):
+        if all(
+            not op["grow"].get("promoted") and not op["grow"].get("widget") and op["grow"].get("inputcount") is None
+            for op in (a, b)
+        ):
+            return False
     if a["op"] == "set_widget" and b["op"] == "set_widget":
         return a.get("value") != b.get("value")
     return True
@@ -2289,6 +2336,7 @@ def canonical(workflow: dict) -> dict:
     w = copy.deepcopy(workflow)
     w.pop("_applied_ops", None)
     w.pop("_widget_stamps", None)
+    w.pop("_autogrow_ranks", None)
     nodes = w.get("nodes")
     # Capture each node's original index -> slot identity BEFORE reordering
     # inputs, so links (which reference the raw index) can be rewritten.
@@ -2393,6 +2441,7 @@ def strip_internal(workflow: dict) -> dict:
     """
     workflow.pop("_applied_ops", None)
     workflow.pop("_widget_stamps", None)
+    workflow.pop("_autogrow_ranks", None)
     return complete_save_format(workflow)
 
 
