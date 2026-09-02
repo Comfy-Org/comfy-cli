@@ -2034,6 +2034,13 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
         # schema's own element names, when the catalog carries a template).
         ins = dst.setdefault("inputs", [])
         to_idx = next((k for k, i in enumerate(ins) if i.get("grow_id") == op["link_id"]), None)
+        inputcount = grow.get("inputcount")
+        port = None
+        template = None
+        if not grow.get("promoted") and not grow.get("widget") and inputcount is None:
+            base = _autogrow_base(str(grow["name"]))
+            port = _autogrow_group_port(graph, dst, base)
+            template = None if port is None else port.autogrow_template
         if grow.get("promoted"):
             # A promoted subgraph input is ONE register named by the definition
             # (``("input", to_node, "grow", name)``), not a fresh slot per
@@ -2052,7 +2059,6 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                     _remove_link(workflow, prev)
                 ins[to_idx]["grow_id"] = op["link_id"]  # the register follows the winner
         if to_idx is None:
-            inputcount = grow.get("inputcount")
             if grow.get("promoted"):
                 name = grow["name"]
             elif inputcount is not None:
@@ -2061,9 +2067,6 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                 # base.elemN fallback — that name is meaningless for this family.
                 name = _next_inputcount_name(ins, grow["name"])
             else:
-                base = _autogrow_base(str(grow["name"]))
-                port = None if grow.get("widget") else _autogrow_group_port(graph, dst, base)
-                template = None if port is None else port.autogrow_template
                 name = _next_autogrow_name(ins, grow["name"], template)
                 if port is not None and name != grow["name"]:
                     # A replay collision renamed the slot: never mint one past

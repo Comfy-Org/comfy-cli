@@ -2081,6 +2081,19 @@ class TestOpModel:
         assert ops.canonical(ab) == ops.canonical(ba)
         assert ops.detect_conflict(lower, higher) is False
 
+    def test_autogrow_replay_with_existing_slot_is_idempotent(self):
+        """A replay can reach an existing grow slot after applied-op history is lost."""
+        ops = self._ops()
+        graph = _graph_with_autogrow_template({"prefix": "frame"})
+        base = _autogrow_workflow()
+        applied, op = ops.connect(base, graph, 20, "IMAGE", 10, "images", actor="a")
+        expected = ops.canonical(applied)
+
+        applied.pop("_applied_ops", None)
+        replayed = ops.apply_op(applied, op, graph)
+
+        assert ops.canonical(replayed) == expected
+
     def test_autogrow_uses_schema_prefix_zero_based(self):
         """A ``{"prefix": "frame"}`` template names grown slots verbatim from
         the schema, 0-based (images.frame0, images.frame1) — a prefix that
