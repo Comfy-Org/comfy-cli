@@ -365,3 +365,130 @@ def write_workflow(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(workflow, indent=2) + "\n", encoding="utf-8")
     return workflow
+
+
+# ---------------------------------------------------------------------------
+# --emit-ops: the same graph, expressed as the frozen op vocabulary
+# ---------------------------------------------------------------------------
+#
+# ``--emit-workflow`` writes API format, which the canvas and every edit tool
+# refuse (workflow_not_frontend_format) and which the CRDT write path cannot
+# attribute. Rather than converting API→frontend after the fact — a second
+# implementation of widget order and layout — the emitter mints the SAME graph
+# as add_node/set_widget/connect specs and lets ``workflow_ops.apply_specs``
+# materialize the frontend workflow: the exact machinery every hand edit
+# already uses, so widget ordering, autogrow growth and position assignment
+# have one answer. The API graph from :func:`build_workflow` stays the single
+# source of the model→node mapping; this is a mechanical re-expression of it.
+
+
+def _is_link_ref(value: Any, node_ids: set[str]) -> bool:
+    """An API input value of the shape ``[node_id, output_index]``."""
+    return (
+        isinstance(value, list)
+        and len(value) == 2
+        and str(value[0]) in node_ids
+        and isinstance(value[1], int)
+        and not isinstance(value[1], bool)
+    )
+
+
+def ops_from_api_workflow(api_wf: dict[str, Any], graph: Any) -> list[dict[str, Any]]:
+    """Re-express an API-format graph as batch specs for ``apply_specs``.
+
+    Shape: every ``add_node`` first (each with a batch-local alias), then every
+    ``set_widget`` (non-dotted keys before dotted ones, so a dynamic-combo
+    selection lands before the sub-widgets it exposes), then every ``connect``
+    — an order in which every referenced endpoint already exists.
+
+    ``graph`` is accepted for parity with the applier's signature and future
+    schema-aware canonicalization; the current mapping is purely structural.
+    """
+    del graph  # structural mapping today; see docstring
+    node_ids = {str(k) for k in api_wf}
+
+    def alias(nid: Any) -> str:
+        return f"gen{nid}"
+
+    adds: list[dict[str, Any]] = []
+    widgets: list[dict[str, Any]] = []
+    connects: list[dict[str, Any]] = []
+    for nid in sorted(api_wf, key=str):
+        node = api_wf[nid]
+        # allow_deprecated: the model→node mapping is curated (and pinned by
+        # test_emit's endpoint invariant), so a class the catalog has since
+        # flagged deprecated is still the intended target — the gate exists to
+        # stop a GUESSED class, not a mapped one.
+        adds.append({"op": "add_node", "class_type": node["class_type"], "as": alias(nid), "allow_deprecated": True})
+        inputs = node.get("inputs") or {}
+        keys = sorted(inputs, key=lambda k: (k.count("."), list(inputs).index(k)))
+        for key in keys:
+            value = inputs[key]
+            if _is_link_ref(value, node_ids):
+                connects.append(
+                    {
+                        "op": "connect",
+                        "from": f"${alias(value[0])}.{value[1]}",
+                        "to": f"${alias(nid)}.{key}",
+                    }
+                )
+            else:
+                widgets.append({"op": "set_widget", "node": f"${alias(nid)}", "widget": key, "value": value})
+    return adds + widgets + connects
+
+
+_EMPTY_FRONTEND: dict[str, Any] = {
+    "nodes": [],
+    "links": [],
+    "version": 0.4,
+    "last_node_id": 0,
+    "last_link_id": 0,
+}
+
+
+def write_frontend_workflow(
+    model: str,
+    values: dict[str, Any],
+    path: Path,
+    graph: Any,
+    *,
+    actor: str = "cli",
+    base_version: int = 0,
+    output_prefix: str = "generate",
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Build the workflow for ``model`` as a FRONTEND-format graph and write it
+    to ``path``; return ``(workflow, ops)`` where ``ops`` is the stamped
+    ``replace_ops`` batch that turns whatever ``path`` previously held into the
+    new graph (empty previous ⇒ no delete half), ready for the envelope exactly
+    like ``templates fetch --emit-ops``.
+
+    Raises ``EmitError``/``UnsupportedModelError`` like :func:`write_workflow`;
+    an applier failure surfaces as ``EmitError`` (the request itself was
+    expressible — a failure here is a schema/catalog mismatch worth reporting).
+    """
+    from comfy_cli import workflow_ops
+
+    api = build_workflow(model, values, output_prefix=output_prefix)
+    specs = ops_from_api_workflow(api, graph)
+    try:
+        workflow, _ops, _aliases = workflow_ops.apply_specs(  # noqa: F841 — wf is the product; batch below is replace-shaped
+            json.loads(json.dumps(_EMPTY_FRONTEND)), graph, specs, actor=actor, base_version=base_version
+        )
+    except (ValueError, KeyError) as e:
+        raise EmitError(f"could not materialize the {model!r} workflow as canvas ops: {e}") from e
+
+    previous: dict[str, Any] = {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict) and isinstance(loaded.get("nodes"), list):
+            previous = loaded
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        previous = {}
+
+    try:
+        ops = workflow_ops.replace_ops(previous, workflow, actor=actor, base_version=base_version)
+    except workflow_ops.NotExpressibleError as e:  # can't-happen for our own built graph; fail loudly if it does
+        raise EmitError(f"the {model!r} workflow cannot be expressed as ops: {e}") from e
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(workflow, indent=2) + "\n", encoding="utf-8")
+    return workflow, ops
