@@ -59,7 +59,15 @@ def _resolved_where(where: str | None) -> str:
     except ValueError:
         # An invalid persisted where_default shouldn't be fatal; fall back to
         # the flag (if valid) or auto-detect with the bad config value dropped.
-        decision = where_module.resolve(flag=where, config_value=None)
+        try:
+            decision = where_module.resolve(flag=where, config_value=None)
+        except ValueError as exc:
+            # The flag/env/project value itself is bad, so dropping the config
+            # changed nothing and no further fallback can make it valid. Emit
+            # the shared `where_invalid` envelope and exit, exactly as
+            # `resolve_default_or_exit` does for the non-recovering verbs —
+            # a machine consumer must read `error.code`, not a stack trace.
+            where_module.emit_where_invalid_or_exit(exc)
     return decision.target.value  # "local" | "cloud"
 
 
