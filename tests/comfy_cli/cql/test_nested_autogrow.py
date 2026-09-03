@@ -161,3 +161,93 @@ def test_show_payload_top_level_autogrow_uses_schema_names(graph):
     assert images["autogrow"] is True
     assert images["element_type"] == "IMAGE"
     assert images["wire_as"].startswith("images.image0")
+
+
+# --------------------------------------------------------------------------- #
+# (D) the production catalog's own autogrow minimums are enforced
+# --------------------------------------------------------------------------- #
+
+
+def _grok_edit_v2_inputs(option_index: int = 0) -> tuple[dict, str]:
+    """Every widget `GrokImageEditNodeV2` requires for one model option, at its
+    schema defaults — everything except the `images` autogrow slots."""
+    info = json.loads(FIXTURE.read_text())
+    node = info["GrokImageEditNodeV2"]["input"]["required"]
+    option = node["model"][1]["options"][option_index]
+
+    def default_of(spec):
+        opts = spec[1] if isinstance(spec, list) and len(spec) > 1 and isinstance(spec[1], dict) else {}
+        if "default" in opts:
+            return opts["default"]
+        return (opts.get("options") or [""])[0]
+
+    inputs = {"model": option["key"]}
+    inputs.update({k: default_of(v) for k, v in node.items() if k != "model"})
+    inputs.update(
+        {f"model.{k}": default_of(v) for k, v in option["inputs"].get("required", {}).items() if k != "images"}
+    )
+    return inputs, option["key"]
+
+
+def _grok_edit_v2_workflow(extra: dict) -> dict:
+    inputs, _ = _grok_edit_v2_inputs()
+    return {
+        "9": {"class_type": "LoadImage", "inputs": {"image": "example.png"}},
+        "1": {"class_type": "GrokImageEditNodeV2", "inputs": {**inputs, **extra}},
+        "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "out"}},
+    }
+
+
+def test_production_nested_autogrow_min_is_enforced(graph):
+    """The false negative, on the real captured catalog rather than a synthetic
+    one: ``GrokImageEditNodeV2.model.images`` declares ``min: 1`` with its inner
+    input in the template's ``required`` section, so the server places slot 0 in
+    ``required`` and rejects a prompt that wires none. This validated clean
+    before the ``autogrow_below_min`` check existed.
+
+    Same declaration shape as ``GrokVideoReferenceNode.model.reference_images``
+    (``TemplateNames(reference_1..7, min=1)``) on ComfyUI master.
+    """
+    images = graph.node("GrokImageEditNodeV2")
+    assert images is not None
+    result = graph.validate_workflow(_grok_edit_v2_workflow({}))
+    assert result["valid"] is False
+    # Zero slots is `autogrow_no_slots` at every depth; a partial fill is
+    # `autogrow_below_min` (see test_production_nested_autogrow_counts_the_declared_names).
+    err = next(e for e in result["errors"] if e["code"] == "autogrow_no_slots")
+    assert err["node_id"] == "1"
+    assert err["field"] == "model.images"
+    assert "places 1 of them in `required`" in err["message"]
+    assert "model.images.image_1" in err["hint"]
+
+
+def test_production_nested_autogrow_at_min_validates_clean(graph):
+    result = graph.validate_workflow(_grok_edit_v2_workflow({"model.images.image_1": ["9", 0]}))
+    assert result["valid"] is True, result["errors"]
+
+
+def test_production_nested_autogrow_counts_the_declared_names(graph):
+    """One wired slot against ``min: 1`` — but the wrong one. The server marks
+    ``model.images.image_1`` required (``names[:min]``) and rejects a prompt
+    that only wires ``image_2``, so a bare count of the ``model.images.`` keys
+    is not the server's test."""
+    result = graph.validate_workflow(_grok_edit_v2_workflow({"model.images.image_2": ["9", 0]}))
+    assert result["valid"] is False
+    err = next(e for e in result["errors"] if e["code"] == "autogrow_below_min")
+    assert "'model.images.image_1'" in err["message"]
+    # The slot that IS wired stays a known key rather than unknown_input noise.
+    assert result["warnings"] == []
+
+
+def test_production_min_zero_group_stays_lenient(graph):
+    """``MinimaxHailuo03ReferenceNode``'s `reference_videos`/`reference_audios`
+    declare ``min: 0`` inside the option's ``required`` section — the deliberate
+    leniency that must survive the new minimum check."""
+    port = next(
+        p
+        for p in graph.autogrow_groups("MinimaxHailuo03ReferenceNode", MINIMAX_UI_WIDGETS)
+        if p.name == "model.reference_videos"
+    )
+    assert port.autogrow_template_required is True
+    assert port.autogrow_limits[0] == 0
+    assert port.autogrow_effective_min == 0
