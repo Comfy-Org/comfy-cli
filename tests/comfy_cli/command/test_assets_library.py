@@ -238,6 +238,25 @@ class TestLsPagination:
         assert env["error"]["code"] == "cloud_http_error"
         assert error_codes.is_registered(env["error"]["code"])
 
+    def test_invalid_utf8_body_is_an_error_envelope_not_a_traceback(self, cloud_target, monkeypatch, capsys):
+        # Handed raw bytes, `json.loads` rejects a NON-UTF-8 body with
+        # `UnicodeDecodeError`, not `JSONDecodeError` — so a binary error page (or
+        # a gzip/TLS fragment from a misbehaving proxy) escaped the `strict_json`
+        # catch entirely and crashed the CLI with a traceback, past the very
+        # handler added to stop invalid JSON from masquerading as an empty
+        # library. Same malformed answer as the test above, different bytes.
+        #
+        # These bytes are chosen to be invalid UTF-8 that is ALSO not a BOM:
+        # `json.loads` sniffs raw bytes for UTF-16/32 (RFC 4627), so a body
+        # starting `\xff\x00` is guessed as UTF-16-LE, decodes to garbage text and
+        # fails as an ordinary `JSONDecodeError` — which the narrow catch already
+        # handled, making it a test that passes with or without the fix.
+        _patch_urlopen_raw(monkeypatch, b"\x80\x81\x82 binary garbage")
+        env = _run(["ls", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+        assert error_codes.is_registered(env["error"]["code"])
+
     def test_count_matches_the_emitted_assets_and_projection_is_unchanged(self, cloud_target, monkeypatch, capsys):
         rows = [
             {
@@ -313,3 +332,69 @@ class TestEnsure:
         assert env["ok"] is True
         assert env["data"] == {"id": "asset-1", "hash": "a" * 64, "created_new": True}
         assert calls[0]["url"].endswith("/api/assets/from-hash") and calls[0]["method"] == "POST"
+
+
+class TestHttpRequestRejectsEveryUnparseableBody:
+    """`http_request`'s decode guard is keyed on the malformed body, not on which
+    exception the parser happened to pick.
+
+    `json.loads` rejects a malformed body with three different exceptions and only
+    one is a `JSONDecodeError`; the other two are exercised here through a patched
+    `json.loads` rather than through pathological input, because the thresholds
+    that produce them (CPython's 4300-digit int limit, the recursion limit) move
+    between interpreter versions and would make the test a platform coin-flip.
+    The invalid-UTF-8 case is deterministic everywhere and is pinned end-to-end
+    in `TestLsPagination` above.
+    """
+
+    @staticmethod
+    def _request(monkeypatch, target, exc: BaseException, *, strict_json: bool):
+        from comfy_cli.command import cloud_http
+
+        class _Resp:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n=None):
+                return b'{"assets": []}'
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: _Resp())
+
+        def _boom(_raw):
+            raise exc
+
+        monkeypatch.setattr(cloud_http.json, "loads", _boom)
+        return cloud_http.http_request(target.url("assets"), target, strict_json=strict_json)
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            pytest.param(ValueError("Exceeds the limit for integer string conversion"), id="bare-ValueError"),
+            pytest.param(RecursionError("maximum recursion depth exceeded"), id="RecursionError"),
+        ],
+    )
+    def test_strict_json_raises_response_unparseable(self, cloud_target, monkeypatch, exc):
+        from comfy_cli.command.cloud_http import ResponseUnparseable
+
+        # Not `pytest.raises(type(exc))`: the point is that the raw exception is
+        # translated, so a call site's `except ResponseUnparseable` sees it.
+        with pytest.raises(ResponseUnparseable):
+            self._request(monkeypatch, cloud_target, exc, strict_json=True)
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            pytest.param(ValueError("Exceeds the limit for integer string conversion"), id="bare-ValueError"),
+            pytest.param(RecursionError("maximum recursion depth exceeded"), id="RecursionError"),
+        ],
+    )
+    def test_default_path_still_collapses_to_none(self, cloud_target, monkeypatch, exc):
+        # The default path's documented contract is that an undecodable body
+        # collapses to `None`; broadening the catch makes that true for these two
+        # as well, instead of letting them escape as a traceback.
+        assert self._request(monkeypatch, cloud_target, exc, strict_json=False) == (200, None)
