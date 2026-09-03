@@ -146,6 +146,10 @@ def _object_info() -> dict[str, Any]:
         # V3 autogrow node mirroring the live cloud BatchImagesNode shape:
         # one declared input `images` (COMFY_AUTOGROW_V3), but the server
         # expects autogrown slot keys `images.image0`, `images.image1`, …
+        # Deliberately template-LESS: this is the catalog shape that carries no
+        # `template_required` signal, so it pins the historical `port.required`
+        # fallback in `_check_autogrow_required`. Groups whose template IS
+        # readable are covered by `TestAutogrowMinSlots`.
         "BatchImagesNode": {
             "input": {
                 "required": {
@@ -3715,6 +3719,219 @@ class TestDynamicComboAutogrowSub:
         err = next(e for e in result["errors"] if e["code"] == "autogrow_bare_input")
         assert err["field"] == "model.images"
         assert "model.images.image0" in err["hint"]
+
+
+class TestAutogrowMinSlots:
+    """The server places autogrow slots ``i < min`` in its ``required``
+    section whenever the template's own inner input is required
+    (``Autogrow._expand_schema_for_dynamic``: ``if i < min and
+    template_required``), and rejects the prompt when they aren't wired.
+    Both the top-level group and a dynamic-combo-nested one must mirror that.
+
+    The fixture's two groups mirror live nodes on ComfyUI master:
+    ``AutogrowTopNode.images`` is ``MeshyMultiImageToModelNode.images``
+    (``TemplatePrefix(min=2, max=4)``), and ``AutogrowNestedNode.model``'s
+    ``strict`` option is ``GrokVideoReferenceNode.model``
+    (``TemplateNames(reference_1…7, min=1)``).
+    """
+
+    def _wf(self, node: dict, *, reachable: bool = True) -> dict:
+        """`node` plus an IMAGE producer and a Sink output node. `reachable`
+        controls whether the Sink actually consumes the node — the server
+        prunes (and never validates) anything an output can't reach."""
+        return {
+            "0": {"class_type": "ImageSrc", "inputs": {}},
+            "1": node,
+            "2": {"class_type": "Sink", "inputs": {"image": ["1", 0]} if reachable else {}},
+        }
+
+    # -- nested (dynamic-combo sub-input) --------------------------------
+
+    def test_nested_min_one_with_zero_slots_errors(self, graph_dynamic: Graph):
+        wf = self._wf({"class_type": "AutogrowNestedNode", "inputs": {"model": "strict"}})
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        errs = [e for e in result["errors"] if e["code"] == "autogrow_below_min"]
+        assert len(errs) == 1
+        assert errs[0]["node_id"] == "1"
+        assert errs[0]["field"] == "model.refs"
+        assert "minimum of 1" in errs[0]["message"]
+        assert "model.refs.reference_1" in errs[0]["hint"]
+
+    def test_nested_min_one_with_one_slot_is_clean(self, graph_dynamic: Graph):
+        wf = self._wf(
+            {
+                "class_type": "AutogrowNestedNode",
+                "inputs": {"model": "strict", "model.refs.reference_1": ["0", 0]},
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+        # The wired slot must stay a known key, not unknown_input noise.
+        assert result["warnings"] == []
+
+    def test_nested_below_min_still_accepts_the_slots_that_are_wired(self, graph_dynamic: Graph):
+        """A short count is ONE error about the count — the slots that ARE
+        present stay valid keys, rather than regressing into `unknown_input`
+        noise on top of it."""
+        wf = self._wf(
+            {
+                "class_type": "AutogrowNestedNode",
+                "inputs": {"model": "strict_pair", "model.refs.reference_1": ["0", 0]},
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert [e["code"] for e in result["errors"]] == ["autogrow_below_min"]
+        assert "1 connected slot(s)" in result["errors"][0]["message"]
+        assert result["warnings"] == []
+
+    def test_nested_seedream_style_min_zero_stays_lenient(self, graph_dynamic: Graph):
+        """Regression pin: a group declaring `min: 0` INSIDE the option's
+        `required` section legitimately emits no slot keys at all (Seedream's
+        `model.images`), and the server accepts it."""
+        wf = self._wf({"class_type": "AutogrowNestedNode", "inputs": {"model": "lenient"}})
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+
+    def test_optional_section_template_ignores_min(self, graph_dynamic: Graph):
+        """`min: 1`, but the template's inner input sits in the TEMPLATE's
+        `optional` section — the server's `template_required` gate is False,
+        so it never promotes a slot to `required` ("if not required, min can
+        be ignored")."""
+        wf = self._wf({"class_type": "AutogrowNestedNode", "inputs": {"model": "optional_template"}})
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+
+    def test_nested_below_min_on_unreachable_node_is_not_a_hard_error(self, graph_dynamic: Graph):
+        """The server prunes a node no output reaches and never validates it,
+        so the count check must not reject one either."""
+        wf = self._wf({"class_type": "AutogrowNestedNode", "inputs": {"model": "strict"}}, reachable=False)
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["errors"] == []
+
+    # -- top level --------------------------------------------------------
+
+    def test_top_level_partial_fill_below_min_errors(self, graph_dynamic: Graph):
+        """The false negative this closes: one wired slot against `min: 2`
+        used to pass, because the old check only looked for zero slots."""
+        wf = self._wf({"class_type": "AutogrowTopNode", "inputs": {"images.image0": ["0", 0]}})
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "autogrow_below_min")
+        assert err["node_id"] == "1"
+        assert err["field"] == "images"
+        assert "1 connected slot(s)" in err["message"]
+        assert "minimum of 2" in err["message"]
+
+    def test_top_level_at_min_is_clean(self, graph_dynamic: Graph):
+        wf = self._wf(
+            {
+                "class_type": "AutogrowTopNode",
+                "inputs": {"images.image0": ["0", 0], "images.image1": ["0", 0]},
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is True, result["errors"]
+
+    def test_top_level_zero_slots_keeps_the_no_slots_code(self, graph_dynamic: Graph):
+        """Zero slots keeps reporting `autogrow_no_slots` — the existing code
+        and wording — rather than being reclassified as below-min."""
+        wf = self._wf({"class_type": "AutogrowTopNode", "inputs": {}})
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        codes = [e["code"] for e in result["errors"]]
+        assert "autogrow_no_slots" in codes
+        assert "autogrow_below_min" not in codes
+
+    def test_top_level_bare_wiring_does_not_also_report_a_count_error(self, graph_dynamic: Graph):
+        """`images: [src, idx]` is the `autogrow_bare_input` mistake; piling a
+        count error on top of it would just be noise."""
+        wf = self._wf({"class_type": "AutogrowTopNode", "inputs": {"images": ["0", 0]}})
+        result = graph_dynamic.validate_workflow(wf)
+        codes = [e["code"] for e in result["errors"]]
+        assert codes == ["autogrow_bare_input"]
+
+    def test_top_level_below_min_on_unreachable_node_is_not_a_hard_error(self, graph_dynamic: Graph):
+        wf = self._wf({"class_type": "AutogrowTopNode", "inputs": {"images.image0": ["0", 0]}}, reachable=False)
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["errors"] == []
+
+    def test_unreadable_template_keeps_the_historical_required_check(self, graph: Graph):
+        """A template-less group (`BatchImagesNode.images`) carries no
+        `template_required` signal, so the zero-slot check falls back to
+        `port.required` rather than being silently dropped — but there is no
+        min to enforce beyond that, so one slot is enough."""
+        one_slot = {
+            "10": {"class_type": "VAEDecode", "inputs": {}},
+            "20": {"class_type": "BatchImagesNode", "inputs": {"images.image0": ["10", 0]}},
+            "30": {"class_type": "SaveImage", "inputs": {"images": ["20", 0], "filename_prefix": "out"}},
+        }
+        codes = [e["code"] for e in graph.validate_workflow(one_slot)["errors"] if e["node_id"] == "20"]
+        assert codes == []
+
+
+class TestAutogrowEffectiveMin:
+    """`Port.autogrow_effective_min` in isolation — the `template_required`
+    gate it mirrors, and the leniency it falls back to."""
+
+    def _port(self, spec) -> Port:
+        from comfy_cli.cql.engine import _port_from_spec
+
+        return _port_from_spec("images", spec, True)
+
+    def test_required_template_section_binds_min(self):
+        p = self._port(
+            [
+                "COMFY_AUTOGROW_V3",
+                {"template": {"input": {"required": {"image": ["IMAGE", {}]}}, "prefix": "image", "min": 2, "max": 4}},
+            ]
+        )
+        assert p.autogrow_effective_min == 2
+        assert p.autogrow_limits == (2, 4)
+
+    def test_optional_template_section_ignores_min(self):
+        p = self._port(
+            [
+                "COMFY_AUTOGROW_V3",
+                {"template": {"input": {"optional": {"image": ["IMAGE", {}]}}, "prefix": "image", "min": 2, "max": 4}},
+            ]
+        )
+        # `autogrow_limits` still reports the DECLARED min for display; only
+        # the effective (server-enforced) min is gated.
+        assert p.autogrow_limits == (2, 4)
+        assert p.autogrow_effective_min == 0
+
+    def test_declared_min_zero_binds_nothing(self):
+        p = self._port(
+            [
+                "COMFY_AUTOGROW_V3",
+                {"template": {"input": {"required": {"image": ["IMAGE", {}]}}, "names": ["a", "b"], "min": 0}},
+            ]
+        )
+        assert p.autogrow_effective_min == 0
+
+    def test_unreadable_template_reports_the_gate_as_unknown(self):
+        """An older/partial capture whose `min`/`names` sit BESIDE `template`
+        rather than inside it (the ByteDance Seedream v2 fixture shape) gives
+        no `template_required` signal at all. That must read as `None` — NOT
+        as a definite `False` — so `_check_autogrow_required` can tell "the
+        server ignores min here" apart from "we cannot tell" and keep its
+        historical `port.required` check for the latter."""
+        p = self._port(["COMFY_AUTOGROW_V3", {"template": {"image": ["IMAGE", {}]}, "names": ["a"], "min": 0}])
+        assert p.autogrow_template_required is None
+        assert p.autogrow_effective_min == 0
+        p2 = self._port(["COMFY_AUTOGROW_V3", {}])
+        assert p2.autogrow_template_required is None
+        assert p2.autogrow_effective_min == 0
+
+    def test_gate_is_a_definite_false_when_the_template_is_readable(self):
+        p = self._port(["COMFY_AUTOGROW_V3", {"template": {"input": {"optional": {"image": ["IMAGE", {}]}}, "min": 1}}])
+        assert p.autogrow_template_required is False
+
+    def test_non_autogrow_port_is_zero(self):
+        p = self._port(["INT", {"min": 3}])
+        assert p.autogrow_template_required is None
+        assert p.autogrow_effective_min == 0
 
 
 # ===========================================================================
