@@ -60,8 +60,33 @@ def ls_cmd(
     except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
         raise handle_cloud_http_error(renderer, e, operation="list") from e
 
+    # A non-empty body decodes here only if it was valid JSON, but valid JSON is
+    # not necessarily the shape we asked for: a proxy or error page can answer 200
+    # with an array or a scalar, and `b.get(...)` would then raise a raw
+    # `AttributeError` past the `except` above — a traceback instead of an error
+    # envelope. Guard it the way `workflow list` guards the same failure on the
+    # sibling endpoint. An empty body stays a legitimate `None` (→ no rows).
+    if body is not None and not isinstance(body, dict):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/assets (expected a JSON object)",
+            details={"got_type": type(body).__name__},
+        )
+        raise typer.Exit(code=1)
+
     b = body or {}
-    rows = b.get("assets") or []
+    # A missing/empty `assets` is a legitimately-empty listing; a present non-list
+    # `assets` is malformed the same way, and `len(rows)` would raise `TypeError`.
+    rows = b.get("assets")
+    if rows is None:
+        rows = []
+    elif not isinstance(rows, list):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/assets (assets must be a JSON array)",
+            details={"got_type": type(rows).__name__},
+        )
+        raise typer.Exit(code=1)
     payload = {
         "count": len(rows),
         "assets": [
@@ -96,7 +121,10 @@ def ls_cmd(
     if isinstance(b.get("has_more"), bool):
         payload["has_more"] = b["has_more"]
     total = b.get("total")
-    if isinstance(total, int) and not isinstance(total, bool):
+    # `>= 0` because the schema publishes `total` as a non-negative integer, and a
+    # guard looser than the declared contract is how the envelope ends up violating
+    # its own schema.
+    if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
         payload["total"] = total
     renderer.emit(payload, command="assets library ls", where="cloud")
 

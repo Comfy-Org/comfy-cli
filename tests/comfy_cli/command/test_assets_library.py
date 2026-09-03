@@ -152,10 +152,43 @@ class TestLsPagination:
         assert "has_more" not in data
         assert "total" not in data
 
+    def test_omits_a_negative_total(self, cloud_target, monkeypatch, capsys):
+        # The schema publishes `total` as `minimum: 0`, so forwarding a negative
+        # server value would emit an envelope violating this command's own
+        # contract — the same class of bug as the cross-typed case above.
+        data = self._ls(monkeypatch, capsys, {"assets": [], "has_more": False, "total": -1})
+        assert "total" not in data
+        assert data["has_more"] is False
+
     def test_omits_values_of_the_wrong_json_type(self, cloud_target, monkeypatch, capsys):
         data = self._ls(monkeypatch, capsys, {"assets": [], "has_more": "true", "total": "1234"})
         assert "has_more" not in data
         assert "total" not in data
+
+    def test_non_object_body_is_an_error_envelope_not_a_traceback(self, cloud_target, monkeypatch, capsys):
+        # A proxy or error page can answer 200 with valid JSON that is not an
+        # object. `b.get(...)` would raise a bare AttributeError past the
+        # HTTPError/URLError/OSError handler, so the user would see a traceback
+        # rather than an envelope.
+        _patch_urlopen(monkeypatch, [1, 2, 3])
+        env = _run(["ls", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+        assert error_codes.is_registered(env["error"]["code"])
+        assert env["error"]["details"]["got_type"] == "list"
+
+    def test_non_list_assets_is_an_error_envelope_not_a_traceback(self, cloud_target, monkeypatch, capsys):
+        # Same failure one level down: `len(rows)` on a scalar raises TypeError.
+        _patch_urlopen(monkeypatch, {"assets": 42})
+        env = _run(["ls", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+        assert env["error"]["details"]["got_type"] == "int"
+
+    def test_empty_body_is_an_empty_listing_not_an_error(self, cloud_target, monkeypatch, capsys):
+        data = self._ls(monkeypatch, capsys, None)
+        assert data["count"] == 0
+        assert data["assets"] == []
 
     def test_existing_count_and_assets_shape_unchanged(self, cloud_target, monkeypatch, capsys):
         rows = [
