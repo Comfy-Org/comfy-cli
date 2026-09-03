@@ -22,7 +22,10 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import typer
 
 
 class WhereTarget(str, Enum):
@@ -34,11 +37,19 @@ CLOUD_PROVIDER = "comfy-cloud"
 ENV_DEFAULT = "COMFY_WHERE"
 CONFIG_KEY_WHERE_DEFAULT = "where_default"
 
-# The one hint every ``where_invalid`` envelope carries. A module constant
-# because two call sites emit it — :func:`resolve_default_or_exit` for the
-# commands with no fallback, and ``nodes._resolved_where`` for the recover-first
-# commands once their fallback is exhausted — and a user-facing string that lives
-# in two places drifts.
+# The hint carried by every ``where_invalid`` envelope raised from a *multi-source*
+# routing failure — one where the offending value could have come from the flag,
+# ``COMFY_WHERE``, ``defaults.where``, or the persisted ``where_default``, so the
+# user has to be told where to look. A module constant because several call sites
+# emit it (:func:`resolve_default_or_exit`, the recover-first ``nodes``/``jobs``
+# helpers once their fallback is exhausted, and ``cmdline``'s ``run``/``upload``/
+# ``download``) and a user-facing string that lives in six places drifts.
+#
+# Sites that validate a *single explicit* value deliberately keep a shorter hint:
+# the top-level ``--where`` flag and ``comfy set-default --where`` / ``comfy setup``
+# call :func:`_parse` on exactly the string the user just typed, and ``comfy logs``
+# is local-only, so pointing any of them at ``COMFY_WHERE``/``comfy.yaml`` would
+# send the user hunting in a file that had nothing to do with the failure.
 WHERE_INVALID_HINT = (
     "use --where local or --where cloud, and check COMFY_WHERE, "
     "`defaults.where` in comfy.yaml, and `comfy set-default --where`"
@@ -126,17 +137,18 @@ def resolve_default_or_exit(
 
     Commands that *can* recover (``nodes``, ``jobs``) keep their own
     ``except ValueError`` fallback instead of calling this — but a fallback only
-    recovers the *config* case, so once it too fails they end on
-    :func:`emit_where_invalid_or_exit`, which is this function's tail.
+    recovers the *config* case, so once it too fails they raise
+    :func:`where_invalid_exit`, which is this function's tail.
     """
     try:
         return resolve_default(flag=flag, env=env, project_value=project_value)
     except ValueError as e:
-        emit_where_invalid_or_exit(e)
+        raise where_invalid_exit(e) from e
 
 
-def emit_where_invalid_or_exit(exc: ValueError) -> NoReturn:
-    """Render the shared ``where_invalid`` envelope for *exc* and exit 1.
+def where_invalid_exit(exc: ValueError) -> typer.Exit:
+    """Render the shared ``where_invalid`` envelope for *exc* and return the
+    ``typer.Exit`` the caller must ``raise``.
 
     Split out of :func:`resolve_default_or_exit` so a command with its own
     recovery fallback can reuse the identical envelope (same ``code``, same
@@ -144,13 +156,22 @@ def emit_where_invalid_or_exit(exc: ValueError) -> NoReturn:
     fallback is exhausted, instead of letting the ``ValueError`` escape as a raw
     traceback with nothing on stdout — the worst possible shape for a machine
     consumer of a JSON-envelope command.
+
+    It *returns* the exception rather than raising it (and is deliberately not
+    annotated ``NoReturn``) so that every call site reads ``raise
+    where_invalid_exit(e) from e``. Nothing in CI enforces a ``NoReturn``
+    contract — ruff's selected rules don't and there is no type checker in the
+    pipeline — so a caller that merely *called* an exiting helper would fall
+    through to an unbound local the moment this function was stubbed, mocked, or
+    softened. Making the ``raise`` structural at each call site keeps the
+    control flow checkable by eye and by any future linter.
     """
     import typer
 
     from comfy_cli.output import get_renderer
 
     get_renderer().error(code="where_invalid", message=str(exc), hint=WHERE_INVALID_HINT)
-    raise typer.Exit(code=1) from exc
+    return typer.Exit(code=1)
 
 
 def _project_where_default() -> str | None:
