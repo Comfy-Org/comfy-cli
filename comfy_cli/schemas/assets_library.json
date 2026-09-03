@@ -25,6 +25,8 @@
     }
    }
   },
+  "has_more": { "type": "boolean" },
+  "total": { "type": "integer" },
   "id": { "type": ["string", "null"] },
   "hash": { "type": ["string", "null"] },
   "created_new": { "type": ["boolean", "null"] }
