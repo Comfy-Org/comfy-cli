@@ -88,7 +88,18 @@ def http_request(
         return status, None
     try:
         return status, json.loads(raw)
-    except json.JSONDecodeError as e:
+    except (ValueError, RecursionError) as e:
+        # Catch the ``ValueError`` BASE, not ``JSONDecodeError``: handed raw bytes,
+        # ``json.loads`` rejects a malformed body with three different exceptions and
+        # only one of them is a ``JSONDecodeError``. Non-UTF-8 bytes (``b"\xff"``, a
+        # binary error page) raise ``UnicodeDecodeError``; a JSON integer past
+        # CPython's 4300-digit int/str limit raises a bare ``ValueError``; both
+        # subclass ``ValueError``. Pathologically nested input raises
+        # ``RecursionError``, which does not — the 64 MiB read permits deep nesting.
+        # Narrowing to ``JSONDecodeError`` let those escape past ``strict_json`` and
+        # past every call site's ``except``, crashing the CLI with a raw traceback
+        # for exactly the malformed response this helper exists to classify. Same
+        # reasoning, and the same catch, as the sibling helper in ``workflow.py``.
         if strict_json:
             raise ResponseUnparseable(f"non-JSON response body from {url}") from e
         return status, None
