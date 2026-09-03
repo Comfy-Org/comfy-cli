@@ -3748,16 +3748,19 @@ class TestAutogrowMinSlots:
     # -- nested (dynamic-combo sub-input) --------------------------------
 
     def test_nested_min_one_with_zero_slots_errors(self, graph_dynamic: Graph):
+        """Zero slots reports `autogrow_no_slots` at BOTH depths — the same
+        authoring mistake must not carry two different codes depending on
+        nesting, or a consumer filtering on one silently misses the other."""
         wf = self._wf({"class_type": "AutogrowNestedNode", "inputs": {"model": "strict"}})
         result = graph_dynamic.validate_workflow(wf)
         assert result["valid"] is False
-        errs = [e for e in result["errors"] if e["code"] == "autogrow_below_min"]
+        errs = [e for e in result["errors"] if e["code"] == "autogrow_no_slots"]
         assert len(errs) == 1
         assert errs[0]["node_id"] == "1"
         assert errs[0]["field"] == "model.refs"
-        assert "missing 1 of the 1 slot(s)" in errs[0]["message"]
-        assert "'model.refs.reference_1'" in errs[0]["message"]
+        assert "places 1 of them in `required`" in errs[0]["message"]
         assert "model.refs.reference_1" in errs[0]["hint"]
+        assert [e["code"] for e in result["errors"] if e["code"] == "autogrow_below_min"] == []
 
     def test_nested_min_one_with_one_slot_is_clean(self, graph_dynamic: Graph):
         wf = self._wf(
@@ -3909,6 +3912,52 @@ class TestAutogrowMinSlots:
         result = graph_dynamic.validate_workflow(wf)
         assert result["errors"] == []
 
+    def test_top_level_zero_slots_names_the_minimum_it_owes(self, graph_dynamic: Graph):
+        """The zero-slot message/hint must state the count the gate actually
+        applies: with `min: 2`, a user who follows a "wire one key" hint gets
+        rejected a second time by `autogrow_below_min`."""
+        wf = self._wf({"class_type": "AutogrowTopNode", "inputs": {}})
+        result = graph_dynamic.validate_workflow(wf)
+        err = next(e for e in result["errors"] if e["code"] == "autogrow_no_slots")
+        assert "places 2 of them in `required`" in err["message"]
+        assert "wire 2 key(s)" in err["hint"]
+
+    @pytest.mark.parametrize(
+        "bad",
+        [None, "", [], ["0", 0, 1], [["0", 0], ["0", 0], ["0", 0]]],
+        ids=["null", "empty-string", "empty-list", "three-tuple", "list-of-links"],
+    )
+    def test_base_key_wired_as_a_non_link_is_still_slot_checked(self, graph_dynamic: Graph, bad):
+        """Only a bare `[src, idx]` link is `autogrow_bare_input`, so only that
+        exact shape may skip the slot check. Any other value on the base key
+        raises no error anywhere else (`validate_shape` no-ops for
+        COMFY_AUTOGROW_V3 and `_check_required_present` exempts autogrow
+        ports), so skipping on mere presence silenced the check for free while
+        the server still rejected the node for the missing `images.image0`."""
+        wf = self._wf({"class_type": "AutogrowTopNode", "inputs": {"images": bad}})
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        assert "autogrow_no_slots" in [e["code"] for e in result["errors"]]
+
+    def test_nested_undeclared_slot_key_is_not_waved_through(self, graph_dynamic: Graph):
+        """A key under the group's prefix that the template never declares is
+        not an input of the node at all — the server ignores it — so it owes an
+        `unknown_input` warning rather than being accepted by a bare prefix
+        match alongside the slots that ARE real."""
+        wf = self._wf(
+            {
+                "class_type": "AutogrowNestedNode",
+                "inputs": {
+                    "model": "strict",
+                    "model.refs.reference_1": ["0", 0],
+                    "model.refs.bogus": ["0", 0],
+                },
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["errors"] == []
+        assert [(w["code"], w["field"]) for w in result["warnings"]] == [("unknown_input", "model.refs.bogus")]
+
     def test_unreadable_template_keeps_the_historical_required_check(self, graph: Graph):
         """A template-less group (`BatchImagesNode.images`) carries no
         `template_required` signal, so the zero-slot check falls back to
@@ -3921,6 +3970,175 @@ class TestAutogrowMinSlots:
         }
         codes = [e["code"] for e in graph.validate_workflow(one_slot)["errors"] if e["node_id"] == "20"]
         assert codes == []
+
+
+class TestAutogrowSchemaEdges:
+    """Reading the autogrow template itself: bounds that aren't numbers, a
+    template that declares no `min`, sections in an unexpected order, and a
+    `min` larger than the group's own capacity. Each is a shape the server
+    either handles differently from the frontend or does not accept at all, so
+    none of them may become a hard reject built on a number we synthesized."""
+
+    _INFO = """
+        {
+          "ImageSrc": {"input": {"required": {}}, "input_order": {"required": []},
+            "output": ["IMAGE"], "output_name": ["image"], "display_name": "S",
+            "python_module": "nodes"},
+          "Sink": {"input": {"required": {}, "optional": {"image": ["IMAGE", {}]}},
+            "input_order": {"required": [], "optional": ["image"]},
+            "output": [], "output_name": [], "output_node": true, "display_name": "K",
+            "python_module": "nodes"},
+          "Grow": {
+            "input": {"__SECTION__": {"images": ["COMFY_AUTOGROW_V3", {"template": __TEMPLATE__}]}},
+            "input_order": {"__SECTION__": ["images"]},
+            "output": ["IMAGE"], "output_name": ["IMAGE"], "display_name": "G",
+            "python_module": "nodes"}
+        }
+    """
+
+    def _graph(self, template: str, *, required_section: bool = True) -> Graph:
+        # Parsed the way the loader parses `/object_info` — plain `json.loads`,
+        # which accepts the bare `NaN`/`Infinity` literals a Python-serialized
+        # payload emits. Kept as raw text (not a dict) for exactly that reason.
+        raw = self._INFO.replace("__SECTION__", "required" if required_section else "optional").replace(
+            "__TEMPLATE__", template
+        )
+        return Graph.from_object_info(json.loads(raw))
+
+    def _wf(self, inputs: dict) -> dict:
+        return {
+            "0": {"class_type": "ImageSrc", "inputs": {}},
+            "1": {"class_type": "Grow", "inputs": inputs},
+            "2": {"class_type": "Sink", "inputs": {"image": ["1", 0]}},
+        }
+
+    IMAGE_TEMPLATE_INPUT = '{"required": {"image": ["IMAGE", {}]}}'
+
+    def _template(self, body: str, template_input: str | None = None) -> str:
+        """A `template` block with `input` prefilled — `body` is the rest of it
+        (`"prefix": ..., "min": ...`) verbatim."""
+        return '{"input": ' + (template_input or self.IMAGE_TEMPLATE_INPUT) + ", " + body + "}"
+
+    def test_non_finite_bounds_yield_a_diagnostic_not_a_crash(self):
+        """`json.loads` accepts `NaN`/`Infinity`, and `int()` raises
+        `ValueError`/`OverflowError` on them — a crash inside
+        `validate_workflow` and the `run` preflight where the validator owes a
+        diagnostic. Non-numeric bounds read as undeclared instead."""
+        graph = self._graph(self._template('"prefix": "image", "min": NaN, "max": Infinity'))
+        port = graph.node("Grow").inputs[0]
+        assert port.autogrow_declared_min is None
+        assert port.autogrow_limits == (1, None)  # the frontend's default min, no max
+        assert port.autogrow_effective_min == 0
+        # Still validates rather than raising, and still reports the historical
+        # zero-slot error through the `required` fallback.
+        result = graph.validate_workflow(self._wf({}))
+        assert [e["code"] for e in result["errors"]] == ["autogrow_no_slots"]
+        assert graph.validate_workflow(self._wf({"images.image0": ["0", 0]}))["valid"] is True
+
+    def test_a_template_declaring_no_min_is_not_a_hard_reject_on_a_synthesized_one(self):
+        """`autogrow_limits` substitutes the FRONTEND's default of 1 when the
+        template omits `min`; the server reads `template["min"]` with no
+        default at all. A hard reject naming a specific slot must not be built
+        on that guess, so an undeclared `min` reads as "cannot judge" and only
+        the historical zero-slot check applies."""
+        graph = self._graph(self._template('"prefix": "image", "max": 4'))
+        port = graph.node("Grow").inputs[0]
+        assert port.autogrow_limits[0] == 1  # frontend-faithful, unchanged
+        assert port.autogrow_declared_min is None
+        assert port.autogrow_effective_min == 0
+        # One slot wired — but not slot 0. A synthesized `min: 1` would demand
+        # `images.image0` by name; nothing declared that, so it stays clean.
+        assert graph.validate_workflow(self._wf({"images.image3": ["0", 0]}))["valid"] is True
+        assert [e["code"] for e in graph.validate_workflow(self._wf({}))["errors"]] == ["autogrow_no_slots"]
+
+    def test_optional_section_declared_first_wins_as_it_does_on_the_server(self):
+        """`_expand_schema_for_dynamic` iterates `input.items()` and takes the
+        first NON-EMPTY section, so a template listing `optional` ahead of
+        `required` reads `template_required = False` and the server ignores
+        `min` entirely. A hardcoded required-then-optional sweep read the
+        opposite and hard-rejected a node the server accepts."""
+        template_input = '{"optional": {"image": ["IMAGE", {}]}, "required": {"other": ["IMAGE", {}]}}'
+        graph = self._graph(self._template('"prefix": "image", "min": 2', template_input))
+        port = graph.node("Grow").inputs[0]
+        assert port.autogrow_template_required is False
+        assert port.autogrow_effective_min == 0
+        assert graph.validate_workflow(self._wf({}))["valid"] is True
+
+    def test_an_empty_leading_section_is_skipped_like_the_server_skips_it(self):
+        """`if len(dict_input) == 0: continue` — an empty `optional` declared
+        first does not make the group optional."""
+        template_input = '{"optional": {}, "required": {"image": ["IMAGE", {}]}}'
+        graph = self._graph(self._template('"prefix": "image", "min": 2', template_input))
+        port = graph.node("Grow").inputs[0]
+        assert port.autogrow_template_required is True
+        assert port.autogrow_effective_min == 2
+
+    def test_min_above_the_groups_capacity_is_clamped(self):
+        """The server promotes slots through `for i, name in enumerate(names)`,
+        so a `min` past the end of `names` simply never reaches those indices.
+        Demanding three slots from a group that grows one would be an error the
+        user cannot clear."""
+        graph = self._graph(self._template('"names": ["a"], "min": 3'))
+        port = graph.node("Grow").inputs[0]
+        assert port.autogrow_limits == (3, 1)
+        assert port.autogrow_effective_min == 1
+        assert graph.validate_workflow(self._wf({"images.a": ["0", 0]}))["valid"] is True
+
+    def test_declared_slot_keys_match_only_the_servers_own_spelling(self):
+        """`f"{prefix}{i}"` never emits `image01` or `image-1`, and `max: 4`
+        stops the expansion at `image3`."""
+        graph = self._graph(self._template('"prefix": "image", "min": 1, "max": 4'))
+        port = graph.node("Grow").inputs[0]
+        keys = ["images.image0", "images.image01", "images.image-1", "images.image4", "images.bogus", "other.image0"]
+        assert port.autogrow_declared_slot_keys(keys) == {"images.image0"}
+
+    def test_declared_slot_keys_survive_hostile_index_text(self):
+        """Slot names come from the prompt, so the index parse must not be
+        reachable with anything `int()` rejects: `isdigit()` is True for
+        superscripts, and `int()` raises outright above 4300 digits."""
+        graph = self._graph(self._template('"prefix": "image", "min": 1, "max": 4'))
+        port = graph.node("Grow").inputs[0]
+        keys = ["images.image\u00b2", "images.image" + "9" * 5000, "images.image1"]
+        assert port.autogrow_declared_slot_keys(keys) == {"images.image1"}
+
+    def test_a_definite_false_gate_is_an_answer_not_a_gap(self):
+        """A template whose inner input sits in `optional` tells us the server
+        ignores `min` outright — that is an answer, so it must NOT fall through
+        to the historical "at least one slot" gate the way an unreadable
+        template does, even when the template also declares no `min`."""
+        template_input = '{"optional": {"image": ["IMAGE", {}]}}'
+        graph = self._graph(self._template('"prefix": "image"', template_input))
+        port = graph.node("Grow").inputs[0]
+        assert port.autogrow_template_required is False
+        assert port.autogrow_declared_min is None
+        assert graph.validate_workflow(self._wf({}))["valid"] is True
+
+    def test_unreadable_template_still_errors_on_zero_slots(self):
+        """The other half of `test_unreadable_template_keeps_the_historical_required_check`:
+        a template with no `input` block gives no `template_required` signal,
+        so the zero-slot check falls back to the historical `required` gate —
+        but the declared `min: 2` never binds, and no hard error may name a
+        *specific* slot on a signal the catalog never gave."""
+        graph = self._graph('{"prefix": "image", "min": 2, "max": 4}')
+        port = graph.node("Grow").inputs[0]
+        assert port.autogrow_template_required is None
+        assert port.autogrow_effective_min == 0
+        assert [e["code"] for e in graph.validate_workflow(self._wf({}))["errors"]] == ["autogrow_no_slots"]
+        # One slot clears it — the declared `min: 2` is NOT enforced, because
+        # the signal that would make it binding is unreadable.
+        assert graph.validate_workflow(self._wf({"images.image3": ["0", 0]}))["valid"] is True
+
+    def test_unreadable_template_on_an_optional_input_is_not_checked_at_all(self):
+        """The historical gate is `required`; an optional autogrow input with
+        an unreadable template stays unchecked, as it always has."""
+        graph = self._graph('{"prefix": "image", "min": 2}', required_section=False)
+        assert graph.validate_workflow(self._wf({}))["valid"] is True
+
+    def test_declared_slot_keys_are_none_without_a_naming_template(self):
+        """No template to filter against — callers keep the historical prefix
+        match rather than filtering on a pluralization guess."""
+        graph = self._graph(self._template('"min": 1'))
+        assert graph.node("Grow").inputs[0].autogrow_declared_slot_keys(["images.image0"]) is None
 
 
 class TestAutogrowEffectiveMin:

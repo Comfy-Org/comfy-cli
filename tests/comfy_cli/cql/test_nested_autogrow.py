@@ -212,9 +212,12 @@ def test_production_nested_autogrow_min_is_enforced(graph):
     assert images is not None
     result = graph.validate_workflow(_grok_edit_v2_workflow({}))
     assert result["valid"] is False
-    err = next(e for e in result["errors"] if e["code"] == "autogrow_below_min")
+    # Zero slots is `autogrow_no_slots` at every depth; a partial fill is
+    # `autogrow_below_min` (see test_production_nested_autogrow_counts_the_declared_names).
+    err = next(e for e in result["errors"] if e["code"] == "autogrow_no_slots")
     assert err["node_id"] == "1"
     assert err["field"] == "model.images"
+    assert "places 1 of them in `required`" in err["message"]
     assert "model.images.image_1" in err["hint"]
 
 

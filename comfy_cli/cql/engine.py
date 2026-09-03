@@ -14,10 +14,12 @@ import difflib
 import hashlib as _hashlib
 import json
 import logging
+import math
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -98,6 +100,28 @@ _PREVIEW_3D_CLASSES = frozenset({"SaveGLB", "Preview3D"})
 # thousands of nodes, so an unreachable target must fail fast rather than walk
 # the whole type lattice.
 _MAX_PATH_SEARCH_STATES = 20_000
+
+# Digits an autogrow slot index may carry before it cannot be one the server
+# generated. `Autogrow._MaxNames` caps a group at 100 slots; the bound exists so
+# a prompt-supplied key like `image<5000 digits>` is rejected by length rather
+# than by `int()`, which raises above 4300 digits.
+_MAX_AUTOGROW_INDEX_DIGITS = 6
+
+
+def _finite_int(value: Any) -> int | None:
+    """``int(value)`` for a real, finite JSON number, else ``None``.
+
+    ``/object_info`` is parsed with plain ``json.loads``, which accepts the bare
+    ``NaN`` / ``Infinity`` literals a Python-serialized payload emits — and
+    ``int()`` raises ``ValueError`` / ``OverflowError`` on those, a crash inside
+    ``validate_workflow`` where the validator owes a diagnostic. ``bool`` is
+    excluded because ``True`` is an ``int`` but never a numeric bound.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return int(value)
 
 
 @dataclass
@@ -215,8 +239,11 @@ class Port:
         inputs = t.get("input")
         if not isinstance(inputs, dict):
             return None
-        for section in ("required", "optional"):
-            section_def = inputs.get(section)
+        # Declaration order, not a hardcoded ("required", "optional"): the
+        # server's `_expand_schema_for_dynamic` iterates `input.items()` and
+        # takes the first non-empty section, so a template that lists
+        # `optional` first is read from `optional`.
+        for section_def in inputs.values():
             if not isinstance(section_def, dict):
                 continue
             for spec in section_def.values():
@@ -232,15 +259,20 @@ class Port:
         length of ``names`` when the template enumerates them, else the
         template's ``max`` (``None`` when the schema leaves it open — the
         frontend's own default there is 100, but that is a UI choice, not a
-        server limit, so it is not asserted here)."""
+        server limit, so it is not asserted here).
+
+        Bounds that are not finite JSON numbers read as undeclared rather than
+        crashing the conversion (see :func:`_finite_int`); the ``min`` default
+        of 1 is the frontend's, so callers that need the *server's* gate must
+        use :attr:`autogrow_declared_min` / :attr:`autogrow_effective_min`,
+        which never synthesize one."""
         t = self.options.template if isinstance(self.options.template, dict) else {}
-        lo = t.get("min")
-        lo = int(lo) if isinstance(lo, (int, float)) and not isinstance(lo, bool) else 1
+        lo = _finite_int(t.get("min"))
+        lo = 1 if lo is None else lo
         names = t.get("names")
         if isinstance(names, list) and names:
             return lo, len(names)
-        hi = t.get("max")
-        return lo, (int(hi) if isinstance(hi, (int, float)) and not isinstance(hi, bool) else None)
+        return lo, _finite_int(t.get("max"))
 
     @property
     def autogrow_template_required(self) -> bool | None:
@@ -249,10 +281,13 @@ class Port:
         ``required`` section.
 
         ``comfy_api/latest/_io.py``, ``Autogrow._expand_schema_for_dynamic``
-        walks the template's sections, takes the first non-empty one, and sets
-        ``template_required = _input_type == "required"`` — *"for now, get just
-        the first value from dict_input; if not required, min can be ignored"*.
-        This walks the same sections in the same order.
+        walks the template's sections *in declaration order* (``input.items()``,
+        JSON insertion order — not a fixed required-then-optional sweep), takes
+        the first non-empty one, and sets ``template_required = _input_type ==
+        "required"`` — *"for now, get just the first value from dict_input; if
+        not required, min can be ignored"*. This walks it the same way, so a
+        template that lists a non-empty ``optional`` ahead of ``required``
+        reads ``False`` here exactly as it does on the server.
 
         ``None`` when there is nothing to read — a non-autogrow port, or a
         template carrying no ``input`` block (an older/partial catalog capture
@@ -267,12 +302,27 @@ class Port:
         inputs = t.get("input")
         if not isinstance(inputs, dict):
             return None
-        for section in ("required", "optional"):
-            section_def = inputs.get(section)
+        for section, section_def in inputs.items():
             if not isinstance(section_def, dict) or not section_def:
                 continue
             return section == "required"
         return None
+
+    @property
+    def autogrow_declared_min(self) -> int | None:
+        """The template's OWN ``min``, or ``None`` when the catalog declares
+        none (or declares one that isn't a finite number).
+
+        Distinct from ``autogrow_limits[0]``, which substitutes the frontend's
+        default of 1: ``applyAutogrow`` picking 1 is a UI choice, while the
+        server reads ``value[1]["template"]["min"]`` with no default at all.
+        A hard reject must not be built on a number nothing declared, so the
+        validation path gates on this and treats ``None`` as "cannot judge".
+        """
+        t = self.options.template
+        if not self.is_autogrow or not isinstance(t, dict):
+            return None
+        return _finite_int(t.get("min"))
 
     @property
     def autogrow_effective_min(self) -> int:
@@ -290,13 +340,26 @@ class Port:
         (``_expand_schema_for_dynamic`` ignores its ``input_type`` argument):
         an ``optional``-section group with ``min: 2`` still owes two slots.
 
-        ``0`` whenever the gate is not positively ``True`` — including the
-        "cannot judge" case, the same "don't reject what you can't read"
-        leniency :attr:`autogrow_element_type` applies. A caller that wants to
-        keep checking an unreadable template must consult
-        :attr:`autogrow_template_required` for the ``None`` itself.
+        ``0`` whenever the gate is not positively ``True`` — including the two
+        "cannot judge" cases (an unreadable ``template_required``, or a
+        template declaring no ``min`` of its own), the same "don't reject what
+        you can't read" leniency :attr:`autogrow_element_type` applies. A
+        caller that wants to keep checking an unreadable template must consult
+        :attr:`autogrow_template_required` and :attr:`autogrow_declared_min`
+        for the ``None`` itself.
+
+        Clamped to the group's declared capacity, as the server's own
+        ``for i, name in enumerate(names)`` loop is: a template naming one slot
+        while declaring ``min: 3`` owes one slot, not an unsatisfiable three.
         """
-        return self.autogrow_limits[0] if self.autogrow_template_required else 0
+        if not self.autogrow_template_required:
+            return 0
+        lo = self.autogrow_declared_min
+        if lo is None:
+            return 0
+        lo = max(lo, 0)
+        hi = self.autogrow_limits[1]
+        return min(lo, hi) if hi is not None else lo
 
     def autogrow_required_slot_names(self, count: int) -> list[str] | None:
         """The first ``count`` slot names the server places in its ``required``
@@ -328,6 +391,54 @@ class Port:
             count = min(count, hi)
         # `autogrow_template` yields `names` or `prefix` and nothing else.
         return [f"{t['prefix']}{i}" for i in range(count)]
+
+    def autogrow_declared_slot_keys(self, keys: Iterable[str]) -> set[str] | None:
+        """Those of ``keys`` that are slot keys this group actually grows —
+        ``{self.name}.{name}`` for a name the schema's template declares.
+
+        ``_expand_schema_for_dynamic`` expands a fixed name list and puts only
+        those ids in the node's schema, so ``images.bogus`` (a typo, or a stale
+        key from another node) is not an input of the node at all: the server
+        ignores it. Callers use this to keep such a key out of the "known keys"
+        set, so it surfaces as ``unknown_input`` rather than being waved
+        through by a bare ``startswith`` on the prefix.
+
+        ``None`` when the catalog declares no naming template
+        (:attr:`autogrow_template`), so callers fall back to the historical
+        prefix match rather than filtering against the pluralization *guess*
+        :attr:`autogrow_element_template` would supply.
+        """
+        t = self.autogrow_template
+        if t is None:
+            return None
+        prefix = f"{self.name}."
+        suffixes = {k: k[len(prefix) :] for k in keys if k.startswith(prefix)}
+        names = t.get("names")
+        if names:
+            declared = {str(n) for n in names}
+            return {k for k, suffix in suffixes.items() if suffix in declared}
+        stem = t["prefix"]
+        hi = self.autogrow_limits[1]
+        out: set[str] = set()
+        for key, suffix in suffixes.items():
+            index = suffix[len(stem) :]
+            # `isascii()` as well as `isdigit()`: the latter is True for
+            # superscripts and other numeric characters that `int()` rejects
+            # outright. The length bound is the other half of that — `int()`
+            # raises above 4300 digits — and both matter because this runs over
+            # prompt-supplied key names. `Autogrow._MaxNames` is 100, so no id
+            # the server generates comes anywhere near the bound.
+            if not suffix.startswith(stem) or not (index.isascii() and index.isdigit()):
+                continue
+            if len(index) > _MAX_AUTOGROW_INDEX_DIGITS:
+                continue
+            # Round-trip the index so only the server's own spelling matches:
+            # `image01` is not an id `f"{prefix}{i}"` ever emits.
+            if f"{stem}{int(index)}" != suffix:
+                continue
+            if hi is None or int(index) < hi:
+                out.add(key)
+        return out
 
     @property
     def autogrow_template(self) -> dict | None:
@@ -2597,11 +2708,11 @@ def _check_dynamic_combo_sub(
         # unknown_input noise; the generic driver loop still edge-checks
         # whichever slot keys ARE present.
         #
-        # What IS enforced is the server's own autogrow minimum
-        # (`_autogrow_below_min_error` over `Port.autogrow_effective_min` — the
-        # `i < min and template_required` gate). A group declaring `min: 0`
-        # inside `required` (Seedream's `model.images`) reads as an effective
-        # min of 0 and stays lenient; one declaring `min >= 1`
+        # What IS enforced is the server's own autogrow minimum, through the
+        # same `_autogrow_slot_errors` the top-level driver uses, so the same
+        # mistake reports the same code at either depth. A group declaring
+        # `min: 0` inside `required` (Seedream's `model.images`) reads as an
+        # effective min of 0 and stays lenient; one declaring `min >= 1`
         # (GrokVideoReferenceNode's `model.reference_images`) is a hard reject
         # the server would issue.
         #
@@ -2632,13 +2743,29 @@ def _check_dynamic_combo_sub(
             )
         slot_prefix = f"{dotted}."
         matched = {k for k in present if k.startswith(slot_prefix)}
-        shortfall = _autogrow_below_min_error(node_id, dotted, port, matched, port.autogrow_effective_min)
-        errors: list[dict] = [shortfall] if shortfall else []
-        # The matched keys stay valid keys even when the count is short, so the
-        # slots that ARE wired don't regress into `unknown_input` noise on top
-        # of the count error. These errors flow into `dyn_errors`, which the
-        # driver loop already gates on output-reachability.
-        return errors, [], matched, set()
+        # `required=False` deliberately, unlike the top-level caller: the
+        # historical "at least one slot" fallback for an unreadable template is
+        # a TOP-LEVEL behaviour that predates this check, while a nested group
+        # has always been lenient there — a dynamic-combo option routinely
+        # declares an autogrow group in `required` with an effective `min: 0`
+        # (Seedream's `model.images`), and the converter legitimately emits no
+        # slot keys for it. Extending the fallback down here to make the two
+        # depths symmetric would reject those real workflows, so the asymmetry
+        # stays: nested enforces only a minimum the catalog actually declares.
+        errors = _autogrow_slot_errors(node_id, dotted, port, matched, required=False)
+        # Only the keys the group actually grows count as known. A key under
+        # the prefix that the template never declares (`model.images.bogus`) is
+        # not an input of the node at all, so waving it through here would
+        # suppress its `unknown_input` warning as well as its slot check.
+        # Where the catalog declares no names there is nothing to filter
+        # against, so the historical prefix match stands.
+        declared = port.autogrow_declared_slot_keys(matched)
+        valid = matched if declared is None else declared
+        # The valid keys stay valid even when the count is short, so the slots
+        # that ARE wired don't regress into `unknown_input` noise on top of the
+        # count error. These errors flow into `dyn_errors`, which the driver
+        # loop already gates on output-reachability.
+        return errors, [], valid, set()
 
     if dotted not in present:
         if not sub_required:
@@ -2739,58 +2866,81 @@ def _autogrow_below_min_error(node_id: str, field: str, port: Port, slots: set[s
     }
 
 
-def _check_autogrow_required(node_id: str, autogrow_ports: dict[str, Port], node_data: dict) -> list[dict]:
-    """Autogrow inputs wired with fewer slots than the server requires.
+def _autogrow_slot_errors(node_id: str, field: str, port: Port, slots: set[str], required: bool) -> list[dict]:
+    """Every slot-count error one autogrow group owes — shared by the top-level
+    driver (:func:`_check_autogrow_required`) and the dynamic-combo-nested path
+    (:func:`_check_dynamic_combo_sub`) so the same authoring mistake reports the
+    same code at every nesting depth.
 
-    The gate is :attr:`Port.autogrow_effective_min`, not ``port.required``: the
+    The gate is :attr:`Port.autogrow_effective_min`, not ``required``: the
     server places autogrow slots ``i < min`` in ``required`` whenever the
     template's inner input is itself required, regardless of which section the
     autogrow input sits in — and conversely ignores ``min`` entirely when it is
-    not (``comfy_api/latest/_io.py``,
-    ``Autogrow._expand_schema_for_dynamic``). Either way the server would reject
-    the node, so surface it here instead of as a cryptic downstream reject.
+    not (``comfy_api/latest/_io.py``, ``Autogrow._expand_schema_for_dynamic``).
 
     One carve-out keeps this strictly additive: a template we cannot read gives
-    no ``template_required`` signal at all, so rather than silently dropping the
-    zero-slot check for older/partial catalogs this falls back to the historical
-    ``port.required`` gate for exactly that case — and to its historical
-    semantics too, "at least one slot", since the ``1`` it stands in for is
-    synthesized here rather than declared by the catalog.
+    no ``template_required`` signal, and one whose gate WOULD bind but which
+    carries no ``min`` of its own declares no minimum for it to bind to
+    (``autogrow_limits`` substitutes the *frontend's* default of 1 there, which
+    is no basis for a hard reject). For exactly those two cases this falls back
+    to the historical ``required`` gate — and to its historical semantics too,
+    "at least one slot", since the ``1`` it stands in for is synthesized here
+    rather than declared by the catalog. A gate that reads a definite ``False``
+    is not one of them: that is the server telling us it ignores ``min``.
+    """
+    lo = port.autogrow_effective_min
+    # "Cannot judge" is narrower than "no minimum binds": a template whose gate
+    # reads a definite `False` tells us the server ignores `min` outright, which
+    # is an answer, not a gap. Only an unreadable gate — or a readable one that
+    # WOULD bind but declares no `min` for it to bind to — leaves us guessing.
+    gate = port.autogrow_template_required
+    cannot_judge = gate is None or (gate is True and port.autogrow_declared_min is None)
+    if lo < 1:
+        if not cannot_judge or not required:
+            return []
+    if not slots:
+        owed = f" but the server places {lo} of them in `required`" if lo >= 1 else ""
+        return [
+            {
+                "node_id": node_id,
+                "field": field,
+                "code": "autogrow_no_slots",
+                "message": (
+                    f"autogrow input {field!r} has no connected slots{owed} — the server will reject this node"
+                ),
+                "hint": (f"wire {lo if lo >= 1 else 1} key(s), one per connection: {port.autogrow_slot_example()}"),
+            }
+        ]
+    if cannot_judge:
+        return []
+    shortfall = _autogrow_below_min_error(node_id, field, port, slots, lo)
+    return [shortfall] if shortfall else []
+
+
+def _check_autogrow_required(node_id: str, autogrow_ports: dict[str, Port], node_data: dict) -> list[dict]:
+    """Autogrow inputs wired with fewer slots than the server requires.
+
+    Every gate and carve-out lives in :func:`_autogrow_slot_errors`, which the
+    nested dynamic-combo path shares so both depths report the same code.
     """
     inputs = node_data.get("inputs")
     if not isinstance(inputs, dict):
         inputs = {}
     errors: list[dict] = []
     for base, port in autogrow_ports.items():
-        lo = port.autogrow_effective_min
-        cannot_judge = False
-        if lo < 1:
-            if port.autogrow_template_required is not None or not port.required:
-                continue
-            cannot_judge = True
-        # The base name wired directly is a different mistake, already reported
-        # as `autogrow_bare_input` by the driver loop — don't double-error it.
-        if base in inputs:
+        # The base name wired directly as a single connection is a different
+        # mistake, already reported as `autogrow_bare_input` by the driver loop
+        # — don't double-error it. Only that exact shape, though: the driver
+        # loop tests `isinstance(value, list) and len(value) == 2` too, so
+        # `{base: None}` / `{base: ""}` / `{base: [[..], [..], [..]]}` raise no
+        # error anywhere (`validate_shape` no-ops for COMFY_AUTOGROW_V3 and
+        # `_check_required_present` exempts autogrow ports) and skipping on
+        # mere presence of the key would silence the slot check for free.
+        value = inputs.get(base)
+        if isinstance(value, list) and len(value) == 2:
             continue
         slots = {k for k in inputs if k.startswith(f"{base}.")}
-        if not slots:
-            errors.append(
-                {
-                    "node_id": node_id,
-                    "field": base,
-                    "code": "autogrow_no_slots",
-                    "message": (
-                        f"required autogrow input {base!r} has no connected slots — the server will reject this node"
-                    ),
-                    "hint": f"wire one key per connection: {port.autogrow_slot_example()}",
-                }
-            )
-            continue
-        if cannot_judge:
-            continue
-        shortfall = _autogrow_below_min_error(node_id, base, port, slots, lo)
-        if shortfall:
-            errors.append(shortfall)
+        errors.extend(_autogrow_slot_errors(node_id, base, port, slots, port.required))
     return errors
 
 
