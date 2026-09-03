@@ -2167,7 +2167,7 @@ class TestOpModel:
         assert ops.canonical(ab) == ops.canonical(ba)
 
     # ---------------------------------------------------------------------
-    # replace_ops on autogrow canvases (BE-10726): the CLI's repeated-edit
+    # replace_ops on autogrow canvases: the CLI's repeated-edit
     # paths leave sparse numbering where the FE compacts; the bulk-writer
     # batch must round-trip both shapes.
     # ---------------------------------------------------------------------
