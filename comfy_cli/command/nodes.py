@@ -67,7 +67,7 @@ def _resolved_where(where: str | None) -> str:
             # the shared `where_invalid` envelope and exit, exactly as
             # `resolve_default_or_exit` does for the non-recovering verbs —
             # a machine consumer must read `error.code`, not a stack trace.
-            where_module.emit_where_invalid_or_exit(exc)
+            raise where_module.where_invalid_exit(exc) from exc
     return decision.target.value  # "local" | "cloud"
 
 
