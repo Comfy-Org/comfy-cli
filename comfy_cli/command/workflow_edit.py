@@ -554,8 +554,10 @@ _MODE_LABELS = {2: "mute", 4: "bypass"}
 # such levels already yield 8189). Every row is accumulated in memory, then
 # serialized to JSON and rendered, so the depth cap alone is not a work bound.
 # Real graphs are nowhere near this — the largest subgraph-heavy workflows run
-# to low hundreds of interior nodes — so a document that reaches this ceiling is
-# corrupt or hostile, and `subgraph_truncated` tells the consumer so.
+# to low hundreds of interior nodes — but this is an output ceiling, not a
+# verdict on the file: a legitimately huge graph reaches it the same way a
+# corrupt or hostile one does, and `subgraph_truncated` tells the consumer only
+# that the listing is short.
 _MAX_SUBGRAPH_INTERIOR_ROWS = 10_000
 
 
@@ -648,11 +650,15 @@ def _subgraph_interior_rows(workflow: dict) -> tuple[list[dict], bool]:
         if not isinstance(nodes, list):
             return
         for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            # Checked AFTER the shape filter: `subgraph_truncated` promises a
+            # REPORTABLE row was omitted, and a malformed entry would never have
+            # produced one. Testing first would flag a listing as short because
+            # the tail of the document was junk we drop either way.
             if len(interior) >= _MAX_SUBGRAPH_INTERIOR_ROWS:
                 truncated = True
                 return
-            if not isinstance(n, dict):
-                continue
             node_id = n.get("id")
             # Stringified exactly as the slot walker stringifies it, so the two
             # commands' addresses stay byte-identical; ``id`` stays verbatim.

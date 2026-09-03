@@ -406,8 +406,8 @@ nodes, which is the point — `workflow_to_api` silently drops those, so this is
 only place a reader sees them. To decide what actually runs, check `mode` on the row
 AND on every ancestor: a live `10/3/7` under a muted `10/3` (or under a disabled
 instance `10`, whose `mode` is on its `nodes[]` row) does not execute. Rarely,
-`data.subgraph_truncated: true` appears — the walk hit its row ceiling on a corrupt
-definition graph, and the listing is incomplete.
+`data.subgraph_truncated: true` appears — the walk hit its row ceiling, so the listing
+is incomplete and `subgraph_count` is a floor; re-read the graph in smaller pieces.
 
 **Building more than one or two nodes? Use `apply` — one batch, one catalog load,
 and `as` aliases so you never capture a minted id by hand:**

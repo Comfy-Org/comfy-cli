@@ -345,6 +345,29 @@ def test_ordinary_workflow_carries_no_truncation_key(patched_graph, tmp_path, ca
     assert "subgraph_truncated" not in env["data"], env["data"]
 
 
+def test_malformed_tail_at_the_row_ceiling_does_not_flag_truncation(patched_graph, tmp_path, capsys, monkeypatch):
+    """`subgraph_truncated` promises a REPORTABLE row was omitted.
+
+    The budget check ran BEFORE the shape filter, so a definition whose last
+    entries are junk we drop either way — `nodes: [ok, ok, 7, "x"]` at a ceiling
+    of 2 — reported the listing as short when nothing listable was left."""
+    monkeypatch.setattr(workflow_edit, "_MAX_SUBGRAPH_INTERIOR_ROWS", 2)
+    wf = _wf_with_interior([{"id": 1, "type": "VAEDecode"}, {"id": 2, "type": "VAEDecode"}, 7, "x"])
+    env = _env(tmp_path, wf, capsys)
+    assert len(env["data"]["subgraph_nodes"]) == 2
+    assert "subgraph_truncated" not in env["data"], env["data"]
+
+
+def test_a_dropped_row_at_the_ceiling_still_flags_truncation(patched_graph, tmp_path, capsys, monkeypatch):
+    """The other half of the same check: a real third node IS omitted, so the
+    flag must still fire — moving the budget test must not disarm it."""
+    monkeypatch.setattr(workflow_edit, "_MAX_SUBGRAPH_INTERIOR_ROWS", 2)
+    wf = _wf_with_interior([{"id": i, "type": "VAEDecode"} for i in (1, 2, 3)])
+    env = _env(tmp_path, wf, capsys)
+    assert len(env["data"]["subgraph_nodes"]) == 2
+    assert env["data"]["subgraph_truncated"] is True
+
+
 # ---------------------------------------------------------------------------
 # Pretty mode: node text is workflow-file text, and Rich reads a `str` cell as
 # MARKUP. `ls-nodes` is pointed at files an agent did not author (downloaded

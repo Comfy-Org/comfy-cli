@@ -51,7 +51,7 @@
     },
     "subgraph_truncated": {
       "type": "boolean",
-      "description": "ls-nodes: present and true ONLY when the interior walk hit its row ceiling, so `subgraph_nodes` is INCOMPLETE and `subgraph_count` is a floor rather than a total. Reachable only from a corrupt or hostile definition graph (a branching one can expand a few-KB file into billions of rows); a normal workflow never carries this key."
+      "description": "ls-nodes: present and true ONLY when the interior walk hit its row ceiling, so `subgraph_nodes` is INCOMPLETE and `subgraph_count` is a floor rather than a total. Any listing whose reachable interior rows exceed the ceiling sets it — usually a branching definition graph, which can expand a few-KB file into billions of rows, but a legitimately huge workflow reaches it the same way. Ordinary workflows are far below the ceiling and never carry this key."
     },
     "notes": {
       "type": "array",
