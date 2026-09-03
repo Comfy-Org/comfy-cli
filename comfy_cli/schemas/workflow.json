@@ -8,14 +8,13 @@
     "count": { "type": "integer" },
     "slots": { "type": "array" },
     "nodes": {
-      "type": "array",
-      "description": "ls-nodes: one row per TOP-LEVEL node — a subgraph instance is a single opaque row here. `count` is the length of this array.",
+      "description": "ls-nodes: an ARRAY with one row per TOP-LEVEL node — a subgraph instance is a single opaque row here, and `count` is the length of that array. Deliberately carries no `type` keyword: this schema is shared by the whole `workflow` command group, and `compose`/`decompose` reuse the `nodes` key for an INTEGER node count. The `items` subschema below therefore constrains only the array form.",
       "items": {
         "type": "object",
         "properties": {
           "id": { "description": "node id as serialized in the workflow" },
-          "type": { "type": ["string", "null"] },
-          "title": { "type": ["string", "null"] },
+          "type": { "description": "class_type as serialized in the workflow; a string (or absent/null) in any well-formed file. Copied verbatim rather than coerced, so a hand-edited or corrupt file is reported as it actually is." },
+          "title": { "description": "display title, else the `Node name for S&R` property; same verbatim-copy caveat as `type`" },
           "mode": {
             "type": "string",
             "enum": ["mute", "bypass"],
@@ -26,7 +25,7 @@
     },
     "subgraph_nodes": {
       "type": "array",
-      "description": "ls-nodes: one row per node INSIDE a live subgraph instance (definitions.subgraphs[].nodes, recursively) — these execute but never appear in `nodes`. Empty when the workflow has no subgraph instances.",
+      "description": "ls-nodes: one row per node INSIDE a live subgraph instance (definitions.subgraphs[].nodes, recursively) — nodes that never appear in `nodes`. Empty when the workflow has no subgraph instances. This listing INCLUDES disabled nodes: a row's own `mode` says whether it is muted/bypassed, and because a nested instance gets a row of its own, a caller deciding what actually EXECUTES must also check the `mode` of every ancestor along the row's `path` prefixes (a live `10/3/7` under a muted `10/3` is dropped by workflow_to_api, as is any interior under a disabled top-level instance — whose mode is on its `nodes[]` row).",
       "items": {
         "type": "object",
         "properties": {
@@ -36,8 +35,8 @@
           },
           "instance": { "type": "string", "description": "id of the TOP-LEVEL subgraph instance this row is reached through" },
           "id": { "description": "interior node id as serialized in the subgraph definition" },
-          "type": { "type": ["string", "null"] },
-          "title": { "type": ["string", "null"] },
+          "type": { "description": "class_type as serialized in the definition; same verbatim-copy caveat as the `nodes[]` `type`" },
+          "title": { "description": "display title, else the `Node name for S&R` property; same verbatim-copy caveat as `type`" },
           "mode": {
             "type": "string",
             "enum": ["mute", "bypass"],
@@ -49,6 +48,10 @@
     "subgraph_count": {
       "type": "integer",
       "description": "ls-nodes: length of `subgraph_nodes` (kept separate from `count`, which stays top-level-only)."
+    },
+    "subgraph_truncated": {
+      "type": "boolean",
+      "description": "ls-nodes: present and true ONLY when the interior walk hit its row ceiling, so `subgraph_nodes` is INCOMPLETE and `subgraph_count` is a floor rather than a total. Reachable only from a corrupt or hostile definition graph (a branching one can expand a few-KB file into billions of rows); a normal workflow never carries this key."
     },
     "notes": {
       "type": "array",

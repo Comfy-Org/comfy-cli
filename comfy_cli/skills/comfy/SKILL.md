@@ -394,12 +394,20 @@ comfy --json workflow ls-nodes    wf.json                            # id / type
 
 `ls-nodes` emits `data.nodes[]` for the TOP LEVEL only (a subgraph instance is one
 opaque row), plus a sibling `data.subgraph_nodes[]` for the nodes INSIDE every live
-subgraph instance — the ones that actually execute. Each interior row carries
+subgraph instance — the ones `nodes[]` never shows you. Each interior row carries
 `path` / `instance` / `id` / `type` / `title`, and `mode` (`mute` | `bypass`) only
 when the node is disabled, same as the top-level rows. `path` uses the same
 `<instance>/<interior>` addressing as `comfy workflow slots` (nesting with `/`, e.g.
 `10/3/7`), so it composes directly into a slot address. `data.count` stays the
 top-level count; `data.subgraph_count` counts the interior rows.
+
+Interior rows are a LISTING, not an execution plan: they include muted and bypassed
+nodes, which is the point — `workflow_to_api` silently drops those, so this is the
+only place a reader sees them. To decide what actually runs, check `mode` on the row
+AND on every ancestor: a live `10/3/7` under a muted `10/3` (or under a disabled
+instance `10`, whose `mode` is on its `nodes[]` row) does not execute. Rarely,
+`data.subgraph_truncated: true` appears — the walk hit its row ceiling on a corrupt
+definition graph, and the listing is incomplete.
 
 **Building more than one or two nodes? Use `apply` — one batch, one catalog load,
 and `as` aliases so you never capture a minted id by hand:**
