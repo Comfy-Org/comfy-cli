@@ -100,6 +100,26 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, outcome):
     return calls
 
 
+def _patch_urlopen_raw(monkeypatch: pytest.MonkeyPatch, raw: bytes):
+    """Like ``_patch_urlopen`` but serves ``raw`` verbatim, so a test can send a
+    body that is not valid JSON at all (or is genuinely empty) rather than one
+    that round-trips through ``json.dumps``."""
+
+    class _Resp:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=None):
+            return raw
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: _Resp())
+
+
 class TestLsPagination:
     """`ls` forwards the server's truncation signal, and only when it sent one."""
 
@@ -185,12 +205,40 @@ class TestLsPagination:
         assert env["error"]["code"] == "cloud_http_error"
         assert env["error"]["details"]["got_type"] == "int"
 
-    def test_empty_body_is_an_empty_listing_not_an_error(self, cloud_target, monkeypatch, capsys):
+    def test_json_null_body_is_an_empty_listing_not_an_error(self, cloud_target, monkeypatch, capsys):
         data = self._ls(monkeypatch, capsys, None)
         assert data["count"] == 0
         assert data["assets"] == []
 
-    def test_existing_count_and_assets_shape_unchanged(self, cloud_target, monkeypatch, capsys):
+    def test_truly_empty_body_is_an_empty_listing_not_an_error(self, cloud_target, monkeypatch, capsys):
+        # Zero bytes: the server had nothing to say, which is a legitimate
+        # empty library and must stay a success envelope.
+        _patch_urlopen_raw(monkeypatch, b"")
+        env = _run(["ls", "--where", "cloud"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["count"] == 0
+        assert env["data"]["assets"] == []
+
+    def test_whitespace_only_body_is_an_empty_listing_not_an_error(self, cloud_target, monkeypatch, capsys):
+        # A body of just a newline is "nothing to say", not a malformed answer;
+        # `strict_json` must not turn it into an error envelope.
+        _patch_urlopen_raw(monkeypatch, b"\n")
+        env = _run(["ls", "--where", "cloud"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["count"] == 0
+
+    def test_invalid_json_body_is_an_error_envelope_not_an_empty_listing(self, cloud_target, monkeypatch, capsys):
+        # `http_request` collapses a JSONDecodeError to `None` by default, which
+        # is indistinguishable from the empty body above — so a proxy or
+        # captive-portal error page answering 200 rendered as a successful EMPTY
+        # library. `ls` opts into `strict_json` so the two stay distinct.
+        _patch_urlopen_raw(monkeypatch, b"<html><body>502 Bad Gateway</body></html>")
+        env = _run(["ls", "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+        assert error_codes.is_registered(env["error"]["code"])
+
+    def test_count_matches_the_emitted_assets_and_projection_is_unchanged(self, cloud_target, monkeypatch, capsys):
         rows = [
             {
                 "id": "a1",
@@ -207,7 +255,12 @@ class TestLsPagination:
             "not-a-dict",
         ]
         data = self._ls(monkeypatch, capsys, {"assets": rows, "has_more": False, "total": 1})
-        assert data["count"] == 2  # counts raw rows, as before
+        # `count` describes the array actually emitted: the non-dict row is
+        # dropped from `assets`, so counting it too would report more items than
+        # the payload carries — misleading in general, and self-defeating beside
+        # a forwarded `total` whose whole purpose is an authoritative count.
+        assert data["count"] == 1
+        assert data["total"] == 1
         assert data["assets"] == [
             {
                 "id": "a1",
