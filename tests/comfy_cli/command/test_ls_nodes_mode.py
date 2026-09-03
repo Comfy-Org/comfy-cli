@@ -375,7 +375,9 @@ def pretty_stream(monkeypatch):
     return stream
 
 
-def _render_pretty(tmp_path, wf: dict) -> str:
+def _render_pretty(tmp_path, wf: dict) -> None:
+    """Render `ls-nodes` into the pretty stream. The assertion is the point: a
+    MarkupError surfaces as `result.exception`, not as a non-zero exit."""
     from typer.testing import CliRunner
 
     from comfy_cli.command import workflow as workflow_cmd
@@ -383,7 +385,6 @@ def _render_pretty(tmp_path, wf: dict) -> str:
     path = _write(tmp_path, wf)
     result = CliRunner().invoke(workflow_cmd.app, ["ls-nodes", str(path)], standalone_mode=False)
     assert result.exception is None, result.exception
-    return result
 
 
 def _assert_inert(out: str) -> None:
