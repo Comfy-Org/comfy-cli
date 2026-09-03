@@ -1,6 +1,17 @@
-"""``comfy assets library`` error envelopes.
+"""``comfy assets library`` envelopes.
 
-Pins the 404 mapping for ``assets library ensure``. Found in prod (Langfuse
+Pins two things: the ``assets library ls`` pagination passthrough, and the 404
+mapping for ``assets library ensure``.
+
+``ls`` forwards the server's ``has_more``/``total`` so a downstream consumer
+(the cloud agent's asset gate) reads an authoritative truncation signal instead
+of inferring one from a page that came back exactly full — which both misses a
+short truncated page and misreads a library of exactly ``--limit`` assets. Both
+fields are ``required`` on the cloud API's ``ListAssetsResponse``, but a server
+that omits them must leave the keys ABSENT rather than emit ``null``, because
+the consumer type-asserts them out of the decoded envelope.
+
+The 404 mapping was found in prod (Langfuse
 2026-08-25, ``use_asset_as_input``): an agent passed a FILE NAME
 (``comfyorg_logo.png``) where the content hash belongs, the API answered 404,
 and the CLI reported ``workflow_not_found`` / "workflow not found (ensure)"
@@ -87,6 +98,91 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, outcome):
 
     monkeypatch.setattr("urllib.request.urlopen", _fake)
     return calls
+
+
+class TestLsPagination:
+    """`ls` forwards the server's truncation signal, and only when it sent one."""
+
+    def _ls(self, monkeypatch, capsys, body: dict) -> dict[str, Any]:
+        _patch_urlopen(monkeypatch, body)
+        env = _run(["ls", "--where", "cloud"], capsys)
+        assert env["ok"] is True, env
+        return env["data"]
+
+    def test_forwards_has_more_and_total(self, cloud_target, monkeypatch, capsys):
+        data = self._ls(
+            monkeypatch,
+            capsys,
+            {"assets": [{"id": "a1", "name": "cat.png", "hash": "h1"}], "has_more": True, "total": 1234},
+        )
+        assert data["has_more"] is True
+        assert data["total"] == 1234
+        # Alongside, not instead of, the existing shape.
+        assert data["count"] == 1
+        assert data["assets"][0]["id"] == "a1"
+
+    def test_forwards_has_more_false(self, cloud_target, monkeypatch, capsys):
+        # `false` is a real answer, not a missing one — the falsy value must
+        # survive, otherwise the consumer cannot distinguish "not truncated"
+        # from "server did not say".
+        data = self._ls(monkeypatch, capsys, {"assets": [], "has_more": False, "total": 0})
+        assert data["has_more"] is False
+        assert data["total"] == 0
+
+    def test_omits_keys_when_server_does_not_send_them(self, cloud_target, monkeypatch, capsys):
+        data = self._ls(monkeypatch, capsys, {"assets": [{"id": "a1"}]})
+        assert "has_more" not in data
+        assert "total" not in data
+        assert data["count"] == 1
+
+    def test_omits_keys_when_server_sends_nulls(self, cloud_target, monkeypatch, capsys):
+        # A forwarded `null` would poison the consumer's type assertion, so a
+        # null is treated exactly like an absent key.
+        data = self._ls(monkeypatch, capsys, {"assets": [], "has_more": None, "total": None})
+        assert "has_more" not in data
+        assert "total" not in data
+
+    def test_existing_count_and_assets_shape_unchanged(self, cloud_target, monkeypatch, capsys):
+        rows = [
+            {
+                "id": "a1",
+                "name": "cat.png",
+                "hash": "h1",
+                "mime_type": "image/png",
+                "size": 12,
+                "tags": ["input"],
+                "preview_url": "https://example.com/p.png",
+                "job_id": "j1",
+                "created_at": "2026-01-01T00:00:00Z",
+                "extra_server_field": "dropped",
+            },
+            "not-a-dict",
+        ]
+        data = self._ls(monkeypatch, capsys, {"assets": rows, "has_more": False, "total": 1})
+        assert data["count"] == 2  # counts raw rows, as before
+        assert data["assets"] == [
+            {
+                "id": "a1",
+                "name": "cat.png",
+                "hash": "h1",
+                "mime_type": "image/png",
+                "size": 12,
+                "tags": ["input"],
+                "preview_url": "https://example.com/p.png",
+                "job_id": "j1",
+                "created_at": "2026-01-01T00:00:00Z",
+            }
+        ]
+
+    def test_envelope_validates_against_the_published_schema(self, cloud_target, monkeypatch, capsys):
+        import json as _json
+        from pathlib import Path
+
+        import jsonschema
+
+        data = self._ls(monkeypatch, capsys, {"assets": [{"id": "a1"}], "has_more": True, "total": 7})
+        schema_path = Path(assets_library.__file__).resolve().parents[1] / "schemas" / "assets_library.json"
+        jsonschema.Draft202012Validator(_json.loads(schema_path.read_text())).validate(data)
 
 
 class TestEnsure:

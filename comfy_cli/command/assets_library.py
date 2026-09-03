@@ -60,7 +60,8 @@ def ls_cmd(
     except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
         raise handle_cloud_http_error(renderer, e, operation="list") from e
 
-    rows = (body or {}).get("assets") or []
+    b = body or {}
+    rows = b.get("assets") or []
     payload = {
         "count": len(rows),
         "assets": [
@@ -79,6 +80,17 @@ def ls_cmd(
             if isinstance(r, dict)
         ],
     }
+    # Forward the server's own truncation signal instead of making callers infer
+    # it from an exactly-full page: `has_more`/`total` are both `required` on the
+    # cloud API's `ListAssetsResponse`, and `has_more` comes off a limit+1
+    # sentinel row rather than off the returned row count, so it stays correct
+    # on a page that comes back short. Only forward what the server actually
+    # sent — an older or local server may omit them, and a JSON `null` in the
+    # envelope would poison a consumer's type assertion, so omit the key rather
+    # than emitting None.
+    for k in ("has_more", "total"):
+        if isinstance(b.get(k), (bool, int)):
+            payload[k] = b[k]
     renderer.emit(payload, command="assets library ls", where="cloud")
 
 
