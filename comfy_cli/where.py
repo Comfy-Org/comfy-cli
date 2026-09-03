@@ -22,7 +22,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, NoReturn
 
 
 class WhereTarget(str, Enum):
@@ -33,6 +33,16 @@ class WhereTarget(str, Enum):
 CLOUD_PROVIDER = "comfy-cloud"
 ENV_DEFAULT = "COMFY_WHERE"
 CONFIG_KEY_WHERE_DEFAULT = "where_default"
+
+# The one hint every ``where_invalid`` envelope carries. A module constant
+# because two call sites emit it — :func:`resolve_default_or_exit` for the
+# commands with no fallback, and ``nodes._resolved_where`` for the recover-first
+# commands once their fallback is exhausted — and a user-facing string that lives
+# in two places drifts.
+WHERE_INVALID_HINT = (
+    "use --where local or --where cloud, and check COMFY_WHERE, "
+    "`defaults.where` in comfy.yaml, and `comfy set-default --where`"
+)
 
 
 @dataclass
@@ -115,22 +125,32 @@ def resolve_default_or_exit(
     JSON-envelope command.
 
     Commands that *can* recover (``nodes``, ``jobs``) keep their own
-    ``except ValueError`` fallback instead of calling this.
+    ``except ValueError`` fallback instead of calling this — but a fallback only
+    recovers the *config* case, so once it too fails they end on
+    :func:`emit_where_invalid_or_exit`, which is this function's tail.
+    """
+    try:
+        return resolve_default(flag=flag, env=env, project_value=project_value)
+    except ValueError as e:
+        emit_where_invalid_or_exit(e)
+
+
+def emit_where_invalid_or_exit(exc: ValueError) -> NoReturn:
+    """Render the shared ``where_invalid`` envelope for *exc* and exit 1.
+
+    Split out of :func:`resolve_default_or_exit` so a command with its own
+    recovery fallback can reuse the identical envelope (same ``code``, same
+    ``message``, same :data:`WHERE_INVALID_HINT`, same exit code) once that
+    fallback is exhausted, instead of letting the ``ValueError`` escape as a raw
+    traceback with nothing on stdout — the worst possible shape for a machine
+    consumer of a JSON-envelope command.
     """
     import typer
 
     from comfy_cli.output import get_renderer
 
-    try:
-        return resolve_default(flag=flag, env=env, project_value=project_value)
-    except ValueError as e:
-        get_renderer().error(
-            code="where_invalid",
-            message=str(e),
-            hint="use --where local or --where cloud, and check COMFY_WHERE, "
-            "`defaults.where` in comfy.yaml, and `comfy set-default --where`",
-        )
-        raise typer.Exit(code=1) from e
+    get_renderer().error(code="where_invalid", message=str(exc), hint=WHERE_INVALID_HINT)
+    raise typer.Exit(code=1) from exc
 
 
 def _project_where_default() -> str | None:
