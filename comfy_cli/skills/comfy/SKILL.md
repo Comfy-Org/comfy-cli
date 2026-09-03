@@ -392,6 +392,15 @@ comfy --json workflow delete-node wf.json 7 $CAT                      # removes 
 comfy --json workflow ls-nodes    wf.json                            # id / type / title (no catalog needed)
 ```
 
+`ls-nodes` emits `data.nodes[]` for the TOP LEVEL only (a subgraph instance is one
+opaque row), plus a sibling `data.subgraph_nodes[]` for the nodes INSIDE every live
+subgraph instance — the ones that actually execute. Each interior row carries
+`path` / `instance` / `id` / `type` / `title`, and `mode` (`mute` | `bypass`) only
+when the node is disabled, same as the top-level rows. `path` uses the same
+`<instance>/<interior>` addressing as `comfy workflow slots` (nesting with `/`, e.g.
+`10/3/7`), so it composes directly into a slot address. `data.count` stays the
+top-level count; `data.subgraph_count` counts the interior rows.
+
 **Building more than one or two nodes? Use `apply` — one batch, one catalog load,
 and `as` aliases so you never capture a minted id by hand:**
 

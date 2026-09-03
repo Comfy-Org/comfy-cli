@@ -7,6 +7,49 @@
     "workflow": { "type": "string" },
     "count": { "type": "integer" },
     "slots": { "type": "array" },
+    "nodes": {
+      "type": "array",
+      "description": "ls-nodes: one row per TOP-LEVEL node — a subgraph instance is a single opaque row here. `count` is the length of this array.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "description": "node id as serialized in the workflow" },
+          "type": { "type": ["string", "null"] },
+          "title": { "type": ["string", "null"] },
+          "mode": {
+            "type": "string",
+            "enum": ["mute", "bypass"],
+            "description": "present ONLY when the node is disabled (litegraph mode 2/4); absent for a normally-executing node"
+          }
+        }
+      }
+    },
+    "subgraph_nodes": {
+      "type": "array",
+      "description": "ls-nodes: one row per node INSIDE a live subgraph instance (definitions.subgraphs[].nodes, recursively) — these execute but never appear in `nodes`. Empty when the workflow has no subgraph instances.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "`<instance>/<interior>` address, nesting with `/` (e.g. \"10/3/7\") — the same addressing `comfy workflow slots` uses, so it composes into a slot address"
+          },
+          "instance": { "type": "string", "description": "id of the TOP-LEVEL subgraph instance this row is reached through" },
+          "id": { "description": "interior node id as serialized in the subgraph definition" },
+          "type": { "type": ["string", "null"] },
+          "title": { "type": ["string", "null"] },
+          "mode": {
+            "type": "string",
+            "enum": ["mute", "bypass"],
+            "description": "present ONLY when the interior node is disabled; workflow_to_api drops such a node after expansion, so nothing else reveals it"
+          }
+        }
+      }
+    },
+    "subgraph_count": {
+      "type": "integer",
+      "description": "ls-nodes: length of `subgraph_nodes` (kept separate from `count`, which stays top-level-only)."
+    },
     "notes": {
       "type": "array",
       "description": "notes: the Note/MarkdownNote documentation nodes the workflow carries, in graph order (top-level nodes first, then each subgraph definition).",

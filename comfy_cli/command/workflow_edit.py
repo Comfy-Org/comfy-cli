@@ -550,6 +550,84 @@ _MODE_LABELS = {2: "mute", 4: "bypass"}
 # ---------------------------------------------------------------------------
 
 
+def _subgraph_interior_rows(workflow: dict) -> list[dict]:
+    """Rows for the nodes INSIDE every live subgraph instance, flattened.
+
+    ``workflow["nodes"]`` only carries the top level: a subgraph instance is a
+    single opaque node whose ``type`` is its definition's UUID, and the nodes it
+    actually executes live under ``definitions.subgraphs[].nodes``. Those
+    interiors are the ones ``workflow_to_api`` expands and then drops when they
+    are muted/bypassed — so without this a reader sees a graph that silently
+    runs without a node, with nothing in ``ls-nodes`` to explain it.
+
+    Addresses match ``comfy workflow slots`` exactly (``<instance>/<interior>``,
+    nesting with ``/``), so a path from here is directly usable as a slot
+    address prefix. Emitted under the sibling ``subgraph_nodes`` key, never
+    appended to ``nodes`` — consumers render ``nodes[]`` verbatim and pin it.
+    """
+    from comfy_cli.cql.engine import _MAX_SUBGRAPH_DEPTH, _SUBGRAPH_PATH_SEP, _subgraph_defs_by_id
+
+    defs_by_id = _subgraph_defs_by_id(workflow)
+    if not defs_by_id:
+        return []
+    interior: list[dict] = []
+
+    def _def_for(node: dict) -> dict | None:
+        """The subgraph definition a node instantiates, or None for a plain node.
+
+        Every key in ``defs_by_id`` is a non-empty ``str``, so a node whose
+        ``type`` is missing or non-string can never be an instance — and looking
+        one up unguarded would either coerce ``None`` into the matchable string
+        ``"None"`` or raise ``TypeError`` on an unhashable (list/dict) ``type``.
+        """
+        node_type = node.get("type")
+        return defs_by_id.get(node_type) if isinstance(node_type, str) else None
+
+    def walk(nodes: Any, prefix: str, instance: str, depth: int, seen_defs: frozenset[int]) -> None:
+        # Same depth cap the slot walker uses (cql.engine), for the same reason:
+        # a hand-written or corrupt document can nest subgraphs pathologically.
+        if depth > _MAX_SUBGRAPH_DEPTH:
+            return
+        for n in nodes or []:
+            if not isinstance(n, dict):
+                continue
+            node_id = n.get("id")
+            # Stringified exactly as the slot walker stringifies it, so the two
+            # commands' addresses stay byte-identical; ``id`` stays verbatim.
+            path = f"{prefix}{_SUBGRAPH_PATH_SEP}{str(n.get('id', ''))}"
+            row = {
+                "path": path,
+                "instance": instance,
+                "id": node_id,
+                "type": n.get("type"),
+                "title": n.get("title") or (n.get("properties") or {}).get("Node name for S&R"),
+            }
+            # Label-only-when-set, exactly as the top-level rows do.
+            if (label := _MODE_LABELS.get(n.get("mode"))) is not None:
+                row["mode"] = label
+            interior.append(row)
+            sg = _def_for(n)
+            # The depth cap alone bounds a *linear* cycle at 32 rows, but a
+            # definition that reaches itself while ALSO branching would cost
+            # branches**32 rows before that cap fires. A definition already open
+            # on this path can only be a cycle (ComfyUI cannot author one), so
+            # stop there; a def reused on sibling paths is unaffected.
+            if sg is not None and id(sg) not in seen_defs:
+                walk(sg.get("nodes"), path, instance, depth + 1, seen_defs | {id(sg)})
+
+    for n in workflow.get("nodes") or []:
+        if not isinstance(n, dict):
+            continue
+        sg = _def_for(n)
+        if sg is None:
+            continue
+        instance = str(n.get("id", ""))
+        # Recurse whether or not the instance itself is muted: the consumer keys
+        # on the root row's own mode, which `nodes[]` already carries.
+        walk(sg.get("nodes"), instance, instance, 1, frozenset({id(sg)}))
+    return interior
+
+
 @tracking.track_command("workflow")
 def ls_nodes_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
@@ -575,7 +653,17 @@ def ls_nodes_cmd(
         if (label := _MODE_LABELS.get(n.get("mode"))) is not None:
             row["mode"] = label
         rows.append(row)
-    payload = {"workflow": str(p), "count": len(rows), "nodes": rows}
+    interior = _subgraph_interior_rows(workflow)
+    # `count`/`nodes` keep their exact pre-existing meaning (top level only) —
+    # interiors go under a NEW sibling key, because consumers render every
+    # `nodes[]` entry verbatim and pin that listing.
+    payload = {
+        "workflow": str(p),
+        "count": len(rows),
+        "nodes": rows,
+        "subgraph_nodes": interior,
+        "subgraph_count": len(interior),
+    }
     if renderer.is_pretty():
         from rich.table import Table
 
@@ -586,6 +674,15 @@ def ls_nodes_cmd(
         for r in rows:
             tbl.add_row(str(r["id"]), str(r["type"]), str(r["title"] or ""))
         renderer.console().print(tbl)
+        if interior:
+            sub = Table(show_header=True, header_style="bold", title="subgraph interiors")
+            sub.add_column("path", no_wrap=True)
+            sub.add_column("type")
+            sub.add_column("title", style="dim")
+            sub.add_column("mode", style="dim")
+            for r in interior:
+                sub.add_row(r["path"], str(r["type"]), str(r["title"] or ""), r.get("mode", ""))
+            renderer.console().print(sub)
     renderer.emit(payload, command="workflow ls-nodes")
 
 
