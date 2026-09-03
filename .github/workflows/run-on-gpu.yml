@@ -12,6 +12,9 @@ on:
       - "!.coveragerc"
       - "!.gitignore"
   pull_request:
+    # `labeled` is required on top of the default trigger set: without it a
+    # freshly applied `gpu-ci` label would do nothing until the next push.
+    types: [opened, synchronize, reopened, labeled]
     branches:
       - main
     paths:
@@ -27,6 +30,12 @@ permissions:
 
 jobs:
   test-cli-gpu:
+    # PR runs are opt-in via the maintainer-applied `gpu-ci` label, because this
+    # job checks out and executes PR code on self-hosted GPU runners. Push-to-main
+    # runs stay automatic. The label persists across later pushes to the same PR,
+    # so apply it only after reading the diff and remove it to re-gate the PR.
+    # Prerequisite for the review-gated auto-builder in #786.
+    if: github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'gpu-ci')
     name: "Run Tests on GPU Runners"
     runs-on:
       group: gpu-runners
