@@ -298,6 +298,37 @@ class Port:
         """
         return self.autogrow_limits[0] if self.autogrow_template_required else 0
 
+    def autogrow_required_slot_names(self, count: int) -> list[str] | None:
+        """The first ``count`` slot names the server places in its ``required``
+        section — the *specific* keys a prompt owes, not merely how many.
+
+        ``_expand_schema_for_dynamic`` expands a fixed name list
+        (``names`` verbatim, or ``[f"{prefix}{i}" for i in range(max)]``) and
+        promotes ``names[:min]`` to ``required``, so a count alone is not the
+        server's test: ``images.image1`` + ``images.image2`` satisfies ``min:
+        2`` by count while the required ``images.image0`` is still missing, and
+        the server rejects it. Gaps like that are not hypothetical — see
+        ``workflow_ops._first_free_autogrow_index`` on legacy workflows.
+
+        ``None`` when the catalog declares no naming template at all
+        (:attr:`autogrow_template`), so callers fall back to counting rather
+        than hard-erroring on the pluralization *guess*
+        :attr:`autogrow_element_template` would supply. Clamped to the
+        declared maximum, as the server's own ``enumerate(names)`` is.
+        """
+        t = self.autogrow_template
+        if t is None:
+            return None
+        count = max(count, 0)
+        names = t.get("names")
+        if names:
+            return [str(n) for n in names[:count]]
+        hi = self.autogrow_limits[1]
+        if hi is not None:
+            count = min(count, hi)
+        # `autogrow_template` yields `names` or `prefix` and nothing else.
+        return [f"{t['prefix']}{i}" for i in range(count)]
+
     @property
     def autogrow_template(self) -> dict | None:
         """The V3 autogrow element-naming template from object_info, if the
@@ -2566,12 +2597,13 @@ def _check_dynamic_combo_sub(
         # unknown_input noise; the generic driver loop still edge-checks
         # whichever slot keys ARE present.
         #
-        # The one count that IS enforced is the server's own autogrow minimum
-        # (`Port.autogrow_effective_min` — the `i < min and template_required`
-        # gate). A group declaring `min: 0` inside `required` (Seedream's
-        # `model.images`) reads as an effective min of 0 and stays lenient;
-        # one declaring `min >= 1` (GrokVideoReferenceNode's
-        # `model.reference_images`) is a hard reject the server would issue.
+        # What IS enforced is the server's own autogrow minimum
+        # (`_autogrow_below_min_error` over `Port.autogrow_effective_min` — the
+        # `i < min and template_required` gate). A group declaring `min: 0`
+        # inside `required` (Seedream's `model.images`) reads as an effective
+        # min of 0 and stays lenient; one declaring `min >= 1`
+        # (GrokVideoReferenceNode's `model.reference_images`) is a hard reject
+        # the server would issue.
         #
         # A bare `dotted: [src, idx]` link, though, is the exact same mistake
         # the top-level autogrow_bare_input check catches — the server expects
@@ -2600,10 +2632,8 @@ def _check_dynamic_combo_sub(
             )
         slot_prefix = f"{dotted}."
         matched = {k for k in present if k.startswith(slot_prefix)}
-        lo = port.autogrow_effective_min
-        errors: list[dict] = []
-        if len(matched) < lo:
-            errors.append(_autogrow_below_min_error(node_id, dotted, port, len(matched), lo))
+        shortfall = _autogrow_below_min_error(node_id, dotted, port, matched, port.autogrow_effective_min)
+        errors: list[dict] = [shortfall] if shortfall else []
         # The matched keys stay valid keys even when the count is short, so the
         # slots that ARE wired don't regress into `unknown_input` noise on top
         # of the count error. These errors flow into `dyn_errors`, which the
@@ -2662,18 +2692,50 @@ def _check_dynamic_combo_sub(
     return errs, warns, set(), set()
 
 
-def _autogrow_below_min_error(node_id: str, field: str, port: Port, n: int, lo: int) -> dict:
-    """One ``autogrow_below_min`` error — an autogrow group wired with fewer
-    slots than the server places in its ``required`` section."""
+def _autogrow_below_min_error(node_id: str, field: str, port: Port, slots: set[str], lo: int) -> dict | None:
+    """One ``autogrow_below_min`` error when ``slots`` — the ``{field}.`` keys
+    the prompt wires — don't cover the ones the server places in its
+    ``required`` section, else ``None``.
+
+    Where the catalog names the slots, this checks the NAMES the server
+    expands (``Port.autogrow_required_slot_names``) rather than the count:
+    ``images.image1`` + ``images.image2`` is two slots against ``min: 2`` and
+    the server still rejects it for a missing ``images.image0``. Where it names
+    none, there is nothing to be precise about and the count is the best test
+    available.
+    """
+    if lo < 1:
+        return None
+    names = port.autogrow_required_slot_names(lo)
+    if names is None:
+        n = len(slots)
+        if n >= lo:
+            return None
+        message = (
+            f"autogrow input {field!r} has {n} connected slot(s) but declares a minimum of {lo} — "
+            f"the server will reject this node"
+        )
+        hint = f"wire at least {lo} keys, one per connection: {port.autogrow_slot_example()}"
+    else:
+        missing = [key for name in names if (key := f"{field}.{name}") not in slots]
+        if not missing:
+            return None
+        # Same truncation as the sibling hints — a group's slot list is
+        # schema-driven and can run long, so don't dump it all into one line.
+        shown = ", ".join(repr(m) for m in missing[:8]) + (
+            f" (and {len(missing) - 8} more)" if len(missing) > 8 else ""
+        )
+        message = (
+            f"autogrow input {field!r} is missing {len(missing)} of the {len(names)} slot(s) the server "
+            f"places in `required`: {shown} — the server will reject this node"
+        )
+        hint = f"wire the missing slot key(s), one connection each: {shown}"
     return {
         "node_id": node_id,
         "field": field,
         "code": "autogrow_below_min",
-        "message": (
-            f"autogrow input {field!r} has {n} connected slot(s) but declares a minimum of {lo} — "
-            f"the server will reject this node"
-        ),
-        "hint": f"wire at least {lo} keys, one per connection: {port.autogrow_slot_example()}",
+        "message": message,
+        "hint": hint,
     }
 
 
@@ -2691,7 +2753,9 @@ def _check_autogrow_required(node_id: str, autogrow_ports: dict[str, Port], node
     One carve-out keeps this strictly additive: a template we cannot read gives
     no ``template_required`` signal at all, so rather than silently dropping the
     zero-slot check for older/partial catalogs this falls back to the historical
-    ``port.required`` gate for exactly that case.
+    ``port.required`` gate for exactly that case — and to its historical
+    semantics too, "at least one slot", since the ``1`` it stands in for is
+    synthesized here rather than declared by the catalog.
     """
     inputs = node_data.get("inputs")
     if not isinstance(inputs, dict):
@@ -2699,16 +2763,17 @@ def _check_autogrow_required(node_id: str, autogrow_ports: dict[str, Port], node
     errors: list[dict] = []
     for base, port in autogrow_ports.items():
         lo = port.autogrow_effective_min
+        cannot_judge = False
         if lo < 1:
             if port.autogrow_template_required is not None or not port.required:
                 continue
-            lo = 1
+            cannot_judge = True
         # The base name wired directly is a different mistake, already reported
         # as `autogrow_bare_input` by the driver loop — don't double-error it.
         if base in inputs:
             continue
-        n = sum(1 for k in inputs if k.startswith(f"{base}."))
-        if n == 0:
+        slots = {k for k in inputs if k.startswith(f"{base}.")}
+        if not slots:
             errors.append(
                 {
                     "node_id": node_id,
@@ -2720,8 +2785,12 @@ def _check_autogrow_required(node_id: str, autogrow_ports: dict[str, Port], node
                     "hint": f"wire one key per connection: {port.autogrow_slot_example()}",
                 }
             )
-        elif n < lo:
-            errors.append(_autogrow_below_min_error(node_id, base, port, n, lo))
+            continue
+        if cannot_judge:
+            continue
+        shortfall = _autogrow_below_min_error(node_id, base, port, slots, lo)
+        if shortfall:
+            errors.append(shortfall)
     return errors
 
 

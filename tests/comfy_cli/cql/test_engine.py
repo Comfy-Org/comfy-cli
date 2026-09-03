@@ -3755,7 +3755,8 @@ class TestAutogrowMinSlots:
         assert len(errs) == 1
         assert errs[0]["node_id"] == "1"
         assert errs[0]["field"] == "model.refs"
-        assert "minimum of 1" in errs[0]["message"]
+        assert "missing 1 of the 1 slot(s)" in errs[0]["message"]
+        assert "'model.refs.reference_1'" in errs[0]["message"]
         assert "model.refs.reference_1" in errs[0]["hint"]
 
     def test_nested_min_one_with_one_slot_is_clean(self, graph_dynamic: Graph):
@@ -3782,7 +3783,7 @@ class TestAutogrowMinSlots:
         )
         result = graph_dynamic.validate_workflow(wf)
         assert [e["code"] for e in result["errors"]] == ["autogrow_below_min"]
-        assert "1 connected slot(s)" in result["errors"][0]["message"]
+        assert "'model.refs.reference_2'" in result["errors"][0]["message"]
         assert result["warnings"] == []
 
     def test_nested_seedream_style_min_zero_stays_lenient(self, graph_dynamic: Graph):
@@ -3820,8 +3821,60 @@ class TestAutogrowMinSlots:
         err = next(e for e in result["errors"] if e["code"] == "autogrow_below_min")
         assert err["node_id"] == "1"
         assert err["field"] == "images"
-        assert "1 connected slot(s)" in err["message"]
-        assert "minimum of 2" in err["message"]
+        assert "missing 1 of the 2 slot(s)" in err["message"]
+        assert "'images.image1'" in err["message"]
+
+    def test_top_level_sparse_slots_meet_the_count_but_not_the_names(self, graph_dynamic: Graph):
+        """Two slots against `min: 2` — but the server expands `image0…image3`
+        and marks `image0`/`image1` required, so a workflow that skipped
+        `image0` is still a reject. Counting alone would pass this.
+
+        Gaps are not hypothetical: `workflow_ops._first_free_autogrow_index`
+        exists because legacy workflows carry them."""
+        wf = self._wf(
+            {
+                "class_type": "AutogrowTopNode",
+                "inputs": {"images.image1": ["0", 0], "images.image2": ["0", 0]},
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert result["valid"] is False
+        err = next(e for e in result["errors"] if e["code"] == "autogrow_below_min")
+        assert "'images.image0'" in err["message"]
+        # Only the genuinely missing one is named — `images.image1` is wired.
+        assert "'images.image1'" not in err["message"]
+
+    def test_top_level_undeclared_slot_names_do_not_count(self, graph_dynamic: Graph):
+        """Keys under the prefix that the schema never declares (`images.bogus`)
+        are not slots the server expands, so they cannot satisfy the minimum."""
+        wf = self._wf(
+            {
+                "class_type": "AutogrowTopNode",
+                "inputs": {"images.image0": ["0", 0], "images.bogus": ["0", 0]},
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        err = next(e for e in result["errors"] if e["code"] == "autogrow_below_min")
+        assert "'images.image1'" in err["message"]
+
+    def test_nested_sparse_slots_meet_the_count_but_not_the_names(self, graph_dynamic: Graph):
+        """The nested path owes the same precision: `min: 2` over
+        `reference_1…3` requires those first two names specifically."""
+        wf = self._wf(
+            {
+                "class_type": "AutogrowNestedNode",
+                "inputs": {
+                    "model": "strict_pair",
+                    "model.refs.reference_2": ["0", 0],
+                    "model.refs.reference_3": ["0", 0],
+                },
+            }
+        )
+        result = graph_dynamic.validate_workflow(wf)
+        assert [e["code"] for e in result["errors"]] == ["autogrow_below_min"]
+        assert "'model.refs.reference_1'" in result["errors"][0]["message"]
+        # The wired slots stay known keys even while the count is short.
+        assert result["warnings"] == []
 
     def test_top_level_at_min_is_clean(self, graph_dynamic: Graph):
         wf = self._wf(
@@ -3932,6 +3985,60 @@ class TestAutogrowEffectiveMin:
         p = self._port(["INT", {"min": 3}])
         assert p.autogrow_template_required is None
         assert p.autogrow_effective_min == 0
+
+    def test_required_slot_names_from_a_prefix_template(self):
+        """The server expands `[f"{prefix}{i}" for i in range(max)]` and marks
+        the first `min` required — 0-based, exactly as this repo's own
+        converter names them (`workflow_ops._autogrow_elem_name`)."""
+        p = self._port(
+            [
+                "COMFY_AUTOGROW_V3",
+                {"template": {"input": {"required": {"image": ["IMAGE", {}]}}, "prefix": "image", "min": 2, "max": 4}},
+            ]
+        )
+        assert p.autogrow_required_slot_names(2) == ["image0", "image1"]
+
+    def test_required_slot_names_from_a_names_template(self):
+        p = self._port(
+            [
+                "COMFY_AUTOGROW_V3",
+                {
+                    "template": {
+                        "input": {"required": {"image": ["IMAGE", {}]}},
+                        "names": ["reference_1", "reference_2", "reference_3"],
+                        "min": 2,
+                    }
+                },
+            ]
+        )
+        assert p.autogrow_required_slot_names(2) == ["reference_1", "reference_2"]
+
+    def test_required_slot_names_clamp_to_the_declared_maximum(self):
+        """`enumerate(names)` can't run past the name list, so neither can
+        this — a `min` above `max` owes only the names that exist."""
+        p = self._port(
+            [
+                "COMFY_AUTOGROW_V3",
+                {"template": {"input": {"required": {"image": ["IMAGE", {}]}}, "prefix": "image", "min": 9, "max": 2}},
+            ]
+        )
+        assert p.autogrow_required_slot_names(9) == ["image0", "image1"]
+        names = self._port(
+            [
+                "COMFY_AUTOGROW_V3",
+                {"template": {"input": {"required": {"image": ["IMAGE", {}]}}, "names": ["a"], "min": 9}},
+            ]
+        )
+        assert names.autogrow_required_slot_names(9) == ["a"]
+
+    def test_required_slot_names_are_none_without_a_declared_template(self):
+        """No declared naming template means the only naming available is the
+        pluralization GUESS — too weak to hard-error on, so callers fall back
+        to counting."""
+        p = self._port(["COMFY_AUTOGROW_V3", {}])
+        assert p.autogrow_required_slot_names(2) is None
+        # …even though the exporter-facing property still supplies the guess.
+        assert p.autogrow_element_template == {"prefix": "image"}
 
 
 # ===========================================================================
