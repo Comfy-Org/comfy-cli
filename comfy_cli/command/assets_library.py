@@ -88,9 +88,16 @@ def ls_cmd(
     # sent — an older or local server may omit them, and a JSON `null` in the
     # envelope would poison a consumer's type assertion, so omit the key rather
     # than emitting None.
-    for k in ("has_more", "total"):
-        if isinstance(b.get(k), (bool, int)):
-            payload[k] = b[k]
+    #
+    # Each field is checked against its OWN type, not a shared bool-or-int test:
+    # `bool` is a subclass of `int` in Python, so one shared check would forward
+    # `has_more: 0` and `total: false` and emit an envelope that violates
+    # schemas/assets_library.json — the very contract this command publishes.
+    if isinstance(b.get("has_more"), bool):
+        payload["has_more"] = b["has_more"]
+    total = b.get("total")
+    if isinstance(total, int) and not isinstance(total, bool):
+        payload["total"] = total
     renderer.emit(payload, command="assets library ls", where="cloud")
 
 

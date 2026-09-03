@@ -142,6 +142,21 @@ class TestLsPagination:
         assert "has_more" not in data
         assert "total" not in data
 
+    def test_omits_cross_typed_values(self, cloud_target, monkeypatch, capsys):
+        # `bool` is a subclass of `int` in Python, so a shared bool-or-int check
+        # would let `has_more: 0` / `total: false` through and emit an envelope
+        # that violates this command's own published schema. Each field is
+        # validated against its own type instead, and a mistyped value is
+        # dropped exactly like an absent one.
+        data = self._ls(monkeypatch, capsys, {"assets": [], "has_more": 0, "total": False})
+        assert "has_more" not in data
+        assert "total" not in data
+
+    def test_omits_values_of_the_wrong_json_type(self, cloud_target, monkeypatch, capsys):
+        data = self._ls(monkeypatch, capsys, {"assets": [], "has_more": "true", "total": "1234"})
+        assert "has_more" not in data
+        assert "total" not in data
+
     def test_existing_count_and_assets_shape_unchanged(self, cloud_target, monkeypatch, capsys):
         rows = [
             {
