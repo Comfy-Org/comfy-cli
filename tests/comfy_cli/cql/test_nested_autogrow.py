@@ -223,6 +223,19 @@ def test_production_nested_autogrow_at_min_validates_clean(graph):
     assert result["valid"] is True, result["errors"]
 
 
+def test_production_nested_autogrow_counts_the_declared_names(graph):
+    """One wired slot against ``min: 1`` — but the wrong one. The server marks
+    ``model.images.image_1`` required (``names[:min]``) and rejects a prompt
+    that only wires ``image_2``, so a bare count of the ``model.images.`` keys
+    is not the server's test."""
+    result = graph.validate_workflow(_grok_edit_v2_workflow({"model.images.image_2": ["9", 0]}))
+    assert result["valid"] is False
+    err = next(e for e in result["errors"] if e["code"] == "autogrow_below_min")
+    assert "'model.images.image_1'" in err["message"]
+    # The slot that IS wired stays a known key rather than unknown_input noise.
+    assert result["warnings"] == []
+
+
 def test_production_min_zero_group_stays_lenient(graph):
     """``MinimaxHailuo03ReferenceNode``'s `reference_videos`/`reference_audios`
     declare ``min: 0`` inside the option's ``required`` section — the deliberate
