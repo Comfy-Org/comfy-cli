@@ -1505,11 +1505,11 @@ class Graph:
         # Server parity: ComfyUI's validate_prompt only validates output nodes
         # and their transitive input ancestors — any node not reachable from an
         # output is pruned and never validated (execution.py). Restrict the
-        # promoted hard checks (required-input presence, autogrow-required, and
-        # below_min/above_max ranges) to that reachable set, so a
-        # disconnected/incomplete node the server would silently drop isn't
-        # hard-rejected here. Edge/shape/enum checks are left as-is (pre-existing
-        # behavior, out of scope for this change).
+        # promoted hard checks (required-input presence, autogrow-required,
+        # below_min/above_max ranges, and edge type mismatches) to that
+        # reachable set, so a disconnected/incomplete node the server would
+        # silently drop isn't hard-rejected here. Shape/enum checks are left
+        # as-is (pre-existing behavior, out of scope).
         reachable = _output_reachable_node_ids(workflow, self)
 
         for node_id, node_data in workflow.items():
@@ -1662,9 +1662,38 @@ class Graph:
                         )
                         continue
 
-                    # (iii) type compatibility — advisory only.
-                    # ComfyUI allows cross-type wiring via reroutes, converters,
-                    # and wildcard ports; the server is the authoritative validator.
+                    # (iii) type compatibility — a hard error on a node the
+                    # server will actually run, advisory on one it prunes.
+                    #
+                    # The server hard-rejects a type-mismatched link
+                    # (`return_type_mismatch`, "Return type mismatch between
+                    # linked nodes" — execution.py's validate_inputs), so
+                    # reporting it as a warning produced an `ok:true,
+                    # valid:true` envelope for a graph that cannot run: a
+                    # downstream agent reads it as runnable, submits, and dies
+                    # server-side, wasting a submit and a run slot.
+                    #
+                    # Gated on output-reachability exactly like
+                    # required_input_missing / below_min / above_max: the server
+                    # prunes nodes not reachable from an output and never
+                    # validates them, so on a pruned node the mismatch stays an
+                    # advisory warning rather than hard-rejecting a prompt the
+                    # server would happily run.
+                    #
+                    # KNOWN over-rejection risk, accepted deliberately: the
+                    # server SKIPS this check entirely when the destination
+                    # node's VALIDATE_INPUTS declares an `input_types` argument
+                    # (`'input_types' not in validate_function_inputs`), and
+                    # object_info does not expose that signature — we cannot
+                    # tell such a node apart from any other. Mitigation is to
+                    # keep the permissive side permissive:
+                    # `_edge_types_compatible` is strictly MORE permissive than
+                    # the server's `validate_node_input` (same comma-separated
+                    # union set-intersection, plus COMFY_MATCHTYPE wildcards and
+                    # a case-insensitive compare), so only an exact
+                    # known-type/empty-intersection mismatch is ever promoted —
+                    # a wildcard, a union overlap, or a blank/unknown type on
+                    # either end still yields no finding at all.
                     port = port_by_name.get(input_name)
                     if port is not None:
                         src_type = src_m.outputs[out_idx].type
@@ -1681,18 +1710,33 @@ class Graph:
                                 if correct
                                 else f"run `comfy nodes ls --produces {dst_type}` to find a source"
                             )
-                            warnings.append(
-                                {
-                                    "node_id": node_id,
-                                    "field": input_name,
-                                    "code": "edge_type_mismatch",
-                                    "message": (
-                                        f"input {input_name!r} expects {dst_type} but "
-                                        f"{src_class}[{out_idx}] produces {src_type}"
-                                    ),
-                                    "hint": hint,
-                                }
+                            finding = {
+                                "node_id": node_id,
+                                "field": input_name,
+                                "code": "edge_type_mismatch",
+                                "message": (
+                                    f"input {input_name!r} expects {dst_type} but "
+                                    f"{src_class}[{out_idx}] produces {src_type}"
+                                ),
+                                "hint": hint,
+                            }
+                            # A dynamic-combo selector (COMFY_DYNAMICCOMBO_V3)
+                            # is a widget port whose concrete option — and the
+                            # sub-inputs it contributes — resolve at execution
+                            # time, which is why the expansion checks skip a
+                            # wired one. Its declared type is not what the
+                            # server ends up comparing, so it stays on the
+                            # permissive side of the promotion and keeps the
+                            # advisory warning it has always emitted.
+                            promote = (
+                                node_id in reachable
+                                and not _is_dynamic_combo_type(src_type)
+                                and not _is_dynamic_combo_type(dst_type)
                             )
+                            if promote:
+                                errors.append(finding)
+                            else:
+                                warnings.append(finding)
                     continue
 
                 port = port_by_name.get(input_name)
@@ -2005,8 +2049,9 @@ def _output_reachable_node_ids(workflow: dict[str, Any], graph: Graph) -> set[st
     output nodes (``OUTPUT_NODE``) and everything reachable by walking their
     input links backward — any node not reachable from an output is pruned and
     never validated. We reproduce that reachable set so the promoted hard checks
-    (required_input_missing, autogrow_no_slots, below_min/above_max) don't
-    reject a disconnected node the server would silently drop.
+    (required_input_missing, autogrow_no_slots, below_min/above_max,
+    edge_type_mismatch) don't reject a disconnected node the server would
+    silently drop.
 
     An input value shaped ``[source_node_id, output_index]`` is a link edge (the
     same predicate the per-input link walk uses); we follow those edges backward
