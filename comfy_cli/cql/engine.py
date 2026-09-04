@@ -225,13 +225,14 @@ class Port:
         return ", ".join(first) + ", …"
 
     @property
-    def autogrow_element_type(self) -> str | None:
-        """The socket type every grown slot of this autogrow input carries —
-        the single input the schema ``template`` declares (``IMAGE`` for
-        ``model.images``, ``VIDEO`` for ``model.reference_videos``). Every
-        group in the production catalog declares exactly one template input;
-        a template with none (or a non-autogrow port) reads as ``None``, which
-        callers treat as "accept the source type".
+    def autogrow_template_input_spec(self) -> Any | None:
+        """The single inner ``INPUT_TYPES`` spec this autogrow group's schema
+        ``template`` declares — the spec the server copies into every grown
+        slot (``["IMAGE", {}]`` for ``model.images``).
+
+        ``None`` when there is nothing to read: a non-autogrow port, a template
+        with no ``input`` block (an older/partial catalog capture), or one whose
+        sections declare no input carrying a usable socket type.
         """
         t = self.options.template
         if not self.is_autogrow or not isinstance(t, dict):
@@ -249,8 +250,47 @@ class Port:
             for spec in section_def.values():
                 type_id = spec[0] if isinstance(spec, (list, tuple)) and spec else spec
                 if isinstance(type_id, str) and type_id:
-                    return type_id
+                    return spec
         return None
+
+    @property
+    def autogrow_element_type(self) -> str | None:
+        """The socket type every grown slot of this autogrow input carries —
+        the single input the schema ``template`` declares (``IMAGE`` for
+        ``model.images``, ``VIDEO`` for ``model.reference_videos``). Every
+        group in the production catalog declares exactly one template input;
+        a template with none (or a non-autogrow port) reads as ``None``, which
+        callers treat as "accept the source type".
+        """
+        spec = self.autogrow_template_input_spec
+        if spec is None:
+            return None
+        return spec[0] if isinstance(spec, (list, tuple)) and spec else spec
+
+    def autogrow_slot_port(self, slot_key: str, *, required: bool) -> Port | None:
+        """A :class:`Port` for one grown slot of this group, parsed from the
+        template's inner input — the same input the server copies into the
+        node's expanded schema under this ``slot_key``
+        (``Autogrow._expand_schema_for_dynamic``).
+
+        Slot keys never appear in ``/object_info``'s own input list, so nothing
+        in ``Morphism.inputs`` types them; validation synthesizes one of these
+        per present, template-declared key so a slot gets the *same* edge,
+        shape and catalog checks as an ordinary input. Everything the inner
+        spec declares comes along — ``enum_values``/``enum_declared`` so a COMBO
+        template is membership-checked, ``options`` so a ranged ``INT`` template
+        is range-checked.
+
+        ``None`` when :attr:`autogrow_template_input_spec` reads nothing (a
+        non-autogrow port, or a template with no inner input): with no declared
+        inner type there is nothing to check a slot against, and inventing one
+        would be the reject-what-you-cannot-read mistake the sibling autogrow
+        accessors all avoid.
+        """
+        spec = self.autogrow_template_input_spec
+        if spec is None:
+            return None
+        return _port_from_spec(slot_key, spec, required)
 
     @property
     def autogrow_limits(self) -> tuple[int, int | None]:
@@ -1781,9 +1821,32 @@ class Graph:
             # _check_dynamic_combos already covers it. Sub-keys under an
             # unresolved selection keep the old generic checks.
             dyn_port_names = {p.name for p in m.inputs if p.is_dynamic_combo}
-            dyn_errors, dyn_warnings, dyn_valid_keys, dyn_unresolved = _check_dynamic_combos(
+            dyn_errors, dyn_warnings, dyn_valid_keys, dyn_unresolved, dyn_slot_ports = _check_dynamic_combos(
                 node_id, class_type, m, node_inputs
             )
+            # Autogrow slot keys (`images.image0`, `model.images.image_1`, …)
+            # are absent from `port_by_name` — object_info declares the GROUP,
+            # never its grown slots — so the per-input loop below had no type to
+            # check them against: a link-valued slot skipped the
+            # `edge_type_mismatch` comparison and a plain value fell out at
+            # `if port is None: continue`, before any shape or catalog check.
+            # An INT wired into an IMAGE slot validated clean here and was then
+            # hard-rejected by the server as `return_type_mismatch`. Synthesize
+            # one Port per present, template-declared slot key from the group's
+            # own template input so those keys route through exactly the same
+            # branches as any other input.
+            slot_ports: dict[str, Port] = {}
+            for base, agp in autogrow_ports.items():
+                matched = {k for k in node_inputs if k.startswith(f"{base}.")}
+                # Only the keys the group actually grows: `images.bogus` is not
+                # an input of the node, so it gets no synthesized diagnostic.
+                # Where the catalog names no slots there is nothing to filter
+                # against and the historical prefix match stands.
+                declared = agp.autogrow_declared_slot_keys(matched)
+                slot_ports.update(_autogrow_slot_ports(base, agp, matched if declared is None else declared))
+            # Nested groups are typed by the dynamic-combo walk, which is the
+            # only pass that knows which option expanded them.
+            slot_ports.update(dyn_slot_ports)
             for input_name, value in node_inputs.items():
                 if (
                     "." in input_name
@@ -1858,7 +1921,7 @@ class Graph:
                     # (iii) type compatibility — advisory only.
                     # ComfyUI allows cross-type wiring via reroutes, converters,
                     # and wildcard ports; the server is the authoritative validator.
-                    port = port_by_name.get(input_name)
+                    port = port_by_name.get(input_name) or slot_ports.get(input_name)
                     if port is not None:
                         src_type = src_m.outputs[out_idx].type
                         dst_type = port.type
@@ -1888,7 +1951,7 @@ class Graph:
                             )
                     continue
 
-                port = port_by_name.get(input_name)
+                port = port_by_name.get(input_name) or slot_ports.get(input_name)
                 if port is None:
                     continue
                 # Shape check (hard error)
@@ -2413,24 +2476,29 @@ def _check_dynamic_combos(
 
     Also flags present dotted keys that match no sub-input of the resolved
     selection — a warning, not an error, because the server ignores extra
-    keys; that pass lives in ``_unknown_dotted_key_warnings``. Returns ``(errors, warnings, valid_keys, unresolved)`` — the caller
+    keys; that pass lives in ``_unknown_dotted_key_warnings``. Returns
+    ``(errors, warnings, valid_keys, unresolved, slot_ports)`` — the caller
     uses ``valid_keys``/``unresolved`` to exempt stale (server-ignored)
     dynamic sub-keys from the generic edge checks, which would otherwise
-    hard-error on e.g. a dangling link left over from a previous selection.
+    hard-error on e.g. a dangling link left over from a previous selection,
+    and ``slot_ports`` to type the autogrow slot keys a resolved option
+    expanded — this walk is the only pass that knows which option expanded
+    them, so the driver loop cannot derive them for itself.
     """
     errors: list[dict] = []
     warnings: list[dict] = []
     present = node_inputs
     dynamic_ports = [p for p in m.inputs if p.is_dynamic_combo]
     if not dynamic_ports:
-        return errors, warnings, set(), set()
+        return errors, warnings, set(), set(), {}
 
     valid_keys: set[str] = set()
     unresolved: set[str] = set()
     resolved: dict[str, Any] = {}
+    slot_ports: dict[str, Port] = {}
     for port in dynamic_ports:
         e, w, v, u = _check_dynamic_combo_input(
-            node_id, class_type, port.name, port.raw_spec, port.required, present, resolved
+            node_id, class_type, port.name, port.raw_spec, port.required, present, resolved, slot_ports=slot_ports
         )
         errors.extend(e)
         warnings.extend(w)
@@ -2438,7 +2506,7 @@ def _check_dynamic_combos(
         unresolved |= u
 
     warnings.extend(_unknown_dotted_key_warnings(node_id, present, dynamic_ports, valid_keys, unresolved, resolved))
-    return errors, warnings, valid_keys, unresolved
+    return errors, warnings, valid_keys, unresolved, slot_ports
 
 
 def _unknown_dotted_key_warnings(
@@ -2527,6 +2595,7 @@ def _check_dynamic_combo_input(
     present: dict,
     resolved: dict[str, Any],
     depth: int = 0,
+    slot_ports: dict[str, Port] | None = None,
 ) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """One dynamic-combo input: resolve its selected option, check its sub-inputs.
 
@@ -2537,6 +2606,13 @@ def _check_dynamic_combo_input(
     (mutated) records ``name -> selected key`` for every combo level that DID
     resolve, so the caller can attribute a stray key to the deepest resolved
     prefix.
+
+    ``slot_ports`` is the second mutated accumulator, filled the same way and
+    for the same reason: an autogrow group nested in a resolved option grows
+    slot keys the top-level driver has no way to type on its own, so this walk
+    records a synthesized :class:`Port` per present slot key
+    (:func:`_autogrow_slot_ports`) for the driver's edge/shape/catalog checks.
+    Optional so the direct callers in the tests need not supply one.
     """
     errors: list[dict] = []
     warnings: list[dict] = []
@@ -2666,7 +2742,7 @@ def _check_dynamic_combo_input(
             dotted = f"{name}.{sub_name}"
             valid_keys.add(dotted)
             e, w, v, u = _check_dynamic_combo_sub(
-                node_id, class_type, dotted, sub_spec, sub_required, present, resolved, depth
+                node_id, class_type, dotted, sub_spec, sub_required, present, resolved, depth, slot_ports
             )
             errors.extend(e)
             warnings.extend(w)
@@ -2684,19 +2760,24 @@ def _check_dynamic_combo_sub(
     present: dict,
     resolved: dict[str, Any],
     depth: int,
+    slot_ports: dict[str, Port] | None = None,
 ) -> tuple[list[dict], list[dict], set[str], set[str]]:
     """Presence + shape + catalog checks for one expanded sub-input.
 
     The sub-input spec is a plain ``INPUT_TYPES`` entry, so it goes through the
     same ``_parse_input_spec`` / :class:`Port` machinery as a top-level input and
     inherits identical shape and enum/range semantics.
+
+    ``slot_ports`` is the mutated accumulator described on
+    :func:`_check_dynamic_combo_input`: an autogrow sub-input records one
+    synthesized :class:`Port` per slot key it grows into it.
     """
     port = _port_from_spec(dotted, sub_spec, sub_required)
 
     if port.is_dynamic_combo:
         # Nested dynamic combo: its own selector/presence rules apply one level down.
         return _check_dynamic_combo_input(
-            node_id, class_type, dotted, sub_spec, sub_required, present, resolved, depth + 1
+            node_id, class_type, dotted, sub_spec, sub_required, present, resolved, depth + 1, slot_ports
         )
 
     if port.is_autogrow:
@@ -2761,6 +2842,12 @@ def _check_dynamic_combo_sub(
         # against, so the historical prefix match stands.
         declared = port.autogrow_declared_slot_keys(matched)
         valid = matched if declared is None else declared
+        # Type each of those keys off the group's template input, so the driver
+        # loop edge/shape/catalog-checks a nested slot exactly as it does a
+        # top-level one. Only the valid keys: an undeclared `model.images.bogus`
+        # stays an `unknown_input` warning and gets no synthesized diagnostic.
+        if slot_ports is not None:
+            slot_ports.update(_autogrow_slot_ports(dotted, port, valid))
         # The valid keys stay valid even when the count is short, so the slots
         # that ARE wired don't regress into `unknown_input` noise on top of the
         # count error. These errors flow into `dyn_errors`, which the driver
@@ -2915,6 +3002,38 @@ def _autogrow_slot_errors(node_id: str, field: str, port: Port, slots: set[str],
         return []
     shortfall = _autogrow_below_min_error(node_id, field, port, slots, lo)
     return [shortfall] if shortfall else []
+
+
+def _autogrow_slot_ports(field: str, port: Port, slots: Iterable[str]) -> dict[str, Port]:
+    """One synthesized :class:`Port` per present slot key of one autogrow group
+    — shared by the top-level driver loop and the dynamic-combo-nested path so a
+    slot is typed the same way at every nesting depth.
+
+    ``slots`` must already be the keys the group actually grows
+    (:meth:`Port.autogrow_declared_slot_keys`, or the historical prefix match
+    where the catalog names none): a key the template never declares is not an
+    input of the node at all, so synthesizing a Port for it would invent a
+    diagnostic about something the server ignores.
+
+    ``required`` per slot is the server's own answer — the specific names it
+    places in the expanded schema's ``required`` section
+    (:meth:`Port.autogrow_required_slot_names` over
+    :attr:`Port.autogrow_effective_min`), not merely the first ``min`` keys the
+    prompt happens to wire. It stays ``False`` where the catalog names no slots
+    for the same reason the count check falls back there: nothing declared them.
+
+    Empty for a group whose template declares no inner input — there is no type
+    to check a slot against, so it keeps the pre-existing "no port, no
+    diagnostic" behaviour rather than guessing one.
+    """
+    names = port.autogrow_required_slot_names(port.autogrow_effective_min)
+    required_keys = set() if names is None else {f"{field}.{name}" for name in names}
+    out: dict[str, Port] = {}
+    for key in slots:
+        slot_port = port.autogrow_slot_port(key, required=key in required_keys)
+        if slot_port is not None:
+            out[key] = slot_port
+    return out
 
 
 def _check_autogrow_required(node_id: str, autogrow_ports: dict[str, Port], node_data: dict) -> list[dict]:

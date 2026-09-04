@@ -251,3 +251,114 @@ def test_production_min_zero_group_stays_lenient(graph):
     assert port.autogrow_template_required is True
     assert port.autogrow_limits[0] == 0
     assert port.autogrow_effective_min == 0
+
+
+# --------------------------------------------------------------------------- #
+# (E) slot keys are type/shape/catalog-checked like any other input
+# --------------------------------------------------------------------------- #
+
+
+def _nano_banana_inputs(option_index: int = 0) -> dict:
+    """Every widget ``GeminiNanoBanana2V2`` requires for one model option, at
+    its schema defaults — everything except the ``images`` autogrow slots."""
+    info = json.loads(FIXTURE.read_text())
+    node = info["GeminiNanoBanana2V2"]["input"]["required"]
+    option = node["model"][1]["options"][option_index]
+
+    def default_of(spec):
+        opts = spec[1] if isinstance(spec, list) and len(spec) > 1 and isinstance(spec[1], dict) else {}
+        if "default" in opts:
+            return opts["default"]
+        return (opts.get("options") or [""])[0]
+
+    inputs = {"model": option["key"]}
+    inputs.update({k: default_of(v) for k, v in node.items() if k != "model"})
+    inputs.update(
+        {f"model.{k}": default_of(v) for k, v in option["inputs"].get("required", {}).items() if k != "images"}
+    )
+    return inputs
+
+
+def _nano_banana_workflow(extra: dict) -> dict:
+    """``GeminiNanoBanana2V2`` fed by a ``LoadImage``, terminating in a
+    ``SaveImage``. ``LoadImage`` is the mis-wire source these tests need:
+    output ``[0]`` is ``IMAGE`` and output ``[1]`` is ``MASK``, so the same node
+    supplies both the correct and the wrongly-typed edge."""
+    return {
+        "9": {"class_type": "LoadImage", "inputs": {"image": "example.png"}},
+        "1": {"class_type": "GeminiNanoBanana2V2", "inputs": {**_nano_banana_inputs(), **extra}},
+        "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "out"}},
+    }
+
+
+def _batch_images_workflow(extra: dict) -> dict:
+    """The ticket's top-level artifact: the production ``BatchImagesNode``,
+    whose ``images`` group declares ``prefix: image``, ``min: 1``, ``max: 50``
+    and an inner ``IMAGE`` input."""
+    return {
+        "9": {"class_type": "LoadImage", "inputs": {"image": "example.png"}},
+        "1": {"class_type": "BatchImagesNode", "inputs": {**extra}},
+        "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "out"}},
+    }
+
+
+def test_top_level_slot_key_edge_is_type_checked(graph):
+    """The defect: ``BatchImagesNode.images.image0`` never entered
+    ``port_by_name`` (object_info declares the GROUP, never its grown slots), so
+    a link into it skipped the ``edge_type_mismatch`` comparison entirely and a
+    wrongly-typed edge validated clean — while the server hard-rejects it as
+    ``return_type_mismatch``. ``LoadImage[1]`` is ``MASK``; the slot's template
+    input is ``IMAGE``."""
+    result = graph.validate_workflow(_batch_images_workflow({"images.image0": ["9", 1]}))
+    warns = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
+    assert len(warns) == 1
+    assert warns[0]["node_id"] == "1"
+    assert warns[0]["field"] == "images.image0"
+    assert "expects IMAGE" in warns[0]["message"]
+    # Advisory, as every other edge check is until BE-10311 promotes them.
+    assert result["errors"] == []
+
+
+def test_top_level_correctly_wired_slot_stays_clean(graph):
+    result = graph.validate_workflow(_batch_images_workflow({"images.image0": ["9", 0]}))
+    assert result["valid"] is True, result["errors"]
+    assert result["warnings"] == []
+
+
+def test_top_level_undeclared_slot_key_gets_no_synthesized_diagnostic(graph):
+    """``images.bogus`` is not a name the template grows, so the server does not
+    place it in the node's schema at all — no Port is synthesized for it and it
+    draws no edge-type diagnostic (and, at the top level, no unknown-input one
+    either: that check does not exist there)."""
+    result = graph.validate_workflow(_batch_images_workflow({"images.image0": ["9", 0], "images.bogus": ["9", 1]}))
+    assert [w["code"] for w in result["warnings"]] == []
+    assert result["errors"] == []
+
+
+def test_nested_slot_key_edge_is_type_checked(graph):
+    """The same defect one level down, on the fixture's ``GeminiNanoBanana2V2``:
+    ``model.images.image_1``'s template input is ``IMAGE``, and the nested walk
+    accepted every slot key wholesale without ever typing it."""
+    result = graph.validate_workflow(_nano_banana_workflow({"model.images.image_1": ["9", 1]}))
+    warns = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
+    assert len(warns) == 1
+    assert warns[0]["node_id"] == "1"
+    assert warns[0]["field"] == "model.images.image_1"
+    assert "expects IMAGE but LoadImage[1] produces MASK" in warns[0]["message"]
+    assert result["errors"] == []
+
+
+def test_nested_correctly_wired_slot_stays_clean(graph):
+    result = graph.validate_workflow(_nano_banana_workflow({"model.images.image_1": ["9", 0]}))
+    assert result["valid"] is True, result["errors"]
+    assert result["warnings"] == []
+
+
+def test_nested_undeclared_slot_key_is_still_unknown_input(graph):
+    """Post-#842 behaviour preserved: a key the template never declares stays
+    out of the synthesized ports AND out of the valid-key set, so it keeps
+    reporting ``unknown_input`` rather than gaining an edge diagnostic about a
+    slot the server ignores."""
+    result = graph.validate_workflow(_nano_banana_workflow({"model.images.bogus": ["9", 1]}))
+    assert [(w["code"], w["field"]) for w in result["warnings"]] == [("unknown_input", "model.images.bogus")]
+    assert result["errors"] == []
