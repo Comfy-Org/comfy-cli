@@ -229,7 +229,12 @@ def test_validate_spec_text_rejects_non_spec_bodies(text):
 def test_model_enum_from_vendored_spec():
     models = spec.model_enum("byteplus/api/v3/contents/generations/tasks")
     assert models, "expected the byteplus tasks request schema to carry a model enum"
-    assert all(m.startswith("seedance-") for m in models)
+    # The endpoint serves the Seedance family under two upstream naming schemes
+    # (`seedance-*` and the newer `dreamina-seedance-*`); assert the family
+    # rather than one prefix, so a partner adding a variant doesn't red the
+    # build for a spec refresh that is working as intended.
+    assert all("seedance" in m for m in models)
+    assert any(m.startswith("seedance-") for m in models)
 
 
 def test_model_enum_returns_none_without_enum():
@@ -275,3 +280,54 @@ def test_find_property_descends_top_level_composition():
     nested = {"anyOf": [{"oneOf": [{"properties": {"model": {"enum": ["m2"]}}}]}]}
     assert spec._find_property(nested, "model") == {"enum": ["m2"]}
     assert spec._find_property({"allOf": [{"type": "object"}]}, "model") is None
+
+
+# ── allowlist / alias drift against the bundled spec ──────────────────────
+
+
+def _bundled_proxy_ids(monkeypatch, tmp_path) -> set[str]:
+    """Endpoint ids the BUNDLED spec declares under ``/proxy/``.
+
+    Points ``_USER_CACHE`` at a path that does not exist so ``_select_spec_path``
+    falls through to the vendored copy — otherwise a developer's own
+    ``~/.comfy/openapi-cache.yml`` would decide whether these tests pass.
+    """
+    monkeypatch.setattr(spec, "_USER_CACHE", tmp_path / "does-not-exist.yml")
+    spec.load_raw_spec.cache_clear()
+    spec._registry.cache_clear()
+    try:
+        assert spec.active_spec_path() == spec._BUNDLED_SPEC
+        paths = spec.load_raw_spec()["paths"]
+        return {p[len(spec.PROXY_PREFIX) :] for p in paths if p.startswith(spec.PROXY_PREFIX)}
+    finally:
+        # Don't leak the bundled-only load into tests that install their own cache.
+        spec.load_raw_spec.cache_clear()
+        spec._registry.cache_clear()
+
+
+def test_every_allowlisted_endpoint_exists_in_vendored_spec(monkeypatch, tmp_path):
+    """Every curated tuple must resolve against the spec we ship.
+
+    ``_registry()`` skips a missing node at runtime so a stale user cache can't
+    crash ``generate``; that ``continue`` also hid allowlist drift in both
+    directions — a retired proxy route stayed advertised by ``generate list``
+    until someone noticed by hand. Assert it here instead, where the failure is
+    loud and names the offending ids.
+    """
+    allowlisted = {endpoint_id for endpoint_id, _, _ in spec._ENDPOINT_ALLOWLIST}
+    declared = _bundled_proxy_ids(monkeypatch, tmp_path)
+    assert allowlisted <= declared, "allowlisted endpoints missing from the vendored spec: " + ", ".join(
+        sorted(allowlisted - declared)
+    )
+
+
+def test_every_alias_targets_an_allowlisted_endpoint(monkeypatch, tmp_path):
+    """An alias pointing at an id no tuple carries resolves to nothing —
+    ``get_endpoint`` raises `Unknown model` for a name ``generate list`` still
+    prints. Catch the dangling alias here."""
+    allowlisted = {endpoint_id for endpoint_id, _, _ in spec._ENDPOINT_ALLOWLIST}
+    dangling = {alias: target for alias, target in spec._ALIASES.items() if target not in allowlisted}
+    assert not dangling, f"aliases targeting a non-allowlisted endpoint: {dangling}"
+    # And the allowlist itself only names endpoints the bundled spec declares,
+    # so every alias is reachable end-to-end.
+    assert allowlisted <= _bundled_proxy_ids(monkeypatch, tmp_path)

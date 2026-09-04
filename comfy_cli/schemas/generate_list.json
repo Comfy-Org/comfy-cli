@@ -27,7 +27,7 @@
           },
           "category": {
             "type": "string",
-            "description": "Model style: text-to-image, image-edit, controlnet, inpaint, outpaint, video, … Rendered as the table's 'Style' column and filterable via `--style` / `--category`."
+            "description": "Model style: text-to-image, image-edit, upscale, inpaint, outpaint, video, … Rendered as the table's 'Style' column and filterable via `--style` / `--category`."
           },
           "mode": {
             "type": "string",
