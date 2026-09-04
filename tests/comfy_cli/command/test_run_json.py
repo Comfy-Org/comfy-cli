@@ -2007,8 +2007,54 @@ class TestEventSchemaDiscriminatesNodesShape:
             self._validator().validate(regressed)
 
     def test_execution_cached_still_accepts_bare_node_ids(self):
-        """`comfy jobs watch --where cloud` emits plain id strings here."""
+        """Legacy shape: comfy-cli 1.16.0's `comfy jobs watch` emitted one
+        `execution_cached` carrying a plain array of node ids. Nothing emits it
+        any more — watch now fans out one event per node, matching `comfy run` —
+        but a stream captured from 1.16.0 must keep validating."""
         self._validator().validate({"schema": "event/1", "type": "execution_cached", "nodes": ["1", "2"]})
+
+    def test_execution_cached_per_node_shape_validates(self):
+        """The shape BOTH streams emit today — one event, one `node`."""
+        self._validator().validate(
+            {
+                "schema": "event/1",
+                "type": "execution_cached",
+                "node": "1",
+                "title": "Latent",
+                "class_type": "EmptyLatentImage",
+                "prompt_id": "p",
+            }
+        )
+        # `comfy jobs watch` has no workflow map, so it omits title/class_type.
+        self._validator().validate({"schema": "event/1", "type": "execution_cached", "node": "1", "prompt_id": "p"})
+
+    def test_execution_cached_rejects_an_event_carrying_neither_shape(self):
+        """`node` and the legacy `nodes` are the only two payloads. An event
+        with neither names no node at all, so a consumer counting cached nodes
+        silently reads zero — the schema must catch that, not pass it."""
+        import jsonschema
+
+        with pytest.raises(jsonschema.ValidationError):
+            self._validator().validate({"schema": "event/1", "type": "execution_cached", "prompt_id": "p"})
+
+    def test_execution_cached_rejects_an_event_carrying_both_shapes(self):
+        """Both fields at once is ambiguous: a consumer reading `node` and one
+        reading `nodes` would disagree about how many nodes were cached."""
+        import jsonschema
+
+        with pytest.raises(jsonschema.ValidationError):
+            self._validator().validate(
+                {"schema": "event/1", "type": "execution_cached", "node": "1", "nodes": ["1", "2"]}
+            )
+
+    def test_execution_cached_rejects_a_null_node(self):
+        """Neither emitter can produce one: `comfy run`'s on_cached skips null
+        entries and `jobs watch` filters them, so `node: null` is a regression
+        that would surface a phantom cached node."""
+        import jsonschema
+
+        with pytest.raises(jsonschema.ValidationError):
+            self._validator().validate({"schema": "event/1", "type": "execution_cached", "node": None})
 
 
 class TestMalformedRejectionPayloadStillYieldsAnEnvelope:

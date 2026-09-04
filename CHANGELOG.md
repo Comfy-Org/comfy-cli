@@ -241,6 +241,24 @@ history.
   from a single open handle, and the body is bounded to exactly the declared
   size.
 
+- Stream-dialect conformance: `comfy jobs watch` now emits one
+  `execution_cached` event **per cached node** (`{"node": "<id>", …}`), the same
+  shape `comfy run` has always emitted, instead of the single list-shaped
+  `{"nodes": [...]}` event that shipped in 1.16.0. `docs/json-output.md`
+  promises the run stream and the watch stream speak one dialect, so a consumer
+  written against the documented run dialect was undercounting every cached node
+  beyond the first on a watch stream. **Breaking for a `jobs watch --json`
+  consumer that reads `ev["nodes"]` on this event**: the published `run_event`
+  schema did describe that array as watch's shape, and watch no longer emits
+  it — read `ev["node"]`, one event per node, the same field the run stream has
+  always required. `event/1` is deliberately not bumped: the list shape existed
+  for a single release and was itself the deviation from the one dialect the
+  schema and `docs/json-output.md` document, and no other event type changes —
+  bumping the CLI-wide event contract would force every consumer of every event
+  to revalidate over a one-event, one-release regression. The `nodes` array
+  remains accepted by the published schema so a stream captured from 1.16.0
+  still validates, but nothing emits it.
+
 ## [1.16.0] - 2026-08-10
 
 [Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.16.0) · 16 commits since v1.15.0. No breaking changes.
