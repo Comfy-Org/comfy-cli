@@ -31,6 +31,11 @@ class ScaleRequest:
     maximum: int | None
     gpu: str | None
     region: str | None
+    # ``None`` is "flag omitted", and the field is then left out of the request
+    # so the service keeps the stored flags; an explicit clear sends an empty
+    # list, which is how the service reads "remove them".
+    startup_args: tuple[str, ...] | None = None
+    clear_startup_args: bool = False
 
 
 @runtime_checkable
@@ -87,6 +92,10 @@ def run_scale(request: ScaleRequest) -> None:
             value = requested if requested is not None else current.get(bound)
             if value is not None:
                 merged[bound] = value
+        if request.clear_startup_args:
+            merged["startupArgs"] = []
+        elif request.startup_args is not None:
+            merged["startupArgs"] = list(request.startup_args)
         try:
             result = client.update_deployment(deployment_id, merged)
         except DeployAPIError as error:
@@ -100,11 +109,17 @@ def run_scale(request: ScaleRequest) -> None:
                 details=details,
             ) from error
         if renderer.is_pretty():
-            renderer.success(
-                f"Scaled deployment {deployment_id} to "
-                f"min={merged.get('min', 'unset')}, max={merged.get('max', 'unset')}"
-            )
-        renderer.emit(result, command="deploy scale", changed=merged != current)
+            settings = [f"{bound}={merged[bound]}" for bound in ("min", "max") if bound in merged]
+            if "startupArgs" in merged:
+                settings.append(f"startupArgs={' '.join(merged['startupArgs']) or 'none'}")
+            elif not settings:
+                settings = ["min=unset", "max=unset"]
+            renderer.success(f"Scaled deployment {deployment_id} to {', '.join(settings)}")
+        # Overlaid on the stored config: a field the request leaves out is kept
+        # by the service, so it is not a change either. The service stores no
+        # empty flag set, so a clear against none stored is not a change.
+        before = {**current, "startupArgs": current.get("startupArgs", [])}
+        renderer.emit(result, command="deploy scale", changed={**before, **merged} != before)
 
     _run_lifecycle(request.target, scale)
 

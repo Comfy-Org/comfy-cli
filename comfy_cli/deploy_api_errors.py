@@ -140,7 +140,14 @@ def _compute_or_bad_request(message: str) -> dict[str, str]:
 
 
 def _immutable_or_conflict(message: str) -> dict[str, str]:
-    return _IMMUTABLE_COMPUTE if "changing gpuclass or region" in message.lower() else _CONFLICT
+    # The service names the field it refused in its own 409 text; both are
+    # "stop the deployment first" refusals rather than a state conflict.
+    lowered = message.lower()
+    return (
+        _IMMUTABLE_COMPUTE
+        if "changing gpuclass or region" in lowered or "changing startupargs" in lowered
+        else _CONFLICT
+    )
 
 
 def _deleted_or_conflict(message: str) -> dict[str, str]:

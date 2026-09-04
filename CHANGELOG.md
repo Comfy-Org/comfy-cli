@@ -15,6 +15,16 @@ history.
 
 ## [Unreleased]
 
+### Added
+
+- `comfy deploy up --startup-arg=<flag>` sets the ComfyUI startup flags on the
+  deployment it creates, and `comfy deploy scale --startup-arg=<flag>` changes
+  them on a stopped deployment (`--highvram`, `--reserve-vram 2`, and the rest
+  of the service's allowlist); `scale --clear-startup-args` removes them. Flags
+  apply when the deployment starts, so a running deployment is stopped first;
+  `deploy status`, `deploy up` and `deploy scale` report the stored flags as
+  `computeConfig.startupArgs`.
+
 ### Fixed
 
 - `comfy install --fast-deps --nvidia` no longer installs a torch that its

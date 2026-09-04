@@ -35,7 +35,7 @@ Every other verb reads, or gives compute back.
 up      Create or reconcile a deployment for the selected Build release.   SPENDS
 run     Submit an API-format workflow to a ready deployment.               SPENDS
 status  Deployment health, release freshness, and serving activity.
-scale   Edit worker bounds, or GPU/region on a stopped deployment.
+scale   Edit worker bounds, or GPU/region/startup flags on a stopped deployment.
 stop    Pause a deployment, retaining its endpoint and staged models.
 start   Resume a stopped or failed deployment.                             SPENDS
 delete  Enqueue teardown and soft-delete the record.
@@ -117,7 +117,7 @@ fixes — say so rather than restarting into the same wall.
 
 ```shell
 comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
-                       [--release <id>] [--deployment <id>] [--watch]
+                       [--startup-arg=<flag>]... [--release <id>] [--deployment <id>] [--watch]
 ```
 
 - **It selects the newest deployable release of the Build** unless `--release`
@@ -144,6 +144,17 @@ comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
   reported back as dropped.
 - **It restarts a `stopped` or `failed` deployment** for that release instead of
   creating another.
+- **`--startup-arg=<flag>` sets the ComfyUI flags the deployment boots with**, one
+  token per use (`--startup-arg=--highvram`; a value is its own token:
+  `--startup-arg=--reserve-vram --startup-arg=2`). Write it with `=` so the
+  token is unambiguously the value and never swallows the option after it. The
+  service accepts only its allowlist of VRAM, precision, attention, cache and
+  performance flags and names a refused token in a 400. Flags apply when the
+  deployment starts: on a live deployment a different set is
+  `deploy_immutable_compute` (`stop` → `scale --startup-arg` → `start`), and on
+  a restart it is reported as dropped rather than applied, so set the flags with
+  `scale --startup-arg` while the deployment is still stopped, then `up`. The
+  stored set comes back as `computeConfig.startupArgs`.
 
 ## `comfy deploy run`
 
@@ -225,7 +236,10 @@ The rest are narrower:
 - **`start`** resumes a `stopped` or `failed` deployment. It spends again from
   that moment.
 - **`scale --min N --max N`** changes the bounds on a live or stopped deployment.
-  `scale --gpu / --region` requires the deployment to be **stopped**.
+  `scale --gpu / --region` requires the deployment to be **stopped**, and so do
+  `scale --startup-arg=<flag>` (repeatable; replaces the whole set) and
+  `scale --clear-startup-args` (removes them). A `scale` that names neither
+  leaves the stored flags alone.
 - **`delete`** enqueues teardown and soft-deletes the record. **It is not
   reversible**: a deleted deployment cannot be started, and serving again means
   `up` creating a new one with a new URL. The record stays visible under
@@ -282,6 +296,8 @@ ever hit one, because the wrong reflex costs money or trust:
 for comes back as a refusal envelope and exits 1: `deploy_delete_needs_confirm`
 for `delete`, `deploy_missing_input` for an omitted `--gpu`, `--region` or
 `--workflow`. Pass `--yes` or the named option once the user has actually agreed.
+`deploy_conflicting_input` is `--startup-arg` together with `--clear-startup-args`;
+pass one or the other.
 
 ## Going back to the build
 
