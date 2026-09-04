@@ -777,6 +777,15 @@ def _set_widget_impl(
     value, norm_note = _normalize_combo(graph, class_type, widget, value)
     old = widgets[idx] if idx < len(widgets) else None
     warnings = _validate_widget(graph, class_type, widget, value)  # raises on shape mismatch
+    morphism = graph.node(class_type)
+    port = next((p for p in morphism.inputs if p.name == widget), None) if morphism is not None else None
+    if port is not None and port.dynamic_options:
+        # Preview through the same value-aware writer apply/replay uses. A
+        # selector change owns a variable-width positional span, so its roster
+        # rebuild warning cannot be derived by scalar validation alone.
+        for warning in _engine._write_widget(copy.deepcopy(node), widget, value, graph, extend=True):
+            if warning not in warnings:
+                warnings.append(warning)
     if norm_note:
         warnings = [norm_note, *warnings]
     op = _new_op(
@@ -1901,12 +1910,10 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
         return  # target concurrently deleted => no-op (delete wins).
     from comfy_cli.cql import engine as _engine
 
-    widgets = _engine._widgets_as_positional(node.get("widgets_values"), graph, node.get("type", ""))
-    node["widgets_values"] = widgets
-    idx = _widget_index(graph, node.get("type", ""), op["widget"], widgets)
-    if idx >= len(widgets):
-        widgets.extend([None] * (idx + 1 - len(widgets)))
-    widgets[idx] = op["value"]
+    # The CQL writer is the schema-aware positional owner. In particular, a
+    # dynamic-combo selector change must replace the old option's variable-width
+    # sub-widget span before preserving trailing values such as seed/watermark.
+    _engine._write_widget(node, op["widget"], op["value"], graph, extend=True)
     _lww_commit(workflow, op)
 
 
@@ -2260,7 +2267,16 @@ def detect_conflict(a: dict, b: dict) -> bool:
     the same base conflict here (their batch order is undecidable leaderlessly)
     even though :func:`apply_op` keeps both connections and ``canonical`` treats
     their order as immaterial."""
-    if _write_target(a) != _write_target(b):
+    target_a = _write_target(a)
+    target_b = _write_target(b)
+    if a["op"] == "set_widget" and b["op"] == "set_widget" and target_a[:-1] == target_b[:-1]:
+        widget_a, widget_b = str(target_a[-1]), str(target_b[-1])
+        # A dynamic-combo selector owns the dotted sub-widget roster below it.
+        # A concurrent selector/sub-widget pair can therefore be order-dependent
+        # even though their leaf names differ; route it through ask-to-merge.
+        if widget_a.startswith(f"{widget_b}.") or widget_b.startswith(f"{widget_a}."):
+            return True
+    if target_a != target_b:
         return False
     if a["op"] == "set_widget" and b["op"] == "set_widget":
         return a.get("value") != b.get("value")
