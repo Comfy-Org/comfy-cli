@@ -12,22 +12,66 @@ on:
       - "!.coveragerc"
       - "!.gitignore"
   pull_request:
+    # Label events *only*, so a PR run exists one-to-one with a maintainer
+    # applying `gpu-ci`: a later push cannot inherit that approval, because
+    # `synchronize` no longer triggers this workflow at all. Re-label (remove,
+    # re-add) to re-run against new commits. `unlabeled` never runs the job --
+    # it is here so removing the label lands in the same concurrency group and
+    # usually cancels an in-flight run (see the caveat on `concurrency` below).
+    # Same shape as ci-cursor-review.yml.
+    #
+    # Trap worth knowing: GitHub creates no `pull_request` runs at all while a
+    # PR has merge conflicts, so applying the label to a conflicted PR is
+    # silently lost -- and resolving the conflict emits only `synchronize`,
+    # which is not a trigger here. Recovery is the same remove/re-add, and it
+    # does need the removal first, since the label is already applied.
+    types: [labeled, unlabeled]
     branches:
       - main
-    paths:
-      - "comfy_cli/**"
-      - "!comfy_cli/test_**"
-      - "!.github/**"
-      - "!tests/**"
-      - "!.coveragerc"
-      - "!.gitignore"
+    # Deliberately no `paths` filter on this leg. Applying the label *is* the
+    # intent signal, so filtering here would only produce the surprise of a
+    # labeled PR that never runs -- e.g. one touching just tests/ or .github/.
+    # The push-to-main leg above keeps its filter, since those runs are
+    # automatic and do need narrowing.
 
 permissions:
   contents: read
 
+concurrency:
+  # Keyed on the label name as well as the PR, so an unrelated label applied to
+  # an already-labeled PR cannot cancel an in-flight GPU run; removing `gpu-ci`
+  # shares the group and so usually cancels it, which is how a maintainer stops
+  # a run they no longer want. Treat that as a convenience rather than a stop
+  # button: the cancelling run is created from the *merge ref's* copy of this
+  # file, so a push landed after labeling can edit this key or drop the
+  # `unlabeled` trigger and the removal then cancels nothing.
+  #
+  # Push-to-main runs fall back to `github.sha`, which is distinct per push, so
+  # each sits alone in its own group: they are simply unaffected here, neither
+  # cancelled nor serialized.
+  group: run-on-gpu-${{ github.event.pull_request.number || github.sha }}-${{ github.event.label.name }}
+  cancel-in-progress: true
+
 jobs:
   test-cli-gpu:
+    # PR runs are opt-in via the maintainer-applied `gpu-ci` label, because this
+    # job checks out and executes PR code on self-hosted GPU runners. Push-to-main
+    # runs stay automatic. Gate on the labeling *event* rather than on the label
+    # being present in the set: `labeled` fires for every label, so a membership
+    # test would re-queue a full GPU run whenever any unrelated label (`bug`, an
+    # automation-applied area label) was added to an already-labeled PR.
+    # Prerequisite for the review-gated auto-builder in #786.
+    if: >-
+      github.event_name == 'push'
+      || (github.event.action == 'labeled' && github.event.label.name == 'gpu-ci')
     name: "Run Tests on GPU Runners"
+    # Bound a hung or hostile run on the shared self-hosted pool, which the
+    # 6-hour default does not: this job executes PR-supplied code (`pip install
+    # -e .` runs the PR's build backend, pytest loads its conftest), and with
+    # the concurrency group above a stuck run also blocks that PR's next one.
+    # The last 20 successful runs all finished within ~11.5 min end to end, so
+    # 30 leaves roughly 2.5x headroom.
+    timeout-minutes: 30
     runs-on:
       group: gpu-runners
       labels: ${{ matrix.os }}-x64-gpu #
@@ -39,6 +83,29 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v7
+        with:
+          # Pin to the head SHA carried by the `labeled` webhook rather than the
+          # merge ref, which would otherwise be resolved whenever a runner frees
+          # up. The `gpu-runners` pool is small, so a labeled run can sit queued
+          # for minutes -- long enough for the author to push first. This closes
+          # that queue window, but it is not proof the maintainer read this
+          # commit: labels are PR-level, so a push between reading the diff and
+          # clicking the label is still what gets captured. Check the head SHA
+          # when you label.
+          #
+          # Two consequences of testing the head rather than the merge result.
+          # A branch that predates a file main added can fail on a step the
+          # merged YAML still references (the workflow definition comes from the
+          # merge ref even though the tree no longer does) -- rebase to clear
+          # it. And for a PR outside the push leg's `paths` filter (tests/,
+          # .github/, pyproject.toml) the merged tree is never GPU-tested at
+          # all, since that leg will not run for it post-merge either.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Keep the job's GITHUB_TOKEN out of .git/config, where it would sit
+          # as an http.extraheader that the PR code running next could read and
+          # reuse for the job's lifetime on a persistent self-hosted runner.
+          # Nothing here pushes, and the build backend needs no git metadata.
+          persist-credentials: false
 
       - name: Check Nvidia
         run: |
