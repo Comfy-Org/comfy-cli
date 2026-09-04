@@ -457,7 +457,129 @@ def _expand_one_subgraph(
             ]
         )
 
+    next_id = _inject_promoted_widget_values(outer_node, sg_def, input_targets, expanded_nodes, expanded_links, next_id)
+
     return expanded_nodes, expanded_links, input_targets, output_sources
+
+
+def _promoted_widget_def_indices(
+    sg_def: dict,
+    input_targets: dict[int, list[tuple[Any, int]]],
+    node_by_id: dict[Any, dict],
+    outer_id: Any,
+) -> list[int]:
+    """Def-input indices that materialize as widgets on a subgraph instance.
+
+    The instance's ``widgets_values`` array holds one entry per promoted
+    widget, in def-input order. A def input is widget-backed exactly when the
+    interior input it feeds is itself widget-backed — which the serialized
+    graph marks with a ``widget`` key on that interior input slot. Deriving it
+    from the interior (rather than guessing from the def input's declared
+    type) is what keeps the indices aligned: a promoted widget can carry any
+    type at all, including node-pack types like ``COMFY_DYNAMICCOMBO_V3``, and
+    an allowlist that misses one shifts every later value into the wrong slot.
+    """
+    indices: list[int] = []
+    for def_idx, in_def in enumerate(sg_def.get("inputs") or []):
+        if not isinstance(in_def, dict):
+            continue
+        for target_id, target_slot in input_targets.get(def_idx) or []:
+            target = node_by_id.get(f"{outer_id}:{target_id}")
+            if not isinstance(target, dict):
+                continue
+            inputs = target.get("inputs") or []
+            if not (isinstance(target_slot, int) and 0 <= target_slot < len(inputs)):
+                continue
+            slot = inputs[target_slot]
+            if isinstance(slot, dict) and slot.get("widget"):
+                indices.append(def_idx)
+                break
+    return indices
+
+
+def _inject_promoted_widget_values(
+    outer_node: dict,
+    sg_def: dict,
+    input_targets: dict[int, list[tuple[Any, int]]],
+    expanded_nodes: list[dict],
+    expanded_links: list,
+    next_id: int,
+) -> int:
+    """Apply the instance's promoted-widget values to the expanded interior.
+
+    A subgraph instance exposes its interior nodes' unlinked widgets as its
+    own; the frontend's graphToPrompt substitutes those instance values into
+    the interior nodes at queue time. Without this, conversion silently falls
+    back to the interior nodes' saved defaults — an instance-edited prompt or
+    seed never reaches the API graph.
+
+    Mechanism: for each promoted value, synthesize a virtual ``PrimitiveNode``
+    carrying it and link it to every interior target of that def input. The
+    existing primitive-value machinery then injects the value (and skips the
+    virtual node in the output), exactly as it does for user-placed primitives.
+
+    Values whose def input is externally linked on the instance are stale
+    residue — the link wins, same as any widget-behind-a-link on a regular
+    node — but they still occupy their slot in ``widgets_values``.
+    """
+    inst_widgets = outer_node.get("widgets_values")
+    if not isinstance(inst_widgets, list) or not inst_widgets:
+        return next_id
+    outer_id = outer_node.get("id")
+    node_by_id = {n.get("id"): n for n in expanded_nodes}
+    promoted = _promoted_widget_def_indices(sg_def, input_targets, node_by_id, outer_id)
+
+    # Fail closed. The value<->slot correspondence is purely positional, so a
+    # length disagreement means we cannot say which value belongs to which
+    # input. Falling back to the interior defaults is wrong but self-consistent
+    # and executable; a misaligned guess submits a prompt string into an INT
+    # slot. Prefer the recoverable failure — but warn, because every value the
+    # instance carries is being dropped and the run would otherwise look fine.
+    if len(promoted) != len(inst_widgets):
+        logger.warning(
+            "Subgraph instance %s exposes %d promoted widget(s) but carries %d "
+            "widgets_values; cannot align them, so the instance's values are "
+            "ignored and the subgraph's interior defaults run instead",
+            outer_id,
+            len(promoted),
+            len(inst_widgets),
+        )
+        return next_id
+
+    externally_linked = {
+        inp.get("name")
+        for inp in outer_node.get("inputs") or []
+        if isinstance(inp, dict) and inp.get("link") is not None
+    }
+
+    for widget_idx, def_idx in enumerate(promoted):
+        in_def = sg_def["inputs"][def_idx]
+        value = inst_widgets[widget_idx]
+        if value is None or in_def.get("name") in externally_linked:
+            continue
+        targets = input_targets.get(def_idx) or []
+        if not targets:
+            continue
+        virtual_id = f"{outer_id}:promoted{def_idx}"
+        expanded_nodes.append(
+            {
+                "id": virtual_id,
+                "type": "PrimitiveNode",
+                "inputs": [],
+                "outputs": [],
+                "mode": 0,
+                "widgets_values": [value],
+            }
+        )
+        for target_id, target_slot in targets:
+            expanded_links.append([next_id, virtual_id, 0, f"{outer_id}:{target_id}", target_slot, in_def.get("type")])
+            target = node_by_id.get(f"{outer_id}:{target_id}")
+            if target is not None:
+                inputs = target.get("inputs") or []
+                if isinstance(target_slot, int) and 0 <= target_slot < len(inputs):
+                    inputs[target_slot]["link"] = next_id
+            next_id += 1
+    return next_id
 
 
 def _rewrite_internal_input(
@@ -1001,12 +1123,15 @@ def _build_api_node(
     ordered = _get_ordered_input_names(node_type, node, object_info)
     if ordered:
         # First widget-like values in the declared order, then link inputs.
-        # This matches what ComfyUI's "Save (API)" produces.
+        # This matches what ComfyUI's "Save (API)" produces. A primitive-fed
+        # input beats the node's own widget entry: when a widget has been
+        # converted to an input and wired, the frontend uses the incoming
+        # value and the widgets_values slot is stale residue.
         for name in ordered:
-            if name in widget_inputs:
-                api_node["inputs"][name] = widget_inputs[name]
-            elif name in primitive_inputs:
+            if name in primitive_inputs:
                 api_node["inputs"][name] = primitive_inputs[name]
+            elif name in widget_inputs:
+                api_node["inputs"][name] = widget_inputs[name]
             elif name in default_inputs:
                 api_node["inputs"][name] = default_inputs[name]
         for name in ordered:
@@ -1014,7 +1139,7 @@ def _build_api_node(
                 api_node["inputs"][name] = link_inputs[name]
 
     # Anything we didn't know an order for is still emitted (preserves data).
-    for source in (widget_inputs, primitive_inputs, default_inputs, link_inputs):
+    for source in (primitive_inputs, widget_inputs, default_inputs, link_inputs):
         for key, value in source.items():
             if key not in api_node["inputs"]:
                 api_node["inputs"][key] = value
