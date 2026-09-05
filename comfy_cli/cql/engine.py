@@ -2794,8 +2794,18 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
     always wins. We still register ``name`` as a *fallback* key (only when it
     doesn't shadow an id and isn't ambiguous across defs) to support older
     name-typed templates that predate UUID ids.
+
+    Containers that are not a ``dict``/``list`` read as "no definitions", so a
+    corrupt file degrades to an empty index rather than raising (a truthy
+    non-dict ``definitions`` or non-list ``subgraphs``) or walking a string
+    per-character.
     """
-    defs = (workflow.get("definitions") or {}).get("subgraphs") or []
+    definitions = workflow.get("definitions")
+    if not isinstance(definitions, dict):
+        return {}
+    defs = definitions.get("subgraphs")
+    if not isinstance(defs, list):
+        return {}
     by_id: dict[str, dict] = {}
     name_counts: dict[str, int] = {}
     name_first: dict[str, dict] = {}
@@ -3493,11 +3503,14 @@ def _count_instances(workflow: dict, def_id: str) -> int:
     for n in workflow.get("nodes") or []:
         if isinstance(n, dict) and str(n.get("type", "")) == def_id:
             count += 1
-    for sg in (workflow.get("definitions") or {}).get("subgraphs") or []:
-        if isinstance(sg, dict):
-            for n in sg.get("nodes") or []:
-                if isinstance(n, dict) and str(n.get("type", "")) == def_id:
-                    count += 1
+    definitions = workflow.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    if isinstance(subgraphs, list):
+        for sg in subgraphs:
+            if isinstance(sg, dict):
+                for n in sg.get("nodes") or []:
+                    if isinstance(n, dict) and str(n.get("type", "")) == def_id:
+                        count += 1
     return count
 
 
