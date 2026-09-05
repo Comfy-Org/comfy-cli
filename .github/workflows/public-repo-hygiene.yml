@@ -34,12 +34,31 @@ jobs:
       # tests/comfy_cli/test_knowledge.py and test_knowledge_attach.py — not a
       # real ticket.
       ticket_allowlist: HAILUO-03,HALO-03
-      # No `exclude_paths:` here, deliberately. Every entry this caller used to
-      # carry was a false positive in the checker itself — Hugging Face model
-      # URLs and HF `owner/name` model repos read as unlisted GitHub repos —
-      # and all of them are fixed upstream as of the pin above. The one
-      # remaining entry, `.github/workflows/refresh-cql-catalogs.yml`, is gone
-      # because that file no longer names its private source: the coordinates
-      # moved into secrets. An exclusion suppresses the scan for a whole path
-      # forever, including code not yet written, so the bar for adding one back
-      # is that the finding is unfixable both here and upstream.
+      # One `exclude_paths:` entry, and the bar it had to clear is recorded here
+      # because the entry is permanent. Every entry this caller used to carry
+      # was a false positive in the checker itself — Hugging Face model URLs and
+      # HF `owner/name` model repos read as unlisted GitHub repos — and all of
+      # them are fixed upstream as of the pin above; the last one,
+      # `.github/workflows/refresh-cql-catalogs.yml`, went away when that file
+      # stopped naming its private source. An exclusion suppresses the scan for
+      # a path forever, including content not yet written, so the bar is that
+      # the finding is unfixable both here and upstream.
+      #
+      # `comfy_cli/command/generate/spec/openapi.yml` clears it. It is not
+      # source: it is the response body of `https://api.comfy.org/openapi`
+      # plus the one trailing newline `end-of-file-fixer` requires, so that a
+      # refresh is a reproducible `curl` rather than a hand-edit (see the module
+      # docstring in `comfy_cli/command/generate/spec.py`, which also carries the
+      # newline-aware command that compares the two). Nobody writes into it, and
+      # redacting the eight tokens the checker flags — six ticket-shaped ids
+      # written into upstream `description` prose, none of them under a
+      # `/proxy/` path this CLI surfaces, plus two hits on an IETF language-tag
+      # standard that is a plain false positive — would silently fork the
+      # vendored copy from the upstream document and make `curl … | cmp` stop
+      # being the way to verify it. Unfixable here. Upstream is a different
+      # repo, and api.comfy.org already serves every one of those ids publicly
+      # to any unauthenticated caller, so vendoring them discloses nothing that
+      # was not already published. Exact file, not a subtree: nothing else
+      # under `spec/` is covered, and a second vendored artifact would need its
+      # own entry and its own justification.
+      exclude_paths: comfy_cli/command/generate/spec/openapi.yml
