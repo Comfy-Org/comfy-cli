@@ -1045,11 +1045,12 @@ class TestRoutingErrorEnvelope:
 class TestSlotsCorruptDefinitions:
     """End-to-end: a corrupt ``definitions`` block must still yield an envelope.
 
-    Before the shape checks in ``_subgraph_defs_by_id`` these two shapes exited
-    ``comfy workflow slots`` on a rich traceback (``AttributeError`` /
-    ``TypeError``) with NOTHING on stdout — the JSON caller saw a hard crash
-    instead of a parseable result. ``slots_cmd``'s ``except (ValueError,
-    KeyError)`` does not catch either, and there is no catch-all above it.
+    Before the shape checks in ``_subgraph_defs_by_id`` a truthy wrong-typed
+    container exited ``comfy workflow slots`` on a rich traceback
+    (``AttributeError`` on ``definitions``, ``TypeError`` on ``subgraphs``)
+    with NOTHING on stdout — the JSON caller saw a hard crash instead of a
+    parseable result. ``slots_cmd``'s ``except (ValueError, KeyError)`` does
+    not catch either, and there is no catch-all above it.
     """
 
     @pytest.mark.parametrize(
@@ -1076,3 +1077,14 @@ class TestSlotsCorruptDefinitions:
         assert env["ok"] is True
         assert env["data"]["count"] > 0
         assert "6.text" in {s["address"] for s in env["data"]["slots"]}
+
+    def test_set_slot_reports_a_domain_error_instead_of_crashing(self, patched_graph, tmp_path, capsys):
+        """``set-slot`` reaches the same helper before any of its own guards, so
+        it crashed on the same input. It should now fail on the real problem —
+        the address doesn't resolve — through the normal error envelope."""
+        path = _write_workflow(tmp_path, {"nodes": [], "links": [], "definitions": {"subgraphs": 5}})
+        _captured, _err, result = _invoke(["set-slot", str(path), "3.seed=1"], capsys)
+        assert result.exception is None or isinstance(result.exception, SystemExit), repr(result.exception)
+        env = _run(["set-slot", str(path), "3.seed=1"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_slot_invalid"

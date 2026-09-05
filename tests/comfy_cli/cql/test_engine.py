@@ -4412,6 +4412,10 @@ class TestSubgraphDefsByIdShapeChecks:
         assert _subgraph_defs_by_id({"nodes": [], "definitions": None}) == {}
         assert _subgraph_defs_by_id({"nodes": [], "definitions": {}}) == {}
         assert _subgraph_defs_by_id({"nodes": [], "definitions": {"subgraphs": []}}) == {}
+        # A top-level ``subgraphs`` with no ``definitions`` wrapper is not the
+        # block this helper reads; it must not be picked up by accident.
+        assert _subgraph_defs_by_id({"subgraphs": {"a": 1}}) == {}
+        assert _subgraph_defs_by_id({"subgraphs": [{"id": "u1"}]}) == {}
 
     def test_well_formed_definitions_still_index_by_id_and_name(self):
         """Positive control: the shape checks must not cost the happy path."""
