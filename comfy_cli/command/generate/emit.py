@@ -18,10 +18,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from comfy_cli import workflow_ops
 from comfy_cli.command.generate import spec
+from comfy_cli.cql.engine import Graph
 
 
 class EmitError(RuntimeError):
@@ -230,6 +233,34 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
 }
 
 
+# Bundled, offline object_info snapshot covering exactly the classes this
+# module ever mints: every ``node_class`` in MODEL_NODE_MAP, plus the fixed
+# support cast (LoadImage/ImageBatch/SaveImage/SaveVideo). ``--emit-workflow``
+# has no server/API-key dependency (see module docstring), so this cannot be a
+# live ``object_info`` fetch — it is the same recorded-snapshot approach
+# ``tests/comfy_cli/command/generate/test_emit.py`` already used for the
+# completeness-contract test, promoted from test-only to the module that needs
+# it so the two never drift. Refresh both together from `comfy nodes show
+# <ClassName> --json` against a current cloud catalog when a mapped node's
+# schema changes.
+_SUPPORT_NODE_CLASSES = ("LoadImage", "ImageBatch", "SaveImage", "SaveVideo")
+
+
+def _load_catalog() -> Graph:
+    data = resources.files("comfy_cli.command.generate.data").joinpath("emit_object_info.json").read_bytes()
+    return Graph.from_object_info(json.loads(data))
+
+
+_CATALOG: Graph | None = None
+
+
+def _catalog() -> Graph:
+    global _CATALOG
+    if _CATALOG is None:
+        _CATALOG = _load_catalog()
+    return _CATALOG
+
+
 def supported_models() -> list[str]:
     """Aliases that ``--emit-workflow`` knows how to render as a node."""
     return sorted(MODEL_NODE_MAP)
@@ -260,52 +291,78 @@ def _resolve_model(model: str) -> tuple[str, NodeSpec]:
     return found
 
 
-def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "generate") -> dict[str, Any]:
-    """Build an API-format workflow that drives the partner node for ``model``.
+def build_workflow(
+    model: str, values: dict[str, Any], *, output_prefix: str = "generate"
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Build a frontend-format workflow that drives the partner node for ``model``.
 
     ``values`` are the parsed ``--param`` values (same dict the proxy client
     receives). Local-file image params are materialized as ``LoadImage`` nodes
     and wired into the partner node; scalar params override the node's fixed
     defaults. A ``SaveImage``/``SaveVideo`` is appended so ``comfy run`` writes
     the result to disk.
+
+    Returns ``(workflow, ops)``: ``workflow`` is frontend-format (``nodes``/
+    ``links``, minted via ``workflow_ops.add_node``/``connect``/``set_widget``
+    — the same CRDT-ready primitives ``comfy workflow`` slot-editing commands
+    require), and ``ops`` is the replayable op stream those primitives emitted,
+    in apply order. This is what makes the result editable downstream instead
+    of a raw API-format dict `list_slots`/`set_widget`/`connect` reject as
+    ``workflow_not_frontend_format``.
+
+    The partner node classes in ``MODEL_NODE_MAP`` are addressed by name
+    against the bundled snapshot regardless of that snapshot's own
+    ``deprecated`` flag (some partner nodes are marked deprecated upstream in
+    favor of a newer node this emitter does not yet target) — ``--emit-workflow``
+    always emits the class ``NodeSpec`` names, so every ``add_node`` call in
+    this module passes ``allow_deprecated=True``.
     """
     _alias, ns = _resolve_model(model)
+    graph = _catalog()
+
+    workflow: dict[str, Any] = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+    ops: list[dict[str, Any]] = []
+
+    def _add(class_type: str) -> Any:
+        nonlocal workflow
+        workflow, op = workflow_ops.add_node(workflow, graph, class_type, allow_deprecated=True)
+        ops.append(op)
+        return op["node_id"]
+
+    def _set(node_id: Any, widget: str, value: Any) -> None:
+        nonlocal workflow
+        workflow, op = workflow_ops.set_widget(workflow, graph, node_id, widget, value)
+        ops.append(op)
+
+    def _link(from_node: Any, from_slot: int, to_node: Any, to_slot: int) -> None:
+        nonlocal workflow
+        workflow, op = workflow_ops.connect(workflow, graph, from_node, from_slot, to_node, to_slot)
+        ops.append(op)
 
     node_inputs: dict[str, Any] = dict(ns.fixed)
-
-    next_id = 2  # the partner node is "1"; loaders/save get 2, 3, …
+    image_links: dict[str, tuple[Any, int]] = {}
 
     # Image-path params → LoadImage nodes wired into the partner node.
-    workflow: dict[str, Any] = {}
     for flag, node_key in ns.image_params.items():
         raw = values.get(flag)
         if raw is None:
             continue
         paths = [str(Path(p).expanduser()) for p in (raw if isinstance(raw, list | tuple) else [raw])]
-        loader_ids: list[str] = []
+        loader_ids: list[Any] = []
         for path in paths:
-            loader_id = str(next_id)
-            next_id += 1
-            workflow[loader_id] = {
-                "class_type": "LoadImage",
-                "_meta": {"title": f"load {Path(path).name}"},
-                "inputs": {"image": path},
-            }
+            loader_id = _add("LoadImage")
+            _set(loader_id, "image", path)
             loader_ids.append(loader_id)
         # One file wires straight in; several fold through chained core
         # ImageBatch nodes (2-input, always present) so the partner still
         # receives a single IMAGE stream.
         upstream, upstream_out = loader_ids[0], 0
         for lid in loader_ids[1:]:
-            batch_id = str(next_id)
-            next_id += 1
-            workflow[batch_id] = {
-                "class_type": "ImageBatch",
-                "_meta": {"title": "batch reference images"},
-                "inputs": {"image1": [upstream, upstream_out], "image2": [lid, 0]},
-            }
+            batch_id = _add("ImageBatch")
+            _link(upstream, upstream_out, batch_id, "image1")
+            _link(lid, 0, batch_id, "image2")
             upstream, upstream_out = batch_id, 0
-        node_inputs[node_key] = [upstream, upstream_out]
+        image_links[node_key] = (upstream, upstream_out)
 
     # Scalar params → node inputs, honoring the explicit param_map.
     for flag, node_key in ns.param_map.items():
@@ -328,32 +385,22 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
         if width_given and height_given:
             node_inputs[ns.aspect_from_wh] = f"{values['width']}:{values['height']}"
 
-    partner = {
-        "class_type": ns.node_class,
-        "_meta": {"title": f"{ns.node_class} ({model})"},
-        "inputs": node_inputs,
-    }
-    workflow["1"] = partner
+    partner_id = _add(ns.node_class)
+    for node_key, value in node_inputs.items():
+        _set(partner_id, node_key, value)
+    for node_key, (src_node, src_slot) in image_links.items():
+        _link(src_node, src_slot, partner_id, node_key)
 
-    save_id = str(next_id)
     if ns.output == "VIDEO":
-        workflow[save_id] = {
-            "class_type": "SaveVideo",
-            "_meta": {"title": "save generated video"},
-            "inputs": {
-                "video": ["1", ns.media_port],
-                "filename_prefix": output_prefix,
-                "format": "mp4",
-                "codec": "h264",
-            },
-        }
+        save_id = _add("SaveVideo")
+        _set(save_id, "filename_prefix", output_prefix)
+        _link(partner_id, ns.media_port, save_id, "video")
     else:
-        workflow[save_id] = {
-            "class_type": "SaveImage",
-            "_meta": {"title": "save generated image"},
-            "inputs": {"images": ["1", ns.media_port], "filename_prefix": output_prefix},
-        }
-    return workflow
+        save_id = _add("SaveImage")
+        _set(save_id, "filename_prefix", output_prefix)
+        _link(partner_id, ns.media_port, save_id, "images")
+
+    return workflow, ops
 
 
 def write_workflow(
@@ -361,7 +408,7 @@ def write_workflow(
 ) -> dict[str, Any]:
     """Build the workflow for ``model`` and write it to ``path`` as JSON.
     Returns the workflow dict. Raises ``EmitError`` on an unsupported model."""
-    workflow = build_workflow(model, values, output_prefix=output_prefix)
+    workflow, _ops = build_workflow(model, values, output_prefix=output_prefix)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(workflow, indent=2) + "\n", encoding="utf-8")
     return workflow
