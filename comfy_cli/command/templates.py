@@ -1621,10 +1621,12 @@ def _workflow_node_types(workflow: Any) -> set[str]:
         return types
     if isinstance(workflow.get("nodes"), list):
         node_lists = [workflow.get("nodes") or []]
-        subgraphs = (workflow.get("definitions") or {}).get("subgraphs") or []
-        for sg in subgraphs:
-            if isinstance(sg, dict):
-                node_lists.append(sg.get("nodes") or [])
+        definitions = workflow.get("definitions")
+        subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+        if isinstance(subgraphs, list):
+            for sg in subgraphs:
+                if isinstance(sg, dict):
+                    node_lists.append(sg.get("nodes") or [])
         for nodes in node_lists:
             for node in nodes:
                 if isinstance(node, dict) and isinstance(node.get("type"), str):
