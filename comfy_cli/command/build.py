@@ -2330,7 +2330,7 @@ def _builder_client(renderer, builder_url: str | None):
 def _report_builder_error(renderer, e) -> None:
     """Emit one error envelope for a builder failure. Prefers the limited-beta 403,
     then the builder's own error body (e.g. `INVALID_DEFINITION: …` or
-    `SUBSCRIPTION_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
+    `PAYMENT_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
     generic transport error.
 
     It carries no Build id, because the old `create` verb's orphan case is gone:
