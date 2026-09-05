@@ -46,9 +46,10 @@ jobs:
       #
       # `comfy_cli/command/generate/spec/openapi.yml` clears it. It is not
       # source: it is the response body of `https://api.comfy.org/openapi`
-      # stored verbatim, so that a refresh is a reproducible `curl` rather than
-      # a hand-edit (see the module docstring in
-      # `comfy_cli/command/generate/spec.py`). Nobody writes into it, and
+      # plus the one trailing newline `end-of-file-fixer` requires, so that a
+      # refresh is a reproducible `curl` rather than a hand-edit (see the module
+      # docstring in `comfy_cli/command/generate/spec.py`, which also carries the
+      # newline-aware command that compares the two). Nobody writes into it, and
       # redacting the eight tokens the checker flags — six ticket-shaped ids
       # written into upstream `description` prose, none of them under a
       # `/proxy/` path this CLI surfaces, plus two hits on an IETF language-tag

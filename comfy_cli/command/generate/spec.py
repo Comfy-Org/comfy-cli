@@ -4,12 +4,19 @@ Lookup order on disk:
 1. ``~/.comfy/openapi-cache.yml`` if fresher than CACHE_TTL_DAYS
 2. The vendored copy under ``comfy_cli/command/generate/spec/openapi.yml``
 
-The vendored copy is the body ``https://api.comfy.org/openapi`` serves, stored
-verbatim — that endpoint is public and needs no token, so a refresh is
-reproducible byte-for-byte:
+The vendored copy is the body ``https://api.comfy.org/openapi`` serves, plus one
+trailing newline the repo's ``end-of-file-fixer`` pre-commit hook requires and
+that the served body does not carry. That endpoint is public and needs no token,
+so a refresh is a reproducible two-command download rather than a hand-edit:
 
     curl -sS https://api.comfy.org/openapi -o comfy_cli/command/generate/spec/openapi.yml
     printf '\n' >> comfy_cli/command/generate/spec/openapi.yml   # end-of-file-fixer
+
+Nothing else is edited into the file, so it stays comparable against upstream —
+but mind the newline when you compare, or every check reports a spurious diff:
+
+    curl -sS https://api.comfy.org/openapi | { cat; printf '\n'; } |
+        cmp - comfy_cli/command/generate/spec/openapi.yml
 
 The body is minified JSON rather than block YAML despite the ``.yml`` name;
 JSON is a subset of YAML 1.2, so the same loader reads either, and the on-disk
