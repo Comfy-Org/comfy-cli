@@ -1283,6 +1283,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "pass every option named in `details.missing`, then retry",
     ),
     ErrorCode(
+        "deploy_conflicting_input",
+        "`comfy deploy scale` was given options that cancel each other: `--startup-arg` sets the ComfyUI startup "
+        "flags and `--clear-startup-args` removes them, so both at once has no meaning the service could honor. "
+        "`details.conflicting` names the pair.",
+        "pass either `--startup-arg` or `--clear-startup-args`, not both, then retry",
+    ),
+    ErrorCode(
         "deploy_bad_request",
         "The deploy control plane rejected structurally invalid input. The message names the invalid field or query parameter.",
         "fix the field or parameter named in the message, then retry",
@@ -1329,8 +1336,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_immutable_compute",
-        "A ready deployment cannot change its GPU class or region in place.",
-        "run `comfy deploy stop`, then `comfy deploy scale --gpu <class> --region <region>`, then `comfy deploy start`",
+        "A ready deployment cannot change its GPU class, region or ComfyUI startup flags in place. The message "
+        "names the setting.",
+        "run `comfy deploy stop`, then `comfy deploy scale` with the setting to change (`--gpu <class> --region "
+        "<region>` or `--startup-arg=<flag>`), then `comfy deploy start`",
     ),
     ErrorCode(
         "deploy_deleted",

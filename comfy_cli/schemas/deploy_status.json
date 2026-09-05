@@ -33,7 +33,8 @@
             "gpuClass": {"type": "string", "minLength": 1},
             "region": {"type": "string", "minLength": 1},
             "min": {"type": "integer", "minimum": 0},
-            "max": {"type": "integer", "minimum": 1}
+            "max": {"type": "integer", "minimum": 1},
+            "startupArgs": {"type": "array", "items": {"type": "string", "pattern": "\\S"}}
           }
         },
         "stopReason": {"enum": [null, "user", "credits", "policy"]},

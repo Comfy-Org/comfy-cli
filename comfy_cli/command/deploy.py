@@ -56,6 +56,38 @@ DeployPath = Annotated[
     typer.Argument(help="ComfyUI install directory or build spec path. Default: the current directory."),
 ]
 DeploymentOption = Annotated[str | None, typer.Option("--deployment", help="Select this deployment id.")]
+StartupArgOption = Annotated[
+    list[str] | None,
+    typer.Option(
+        "--startup-arg",
+        help=(
+            "ComfyUI startup flag, one token per use, written as --startup-arg=--highvram "
+            "(a value is its own token: --startup-arg=--reserve-vram --startup-arg=2). "
+            "Only the service's allowlist of VRAM, precision, attention, cache and performance "
+            "flags is accepted. `up` sets the flags on the deployment it creates; `scale` replaces "
+            "the whole stored set on a stopped deployment. Flags apply when the deployment starts."
+        ),
+    ),
+]
+
+
+def _startup_args(values: list[str] | None) -> tuple[str, ...] | None:
+    """``None`` when the flag was never given, so the request omits the field."""
+    return tuple(values) if values else None
+
+
+def _refuse_startup_arg_conflict(renderer, startup_arg: list[str] | None, clear: bool) -> None:
+    """``--startup-arg`` sets the flags and ``--clear-startup-args`` removes them;
+    both at once has no meaning the service could honor, so it is refused
+    before any round trip."""
+    if not startup_arg or not clear:
+        return
+    renderer.error(
+        code="deploy_conflicting_input",
+        message="--startup-arg and --clear-startup-args cannot be combined",
+        details={"conflicting": ["--startup-arg", "--clear-startup-args"]},
+    )
+    raise typer.Exit(code=1)
 
 
 def _require_paired_bounds(renderer, minimum: int | None, maximum: int | None) -> None:
@@ -127,10 +159,21 @@ def scale_cmd(
     ] = None,
     gpu: Annotated[str | None, typer.Option("--gpu", help="GPU class; deployment must be stopped.")] = None,
     region: Annotated[str | None, typer.Option("--region", help="Region; deployment must be stopped.")] = None,
+    startup_arg: StartupArgOption = None,
+    clear_startup_args: Annotated[
+        bool,
+        typer.Option("--clear-startup-args", help="Remove every ComfyUI startup flag; deployment must be stopped."),
+    ] = False,
 ) -> None:
-    _require_paired_bounds(get_renderer(), minimum, maximum)
+    renderer = get_renderer()
+    _require_paired_bounds(renderer, minimum, maximum)
+    _refuse_startup_arg_conflict(renderer, startup_arg, clear_startup_args)
     target = _deploy_read.ReadRequest(path, deployment_id)
-    _deploy_lifecycle.run_scale(_deploy_lifecycle.ScaleRequest(target, minimum, maximum, gpu, region))
+    _deploy_lifecycle.run_scale(
+        _deploy_lifecycle.ScaleRequest(
+            target, minimum, maximum, gpu, region, _startup_args(startup_arg), clear_startup_args
+        )
+    )
 
 
 @app.command("stop", help="Pause a deployment while retaining its endpoint and staged models.")
@@ -234,6 +277,7 @@ def up_cmd(
     ] = None,
     release: Annotated[str | None, typer.Option("--release", help="Deploy this release id.")] = None,
     deployment_id: DeploymentOption = None,
+    startup_arg: StartupArgOption = None,
     watch: Annotated[bool, typer.Option("--watch", help="Poll until the deployment reaches a terminal state.")] = False,
 ) -> None:
     renderer = get_renderer()
@@ -247,6 +291,7 @@ def up_cmd(
             minimum=minimum,
             maximum=maximum,
             deployment_id=deployment_id,
+            startup_args=_startup_args(startup_arg),
         )
         try:
             result = reconcile_up(builder, client, request)

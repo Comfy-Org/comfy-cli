@@ -38,6 +38,10 @@ class UpRequest:
     # The deployment `--deployment` named, when the Build has more than one the
     # ranking cannot separate.
     deployment_id: str | None = None
+    # ComfyUI startup flags, one token each. ``None`` is "flag omitted": the
+    # service keeps whatever the deployment stores, so only an explicit list is
+    # ever sent, and only a create applies it (see ``reconcile_up``).
+    startup_args: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,10 +53,10 @@ class UpResult:
     created: bool
     changed: bool
     # Flags the caller supplied that this reconcile could not apply. Restarting
-    # a stopped deployment is a start, not an edit, so bounds passed alongside
-    # it are dropped — silently discarding explicit input is the same defect as
-    # silently resetting it, so the renderer says so.
-    dropped_bounds: tuple[str, ...] = ()
+    # a stopped deployment is a start, not an edit, so bounds and startup flags
+    # passed alongside it are dropped; silently discarding explicit input is the
+    # same defect as silently resetting it, so the renderer says so.
+    dropped_flags: tuple[str, ...] = ()
 
     def payload(self) -> JsonObject:
         supersedes: list[JsonValue] = [*self.supersedes]
@@ -91,6 +95,13 @@ def required_int(value: JsonObject, key: str) -> int:
     return field
 
 
+def required_string_list(value: JsonObject, key: str) -> list[str]:
+    field = value.get(key)
+    if not isinstance(field, list) or any(not isinstance(item, str) or not item.strip() for item in field):
+        raise server_shape_error(f"the deploy service returned an invalid {key}", field=key)
+    return list(field)
+
+
 def compute_config(deployment: JsonObject) -> JsonObject:
     """The deployment's compute configuration, as the service models it.
 
@@ -109,6 +120,10 @@ def compute_config(deployment: JsonObject) -> JsonObject:
     for bound in ("min", "max"):
         if bound in raw:
             config[bound] = required_int(raw, bound)
+    # Stored only when the deployment has flags: the service drops the key on a
+    # clear, so absence here is "none" and an omitted flag on `scale` keeps it.
+    if "startupArgs" in raw:
+        config["startupArgs"] = required_string_list(raw, "startupArgs")
     return config
 
 

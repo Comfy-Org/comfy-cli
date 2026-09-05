@@ -425,3 +425,214 @@ def test_scale_of_a_bounds_free_deployment_validates_against_its_schema(monkeypa
     # Then
     assert result.exit_code == 0, result.stderr
     jsonschema.Draft202012Validator(_schema("deploy_scale.json")).validate(_envelope(result)["data"])
+
+
+def test_scale_registers_the_startup_arg_options() -> None:
+    assert {"--startup-arg", "--clear-startup-args"} <= option_names("scale")
+
+
+def test_scale_sends_startup_args_only_when_named(monkeypatch) -> None:
+    # Given
+    responder = APIResponder(deployment("dep-1", minimum=2, maximum=4))
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", responder)
+    _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
+
+    # When
+    result = _invoke(
+        "scale",
+        "--deployment",
+        "dep-1",
+        "--startup-arg=--highvram",
+        "--startup-arg=--reserve-vram",
+        "--startup-arg=2",
+    )
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert responder.bodies == [
+        {
+            "computeConfig": {
+                "gpuClass": "l4",
+                "region": "US-MO-2",
+                "min": 2,
+                "max": 4,
+                "startupArgs": ["--highvram", "--reserve-vram", "2"],
+            }
+        }
+    ]
+    assert _envelope(result)["changed"] is True
+
+
+def test_scale_leaves_stored_startup_args_out_of_a_bounds_edit(monkeypatch) -> None:
+    """The service keeps the stored flags when the field is absent, so a bounds
+    edit must not resend them (a stale copy would overwrite a newer set) and must
+    not send an empty list (which the service reads as a clear)."""
+    # Given
+    responder = APIResponder(deployment("dep-1", minimum=2, maximum=4, startup_args=["--highvram"]))
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", responder)
+    _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
+
+    # When
+    result = _invoke("scale", "--deployment", "dep-1", "--min", "1", "--max", "4")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert responder.bodies == [{"computeConfig": {"gpuClass": "l4", "region": "US-MO-2", "min": 1, "max": 4}}]
+    assert _envelope(result)["changed"] is True
+
+
+def test_scale_that_names_nothing_new_is_not_a_change(monkeypatch) -> None:
+    # Given
+    responder = APIResponder(deployment("dep-1", minimum=2, maximum=4, startup_args=["--highvram"]))
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", responder)
+    _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
+
+    # When
+    result = _invoke("scale", "--deployment", "dep-1", "--min", "2", "--max", "4")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _envelope(result)["changed"] is False
+
+
+def test_scale_clears_startup_args_with_an_explicit_empty_list(monkeypatch) -> None:
+    # Given
+    responder = APIResponder(deployment("dep-1", minimum=2, maximum=4, startup_args=["--highvram"]))
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", responder)
+    _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
+
+    # When
+    result = _invoke("scale", "--deployment", "dep-1", "--clear-startup-args")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert responder.bodies == [
+        {"computeConfig": {"gpuClass": "l4", "region": "US-MO-2", "min": 2, "max": 4, "startupArgs": []}}
+    ]
+    assert _envelope(result)["changed"] is True
+
+
+def test_scale_refuses_startup_arg_together_with_clear(monkeypatch) -> None:
+    # Given
+    responder = APIResponder(deployment("dep-1"))
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", responder)
+    _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
+
+    # When
+    result = _invoke("scale", "--deployment", "dep-1", "--startup-arg=--highvram", "--clear-startup-args")
+
+    # Then
+    error = _object(_envelope(result), "error")
+    assert result.exit_code == 1
+    assert error["code"] == "deploy_conflicting_input"
+    assert _object(error, "details")["conflicting"] == ["--startup-arg", "--clear-startup-args"]
+    assert responder.bodies == []
+
+
+def test_scale_clear_against_no_stored_startup_args_is_not_a_change(monkeypatch) -> None:
+    """The service stores no empty flag set, so clearing a deployment that has
+    none changes nothing it stores; `changed` must say so."""
+    # Given
+    responder = APIResponder(deployment("dep-1", minimum=2, maximum=4))
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", responder)
+    _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
+
+    # When
+    result = _invoke("scale", "--deployment", "dep-1", "--clear-startup-args")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert responder.bodies == [
+        {"computeConfig": {"gpuClass": "l4", "region": "US-MO-2", "min": 2, "max": 4, "startupArgs": []}}
+    ]
+    assert _envelope(result)["changed"] is False
+
+
+@pytest.mark.parametrize(
+    ("row", "args", "line"),
+    [
+        (
+            deployment("dep-1", minimum=2, maximum=4),
+            ["--startup-arg=--highvram", "--startup-arg=--reserve-vram", "--startup-arg=2"],
+            "Scaled deployment dep-1 to min=2, max=4, startupArgs=--highvram --reserve-vram 2",
+        ),
+        (
+            deployment("dep-1", minimum=2, maximum=4, startup_args=["--highvram"]),
+            ["--clear-startup-args"],
+            "Scaled deployment dep-1 to min=2, max=4, startupArgs=none",
+        ),
+        (
+            _bounds_free("dep-2"),
+            ["--startup-arg=--highvram"],
+            "Scaled deployment dep-2 to startupArgs=--highvram",
+        ),
+        (
+            deployment("dep-1", minimum=2, maximum=4),
+            ["--min", "1", "--max", "4"],
+            "Scaled deployment dep-1 to min=1, max=4",
+        ),
+    ],
+    ids=["set-with-bounds", "clear", "set-without-bounds", "bounds-only"],
+)
+def test_scale_pretty_line_reports_what_the_request_changed(monkeypatch, row, args, line) -> None:
+    # Given
+    responder = APIResponder(row)
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", responder)
+    _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
+
+    # When
+    result = _invoke("scale", "--deployment", row["id"], *args, pretty=True)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert line in result.stdout
+    assert "unset" not in result.stdout
+
+
+def test_scale_pretty_line_keeps_the_unset_form_when_neither_bounds_nor_flags_are_named(monkeypatch) -> None:
+    # Given
+    responder = APIResponder(_bounds_free("dep-2"))
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", responder)
+    _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
+
+    # When
+    result = _invoke("scale", "--deployment", "dep-2", "--gpu", "a100", pretty=True)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert "Scaled deployment dep-2 to min=unset, max=unset" in result.stdout
+
+
+def test_ready_startup_args_change_maps_to_immutable_compute(monkeypatch) -> None:
+    # Given
+    responder = APIResponder(
+        deployment("dep-1"),
+        status=409,
+        message="stop the deployment before changing startupArgs; they apply when it starts",
+    )
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", responder)
+    _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
+
+    # When
+    result = _invoke("scale", "--deployment", "dep-1", "--startup-arg=--lowvram")
+
+    # Then
+    error = _object(_envelope(result), "error")
+    assert result.exit_code == 1
+    assert error["code"] == "deploy_immutable_compute"
+
+
+def test_scale_with_startup_args_validates_against_its_schema(monkeypatch) -> None:
+    # Given
+    responder = APIResponder(deployment("dep-1", minimum=0, maximum=3))
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", responder)
+    _install_client(monkeypatch, DeployClient("https://deploy.test", "token"))
+
+    # When
+    result = _invoke("scale", "--deployment", "dep-1", "--startup-arg=--highvram")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _envelope(result)["data"]
+    assert data["computeConfig"]["startupArgs"] == ["--highvram"]
+    jsonschema.Draft202012Validator(_schema("deploy_scale.json")).validate(data)
