@@ -123,10 +123,24 @@ def ensure_cmd(
             resource_id=hash,
         ) from e
 
-    b = body or {}
+    # Unlike `ls`, an EMPTY body is an error here, not an empty result: a POST
+    # cannot confirm the borrow without one, and the server contract
+    # (`AssetCreated`) always returns an object. `http_request` also collapses
+    # an unparseable body (an HTML error page from a proxy, say) to `None`, so
+    # `NoneType` covers both — otherwise they emit `{"ok": true}` with a null id
+    # and the caller's own hash echoed back as if the borrow had happened.
+    if not isinstance(body, dict):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response from /api/assets/from-hash (expected a JSON object describing the asset)",
+            hint="the borrow could not be confirmed; retry, and check whether a proxy is intercepting the request",
+            details={"operation": "ensure", "hash": hash, "got_type": type(body).__name__},
+        )
+        raise typer.Exit(code=1)
+
     payload = {
-        "id": b.get("id"),
-        "hash": b.get("hash", hash),
+        "id": body.get("id"),
+        "hash": body.get("hash", hash),
         "created_new": status == 201,
     }
     renderer.emit(payload, command="assets library ensure", where="cloud")
