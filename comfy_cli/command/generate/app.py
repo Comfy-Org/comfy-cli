@@ -605,13 +605,22 @@ def _generate(model: str, extra_args: list[str]) -> None:
                     actor = meta.get("actor") if isinstance(meta.get("actor"), str) else "cli"
                     try:
                         base_version = int(meta.get("base-version", 0))
-                    except (TypeError, ValueError):
-                        renderer.error(
+                    except (TypeError, ValueError) as e:
+                        _bail(
+                            _track_error,
+                            e,
                             code="generate_bad_args",
                             message=f"--base-version must be an integer, got {meta.get('base-version')!r}",
+                            kind="schema",
                         )
-                        raise typer.Exit(code=1) from None
-                    graph = _get_graph(None, None, None)
+                    try:
+                        graph = _get_graph(None, None, None)
+                    except typer.Exit as e:
+                        # _get_graph already rendered cql_no_graph; only the
+                        # generate:error record is owed here, or generate:start
+                        # is left without its terminal event.
+                        _track_error("emit", e)
+                        raise
                     workflow, ops = emit.write_frontend_workflow(
                         name,
                         values,

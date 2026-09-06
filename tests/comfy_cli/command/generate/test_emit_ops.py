@@ -1,6 +1,6 @@
 """``generate --emit-ops``: the emitter expressed as the frozen op vocabulary.
 
-BE-11131: ``--emit-workflow`` writes an API-format file, which the canvas and
+Why: ``--emit-workflow`` writes an API-format file, which the canvas and
 every edit tool refuse (``workflow_not_frontend_format`` — 48 refusals in one
 staging day), and which the CRDT write path cannot attribute (no ops). Instead
 of converting API→frontend after the fact — a second implementation of widget
