@@ -60,7 +60,7 @@ def _install_clients(monkeypatch, builder: FakeBuilder, client: PagedDeploy | De
 
 
 def _invoke_json(path: Path, *args: str):
-    return CliRunner(mix_stderr=False).invoke(app, ["--json", "deploy", "ls", str(path), *args])
+    return CliRunner().invoke(app, ["--json", "deploy", "ls", str(path), *args])
 
 
 def _payload(result) -> JsonObject:
@@ -166,7 +166,7 @@ def test_pretty_output_marks_deleted_rows(tmp_path: Path, monkeypatch) -> None:
     _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([[row]]))
 
     # When
-    result = CliRunner(mix_stderr=False).invoke(
+    result = CliRunner().invoke(
         app,
         ["--no-json", "deploy", "ls", str(write_spec(tmp_path)), "--all"],
         env={"COLUMNS": "400"},

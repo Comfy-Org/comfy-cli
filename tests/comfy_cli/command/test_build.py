@@ -479,9 +479,7 @@ def test_delete_declined_at_the_prompt_aborts_without_touching_the_builder(monke
     monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: False)
     monkeypatch.setattr("comfy_cli.interaction._ask_confirm", lambda _question: False)
 
-    result = CliRunner(mix_stderr=False).invoke(
-        cli_app, ["--no-json", "build", "delete", "--id", "build-1"], env={"COLUMNS": "400"}
-    )
+    result = CliRunner().invoke(cli_app, ["--no-json", "build", "delete", "--id", "build-1"], env={"COLUMNS": "400"})
 
     assert result.exit_code == 0
     assert "Aborted." in result.stdout
@@ -502,7 +500,7 @@ def test_json_delete_on_a_tty_refuses_instead_of_opening_a_prompt(monkeypatch):
     monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: False)
     monkeypatch.setattr("comfy_cli.interaction._ask_confirm", lambda _q: pytest.fail("prompted a --json caller"))
 
-    result = CliRunner(mix_stderr=False).invoke(cli_app, ["--json", "build", "delete", "--id", "build-1"])
+    result = CliRunner().invoke(cli_app, ["--json", "build", "delete", "--id", "build-1"])
 
     envelope = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
     assert result.exit_code == 1
@@ -526,7 +524,7 @@ def test_json_delete_with_skip_prompt_runs_to_completion(monkeypatch):
     monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: True)
     monkeypatch.setattr("comfy_cli.interaction._ask_confirm", lambda _question: pytest.fail("prompted"))
 
-    result = CliRunner(mix_stderr=False).invoke(cli_app, ["--json", "build", "delete", "--id", "build-1"])
+    result = CliRunner().invoke(cli_app, ["--json", "build", "delete", "--id", "build-1"])
 
     envelope = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
     assert result.exit_code == 0

@@ -209,16 +209,9 @@ def test_login_success_never_echoes_secret(mode: str, tmp_path, monkeypatch):
         result = runner.invoke(app, [mode, "cloud", "login", "--no-browser"], env=invoke_env)
 
     assert result.exit_code == 0, f"login/{mode} failed: output={result.output!r} exc={result.exception!r}"
-    # Honor the module's 'stdout OR stderr' invariant like the subprocess cases.
-    # Click 8.1's default mix_stderr=True folds stderr into result.output (and
-    # result.stderr raises); Click >= 8.2 dropped mix_stderr and captures stderr
-    # separately, so result.output is stdout-only — fold stderr back in when it
-    # is its own stream, otherwise a secret leaked to stderr would slip past.
-    combined = result.output
-    try:
-        combined += result.stderr
-    except ValueError:
-        pass  # click 8.1 mix_stderr=True: stderr already merged into result.output
+    # Honor the module's 'stdout OR stderr' invariant like the subprocess cases:
+    # result.output is stdout-only, so a secret leaked to stderr would slip past.
+    combined = result.output + result.stderr
     for secret in (SENTINEL_ACCESS, SENTINEL_REFRESH):
         assert secret not in combined, f"login/{mode} leaked a secret:\n{combined!r}"
 

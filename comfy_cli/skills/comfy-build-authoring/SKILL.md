@@ -18,6 +18,17 @@ onto `baseComfyVersion`, `customNodes`, `pipDependencies` and `models`
 respectively. A workflow file is one step ahead: it names its node classes
 exactly, so start from those rather than from search terms.
 
+**A `custom_nodes/` clone is not automatically a node pack.** Source scripts also
+clone research libraries in there purely to `pip install -e` them, and those
+declare no nodes at all: `ByteDance-Seed/depth-anything-3` has no `__init__.py`
+and no `NODE_CLASS_MAPPINGS`, and its own README points at a different repo for
+the ComfyUI nodes. ComfyUI logs such an import failure and carries on; **the
+builder treats it as fatal** — `exit_code 13`, `class user_error`, `declared
+custom nodes failed to import` — which cost a release. So check each clone
+declares `NODE_CLASS_MAPPINGS` before listing it in `customNodes`. A side-loaded
+library belongs nowhere in the definition, and `pipDependencies` cannot stand in
+for it: an override pins a version, it never adds a package.
+
 When `comfy which` still names a path, say so and let the user settle it — a
 `workspace_type` of `recent` is a remembered directory, not a declared workspace.
 
@@ -55,17 +66,33 @@ curl -s "https://api.comfy.org/nodes/search?search=background+removal"
   the whole catalog's first page, as does `comfy node registry-list`.
 - **No tag or category search exists**, so description text is the only topic
   surface a search can aim at.
-- **Ask which pack publishes a node class** — the whole route when a workflow
-  named the classes exactly:
+- **Ask which pack publishes a node class** — a fast first guess when a workflow
+  named the classes exactly, and only a guess:
 
   ```shell
   curl -s -w '\nHTTP %{http_code}\n' "https://api.comfy.org/comfy-nodes/<ClassName>/node"
   ```
 
-  A 404 means core **or** unknown, never missing, and those two need telling
-  apart: a class upstream ComfyUI ships needs nothing in `customNodes`, while one
-  nothing ships is a graph that will not run. Check the class against the ComfyUI
-  ref you are about to pin, and say which of the two you concluded.
+  **A 200 identifies *a* pack that claims the name, not *the* pack that publishes
+  it.** Any publisher may register any class name, so the index answers with
+  confident attributions that are simply wrong. Measured against one real
+  environment: `LoadImage` → `glm_prompt`, `LoadVideo` and `SaveVideo` →
+  `comfyui-vid2vid`, `ResolutionSelector` → `llm-toolkit`, `BatchImagesNode` →
+  `ComfyUI-YarvixPA`. The first four are **core** ComfyUI
+  (`comfy_extras/nodes_video.py`, `comfy_extras/nodes_resolution.py`); the last
+  names a pack that environment does not install. Acting on any of them adds a
+  pack the graph never wanted and leaves the real class unresolved.
+
+  **A 404 means core, or unknown, or merely unindexed** — never "missing". It
+  404s on classes an installed pack really does publish: every `Swordfish*`
+  class, `ComfyMathExpression`, `LTXVSetAudioRefTokens` and the `ComfyUI-Logic`
+  `-🔬` family all did.
+
+  **The reliable answer is to look.** Clone each candidate pack (and core) at the
+  ref you are about to pin and grep for the class in its `NODE_CLASS_MAPPINGS`.
+  A class upstream ComfyUI ships needs nothing in `customNodes`; one nothing
+  ships is a graph that will not run. Say which of the two you concluded, and on
+  what evidence.
 
 ## Check the models
 
@@ -87,7 +114,16 @@ comfy build refs resolve <filename> [<filename> ...]
   rather than trustworthy. `verified` means the URL served the file when asked and
   `confidence` is a ranking score; neither says it is the file you want.
 - **An empty candidate list is the answer, not an error.** The call succeeds with
-  `error` null — read the candidates and report that filename as an absence.
+  `error` null — read the candidates and report that filename as an absence. It
+  happens for files that plainly do exist publicly, so zero candidates means "the
+  resolver did not find it", never "it is not out there": one weight had to be
+  located by hand on HuggingFace, with its digest read off the LFS `oid`.
+- **A public source can be renamed *and* gated between the workflow being
+  authored and the port.** The signature is a **307 on the HF API with a 401 on
+  the file**: `Lightricks/LTX-2.3-22b-IC-LoRA-LipDub` now redirects to
+  `…-DubIt`, and the file 401s unauthenticated. Following the redirect does not
+  help — the builder fetches anonymously, so a gated file is unreachable however
+  it is named. The escape hatch is an uploaded blob, not a `sourceUri`.
 - **A candidate with no `sha256` is an unpinned fetch**, so prefer one carrying a
   digest and say in the proposal when none does.
 - **Candidates sharing a digest are mirrors of one file**, so take either and
@@ -212,6 +248,43 @@ by dots. The neighbouring `latest_version.id` is a UUID, which the builder
 refuses. A pack whose `latest_version` is empty has nothing to pin: use its
 `repository` at a commit, or drop it and say which. Never write a version the
 search did not return.
+
+**`latest_version` is the newest *published* version, which is not the repository
+HEAD.** When the source environment installs a pack with `git clone` — what
+Dockerfiles and Modal scripts almost always do — a registry pin silently
+substitutes different code, and the build is green because nothing compares the
+two. `comfyui-logic`'s newest published version is **1.0.0, from 2024-07-01**;
+the repository has since renamed every node with a `-🔬` suffix. A workflow
+authored against HEAD calls `Bool-🔬`; the registry pin provides `Bool`. Proven
+by inversion across two releases: `Bool-🔬` ran on the HEAD pin and was not found
+on the registry pin, and `Bool` did the reverse. (Encoding was ruled out —
+escaped surrogate pairs behaved identically to literal UTF-8, and class names
+with spaces or colons work fine.) An audit of 41 registry-pinned packs in that
+build found exactly one real mismatch: rare, not theoretical, and it cost a
+release.
+
+**So compare `latest_version`'s publication date against the repository's last
+commit, and prefer `repository` + `gitRef` when they diverge.** Two dates, and
+each has a wrong neighbour to avoid:
+
+```shell
+# The VERSION's publication date is latest_version.createdAt.
+# The sibling top-level `created_at` is when the PACK was registered — a
+# different date entirely: comfyui-logicutils registered 2024-05, published 2026-01.
+curl -s "https://api.comfy.org/nodes/search?search=<pack>" \
+  | python3 -c 'import json,sys; [print(n["id"], (n.get("latest_version") or {}).get("version"), (n.get("latest_version") or {}).get("createdAt")) for n in json.load(sys.stdin)["nodes"]]'
+
+# The repo's last commit DATE. `git ls-remote` answers with a SHA, not a date,
+# so it cannot make this comparison.
+curl -s "https://api.github.com/repos/<org>/<repo>/commits?per_page=1" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["commit"]["committer"]["date"])'
+```
+
+A gap of months is the signal, and `comfyui-logic` is the worked example:
+published `2024-07-01`, last commit `2025-06-13`. Say which pin you chose and
+why, because the two are different artifacts.
+(Incidentally: the registry serves pack archives at `.../node.tar.gz`, but the
+bytes are a **ZIP** — `PK` magic — so `tarfile` cannot open one.)
 
 **Put a commit in a `repository` entry's `gitRef`.** A branch is accepted and
 resolved at the cut to whatever it points at then, so two cuts of one definition

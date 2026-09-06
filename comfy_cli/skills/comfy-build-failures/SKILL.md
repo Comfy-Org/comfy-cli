@@ -148,6 +148,14 @@ comfy build push <dir>
 comfy build release create <dir> --target <os>/<gpu>
 ```
 
+**Read `local.scanned` before reading `local.drift`.** The two halves of that
+report are independent, and only the install half needs an install. On a
+hand-authored spec — or with `--no-scan`, or when the install cannot be scanned —
+`local.scanned` is `false`, `local.reason` says why, and **`local.drift` is
+`null`**. That is "not compared", never "no drift": treating a null as clean is
+how an unpushed local change gets pushed over, or a `pull` gets chosen when
+`push --force` was wanted. `remote.behind` is unaffected and always answers.
+
 **When the remote moved under you**, `push` refuses with `build_spec_stale`.
 `comfy build pull <dir>` takes the remote copy while keeping local asset
 identities, and `push --force` overwrites it, retrying a bounded three times

@@ -10,7 +10,6 @@ from enum import Enum
 from pathlib import Path
 from urllib.parse import urlsplit
 
-import click
 import pytest
 import typer
 from build_auth_support import BUILD_ID, RELEASE_ID
@@ -188,13 +187,13 @@ def deploy_leaf_commands() -> set[str]:
                 leaves.add(" ".join((*prefix, name)))
 
     command = typer.main.get_command(deploy.app)
-    assert isinstance(command, click.Group)
+    assert hasattr(command, "commands"), command
     walk(command.commands, ())
     return leaves
 
 
 def invoke_deploy(args: list[str], token: str | None):
-    return CliRunner(mix_stderr=False).invoke(
+    return CliRunner().invoke(
         cli_app,
         args,
         env={

@@ -39,7 +39,7 @@ def workspace(tmp_path: Path) -> Path:
 
 
 def _invoke(root: Path, *args: str, token: str | None = None, output: str = "json"):
-    return CliRunner(mix_stderr=False).invoke(
+    return CliRunner().invoke(
         cli_app,
         ["build", "validate", *args, str(root)],
         env={
@@ -86,7 +86,7 @@ def test_offline_validate_accepts_local_entries_without_constructing_a_client(
 
 def test_init_then_offline_validate_passes_signed_out(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Given
-    init = CliRunner(mix_stderr=False).invoke(
+    init = CliRunner().invoke(
         cli_app,
         [
             "build",

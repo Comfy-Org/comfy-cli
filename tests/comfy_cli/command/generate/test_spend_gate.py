@@ -161,7 +161,9 @@ def test_interactive_prompt_accept_proceeds(runner, api_key, post_spy, interacti
     r = runner.invoke(cli_app, ["generate", "dalle", "--prompt", "x"], input="y\n")
     assert r.exit_code == 0, r.stdout
     assert len(post_spy) == 1
-    assert "spends Comfy credits" in r.stdout
+    # Machine stdout (the runner is not a TTY, so the renderer is in JSON mode),
+    # which is exactly the case that routes the human notice to stderr.
+    assert "spends Comfy credits" in r.stderr
 
 
 def test_interactive_prompt_decline_spends_nothing(runner, api_key, post_spy, interactive_tty):
@@ -278,7 +280,7 @@ def test_interactive_prompt_goes_to_stderr_when_stdout_is_machine(api_key, post_
     invisible — the person sees a silent hang — and it splices human text ahead
     of the JSON the caller parses. It belongs on stderr; a TTY user reads it on
     the same terminal either way."""
-    split = CliRunner(mix_stderr=False)
+    split = CliRunner()
     r = split.invoke(cli_app, ["generate", "dalle", "--prompt", "x"], input="n\n")
     assert r.exit_code == 1
     assert post_spy == []
@@ -299,7 +301,7 @@ def test_interactive_prompt_goes_to_stderr_when_stdout_is_machine(api_key, post_
 
 def test_pretty_interactive_prompt_stays_on_stdout(api_key, post_spy, interactive_tty):
     """Pretty mode (a plain TTY run) is untouched: notice and prompt on stdout."""
-    split = CliRunner(mix_stderr=False)
+    split = CliRunner()
     r = split.invoke(cli_app, ["--no-json", "generate", "dalle", "--prompt", "x"], input="n\n")
     assert r.exit_code == 1
     assert post_spy == []

@@ -348,7 +348,7 @@ def _invoke(args, **kwargs):
 
     from comfy_cli.cmdline import app
 
-    return CliRunner(mix_stderr=False).invoke(app, args, **kwargs)
+    return CliRunner().invoke(app, args, **kwargs)
 
 
 def test_run_json_bad_port_terminates_with_envelope(tmp_path):

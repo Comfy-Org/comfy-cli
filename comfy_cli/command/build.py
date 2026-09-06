@@ -1005,6 +1005,21 @@ class ScanRequest:
     comfy_url: str | None = None
 
 
+class ScanUnavailableError(Exception):
+    """This directory cannot be scanned as a ComfyUI installation.
+
+    Raised rather than rendered so the caller decides what it means: fatal for
+    `init` and `update`, where a scan is the whole command, but only a skipped
+    section for `status`, whose spec-vs-remote half needs no install.
+    """
+
+    def __init__(self, code: str, message: str, *, hint: str | None = None, details: dict | None = None) -> None:
+        self.code = code
+        self.hint = hint
+        self.details = details or {}
+        super().__init__(message)
+
+
 @dataclass(frozen=True, slots=True)
 class ScanResult:
     """One local scan. ``definition`` is the builder-ready document; the rest is
@@ -1016,26 +1031,26 @@ class ScanResult:
     skipped_symlinks: tuple[dict, ...] = ()
 
 
-def _scan_install(renderer, ctx, request: ScanRequest) -> ScanResult:
+def _scan_install(renderer, ctx, request: ScanRequest, *, optional: bool = False) -> ScanResult:
     """Scan an installation into a ``definition`` — the path `init` and `update`
     share, so a rescan can never drift from the original scan.
 
-    Every failure is rendered as one error envelope and raises ``typer.Exit``,
-    which is why this takes the renderer rather than returning a union: both
-    callers do exactly the same thing with every one of them.
+    Every reason the scan cannot run raises :class:`ScanUnavailableError`, so a
+    caller for which "no install here" is an ordinary answer can say so instead
+    of exiting. ``optional=True`` marks such a caller: nothing prompts, and even
+    the packaging failure that otherwise renders itself and exits is raised.
     """
     paths = request.paths
     if not paths.models_dir.is_dir():
-        renderer.error(
+        raise ScanUnavailableError(
             code="build_models_dir_missing",
             message=f"No models/ directory to scan at {paths.models_dir}.",
             details={"path": str(paths.models_dir)},
         )
-        raise typer.Exit(code=1)
 
     explicit_python = str(paths.python) if paths.python is not None else None
     python_exe = find_comfy_python(paths.install_root, explicit_python)
-    if python_exe is None:
+    if python_exe is None and not optional:
         selected_python = require_option(
             "--python",
             None,
@@ -1045,23 +1060,25 @@ def _scan_install(renderer, ctx, request: ScanRequest) -> ScanResult:
         )
         python_exe = find_comfy_python(paths.install_root, selected_python)
     if python_exe is None:
-        renderer.error(
+        raise ScanUnavailableError(
             code="build_missing_input",
-            message="The selected --python executable could not be resolved.",
+            message=(
+                f"No ComfyUI Python executable under {paths.install_root}."
+                if optional
+                else "The selected --python executable could not be resolved."
+            ),
             hint="pass --python <path> pointing at the ComfyUI environment's Python executable",
             details={"missing": ["--python"], "path": explicit_python},
         )
-        raise typer.Exit(code=1)
 
     provenance = capture_pip_provenance(str(python_exe))
     if provenance is None:
-        renderer.error(
+        raise ScanUnavailableError(
             code="build_missing_input",
             message=f"Could not capture dependency provenance from {python_exe}.",
             hint="pass --python <path> pointing at a working ComfyUI environment",
             details={"missing": ["--python"], "path": str(python_exe)},
         )
-        raise typer.Exit(code=1)
 
     renderer.info(f"Scanning models in {paths.models_dir} …")
     models = scan_models(paths.models_dir)
@@ -1074,6 +1091,10 @@ def _scan_install(renderer, ctx, request: ScanRequest) -> ScanResult:
         try:
             nodes = scan_custom_nodes(paths.custom_nodes_dir, on_skip=skipped.append)
         except NodePackageError as error:
+            if optional:
+                raise ScanUnavailableError(
+                    code="build_spec_invalid", message=str(error), details={"path": str(error.path)}
+                ) from error
             _raise_node_package_error(renderer, error)
         reported_symlinks = _warn_skipped_symlinks(renderer, skipped)
 
@@ -1098,6 +1119,15 @@ def _scan_install(renderer, ctx, request: ScanRequest) -> ScanResult:
         total_bytes=sum(m["sizeBytes"] for m in models),
         skipped_symlinks=tuple(reported_symlinks),
     )
+
+
+def _require_scan(renderer, ctx, request: ScanRequest) -> ScanResult:
+    """Scan, or render the reason and exit — for the commands a scan IS."""
+    try:
+        return _scan_install(renderer, ctx, request)
+    except ScanUnavailableError as error:
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
+        raise typer.Exit(code=1) from error
 
 
 def _reject_scan_options(
@@ -1489,7 +1519,7 @@ def init_cmd(
         definition = imported.definition
         payload = _imported_payload(imported)
     else:
-        scan = _scan_install(renderer, ctx, ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url))
+        scan = _require_scan(renderer, ctx, ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url))
         definition = scan.definition
         payload = _scanned_payload(paths, scan)
         renderer.event(
@@ -1629,7 +1659,7 @@ def update_cmd(
             overrides=InstallOverrides.from_options(models_dir, custom_nodes_dir, python),
         )
     except BuildSpecNotFoundError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
 
     spec = _read_spec(renderer, paths.spec_file)
@@ -1646,7 +1676,7 @@ def update_cmd(
         )
         incoming = imported.definition
     else:
-        scanned = _scan_install(renderer, ctx, ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url))
+        scanned = _require_scan(renderer, ctx, ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url))
         incoming = scanned.definition
     definition = merge_definition(stored, incoming)
     # After the merge, never before: a scan reports no base image, so the merge
@@ -1872,7 +1902,7 @@ def push_cmd(
             overrides=InstallOverrides.from_options(models_dir, custom_nodes_dir),
         )
     except BuildSpecNotFoundError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
     stored_id = spec.get("id")
@@ -2062,7 +2092,7 @@ def pull_cmd(
             overrides=InstallOverrides.from_options(models_dir, custom_nodes_dir),
         )
     except BuildSpecNotFoundError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
     target_id = require_option(
@@ -2152,13 +2182,15 @@ def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _render_status(renderer, payload: dict, drift: DefinitionDiff) -> None:
+def _render_status(renderer, payload: dict, drift: DefinitionDiff | None) -> None:
     build = payload["build"]
     remote = payload["remote"]
     renderer.print(f"build:  {build['id']}" + (f"  {build['name']}" if build["name"] else ""))
     renderer.print(f"spec:   {payload['spec']['path']}")
     renderer.print(f"remote: {'behind' if remote['behind'] else 'in sync'} (revision {remote['revision'] or '—'})")
-    renderer.print(f"local:  {summarize_definition_diff(drift)}")
+    # "not compared" rather than a dash: silence here would read as "no drift".
+    local = summarize_definition_diff(drift) if drift is not None else f"not compared ({payload['local']['reason']})"
+    renderer.print(f"local:  {local}")
     if payload["hint"]:
         renderer.warn("the remote Build has moved since this spec was synchronized", hint=payload["hint"])
 
@@ -2196,6 +2228,10 @@ def status_cmd(
             "--comfy-url", help=f"Running ComfyUI URL to read the version from. Default: {DEFAULT_COMFY_URL}."
         ),
     ] = None,
+    no_scan: Annotated[
+        bool,
+        typer.Option("--no-scan", help="Report spec-vs-remote only; never scan the install."),
+    ] = False,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
@@ -2209,7 +2245,7 @@ def status_cmd(
             overrides=InstallOverrides.from_options(models_dir, custom_nodes_dir, python),
         )
     except BuildSpecNotFoundError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
     target_id = require_option(
@@ -2227,19 +2263,17 @@ def status_cmd(
     behind = _optional_str(spec.get("syncedRevision")) != revision
 
     stored = spec["definition"]
-    scanned = _scan_install(
-        renderer, ctx, ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url)
-    ).definition
-    # Merged before diffing, exactly as `update` does, so drift means "an
-    # `update` would rewrite the spec": the cached keys a scan never reports
-    # (`blobId`, a resolver's `sourceUri`) must not read as differences.
-    drift = diff_definitions(stored, merge_definition(stored, scanned))
+    # Independent halves: only the drift one needs an install, so a hand-authored
+    # spec must still be comparable against its remote.
+    drift, local = _status_drift(
+        renderer, ctx, paths, stored, no_scan=no_scan, comfy_version=comfy_version, comfy_url=comfy_url
+    )
 
     payload = {
         "build": {"id": target_id, "name": _optional_str(remote.get("name"))},
         "spec": {"path": str(paths.spec_file), "syncedRevision": _optional_str(spec.get("syncedRevision"))},
         "remote": {"revision": revision, "behind": behind},
-        "local": {"drift": drift.as_drift()},
+        "local": local,
         # In the payload rather than only on stderr: `emit` has no hint field,
         # and the agent reading this envelope is who needs the next step.
         "hint": "run `comfy build pull` to take the remote changes" if behind else None,
@@ -2247,6 +2281,29 @@ def status_cmd(
     if renderer.is_pretty():
         _render_status(renderer, payload, drift)
     renderer.emit(payload, command="build status", changed=False)
+
+
+def _status_drift(renderer, ctx, paths, stored: dict, *, no_scan: bool, comfy_version, comfy_url):
+    """Spec-vs-install drift, or a stated reason there is none to compute.
+
+    Returns ``(diff | None, local_payload)``. ``local.scanned`` is the flag a
+    consumer branches on: ``false`` means the drift half was not computed and
+    ``local.reason`` says why, NOT that the spec and the install agree.
+    """
+    if no_scan:
+        return None, {"scanned": False, "reason": "--no-scan was passed", "drift": None}
+    try:
+        scanned = _scan_install(
+            renderer, ctx, ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url), optional=True
+        ).definition
+    except ScanUnavailableError as error:
+        renderer.warn(f"Skipping spec-vs-install drift: {error}", hint=error.hint)
+        return None, {"scanned": False, "reason": str(error), "drift": None}
+    # Merged before diffing, exactly as `update` does, so drift means "an
+    # `update` would rewrite the spec": the cached keys a scan never reports
+    # (`blobId`, a resolver's `sourceUri`) must not read as differences.
+    drift = diff_definitions(stored, merge_definition(stored, scanned))
+    return drift, {"scanned": True, "drift": drift.as_drift()}
 
 
 def _builder_client(renderer, builder_url: str | None):
@@ -2282,6 +2339,16 @@ def _report_builder_error(renderer, e) -> None:
     this envelope."""
     import urllib.error
 
+    from comfy_cli.http import tls_trust_hint, tls_verification_failed
+
+    # Ahead of the transport clause below, whose hint ("check the builder URL and
+    # your access") points away from a failure that is neither: the endpoint and
+    # the credential are both fine and the CA store is the problem.
+    if tls_verification_failed(e):
+        renderer.error(
+            code="tls_verify_failed", message=f"TLS certificate verification failed: {e}", hint=tls_trust_hint()
+        )
+        return
     if isinstance(e, urllib.error.HTTPError):
         body = ""
         try:
@@ -2359,7 +2426,7 @@ def _resolve_build_id(renderer, client, scope: _BuildScope) -> str:
     try:
         paths = resolve_build_paths(scope.path)
     except BuildSpecNotFoundError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
     return require_option(
@@ -2686,7 +2753,7 @@ def validate_cmd(
             overrides=InstallOverrides.from_options(models_dir, custom_nodes_dir),
         )
     except BuildSpecNotFoundError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
     try:

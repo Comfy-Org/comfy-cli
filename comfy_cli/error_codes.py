@@ -43,6 +43,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "User pressed Ctrl-C; in-flight work was torn down.",
     ),
     ErrorCode(
+        "usage_error",
+        "The invocation itself was wrong -- an unknown option, a missing option value, a bad argument count "
+        "or an unknown subcommand. Raised during argv parsing, so NOTHING ran and nothing changed; the exit "
+        "code is 2, not 1. `details.command` is the command path whose surface was violated and "
+        "`details.did_you_mean` carries click's suggestions for a near-miss option. Never retry this: it is "
+        "deterministic.",
+        "fix the invocation; `details.command` plus `--help`, or `comfy --json discover`, gives the exact surface",
+    ),
+    ErrorCode(
         "not_in_workspace",
         "Resolved no workspace where one was required (e.g. `comfy which`).",
         "run `comfy install`, or pass `--workspace`",
@@ -264,9 +273,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "workflow_unknown_nodes",
-        "Workflow references class_type(s) not present in the server's object_info. "
-        "`details.unknown_nodes` lists each with close_matches.",
-        "fix the class_type names; install missing custom nodes",
+        "The workflow failed validation against the target's object_info. Named for its commonest cause -- a "
+        "class_type the target does not have -- but raised for every verdict the validator returns, input "
+        "shape and enum mismatches included, so read `details.errors` rather than assuming a naming problem. "
+        "`details.errors` is one record per failure, each with `node_id`, `message` and any `suggestions`; "
+        "`details.warnings` carries the non-fatal remainder. The `hint` is built from those same records, so "
+        "it describes the actual failures rather than the code's name.",
+        "read `details.errors`: fix the class_type names and install missing custom nodes for an unknown "
+        "class, or correct the input for a shape mismatch",
     ),
     # --- routing / cloud / auth ---------------------------------------------
     ErrorCode(
@@ -1161,6 +1175,17 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "the developer platform is in limited beta; request access, then sign in with an enabled account",
     ),
     ErrorCode(
+        "tls_verify_failed",
+        "The server's TLS certificate could not be verified against this machine's CA trust store. A local "
+        "trust problem, not an auth, URL or availability one: `curl` to the same host typically succeeds. "
+        "Raised on two surfaces only -- the `comfy build` builder calls and the `comfy deploy` control/data "
+        "planes. Other paths still map a verify failure to their own transport code, so its ABSENCE does not "
+        "rule a trust problem out. `hint` names the store actually in use.",
+        "install `certifi`, or point SSL_CERT_FILE **and** REQUESTS_CA_BUNDLE at a PEM bundle containing "
+        "the server's CA (e.g. /etc/ssl/certs/ca-certificates.crt) -- SSL_CERT_FILE covers the urllib call "
+        "sites and REQUESTS_CA_BUNDLE the `requests` ones (blob upload, model download)",
+    ),
+    ErrorCode(
         "build_registry_pin_missing",
         "`comfy build push` sent its identity-keyed public-node subset to the builder's snapshot importer, "
         "which could not vouch for one or more pins. Pushing anyway would save a definition that cannot "
@@ -1313,6 +1338,17 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "create a new deployment with `comfy deploy up`",
     ),
     ErrorCode(
+        "deploy_status_terminal",
+        "The deployment was read successfully and is in a state the reading command treats as terminal. The "
+        "read itself did not fail, so `data` carries the full payload alongside this block and "
+        "`details.status` names the state. The two commands differ, deliberately: `comfy deploy status` "
+        "reports only `failed` and `stop_failed`, since a `stopped` deployment is a normal thing to be "
+        "asked about; `comfy deploy up` adds `stopped` (with or without `--watch`), because a deployment it was "
+        "asked to bring up and that is stopped did not come up.",
+        "for `failed`, inspect `comfy deploy logs` and redeploy with `comfy deploy up`; for `stop_failed`, "
+        "re-run `comfy deploy stop` -- it may still be billing; for `stopped`, `comfy deploy start`",
+    ),
+    ErrorCode(
         "deploy_delete_needs_confirm",
         "`comfy deploy delete` was run without `--yes` in a non-interactive context. The irreversible "
         "teardown and soft-delete are refused without explicit consent; `details.deploymentId` names the "
@@ -1340,8 +1376,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_workflow_invalid",
-        "The data plane rejected the API-format workflow. `details.node_errors` preserves structured per-node failures.",
-        "fix the nodes named in `details.node_errors`, then submit again with a new idempotency key",
+        "The data plane rejected the API-format workflow, and `message` is the server's own explanation of "
+        "why -- read it first. It usually names the offending node, though some rejections are about the "
+        "document rather than a node (a UI-format export, or a count over a per-workflow limit). "
+        "`details.node_errors` carries structured per-node failures only when the server sent them, which "
+        "this route usually does not.",
+        "fix the workflow as `message` describes, then submit again with a new idempotency key",
     ),
     ErrorCode(
         "deploy_workflow_empty",
