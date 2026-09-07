@@ -1195,7 +1195,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "build_release_limit",
         "The builder refused `comfy build release create` because the workspace already holds as many "
-        "releases as its limit allows (20 today), counting every status. `message` is the builder's own "
+        "releases as its limit allows, counting every status. `message` is the builder's own "
         "wording and `details.buildId` names the Build the cut was for. Nothing was created and retrying "
         "unchanged is refused again.",
         "delete a release with `comfy build release delete`, or delete a whole build to give up every "

@@ -50,8 +50,9 @@ blob      ls                                    (hidden; workspace private blobs
 
 - **Every command that reads the spec takes the install directory or the spec
   path** as its argument, defaulting to the current directory. `ls`, `refs` and
-  `blob` are workspace-level and take none. Once the spec exists it carries the
-  Build id, so nothing after `init` needs an id from you. `--id` overrides it.
+  `blob` are workspace-level and take none, and `release delete` takes the
+  release id instead. Once the spec exists it carries the Build id, so nothing
+  after `init` needs an id from you. `--id` overrides it.
 - **`comfy which` names the install** when the user has not said where it is.
 - **Only sign in when told to.** Run `comfy cloud login` if a command answers
   `build_not_signed_in`, and not before. Everything under `refs`, both importers
@@ -276,8 +277,7 @@ pass `--yes` first and disclose after.
 them.** Each names what must be deleted, and each exits 1:
 
 - **`build_release_limit`** — the cut was refused because the workspace already
-  holds as many releases as its limit allows (20 today). Free a slot, then cut
-  again.
+  holds as many releases as its limit allows. Free a slot, then cut again.
 - **`build_release_in_use`** — `comfy build release delete` was refused because a
   deployment still references that release. The `message` names every one.
 - **`build_in_use`** — `comfy build delete` was refused because a deployment
@@ -289,10 +289,11 @@ A workspace has a ceiling on **how many releases it may hold**, counting every
 status and whether or not anything deploys them, and a separate ceiling on **how
 many builds it may keep**. Both are cleared the same way, by deleting:
 
-- **`comfy build release delete [RELEASE]`** gives up one release slot. With no
-  RELEASE it takes the current Build's newest release, which is rarely the one to
-  drop — name the id from `comfy build release ls`. It is idempotent, so a
-  release already gone answers success again.
+- **`comfy build release delete RELEASE`** gives up one release slot. RELEASE is
+  required — there is no default and no spec to fall back on, so name the id from
+  `comfy build release ls`. Repeating the same id is safe: the builder answers
+  success again for a release already deleted, so a retry after a dropped
+  connection costs nothing.
 - **`comfy build delete`** gives up the build slot *and* every release that build
   held, so it is how to free several release slots at once. Say that plainly
   before running it: the releases go with it.

@@ -17,11 +17,11 @@ history.
 
 ### Added
 
-- `comfy build release delete [RELEASE]` deletes one release, freeing the slot it
-  held against the workspace's release limit. It confirms first (`--yes` skips
+- `comfy build release delete RELEASE` deletes the named release, freeing the slot
+  it held against the workspace's release limit. It confirms first (`--yes` skips
   the prompt, `build_release_delete_needs_confirm` refuses a caller that cannot
-  answer one), takes the current Build's newest release when RELEASE is omitted,
-  and is idempotent.
+  answer one), and repeating the same id is safe: the builder answers success
+  again for a release already deleted.
 - Three builder refusals an agent can act on now arrive under their own error
   codes instead of the one `build_builder_error` envelope: `build_release_limit`
   (the workspace holds as many releases as its limit allows),

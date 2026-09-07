@@ -17,7 +17,7 @@ from enum import Enum
 from pathlib import Path
 
 import pytest
-from build_auth_support import BUILD_ID, RecordingTransport, write_snapshot
+from build_auth_support import BUILD_ID, RELEASE_ID, RecordingTransport, write_snapshot
 from build_push_support import make_workspace, write_spec
 from build_tree_support import leaf_commands
 from deploy_auth_support import (
@@ -186,7 +186,7 @@ def _prepare(kind: FixtureKind, root: Path) -> list[str]:
         case FixtureKind.RELEASE_MANIFEST:
             return ["build", "release", "manifest", "--id", BUILD_ID]
         case FixtureKind.RELEASE_DELETE:
-            return ["build", "release", "delete", "-y", "--id", BUILD_ID]
+            return ["build", "release", "delete", RELEASE_ID, "-y"]
         case FixtureKind.REFS_RESOLVE:
             return ["build", "refs", "resolve", "base.safetensors"]
         case FixtureKind.REFS_BASE_IMAGES:

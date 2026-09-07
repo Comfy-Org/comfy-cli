@@ -237,7 +237,16 @@ class BuilderClient:
         it held against the workspace's release limit. Idempotent (204 even when
         already gone); the builder returns 409 while any deployment in the
         workspace still references it, a stopped one included."""
-        request_json(self.target.url("releases", release_id), self.target, method="DELETE", max_bytes=_MAX_JSON)
+        # Validate + encode the id so it stays a single terminal path segment.
+        # ``Target.url`` only ``strip('/')``s each part, so an empty id would
+        # collapse this DELETE onto the collection and an id carrying ``/`` or
+        # ``..`` would aim it, through any normalizing proxy, at a resource the
+        # caller never confirmed.
+        release_id = (release_id or "").strip()
+        if not release_id:
+            raise ValueError("release_id must be a non-empty string")
+        encoded_id = urllib.parse.quote(release_id, safe="")
+        request_json(self.target.url("releases", encoded_id), self.target, method="DELETE", max_bytes=_MAX_JSON)
 
     def validate_build(self, build_id: str) -> dict:
         """POST /v1/builds/{id}/validate -> dry-run resolve the stored

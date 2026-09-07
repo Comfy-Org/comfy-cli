@@ -2031,7 +2031,9 @@ def push_cmd(
     release_summary: dict[str, str] | None = None
     if release:
         requested = [item.as_wire() for item in targets]
-        release_id, status_url = _builder_call(renderer, lambda: client.create_release(target_id, requested))
+        release_id, status_url = _builder_call(
+            renderer, lambda: client.create_release(target_id, requested), {"buildId": target_id}
+        )
         release_summary = {"releaseId": release_id, "statusUrl": status_url}
         payload["targets"] = requested
         payload["release"] = release_summary
@@ -2328,11 +2330,11 @@ def _builder_client(renderer, builder_url: str | None):
 
 
 #: comfy-builder refusals the caller can clear itself, keyed on the builder's own
-#: ``error`` field. That field is the contract and its ``message`` is explicitly
-#: rewordable, so matching the field beats matching a substring of the body --
-#: which would also break the day the body grows past the cap below. Each row's
-#: ``message`` stands in only for a builder that sent none. Everything absent
-#: from this table stays on ``build_builder_error``.
+#: ``error`` field under a 409. That field is the contract and its ``message`` is
+#: explicitly rewordable, so matching the field beats matching a substring of the
+#: body -- which would also break the day the body grows past the cap below. Each
+#: row's ``message`` stands in only for a builder that sent none. Everything
+#: absent from this table stays on ``build_builder_error``.
 _BUILDER_REFUSALS: Final = {
     "RELEASE_LIMIT": {
         "code": "build_release_limit",
@@ -2348,9 +2350,15 @@ _BUILDER_REFUSALS: Final = {
     },
 }
 
-#: A hostile endpoint can be reached through the env-configurable base URL, so a
-#: body never reaches the envelope whole.
+#: A hostile endpoint can be reached through the env-configurable base URL, so
+#: nothing it sends reaches the envelope unbounded: the body is read under
+#: ``_BUILDER_ERROR_READ``, excerpted into ``details.body`` at
+#: ``_BUILDER_BODY_CAP``, and a carried refusal message is capped at
+#: ``_BUILDER_MESSAGE_CAP`` -- far above any real blocker list, since the builder
+#: names at most ten deployments before it appends "(and more)".
 _BUILDER_BODY_CAP: Final = 1000
+_BUILDER_MESSAGE_CAP: Final = 8 * 1024
+_BUILDER_ERROR_READ: Final = 64 * 1024
 
 
 def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None) -> None:
@@ -2359,12 +2367,14 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None)
     `SUBSCRIPTION_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
     generic transport error.
 
-    The generic envelope carries no Build id, because the old `create` verb's
-    orphan case is gone: `push` writes the id into the spec on disk before it
-    cuts, so a cut that fails afterwards leaves the id in the user's own file
-    rather than only in this envelope. A mapped refusal is different — it is a
-    state the caller clears by deleting a named thing — so it carries *subject*,
-    the id the command was acting on."""
+    *subject* is the id the command was acting on, spread into every envelope
+    that carries details, and spread first so it can never displace `status` or
+    `body`. A mapped refusal needs it because clearing the state means deleting
+    the named thing; a lost response needs it because retrying means naming the
+    id the first attempt used. A call site that passes none invents nothing: the
+    old `create` verb's orphan case is gone, because `push` writes the id into
+    the spec on disk before it cuts, so a cut that fails afterwards leaves the id
+    in the user's own file rather than only in this envelope."""
     import urllib.error
 
     from comfy_cli.http import tls_trust_hint, tls_verification_failed
@@ -2380,7 +2390,7 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None)
     if isinstance(e, urllib.error.HTTPError):
         body = ""
         try:
-            body = e.read().decode("utf-8", "replace")
+            body = (e.read(_BUILDER_ERROR_READ) or b"").decode("utf-8", "replace")
         except Exception:
             pass
         if e.code == 403 and "FEATURE_NOT_ENABLED" in body:
@@ -2390,26 +2400,31 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None)
             )
             return
         builder_error, builder_message = _builder_error_fields(body)
-        refusal = _BUILDER_REFUSALS.get(builder_error)
+        # All three refusals are 409 in the builder's contract and nothing else
+        # sends them, so a mapped code under any other status came from something
+        # that is not the builder and must not be answered with its remediation.
+        refusal = _BUILDER_REFUSALS.get(builder_error) if e.code == 409 else None
         if refusal is not None:
             # The blocking deployment ids ride in the builder's prose and nowhere
-            # else in its contract, so the message is carried whole instead of
-            # parsed for them: a regex over a rewordable sentence is a contract
-            # nobody wrote, and the capped body would lose the tail of a long one.
+            # else in its contract, so the message is carried unparsed under its
+            # own cap: a regex over a rewordable sentence is a contract nobody
+            # wrote, and the body excerpt would lose the tail of a long one.
             renderer.error(
                 code=refusal["code"],
-                message=builder_message or refusal["message"],
-                details={"status": e.code, "body": body[:_BUILDER_BODY_CAP], **(subject or {})},
+                message=(builder_message or refusal["message"])[:_BUILDER_MESSAGE_CAP],
+                details={**(subject or {}), "status": e.code, "body": body[:_BUILDER_BODY_CAP]},
             )
             return
         detail = _builder_msg(body) or getattr(e, "reason", None) or str(e)
         renderer.error(
             code="build_builder_error",
             message=f"builder call failed ({e.code}): {detail}",
-            details={"status": e.code, "body": body[:_BUILDER_BODY_CAP]},
+            details={**(subject or {}), "status": e.code, "body": body[:_BUILDER_BODY_CAP]},
         )
         return
-    renderer.error(code="build_builder_error", message=f"builder call failed: {e}")
+    # A dropped connection, a reset or a timeout: the caller's own remediation is
+    # to retry, which needs the id the lost attempt named.
+    renderer.error(code="build_builder_error", message=f"builder call failed: {e}", details=dict(subject or {}))
 
 
 def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None):
@@ -2951,22 +2966,21 @@ def release_manifest(
 @tracking.track_command("build")
 def release_delete(
     ctx: typer.Context,
-    release: Annotated[
-        str | None, typer.Argument(help="Release id. Default: the current Build's newest release.")
-    ] = None,
-    path: Annotated[str | None, typer.Argument(help="Build spec path used when RELEASE is omitted.")] = None,
-    build_id: Annotated[str | None, typer.Option("--id", help="Resolve the newest release from this Build id.")] = None,
+    release: Annotated[str, typer.Argument(help="Release id to delete.")],
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
+    # The one release verb that destroys something names its target and takes no
+    # other selector: a caller whose connection dropped retries, and a resolved
+    # default would re-resolve against a list the builder has already filtered the
+    # first delete out of, destroying a second release nobody asked for.
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
-    release_id = _selected_release_id(renderer, client, _BuildScope(ctx, path, build_id), release)
     if not confirm(
-        f"Delete release {release_id}?",
+        f"Delete release {release}?",
         yes=yes,
         error_code="build_release_delete_needs_confirm",
-        details={"releaseId": release_id},
+        details={"releaseId": release},
         ctx=ctx,
     ):
         # Declining needs a prompt, and a prompt needs pretty mode, where `emit`
@@ -2974,10 +2988,10 @@ def release_delete(
         # `build_release_delete_needs_confirm` rather than reaching this branch.
         renderer.info("Aborted.")
         return
-    _builder_call(renderer, lambda: client.delete_release(release_id), {"releaseId": release_id})
+    _builder_call(renderer, lambda: client.delete_release(release), {"releaseId": release})
     if renderer.is_pretty():
-        renderer.success(f"Deleted release {release_id}")
-    renderer.emit({"releaseId": release_id, "deleted": True}, command="build release delete", changed=True)
+        renderer.success(f"Deleted release {release}")
+    renderer.emit({"releaseId": release, "deleted": True}, command="build release delete", changed=True)
 
 
 @blob_app.command("ls", help="List the workspace's private blobs.")
