@@ -273,15 +273,19 @@ for comes back as a refusal envelope and exits 1: `build_update_needs_confirm`,
 Pass `--yes`, or the option it named, once the user has actually agreed. Do not
 pass `--yes` first and disclose after.
 
-**Three other refusals are limits, not confirmations — `--yes` does nothing for
-them.** Each names what must be deleted, and each exits 1:
+**Three other refusals block rather than ask — `--yes` does nothing for them.**
+Each is cleared by deleting something, and each exits 1:
 
 - **`build_release_limit`** — the cut was refused because the workspace already
   holds as many releases as its limit allows. Free a slot, then cut again.
 - **`build_release_in_use`** — `comfy build release delete` was refused because a
-  deployment still references that release. The `message` names every one.
+  deployment still references that release. The `message` is the builder's own
+  wording and names the blocking deployments, though on a long list it may name
+  only the first several and say so.
 - **`build_in_use`** — `comfy build delete` was refused because a deployment
-  still references one of that build's releases. The `message` names every one.
+  still references one of that build's releases. The `message` is the builder's
+  own wording and names the blocking deployments, though on a long list it may
+  name only the first several and say so.
 
 ## The two limits, and what clears each
 
