@@ -1194,10 +1194,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "build_release_limit",
-        "The builder refused `comfy build release create` because the workspace already holds as many "
-        "releases as its limit allows, counting every status. `message` is the builder's own "
-        "wording and `details.buildId` names the Build the cut was for. Nothing was created and retrying "
-        "unchanged is refused again.",
+        "The builder refused the release cut because the workspace already holds as many releases as its "
+        "limit allows, counting every status. `message` is the builder's own wording. `comfy build release "
+        "create` and `comfy build push --release` both post to this route and both answer this code, and "
+        "each attaches `details.buildId` naming the Build the cut was for. No release was cut and retrying "
+        "unchanged is refused again -- but only the cut was refused: under `comfy build push --release` the "
+        "push already landed, so the build was created or updated, its blobs were stored, and its id was "
+        "written into the spec on disk before the refusal.",
         "delete a release with `comfy build release delete`, or delete a whole build to give up every "
         "release it holds, then cut again",
     ),

@@ -96,7 +96,6 @@ from comfy_cli.command.pack_scan import read_pyproject
 from comfy_cli.constants import SUPPORTED_PT_EXTENSIONS
 from comfy_cli.interaction import confirm, require_option
 from comfy_cli.output import get_renderer
-from comfy_cli.output.sanitize import sanitize
 from comfy_cli.registry.api import sanitize_error_body
 from comfy_cli.utils import parse_rfc3339
 
@@ -2352,15 +2351,64 @@ _BUILDER_REFUSALS: Final = {
 }
 
 #: A hostile endpoint can be reached through the env-configurable base URL, so
-#: nothing it sends reaches the envelope unbounded or able to address a terminal:
-#: the body is read under ``_BUILDER_ERROR_READ``, excerpted into ``details.body``
-#: at ``_BUILDER_BODY_CAP``, and a carried message is stripped of control
-#: characters and capped at ``_BUILDER_MESSAGE_CAP`` -- room enough for a long
-#: list of blocking deployments and their prose without letting one endpoint
-#: decide how big an envelope is.
+#: nothing it sends reaches the envelope unbounded: the body is read under
+#: ``_BUILDER_ERROR_READ``, excerpted into ``details.body`` at
+#: ``_BUILDER_BODY_CAP``, and a carried message is capped at
+#: ``_BUILDER_MESSAGE_CAP`` -- room enough for a long list of blocking
+#: deployments and their prose without letting one endpoint decide how big an
+#: envelope is. The message cap counts **bytes** (see ``_capped_message``),
+#: because a cap on characters is one the sender picks the multiplier for: a
+#: message of four-byte characters costs four times what it promises. The body
+#: excerpt is a debugging aid rather than the envelope's payload, so it keeps its
+#: cheaper slice and is bounded in turn by the byte-counted ``_BUILDER_ERROR_READ``.
+#:
+#: Bounded, not sanitized. What reaches a terminal is sanitized at the terminal
+#: (``error_panel``); the envelope stays byte-faithful -- see
+#: ``_report_builder_error``.
 _BUILDER_BODY_CAP: Final = 1000
 _BUILDER_MESSAGE_CAP: Final = 8 * 1024
 _BUILDER_ERROR_READ: Final = 64 * 1024
+
+
+def _capped_message(text: str) -> str:
+    """``text`` truncated to ``_BUILDER_MESSAGE_CAP`` UTF-8 bytes, whole characters only.
+
+    Slicing the ``str`` would cap Python characters instead, which bounds the
+    envelope only for ASCII. Truncation happens on the encoded form and the
+    partial character a byte cut can leave behind is dropped, so what the JSON
+    writer receives is always decodable. Text that already fits is returned
+    unchanged rather than round-tripped, so the common case stays byte-identical.
+    """
+    encoded = text.encode("utf-8", "replace")
+    if len(encoded) <= _BUILDER_MESSAGE_CAP:
+        return text
+    return encoded[:_BUILDER_MESSAGE_CAP].decode("utf-8", "ignore")
+
+
+#: Any URL in an exception's text, with its query string. Both shapes ``requests``
+#: produces quote what they were talking to: ``raise_for_status`` gives the whole
+#: URL ("... for url: https://host/o?sig=..."), while a ``ConnectionError`` gives
+#: the path alone ("Max retries exceeded with url: /o?sig=..."), so both forms are
+#: matched. The query is lazy-anchored to the FIRST ``?`` in the run, and must be
+#: non-empty, so a sentence ending in a question mark is left alone.
+_URL_QUERY_RE: Final = re.compile(r"(?:[a-z][a-z0-9+.\-]*://\S*?|/\S*?)\?\S+", re.IGNORECASE)
+
+
+def _without_signed_query(e: BaseException) -> str:
+    """``str(e)`` with the query string cut off every URL it quotes.
+
+    ``upload_assets`` runs inside ``_builder_call``, and it talks to a presigned
+    GCS PUT whose query string *is* the credential: an ordinary failed upload
+    would otherwise write a still-valid ``X-Goog-Credential`` and
+    ``X-Goog-Signature`` to stdout, into the JSON envelope, and into any CI log
+    that captured either. Only the query comes off -- the host and the path are
+    what make the failure diagnosable.
+
+    This errs toward removing too much: a path with a legitimate ``?`` in it
+    loses its tail. That is the correct bias for a redaction, and the same one
+    ``tracking._scrub_value`` takes for a URL standing alone as a value.
+    """
+    return _URL_QUERY_RE.sub(lambda m: m.group(0).partition("?")[0], str(e))
 
 
 def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None) -> None:
@@ -2411,24 +2459,40 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None)
             # else in its contract, so the message is carried unparsed under its
             # own cap: a regex over a rewordable sentence is a contract nobody
             # wrote, and the body excerpt would lose the tail of a long one.
-            # Sanitized before the cap, not after, so a cut cannot manufacture an
-            # unterminated escape whose sanitizer then swallows the ids.
+            #
+            # Carried BYTE-FAITHFULLY, and deliberately not sanitized. The
+            # sanitizer's module docstring rules the JSON/NDJSON paths out, and
+            # here the cost is concrete: its unterminated-introducer rule cuts
+            # from a stray introducer to the end of the string, so one byte of
+            # ordinary mojibake would silently delete every blocking id after it
+            # -- the ids being the whole reason an agent reads this refusal.
+            # Stripping buys nothing either, since `details.body` beside it
+            # carries the same bytes raw. A terminal is protected where the
+            # terminal is: `error_panel` sanitizes `message` and every details
+            # row on the pretty path.
             renderer.error(
                 code=refusal["code"],
-                message=sanitize(builder_message or refusal["message"])[:_BUILDER_MESSAGE_CAP],
+                message=_capped_message(builder_message or refusal["message"]),
                 details={**(subject or {}), "status": e.code, "body": body[:_BUILDER_BODY_CAP]},
             )
             return
         detail = _builder_msg(body) or getattr(e, "reason", None) or str(e)
         renderer.error(
             code="build_builder_error",
-            message=f"builder call failed ({e.code}): {str(detail)[:_BUILDER_MESSAGE_CAP]}",
+            message=f"builder call failed ({e.code}): {_capped_message(str(detail))}",
             details={**(subject or {}), "status": e.code, "body": body[:_BUILDER_BODY_CAP]},
         )
         return
     # A dropped connection, a reset or a timeout: the caller's own remediation is
-    # to retry, which needs the id the lost attempt named.
-    renderer.error(code="build_builder_error", message=f"builder call failed: {e}", details=dict(subject or {}))
+    # to retry, which needs the id the lost attempt named. The exception is
+    # redacted rather than interpolated raw -- a failed blob upload quotes its
+    # presigned PUT URL, whose query string is a live credential (see
+    # ``_without_signed_query``).
+    renderer.error(
+        code="build_builder_error",
+        message=f"builder call failed: {_without_signed_query(e)}",
+        details=dict(subject or {}),
+    )
 
 
 def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None):
@@ -2999,15 +3063,22 @@ def release_delete(
     # default would re-resolve against a list the builder has already filtered the
     # first delete out of, destroying a second release nobody asked for.
     renderer = get_renderer()
-    client = _builder_client(renderer, builder_url)
-    # Normalized and refused once, above the prompt, so the id confirmed, the id
-    # deleted and the id reported are one string rather than three. A segment of
-    # only dots is refused rather than encoded: `quote(safe="")` leaves it alone
-    # (RFC 3986 unreserved) and nothing between here and the service resolves dot
-    # segments, so `.` would aim this DELETE at the collection and `..` a level
-    # above it -- and `.` is a plausible argument, since every other `comfy build`
-    # verb takes a path defaulting to it. What else an id may look like is the
-    # builder's to say, so nothing here spells out its grammar.
+    # Normalized and refused once, above both the client and the prompt, so the
+    # id confirmed, the id deleted and the id reported are one string rather than
+    # three. Above the client because `_builder_client` can exit with
+    # `build_not_signed_in` after an OAuth round trip: a signed-out caller
+    # passing a blank id would be told to sign in, do so, and only then learn the
+    # id was never usable. This check needs nothing but the argument, so the
+    # first envelope is the actionable one.
+    #
+    # A segment of only dots is refused rather than encoded: `quote(safe="")`
+    # leaves it alone (RFC 3986 unreserved) and nothing between here and the
+    # service resolves dot segments, so `.` would aim this DELETE at the
+    # collection and `..` a level above it -- and `.` is a plausible argument,
+    # since every other `comfy build` verb takes a path defaulting to it.
+    # `delete_release` refuses the same ids for any other caller; this is the
+    # copy that produces the readable refusal. What else an id may look like is
+    # the builder's to say, so nothing here spells out its grammar.
     release = release.strip()
     if not release or set(release) == {"."}:
         renderer.error(
@@ -3017,6 +3088,7 @@ def release_delete(
             details={"invalid": [release]},
         )
         raise typer.Exit(code=1)
+    client = _builder_client(renderer, builder_url)
     if not confirm(
         f"Delete release {release}?",
         yes=yes,

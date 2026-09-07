@@ -705,32 +705,6 @@ def test_a_lone_surrogate_in_the_builder_message_still_reaches_the_agent(monkeyp
     assert (error["code"], error["details"]["releaseId"]) == ("build_release_in_use", "release-9")
 
 
-def test_the_carried_message_cannot_forge_a_line_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The carried message is now the envelope's authoritative `message`, and the
-    skill page sends an agent to act on the deployments it names. `json.dumps`
-    escapes C0 but emits C1 raw, and the pretty path prints the message, so an
-    erase-line plus a carriage return would let the builder's prose overwrite what
-    the CLI already printed with a success that never happened."""
-    # Given
-    _refusing_builder(
-        monkeypatch,
-        409,
-        {
-            "error": "RELEASE_IN_USE",
-            "message": "these deployments still reference this release: dep-01a4f7c1e9b3, dep-02a4f7c1e9b3"
-            "\x1b[2K\rDeleted release release-9",
-        },
-    )
-
-    # When
-    result = invoke_release("delete", "release-9", "--yes")
-
-    # Then
-    assert envelope(result)["error"]["message"] == (
-        "these deployments still reference this release: dep-01a4f7c1e9b3, dep-02a4f7c1e9b3Deleted release release-9"
-    )
-
-
 def test_a_long_message_under_an_unmapped_status_obeys_the_message_cap(monkeypatch: pytest.MonkeyPatch) -> None:
     """The block comment beside the caps says nothing an endpoint sends reaches the
     envelope unbounded, but only the refusal branch three lines below it applied
@@ -745,6 +719,72 @@ def test_a_long_message_under_an_unmapped_status_obeys_the_message_cap(monkeypat
     # Then
     message = envelope(result)["error"]["message"]
     assert len(message.removeprefix("builder call failed (400): ")) == build._BUILDER_MESSAGE_CAP
+
+
+#: One four-byte character. Sent `_BUILDER_MESSAGE_CAP // 2` times, so the
+#: message passes a cap counting characters and doubles the cap counting bytes,
+#: while its JSON-escaped body (12 bytes per character) still fits the 64 KiB
+#: `_BUILDER_ERROR_READ` and so still parses as the builder's `{error, message}`.
+WIDE = "\N{GRINNING FACE}"
+
+
+@pytest.mark.parametrize(
+    "status, builder_error, prefix",
+    [
+        pytest.param(409, "RELEASE_IN_USE", "", id="carried-refusal"),
+        pytest.param(400, "NOPE", "builder call failed (400): ", id="generic-branch"),
+    ],
+)
+def test_a_multibyte_message_is_capped_in_bytes_not_characters(
+    monkeypatch: pytest.MonkeyPatch, status: int, builder_error: str, prefix: str
+) -> None:
+    """Both slices cap Python characters, so the block comment's promise that
+    nothing an endpoint sends reaches the envelope unbounded holds only for
+    ASCII: a message of four-byte characters passes the cap and emits four times
+    it. Capping the encoded form must not split a character either -- a
+    truncated envelope carrying half a character is not one an agent can
+    decode."""
+    # Given
+    _refusing_builder(
+        monkeypatch, status, {"error": builder_error, "message": WIDE * (build._BUILDER_MESSAGE_CAP // 2)}
+    )
+
+    # When
+    result = invoke_release("delete", "release-9", "--yes")
+
+    # Then
+    message = envelope(result)["error"]["message"]
+    carried = message.removeprefix(prefix)
+    assert (
+        len(message.encode("utf-8")) <= build._BUILDER_MESSAGE_CAP + len(prefix),
+        # Every surviving character is whole: a byte slice through the middle of
+        # one would leave a replacement character or a mojibake tail here.
+        set(carried.removeprefix(f"{builder_error}: ")),
+    ) == (True, {WIDE})
+
+
+def test_a_blank_id_is_refused_before_a_signed_out_caller_is_sent_to_log_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Constructing the client can exit with `build_not_signed_in` after an OAuth
+    round trip, so validating the id afterwards tells a signed-out caller with a
+    blank id to sign in -- and only once they have does it say the id was never
+    usable. The first envelope has to be the actionable one."""
+    # Given
+    constructed: list[str] = []
+
+    def signed_out(renderer, builder_url):
+        constructed.append("client")
+        renderer.error(code="build_not_signed_in", message="run `comfy cloud login` first")
+        raise typer.Exit(code=1)
+
+    monkeypatch.setattr(build, "_builder_client", signed_out)
+
+    # When
+    result = invoke_release("delete", "   ", "--yes")
+
+    # Then
+    assert (envelope(result)["error"]["code"], constructed) == ("build_missing_input", [])
 
 
 def _recording_builder(monkeypatch: pytest.MonkeyPatch) -> list[str]:

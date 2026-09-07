@@ -32,6 +32,12 @@ history.
 
 ### Fixed
 
+- A failed blob upload during `comfy build push` no longer writes the presigned
+  PUT URL's query string to stdout, into the JSON envelope, or into a CI log.
+  Both a rejected upload and a dropped connection quote the URL they were talking
+  to, and for a presigned GCS PUT that query string is a live credential
+  (`X-Goog-Credential`, `X-Goog-Signature`). The host and path are kept, so the
+  failure still says what it failed to reach.
 - `comfy install --fast-deps --nvidia` no longer installs a torch that its
   torchvision was not built against, which made ComfyUI fail to import with
   `RuntimeError: operator torchvision::nms does not exist`. The GPU override

@@ -237,16 +237,22 @@ class BuilderClient:
         it held against the workspace's release limit. Idempotent (204 even when
         already gone); the builder returns 409 while any deployment in the
         workspace still references it, a stopped one included."""
-        # Encode the id so it stays a single terminal path segment: ``Target.url``
-        # only ``strip('/')``s each part, so an id carrying ``/`` or ``..`` would
-        # aim this DELETE, through any normalizing proxy, at a resource the caller
+        # Keep the id a single terminal path segment: ``Target.url`` only
+        # ``strip('/')``s each part, so an id carrying ``/`` or ``..`` would aim
+        # this DELETE, through any normalizing proxy, at a resource the caller
         # never confirmed. Percent-encoding belongs here because only the client
-        # knows it is building a URL. The empty check is a defensive precondition
-        # rather than the active rule -- ``release_delete`` refuses a blank or
-        # dot-only id above its own prompt, before this is ever called.
+        # knows it is building a URL -- but it is not enough on its own:
+        # ``quote(safe="")`` leaves ``.`` and ``..`` untouched, RFC 3986 calling
+        # both unreserved, so those two are refused rather than encoded.
+        #
+        # This is the guarantee, and it holds for whoever calls the method.
+        # ``release_delete`` refuses the same ids above its own prompt, and that
+        # check is the one a person or an agent actually reads: it names the
+        # command's argument and points at `comfy build release ls`. This one
+        # only has to keep the sentence above true.
         release_id = (release_id or "").strip()
-        if not release_id:
-            raise ValueError("release_id must be a non-empty string")
+        if not release_id or set(release_id) == {"."}:
+            raise ValueError("release_id must name one release, not an empty or dot-only path segment")
         encoded_id = urllib.parse.quote(release_id, safe="")
         request_json(self.target.url("releases", encoded_id), self.target, method="DELETE", max_bytes=_MAX_JSON)
 
