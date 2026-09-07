@@ -1204,7 +1204,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "build_release_in_use",
         "The builder refused `comfy build release delete` because a deployment still references the "
-        "release. `message` names every blocking deployment and `details.releaseId` names the release. A "
+        "release. `message` is the builder's own wording and names the blocking deployments, though on a "
+        "long list it may name only the first several and say so. `comfy build release delete` is the "
+        "route that answers this code, and it attaches `details.releaseId` naming the release. A "
         "deployment blocks whatever its state -- serving, stopped or failed -- and stops blocking only "
         "once it has been deleted and its teardown has released its compute.",
         "delete each deployment the message names (stopping one is not enough), wait for its teardown, then retry",
@@ -1212,9 +1214,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "build_in_use",
         "The builder refused `comfy build delete` because a deployment still references one of the "
-        "build's releases. `message` names every blocking deployment and `details.buildId` names the "
-        "build. A deployment blocks whatever its state -- serving, stopped or failed -- and stops "
-        "blocking only once it has been deleted and its teardown has released its compute.",
+        "build's releases. `message` is the builder's own wording and names the blocking deployments, "
+        "though on a long list it may name only the first several and say so. `comfy build delete` is "
+        "the route that answers this code, and it attaches `details.buildId` naming the build. A "
+        "deployment blocks whatever its state -- serving, stopped or failed -- and stops blocking only "
+        "once it has been deleted and its teardown has released its compute.",
         "delete each deployment the message names (stopping one is not enough), wait for its teardown, then retry",
     ),
     ErrorCode(

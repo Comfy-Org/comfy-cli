@@ -25,9 +25,13 @@ AT_THE_LIMIT = (
 )
 
 
-def refusal(status: int, body: dict, url: str) -> urllib.error.HTTPError:
-    """The builder's `{error, message}` body, raised the way the HTTP layer raises it."""
-    return urllib.error.HTTPError(url, status, "Conflict", {}, io.BytesIO(json.dumps(body).encode()))
+def refusal(status: int, body: dict | bytes, url: str) -> urllib.error.HTTPError:
+    """The builder's `{error, message}` body, raised the way the HTTP layer raises it.
+
+    Bytes are sent through untouched, for the bodies a hostile endpoint can send
+    that `json.dumps` cannot produce."""
+    raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+    return urllib.error.HTTPError(url, status, "Conflict", {}, io.BytesIO(raw))
 
 
 class ReleaseBuilder:
@@ -654,6 +658,95 @@ def test_delete_without_yes_refuses_an_agent_before_the_builder(
     )
 
 
+def _refusing_builder(monkeypatch: pytest.MonkeyPatch, status: int, refused_body: dict | bytes) -> None:
+    """A live `BuilderClient` whose transport answers every call with one refusal."""
+    from comfy_cli.builder_api import BuilderClient
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        raise refusal(status, refused_body, url)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+
+def test_a_deeply_nested_error_body_still_reaches_the_agent_as_an_envelope(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`json.loads` answers a nest this deep with `RecursionError`, a `RuntimeError`
+    rather than a `ValueError`, so it escapes every clause between here and the CLI
+    and leaves exit 1 with nothing on stdout -- on every builder HTTP error path,
+    not just this one, so an agent cannot even tell whether the delete happened.
+    20 000 is deterministic on this interpreter; 5 000 parses fine."""
+    # Given
+    _refusing_builder(monkeypatch, 409, b"[" * 20_000)
+
+    # When
+    result = invoke_release("delete", "release-9", "--yes")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["details"]["status"]) == ("build_builder_error", 409)
+
+
+def test_a_lone_surrogate_in_the_builder_message_still_reaches_the_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lone surrogate is legal in a JSON string and legal in a Python `str`, but
+    encoding it raises `UnicodeEncodeError` -- a `ValueError`, which the JSON
+    writer's own except swallows, so the whole envelope silently never lands."""
+    # Given
+    _refusing_builder(
+        monkeypatch, 409, json.dumps({"error": "RELEASE_IN_USE", "message": "\ud800"}).encode("utf-8", "surrogatepass")
+    )
+
+    # When
+    result = invoke_release("delete", "release-9", "--yes")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["details"]["releaseId"]) == ("build_release_in_use", "release-9")
+
+
+def test_the_carried_message_cannot_forge_a_line_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The carried message is now the envelope's authoritative `message`, and the
+    skill page sends an agent to act on the deployments it names. `json.dumps`
+    escapes C0 but emits C1 raw, and the pretty path prints the message, so an
+    erase-line plus a carriage return would let the builder's prose overwrite what
+    the CLI already printed with a success that never happened."""
+    # Given
+    _refusing_builder(
+        monkeypatch,
+        409,
+        {
+            "error": "RELEASE_IN_USE",
+            "message": "these deployments still reference this release: dep-01a4f7c1e9b3, dep-02a4f7c1e9b3"
+            "\x1b[2K\rDeleted release release-9",
+        },
+    )
+
+    # When
+    result = invoke_release("delete", "release-9", "--yes")
+
+    # Then
+    assert envelope(result)["error"]["message"] == (
+        "these deployments still reference this release: dep-01a4f7c1e9b3, dep-02a4f7c1e9b3Deleted release release-9"
+    )
+
+
+def test_a_long_message_under_an_unmapped_status_obeys_the_message_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The block comment beside the caps says nothing an endpoint sends reaches the
+    envelope unbounded, but only the refusal branch three lines below it applied
+    the message cap: a 400 carrying a 60 000-character message produced an
+    `error.message` detail of 60 006 beside a `details.body` of exactly 1 000."""
+    # Given
+    _refusing_builder(monkeypatch, 400, {"error": "NOPE", "message": "x" * 60_000})
+
+    # When
+    result = invoke_release("delete", "release-9", "--yes")
+
+    # Then
+    message = envelope(result)["error"]["message"]
+    assert len(message.removeprefix("builder call failed (400): ")) == build._BUILDER_MESSAGE_CAP
+
+
 def _recording_builder(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """A live `BuilderClient` whose transport records the URLs it is handed."""
     from comfy_cli.builder_api import BuilderClient
@@ -684,14 +777,52 @@ def test_delete_keeps_a_traversing_release_id_inside_one_path_segment(monkeypatc
     assert calls == ["https://builder.test/v1/releases/..%2Fbuilds%2Fabc"]
 
 
-def test_delete_refuses_a_blank_release_id_before_it_reaches_the_builder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An empty part drops out of the path entirely, which would aim the DELETE at
-    the whole collection."""
+@pytest.mark.parametrize(
+    "release_id",
+    [
+        pytest.param("   ", id="blank"),
+        pytest.param(".", id="dot"),
+        pytest.param("..", id="dot-dot"),
+    ],
+)
+def test_delete_refuses_an_id_that_names_no_release_before_it_reaches_the_builder(
+    monkeypatch: pytest.MonkeyPatch, release_id: str
+) -> None:
+    """An empty part drops out of the path entirely, and `quote(safe="")` leaves a
+    dot segment alone because RFC 3986 calls it unreserved -- so all three aim the
+    DELETE at the collection or at its parent rather than at a release. `.` is a
+    plausible argument because every other `comfy build` verb takes a path
+    defaulting to it. The empty `calls` is the load-bearing half: nothing reached
+    the wire, rather than something reaching it encoded."""
     # Given
     calls = _recording_builder(monkeypatch)
 
     # When
-    result = invoke_release("delete", "   ", "--yes")
+    result = invoke_release("delete", release_id, "--yes")
 
     # Then
     assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, "build_missing_input", [])
+
+
+def test_delete_uses_one_stripped_release_id_for_the_prompt_the_url_and_the_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A padded id otherwise splits into three different strings: the prompt echoes
+    the padding, the client strips it for the URL, and the payload reports the
+    padding back -- so the id confirmed is not the id deleted is not the id
+    reported."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+
+    # When
+    refused = invoke_release("delete", "  release-9  ")
+    deleted = invoke_release("delete", "  release-9  ", "--yes")
+
+    # Then
+    refusal_details = envelope(refused)["error"]["details"]
+    assert (refusal_details["question"], refusal_details["releaseId"], calls, envelope(deleted)["data"]) == (
+        "Delete release release-9?",
+        "release-9",
+        ["https://builder.test/v1/releases/release-9"],
+        {"releaseId": "release-9", "deleted": True},
+    )

@@ -96,6 +96,7 @@ from comfy_cli.command.pack_scan import read_pyproject
 from comfy_cli.constants import SUPPORTED_PT_EXTENSIONS
 from comfy_cli.interaction import confirm, require_option
 from comfy_cli.output import get_renderer
+from comfy_cli.output.sanitize import sanitize
 from comfy_cli.registry.api import sanitize_error_body
 from comfy_cli.utils import parse_rfc3339
 
@@ -2351,11 +2352,12 @@ _BUILDER_REFUSALS: Final = {
 }
 
 #: A hostile endpoint can be reached through the env-configurable base URL, so
-#: nothing it sends reaches the envelope unbounded: the body is read under
-#: ``_BUILDER_ERROR_READ``, excerpted into ``details.body`` at
-#: ``_BUILDER_BODY_CAP``, and a carried refusal message is capped at
-#: ``_BUILDER_MESSAGE_CAP`` -- far above any real blocker list, since the builder
-#: names at most ten deployments before it appends "(and more)".
+#: nothing it sends reaches the envelope unbounded or able to address a terminal:
+#: the body is read under ``_BUILDER_ERROR_READ``, excerpted into ``details.body``
+#: at ``_BUILDER_BODY_CAP``, and a carried message is stripped of control
+#: characters and capped at ``_BUILDER_MESSAGE_CAP`` -- room enough for a long
+#: list of blocking deployments and their prose without letting one endpoint
+#: decide how big an envelope is.
 _BUILDER_BODY_CAP: Final = 1000
 _BUILDER_MESSAGE_CAP: Final = 8 * 1024
 _BUILDER_ERROR_READ: Final = 64 * 1024
@@ -2409,16 +2411,18 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None)
             # else in its contract, so the message is carried unparsed under its
             # own cap: a regex over a rewordable sentence is a contract nobody
             # wrote, and the body excerpt would lose the tail of a long one.
+            # Sanitized before the cap, not after, so a cut cannot manufacture an
+            # unterminated escape whose sanitizer then swallows the ids.
             renderer.error(
                 code=refusal["code"],
-                message=(builder_message or refusal["message"])[:_BUILDER_MESSAGE_CAP],
+                message=sanitize(builder_message or refusal["message"])[:_BUILDER_MESSAGE_CAP],
                 details={**(subject or {}), "status": e.code, "body": body[:_BUILDER_BODY_CAP]},
             )
             return
         detail = _builder_msg(body) or getattr(e, "reason", None) or str(e)
         renderer.error(
             code="build_builder_error",
-            message=f"builder call failed ({e.code}): {detail}",
+            message=f"builder call failed ({e.code}): {str(detail)[:_BUILDER_MESSAGE_CAP]}",
             details={**(subject or {}), "status": e.code, "body": body[:_BUILDER_BODY_CAP]},
         )
         return
@@ -2456,16 +2460,36 @@ def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None):
         raise typer.Exit(code=1) from e
 
 
+def _encodable(text: str) -> str:
+    """``text`` with anything unencodable replaced, so it can reach stdout.
+
+    A lone surrogate is legal in a JSON string and legal in a Python ``str``, but
+    encoding one raises ``UnicodeEncodeError`` — a ``ValueError``, which the JSON
+    writer's own except clause swallows, so a crafted ``message`` would cost the
+    caller the whole envelope rather than one bad character. Scrubbed where the
+    strings are produced, because that writer belongs to every command.
+    """
+    return text.encode("utf-8", "replace").decode("utf-8", "replace")
+
+
 def _builder_error_fields(body: str) -> tuple[str, str]:
     """Split a builder JSON error body ({error, message}) into its two fields,
-    or ``("", "")`` when the body isn't the expected shape."""
+    or ``("", "")`` when the body isn't the expected shape.
+
+    ``RecursionError`` is a ``RuntimeError``, so a deeply nested body escapes the
+    ``ValueError`` clause and, uncaught, every clause up to the CLI — leaving the
+    caller exit 1 and no envelope on any builder HTTP error path.
+    """
     try:
         parsed = json.loads(body)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, RecursionError):
         return "", ""
     if not isinstance(parsed, dict):
         return "", ""
-    return str(parsed.get("error") or "").strip(), str(parsed.get("message") or "").strip()
+    return (
+        _encodable(str(parsed.get("error") or "").strip()),
+        _encodable(str(parsed.get("message") or "").strip()),
+    )
 
 
 def _builder_msg(body: str) -> str:
@@ -2976,6 +3000,23 @@ def release_delete(
     # first delete out of, destroying a second release nobody asked for.
     renderer = get_renderer()
     client = _builder_client(renderer, builder_url)
+    # Normalized and refused once, above the prompt, so the id confirmed, the id
+    # deleted and the id reported are one string rather than three. A segment of
+    # only dots is refused rather than encoded: `quote(safe="")` leaves it alone
+    # (RFC 3986 unreserved) and nothing between here and the service resolves dot
+    # segments, so `.` would aim this DELETE at the collection and `..` a level
+    # above it -- and `.` is a plausible argument, since every other `comfy build`
+    # verb takes a path defaulting to it. What else an id may look like is the
+    # builder's to say, so nothing here spells out its grammar.
+    release = release.strip()
+    if not release or set(release) == {"."}:
+        renderer.error(
+            code="build_missing_input",
+            message="RELEASE must name one release, not an empty or dot-only path segment.",
+            hint="pass the release id shown by `comfy build release ls`",
+            details={"invalid": [release]},
+        )
+        raise typer.Exit(code=1)
     if not confirm(
         f"Delete release {release}?",
         yes=yes,

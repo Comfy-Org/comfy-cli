@@ -237,11 +237,13 @@ class BuilderClient:
         it held against the workspace's release limit. Idempotent (204 even when
         already gone); the builder returns 409 while any deployment in the
         workspace still references it, a stopped one included."""
-        # Validate + encode the id so it stays a single terminal path segment.
-        # ``Target.url`` only ``strip('/')``s each part, so an empty id would
-        # collapse this DELETE onto the collection and an id carrying ``/`` or
-        # ``..`` would aim it, through any normalizing proxy, at a resource the
-        # caller never confirmed.
+        # Encode the id so it stays a single terminal path segment: ``Target.url``
+        # only ``strip('/')``s each part, so an id carrying ``/`` or ``..`` would
+        # aim this DELETE, through any normalizing proxy, at a resource the caller
+        # never confirmed. Percent-encoding belongs here because only the client
+        # knows it is building a URL. The empty check is a defensive precondition
+        # rather than the active rule -- ``release_delete`` refuses a blank or
+        # dot-only id above its own prompt, before this is ever called.
         release_id = (release_id or "").strip()
         if not release_id:
             raise ValueError("release_id must be a non-empty string")
