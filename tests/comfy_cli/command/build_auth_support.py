@@ -73,6 +73,7 @@ _ROUTES: dict[tuple[str, str], tuple[int, JsonObject]] = {
         },
     ),
     ("GET", f"/v1/releases/{RELEASE_ID}/manifest"): (200, {"models": []}),
+    ("DELETE", f"/v1/releases/{RELEASE_ID}"): (204, {}),
     ("GET", "/v1/base-images"): (200, {"baseImages": []}),
     ("GET", "/v1/build-targets"): (200, {"targets": []}),
     ("GET", "/v1/model-directories"): (200, {"directories": []}),

@@ -232,6 +232,13 @@ class BuilderClient:
         its releases."""
         request_json(self.target.url("builds", build_id), self.target, method="DELETE", max_bytes=_MAX_JSON)
 
+    def delete_release(self, release_id: str) -> None:
+        """DELETE /v1/releases/{id} -> stamp the release deleted, freeing the slot
+        it held against the workspace's release limit. Idempotent (204 even when
+        already gone); the builder returns 409 while any deployment in the
+        workspace still references it, a stopped one included."""
+        request_json(self.target.url("releases", release_id), self.target, method="DELETE", max_bytes=_MAX_JSON)
+
     def validate_build(self, build_id: str) -> dict:
         """POST /v1/builds/{id}/validate -> dry-run resolve the stored
         definition (no build). 200 with a ValidateResult when resolvable; the

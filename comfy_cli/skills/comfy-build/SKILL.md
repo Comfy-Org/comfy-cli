@@ -43,7 +43,7 @@ ls        List the workspace's builds.
 show      Show a Build and its full definition.
 validate  Validate the local spec without contacting the builder.
 delete    Delete a Build (soft-delete).
-release   create · ls · show · logs · manifest
+release   create · ls · show · logs · manifest · delete
 refs      resolve · base-images · build-targets · model-dirs
 blob      ls                                    (hidden; workspace private blobs)
 ```
@@ -267,9 +267,44 @@ Say all of this in plain words, and wait for a yes:
 
 **Under `--json`, nothing prompts.** A confirmation the command would have asked
 for comes back as a refusal envelope and exits 1: `build_update_needs_confirm`,
-`build_pull_needs_confirm`, `build_delete_needs_confirm`, `build_missing_input`,
-`build_id_unknown`. Pass `--yes`, or the option it named, once the user has
-actually agreed. Do not pass `--yes` first and disclose after.
+`build_pull_needs_confirm`, `build_delete_needs_confirm`,
+`build_release_delete_needs_confirm`, `build_missing_input`, `build_id_unknown`.
+Pass `--yes`, or the option it named, once the user has actually agreed. Do not
+pass `--yes` first and disclose after.
+
+**Three other refusals are limits, not confirmations — `--yes` does nothing for
+them.** Each names what must be deleted, and each exits 1:
+
+- **`build_release_limit`** — the cut was refused because the workspace already
+  holds as many releases as its limit allows (20 today). Free a slot, then cut
+  again.
+- **`build_release_in_use`** — `comfy build release delete` was refused because a
+  deployment still references that release. The `message` names every one.
+- **`build_in_use`** — `comfy build delete` was refused because a deployment
+  still references one of that build's releases. The `message` names every one.
+
+## The two limits, and what clears each
+
+A workspace has a ceiling on **how many releases it may hold**, counting every
+status and whether or not anything deploys them, and a separate ceiling on **how
+many builds it may keep**. Both are cleared the same way, by deleting:
+
+- **`comfy build release delete [RELEASE]`** gives up one release slot. With no
+  RELEASE it takes the current Build's newest release, which is rarely the one to
+  drop — name the id from `comfy build release ls`. It is idempotent, so a
+  release already gone answers success again.
+- **`comfy build delete`** gives up the build slot *and* every release that build
+  held, so it is how to free several release slots at once. Say that plainly
+  before running it: the releases go with it.
+
+**A deployment blocking either delete has to be deleted, not stopped.** The
+builder counts a stopped or failed deployment exactly as it counts a serving one,
+so stopping one and retrying is refused a second time. It stops blocking only
+once it has been deleted *and* its teardown has released its compute, so a delete
+still tearing down keeps refusing. **A deleted deployment never starts again** —
+that is a decision for the user to make, not one to take on their behalf to clear
+a limit. Name the deployments the refusal message lists, say what deleting them
+costs, and wait.
 
 ## Watching the release
 

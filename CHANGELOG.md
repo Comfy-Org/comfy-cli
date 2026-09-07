@@ -15,6 +15,21 @@ history.
 
 ## [Unreleased]
 
+### Added
+
+- `comfy build release delete [RELEASE]` deletes one release, freeing the slot it
+  held against the workspace's release limit. It confirms first (`--yes` skips
+  the prompt, `build_release_delete_needs_confirm` refuses a caller that cannot
+  answer one), takes the current Build's newest release when RELEASE is omitted,
+  and is idempotent.
+- Three builder refusals an agent can act on now arrive under their own error
+  codes instead of the one `build_builder_error` envelope: `build_release_limit`
+  (the workspace holds as many releases as its limit allows),
+  `build_release_in_use` and `build_in_use` (a deployment still references the
+  release, or one of the build's releases). The builder's message is carried
+  whole, so the blocking deployment ids it names are no longer lost to the
+  1000-byte cap on the raw body.
+
 ### Fixed
 
 - `comfy install --fast-deps --nvidia` no longer installs a torch that its

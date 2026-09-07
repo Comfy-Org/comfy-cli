@@ -34,7 +34,7 @@ import subprocess
 import tempfile
 import time
 import urllib.error
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2327,16 +2327,44 @@ def _builder_client(renderer, builder_url: str | None):
         raise typer.Exit(code=1) from e
 
 
-def _report_builder_error(renderer, e) -> None:
+#: comfy-builder refusals the caller can clear itself, keyed on the builder's own
+#: ``error`` field. That field is the contract and its ``message`` is explicitly
+#: rewordable, so matching the field beats matching a substring of the body --
+#: which would also break the day the body grows past the cap below. Each row's
+#: ``message`` stands in only for a builder that sent none. Everything absent
+#: from this table stays on ``build_builder_error``.
+_BUILDER_REFUSALS: Final = {
+    "RELEASE_LIMIT": {
+        "code": "build_release_limit",
+        "message": "the workspace already holds as many releases as its limit allows",
+    },
+    "RELEASE_IN_USE": {
+        "code": "build_release_in_use",
+        "message": "a deployment still references this release",
+    },
+    "BUILD_IN_USE": {
+        "code": "build_in_use",
+        "message": "a deployment still references one of this build's releases",
+    },
+}
+
+#: A hostile endpoint can be reached through the env-configurable base URL, so a
+#: body never reaches the envelope whole.
+_BUILDER_BODY_CAP: Final = 1000
+
+
+def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None) -> None:
     """Emit one error envelope for a builder failure. Prefers the limited-beta 403,
     then the builder's own error body (e.g. `INVALID_DEFINITION: …` or
     `SUBSCRIPTION_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
     generic transport error.
 
-    It carries no Build id, because the old `create` verb's orphan case is gone:
-    `push` writes the id into the spec on disk before it cuts, so a cut that
-    fails afterwards leaves the id in the user's own file rather than only in
-    this envelope."""
+    The generic envelope carries no Build id, because the old `create` verb's
+    orphan case is gone: `push` writes the id into the spec on disk before it
+    cuts, so a cut that fails afterwards leaves the id in the user's own file
+    rather than only in this envelope. A mapped refusal is different — it is a
+    state the caller clears by deleting a named thing — so it carries *subject*,
+    the id the command was acting on."""
     import urllib.error
 
     from comfy_cli.http import tls_trust_hint, tls_verification_failed
@@ -2361,19 +2389,33 @@ def _report_builder_error(renderer, e) -> None:
                 message="The developer platform is in limited beta and your account isn't enabled yet.",
             )
             return
+        builder_error, builder_message = _builder_error_fields(body)
+        refusal = _BUILDER_REFUSALS.get(builder_error)
+        if refusal is not None:
+            # The blocking deployment ids ride in the builder's prose and nowhere
+            # else in its contract, so the message is carried whole instead of
+            # parsed for them: a regex over a rewordable sentence is a contract
+            # nobody wrote, and the capped body would lose the tail of a long one.
+            renderer.error(
+                code=refusal["code"],
+                message=builder_message or refusal["message"],
+                details={"status": e.code, "body": body[:_BUILDER_BODY_CAP], **(subject or {})},
+            )
+            return
         detail = _builder_msg(body) or getattr(e, "reason", None) or str(e)
         renderer.error(
             code="build_builder_error",
             message=f"builder call failed ({e.code}): {detail}",
-            details={"status": e.code, "body": body[:1000]},
+            details={"status": e.code, "body": body[:_BUILDER_BODY_CAP]},
         )
         return
     renderer.error(code="build_builder_error", message=f"builder call failed: {e}")
 
 
-def _builder_call(renderer, fn):
+def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None):
     """Run a builder API call, mapping every failure class to one error envelope
-    + exit(1) via _report_builder_error.
+    + exit(1) via _report_builder_error. *subject* names the id the command is
+    acting on, so a refusal an agent must act on says which one.
 
     Never package inside *fn*. ``NodePackageError`` is a ``ValueError``, so the
     clause below would relabel a packaging failure as ``build_missing_input``
@@ -2395,21 +2437,26 @@ def _builder_call(renderer, fn):
         renderer.error(code="build_missing_input", message=str(e))
         raise typer.Exit(code=1) from e
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
-        _report_builder_error(renderer, e)
+        _report_builder_error(renderer, e, subject)
         raise typer.Exit(code=1) from e
+
+
+def _builder_error_fields(body: str) -> tuple[str, str]:
+    """Split a builder JSON error body ({error, message}) into its two fields,
+    or ``("", "")`` when the body isn't the expected shape."""
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, ValueError):
+        return "", ""
+    if not isinstance(parsed, dict):
+        return "", ""
+    return str(parsed.get("error") or "").strip(), str(parsed.get("message") or "").strip()
 
 
 def _builder_msg(body: str) -> str:
     """Pull ``"<error>: <message>"`` out of a builder JSON error body ({error, message}),
     or ``""`` when the body isn't the expected shape."""
-    try:
-        parsed = json.loads(body)
-    except (json.JSONDecodeError, ValueError):
-        return ""
-    if not isinstance(parsed, dict):
-        return ""
-    err = str(parsed.get("error") or "").strip()
-    msg = str(parsed.get("message") or "").strip()
+    err, msg = _builder_error_fields(body)
     return f"{err}: {msg}".strip(": ").strip() if (err or msg) else ""
 
 
@@ -2592,6 +2639,7 @@ def release_create(
     release_id, status_url = _builder_call(
         renderer,
         lambda: client.create_release(selected_build_id, requested),
+        {"buildId": selected_build_id},
     )
     payload = {
         "buildId": selected_build_id,
@@ -2807,7 +2855,7 @@ def delete_cmd(
         # `build_delete_needs_confirm` rather than reaching this branch.
         renderer.info("Aborted.")
         return
-    _builder_call(renderer, lambda: client.delete_build(selected_build_id))
+    _builder_call(renderer, lambda: client.delete_build(selected_build_id), {"buildId": selected_build_id})
     if renderer.is_pretty():
         renderer.success(f"Deleted build {selected_build_id}")
     renderer.emit({"buildId": selected_build_id, "deleted": True}, command="build delete", changed=True)
@@ -2897,6 +2945,39 @@ def release_manifest(
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(manifest))
     renderer.emit(manifest, command="build release manifest")
+
+
+@release_app.command("delete", help="Delete a release, freeing its slot against the workspace release limit.")
+@tracking.track_command("build")
+def release_delete(
+    ctx: typer.Context,
+    release: Annotated[
+        str | None, typer.Argument(help="Release id. Default: the current Build's newest release.")
+    ] = None,
+    path: Annotated[str | None, typer.Argument(help="Build spec path used when RELEASE is omitted.")] = None,
+    build_id: Annotated[str | None, typer.Option("--id", help="Resolve the newest release from this Build id.")] = None,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
+    renderer = get_renderer()
+    client = _builder_client(renderer, builder_url)
+    release_id = _selected_release_id(renderer, client, _BuildScope(ctx, path, build_id), release)
+    if not confirm(
+        f"Delete release {release_id}?",
+        yes=yes,
+        error_code="build_release_delete_needs_confirm",
+        details={"releaseId": release_id},
+        ctx=ctx,
+    ):
+        # Declining needs a prompt, and a prompt needs pretty mode, where `emit`
+        # is a no-op; a machine caller is refused above with
+        # `build_release_delete_needs_confirm` rather than reaching this branch.
+        renderer.info("Aborted.")
+        return
+    _builder_call(renderer, lambda: client.delete_release(release_id), {"releaseId": release_id})
+    if renderer.is_pretty():
+        renderer.success(f"Deleted release {release_id}")
+    renderer.emit({"releaseId": release_id, "deleted": True}, command="build release delete", changed=True)
 
 
 @blob_app.command("ls", help="List the workspace's private blobs.")

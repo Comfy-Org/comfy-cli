@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import io
+import json
+import urllib.error
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -12,6 +15,19 @@ from comfy_cli.caller import Caller
 from comfy_cli.cmdline import app as cli_app
 from comfy_cli.command import build
 from comfy_cli.command.build_spec import JsonObject
+
+#: The builder's own refusal prose for a workspace holding every release its
+#: limit allows. Carried verbatim so the envelope's message is the one a user
+#: would be shown.
+AT_THE_LIMIT = (
+    "this workspace already holds 20 releases, which is its limit; delete a release, or delete a build to "
+    "give up every release it holds, and cut again"
+)
+
+
+def refusal(status: int, body: dict, url: str) -> urllib.error.HTTPError:
+    """The builder's `{error, message}` body, raised the way the HTTP layer raises it."""
+    return urllib.error.HTTPError(url, status, "Conflict", {}, io.BytesIO(json.dumps(body).encode()))
 
 
 class ReleaseBuilder:
@@ -93,7 +109,7 @@ def test_release_surface_replaces_version_and_uses_one_target_spelling() -> None
 
     # Then
     assert "version" not in command.commands
-    assert set(release.commands) == {"create", "ls", "show", "logs", "manifest"}
+    assert set(release.commands) == {"create", "ls", "show", "logs", "manifest", "delete"}
     assert {"--target", "--follow", "-f"} <= options
     assert options.isdisjoint({"--os", "--gpu"})
 
@@ -339,3 +355,271 @@ def test_a_release_order_key_stays_comparable_for_every_created_at(created_at: o
 
     # Then
     assert newest["id"] == "release-dated"
+
+
+def test_release_limit_refusal_gets_its_own_code(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A workspace at its release limit is a state the caller can clear itself, so
+    it reaches an agent as a code it can branch on rather than folded into the one
+    envelope every builder failure shared."""
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        raise refusal(409, {"error": "RELEASE_LIMIT", "message": AT_THE_LIMIT}, url)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code != 0
+    error = envelope(result)["error"]
+    assert isinstance(error, dict)
+    assert error["code"] == "build_release_limit"
+
+
+#: Every deployment the builder found blocking, named in one sentence. Long on
+#: purpose: this is the shape that made the old envelope useless, because the ids
+#: sat in a body truncated at 1000 bytes.
+BLOCKED_BY = (
+    "these deployments still reference this release: "
+    + ", ".join(f"dep-{index:02d}a4f7c1e9b3" for index in range(80))
+    + "; each stops blocking once it has been deleted and its teardown has released its compute"
+)
+
+#: The last id the builder named, and the first thing a capped body loses.
+LAST_BLOCKER = "dep-79a4f7c1e9b3"
+
+
+def delete_refused(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+    """A `RELEASE_IN_USE` body whose long `message` precedes its `error`, so the
+    capped copy in `details.body` no longer contains the code at all."""
+    raise refusal(409, {"message": BLOCKED_BY, "error": "RELEASE_IN_USE"}, url)
+
+
+@pytest.mark.parametrize(
+    "builder_error, expected_code",
+    [
+        pytest.param("RELEASE_LIMIT", "build_release_limit", id="release-limit"),
+        pytest.param("RELEASE_IN_USE", "build_release_in_use", id="release-in-use"),
+        pytest.param("BUILD_IN_USE", "build_in_use", id="build-in-use"),
+        pytest.param("STALE", "build_builder_error", id="unmapped-409-is-unchanged"),
+    ],
+)
+def test_each_mapped_refusal_reaches_the_agent_under_its_own_code(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, builder_error: str, expected_code: str
+) -> None:
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        raise refusal(409, {"error": builder_error, "message": AT_THE_LIMIT}, url)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    assert envelope(result)["error"]["code"] == expected_code
+
+
+@pytest.mark.parametrize(
+    "status",
+    [pytest.param(400, id="bad-request"), pytest.param(500, id="server-error")],
+)
+def test_a_status_outside_the_table_keeps_the_generic_envelope(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """The table is keyed on the builder's `error`, not on 409, so a code it does
+    carry under another status must not be relabelled either."""
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        raise refusal(status, {"error": "INVALID_DEFINITION", "message": "no target is buildable"}, url)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["details"]["status"]) == ("build_builder_error", status)
+
+
+def test_the_blocking_deployment_ids_survive_the_body_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ids are the whole reason an agent reads this refusal, and the builder
+    puts them in prose. Matching a substring of `details.body` would have found
+    nothing here, and reading the ids back out of it would have found only some."""
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", delete_refused)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("delete", "release-9", "--yes")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (
+        error["code"],
+        error["message"],
+        error["details"]["releaseId"],
+        LAST_BLOCKER in error["details"]["body"],
+        "RELEASE_IN_USE" in error["details"]["body"],
+    ) == ("build_release_in_use", BLOCKED_BY, "release-9", False, False)
+
+
+def test_delete_exits_non_zero_when_a_deployment_still_references_the_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", delete_refused)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("delete", "release-9", "--yes")
+
+    # Then
+    assert result.exit_code == 1
+
+
+@pytest.mark.parametrize(
+    "already_deleted",
+    [pytest.param(False, id="deleted-now"), pytest.param(True, id="deleted-before")],
+)
+def test_delete_reports_the_same_payload_whether_or_not_the_release_was_already_gone(
+    monkeypatch: pytest.MonkeyPatch, already_deleted: bool
+) -> None:
+    """The builder answers 204 both times -- delete is idempotent -- so a retry
+    after a dropped connection must not read as a different outcome."""
+    # Given
+    import jsonschema
+
+    from comfy_cli.builder_api import BuilderClient
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        return 204, None
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    if already_deleted:
+        invoke_release("delete", "release-9", "--yes")
+    result = invoke_release("delete", "release-9", "--yes")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = envelope(result)["data"]
+    assert data == {"releaseId": "release-9", "deleted": True}
+    schemas_dir = Path(__file__).parent.parent.parent.parent / "comfy_cli" / "schemas"
+    schema = json.loads((schemas_dir / "build_release_delete.json").read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator(schema).validate(data)
+
+
+def test_deleting_a_release_the_workspace_does_not_have_stays_a_builder_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 404 is not a refusal the caller clears by deleting something, so it keeps
+    the generic code rather than joining the table."""
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        raise refusal(404, {"error": "NOT_FOUND", "message": "release not found"}, url)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("delete", "release-9", "--yes")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["details"]["status"]) == ("build_builder_error", 404)
+
+
+def test_delete_reaches_the_release_route_as_a_DELETE(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    calls: list[tuple[str, str]] = []
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        calls.append((method, url))
+        return 204, None
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    invoke_release("delete", "release-9", "--yes")
+
+    # Then
+    assert calls == [("DELETE", "https://builder.test/v1/releases/release-9")]
+
+
+def test_delete_without_yes_refuses_an_agent_before_the_builder(
+    workspace: Path, client: ReleaseBuilder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Delete is the one release verb that destroys something, so an agent that
+    cannot answer a prompt is refused rather than having the prompt skipped."""
+    # Given
+    deleted: list[str] = []
+    client.releases = [{"id": "release-9", "version": 9}]
+    monkeypatch.setattr(client, "delete_release", deleted.append, raising=False)
+
+    # When
+    result = invoke_release("delete")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["details"]["releaseId"], deleted) == (
+        "build_release_delete_needs_confirm",
+        "release-9",
+        [],
+    )
+
+
+def test_delete_takes_the_newest_release_when_none_is_named(
+    workspace: Path, client: ReleaseBuilder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resolution is the neighbouring release commands' own, so an omitted id
+    means the current Build's newest release and not a refusal."""
+    # Given
+    deleted: list[str] = []
+    client.releases = [{"id": "release-1", "version": 1}, {"id": "release-9", "version": 9}]
+    monkeypatch.setattr(client, "delete_release", deleted.append, raising=False)
+
+    # When
+    result = invoke_release("delete", "--yes")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert deleted == ["release-9"]

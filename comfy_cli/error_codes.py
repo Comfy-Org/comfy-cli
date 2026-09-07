@@ -1193,6 +1193,39 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "edit the spec to name a published registry version or normalized repository, or remove the node",
     ),
     ErrorCode(
+        "build_release_limit",
+        "The builder refused `comfy build release create` because the workspace already holds as many "
+        "releases as its limit allows (20 today), counting every status. `message` is the builder's own "
+        "wording and `details.buildId` names the Build the cut was for. Nothing was created and retrying "
+        "unchanged is refused again.",
+        "delete a release with `comfy build release delete`, or delete a whole build to give up every "
+        "release it holds, then cut again",
+    ),
+    ErrorCode(
+        "build_release_in_use",
+        "The builder refused `comfy build release delete` because a deployment still references the "
+        "release. `message` names every blocking deployment and `details.releaseId` names the release. A "
+        "deployment blocks whatever its state -- serving, stopped or failed -- and stops blocking only "
+        "once it has been deleted and its teardown has released its compute.",
+        "delete each deployment the message names (stopping one is not enough), wait for its teardown, then retry",
+    ),
+    ErrorCode(
+        "build_in_use",
+        "The builder refused `comfy build delete` because a deployment still references one of the "
+        "build's releases. `message` names every blocking deployment and `details.buildId` names the "
+        "build. A deployment blocks whatever its state -- serving, stopped or failed -- and stops "
+        "blocking only once it has been deleted and its teardown has released its compute.",
+        "delete each deployment the message names (stopping one is not enough), wait for its teardown, then retry",
+    ),
+    ErrorCode(
+        "build_release_delete_needs_confirm",
+        "`comfy build release delete` was run without `--yes` in a non-interactive context (JSON output, "
+        "an agent, or a pipe) where nothing can answer a confirmation. Delete is refused rather than "
+        "blocking on a prompt. `details.releaseId` names the release, and `details.question` carries the "
+        "confirmation.",
+        "pass `--yes` to confirm the delete when running non-interactively",
+    ),
+    ErrorCode(
         "build_delete_needs_confirm",
         "`comfy build delete` was run without `--yes` in a non-interactive context (JSON output, an agent, "
         "or a pipe) where nothing can answer a confirmation. Delete is refused rather than blocking on a "
