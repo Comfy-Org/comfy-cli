@@ -27,8 +27,8 @@ history.
   (the workspace holds as many releases as its limit allows),
   `build_release_in_use` and `build_in_use` (a deployment still references the
   release, or one of the build's releases). The builder's message is carried
-  whole, so the blocking deployment ids it names are no longer lost to the
-  1000-byte cap on the raw body.
+  whole up to 8 KiB, so the blocking deployment ids it names are no longer lost
+  to the 1000-byte cap on the raw body.
 
 ### Fixed
 
