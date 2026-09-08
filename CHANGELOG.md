@@ -21,9 +21,9 @@ history.
   deployment it creates, and `comfy deploy scale --startup-arg=<flag>` changes
   them on a stopped deployment (`--highvram`, `--reserve-vram 2`, and the rest
   of the service's allowlist); `scale --clear-startup-args` removes them. Flags
-  apply when the deployment starts, so a running deployment is stopped first;
-  `deploy status`, `deploy up` and `deploy scale` report the stored flags as
-  `computeConfig.startupArgs`.
+  apply when the deployment starts, so stop a running deployment first
+  (`comfy deploy stop`, then `scale`, then `start`); `deploy status`, `deploy up`
+  and `deploy scale` report the stored flags as `computeConfig.startupArgs`.
 
 ### Fixed
 
