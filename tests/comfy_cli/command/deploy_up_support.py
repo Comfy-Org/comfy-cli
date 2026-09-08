@@ -36,12 +36,16 @@ def deployment(
     minimum: int = 0,
     maximum: int = 1,
     deleted_at: str | None = None,
+    startup_args: list[str] | None = None,
 ) -> JsonObject:
+    compute: JsonObject = {"gpuClass": gpu, "region": region, "min": minimum, "max": maximum}
+    if startup_args is not None:
+        compute["startupArgs"] = list(startup_args)
     return {
         "id": deployment_id,
         "releaseId": release_id,
         "status": status,
-        "computeConfig": {"gpuClass": gpu, "region": region, "min": minimum, "max": maximum},
+        "computeConfig": compute,
         "createdAt": f"2026-08-23T12:00:{deployment_id[-1].zfill(2) if deployment_id[-1].isdigit() else '00'}Z",
         "deletedAt": deleted_at,
     }
@@ -81,6 +85,7 @@ class FakeDeploy:
         self.create_keys: list[str] = []
         self.generation_deleted_counts: list[int] = []
         self.update_calls: list[str] = []
+        self.update_bodies: list[JsonObject] = []
         self.start_calls: list[str] = []
         self.catalog_calls = 0
         self._keys: dict[str, str] = {}
@@ -135,7 +140,16 @@ class FakeDeploy:
     def update_deployment(self, deployment_id: str, compute_config: JsonObject) -> JsonObject:
         with self._lock:
             self.update_calls.append(deployment_id)
-            self.rows[deployment_id]["computeConfig"] = copy.deepcopy(compute_config)
+            self.update_bodies.append(copy.deepcopy(compute_config))
+            stored = self.rows[deployment_id]["computeConfig"]
+            merged = copy.deepcopy(compute_config)
+            # As the service reads the field: absent keeps the stored flags, an
+            # empty list clears them, and no empty set is ever stored.
+            if "startupArgs" not in merged and "startupArgs" in stored:
+                merged["startupArgs"] = copy.deepcopy(stored["startupArgs"])
+            if merged.get("startupArgs") == []:
+                del merged["startupArgs"]
+            self.rows[deployment_id]["computeConfig"] = merged
             return copy.deepcopy(self.rows[deployment_id])
 
     def start_deployment(self, deployment_id: str) -> JsonObject:

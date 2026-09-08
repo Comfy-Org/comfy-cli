@@ -119,15 +119,39 @@ def _create_live_deployment(client: DeployUpClient, request: UpRequest, compute:
     raise AssertionError("bounded create loop exhausted without returning or raising")
 
 
-def _dropped_bounds(request: UpRequest, compute: JsonObject) -> tuple[str, ...]:
-    """Name the bound flags that were supplied but would not change the live value.
+def _dropped_flags(request: UpRequest, compute: JsonObject) -> tuple[str, ...]:
+    """Name the flags the caller supplied that a restart will not apply.
 
     Only the restart branches consult this: they hand back ``compute`` untouched,
-    so a bound the caller actually typed is discarded. A bound equal to what is
-    already live is not reported — nothing was lost.
+    so a bound that differs from the live value is discarded, and so is a startup
+    flag set that differs from the stored one (flags are set while a deployment
+    is stopped, and the restart just started it). A value equal to what is
+    already live is not reported: nothing was lost.
     """
     supplied = (("--min", request.minimum, compute.get("min")), ("--max", request.maximum, compute.get("max")))
-    return tuple(flag for flag, value, live in supplied if value is not None and value != live)
+    dropped = [flag for flag, value, live in supplied if value is not None and value != live]
+    if _startup_args_changed(request, compute):
+        dropped.append("--startup-arg")
+    return tuple(dropped)
+
+
+def _startup_args_changed(request: UpRequest, compute: JsonObject) -> bool:
+    """Whether the caller named startup flags that differ from the live set.
+
+    An omitted flag is never a change, and the same list as live is not one
+    either: re-running `up` with the flags it was created with must be a no-op.
+    """
+    return request.startup_args is not None and list(request.startup_args) != compute.get("startupArgs", [])
+
+
+def _startup_args_remedy(deployment_id: str, also: str = "") -> str:
+    """Startup flags are set only while a deployment is stopped, so the remedy
+    is always the same three steps; ``also`` rides on the `scale`."""
+    return (
+        f"run `comfy deploy stop --deployment {deployment_id}`, then "
+        f"`comfy deploy scale --deployment {deployment_id} --startup-arg=<flag>{also}`, then "
+        f"`comfy deploy start --deployment {deployment_id}`"
+    )
 
 
 def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request: UpRequest) -> UpResult:
@@ -152,6 +176,8 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
             "min": minimum,
             "max": maximum,
         }
+        if request.startup_args is not None:
+            compute["startupArgs"] = list(request.startup_args)
         snapshot = _create_live_deployment(client, request, compute)
         return UpResult(snapshot, _release_summary(request.release), compute, supersedes, True, True)
 
@@ -166,12 +192,23 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         )
     deployment_id = _required_string(existing, "id")
     status = _required_string(existing, "status")
-    dropped = _dropped_bounds(request, compute)
+    dropped = _dropped_flags(request, compute)
     if status in {"stopped", "failed"}:
         started = client.start_deployment(deployment_id)
         return UpResult(started, _release_summary(request.release), compute, supersedes, False, True, dropped)
     if status == "stop_failed":
         return UpResult(existing, _release_summary(request.release), compute, supersedes, False, False, dropped)
+    # Startup flags are set when compute is provisioned and the service refuses
+    # to change them on a running deployment, the same as gpuClass and region.
+    # Refused here for the same reason those are: the remedy is stop, then
+    # `scale --startup-arg`, and a 409 relayed from the service says less.
+    if _startup_args_changed(request, compute):
+        raise DeployAPIError(
+            "deploy_immutable_compute",
+            "a running deployment cannot change startupArgs in place",
+            details={"deploymentId": deployment_id, "computeConfig": compute},
+            hint=_startup_args_remedy(deployment_id),
+        )
     # An omitted bound keeps the live value, exactly as `comfy deploy scale`
     # merges: re-running `up` after a release must not silently unscale.
     desired = {**compute}
@@ -179,8 +216,12 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         if requested is not None:
             desired[bound] = requested
     if desired != compute:
-        updated = client.update_deployment(deployment_id, desired)
-        return UpResult(updated, _release_summary(request.release), desired, supersedes, False, True)
+        # The stored flags are left out of the request, as `scale` leaves them
+        # out: the service keeps them when the field is absent, and a copy read
+        # before this edit could be stale. The response is what is stored now.
+        body = {key: value for key, value in desired.items() if key != "startupArgs"}
+        updated = client.update_deployment(deployment_id, body)
+        return UpResult(updated, _release_summary(request.release), _compute_config(updated), supersedes, False, True)
     return UpResult(existing, _release_summary(request.release), compute, supersedes, False, False)
 
 
@@ -196,17 +237,22 @@ def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
         )
     elif watch and status in {"failed", "stopped"}:
         renderer.warn(f"Deployment {deployment_id} reached terminal status {status}.")
-    if result.dropped_bounds:
-        joined = " and ".join(result.dropped_bounds)
-        renderer.warn(
-            f"{joined} had no effect; deployment {deployment_id} kept its existing worker bounds.",
+    if result.dropped_flags:
+        joined = " and ".join(result.dropped_flags)
+        bounds = " --min <n> --max <n>" if any(flag != "--startup-arg" for flag in result.dropped_flags) else ""
+        if status == "stop_failed":
             # `scale` is only actionable once the deployment settles: the API
             # rejects an edit unless it is ready or stopped (`run_scale` re-wraps
             # that as `deploy_conflict`), so a `stop_failed` deployment is sent
             # to the stop remedy warned about just above instead.
-            hint=None
-            if status == "stop_failed"
-            else f"run `comfy deploy scale --deployment {deployment_id} --min <n> --max <n>` to change them",
+            hint = None
+        elif "--startup-arg" in result.dropped_flags:
+            hint = _startup_args_remedy(deployment_id, bounds)
+        else:
+            hint = f"run `comfy deploy scale --deployment {deployment_id}{bounds}` to change them"
+        renderer.warn(
+            f"{joined} had no effect; deployment {deployment_id} kept its existing compute settings.",
+            hint=hint,
         )
     terminal = status in {"failed", "stopped", "stop_failed"}
     renderer.emit(

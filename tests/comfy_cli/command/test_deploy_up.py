@@ -407,7 +407,7 @@ def test_bounds_supplied_to_a_restart_are_reported_rather_than_dropped(status: s
     result = module.reconcile_up(FakeBuilder(), client, _request(module, minimum=3, maximum=5))
 
     # Then
-    assert result.dropped_bounds == ("--min", "--max")
+    assert result.dropped_flags == ("--min", "--max")
     assert result.compute_config == {"gpuClass": "l4", "region": "US-MO-2", "min": 2, "max": 8}
     assert client.update_calls == []
 
@@ -421,7 +421,7 @@ def test_a_restart_reports_only_the_bound_that_would_have_changed() -> None:
     result = module.reconcile_up(FakeBuilder(), client, _request(module, minimum=2, maximum=5))
 
     # Then
-    assert result.dropped_bounds == ("--max",)
+    assert result.dropped_flags == ("--max",)
 
 
 def test_a_restart_without_bounds_reports_nothing() -> None:
@@ -433,7 +433,7 @@ def test_a_restart_without_bounds_reports_nothing() -> None:
     result = module.reconcile_up(FakeBuilder(), client, _request(module, minimum=None, maximum=None))
 
     # Then
-    assert result.dropped_bounds == ()
+    assert result.dropped_flags == ()
 
 
 def test_the_dropped_bound_warning_reaches_a_json_caller_on_stderr(tmp_path, monkeypatch) -> None:
@@ -443,11 +443,16 @@ def test_the_dropped_bound_warning_reaches_a_json_caller_on_stderr(tmp_path, mon
     monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
 
     # When
-    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3", "--max", "8"])
+    result = CliRunner().invoke(
+        app,
+        ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3", "--max", "8"],
+        env={"COLUMNS": "400"},
+    )
 
     # Then
     assert "--min had no effect" in result.stderr
-    assert "comfy deploy scale --deployment" in result.stderr
+    assert "comfy deploy scale --deployment dep-live --min <n> --max <n>" in result.stderr
+    assert "comfy deploy stop" not in result.stderr
     assert _json_envelope(result)["data"]["computeConfig"]["min"] == 2
 
 
@@ -597,3 +602,197 @@ def test_watch_continues_through_unhealthy_until_ready(tmp_path, monkeypatch) ->
     assert result.exit_code == 0
     assert _json_envelope(result)["data"]["deployment"]["status"] == "ready"
     assert sleeps == [DEPLOY_POLL_SECONDS]
+
+
+def test_up_registers_the_startup_arg_option() -> None:
+    assert "--startup-arg" in option_names("up")
+
+
+def test_a_created_deployment_carries_its_startup_args() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([])
+
+    # When
+    result = module.reconcile_up(
+        FakeBuilder(), client, _request(module, startup_args=("--highvram", "--reserve-vram", "2"))
+    )
+
+    # Then
+    assert result.created is True
+    assert result.compute_config["startupArgs"] == ["--highvram", "--reserve-vram", "2"]
+    assert client.rows["dep-1"]["computeConfig"]["startupArgs"] == ["--highvram", "--reserve-vram", "2"]
+    _validate_compute_config(result.compute_config)
+
+
+def test_a_created_deployment_without_startup_args_sends_no_key() -> None:
+    """Absence and an empty list mean different things to the service (an empty
+    list on an edit is a clear), so a create that names no flags sends nothing."""
+    # Given
+    module = _deploy()
+    client = FakeDeploy([])
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module))
+
+    # Then
+    assert "startupArgs" not in result.compute_config
+    assert "startupArgs" not in client.rows["dep-1"]["computeConfig"]
+
+
+def test_reconcile_refuses_a_startup_arg_change_on_a_running_deployment() -> None:
+    """The service refuses it with a 409 for the same reason it refuses a gpu
+    change; refusing here names the remedy in the user's vocabulary."""
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live")])
+
+    # When / Then
+    with pytest.raises(DeployAPIError) as raised:
+        module.reconcile_up(FakeBuilder(), client, _request(module, startup_args=("--highvram",)))
+    assert raised.value.code == "deploy_immutable_compute"
+    assert raised.value.hint == (
+        "run `comfy deploy stop --deployment dep-live`, then "
+        "`comfy deploy scale --deployment dep-live --startup-arg=<flag>`, then "
+        "`comfy deploy start --deployment dep-live`"
+    )
+    assert client.update_calls == []
+    assert client.create_keys == []
+
+
+def test_reconcile_with_the_live_startup_args_is_a_noop() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", minimum=2, maximum=8, startup_args=["--highvram"])])
+
+    # When
+    result = module.reconcile_up(
+        FakeBuilder(), client, _request(module, minimum=None, maximum=None, startup_args=("--highvram",))
+    )
+
+    # Then
+    assert result.changed is False
+    assert client.update_calls == []
+    assert result.compute_config["startupArgs"] == ["--highvram"]
+
+
+def test_a_bounds_edit_on_a_running_deployment_keeps_its_startup_args() -> None:
+    """An omitted `--startup-arg` is never a change. The request leaves the field
+    out, as `scale` does, so the service keeps the stored flags and a copy read
+    before the edit cannot overwrite a newer set; the result still reports them."""
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", minimum=2, maximum=8, startup_args=["--highvram"])])
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module, minimum=0, maximum=4))
+
+    # Then
+    assert client.update_bodies == [{"gpuClass": "l4", "region": "US-MO-2", "min": 0, "max": 4}]
+    assert client.rows["dep-live"]["computeConfig"]["startupArgs"] == ["--highvram"]
+    assert result.compute_config == {
+        "gpuClass": "l4",
+        "region": "US-MO-2",
+        "min": 0,
+        "max": 4,
+        "startupArgs": ["--highvram"],
+    }
+
+
+@pytest.mark.parametrize("status", ["stopped", "failed", "stop_failed"])
+def test_startup_args_supplied_to_a_restart_are_reported_rather_than_dropped(status: str) -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", status=status)])
+
+    # When
+    result = module.reconcile_up(
+        FakeBuilder(), client, _request(module, minimum=None, maximum=None, startup_args=("--highvram",))
+    )
+
+    # Then
+    assert result.dropped_flags == ("--startup-arg",)
+    assert client.start_calls == ([] if status == "stop_failed" else ["dep-live"])
+    assert client.update_calls == []
+    assert "startupArgs" not in result.compute_config
+
+
+def test_a_restart_that_dropped_startup_args_is_pointed_at_stop_scale_start(tmp_path, monkeypatch) -> None:
+    """The restart just left the only state in which flags can be set, so a bare
+    `scale --startup-arg` would bounce; the remedy names all three steps."""
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", status="stopped", minimum=2, maximum=8)])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+
+    # When
+    result = CliRunner().invoke(
+        app,
+        ["--json", "deploy", "up", str(write_spec(tmp_path)), "--startup-arg=--highvram", "--min", "3", "--max", "8"],
+        env={"COLUMNS": "400"},
+    )
+
+    # Then
+    assert "--min and --startup-arg had no effect" in result.stderr
+    assert "run `comfy deploy stop --deployment dep-live`, then" in result.stderr
+    assert "`comfy deploy scale --deployment dep-live --startup-arg=<flag> --min <n> --max <n>`, then" in result.stderr
+    assert "`comfy deploy start --deployment dep-live`" in result.stderr
+    assert client.start_calls == ["dep-live"]
+
+
+def test_up_with_startup_args_validates_against_the_published_up_schema(tmp_path, monkeypatch) -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+
+    # When
+    result = CliRunner().invoke(
+        app,
+        [
+            "--json",
+            "deploy",
+            "up",
+            str(write_spec(tmp_path)),
+            "--gpu",
+            "l4",
+            "--region",
+            "US-MO-2",
+            "--startup-arg=--highvram",
+            "--startup-arg=--reserve-vram",
+            "--startup-arg=2",
+        ],
+    )
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _json_envelope(result)["data"]
+    assert data["computeConfig"]["startupArgs"] == ["--highvram", "--reserve-vram", "2"]
+    jsonschema.Draft202012Validator(_schema("deploy_up.json")).validate(data)
+
+
+def test_compute_config_carries_startup_args_and_refuses_a_malformed_set() -> None:
+    from comfy_cli.command.deploy_types import compute_config
+
+    row = deployment("dep-1")
+    row["computeConfig"]["startupArgs"] = ["--highvram", "--reserve-vram", "2"]
+    assert compute_config(row)["startupArgs"] == ["--highvram", "--reserve-vram", "2"]
+
+    row["computeConfig"]["startupArgs"] = "--highvram"
+    with pytest.raises(DeployAPIError) as raised:
+        compute_config(row)
+    assert raised.value.code == "deploy_server_error"
+
+    for blank in ("", " "):
+        row["computeConfig"]["startupArgs"] = ["--highvram", blank]
+        with pytest.raises(DeployAPIError):
+            compute_config(row)
+
+
+def test_client_validation_refuses_a_startup_args_shape_the_service_would_reject() -> None:
+    _validate_compute_config({"gpuClass": "l4", "region": "US-MO-2", "startupArgs": ["--highvram"]})
+    _validate_compute_config({"gpuClass": "l4", "region": "US-MO-2", "startupArgs": []})
+    for bad in ("--highvram", ["--highvram", " "], [1]):
+        with pytest.raises(DeployAPIError) as raised:
+            _validate_compute_config({"gpuClass": "l4", "region": "US-MO-2", "startupArgs": bad})
+        assert raised.value.code == "deploy_bad_request"

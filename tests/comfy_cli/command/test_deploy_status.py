@@ -305,3 +305,19 @@ def test_watch_exits_promptly_on_stop_failed_with_retry_stop_hint(tmp_path, monk
     assert client.get_calls == ["dep-status"]
     assert client.get_statuses == ["ready"]
     assert sleeps == []
+
+
+def test_a_deployment_with_startup_args_validates_against_the_published_status_schema(tmp_path, monkeypatch) -> None:
+    # Given
+    row = _status_deployment()
+    row["computeConfig"] = {"gpuClass": "l4", "region": "US-MO-2", "startupArgs": ["--highvram", "--reserve-vram", "2"]}
+    _install_clients(monkeypatch, FakeBuilder([_release(5)]), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _json_envelope(result)["data"]
+    assert data["deployment"]["computeConfig"]["startupArgs"] == ["--highvram", "--reserve-vram", "2"]
+    jsonschema.Draft202012Validator(_schema("deploy_status.json")).validate(data)

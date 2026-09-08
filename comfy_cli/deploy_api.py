@@ -72,6 +72,14 @@ def _validate_compute_config(compute_config: dict) -> None:
     # refused against the placeholder max of 1 above — a ceiling nobody set.
     if "min" in compute_config and "max" in compute_config and minimum > maximum:
         raise bad_request("computeConfig.min must not exceed computeConfig.max")
+    # Shape only; which flags are allowed is the service's call and its 400
+    # names the offending token.
+    startup_args = compute_config.get("startupArgs")
+    if startup_args is not None and (
+        not isinstance(startup_args, list)
+        or any(not isinstance(token, str) or not token.strip() for token in startup_args)
+    ):
+        raise bad_request("computeConfig.startupArgs must be a list of ComfyUI flag tokens")
 
 
 class DeployClient:

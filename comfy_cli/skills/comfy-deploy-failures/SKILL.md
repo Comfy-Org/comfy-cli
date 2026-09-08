@@ -32,11 +32,13 @@ argument you pass.
 | `deploy_build_not_pushed` | The local spec has no Build id | `comfy build push` |
 | `deploy_no_deployable_release` | No release with a ready `linux/nvidia` artifact | `comfy build release create --target linux/nvidia` |
 | `deploy_not_ready` | The deployment is not in `ready` | Wait if transitional; read `events` if terminal |
-| `deploy_immutable_compute` | Tried to change GPU/region in place | `stop` → `scale` → `start` |
+| `deploy_immutable_compute` | Tried to change GPU/region or startup flags in place | `stop` → `scale` → `start` |
 | `deploy_deleted` | Tried to start a deleted deployment | `comfy deploy up` makes a new one |
 | `deploy_ambiguous_deployment` | Several deployments tie for selection | Pass `--deployment <id>` |
 | `deploy_unrelated_deployment` | `--deployment` names one outside this scope | Pick from `details.candidateIds` |
 | `deploy_missing_input` | A required option was omitted non-interactively | Pass everything in `details.missing` |
+| `deploy_conflicting_input` | `--startup-arg` and `--clear-startup-args` given together | Pass one of the pair |
+| `deploy_bad_request` | The service refused the input; the message names the field or token (a startup flag outside the allowlist, for one) | Fix what the message names, then retry |
 | `deploy_compute_unavailable` | That GPU/region cannot provision now | Choose another pair from `comfy deploy refs compute` |
 | `deploy_quota_exceeded` | Workspace deployment or worker limit | Stop or scale down another deployment |
 | `deploy_payment_required` | No active subscription or credit | Billing problem; a retry will not fix it |
