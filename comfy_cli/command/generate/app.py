@@ -1259,6 +1259,10 @@ def _print_top_help() -> None:
         '  comfy generate flux-2 --prompt "a fox" --emit-workflow flux.json   '
         "[dim]# write a runnable workflow instead of calling the proxy[/dim]"
     )
+    rprint(
+        '  comfy generate flux-2 --prompt "a fox" --emit-workflow flux.json --emit-ops [--actor ID] [--base-version N]'
+    )
+    rprint("      [dim]# frontend-format (canvas-editable) file plus a stamped op batch in the envelope[/dim]")
     rprint("")
     rprint("[bold]Actions:[/bold]")
     rprint("  comfy generate list                    Browse available models")
