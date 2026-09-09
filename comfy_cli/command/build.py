@@ -2432,9 +2432,13 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None)
     # Ahead of the transport clause below, whose hint ("check the builder URL and
     # your access") points away from a failure that is neither: the endpoint and
     # the credential are both fine and the CA store is the problem.
+    # Redacted like the transport branch below: a verification failure on the
+    # presigned blob PUT quotes that URL, whose query string is the credential.
     if tls_verification_failed(e):
         renderer.error(
-            code="tls_verify_failed", message=f"TLS certificate verification failed: {e}", hint=tls_trust_hint()
+            code="tls_verify_failed",
+            message=f"TLS certificate verification failed: {_without_signed_query(e)}",
+            hint=tls_trust_hint(),
         )
         return
     if isinstance(e, urllib.error.HTTPError):
@@ -2516,11 +2520,14 @@ def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None):
         # beats an unhandled traceback.
         renderer.error(code="build_builder_error", message=f"builder response exceeded the client size cap ({e})")
         raise typer.Exit(code=1) from e
-    except ValueError as e:
-        renderer.error(code="build_missing_input", message=str(e))
-        raise typer.Exit(code=1) from e
+    # Transport before ValueError: ``requests.exceptions.MissingSchema``,
+    # ``InvalidURL`` and ``InvalidSchema`` subclass both, and a malformed builder-supplied upload
+    # URL is the builder's failure, reported redacted, not the caller's input.
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
         _report_builder_error(renderer, e, subject)
+        raise typer.Exit(code=1) from e
+    except ValueError as e:
+        renderer.error(code="build_missing_input", message=str(e))
         raise typer.Exit(code=1) from e
 
 

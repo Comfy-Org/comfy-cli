@@ -425,8 +425,59 @@ def test_a_failed_upload_keeps_the_signature_out_of_the_envelope(
     assert (
         "X-Goog-Signature" in result.output,
         "X-Goog-Credential" in result.output,
+        "?" in message,
         kept in message,
-    ) == (False, False, True)
+    ) == (False, False, False, True)
+
+
+@pytest.mark.parametrize(
+    "error, code, kept",
+    [
+        pytest.param(
+            requests.exceptions.SSLError(
+                f"HTTPSConnectionPool(host='storage.googleapis.com', port=443): Max retries exceeded with url: "
+                f"{SIGNED_URL} (Caused by SSLError(SSLCertVerificationError(1, "
+                "'[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate')))"
+            ),
+            "tls_verify_failed",
+            "Max retries exceeded with url: https://storage.googleapis.com/comfy-blobs/blob-1 (Caused by",
+            id="tls-branch-redacts-too",
+        ),
+        pytest.param(
+            requests.exceptions.InvalidURL(f"Invalid URL {SIGNED_URL!r}: No host supplied."),
+            "build_builder_error",
+            "Invalid URL 'https://storage.googleapis.com/comfy-blobs/blob-1",
+            id="malformed-url-is-the-builders-failure-and-redacted",
+        ),
+    ],
+)
+def test_the_other_two_failure_paths_keep_the_signature_out_too(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, error: Exception, code: str, kept: str
+) -> None:
+    """Two paths skipped the redaction above. A certificate failure exits
+    `_report_builder_error` before the transport branch, and used to interpolate
+    the exception raw. And `requests.exceptions.InvalidURL` (with `MissingSchema`
+    and `InvalidSchema`) subclasses `ValueError` as well as `RequestException`, so
+    with the `ValueError` clause first a malformed builder-supplied upload URL was
+    relabelled `build_missing_input` -- the caller's fault -- and printed whole."""
+    # Given
+    write_spec(workspace, build_id="build-1", revision="revision-0")
+    failing = _SignedUrlBuilder(error)
+    failing.remote_revisions["build-1"] = "revision-0"
+    _install_client(monkeypatch, failing)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    err = envelope(result)["error"]
+    assert (
+        err["code"],
+        "X-Goog-Signature" in result.output,
+        "X-Goog-Credential" in result.output,
+        "?" in err["message"],
+        kept in err["message"],
+    ) == (code, False, False, False, True)
 
 
 def test_resuming_an_interrupted_push_uploads_only_what_is_missing(
