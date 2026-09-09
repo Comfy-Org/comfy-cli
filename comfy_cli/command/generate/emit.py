@@ -485,6 +485,15 @@ def write_frontend_workflow(
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         previous = {}
 
+    # The document leaves this process here — through `strip_internal`, like
+    # every other write path. `apply_specs` leaves `_applied_ops` and
+    # `_widget_stamps` on the workflow; written to disk, the emit run's stamps
+    # seed the LWW register and outrank the next `set-widget` (at a higher
+    # `--base-version` deterministically, at the defaults on a coin flip), and
+    # the edit reports `ok: true` while changing nothing. Strip BEFORE
+    # `replace_ops` so the returned workflow, the file and the batch describe
+    # one document.
+    workflow_ops.strip_internal(workflow)
     try:
         ops = workflow_ops.replace_ops(previous, workflow, actor=actor, base_version=base_version)
     except workflow_ops.NotExpressibleError as e:  # can't-happen for our own built graph; fail loudly if it does

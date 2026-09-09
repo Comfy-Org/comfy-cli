@@ -328,3 +328,55 @@ def test_cli_emit_ops_without_emit_workflow_is_an_error(tmp_path, monkeypatch):
     result = CliRunner().invoke(app, ["--json", "generate", "nano-banana", "--prompt", "x", "--emit-ops"])
     assert result.exit_code != 0
     assert "generate_bad_args" in result.output
+
+
+# ─── regression: the emitted document leaves through strip_internal ────────
+
+
+def test_write_frontend_workflow_strips_apply_bookkeeping_before_write_and_batch(tmp_path):
+    """``apply_specs`` leaves ``_applied_ops``/``_widget_stamps`` on the
+    workflow it returns. Every other write path strips them; this one wrote
+    them to disk, so the LWW register seeded by the emit run outranked the
+    next edit. Strip BEFORE ``replace_ops`` so the returned workflow, the
+    file and the batch all describe the same document."""
+    out = tmp_path / "workflow.json"
+    wf, ops = emit.write_frontend_workflow(
+        "nano-banana", {"prompt": "ORIGINAL", "image": "cat.png"}, out, _graph(), actor="agent", base_version=7
+    )
+    on_disk = json.loads(out.read_text())
+    assert "_widget_stamps" not in on_disk and "_applied_ops" not in on_disk, sorted(on_disk)
+    assert "_widget_stamps" not in wf and "_applied_ops" not in wf
+    assert on_disk == wf
+    assert {"nodes", "links", "version", "last_node_id", "last_link_id"} <= set(on_disk)
+    assert ops
+
+
+def test_emitted_workflow_accepts_a_later_edit_stamped_below_its_base_version(tmp_path, monkeypatch):
+    """The PR's premise: the file is canvas-editable. A ``set-widget`` with
+    default stamps (``[0, "cli", …]``) against a graph emitted at
+    ``--base-version 7`` must apply — it was silently dropped (``ok: true``)
+    while the emit run's stamps rode along in the file."""
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    oi_path = tmp_path / "object_info.json"
+    oi_path.write_text(json.dumps(_object_info()), encoding="utf-8")
+    monkeypatch.setenv("COMFY_OBJECT_INFO_FILE", str(oi_path))
+    out = tmp_path / "workflow.json"
+
+    emitted = CliRunner().invoke(
+        app,
+        ["--json", "generate", "nano-banana", "--prompt", "ORIGINAL", "--image", "cat.png"]
+        + ["--emit-workflow", str(out), "--emit-ops", "--actor", "agent", "--base-version", "7"],
+    )
+    assert emitted.exit_code == 0, emitted.output
+    partner = next(n for n in json.loads(out.read_text())["nodes"] if n["type"] == "GeminiImageNode")
+
+    edited = CliRunner().invoke(
+        app,
+        ["--json", "workflow", "set-widget", str(out), f"{partner['id']}.prompt", "EDITED", "--input", str(oi_path)],
+    )
+    assert edited.exit_code == 0, edited.output
+    lowered = convert_ui_to_api(json.loads(out.read_text()), _object_info())
+    assert _api_by_class(lowered)["GeminiImageNode"]["prompt"] == "EDITED", "the edit was discarded by a stale stamp"

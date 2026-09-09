@@ -578,12 +578,14 @@ def _generate(model: str, extra_args: list[str]) -> None:
 
         emit_ops_mode = bool(meta.get("emit-ops", False))
         if emit_ops_mode and not emit_path:
-            get_renderer().error(
+            _bail(
+                _track_error,
+                schema.SchemaError("--emit-ops requires --emit-workflow <path>"),
                 code="generate_bad_args",
                 message="--emit-ops requires --emit-workflow <path>: the op batch describes the workflow written there",
+                kind="schema",
                 hint="add --emit-workflow workflow.json",
             )
-            raise typer.Exit(code=1)
         if emit_path:
             # Emit a runnable workflow that drives the partner *node* and return
             # — no proxy call, no API key required. The artifact is the result.
