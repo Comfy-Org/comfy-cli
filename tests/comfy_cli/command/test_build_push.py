@@ -361,6 +361,125 @@ def test_an_interrupted_push_keeps_the_blobs_it_already_uploaded(
     assert [(upload.kind, upload.index) for upload in pending_uploads(resumed)] == [("node_zip", 0)]
 
 
+#: A presigned GCS PUT URL: everything after the `?` IS the credential, and it
+#: stays valid for as long as `X-Goog-Expires` says.
+SIGNED_URL = (
+    "https://storage.googleapis.com/comfy-blobs/blob-1"
+    "?X-Goog-Algorithm=GOOG4-RSA-SHA256"
+    "&X-Goog-Credential=builder%40comfy.iam.gserviceaccount.com%2F20260906%2Fauto%2Fstorage%2Fgoog4_request"
+    "&X-Goog-Date=20260906T090000Z&X-Goog-Expires=900&X-Goog-SignedHeaders=host"
+    "&X-Goog-Signature=6d1f3c9ab0e5147a2d8f"
+)
+
+
+class _SignedUrlBuilder(RecordingBuilder):
+    """Fails the first upload with an exception quoting the presigned URL."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    def upload_blob(self, upload_url: str, path: Path) -> None:
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    "error, kept",
+    [
+        pytest.param(
+            requests.HTTPError(f"403 Client Error: Forbidden for url: {SIGNED_URL}"),
+            "403 Client Error: Forbidden for url: https://storage.googleapis.com/comfy-blobs/blob-1",
+            id="raise_for_status-quotes-the-whole-url",
+        ),
+        pytest.param(
+            requests.ConnectionError(
+                "HTTPSConnectionPool(host='storage.googleapis.com', port=443): Max retries exceeded with url: "
+                "/comfy-blobs/blob-1?X-Goog-Signature=6d1f3c9ab0e5147a2d8f (Caused by NewConnectionError('boom'))"
+            ),
+            "Max retries exceeded with url: /comfy-blobs/blob-1 (Caused by NewConnectionError('boom'))",
+            id="connection-error-quotes-the-path",
+        ),
+    ],
+)
+def test_a_failed_upload_keeps_the_signature_out_of_the_envelope(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, error: Exception, kept: str
+) -> None:
+    """`upload_assets` runs inside `_builder_call`, so an upload that fails hands
+    its exception to the transport branch of `_report_builder_error`, which
+    interpolates it whole. Both shapes `requests` produces quote what they were
+    talking to -- and for a presigned PUT the query string IS the credential, so
+    an ordinary failed upload writes a still-valid `X-Goog-Signature` to stdout,
+    into the JSON envelope and into any CI log that captured it. The host and the
+    path are what make the failure diagnosable, so only the query comes off."""
+    # Given
+    write_spec(workspace, build_id="build-1", revision="revision-0")
+    failing = _SignedUrlBuilder(error)
+    failing.remote_revisions["build-1"] = "revision-0"
+    _install_client(monkeypatch, failing)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    message = envelope(result)["error"]["message"]
+    assert (
+        "X-Goog-Signature" in result.output,
+        "X-Goog-Credential" in result.output,
+        "?" in message,
+        kept in message,
+    ) == (False, False, False, True)
+
+
+@pytest.mark.parametrize(
+    "error, code, kept",
+    [
+        pytest.param(
+            requests.exceptions.SSLError(
+                f"HTTPSConnectionPool(host='storage.googleapis.com', port=443): Max retries exceeded with url: "
+                f"{SIGNED_URL} (Caused by SSLError(SSLCertVerificationError(1, "
+                "'[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: self-signed certificate')))"
+            ),
+            "tls_verify_failed",
+            "Max retries exceeded with url: https://storage.googleapis.com/comfy-blobs/blob-1 (Caused by",
+            id="tls-branch-redacts-too",
+        ),
+        pytest.param(
+            requests.exceptions.InvalidURL(f"Invalid URL {SIGNED_URL!r}: No host supplied."),
+            "build_builder_error",
+            "Invalid URL 'https://storage.googleapis.com/comfy-blobs/blob-1",
+            id="malformed-url-is-the-builders-failure-and-redacted",
+        ),
+    ],
+)
+def test_the_other_two_failure_paths_keep_the_signature_out_too(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, error: Exception, code: str, kept: str
+) -> None:
+    """Two paths skipped the redaction above. A certificate failure exits
+    `_report_builder_error` before the transport branch, and used to interpolate
+    the exception raw. And `requests.exceptions.InvalidURL` (with `MissingSchema`
+    and `InvalidSchema`) subclasses `ValueError` as well as `RequestException`, so
+    with the `ValueError` clause first a malformed builder-supplied upload URL was
+    relabelled `build_missing_input` -- the caller's fault -- and printed whole."""
+    # Given
+    write_spec(workspace, build_id="build-1", revision="revision-0")
+    failing = _SignedUrlBuilder(error)
+    failing.remote_revisions["build-1"] = "revision-0"
+    _install_client(monkeypatch, failing)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    err = envelope(result)["error"]
+    assert (
+        err["code"],
+        "X-Goog-Signature" in result.output,
+        "X-Goog-Credential" in result.output,
+        "?" in err["message"],
+        kept in err["message"],
+    ) == (code, False, False, False, True)
+
+
 def test_resuming_an_interrupted_push_uploads_only_what_is_missing(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

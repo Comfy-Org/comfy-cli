@@ -15,8 +15,29 @@ history.
 
 ## [Unreleased]
 
+### Added
+
+- `comfy build release delete RELEASE` deletes the named release, freeing the slot
+  it held against the workspace's release limit. It confirms first (`--yes` skips
+  the prompt, `build_release_delete_needs_confirm` refuses a caller that cannot
+  answer one), and repeating the same id is safe: the builder answers success
+  again for a release already deleted.
+- Three builder refusals an agent can act on now arrive under their own error
+  codes instead of the one `build_builder_error` envelope: `build_release_limit`
+  (the workspace holds as many releases as its limit allows),
+  `build_release_in_use` and `build_in_use` (a deployment still references the
+  release, or one of the build's releases). The builder's message is carried
+  whole up to 8 KiB, so the blocking deployment ids it names are no longer lost
+  to the 1000-byte cap on the raw body.
+
 ### Fixed
 
+- A failed blob upload during `comfy build push` no longer writes the presigned
+  PUT URL's query string to stdout, into the JSON envelope, or into a CI log.
+  Both a rejected upload and a dropped connection quote the URL they were talking
+  to, and for a presigned GCS PUT that query string is a live credential
+  (`X-Goog-Credential`, `X-Goog-Signature`). The host and path are kept, so the
+  failure still says what it failed to reach.
 - `comfy install --fast-deps --nvidia` no longer installs a torch that its
   torchvision was not built against, which made ComfyUI fail to import with
   `RuntimeError: operator torchvision::nms does not exist`. The GPU override

@@ -17,7 +17,7 @@ from enum import Enum
 from pathlib import Path
 
 import pytest
-from build_auth_support import BUILD_ID, RecordingTransport, write_snapshot
+from build_auth_support import BUILD_ID, RELEASE_ID, RecordingTransport, write_snapshot
 from build_push_support import make_workspace, write_spec
 from build_tree_support import leaf_commands
 from deploy_auth_support import (
@@ -63,6 +63,7 @@ class FixtureKind(Enum):
     RELEASE_SHOW = "release show"
     RELEASE_LOGS = "release logs"
     RELEASE_MANIFEST = "release manifest"
+    RELEASE_DELETE = "release delete"
     REFS_RESOLVE = "refs resolve"
     REFS_BASE_IMAGES = "refs base-images"
     REFS_BUILD_TARGETS = "refs build-targets"
@@ -103,6 +104,7 @@ BUILD_AUTH_CASES = (
     BuildAuthCase(FixtureKind.RELEASE_SHOW, "release show", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.RELEASE_LOGS, "release logs", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.RELEASE_MANIFEST, "release manifest", True, _ONE_PLUS),
+    BuildAuthCase(FixtureKind.RELEASE_DELETE, "release delete", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.REFS_RESOLVE, "refs resolve", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.REFS_BASE_IMAGES, "refs base-images", True, _ONE_PLUS),
     BuildAuthCase(FixtureKind.REFS_BUILD_TARGETS, "refs build-targets", True, _ONE_PLUS),
@@ -183,6 +185,8 @@ def _prepare(kind: FixtureKind, root: Path) -> list[str]:
             return ["build", "release", "logs", "--id", BUILD_ID, "--target", "linux/nvidia"]
         case FixtureKind.RELEASE_MANIFEST:
             return ["build", "release", "manifest", "--id", BUILD_ID]
+        case FixtureKind.RELEASE_DELETE:
+            return ["build", "release", "delete", RELEASE_ID, "-y"]
         case FixtureKind.REFS_RESOLVE:
             return ["build", "refs", "resolve", "base.safetensors"]
         case FixtureKind.REFS_BASE_IMAGES:

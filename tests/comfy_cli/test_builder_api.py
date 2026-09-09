@@ -302,6 +302,31 @@ def test_create_release_refuses_a_missing_or_empty_target_list(recorder, targets
     assert recorder.calls == []
 
 
+@pytest.mark.parametrize(
+    "release_id",
+    [
+        pytest.param("", id="empty"),
+        pytest.param("   ", id="blank"),
+        pytest.param(".", id="dot"),
+        pytest.param("..", id="dot-dot"),
+        pytest.param("...", id="three-dots"),
+    ],
+)
+def test_delete_release_refuses_an_id_that_is_not_one_path_segment(recorder, release_id):
+    """The method's own comment promises the id stays a single terminal path
+    segment, and `quote(safe="")` keeps that promise for everything except the
+    two segments that are not one: RFC 3986 calls `.` and `..` unreserved, so
+    they pass through untouched and aim the DELETE at the collection or at its
+    parent. `release_delete` refuses them above its prompt, but this method is
+    public, so the guarantee has to hold for a second caller too."""
+    client = BuilderClient(_BASE_URL, "jwt-token")
+
+    with pytest.raises(ValueError, match="empty or dot-only"):
+        client.delete_release(release_id)
+
+    assert recorder.calls == []
+
+
 def test_create_release_refuses_when_targets_is_omitted_entirely(recorder):
     client = BuilderClient(_BASE_URL, "jwt-token")
 
