@@ -276,7 +276,7 @@ def test_shared_definition_is_forked_not_mutated(graph, widget, value):
     wf["nodes"].append(sibling)
     original_def_id = sibling["type"]
     original_def = copy.deepcopy(_def_of(wf, sibling))
-    wf, op = workflow_ops.set_widget(wf, graph, 56, widget, value)
+    wf, _ = workflow_ops.set_widget(wf, graph, 56, widget, value)
     assert _node(wf, 56)["type"] == _deterministic_fork_id(original_def_id, 56)
     assert _node(wf, 156)["type"] == original_def_id
     assert _def_of(wf, _node(wf, 156)) == original_def
