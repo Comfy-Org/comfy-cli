@@ -675,6 +675,13 @@ def _set_widget_impl(
             pi = _promoted.find_promoted(sg, defs, widget)
             promoted_meta["value_index"] = pi.value_index
             old = _promoted.effective_value(workflow, instance, widget, graph)
+            # Materializing declared-order values while legacy tuples remain
+            # makes a later migration reinterpret them in proxy order.
+            plan = _promoted.plan_proxy_migration(workflow, instance, graph, defs)
+            if any(e.plan != _promoted.PLAN_PREVIEW for e in plan):
+                promoted_meta["repair"] = {
+                    "ids": _promoted.plan_repair_ids(list(target.segments), plan),
+                }
         inner_type, port = _engine.promoted_source_port(sg, pi, defs, graph)
         value, norm_note = _normalize_combo(graph, inner_type, port.name if port else widget, value)
         warnings: list[dict] = []

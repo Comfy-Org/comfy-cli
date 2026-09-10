@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import json
+from itertools import permutations
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +97,46 @@ def test_legacy_write_repairs_the_definition_and_writes_the_host(graph):
     assert repair["entry"] == ["52", "seed"]
     assert repair["ids"] == {"52.seed": promoted.repair_ids(["56"], "52", "seed", 1)}
     assert repair["ids"]["52.seed"]["links"][0] == sg["inputs"][-1]["linkIds"][0]
+
+
+@pytest.mark.parametrize("order", list(permutations(["text", "width", "seed"])))
+@pytest.mark.parametrize("reload_between_writes", [False, True])
+def test_mixed_legacy_and_declared_writes_preserve_values(graph, order, reload_between_writes):
+    wf = _load(FLUX)
+    # Legacy widget order need not match the definition's linked-input order.
+    proxies = _node(wf, 56)["properties"]["proxyWidgets"]
+    proxies[0], proxies[1] = proxies[1], proxies[0]
+    baseline = copy.deepcopy(wf)
+    updates = {"text": "a lighthouse at dusk", "width": 768, "seed": 424242}
+    for name in ["seed", "text", "width"]:
+        baseline, _ = workflow_ops.set_widget(baseline, graph, 56, name, updates[name])
+
+    original = copy.deepcopy(wf)
+    ops = []
+    for name in order:
+        wf, op = workflow_ops.set_widget(wf, graph, 56, name, updates[name])
+        ops.append(op)
+        if reload_between_writes:
+            wf = json.loads(json.dumps(wf))
+
+    assert _node(wf, 56)["widgets_values"] == _node(baseline, 56)["widgets_values"]
+    slots = {s["address"]: s for s in graph.get_template_schema("t", wf)["slots"]}
+    for name, value in updates.items():
+        assert promoted.effective_value(wf, _node(wf, 56), name, graph) == value
+        assert slots[f"56.{name}"]["current_value"] == value
+    assert _api(wf) == _api(baseline)
+
+    via_slots = copy.deepcopy(original)
+    if reload_between_writes:
+        for name in order:
+            via_slots, _ = graph.apply_slots(via_slots, {f"56.{name}": updates[name]})
+            via_slots = json.loads(json.dumps(via_slots))
+    else:
+        via_slots, _ = graph.apply_slots(via_slots, {f"56.{name}": updates[name] for name in order})
+    assert _stripped(via_slots) == _stripped(wf)
+    for op in ops:
+        workflow_ops.apply_op(original, op, graph)
+    assert _stripped(original) == _stripped(wf)
 
 
 def test_interior_address_of_a_legacy_promotion_is_redirected_to_the_host(graph):
@@ -227,14 +268,15 @@ def test_concurrent_repairs_of_one_instance_converge(graph):
     assert _node(ab, 143)["widgets_values"] == ["Nano Banana 2", "1K", "1:1"]
 
 
-def test_shared_definition_is_forked_not_mutated(graph):
+@pytest.mark.parametrize(("widget", "value"), [("seed", 5), ("text", "new prompt")])
+def test_shared_definition_is_forked_not_mutated(graph, widget, value):
     wf = _load(FLUX)
     sibling = copy.deepcopy(_node(wf, 56))
     sibling["id"] = 156
     wf["nodes"].append(sibling)
     original_def_id = sibling["type"]
     original_def = copy.deepcopy(_def_of(wf, sibling))
-    wf, op = workflow_ops.set_widget(wf, graph, 56, "seed", 5)
+    wf, op = workflow_ops.set_widget(wf, graph, 56, widget, value)
     assert _node(wf, 56)["type"] == _deterministic_fork_id(original_def_id, 56)
     assert _node(wf, 156)["type"] == original_def_id
     assert _def_of(wf, _node(wf, 156)) == original_def
@@ -247,7 +289,8 @@ def test_shared_definition_is_forked_not_mutated(graph):
     assert _node(wf, 156)["type"] == original_def_id
     assert [i["name"] for i in _def_of(wf, _node(wf, 156))["inputs"]][-1] == "seed"
     assert _def_of(wf, _node(wf, 56)) == forked
-    assert _node(wf, 56)["widgets_values"][-1] == 5 and _node(wf, 156)["widgets_values"][-1] == 6
+    assert promoted.effective_value(wf, _node(wf, 56), widget, graph) == value
+    assert _node(wf, 156)["widgets_values"][-1] == 6
 
 
 # --------------------------------------------------------------------------- #
