@@ -1171,6 +1171,9 @@ history.
   when a model folder listing is over the size cap. It also percent-encodes the
   model folder name it asks the local server for, accepts a folder name with
   `..` inside it, and refreshes a stale gallery index before looking up the name.
+- Writing a declared promoted widget before a legacy `proxyWidgets` slot no
+  longer shifts the host's other values. Pending proxy migration now runs before
+  the first host write, including when edits are saved in separate calls.
 - A failed blob upload during `comfy build push` no longer writes the presigned
   PUT URL's query string to stdout, into the JSON envelope, or into a CI log.
   Both a rejected upload and a dropped connection quote the URL they were talking
