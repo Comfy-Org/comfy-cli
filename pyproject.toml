@@ -90,6 +90,7 @@ include = [ "comfy_cli*" ]
 
 "comfy_cli.cql.data" = [ "*.yaml", "*.json" ]
 "comfy_cli.command.generate" = [ "spec/openapi.yml" ]
+"comfy_cli.command.generate.data" = [ "*.json" ]
 
 [tool.ruff]
 target-version = "py310"
