@@ -141,3 +141,52 @@ def test_coerce_string_array_commas_only_raises():
     # Commas and whitespace split/strip to no items; should raise SchemaError, not return [].
     with pytest.raises(schema.SchemaError, match="expected at least one value"):
         schema._coerce(_string_array_flag(), ", ,")
+
+
+def test_flags_for_unwraps_single_branch_anyof():
+    # BFL's Fill inputs wrap every optional field in a one-branch anyOf; the
+    # wrapper is spec noise, not a real union, so the declared type must win.
+    ep = spec.get_endpoint("bfl/flux-pro-1.0-fill/generate")
+    flags = {f.name: f for f in schema.flags_for(ep)}
+    assert flags["prompt"].kind == "string"
+    assert flags["steps"].kind == "integer"
+    assert flags["guidance"].kind == "number"
+    assert flags["output_format"].kind == "enum"
+    assert flags["output_format"].enum == ["jpeg", "png"]
+    # The parent's own default survives the unwrap.
+    assert flags["output_format"].default == "jpeg"
+
+
+def test_flags_for_single_branch_anyof_keeps_base64_upload():
+    # upload-mode detection only inspects `string` props, so a mis-classified
+    # `object` silently loses it and forces the caller to base64 by hand.
+    ep = spec.get_endpoint("bfl/flux-pro-1.0-fill/generate")
+    flags = {f.name: f for f in schema.flags_for(ep)}
+    assert flags["mask"].upload_mode == "base64"
+    assert flags["image"].upload_mode == "base64"
+
+
+def test_unwrap_single_variant_drops_null_branch():
+    prop = {"anyOf": [{"type": "string"}, {"type": "null"}], "description": "d"}
+    assert schema._unwrap_single_variant(prop) == {"type": "string", "description": "d"}
+
+
+def test_unwrap_single_variant_keeps_real_union_as_object():
+    prop = {"anyOf": [{"type": "string"}, {"type": "integer"}]}
+    assert schema._unwrap_single_variant(prop) == prop
+    assert schema._classify(prop) == ("object", None)
+
+
+def test_unwrap_single_variant_branch_overrides_parent_type():
+    prop = {"anyOf": [{"type": "integer"}], "title": "outer", "default": 3}
+    assert schema._unwrap_single_variant(prop) == {"type": "integer", "title": "outer", "default": 3}
+
+
+def test_parse_args_accepts_plain_text_for_wrapped_prompt():
+    # The regression this guards: `--prompt "a fox"` used to fail with
+    # "expected JSON object" because the one-branch anyOf read as an object.
+    ep = spec.get_endpoint("bfl/flux-pro-1.0-expand/generate")
+    flags = schema.flags_for(ep)
+    values = schema.parse_args(flags, ["--image", "in.png", "--prompt", "a fox", "--left", "236"])
+    assert values["prompt"] == "a fox"
+    assert values["left"] == 236

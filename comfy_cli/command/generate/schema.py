@@ -34,6 +34,48 @@ class SchemaError(ValueError):
     pass
 
 
+# Spec-authored nesting is one level deep in practice; the bound just keeps a
+# pathological or self-referential schema from spinning here.
+_MAX_VARIANT_DEPTH = 4
+
+
+def _unwrap_single_variant(prop: dict[str, Any]) -> dict[str, Any]:
+    """Flatten a one-real-branch ``anyOf``/``oneOf``/``allOf`` into its parent.
+
+    Several partner specs wrap every optional field in a single-branch
+    ``anyOf`` (BFL's Fill / Expand / Canny / Depth inputs all do): ``prompt``
+    arrives as ``{"anyOf": [{"type": "string"}], "description": ...}`` rather
+    than the ``{"type": "string", ...}`` it plainly means. Left alone,
+    :func:`_classify` sees the ``anyOf`` and calls the field an ``object``, so
+    a plain ``--prompt "a fox"`` is rejected for not being JSON, ``--steps 50``
+    lands as parsed JSON rather than a coerced int, and ``--mask path.png``
+    never reaches
+    :func:`_detect_upload_mode` (which only inspects ``string`` props), leaving
+    the caller to base64 the file by hand.
+
+    The parent's own keys are kept unless the branch restates them, so an outer
+    ``description`` still drives upload-mode detection and an outer ``default``
+    survives. Only the unambiguous shape is flattened: exactly one branch once
+    ``null`` branches are dropped. A genuine multi-branch union stays an
+    ``object``, which is what it is.
+    """
+    for _ in range(_MAX_VARIANT_DEPTH):
+        for key in ("anyOf", "oneOf", "allOf"):
+            variants = prop.get(key)
+            if not isinstance(variants, list):
+                continue
+            branches = [v for v in variants if isinstance(v, dict) and v.get("type") != "null"]
+            if len(branches) != 1:
+                continue
+            merged = {k: v for k, v in prop.items() if k not in ("anyOf", "oneOf", "allOf")}
+            merged.update(branches[0])
+            prop = merged
+            break
+        else:
+            break
+    return prop
+
+
 def _classify(prop: dict[str, Any]) -> tuple[str, str | None]:
     """Return (kind, item_kind). item_kind only set when kind == 'array'."""
     if "enum" in prop and prop.get("type", "string") == "string":
@@ -100,6 +142,7 @@ def flags_for(endpoint: Endpoint) -> list[FlagDef]:
     for name, prop in props.items():
         if not isinstance(prop, dict):
             continue
+        prop = _unwrap_single_variant(prop)
         kind, item_kind = _classify(prop)
         upload_mode = _detect_upload_mode(name, prop) if kind == "string" else None
         out.append(
