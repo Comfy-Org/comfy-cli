@@ -821,13 +821,15 @@ def test_delete_command_needs_confirm_non_interactive():
 
 
 class _RecordingRenderer:
-    """Minimal renderer stand-in that records the error code emitted."""
+    """Minimal renderer stand-in that records the error code and hint emitted."""
 
     def __init__(self):
         self.codes = []
+        self.hints = []
 
-    def error(self, code, message, details=None):
+    def error(self, code, message, *, hint=None, details=None):
         self.codes.append(code)
+        self.hints.append(hint)
 
 
 def test_builder_client_uses_injected_token(monkeypatch):
@@ -887,6 +889,48 @@ def test_builder_call_maps_other_errors_to_builder_error():
     with pytest.raises(typer.Exit):
         _builder_call(r, raise_500)
     assert r.codes == ["build_builder_error"]
+
+
+@pytest.mark.parametrize("failure", ["server-error", "transport-failure"])
+def test_a_failed_cut_says_the_retry_cannot_double_cut(failure):
+    # The two outcomes where the caller cannot tell whether the release landed. Left
+    # unexplained, the safe-looking read is "do not retry", which strands a release
+    # the builder would have re-driven — so the idempotency has to reach the envelope.
+    import io
+    import urllib.error
+
+    from comfy_cli.command.build import _CUT_RETRY_HINT, _builder_call
+
+    def raise_it():
+        if failure == "server-error":
+            raise urllib.error.HTTPError("https://x", 500, "Server Error", None, io.BytesIO(b"boom"))
+        raise urllib.error.URLError("connection reset")
+
+    r = _RecordingRenderer()
+    with pytest.raises(typer.Exit):
+        _builder_call(r, raise_it, hint=_CUT_RETRY_HINT)
+    assert r.codes == ["build_builder_error"]
+    assert r.hints == [_CUT_RETRY_HINT]
+
+
+def test_the_limited_beta_403_keeps_its_own_hint_over_the_cut_hint():
+    # build_not_enabled is a dead end, not an ambiguous write: telling that caller to
+    # re-run the cut would be advice for a different failure.
+    import io
+    import urllib.error
+
+    from comfy_cli.command.build import _CUT_RETRY_HINT, _builder_call
+
+    def raise_403():
+        raise urllib.error.HTTPError(
+            "https://x", 403, "Forbidden", None, io.BytesIO(b'{"error":"FEATURE_NOT_ENABLED"}')
+        )
+
+    r = _RecordingRenderer()
+    with pytest.raises(typer.Exit):
+        _builder_call(r, raise_403, hint=_CUT_RETRY_HINT)
+    assert r.codes == ["build_not_enabled"]
+    assert r.hints == [None]
 
 
 def test_upload_blob_sends_generation_match_header(monkeypatch, tmp_path):

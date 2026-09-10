@@ -1,6 +1,6 @@
 """``comfy build push --release`` — targets are always explicit, never defaulted.
 
-A target belongs to a release and spends build minutes, so every path here is
+A target belongs to a release and builds an artifact, so every path here is
 about refusing to invent one: a malformed spelling, an absent ``--target``, an
 aborted picker and a failed push must all end with **zero** release cuts.
 """
