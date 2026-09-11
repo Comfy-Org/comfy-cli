@@ -16,6 +16,7 @@ import copy
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
 from typer.testing import CliRunner
@@ -527,6 +528,33 @@ def _run(args: list[str], capsys) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # add-node
 # ---------------------------------------------------------------------------
+
+
+class TestInsertWorkflow:
+    def test_transmits_op_once_through_renderer(self, monkeypatch, tmp_path):
+        workflow = _write(tmp_path, {"nodes": [], "links": [], "groups": []})
+        template = _write(tmp_path, {"nodes": [], "links": [], "groups": []}, "template.json")
+        renderer = _force_json_renderer()
+        transport = Mock()
+        monkeypatch.setattr(renderer, "emit", transport)
+
+        result = CliRunner().invoke(
+            workflow_cmd.app,
+            ["insert-workflow", str(workflow), str(template), "--actor", "agent", "--base-version", "4"],
+            standalone_mode=False,
+        )
+
+        assert result.exit_code == 0
+        transport.assert_called_once()
+        payload = transport.call_args.args[0]
+        assert transport.call_args.kwargs == {"command": "workflow insert-workflow", "changed": False}
+        assert payload["workflow"] == str(workflow)
+        assert payload["base_version"] == 4
+        assert payload["wrote"] is None
+        assert payload["op"]["op"] == "insert_workflow"
+        assert payload["op"]["actor"] == "agent"
+        assert payload["op"]["stamp"] == [4, "agent"]
+        assert payload["op"]["workflow"] == {"nodes": [], "links": [], "groups": []}
 
 
 class TestAddNode:
