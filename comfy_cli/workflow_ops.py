@@ -1140,18 +1140,14 @@ class NotExpressibleError(ValueError):
 def _inexpressible_reason(workflow: dict) -> str | None:
     """Why ``workflow`` cannot be rebuilt from add_node/connect ops, or None.
 
-    The frozen vocabulary has four batchable kinds and none of them can create a
-    subgraph definition, a canvas group, or a reroute point — so a graph that
-    carries any of those is not reconstructible from ops, full stop. Enumerated
+    The frozen vocabulary cannot create a canvas group or a reroute point, so a
+    graph that carries either is not reconstructible from ops. Enumerated
     positively (a closed list of things we know we CAN'T do) rather than by
     trying and checking, so an unexpressible template fails before it has
     written anything.
     """
     if not isinstance(workflow, dict) or not isinstance(workflow.get("nodes"), list):
         return "not a frontend-format workflow (no `nodes` list) — only the save/UI format can be op-ified"
-    definitions = workflow.get("definitions")
-    if isinstance(definitions, dict) and definitions.get("subgraphs"):
-        return "the workflow contains a subgraph definition, which no frozen op kind can create"
     if workflow.get("groups"):
         return "the workflow contains canvas groups, which no frozen op kind can create"
     extra = workflow.get("extra")
@@ -1227,6 +1223,39 @@ def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int =
         raise NotExpressibleError(reason)
 
     ops: list[dict] = []
+    old_definitions = {
+        str(definition.get("id")): definition
+        for definition in ((old.get("definitions") or {}).get("subgraphs") or [])
+        if isinstance(definition, dict)
+    }
+    new_definitions = {
+        str(definition.get("id")): definition
+        for definition in ((new.get("definitions") or {}).get("subgraphs") or [])
+        if isinstance(definition, dict)
+    }
+    if any(identifier not in new_definitions for identifier in old_definitions):
+        raise NotExpressibleError("the replacement removes a subgraph definition, which no frozen op kind can delete")
+    for identifier, definition in new_definitions.items():
+        existing = old_definitions.get(identifier)
+        if existing is not None and existing != definition:
+            raise NotExpressibleError(
+                "the replacement changes an existing subgraph definition; emit id-addressed edits instead"
+            )
+        if existing is None:
+            try:
+                _validate_subgraph_definition(definition)
+                _validate_subgraph_cycles(definition)
+            except ValueError as error:
+                raise NotExpressibleError(f"the workflow contains a malformed subgraph definition: {error}") from error
+            ops.append(
+                _new_op(
+                    "define_subgraph",
+                    actor,
+                    base_version,
+                    subgraph_id=identifier,
+                    subgraph_definition=copy.deepcopy(definition),
+                )
+            )
     old_links = [link for link in (old.get("links") or []) if isinstance(link, list) and len(link) >= 5]
     for node in old.get("nodes") or []:
         if not isinstance(node, dict) or node.get("id") is None:
@@ -1861,7 +1890,12 @@ def define_subgraph(
     if not isinstance(definition, dict):
         raise ValueError("subgraph definition must be a JSON object")
     definition = copy.deepcopy(definition)
-    definition_id = subgraph_id or definition.get("id") or str(uuid.uuid4())
+    if subgraph_id is not None:
+        definition_id = subgraph_id
+    elif "id" in definition:
+        definition_id = definition["id"]
+    else:
+        definition_id = str(uuid.uuid4())
     if not isinstance(definition_id, str) or not definition_id:
         raise ValueError("subgraph definition requires a non-empty string id")
     if not _UUID_RE.fullmatch(definition_id):
@@ -1870,6 +1904,7 @@ def define_subgraph(
         raise ValueError("subgraph definition id must match --id")
     definition["id"] = definition_id
     _validate_subgraph_definition(definition)
+    _validate_subgraph_cycles(definition)
     existing = _subgraph_definition(workflow, definition_id)
     if existing is not None:
         raise ValueError(f"subgraph definition {definition_id!r} already exists; define-subgraph only creates new ids")
@@ -1899,6 +1934,16 @@ def _validate_subgraph_definition(
     seen.add(definition_id)
     if not isinstance(definition.get("nodes"), list) or not isinstance(definition.get("links"), list):
         raise ValueError(f"{path} nodes and links must be arrays")
+    for index, node in enumerate(definition["nodes"]):
+        node_path = f"{path}.nodes[{index}]"
+        if not isinstance(node, dict) or node.get("id") is None or not isinstance(node.get("type"), str):
+            raise ValueError(f"{node_path} must be an object with id and string type")
+        for field in ("inputs", "outputs"):
+            if field in node and not isinstance(node[field], list):
+                raise ValueError(f"{node_path}.{field} must be an array")
+    for index, link in enumerate(definition["links"]):
+        if not isinstance(link, list) or len(link) < 5:
+            raise ValueError(f"{path}.links[{index}] must be a link tuple with at least 5 items")
     nested = definition.get("definitions")
     if nested is None:
         return
@@ -1909,6 +1954,36 @@ def _validate_subgraph_definition(
         if not isinstance(child, dict):
             raise ValueError(f"{child_path} must be a JSON object")
         _validate_subgraph_definition(child, child_path, seen)
+
+
+def _validate_subgraph_cycles(root: dict) -> None:
+    """Reject recursive definition references that expansion cannot terminate."""
+    definitions: dict[str, dict] = {}
+
+    def collect(definition: dict) -> None:
+        definitions[definition["id"]] = definition
+        for child in (definition.get("definitions") or {}).get("subgraphs") or []:
+            collect(child)
+
+    collect(root)
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(identifier: str) -> None:
+        if identifier in visiting:
+            raise ValueError(f"cyclic subgraph reference involving {identifier!r}")
+        if identifier in visited:
+            return
+        visiting.add(identifier)
+        for node in definitions[identifier]["nodes"]:
+            target = node.get("type")
+            if target in definitions:
+                visit(target)
+        visiting.remove(identifier)
+        visited.add(identifier)
+
+    for identifier in definitions:
+        visit(identifier)
 
 
 def _subgraph_definition(workflow: dict, subgraph_id: str) -> dict | None:
@@ -1957,14 +2032,15 @@ def _apply_define_subgraph(workflow: dict, op: dict) -> None:
         raise ValueError("malformed_op: subgraph_id must match a definition with nodes and links arrays")
     try:
         _validate_subgraph_definition(definition)
+        _validate_subgraph_cycles(definition)
     except ValueError as error:
         raise ValueError(f"malformed_op: {error}") from error
     existing = _subgraph_definition(workflow, subgraph_id)
     if existing is not None:
-        if existing == definition:
-            return
-        raise ValueError(f"definition_conflict: definition {subgraph_id!r} already exists with different content")
-    workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(copy.deepcopy(definition))
+        return
+    if workflow.get("definitions") is None:
+        workflow["definitions"] = {}
+    workflow["definitions"].setdefault("subgraphs", []).append(copy.deepcopy(definition))
 
 
 def _apply_add_node(workflow: dict, op: dict) -> None:
@@ -2397,6 +2473,8 @@ def _write_target(op: dict) -> tuple:
             # not share a target with its sibling (``model.reference_videos``).
             return ("input", str(op["to_node"]), "grow", _autogrow_base(str(grow["name"])))
         return ("input", str(op["to_node"]), op["to_slot"])
+    if kind == "define_subgraph":
+        return ("subgraph", str(op["subgraph_id"]))
     return (kind,)
 
 

@@ -14,6 +14,7 @@ collide; widgets are addressed by name, not array index. See ``workflow_ops``.
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -48,6 +49,7 @@ InputOpt = Annotated[str | None, typer.Option("--input", show_default=False)]
 HostOpt = Annotated[str | None, typer.Option(show_default=False)]
 PortOpt = Annotated[int | None, typer.Option(show_default=False)]
 WhereOpt = Annotated[str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")]
+_MAX_DEFINITION_BYTES = 16 * 1024 * 1024
 
 
 def _emit_edit_error(renderer, e: ValueError, *, hint: str) -> None:
@@ -137,6 +139,23 @@ def _graph_or_exit(input_path, host, port, renderer, where=None):
 # ---------------------------------------------------------------------------
 
 
+def _read_subgraph_definition(path: Path):
+    """Read a bounded regular JSON file without blocking on devices or FIFOs."""
+    file_stat = path.stat()
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise ValueError("subgraph definition must be a regular file")
+    if file_stat.st_size > _MAX_DEFINITION_BYTES:
+        raise ValueError(f"subgraph definition is too large (maximum {_MAX_DEFINITION_BYTES} bytes)")
+    try:
+        with path.open("rb") as definition_file:
+            raw = definition_file.read(_MAX_DEFINITION_BYTES + 1)
+        if len(raw) > _MAX_DEFINITION_BYTES:
+            raise ValueError(f"subgraph definition is too large (maximum {_MAX_DEFINITION_BYTES} bytes)")
+        return json.loads(raw.decode("utf-8"))
+    except (RecursionError, MemoryError) as error:
+        raise ValueError("subgraph definition is too deeply nested or too large") from error
+
+
 @tracking.track_command("workflow")
 def define_subgraph_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON to update.")],
@@ -152,7 +171,7 @@ def define_subgraph_cmd(
     p, workflow = _load_workflow_or_fail(renderer, file)
     try:
         definition_path = Path(definition_file).expanduser()
-        definition = json.loads(definition_path.read_text(encoding="utf-8"))
+        definition = _read_subgraph_definition(definition_path)
         workflow, op = workflow_ops.define_subgraph(
             workflow,
             definition,
@@ -160,7 +179,7 @@ def define_subgraph_cmd(
             actor=actor,
             base_version=base_version,
         )
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as e:
         _emit_edit_error(renderer, e, hint="provide a serializable subgraph definition JSON object")
         raise typer.Exit(code=1) from e
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow define-subgraph")
