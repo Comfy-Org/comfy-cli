@@ -130,6 +130,14 @@ def _finish(renderer, p, workflow: dict, op: dict, base_version: int, stdout: bo
     renderer.emit(payload, command=command, changed=not stdout)
 
 
+def _emit_op(renderer, p: Path, op: dict, base_version: int, command: str) -> None:
+    """Emit an op without applying it or writing the source workflow."""
+    payload = {"workflow": str(p), "op": op, "base_version": base_version, "wrote": None}
+    if renderer.is_pretty():
+        rprint(f"[bold green]✓[/bold green] {op['op']} emitted for [dim]{p}[/dim]")
+    renderer.emit(payload, command=command, changed=False)
+
+
 def _graph_or_exit(input_path, host, port, renderer, where=None):
     return _get_graph(input_path, host, port, where=where)
 
@@ -172,7 +180,7 @@ def define_subgraph_cmd(
     try:
         definition_path = Path(definition_file).expanduser()
         definition = _read_subgraph_definition(definition_path)
-        workflow, op = workflow_ops.define_subgraph(
+        _, op = workflow_ops.define_subgraph(
             workflow,
             definition,
             subgraph_id=subgraph_id,
@@ -182,7 +190,7 @@ def define_subgraph_cmd(
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as e:
         _emit_edit_error(renderer, e, hint="provide a serializable subgraph definition JSON object")
         raise typer.Exit(code=1) from e
-    _finish(renderer, p, workflow, op, base_version, stdout, "workflow define-subgraph")
+    _emit_op(renderer, p, op, base_version, "workflow define-subgraph")
 
 
 # ---------------------------------------------------------------------------

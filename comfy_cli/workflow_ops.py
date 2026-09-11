@@ -102,10 +102,10 @@ FROZEN_OPS: tuple[str, ...] = (
     "define_subgraph",
 )
 
-#: Kinds frozen in the contract whose replay is not implemented yet.
-#: ``apply_op`` must keep rejecting these. Empty since amendment v1.1:
-#: ``reset_doc`` was un-deferred by the bulk-writers ticket (V1-038).
-DEFERRED_OPS: tuple[str, ...] = ()
+#: Kinds frozen in the contract whose replay is not implemented in the CLI.
+#: ``define_subgraph`` is emitted for cmp to validate and apply; the CLI must
+#: keep rejecting local replay to preserve that ownership boundary.
+DEFERRED_OPS: tuple[str, ...] = ("define_subgraph",)
 
 #: Kinds a batch (``apply_specs``) dispatches. ``clear`` and ``reset_doc`` are
 #: standalone-only: they rewrite the whole document, so they never ride inside
@@ -1150,6 +1150,8 @@ def _inexpressible_reason(workflow: dict) -> str | None:
         return "not a frontend-format workflow (no `nodes` list) — only the save/UI format can be op-ified"
     if workflow.get("groups"):
         return "the workflow contains canvas groups, which no frozen op kind can create"
+    if (workflow.get("definitions") or {}).get("subgraphs"):
+        return "the workflow contains subgraph definitions, which only cmp can project into ops"
     extra = workflow.get("extra")
     if isinstance(extra, dict) and (extra.get("reroutes") or extra.get("linkExtensions")):
         return "the workflow contains reroute points, which no frozen op kind can create"
@@ -1223,39 +1225,6 @@ def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int =
         raise NotExpressibleError(reason)
 
     ops: list[dict] = []
-    old_definitions = {
-        str(definition.get("id")): definition
-        for definition in ((old.get("definitions") or {}).get("subgraphs") or [])
-        if isinstance(definition, dict)
-    }
-    new_definitions = {
-        str(definition.get("id")): definition
-        for definition in ((new.get("definitions") or {}).get("subgraphs") or [])
-        if isinstance(definition, dict)
-    }
-    if any(identifier not in new_definitions for identifier in old_definitions):
-        raise NotExpressibleError("the replacement removes a subgraph definition, which no frozen op kind can delete")
-    for identifier, definition in new_definitions.items():
-        existing = old_definitions.get(identifier)
-        if existing is not None and existing != definition:
-            raise NotExpressibleError(
-                "the replacement changes an existing subgraph definition; emit id-addressed edits instead"
-            )
-        if existing is None:
-            try:
-                _validate_subgraph_definition(definition)
-                _validate_subgraph_cycles(definition)
-            except ValueError as error:
-                raise NotExpressibleError(f"the workflow contains a malformed subgraph definition: {error}") from error
-            ops.append(
-                _new_op(
-                    "define_subgraph",
-                    actor,
-                    base_version,
-                    subgraph_id=identifier,
-                    subgraph_definition=copy.deepcopy(definition),
-                )
-            )
     old_links = [link for link in (old.get("links") or []) if isinstance(link, list) and len(link) >= 5]
     for node in old.get("nodes") or []:
         if not isinstance(node, dict) or node.get("id") is None:
@@ -1861,8 +1830,6 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
             _apply_clear(workflow, op)
         elif kind == "reset_doc":
             _apply_reset_doc(workflow, op)
-        elif kind == "define_subgraph":
-            _apply_define_subgraph(workflow, op)
         else:
             raise ValueError(f"unknown op {kind!r}")
     except BaseException:
@@ -1886,7 +1853,7 @@ def define_subgraph(
     actor: str = "cli",
     base_version: int = 0,
 ) -> tuple[dict, dict]:
-    """Create one subgraph definition and emit the matching cmp op."""
+    """Emit a definition op; cmp owns semantic validation and application."""
     if not isinstance(definition, dict):
         raise ValueError("subgraph definition must be a JSON object")
     definition = copy.deepcopy(definition)
@@ -1903,12 +1870,10 @@ def define_subgraph(
     if "id" in definition and definition["id"] != definition_id:
         raise ValueError("subgraph definition id must match --id")
     definition["id"] = definition_id
-    _validate_subgraph_definition(definition)
-    _validate_subgraph_cycles(definition)
-    existing = _subgraph_definition(workflow, definition_id)
-    if existing is not None:
-        raise ValueError(f"subgraph definition {definition_id!r} already exists; define-subgraph only creates new ids")
-    _validate_subgraph_definition(definition, seen=_subgraph_definition_ids(workflow))
+    try:
+        json.dumps(definition)
+    except (TypeError, ValueError, RecursionError) as error:
+        raise ValueError("subgraph definition must be JSON-serializable") from error
     op = _new_op(
         "define_subgraph",
         actor,
@@ -1916,131 +1881,7 @@ def define_subgraph(
         subgraph_id=definition_id,
         subgraph_definition=definition,
     )
-    apply_op(workflow, op, None)
     return workflow, op
-
-
-def _validate_subgraph_definition(
-    definition: dict, path: str = "subgraph definition", seen: set[str] | None = None
-) -> None:
-    """Validate definition ids and containers while preserving its serialized shape."""
-    if seen is None:
-        seen = set()
-    definition_id = definition.get("id")
-    if not isinstance(definition_id, str) or not _UUID_RE.fullmatch(definition_id):
-        raise ValueError(f"{path} id must be a valid UUID")
-    if definition_id in seen:
-        raise ValueError(f"{path} duplicates subgraph definition id {definition_id!r}")
-    seen.add(definition_id)
-    if not isinstance(definition.get("nodes"), list) or not isinstance(definition.get("links"), list):
-        raise ValueError(f"{path} nodes and links must be arrays")
-    for index, node in enumerate(definition["nodes"]):
-        node_path = f"{path}.nodes[{index}]"
-        if not isinstance(node, dict) or node.get("id") is None or not isinstance(node.get("type"), str):
-            raise ValueError(f"{node_path} must be an object with id and string type")
-        for field in ("inputs", "outputs"):
-            if field in node and not isinstance(node[field], list):
-                raise ValueError(f"{node_path}.{field} must be an array")
-    for index, link in enumerate(definition["links"]):
-        if not isinstance(link, list) or len(link) < 5:
-            raise ValueError(f"{path}.links[{index}] must be a link tuple with at least 5 items")
-    nested = definition.get("definitions")
-    if nested is None:
-        return
-    if not isinstance(nested, dict) or not isinstance(nested.get("subgraphs"), list):
-        raise ValueError(f"{path}.definitions.subgraphs must be an array")
-    for index, child in enumerate(nested["subgraphs"]):
-        child_path = f"{path}.definitions.subgraphs[{index}]"
-        if not isinstance(child, dict):
-            raise ValueError(f"{child_path} must be a JSON object")
-        _validate_subgraph_definition(child, child_path, seen)
-
-
-def _validate_subgraph_cycles(root: dict) -> None:
-    """Reject recursive definition references that expansion cannot terminate."""
-    definitions: dict[str, dict] = {}
-
-    def collect(definition: dict) -> None:
-        definitions[definition["id"]] = definition
-        for child in (definition.get("definitions") or {}).get("subgraphs") or []:
-            collect(child)
-
-    collect(root)
-    visiting: set[str] = set()
-    visited: set[str] = set()
-
-    def visit(identifier: str) -> None:
-        if identifier in visiting:
-            raise ValueError(f"cyclic subgraph reference involving {identifier!r}")
-        if identifier in visited:
-            return
-        visiting.add(identifier)
-        for node in definitions[identifier]["nodes"]:
-            target = node.get("type")
-            if target in definitions:
-                visit(target)
-        visiting.remove(identifier)
-        visited.add(identifier)
-
-    for identifier in definitions:
-        visit(identifier)
-
-
-def _subgraph_definition(workflow: dict, subgraph_id: str) -> dict | None:
-    definitions = workflow.get("definitions")
-    if definitions is None:
-        return None
-    if not isinstance(definitions, dict) or not isinstance(definitions.get("subgraphs", []), list):
-        raise ValueError("malformed workflow: definitions.subgraphs must be an array")
-    for definition in definitions.get("subgraphs", []):
-        if isinstance(definition, dict):
-            if str(definition.get("id")) == subgraph_id:
-                return definition
-            nested = _subgraph_definition(definition, subgraph_id)
-            if nested is not None:
-                return nested
-    return None
-
-
-def _subgraph_definition_ids(workflow: dict) -> set[str]:
-    """Collect all definition ids recursively from a workflow or definition."""
-    definitions = workflow.get("definitions")
-    if definitions is None:
-        return set()
-    if not isinstance(definitions, dict) or not isinstance(definitions.get("subgraphs", []), list):
-        raise ValueError("malformed workflow: definitions.subgraphs must be an array")
-    ids: set[str] = set()
-    for definition in definitions.get("subgraphs", []):
-        if not isinstance(definition, dict):
-            continue
-        definition_id = definition.get("id")
-        if isinstance(definition_id, str):
-            ids.add(definition_id)
-        ids.update(_subgraph_definition_ids(definition))
-    return ids
-
-
-def _apply_define_subgraph(workflow: dict, op: dict) -> None:
-    subgraph_id = op.get("subgraph_id")
-    definition = op.get("subgraph_definition")
-    if (
-        not isinstance(subgraph_id, str)
-        or not subgraph_id
-        or not isinstance(definition, dict)
-        or definition.get("id") != subgraph_id
-    ):
-        raise ValueError("malformed_op: subgraph_id must match a definition with nodes and links arrays")
-    try:
-        _validate_subgraph_definition(definition)
-        _validate_subgraph_cycles(definition)
-    except ValueError as error:
-        raise ValueError(f"malformed_op: {error}") from error
-    existing = _subgraph_definition(workflow, subgraph_id)
-    if existing is not None:
-        return
-    if workflow.get("definitions") is None:
-        workflow["definitions"] = {}
-    workflow["definitions"].setdefault("subgraphs", []).append(copy.deepcopy(definition))
 
 
 def _apply_add_node(workflow: dict, op: dict) -> None:

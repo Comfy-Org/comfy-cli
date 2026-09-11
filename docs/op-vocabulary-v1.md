@@ -182,8 +182,9 @@ pre-reset `base_version` do not replay across it.
 ### 1.7 `define_subgraph`
 
 Command: `comfy workflow define-subgraph <file> <definition-file> [--id <uuid>]`.
-The command validates a serializable definition, assigns its id from `--id`,
-the definition's `id`, or a new UUID, and emits exactly one stamped op:
+The command performs envelope shape and JSON-serialization checks, assigns its
+id from `--id`, the definition's `id`, or a new UUID, and emits exactly one
+stamped op without modifying the local workflow:
 
 ```json
 {
@@ -197,10 +198,12 @@ the definition's `id`, or a new UUID, and emits exactly one stamped op:
 }
 ```
 
-Only this op may carry `subgraph_id` or definition payloads. Creation fails
-before writing when the id already exists. Exact op replay is a no-op; a
-different definition under an existing id is rejected as `malformed_op`.
-Subsequent interior edits use the existing id-addressed op scopes.
+Only this op may carry `subgraph_id` or definition payloads. The CLI does not
+semantically validate, apply, replay, project, or resolve conflicts for the
+definition. cmp owns those operations: reusing an id with different content
+returns `definition_conflict`, and references to unknown ids follow cmp's
+unknown-node failure path. The CLI surfaces server errors verbatim. Subsequent
+interior edits use the existing id-addressed op scopes.
 
 ## 2. Idempotency and identity
 
