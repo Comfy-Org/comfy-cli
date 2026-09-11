@@ -74,7 +74,7 @@ jobs:
           app-id: ${{ vars.APP_ID }}
           private-key: ${{ secrets.CLOUD_CODE_BOT_PRIVATE_KEY }}
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # Persist the app token (not the default GITHUB_TOKEN) as the credential
           # for `origin` so the later force-push is authored by the bot and fires
@@ -131,7 +131,7 @@ jobs:
           fi
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.10'  # Follow the min version in pyproject.toml
 
