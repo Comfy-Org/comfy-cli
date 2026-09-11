@@ -47,13 +47,23 @@ def test_insert_workflow_emits_semantically_invalid_json_for_server_validation()
     assert op["workflow"] == template
 
 
-@pytest.mark.parametrize("missing", ["nodes", "links", "groups"])
-def test_insert_workflow_rejects_each_missing_required_collection(missing):
+def test_insert_workflow_rejects_missing_nodes():
     template = _template()
-    del template[missing]
+    del template["nodes"]
 
-    with pytest.raises(ValueError, match=rf"insert_workflow.*missing required field.*{missing}"):
+    with pytest.raises(ValueError, match=r"insert_workflow.*missing required field.*nodes"):
         workflow_ops.insert_workflow({"nodes": [], "links": []}, template)
+
+
+def test_insert_workflow_accepts_nodes_only_and_preserves_omitted_optional_collections():
+    template = {"nodes": [{"id": 100, "type": "Src"}]}
+
+    _, op = workflow_ops.insert_workflow({"nodes": [], "links": []}, template)
+
+    assert op["workflow"] == template
+    assert "links" not in op["workflow"]
+    assert "groups" not in op["workflow"]
+    assert op["workflow"]["nodes"][0]["id"] == 100
 
 
 def test_insert_workflow_accepts_required_collections_without_definitions():
@@ -65,7 +75,7 @@ def test_insert_workflow_accepts_required_collections_without_definitions():
 
 
 @pytest.mark.parametrize("field", ["nodes", "links", "groups"])
-def test_insert_workflow_rejects_non_array_required_collection(field):
+def test_insert_workflow_rejects_non_array_collection(field):
     template = _template()
     template[field] = {}
 

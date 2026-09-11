@@ -1315,13 +1315,18 @@ def insert_workflow(
     actor: str = "cli",
     base_version: int = 0,
 ) -> tuple[dict, dict]:
-    """Structurally validate and emit an insert op without applying it."""
+    """Structurally validate and emit an insert op without applying it.
+
+    The CLI deliberately preserves all source IDs. Per the vetoable contract
+    decision recorded in the TDD, cmp owns deterministic ID remapping from the
+    op envelope ID when it applies this payload.
+    """
     if not isinstance(template, dict):
         raise ValueError("insert_workflow workflow must be a JSON object")
+    if "nodes" not in template:
+        raise ValueError("insert_workflow missing required field: nodes")
     for field in ("nodes", "links", "groups"):
-        if field not in template:
-            raise ValueError(f"insert_workflow missing required field: {field}")
-        if not isinstance(template[field], list):
+        if field in template and not isinstance(template[field], list):
             raise ValueError(f"insert_workflow field {field} must be an array")
     if "definitions" in template and not isinstance(template["definitions"], dict):
         raise ValueError("insert_workflow field definitions must be an object")
