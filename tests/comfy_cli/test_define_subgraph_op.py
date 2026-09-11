@@ -7,6 +7,7 @@ import pytest
 from comfy_cli import workflow_ops
 
 SUBGRAPH_ID = "12345678-1234-4123-8123-123456789abc"
+NESTED_ID = "abcdefab-cdef-4abc-8def-abcdefabcdef"
 
 
 def _definition(value: int = 1) -> dict:
@@ -45,7 +46,17 @@ def test_define_subgraph_emits_cmp_payload_and_inserts_definition():
     [
         ([], "JSON object"),
         ({"id": 7, "nodes": [], "links": []}, "non-empty string id"),
+        ({"id": "not-a-uuid", "nodes": [], "links": []}, "valid UUID"),
         ({"id": SUBGRAPH_ID, "nodes": {}, "links": []}, "nodes and links must be arrays"),
+        (
+            {
+                "id": SUBGRAPH_ID,
+                "nodes": [],
+                "links": [],
+                "definitions": {"subgraphs": [{"id": "not-a-uuid", "nodes": [], "links": []}]},
+            },
+            "definitions.subgraphs\\[0\\].*valid UUID",
+        ),
     ],
 )
 def test_define_subgraph_rejects_malformed_input_before_mutation(definition, match):
@@ -73,6 +84,17 @@ def test_define_subgraph_rejects_existing_id_and_different_definition():
 
     with pytest.raises(ValueError, match="already exists"):
         workflow_ops.define_subgraph(workflow, _definition(2))
+
+
+def test_define_subgraph_preserves_nested_definitions_inside_single_parent_op():
+    nested = {"id": NESTED_ID, "nodes": [], "links": []}
+    definition = {**_definition(), "definitions": {"subgraphs": [nested]}}
+
+    result, op = workflow_ops.define_subgraph({"nodes": [], "links": []}, definition)
+
+    assert op["subgraph_definition"]["definitions"] == {"subgraphs": [nested]}
+    assert result["definitions"]["subgraphs"] == [definition]
+    assert op["op"] == "define_subgraph"
 
 
 def test_apply_define_subgraph_exact_replay_is_idempotent_and_conflict_is_rejected():

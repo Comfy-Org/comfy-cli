@@ -64,6 +64,7 @@ from comfy_cli.cql.engine import frontend_injected_widget_error
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
 _ID_FLOOR = 1 << 40
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
 
 
 def mint_id() -> int:
@@ -1863,11 +1864,12 @@ def define_subgraph(
     definition_id = subgraph_id or definition.get("id") or str(uuid.uuid4())
     if not isinstance(definition_id, str) or not definition_id:
         raise ValueError("subgraph definition requires a non-empty string id")
+    if not _UUID_RE.fullmatch(definition_id):
+        raise ValueError("subgraph definition id must be a valid UUID")
     if "id" in definition and definition["id"] != definition_id:
         raise ValueError("subgraph definition id must match --id")
     definition["id"] = definition_id
-    if not isinstance(definition.get("nodes"), list) or not isinstance(definition.get("links"), list):
-        raise ValueError("subgraph definition nodes and links must be arrays")
+    _validate_subgraph_definition(definition)
     existing = _subgraph_definition(workflow, definition_id)
     if existing is not None:
         raise ValueError(f"subgraph definition {definition_id!r} already exists; define-subgraph only creates new ids")
@@ -1880,6 +1882,31 @@ def define_subgraph(
     )
     apply_op(workflow, op, None)
     return workflow, op
+
+
+def _validate_subgraph_definition(definition: dict, path: str = "subgraph definition") -> None:
+    """Validate definition ids and containers while preserving its serialized shape."""
+    definition_id = definition.get("id")
+    if not isinstance(definition_id, str) or not _UUID_RE.fullmatch(definition_id):
+        raise ValueError(f"{path} id must be a valid UUID")
+    if not isinstance(definition.get("nodes"), list) or not isinstance(definition.get("links"), list):
+        raise ValueError(f"{path} nodes and links must be arrays")
+    nested = definition.get("definitions")
+    if nested is None:
+        return
+    if not isinstance(nested, dict) or not isinstance(nested.get("subgraphs"), list):
+        raise ValueError(f"{path}.definitions.subgraphs must be an array")
+    seen: set[str] = set()
+    for index, child in enumerate(nested["subgraphs"]):
+        child_path = f"{path}.definitions.subgraphs[{index}]"
+        if not isinstance(child, dict):
+            raise ValueError(f"{child_path} must be a JSON object")
+        child_id = child.get("id")
+        if isinstance(child_id, str) and child_id in seen:
+            raise ValueError(f"{child_path} duplicates subgraph definition id {child_id!r}")
+        if isinstance(child_id, str):
+            seen.add(child_id)
+        _validate_subgraph_definition(child, child_path)
 
 
 def _subgraph_definition(workflow: dict, subgraph_id: str) -> dict | None:
