@@ -1873,6 +1873,7 @@ def define_subgraph(
     existing = _subgraph_definition(workflow, definition_id)
     if existing is not None:
         raise ValueError(f"subgraph definition {definition_id!r} already exists; define-subgraph only creates new ids")
+    _validate_subgraph_definition(definition, seen=_subgraph_definition_ids(workflow))
     op = _new_op(
         "define_subgraph",
         actor,
@@ -1917,9 +1918,31 @@ def _subgraph_definition(workflow: dict, subgraph_id: str) -> dict | None:
     if not isinstance(definitions, dict) or not isinstance(definitions.get("subgraphs", []), list):
         raise ValueError("malformed workflow: definitions.subgraphs must be an array")
     for definition in definitions.get("subgraphs", []):
-        if isinstance(definition, dict) and str(definition.get("id")) == subgraph_id:
-            return definition
+        if isinstance(definition, dict):
+            if str(definition.get("id")) == subgraph_id:
+                return definition
+            nested = _subgraph_definition(definition, subgraph_id)
+            if nested is not None:
+                return nested
     return None
+
+
+def _subgraph_definition_ids(workflow: dict) -> set[str]:
+    """Collect all definition ids recursively from a workflow or definition."""
+    definitions = workflow.get("definitions")
+    if definitions is None:
+        return set()
+    if not isinstance(definitions, dict) or not isinstance(definitions.get("subgraphs", []), list):
+        raise ValueError("malformed workflow: definitions.subgraphs must be an array")
+    ids: set[str] = set()
+    for definition in definitions.get("subgraphs", []):
+        if not isinstance(definition, dict):
+            continue
+        definition_id = definition.get("id")
+        if isinstance(definition_id, str):
+            ids.add(definition_id)
+        ids.update(_subgraph_definition_ids(definition))
+    return ids
 
 
 def _apply_define_subgraph(workflow: dict, op: dict) -> None:

@@ -132,6 +132,26 @@ def test_define_subgraph_rejects_duplicate_ids_across_entire_definition_tree(def
     assert workflow == before
 
 
+def test_define_subgraph_rejects_id_already_nested_in_workflow():
+    existing = {
+        "id": OTHER_NESTED_ID,
+        "nodes": [],
+        "links": [],
+        "definitions": {"subgraphs": [{"id": NESTED_ID, "nodes": [], "links": []}]},
+    }
+    workflow = {"nodes": [], "links": [], "definitions": {"subgraphs": [existing]}}
+    before = copy.deepcopy(workflow)
+    definition = {
+        **_definition(),
+        "definitions": {"subgraphs": [{"id": NESTED_ID, "nodes": [], "links": []}]},
+    }
+
+    with pytest.raises(ValueError, match="duplicates subgraph definition id"):
+        workflow_ops.define_subgraph(workflow, definition)
+
+    assert workflow == before
+
+
 def test_apply_define_subgraph_rejects_malformed_nested_definition_atomically():
     workflow = {"nodes": [], "links": []}
     before = copy.deepcopy(workflow)
