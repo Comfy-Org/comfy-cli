@@ -138,6 +138,30 @@ def _graph_or_exit(input_path, host, port, renderer, where=None):
 
 
 @tracking.track_command("workflow")
+def insert_workflow_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON to update.")],
+    template: Annotated[str, typer.Argument(help="Frontend-format workflow JSON to insert.")],
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+):
+    """Insert a workflow template and emit one atomic ``insert_workflow`` op."""
+    renderer = get_renderer()
+    renderer.command = "workflow insert-workflow"
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    try:
+        template_path = Path(template).expanduser()
+        inserted = json.loads(template_path.read_text(encoding="utf-8"))
+        if not isinstance(inserted, dict):
+            raise ValueError("template must be a JSON object")
+        workflow, op = workflow_ops.insert_workflow(workflow, inserted, actor=actor, base_version=base_version)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+        _emit_edit_error(renderer, e, hint="provide a frontend-format workflow template JSON file")
+        raise typer.Exit(code=1) from e
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow insert-workflow")
+
+
+@tracking.track_command("workflow")
 def add_node_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
     class_type: Annotated[str, typer.Argument(help="Node class_type, e.g. KSampler.")],

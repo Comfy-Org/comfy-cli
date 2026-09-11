@@ -91,7 +91,15 @@ def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str
 # ---------------------------------------------------------------------------
 
 #: Every op kind in the v1 vocabulary, including defined-but-deferred kinds.
-FROZEN_OPS: tuple[str, ...] = ("add_node", "connect", "set_widget", "delete_node", "clear", "reset_doc")
+FROZEN_OPS: tuple[str, ...] = (
+    "add_node",
+    "connect",
+    "set_widget",
+    "delete_node",
+    "clear",
+    "reset_doc",
+    "insert_workflow",
+)
 
 #: Kinds frozen in the contract whose replay is not implemented yet.
 #: ``apply_op`` must keep rejecting these. Empty since amendment v1.1:
@@ -116,6 +124,11 @@ _NOT_BATCHABLE: dict[str, dict[str, str]] = {
         "code": "workflow_reset_doc_not_batchable",
         "command": "comfy workflow reset-doc <file> --confirm",
         "does": "resets the whole document to the empty baseline and erases its replay history",
+    },
+    "insert_workflow": {
+        "code": "workflow_insert_workflow_not_batchable",
+        "command": "comfy workflow insert-workflow <file> <template>",
+        "does": "inserts a complete workflow in one transaction",
     },
 }
 
@@ -1295,6 +1308,57 @@ def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int =
     return ops
 
 
+def remap_workflow_ids(workflow: dict, *, node_id_start: int, link_id_start: int) -> dict:
+    """Port of cmp ``remapWorkflowIds``: remap only the top-level namespace.
+
+    Definition interiors are independent graphs and deliberately remain
+    untouched. The input is never mutated.
+    """
+    out = copy.deepcopy(workflow)
+    nodes = out.get("nodes") or []
+    links = out.get("links") or []
+    node_ids = {node.get("id"): node_id_start + index for index, node in enumerate(nodes)}
+    link_ids = {link[0]: link_id_start + index for index, link in enumerate(links) if isinstance(link, list)}
+
+    for node in nodes:
+        original_id = node.get("id")
+        node["id"] = node_ids[original_id]
+        if isinstance(node.get("inputs"), list):
+            for slot in node["inputs"]:
+                if isinstance(slot, dict) and "link" in slot and slot["link"] in link_ids:
+                    slot["link"] = link_ids[slot["link"]]
+        if isinstance(node.get("outputs"), list):
+            for slot in node["outputs"]:
+                if isinstance(slot, dict) and isinstance(slot.get("links"), list):
+                    slot["links"] = [link_ids.get(link_id, link_id) for link_id in slot["links"]]
+
+    for link in links:
+        if not isinstance(link, list):
+            continue
+        link[0] = link_ids.get(link[0], link[0])
+        link[1] = node_ids.get(link[1], link[1])
+        link[3] = node_ids.get(link[3], link[3])
+    return out
+
+
+def insert_workflow(
+    workflow: dict,
+    template: dict,
+    *,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, dict]:
+    """Remap and insert a complete workflow with one stamped op."""
+    numeric_nodes = [n.get("id") for n in workflow.get("nodes", []) if isinstance(n, dict)]
+    numeric_links = [link[0] for link in workflow.get("links", []) if isinstance(link, list) and link]
+    node_start = max([workflow.get("last_node_id", 0), *[x for x in numeric_nodes if isinstance(x, int)]]) + 1
+    link_start = max([workflow.get("last_link_id", 0), *[x for x in numeric_links if isinstance(x, int)]]) + 1
+    remapped = remap_workflow_ids(template, node_id_start=node_start, link_id_start=link_start)
+    op = _new_op("insert_workflow", actor, base_version, workflow=remapped)
+    apply_op(workflow, op, None)
+    return workflow, op
+
+
 def delete_node(
     workflow: dict,
     graph,
@@ -1813,6 +1877,8 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
             _apply_clear(workflow, op)
         elif kind == "reset_doc":
             _apply_reset_doc(workflow, op)
+        elif kind == "insert_workflow":
+            _apply_insert_workflow(workflow, op)
         else:
             raise ValueError(f"unknown op {kind!r}")
     except BaseException:
@@ -1840,6 +1906,53 @@ def _apply_add_node(workflow: dict, op: dict) -> None:
     # address, historical workflow) is not comparable and never bumps it.
     if isinstance(op["node_id"], int) and not isinstance(op["node_id"], bool):
         workflow["last_node_id"] = max(workflow.get("last_node_id") or 0, op["node_id"])
+
+
+def _apply_insert_workflow(workflow: dict, op: dict) -> None:
+    inserted = op.get("workflow")
+    if not isinstance(inserted, dict):
+        raise ValueError("malformed_op: insert_workflow workflow must be an object")
+    nodes, links = inserted.get("nodes"), inserted.get("links", [])
+    if not isinstance(nodes, list) or not isinstance(links, list):
+        raise ValueError("malformed_op: insert_workflow nodes and links must be arrays")
+    live_node_ids = {str(n.get("id")) for n in workflow.get("nodes", []) if isinstance(n, dict)}
+    live_link_ids = {str(link[0]) for link in workflow.get("links", []) if isinstance(link, list) and link}
+    seen_nodes: set[str] = set()
+    for node in nodes:
+        if (
+            not isinstance(node, dict)
+            or node.get("id") is None
+            or not isinstance(node.get("type"), str)
+            or not node["type"]
+        ):
+            raise ValueError("invalid_node_payload: insert_workflow every node requires id and type")
+        key = str(node["id"])
+        if key in live_node_ids or key in seen_nodes:
+            raise ValueError(f"node_id_collision: insert_workflow node id {key!r} collides")
+        seen_nodes.add(key)
+    seen_links: set[str] = set()
+    for link in links:
+        if not isinstance(link, list) or not link or link[0] is None:
+            raise ValueError("malformed_op: insert_workflow every link must be a tuple with an id")
+        key = str(link[0])
+        if key in live_link_ids or key in seen_links:
+            raise ValueError(f"link_id_collision: insert_workflow link id {key!r} collides")
+        seen_links.add(key)
+    definitions = inserted.get("definitions")
+    if definitions is not None and not isinstance(definitions, dict):
+        raise ValueError("malformed_op: insert_workflow definitions must be an object")
+    subgraphs = definitions.get("subgraphs", []) if definitions else []
+    if not isinstance(subgraphs, list):
+        raise ValueError("malformed_op: insert_workflow definitions.subgraphs must be an array")
+
+    workflow.setdefault("nodes", []).extend(copy.deepcopy(nodes))
+    workflow.setdefault("links", []).extend(copy.deepcopy(links))
+    if subgraphs:
+        workflow.setdefault("definitions", {}).setdefault("subgraphs", []).extend(copy.deepcopy(subgraphs))
+    workflow["last_node_id"] = max(
+        workflow.get("last_node_id", 0), *[n["id"] for n in nodes if isinstance(n["id"], int)]
+    )
+    workflow["last_link_id"] = max(workflow.get("last_link_id", 0), *[x[0] for x in links if isinstance(x[0], int)])
 
 
 def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
