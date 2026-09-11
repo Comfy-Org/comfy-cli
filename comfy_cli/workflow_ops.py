@@ -1315,7 +1315,16 @@ def insert_workflow(
     actor: str = "cli",
     base_version: int = 0,
 ) -> tuple[dict, dict]:
-    """Emit an insert op; cmp owns validation, ID remapping, and application."""
+    """Structurally validate and emit an insert op without applying it."""
+    if not isinstance(template, dict):
+        raise ValueError("insert_workflow workflow must be a JSON object")
+    for field in ("nodes", "links", "groups"):
+        if field not in template:
+            raise ValueError(f"insert_workflow missing required field: {field}")
+        if not isinstance(template[field], list):
+            raise ValueError(f"insert_workflow field {field} must be an array")
+    if "definitions" in template and not isinstance(template["definitions"], dict):
+        raise ValueError("insert_workflow field definitions must be an object")
     return workflow, _new_op("insert_workflow", actor, base_version, workflow=copy.deepcopy(template))
 
 

@@ -15,6 +15,7 @@ def _template() -> dict:
             {"id": 101, "type": "def-2", "inputs": [{"name": "a", "link": 200}]},
         ],
         "links": [[200, 100, 0, 101, 0, "X"]],
+        "groups": [],
         "definitions": {"subgraphs": [{"id": "def-2", "nodes": [{"id": 5, "type": "Inner"}], "links": []}]},
     }
 
@@ -34,11 +35,50 @@ def test_insert_workflow_emits_input_payload_without_remapping_ids():
 
 def test_insert_workflow_emits_semantically_invalid_json_for_server_validation():
     live = {"nodes": [], "links": []}
-    template = {"nodes": [{"id": 10}], "links": [[20, 10, 0, 999, 0]], "definitions": {"subgraphs": [{}]}}
+    template = {
+        "nodes": [{"id": 10}],
+        "links": [[20, 10, 0, 999, 0]],
+        "groups": [],
+        "definitions": {"subgraphs": [{}]},
+    }
 
     _, op = workflow_ops.insert_workflow(live, template)
 
     assert op["workflow"] == template
+
+
+@pytest.mark.parametrize("missing", ["nodes", "links", "groups"])
+def test_insert_workflow_rejects_each_missing_required_collection(missing):
+    template = _template()
+    del template[missing]
+
+    with pytest.raises(ValueError, match=rf"insert_workflow.*missing required field.*{missing}"):
+        workflow_ops.insert_workflow({"nodes": [], "links": []}, template)
+
+
+def test_insert_workflow_accepts_required_collections_without_definitions():
+    template = {"nodes": [], "links": [], "groups": []}
+
+    _, op = workflow_ops.insert_workflow({"nodes": [], "links": []}, template)
+
+    assert op["workflow"] == template
+
+
+@pytest.mark.parametrize("field", ["nodes", "links", "groups"])
+def test_insert_workflow_rejects_non_array_required_collection(field):
+    template = _template()
+    template[field] = {}
+
+    with pytest.raises(ValueError, match=rf"insert_workflow field {field} must be an array"):
+        workflow_ops.insert_workflow({"nodes": [], "links": []}, template)
+
+
+def test_insert_workflow_rejects_non_object_definitions():
+    template = _template()
+    template["definitions"] = []
+
+    with pytest.raises(ValueError, match="insert_workflow field definitions must be an object"):
+        workflow_ops.insert_workflow({"nodes": [], "links": []}, template)
 
 
 def test_insert_workflow_does_not_mutate_local_workflow():
