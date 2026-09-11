@@ -4,14 +4,26 @@
   "title": "comfy generate list",
   "description": "The partner-model catalog `comfy generate list` exposes. This is the only source of the alias list — `comfy discover` does not carry it. Under --json the summary is the FULL text, not the '…'-truncated form the human table cuts to fit its column.",
   "type": "object",
-  "required": ["models", "count"],
+  "required": [
+    "models",
+    "count"
+  ],
   "properties": {
     "models": {
       "type": "array",
       "description": "One record per model, ordered by (partner, id) — the same order the human table renders.",
       "items": {
         "type": "object",
-        "required": ["alias", "id", "partner", "category", "mode", "summary", "emit_supported"],
+        "required": [
+          "alias",
+          "id",
+          "partner",
+          "category",
+          "mode",
+          "summary",
+          "emit_supported",
+          "node_class"
+        ],
         "properties": {
           "alias": {
             "type": "string",
@@ -31,7 +43,10 @@
           },
           "mode": {
             "type": "string",
-            "enum": ["sync", "async"],
+            "enum": [
+              "sync",
+              "async"
+            ],
             "description": "'async' when the partner returns a job to poll (resumable via `comfy generate resume`); 'sync' when the result comes back on the create call."
           },
           "summary": {
@@ -41,6 +56,13 @@
           "emit_supported": {
             "type": "boolean",
             "description": "Whether `comfy generate <alias> --emit-workflow <path>` can render this model as a ComfyUI partner node (a runnable workflow) instead of calling the proxy. False for most of the catalog: asking for --emit-workflow on such a model fails with `emit_workflow_unsupported_model`, whose `details.supported` lists the aliases that can."
+          },
+          "node_class": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The ComfyUI node class `--emit-workflow` would mint for this model, or null when `emit_supported` is false. The mapping behind it is hand-written, so a consumer can check this against the catalog its own ComfyUI serves rather than trusting the boolean."
           }
         }
       }
@@ -53,11 +75,29 @@
       "type": "object",
       "description": "The filters that produced this result, echoed back. Null where the flag was not passed.",
       "properties": {
-        "partner": { "type": ["string", "null"] },
-        "category": { "type": ["string", "null"] },
-        "query": { "type": ["string", "null"] }
+        "partner": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "query": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
-    "knowledge": { "$ref": "knowledge_block.json", "description": "Curated model knowledge matching this call; absent when no bundle is loaded or the call named no subject. A query term nothing curated answers attaches a rowless block carrying hit_ids: [] and zero_hit, unless the terms alone overrun the byte ceiling." }
+    "knowledge": {
+      "$ref": "knowledge_block.json",
+      "description": "Curated model knowledge matching this call; absent when no bundle is loaded or the call named no subject. A query term nothing curated answers attaches a rowless block carrying hit_ids: [] and zero_hit, unless the terms alone overrun the byte ceiling."
+    }
   }
 }
