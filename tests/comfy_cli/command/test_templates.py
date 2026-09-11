@@ -1517,3 +1517,32 @@ def test_ls_self_heals_from_a_cache_poisoned_by_an_older_build(cache_file, monke
     assert result.exit_code == 0, result.output
     assert _envelope(result.output)["data"]["total_in_gallery"] > 0
     assert json.loads(cache_file.read_bytes()) == FIXTURE  # healed on disk too
+
+
+# ---------------------------------------------------------------------------
+# _workflow_node_types — corrupt definitions containers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "definitions",
+    [5, "definitions", ["x"], {"subgraphs": 5}, {"subgraphs": "abc"}],
+    ids=["int", "str", "list", "non-list-subgraphs", "str-subgraphs"],
+)
+def test_workflow_node_types_tolerates_corrupt_definitions(definitions):
+    """A wrong-typed ``definitions``/``subgraphs`` reads as "no definitions".
+
+    ``or`` only replaced falsy values, so a truthy wrong-typed one reached
+    ``.get``/the loop and raised. Top-level nodes are still collected.
+    """
+    wf = {"nodes": [{"id": 1, "type": "KSampler"}], "definitions": definitions}
+    assert templates_cmd._workflow_node_types(wf) == {"KSampler"}
+
+
+def test_workflow_node_types_still_reads_well_formed_subgraph_nodes():
+    """Positive control: the shape checks must not cost the happy path."""
+    wf = {
+        "nodes": [{"id": 1, "type": "KSampler"}],
+        "definitions": {"subgraphs": [{"id": "u1", "nodes": [{"id": 9, "type": "CLIPTextEncode"}]}]},
+    }
+    assert templates_cmd._workflow_node_types(wf) == {"KSampler", "CLIPTextEncode"}
