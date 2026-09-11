@@ -181,9 +181,8 @@ pre-reset `base_version` do not replay across it.
 
 ### 1.7 `insert_workflow` — standalone only
 
-Command: `comfy workflow insert-workflow <file> <template>`. The CLI remaps the
-template's top-level node and link ids away from ids in the live document, then
-emits exactly one stamped op:
+Command: `comfy workflow insert-workflow <file> <template>`. The CLI preserves
+the template payload verbatim and emits exactly one stamped op:
 
 ```json
 {
@@ -197,15 +196,11 @@ emits exactly one stamped op:
 ```
 
 The `workflow` payload is authoritative and carries top-level `nodes`, `links`,
-and optional `definitions.subgraphs`. Remapping rewrites top-level node ids,
-link tuple ids/endpoints, node input `link` fields, and output `links` arrays.
-Definition interiors are independent graph namespaces and remain unchanged.
-The applier validates all payloads before mutation and rejects with
-`node_id_collision`, `link_id_collision`, `malformed_op`,
-`invalid_node_payload`, `dangling_link_endpoint`, `definition_conflict`, or
-`catalog_required`. Only `define_subgraph` and `insert_workflow` ops may carry
-definitions; edit ops reject a `definitions` field as `malformed_op`. The kind
-is not batchable and a spec batch rejects it as
+and optional `definitions.subgraphs`. The CLI does not validate graph semantics,
+remap IDs, apply the op, or write a mutated workflow document; cmp owns those
+operations and returns their errors. Only `define_subgraph` and
+`insert_workflow` ops may carry definitions; edit ops reject a `definitions`
+field as `malformed_op`. The kind is not batchable and a spec batch rejects it as
 `workflow_insert_workflow_not_batchable`.
 
 ## 2. Idempotency and identity

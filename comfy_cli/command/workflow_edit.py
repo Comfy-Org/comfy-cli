@@ -128,6 +128,14 @@ def _finish(renderer, p, workflow: dict, op: dict, base_version: int, stdout: bo
     renderer.emit(payload, command=command, changed=not stdout)
 
 
+def _emit_op(renderer, p: Path, op: dict, base_version: int, command: str) -> None:
+    """Emit an op without applying it or writing the source workflow."""
+    payload = {"workflow": str(p), "op": op, "base_version": base_version, "wrote": None}
+    if renderer.is_pretty():
+        rprint(f"[bold green]✓[/bold green] {op['op']} emitted for [dim]{p}[/dim]")
+    renderer.emit(payload, command=command, changed=False)
+
+
 def _graph_or_exit(input_path, host, port, renderer, where=None):
     return _get_graph(input_path, host, port, where=where)
 
@@ -154,11 +162,11 @@ def insert_workflow_cmd(
         inserted = json.loads(template_path.read_text(encoding="utf-8"))
         if not isinstance(inserted, dict):
             raise ValueError("template must be a JSON object")
-        workflow, op = workflow_ops.insert_workflow(workflow, inserted, actor=actor, base_version=base_version)
+        _, op = workflow_ops.insert_workflow(workflow, inserted, actor=actor, base_version=base_version)
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
         _emit_edit_error(renderer, e, hint="provide a frontend-format workflow template JSON file")
         raise typer.Exit(code=1) from e
-    _finish(renderer, p, workflow, op, base_version, stdout, "workflow insert-workflow")
+    _emit_op(renderer, p, op, base_version, "workflow insert-workflow")
 
 
 @tracking.track_command("workflow")
