@@ -55,3 +55,75 @@ def test_insert_workflow_is_not_batchable():
             [{"op": "insert_workflow", "workflow": _template()}],
         )
     assert exc.value.code == "workflow_insert_workflow_not_batchable"
+
+
+def test_insert_workflow_accepts_empty_collections_without_partial_failure():
+    live = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+
+    result, op = workflow_ops.insert_workflow(live, {"nodes": [], "links": [], "definitions": {"subgraphs": []}})
+
+    assert result["nodes"] == []
+    assert result["links"] == []
+    assert result["_applied_ops"] == [op["op_id"]]
+
+
+def test_insert_workflow_rejects_dangling_link_before_mutation():
+    live = {"nodes": [{"id": 1, "type": "Live"}], "links": []}
+    before = copy.deepcopy(live)
+    template = {"nodes": [{"id": 10, "type": "New"}], "links": [[20, 10, 0, 999, 0, "X"]]}
+
+    with pytest.raises(ValueError, match="dangling_link_endpoint"):
+        workflow_ops.insert_workflow(live, template)
+
+    assert live == before
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        {"nodes": ["not-an-object"], "links": []},
+        {"nodes": [{"type": "MissingId"}], "links": []},
+        {"nodes": [{"id": 1, "type": "A"}], "links": [[2, 1]]},
+    ],
+)
+def test_insert_workflow_rejects_malformed_members_before_mutation(template):
+    live = {"nodes": [], "links": []}
+    before = copy.deepcopy(live)
+
+    with pytest.raises(ValueError, match="malformed_op|invalid_node_payload"):
+        workflow_ops.insert_workflow(live, template)
+
+    assert live == before
+
+
+def test_insert_workflow_definition_collision_is_idempotent_or_conflict():
+    definition = {"id": "def-1", "nodes": [], "links": []}
+    live = {"nodes": [], "links": [], "definitions": {"subgraphs": [copy.deepcopy(definition)]}}
+
+    workflow_ops.insert_workflow(
+        live, {"nodes": [], "links": [], "definitions": {"subgraphs": [copy.deepcopy(definition)]}}
+    )
+    assert live["definitions"]["subgraphs"] == [definition]
+
+    before = copy.deepcopy(live)
+    conflicting = {"id": "def-1", "nodes": [{"id": 1, "type": "Changed"}], "links": []}
+    with pytest.raises(ValueError, match="definition_conflict"):
+        workflow_ops.insert_workflow(live, {"nodes": [], "links": [], "definitions": {"subgraphs": [conflicting]}})
+    assert live == before
+
+
+def test_non_definition_op_rejects_definitions_field():
+    live = {"nodes": [], "links": []}
+    op = workflow_ops._new_op(
+        "add_node",
+        "test",
+        0,
+        node_id=1,
+        node={"id": 1, "type": "A"},
+        definitions={"subgraphs": []},
+    )
+
+    with pytest.raises(ValueError, match="malformed_op.*definitions"):
+        workflow_ops.apply_op(live, op, None)
+
+    assert live == {"nodes": [], "links": [], "_applied_ops": []}

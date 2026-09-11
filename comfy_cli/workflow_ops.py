@@ -1341,6 +1341,40 @@ def remap_workflow_ids(workflow: dict, *, node_id_start: int, link_id_start: int
     return out
 
 
+def _validate_insert_workflow_payload(inserted: Any, live_node_ids: set[str]) -> tuple[list, list, list]:
+    """Validate the complete insert payload before remapping or applying it."""
+    if not isinstance(inserted, dict):
+        raise ValueError("malformed_op: insert_workflow workflow must be an object")
+    nodes, links = inserted.get("nodes"), inserted.get("links", [])
+    if not isinstance(nodes, list) or not isinstance(links, list):
+        raise ValueError("malformed_op: insert_workflow nodes and links must be arrays")
+    node_ids: set[str] = set()
+    for node in nodes:
+        if (
+            not isinstance(node, dict)
+            or node.get("id") is None
+            or not isinstance(node.get("type"), str)
+            or not node["type"]
+        ):
+            raise ValueError("invalid_node_payload: insert_workflow every node requires id and type")
+        node_ids.add(str(node["id"]))
+    valid_endpoints = live_node_ids | node_ids
+    for link in links:
+        if not isinstance(link, list) or len(link) < 5 or link[0] is None:
+            raise ValueError("malformed_op: insert_workflow every link must have id and endpoint fields")
+        if str(link[1]) not in valid_endpoints or str(link[3]) not in valid_endpoints:
+            raise ValueError("dangling_link_endpoint: insert_workflow link references a missing node")
+    definitions = inserted.get("definitions")
+    if definitions is not None and not isinstance(definitions, dict):
+        raise ValueError("malformed_op: insert_workflow definitions must be an object")
+    subgraphs = definitions.get("subgraphs", []) if definitions else []
+    if not isinstance(subgraphs, list):
+        raise ValueError("malformed_op: insert_workflow definitions.subgraphs must be an array")
+    if any(not isinstance(definition, dict) or definition.get("id") is None for definition in subgraphs):
+        raise ValueError("malformed_op: insert_workflow every subgraph definition requires an id")
+    return nodes, links, subgraphs
+
+
 def insert_workflow(
     workflow: dict,
     template: dict,
@@ -1349,6 +1383,8 @@ def insert_workflow(
     base_version: int = 0,
 ) -> tuple[dict, dict]:
     """Remap and insert a complete workflow with one stamped op."""
+    live_node_ids = {str(n.get("id")) for n in workflow.get("nodes", []) if isinstance(n, dict)}
+    _validate_insert_workflow_payload(template, live_node_ids)
     numeric_nodes = [n.get("id") for n in workflow.get("nodes", []) if isinstance(n, dict)]
     numeric_links = [link[0] for link in workflow.get("links", []) if isinstance(link, list) and link]
     node_start = max([workflow.get("last_node_id", 0), *[x for x in numeric_nodes if isinstance(x, int)]]) + 1
@@ -1859,6 +1895,8 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     if op["op_id"] in applied:
         return workflow
     kind = op["op"]
+    if kind != "insert_workflow" and "definitions" in op:
+        raise ValueError(f"malformed_op: {kind} does not accept definitions")
     # Snapshot the LWW bookkeeping so an exception escaping a handler cannot
     # leave a stamp committed WITHOUT its op_id recorded below. That pairing is
     # the poison state: a retry of the identical op loses to the failed
@@ -1910,12 +1948,8 @@ def _apply_add_node(workflow: dict, op: dict) -> None:
 
 def _apply_insert_workflow(workflow: dict, op: dict) -> None:
     inserted = op.get("workflow")
-    if not isinstance(inserted, dict):
-        raise ValueError("malformed_op: insert_workflow workflow must be an object")
-    nodes, links = inserted.get("nodes"), inserted.get("links", [])
-    if not isinstance(nodes, list) or not isinstance(links, list):
-        raise ValueError("malformed_op: insert_workflow nodes and links must be arrays")
     live_node_ids = {str(n.get("id")) for n in workflow.get("nodes", []) if isinstance(n, dict)}
+    nodes, links, subgraphs = _validate_insert_workflow_payload(inserted, live_node_ids)
     live_link_ids = {str(link[0]) for link in workflow.get("links", []) if isinstance(link, list) and link}
     seen_nodes: set[str] = set()
     for node in nodes:
@@ -1932,27 +1966,30 @@ def _apply_insert_workflow(workflow: dict, op: dict) -> None:
         seen_nodes.add(key)
     seen_links: set[str] = set()
     for link in links:
-        if not isinstance(link, list) or not link or link[0] is None:
-            raise ValueError("malformed_op: insert_workflow every link must be a tuple with an id")
         key = str(link[0])
         if key in live_link_ids or key in seen_links:
             raise ValueError(f"link_id_collision: insert_workflow link id {key!r} collides")
         seen_links.add(key)
-    definitions = inserted.get("definitions")
-    if definitions is not None and not isinstance(definitions, dict):
-        raise ValueError("malformed_op: insert_workflow definitions must be an object")
-    subgraphs = definitions.get("subgraphs", []) if definitions else []
-    if not isinstance(subgraphs, list):
-        raise ValueError("malformed_op: insert_workflow definitions.subgraphs must be an array")
+    existing_subgraphs = workflow.get("definitions", {}).get("subgraphs", [])
+    existing_by_id = {str(definition.get("id")): definition for definition in existing_subgraphs}
+    new_subgraphs = []
+    for definition in subgraphs:
+        existing = existing_by_id.get(str(definition["id"]))
+        if existing is not None:
+            if existing != definition:
+                raise ValueError(f"definition_conflict: subgraph definition id {definition['id']!r} differs")
+            continue
+        existing_by_id[str(definition["id"])] = definition
+        new_subgraphs.append(definition)
 
     workflow.setdefault("nodes", []).extend(copy.deepcopy(nodes))
     workflow.setdefault("links", []).extend(copy.deepcopy(links))
-    if subgraphs:
-        workflow.setdefault("definitions", {}).setdefault("subgraphs", []).extend(copy.deepcopy(subgraphs))
+    if new_subgraphs:
+        workflow.setdefault("definitions", {}).setdefault("subgraphs", []).extend(copy.deepcopy(new_subgraphs))
     workflow["last_node_id"] = max(
-        workflow.get("last_node_id", 0), *[n["id"] for n in nodes if isinstance(n["id"], int)]
+        [workflow.get("last_node_id", 0), *[n["id"] for n in nodes if isinstance(n["id"], int)]]
     )
-    workflow["last_link_id"] = max(workflow.get("last_link_id", 0), *[x[0] for x in links if isinstance(x[0], int)])
+    workflow["last_link_id"] = max([workflow.get("last_link_id", 0), *[x[0] for x in links if isinstance(x[0], int)]])
 
 
 def _apply_set_widget(workflow: dict, op: dict, graph) -> None:

@@ -202,8 +202,11 @@ link tuple ids/endpoints, node input `link` fields, and output `links` arrays.
 Definition interiors are independent graph namespaces and remain unchanged.
 The applier validates all payloads before mutation and rejects with
 `node_id_collision`, `link_id_collision`, `malformed_op`,
-`invalid_node_payload`, or `catalog_required`. The kind is not batchable and a
-spec batch rejects it as `workflow_insert_workflow_not_batchable`.
+`invalid_node_payload`, `dangling_link_endpoint`, `definition_conflict`, or
+`catalog_required`. Only `define_subgraph` and `insert_workflow` ops may carry
+definitions; edit ops reject a `definitions` field as `malformed_op`. The kind
+is not batchable and a spec batch rejects it as
+`workflow_insert_workflow_not_batchable`.
 
 ## 2. Idempotency and identity
 
