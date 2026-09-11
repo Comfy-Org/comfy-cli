@@ -5,9 +5,12 @@ name: Groom
 # GitHub-issue sink) lives in Comfy-Org/github-workflows. This repo carries only
 # the pin and its cadence, exactly like the other shared-workflow callers here.
 #
-# FINDS ONLY. The opt-in auto-builder (`builder: true`, which turns findings into
-# review-gated PRs) is deliberately left OFF. Groom files issues a human triages;
-# it opens no PRs, writes no commits, and never merges.
+# BUILDER MODE IS ON. `builder: true` below turns the top `max_prs` CONFIRMED,
+# non-security findings into REVIEW-GATED PRs; everything else still files as an
+# issue a human triages. Groom therefore writes commits on its own branches and
+# opens PRs, but it NEVER merges — every groom PR goes through this repo's normal
+# review + CI gate like any other. Read the HARD PREREQUISITE block on the
+# `builder:` input below before enabling or re-enabling it.
 #
 # CADENCE lives in the repo Actions variable GROOM_INTERVAL_DAYS, not in this
 # file. Retuning is a variable edit with no workflow change:
@@ -28,13 +31,18 @@ name: Groom
 # reusable declares it required, so an absent key fails the run LOUD at the agent
 # step by design rather than leaving the sweep silently inert.
 #
-# `vars.APP_ID` and `secrets.CLOUD_CODE_BOT_PRIVATE_KEY` are optional, but they
-# are ALL-OR-NOTHING and must be set/rotated together. The reusable gates App
-# token minting on `bot_app_id != ''` — the ID alone, NOT the key — so it
-# degrades to github-actions[bot] only when APP_ID is absent. With APP_ID present
+# `vars.APP_ID` and `secrets.CLOUD_CODE_BOT_PRIVATE_KEY` are REQUIRED — not
+# optional — now that `builder: true` is set below, and they remain ALL-OR-NOTHING:
+# set and rotate them together. An absent APP_ID does NOT degrade to
+# github-actions[bot] in builder mode: the reusable's `build_select` job fails its
+# "Validate builder config" step with `exit 1` when `builder` is true and
+# `bot_app_id` is empty, and the `file` job declares `needs: [gate, build_select]`,
+# so that one failure takes the ISSUE sink down with the PR sink and the run emits
+# NOTHING — after the finder and verifier have already billed. With APP_ID present
 # (including inherited from the org) and the private key missing or rotated out,
-# the token step fails in the `file` job, i.e. AFTER the finder and verifier have
-# already billed, discarding that run's findings. If you unset one, unset both.
+# the App-token step fails in that same job, for the same net result. If you unset
+# one, unset both — and turn `builder` off in the same PR (see below: it is not a
+# variable, so there is no faster way to stop the failing runs).
 
 on:
   schedule:
@@ -89,9 +97,61 @@ jobs:
       actions: read
     uses: Comfy-Org/github-workflows/.github/workflows/groom.yml@c2315350ee0d60d0c5f16c1bdb0da7ecffc6d465 # main @ c231535
     with:
-      # File as cloud-code-bot (App token) rather than github-actions[bot]. Absent
-      # APP_ID degrades to github-actions[bot] instead of failing.
+      # File as cloud-code-bot (App token) rather than github-actions[bot]. This is
+      # REQUIRED under `builder: true` below, not a nicety: an absent APP_ID no
+      # longer degrades to github-actions[bot], it hard-fails `build_select` and
+      # takes the issue sink down with it. See HARD PREREQUISITE (1) below.
       bot_app_id: ${{ vars.APP_ID }}
+      # Turn the top `max_prs` CONFIRMED, non-security findings into REVIEW-GATED
+      # PRs instead of issues, which is what `vars.GROOM_CONFIG`'s `max_findings: 0`
+      # here already assumes: that value PARKS issue filing (a literal `[:0]`
+      # slice, not "unlimited"), so without the builder this repo runs the full
+      # finder + verifier and emits nothing at all.
+      #
+      # `max_prs` is NOT set here on purpose: `vars.GROOM_CONFIG` already carries
+      # it and the variable outranks this `with:` block, so a value here would be
+      # dead config that reads as authoritative. Retune the variable. Verified
+      # 2026-08-28 to carry `max_prs: 2`; note the fallback if it is ever dropped
+      # from the variable is the reusable's OWN default of 5, not 2, so re-read
+      # the variable rather than assuming this file pins the volume.
+      #
+      # `builder` is NOT a `GROOM_CONFIG` knob. The reusable reads it straight off
+      # `inputs.builder` and never layers the variable over it (the variable only
+      # covers the operational knobs listed in its `DEFAULTS` blob), so once this
+      # merges, ONLY ANOTHER PR can turn it back off — there is no variable-level
+      # kill switch. To stop grooming without a PR, disable the workflow.
+      #
+      # HARD PREREQUISITE — do not merge before ALL THREE are met.
+      #
+      # 1. `secrets.CLOUD_CODE_BOT_PRIVATE_KEY` FIRST, then `vars.APP_ID`. This
+      #    repo has NEITHER today, at repo or org level. With `builder: true` and
+      #    an empty `bot_app_id` the reusable's `build_select` job exits 1 in its
+      #    "Validate builder config" step, and because `file` needs
+      #    `build_select`, that kills the ISSUE sink too — the run emits nothing
+      #    at all, AFTER the finder and verifier have billed `ANTHROPIC_API_KEY`.
+      #    (The PR sink is doomed independently: `build_pr` reads
+      #    `steps.bot_token.outputs.token` with no `github.token` fallback and
+      #    callers grant only `contents: read`, so there is no other way to push a
+      #    branch.) Key first, ID second: the reusable mints a token whenever
+      #    `bot_app_id` is non-empty and hard-fails on an empty key, so the
+      #    reverse order breaks the runs that currently work.
+      # 2. Raise `max_findings` above 0 in `vars.GROOM_CONFIG`. The builder builds
+      #    only CONFIRM, non-security findings; DOWNGRADE findings and every
+      #    security / auth-adjacent one are deliberately routed to the `file`
+      #    job's remainder — which `max_findings: 0` then truncates to nothing.
+      #    Leaving it at 0 alongside `builder: true` silently discards exactly the
+      #    class the builder refuses to touch. (Builder BAIL issues ride a
+      #    separate, uncapped path in `build_pr` and are unaffected either way.)
+      # 3. Gate `run-on-gpu.yml` BEFORE provisioning the credentials in (1). It
+      #    triggers on `pull_request` to `main` for `comfy_cli/**` — precisely the
+      #    paths a groom refactor touches — and runs `pip install -e .` plus
+      #    `TEST_E2E=true pytest tests/e2e` on the SELF-HOSTED `gpu-runners`
+      #    group. Groom PRs are same-repo, so that fires with no approval gate,
+      #    executing LLM-authored code on our own hardware before a human reads
+      #    the diff. The reusable's patch-path policy denies workflows, manifests
+      #    and lockfiles but NOT ordinary source, so the gate has to live on our
+      #    side: a maintainer label or a protected environment on that workflow.
+      builder: true
       # Keep the assets ref (finder and verifier briefs plus dedup ledger) in
       # lock-step with the `uses:` ref above, so a run always loads the briefs
       # that match the workflow filing the issues.
