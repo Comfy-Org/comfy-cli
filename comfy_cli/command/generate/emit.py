@@ -173,22 +173,28 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
     # Flux2ProImageNode would emit a workflow for a *different* model, so
     # `flux-pro` falls through to the EmitError instead.
     "flux-2": NodeSpec(
-        node_class="Flux2ProImageNode",
+        node_class="Flux2ImageNode",
         endpoint="bfl/flux-2-pro/generate",
         param_map={
             "prompt": "prompt",
-            "width": "width",
-            "height": "height",
+            "width": "model.width",
+            "height": "model.height",
             "seed": "seed",
-            "prompt_upsampling": "prompt_upsampling",
         },
-        fixed={"width": 1024, "height": 768, "seed": 0, "prompt_upsampling": True},
+        # `model` is the dynamic-combo selector and its sub-widgets are addressed
+        # through it. It must be set before them, which `ops_from_api_workflow`
+        # guarantees by ordering plain keys ahead of dotted ones.
+        #
+        # "Flux.2 [pro]" is the option that posts to this entry's `endpoint`.
+        # The node's other option, "Flux.2 [max]", is a different model at a
+        # different price, so it needs its own alias and endpoint rather than
+        # being reachable by accident from this one.
+        #
+        # No `prompt_upsampling`: the proxy takes it, this node does not expose
+        # it, so the emitted workflow cannot carry it. `comfy generate` without
+        # --emit-workflow still sends it straight to the proxy.
+        fixed={"model": "Flux.2 [pro]", "model.width": 1024, "model.height": 768, "seed": 0},
         output="IMAGE",
-        # ComfyUI deprecated Flux2ProImageNode in favor of Flux2ImageNode,
-        # whose width/height live inside a dynamic combo that
-        # the flat `param_map` cannot express. Emitting the deprecated class is
-        # the status quo until that migration lands; this flag comes off with it.
-        deprecated_ok=True,
     ),
     # BFL Flux 1.1 [pro] Ultra (text-to-image). Node: FluxProUltraImageNode.
     # The node takes an `aspect_ratio` string where the proxy schema takes

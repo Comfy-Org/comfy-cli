@@ -159,7 +159,7 @@ def test_allow_deprecated_is_read_from_the_spec_not_stamped_on_everything():
         return {s["class_type"]: s["allow_deprecated"] for s in specs if s["op"] == "add_node"}
 
     flux = adds("flux-2", {"prompt": "a fox"})
-    assert flux["Flux2ProImageNode"] is True, "the flux-2 entry declares deprecated_ok"
+    assert flux["Flux2ImageNode"] is False, "a live partner class carries no exemption"
     assert flux["SaveImage"] is False, "a live core class carries no exemption"
 
     gemini = adds("nano-banana", {"prompt": "p", "image": ["a.png", "b.png"]})
@@ -167,8 +167,8 @@ def test_allow_deprecated_is_read_from_the_spec_not_stamped_on_everything():
     assert gemini["ImageBatch"] is True, "core scaffolding the emitter mints itself keeps its exemption"
 
     # The exemption is read off the entry being emitted, not off a union over
-    # the whole table: `flux-2` declaring deprecated_ok must not waive the gate
-    # for a Flux2ProImageNode that arrives under some other model's graph.
+    # the whole table. No entry declares `deprecated_ok` today, so a deprecated
+    # class arriving under any model's graph must still be refused.
     borrowed = emit.ops_from_api_workflow(
         {"1": {"class_type": "Flux2ProImageNode", "inputs": {"prompt": "p"}}}, _graph(), "nano-banana"
     )
@@ -267,9 +267,14 @@ def test_ops_roundtrip_with_no_image_params():
     wf = _apply(emit.ops_from_api_workflow(api, _graph(), "flux-2"))
     lowered = convert_ui_to_api(wf, _object_info())
     got = _api_by_class(lowered)
-    assert got["Flux2ProImageNode"]["prompt"] == "a fox"
-    assert got["Flux2ProImageNode"]["width"] == 512
-    assert got["SaveImage"]["images"] == ("link", "Flux2ProImageNode")
+    assert got["Flux2ImageNode"]["prompt"] == "a fox"
+    # The combo selection survives the round trip alongside its sub-widgets. If
+    # the selector were lost the sub-widgets would have nothing to hang off, so
+    # asserting it is what makes the two below meaningful.
+    assert got["Flux2ImageNode"]["model"] == "Flux.2 [pro]"
+    assert got["Flux2ImageNode"]["model.width"] == 512
+    assert got["Flux2ImageNode"]["model.height"] == 768
+    assert got["SaveImage"]["images"] == ("link", "Flux2ImageNode")
 
 
 def test_ops_fold_multiple_images_through_image_batch():

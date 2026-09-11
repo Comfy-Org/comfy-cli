@@ -39,11 +39,15 @@ def runner():
 def test_build_flux_text_to_image_class_type_and_params():
     wf = emit.build_workflow("flux-2", {"prompt": "a fox", "width": 512})
     # partner node is "1"
-    assert wf["1"]["class_type"] == "Flux2ProImageNode"
+    assert wf["1"]["class_type"] == "Flux2ImageNode"
     assert wf["1"]["inputs"]["prompt"] == "a fox"
+    # Width and height are sub-widgets of the `model` dynamic combo, so they are
+    # addressed through it. The selector itself has to be in the emitted inputs
+    # or the sub-widgets it exposes do not exist yet.
+    assert wf["1"]["inputs"]["model"] == "Flux.2 [pro]"
     # user override applied, fixed default preserved for unset params
-    assert wf["1"]["inputs"]["width"] == 512
-    assert wf["1"]["inputs"]["height"] == 768
+    assert wf["1"]["inputs"]["model.width"] == 512
+    assert wf["1"]["inputs"]["model.height"] == 768
     # save node references the partner output
     save = [n for n in wf.values() if n["class_type"] == "SaveImage"]
     assert len(save) == 1
@@ -282,7 +286,7 @@ def test_cli_emit_writes_file_no_api_key(runner, tmp_path, monkeypatch):
     assert r.exit_code == 0, r.stdout
     assert out.is_file()
     wf = json.loads(out.read_text())
-    assert wf["1"]["class_type"] == "Flux2ProImageNode"
+    assert wf["1"]["class_type"] == "Flux2ImageNode"
     assert wf["1"]["inputs"]["prompt"] == "a cat"
 
 
