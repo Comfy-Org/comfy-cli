@@ -90,6 +90,11 @@ class NodeSpec:
     # Node input to set to "{width}:{height}" when the user passes both flags —
     # for nodes that take an aspect ratio where the proxy schema takes w/h.
     aspect_from_wh: str | None = None
+    # Emit this class even though the catalog flags it deprecated. Per-entry and
+    # off by default: an entry that goes stale must be renewed deliberately, not
+    # ride a blanket exemption. `test_emit.py` asserts the flag matches the
+    # recorded catalog in both directions.
+    deprecated_ok: bool = False
 
 
 # proxy model alias → partner node spec. Param keys are the *generate* flag
@@ -179,6 +184,11 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
         },
         fixed={"width": 1024, "height": 768, "seed": 0, "prompt_upsampling": True},
         output="IMAGE",
+        # BE-13301: ComfyUI deprecated Flux2ProImageNode in favor of
+        # Flux2ImageNode, whose width/height live inside a dynamic combo that
+        # the flat `param_map` cannot express. Emitting the deprecated class is
+        # the status quo until that migration lands; this flag comes off with it.
+        deprecated_ok=True,
     ),
     # BFL Flux 1.1 [pro] Ultra (text-to-image). Node: FluxProUltraImageNode.
     # The node takes an `aspect_ratio` string where the proxy schema takes
@@ -228,6 +238,13 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
         output="VIDEO",
     ),
 }
+
+
+# Core scaffolding `build_workflow` mints itself, exempt on the same grounds a
+# NodeSpec entry can be: the class is chosen here, not guessed. ImageBatch has
+# carried DEPRECATED since ComfyUI v0.35.0 — BatchImagesNode replaces it, but
+# folding the chain over changes emitted output, so that is its own change.
+_CORE_DEPRECATED_OK = frozenset({"ImageBatch"})
 
 
 def supported_models() -> list[str]:
@@ -406,6 +423,7 @@ def ops_from_api_workflow(api_wf: dict[str, Any], graph: Any) -> list[dict[str, 
     """
     del graph  # structural mapping today; see docstring
     node_ids = {str(k) for k in api_wf}
+    deprecated_ok = {ns.node_class for ns in MODEL_NODE_MAP.values() if ns.deprecated_ok} | _CORE_DEPRECATED_OK
 
     def alias(nid: Any) -> str:
         return f"gen{nid}"
@@ -415,11 +433,17 @@ def ops_from_api_workflow(api_wf: dict[str, Any], graph: Any) -> list[dict[str, 
     connects: list[dict[str, Any]] = []
     for nid in sorted(api_wf, key=str):
         node = api_wf[nid]
-        # allow_deprecated: the model→node mapping is curated (and pinned by
-        # test_emit's endpoint invariant), so a class the catalog has since
-        # flagged deprecated is still the intended target — the gate exists to
-        # stop a GUESSED class, not a mapped one.
-        adds.append({"op": "add_node", "class_type": node["class_type"], "as": alias(nid), "allow_deprecated": True})
+        # The deprecation gate exists to stop a GUESSED class, so a mapped one
+        # may opt out — but only the entry that says so. Anything else the
+        # catalog has since flagged deprecated fails here, loudly.
+        adds.append(
+            {
+                "op": "add_node",
+                "class_type": node["class_type"],
+                "as": alias(nid),
+                "allow_deprecated": node["class_type"] in deprecated_ok,
+            }
+        )
         inputs = node.get("inputs") or {}
         keys = sorted(inputs, key=lambda k: (k.count("."), list(inputs).index(k)))
         for key in keys:

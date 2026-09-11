@@ -80,6 +80,10 @@ CORE_OBJECT_INFO = {
         "name": "ImageBatch",
         "display_name": "Batch Images",
         "category": "image",
+        # ComfyUI has flagged this DEPRECATED since v0.35.0, the version cloud
+        # runs. The multi-image chain still mints it, so the fixture has to say
+        # so or the deprecation gate is never exercised on that path.
+        "deprecated": True,
     },
 }
 
@@ -142,6 +146,25 @@ def test_ops_shape_for_an_image_edit_model():
     assert len(prompts) == 1 and prompts[0]["value"] == "add sunglasses"
     connects = [s for s in specs if s["op"] == "connect"]
     assert len(connects) == 2, "loader→partner and partner→save"
+
+
+def test_allow_deprecated_is_read_from_the_spec_not_stamped_on_everything():
+    """Each add carries the exemption its NodeSpec declares, and nothing else
+    does. A blanket `allow_deprecated: True` on every add means the deprecation
+    gate can never fire on this path, which is how the `flux-2` entry sat on a
+    class ComfyUI had deprecated until a user reported the workflow (BE-13301)."""
+
+    def adds(model: str, values: dict) -> dict[str, bool]:
+        specs = emit.ops_from_api_workflow(emit.build_workflow(model, values), _graph())
+        return {s["class_type"]: s["allow_deprecated"] for s in specs if s["op"] == "add_node"}
+
+    flux = adds("flux-2", {"prompt": "a fox"})
+    assert flux["Flux2ProImageNode"] is True, "the flux-2 entry declares deprecated_ok"
+    assert flux["SaveImage"] is False, "a live core class carries no exemption"
+
+    gemini = adds("nano-banana", {"prompt": "p", "image": ["a.png", "b.png"]})
+    assert gemini["GeminiImageNode"] is False, "a partner class that is not deprecated gets no exemption"
+    assert gemini["ImageBatch"] is True, "core scaffolding the emitter mints itself keeps its exemption"
 
 
 def test_ops_apply_to_a_frontend_workflow_that_lowers_back_to_the_same_api_graph():

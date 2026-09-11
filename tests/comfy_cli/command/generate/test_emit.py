@@ -137,6 +137,30 @@ def test_emitted_node_covers_every_widget_input(model):
         )
 
 
+@pytest.mark.parametrize("model", sorted(emit.MODEL_NODE_MAP))
+def test_deprecated_mapped_node_must_declare_its_exemption(model):
+    """The mapping is hand-written, so nothing notices a class ComfyUI has since
+    deprecated — BE-13301 shipped `Flux2ProImageNode` workflows for exactly that
+    reason. `deprecated_ok` has to match the recorded catalog in both directions:
+    set it when the class is deprecated (a deliberate, commented exemption), drop
+    it when the class is live (so a stale flag cannot outlive its migration)."""
+    ns = emit.MODEL_NODE_MAP[model]
+    meta = Graph.from_object_info(PARTNER_OBJECT_INFO).node(ns.node_class)
+    assert meta is not None, f"{ns.node_class} missing from the fixture snapshot — refresh it"
+
+    if meta.deprecated:
+        assert ns.deprecated_ok, (
+            f"{model}: {ns.node_class} is deprecated in the catalog. Either map the alias to the "
+            f"replacement class, or set deprecated_ok=True on MODEL_NODE_MAP[{model!r}] with a "
+            f"comment naming the ticket that takes it off."
+        )
+    else:
+        assert not ns.deprecated_ok, (
+            f"{model}: {ns.node_class} is not deprecated, so drop deprecated_ok from "
+            f"MODEL_NODE_MAP[{model!r}] — the emitter should not carry a blanket exemption."
+        )
+
+
 def test_unknown_model_lists_supported():
     with pytest.raises(emit.EmitError) as ei:
         emit.build_workflow("dalle", {"prompt": "x"})
