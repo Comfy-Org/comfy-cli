@@ -1132,7 +1132,7 @@ def run(
         try:
             decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
         except ValueError as e:
-            renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
+            renderer.error(code="where_invalid", message=str(e), hint=where_module.WHERE_INVALID_HINT)
             raise typer.Exit(code=1)
 
         # The routing target is now known, so every downstream error envelope
@@ -1362,7 +1362,7 @@ def upload(
     try:
         decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
     except ValueError as e:
-        renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
+        renderer.error(code="where_invalid", message=str(e), hint=where_module.WHERE_INVALID_HINT)
         raise typer.Exit(code=1)
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
@@ -1428,7 +1428,7 @@ def download(
     try:
         decision = where_module.resolve(flag=where, config_value=config.get(where_module.CONFIG_KEY_WHERE_DEFAULT))
     except ValueError as e:
-        renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
+        renderer.error(code="where_invalid", message=str(e), hint=where_module.WHERE_INVALID_HINT)
         raise typer.Exit(code=1)
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
