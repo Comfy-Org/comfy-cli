@@ -198,7 +198,8 @@ the template payload verbatim and emits exactly one stamped op:
 The `workflow` payload is authoritative and requires top-level `nodes`, `links`,
 and `groups` arrays; `definitions` is optional. The CLI checks only this outer
 shape. It does not validate graph semantics, remap IDs, apply the op, or write a
-mutated workflow document; cmp owns those operations. Only `define_subgraph` and
+mutated workflow document. Per the contract decision recorded in the TDD
+(vetoable), cmp owns deterministic ID remapping from the op envelope ID. Only `define_subgraph` and
 `insert_workflow` ops may carry definitions; edit ops reject a `definitions`
 field as `malformed_op`. The kind is not batchable and a spec batch rejects it as
 `workflow_insert_workflow_not_batchable`.
