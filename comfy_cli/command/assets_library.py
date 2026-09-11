@@ -15,6 +15,7 @@ import typer
 
 from comfy_cli import tracking
 from comfy_cli.command.cloud_http import (
+    ResponseUnparseable,
     cloud_target_or_local_error,
     handle_cloud_http_error,
     http_request,
@@ -56,29 +57,98 @@ def ls_cmd(
     url = target.url("assets") + "?" + urllib.parse.urlencode(params)
 
     try:
-        _, body = http_request(url, target)
+        # `strict_json` so a 200 carrying a proxy/captive-portal error page is
+        # reported as malformed rather than collapsed to `None`, which is
+        # indistinguishable here from a genuinely empty body — and would render
+        # a broken response as a successful EMPTY library, the same masquerade
+        # the shape guards below refuse to make.
+        _, body = http_request(url, target, strict_json=True)
     except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
         raise handle_cloud_http_error(renderer, e, operation="list") from e
+    except ResponseUnparseable as e:
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response from /api/assets (body was not valid JSON)",
+            hint="check whether a proxy or captive portal is intercepting the request",
+            details={"operation": "list"},
+        )
+        raise typer.Exit(code=1) from e
 
-    rows = (body or {}).get("assets") or []
+    # A non-empty body decodes here only if it was valid JSON, but valid JSON is
+    # not necessarily the shape we asked for: a proxy or error page can answer 200
+    # with an array or a scalar, and `b.get(...)` would then raise a raw
+    # `AttributeError` past the `except` above — a traceback instead of an error
+    # envelope. Guard it the way `workflow list` guards the same failure on the
+    # sibling endpoint. An empty body stays a legitimate `None` (→ no rows).
+    if body is not None and not isinstance(body, dict):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/assets (expected a JSON object)",
+            details={"got_type": type(body).__name__},
+        )
+        raise typer.Exit(code=1)
+
+    b = body or {}
+    # A missing/empty `assets` is a legitimately-empty listing; a present non-list
+    # `assets` is malformed the same way, and `len(rows)` would raise `TypeError`.
+    rows = b.get("assets")
+    if rows is None:
+        rows = []
+    elif not isinstance(rows, list):
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response shape from /api/assets (assets must be a JSON array)",
+            details={"got_type": type(rows).__name__},
+        )
+        raise typer.Exit(code=1)
+    assets = [
+        {
+            "id": r.get("id"),
+            "name": r.get("name"),
+            "hash": r.get("hash"),
+            "mime_type": r.get("mime_type"),
+            "size": r.get("size"),
+            "tags": r.get("tags"),
+            "preview_url": r.get("preview_url"),
+            "job_id": r.get("job_id"),
+            "created_at": r.get("created_at"),
+        }
+        for r in rows
+        if isinstance(r, dict)
+    ]
     payload = {
-        "count": len(rows),
-        "assets": [
-            {
-                "id": r.get("id"),
-                "name": r.get("name"),
-                "hash": r.get("hash"),
-                "mime_type": r.get("mime_type"),
-                "size": r.get("size"),
-                "tags": r.get("tags"),
-                "preview_url": r.get("preview_url"),
-                "job_id": r.get("job_id"),
-                "created_at": r.get("created_at"),
-            }
-            for r in rows
-            if isinstance(r, dict)
-        ],
+        # `count` describes the array actually emitted, not the raw server rows.
+        # A non-dict row is dropped from `assets` above, so counting raw rows
+        # reported more items than the payload carries — and a knowingly-skewed
+        # `count` sitting next to a forwarded `total` undercuts the point of
+        # forwarding an authoritative count at all. Identical to the old value
+        # for every well-formed response; it differs only where the old value
+        # was simply wrong. Matches the repo convention in
+        # `comfy_cli/command/nodes.py`, where `count` is over the emitted rows.
+        "count": len(assets),
+        "assets": assets,
     }
+    # Forward the server's own truncation signal instead of making callers infer
+    # it from an exactly-full page: `has_more`/`total` are both `required` on the
+    # cloud API's `ListAssetsResponse`, and `has_more` comes off a limit+1
+    # sentinel row rather than off the returned row count, so it stays correct
+    # on a page that comes back short. Only forward what the server actually
+    # sent — an older or local server may omit them, and a JSON `null` in the
+    # envelope would poison a consumer's type assertion, so omit the key rather
+    # than emitting None.
+    #
+    # Each field is checked against its OWN type, not a shared bool-or-int test:
+    # `bool` is a subclass of `int` in Python, so one shared check would forward
+    # `has_more: 0` and `total: false` and emit an envelope that violates
+    # schemas/assets_library.json — the very contract this command publishes.
+    if isinstance(b.get("has_more"), bool):
+        payload["has_more"] = b["has_more"]
+    total = b.get("total")
+    # `>= 0` because the schema publishes `total` as a non-negative integer, and a
+    # guard looser than the declared contract is how the envelope ends up violating
+    # its own schema.
+    if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
+        payload["total"] = total
     renderer.emit(payload, command="assets library ls", where="cloud")
 
 
