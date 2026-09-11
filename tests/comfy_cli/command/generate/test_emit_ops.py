@@ -80,6 +80,10 @@ CORE_OBJECT_INFO = {
         "name": "ImageBatch",
         "display_name": "Batch Images",
         "category": "image",
+        # ComfyUI has flagged this DEPRECATED since v0.35.0, the version cloud
+        # runs. The multi-image chain still mints it, so the fixture has to say
+        # so or the deprecation gate is never exercised on that path.
+        "deprecated": True,
     },
 }
 
@@ -129,7 +133,7 @@ def _api_by_class(api_wf: dict) -> dict[str, dict]:
 
 def test_ops_shape_for_an_image_edit_model():
     api = emit.build_workflow("nano-banana", {"prompt": "add sunglasses", "image": "cat.png"})
-    specs = emit.ops_from_api_workflow(api, _graph())
+    specs = emit.ops_from_api_workflow(api, _graph(), "nano-banana")
 
     kinds = [s["op"] for s in specs]
     assert kinds == sorted(kinds, key=["add_node", "set_widget", "connect"].index), (
@@ -144,9 +148,101 @@ def test_ops_shape_for_an_image_edit_model():
     assert len(connects) == 2, "loader→partner and partner→save"
 
 
+def test_allow_deprecated_is_read_from_the_spec_not_stamped_on_everything():
+    """Each add carries the exemption its NodeSpec declares, and nothing else
+    does. A blanket `allow_deprecated: True` on every add means the deprecation
+    gate can never fire on this path, which is how the `flux-2` entry sat on a
+    class ComfyUI had deprecated until a user reported the workflow."""
+
+    def adds(model: str, values: dict) -> dict[str, bool]:
+        specs = emit.ops_from_api_workflow(emit.build_workflow(model, values), _graph(), model)
+        return {s["class_type"]: s["allow_deprecated"] for s in specs if s["op"] == "add_node"}
+
+    flux = adds("flux-2", {"prompt": "a fox"})
+    assert flux["Flux2ProImageNode"] is True, "the flux-2 entry declares deprecated_ok"
+    assert flux["SaveImage"] is False, "a live core class carries no exemption"
+
+    gemini = adds("nano-banana", {"prompt": "p", "image": ["a.png", "b.png"]})
+    assert gemini["GeminiImageNode"] is False, "a partner class that is not deprecated gets no exemption"
+    assert gemini["ImageBatch"] is True, "core scaffolding the emitter mints itself keeps its exemption"
+
+    # The exemption is read off the entry being emitted, not off a union over
+    # the whole table: `flux-2` declaring deprecated_ok must not waive the gate
+    # for a Flux2ProImageNode that arrives under some other model's graph.
+    borrowed = emit.ops_from_api_workflow(
+        {"1": {"class_type": "Flux2ProImageNode", "inputs": {"prompt": "p"}}}, _graph(), "nano-banana"
+    )
+    assert [s["allow_deprecated"] for s in borrowed if s["op"] == "add_node"] == [False]
+
+
+def test_core_exemption_must_match_the_catalog_in_both_directions():
+    """The sibling of `test_deprecated_mapped_node_must_declare_its_exemption`,
+    for the classes `build_workflow` mints itself. Without it the core exemption
+    is write-only: once `BatchImagesNode` takes over and `ImageBatch` stops being
+    deprecated, a stale entry in `_CORE_DEPRECATED_OK` would survive its own
+    migration in silence — the same failure that put a deprecated class in front
+    of users in the first place."""
+    graph = _graph()
+    for class_type in CORE_OBJECT_INFO:
+        meta = graph.node(class_type)
+        assert meta is not None, f"{class_type} missing from CORE_OBJECT_INFO — the fixture and the graph disagree"
+        assert (class_type in emit._CORE_DEPRECATED_OK) is bool(meta.deprecated), (
+            f"{class_type}: deprecated={bool(meta.deprecated)} but "
+            f"{'listed in' if class_type in emit._CORE_DEPRECATED_OK else 'missing from'} _CORE_DEPRECATED_OK. "
+            f"Exempt a class only while it is deprecated, and drop it the moment it is not."
+        )
+    unknown = set(emit._CORE_DEPRECATED_OK) - set(CORE_OBJECT_INFO)
+    assert not unknown, f"_CORE_DEPRECATED_OK names classes the fixture does not record: {sorted(unknown)}"
+
+
+def test_an_unexempt_deprecated_class_refuses_with_its_own_code_not_the_umbrella(tmp_path):
+    """The gate this PR makes reachable has to arrive readable. `apply_specs`
+    re-raises `DeprecatedNodeType` unwrapped so the caller keeps the code, the
+    hint and the replacement class; `write_frontend_workflow` used to catch it
+    as a plain `ValueError` and flatten all three into `EmitError`."""
+    oi = _object_info()
+    oi["GeminiImageNode"] = {**oi["GeminiImageNode"], "deprecated": True}
+
+    with pytest.raises(workflow_ops.DeprecatedNodeType) as ei:
+        emit.write_frontend_workflow(
+            "nano-banana", {"prompt": "p", "image": "cat.png"}, tmp_path / "wf.json", Graph.from_object_info(oi)
+        )
+    assert ei.value.code == "node_deprecated"
+    assert ei.value.class_type == "GeminiImageNode"
+    assert "allow_deprecated" in ei.value.hint
+    assert not (tmp_path / "wf.json").exists(), "a refused emit writes nothing"
+
+
+def test_cli_deprecated_class_renders_node_deprecated_with_the_replacement(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    oi = _object_info()
+    oi["GeminiImageNode"] = {**oi["GeminiImageNode"], "deprecated": True}
+    oi_path = tmp_path / "object_info.json"
+    oi_path.write_text(json.dumps(oi), encoding="utf-8")
+    monkeypatch.setenv("COMFY_OBJECT_INFO_FILE", str(oi_path))
+    out = tmp_path / "workflow.json"
+
+    result = CliRunner().invoke(
+        app,
+        ["--json", "generate", "nano-banana", "--prompt", "x", "--image", "cat.png"]
+        + ["--emit-workflow", str(out), "--emit-ops"],
+    )
+    assert result.exit_code == 1, result.output
+    envelope = json.loads(result.output.strip().splitlines()[-1])
+    assert envelope["ok"] is False
+    err = envelope["error"]
+    assert err["code"] == "node_deprecated", "not the umbrella emit_workflow_failed"
+    assert err["details"]["requested"] == "GeminiImageNode"
+    assert err["details"]["model"] == "nano-banana"
+    assert "allow_deprecated" in err["hint"]
+
+
 def test_ops_apply_to_a_frontend_workflow_that_lowers_back_to_the_same_api_graph():
     api = emit.build_workflow("nano-banana", {"prompt": "add sunglasses", "image": "cat.png"})
-    wf = _apply(emit.ops_from_api_workflow(api, _graph()))
+    wf = _apply(emit.ops_from_api_workflow(api, _graph(), "nano-banana"))
 
     assert isinstance(wf.get("nodes"), list), "the materialized workflow is FRONTEND format"
     lowered = convert_ui_to_api(wf, _object_info())
@@ -159,7 +255,7 @@ def test_ops_apply_to_a_frontend_workflow_that_lowers_back_to_the_same_api_graph
 
 def test_ops_roundtrip_for_a_video_model():
     api = emit.build_workflow("seedance", {"prompt": "drift", "image": "frame.png", "duration": 8})
-    wf = _apply(emit.ops_from_api_workflow(api, _graph()))
+    wf = _apply(emit.ops_from_api_workflow(api, _graph(), "seedance"))
     lowered = convert_ui_to_api(wf, _object_info())
     got, want = _api_by_class(lowered), _api_by_class(api)
     assert got["SaveVideo"]["video"] == ("link", "ByteDanceImageToVideoNode")
@@ -168,7 +264,7 @@ def test_ops_roundtrip_for_a_video_model():
 
 def test_ops_roundtrip_with_no_image_params():
     api = emit.build_workflow("flux-2", {"prompt": "a fox", "width": 512, "height": 768})
-    wf = _apply(emit.ops_from_api_workflow(api, _graph()))
+    wf = _apply(emit.ops_from_api_workflow(api, _graph(), "flux-2"))
     lowered = convert_ui_to_api(wf, _object_info())
     got = _api_by_class(lowered)
     assert got["Flux2ProImageNode"]["prompt"] == "a fox"
@@ -178,7 +274,7 @@ def test_ops_roundtrip_with_no_image_params():
 
 def test_ops_fold_multiple_images_through_image_batch():
     api = emit.build_workflow("nano-banana", {"prompt": "merge", "image": ["a.png", "b.png"]})
-    wf = _apply(emit.ops_from_api_workflow(api, _graph()))
+    wf = _apply(emit.ops_from_api_workflow(api, _graph(), "nano-banana"))
     lowered = convert_ui_to_api(wf, _object_info())
     got = _api_by_class(lowered)
     assert got["GeminiImageNode"]["images"] == ("link", "ImageBatch")

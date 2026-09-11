@@ -743,7 +743,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "node_deprecated",
         "`workflow add-node` (or an `add_node` op in a batch) named a class the catalog marks deprecated. "
         "Nothing was added. `details.replacement` names the live class with the same display name when "
-        "one exists.",
+        "one exists. `generate --emit-workflow --emit-ops` raises it too, when the node a model maps to "
+        "has gone stale; there `details.model` names the model alias and nothing is written.",
         "add `details.replacement` instead, or pass --allow-deprecated "
         '(`"allow_deprecated": true` on the op) when the user asked for that exact node',
     ),
