@@ -1808,7 +1808,7 @@ def apply_specs(
 def apply_op(workflow: dict, op: dict, graph) -> dict:
     """Replay one op onto ``workflow`` in place and return it. Idempotent: an
     op whose ``op_id`` was already applied is a no-op."""
-    applied = workflow.setdefault("_applied_ops", [])
+    applied = workflow.get("_applied_ops", [])
     if op["op_id"] in applied:
         return workflow
     kind = op["op"]
@@ -1884,11 +1884,18 @@ def define_subgraph(
     return workflow, op
 
 
-def _validate_subgraph_definition(definition: dict, path: str = "subgraph definition") -> None:
+def _validate_subgraph_definition(
+    definition: dict, path: str = "subgraph definition", seen: set[str] | None = None
+) -> None:
     """Validate definition ids and containers while preserving its serialized shape."""
+    if seen is None:
+        seen = set()
     definition_id = definition.get("id")
     if not isinstance(definition_id, str) or not _UUID_RE.fullmatch(definition_id):
         raise ValueError(f"{path} id must be a valid UUID")
+    if definition_id in seen:
+        raise ValueError(f"{path} duplicates subgraph definition id {definition_id!r}")
+    seen.add(definition_id)
     if not isinstance(definition.get("nodes"), list) or not isinstance(definition.get("links"), list):
         raise ValueError(f"{path} nodes and links must be arrays")
     nested = definition.get("definitions")
@@ -1896,17 +1903,11 @@ def _validate_subgraph_definition(definition: dict, path: str = "subgraph defini
         return
     if not isinstance(nested, dict) or not isinstance(nested.get("subgraphs"), list):
         raise ValueError(f"{path}.definitions.subgraphs must be an array")
-    seen: set[str] = set()
     for index, child in enumerate(nested["subgraphs"]):
         child_path = f"{path}.definitions.subgraphs[{index}]"
         if not isinstance(child, dict):
             raise ValueError(f"{child_path} must be a JSON object")
-        child_id = child.get("id")
-        if isinstance(child_id, str) and child_id in seen:
-            raise ValueError(f"{child_path} duplicates subgraph definition id {child_id!r}")
-        if isinstance(child_id, str):
-            seen.add(child_id)
-        _validate_subgraph_definition(child, child_path)
+        _validate_subgraph_definition(child, child_path, seen)
 
 
 def _subgraph_definition(workflow: dict, subgraph_id: str) -> dict | None:
@@ -1929,15 +1930,17 @@ def _apply_define_subgraph(workflow: dict, op: dict) -> None:
         or not subgraph_id
         or not isinstance(definition, dict)
         or definition.get("id") != subgraph_id
-        or not isinstance(definition.get("nodes"), list)
-        or not isinstance(definition.get("links"), list)
     ):
         raise ValueError("malformed_op: subgraph_id must match a definition with nodes and links arrays")
+    try:
+        _validate_subgraph_definition(definition)
+    except ValueError as error:
+        raise ValueError(f"malformed_op: {error}") from error
     existing = _subgraph_definition(workflow, subgraph_id)
     if existing is not None:
         if existing == definition:
             return
-        raise ValueError(f"malformed_op: definition {subgraph_id!r} already exists with different content")
+        raise ValueError(f"definition_conflict: definition {subgraph_id!r} already exists with different content")
     workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(copy.deepcopy(definition))
 
 

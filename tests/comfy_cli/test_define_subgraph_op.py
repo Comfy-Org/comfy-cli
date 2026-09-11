@@ -8,6 +8,7 @@ from comfy_cli import workflow_ops
 
 SUBGRAPH_ID = "12345678-1234-4123-8123-123456789abc"
 NESTED_ID = "abcdefab-cdef-4abc-8def-abcdefabcdef"
+OTHER_NESTED_ID = "fedcbafe-dcba-4fed-8cba-fedcbafedcba"
 
 
 def _definition(value: int = 1) -> dict:
@@ -97,6 +98,63 @@ def test_define_subgraph_preserves_nested_definitions_inside_single_parent_op():
     assert op["op"] == "define_subgraph"
 
 
+@pytest.mark.parametrize(
+    "definition",
+    [
+        {
+            **_definition(),
+            "definitions": {"subgraphs": [{"id": SUBGRAPH_ID, "nodes": [], "links": []}]},
+        },
+        {
+            **_definition(),
+            "definitions": {
+                "subgraphs": [
+                    {
+                        "id": NESTED_ID,
+                        "nodes": [],
+                        "links": [],
+                        "definitions": {"subgraphs": [{"id": OTHER_NESTED_ID, "nodes": [], "links": []}]},
+                    },
+                    {"id": OTHER_NESTED_ID, "nodes": [], "links": []},
+                ]
+            },
+        },
+    ],
+    ids=["ancestor", "across-branches"],
+)
+def test_define_subgraph_rejects_duplicate_ids_across_entire_definition_tree(definition):
+    workflow = {"nodes": [], "links": []}
+    before = copy.deepcopy(workflow)
+
+    with pytest.raises(ValueError, match="duplicates subgraph definition id"):
+        workflow_ops.define_subgraph(workflow, definition)
+
+    assert workflow == before
+
+
+def test_apply_define_subgraph_rejects_malformed_nested_definition_atomically():
+    workflow = {"nodes": [], "links": []}
+    before = copy.deepcopy(workflow)
+    definition = {
+        **_definition(),
+        "definitions": {"subgraphs": [{"id": NESTED_ID, "nodes": {}, "links": []}]},
+    }
+    op = {
+        "op": "define_subgraph",
+        "op_id": "a" * 32,
+        "actor": "peer",
+        "base_version": 0,
+        "stamp": [0, "peer"],
+        "subgraph_id": SUBGRAPH_ID,
+        "subgraph_definition": definition,
+    }
+
+    with pytest.raises(ValueError, match="malformed_op:.*definitions.subgraphs\\[0\\].*nodes and links"):
+        workflow_ops.apply_op(workflow, op, None)
+
+    assert workflow == before
+
+
 def test_apply_define_subgraph_exact_replay_is_idempotent_and_conflict_is_rejected():
     workflow = {"nodes": [], "links": []}
     _, op = workflow_ops.define_subgraph(workflow, _definition())
@@ -106,5 +164,6 @@ def test_apply_define_subgraph_exact_replay_is_idempotent_and_conflict_is_reject
     assert workflow == before
 
     conflicting = {**op, "op_id": "f" * 32, "subgraph_definition": _definition(2)}
-    with pytest.raises(ValueError, match="already exists with different content"):
+    with pytest.raises(ValueError, match="definition_conflict:.*already exists with different content"):
         workflow_ops.apply_op(workflow, conflicting, None)
+    assert workflow == before
