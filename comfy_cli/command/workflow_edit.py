@@ -166,7 +166,14 @@ def insert_workflow_cmd(
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
         _emit_edit_error(renderer, e, hint="provide a frontend-format workflow template JSON file")
         raise typer.Exit(code=1) from e
-    _emit_op(renderer, p, op, base_version, "workflow insert-workflow")
+    try:
+        _emit_op(renderer, p, op, base_version, "workflow insert-workflow")
+    except ValueError as e:
+        # The outbound edit transport may return cmp's rejection. Preserve its
+        # message exactly: it is already the most actionable explanation and
+        # callers must not have to unwrap a second client-side paraphrase.
+        renderer.error(code="workflow_edit_invalid", message=str(e))
+        raise typer.Exit(code=1) from e
 
 
 @tracking.track_command("workflow")

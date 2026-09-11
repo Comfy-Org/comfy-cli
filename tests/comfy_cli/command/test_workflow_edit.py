@@ -19,6 +19,7 @@ from typing import Any
 from unittest.mock import Mock
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from comfy_cli import workflow_ops
@@ -555,6 +556,20 @@ class TestInsertWorkflow:
         assert payload["op"]["actor"] == "agent"
         assert payload["op"]["stamp"] == [4, "agent"]
         assert payload["op"]["workflow"] == {"nodes": [], "links": [], "groups": []}
+
+    def test_doc_host_rejection_is_surfaced_verbatim(self, monkeypatch, tmp_path, capsys):
+        workflow = _write(tmp_path, {"nodes": [], "links": []})
+        template = _write(tmp_path, {"nodes": []}, "template.json")
+        renderer = _force_json_renderer()
+        transport = Mock(side_effect=ValueError("cmp rejected insert: node_id_collision 100"))
+        monkeypatch.setattr(renderer, "emit", transport)
+
+        with pytest.raises(typer.Exit) as exc:
+            workflow_edit.insert_workflow_cmd(str(workflow), str(template))
+
+        assert exc.value.exit_code == 1
+        transport.assert_called_once()
+        assert "cmp rejected insert: node_id_collision 100" in capsys.readouterr().out
 
 
 class TestAddNode:
