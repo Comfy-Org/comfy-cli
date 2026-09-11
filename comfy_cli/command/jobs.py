@@ -1941,8 +1941,12 @@ def _history_completed_nodes(host: str, port: int, prompt_id: str) -> set[str]:
             listed = msg[1].get("executed")
         else:
             continue
-        for n in listed or []:
-            nodes.add(str(n))
+        if not isinstance(listed, list):
+            continue
+        # Same null guard as the live `_watch_execution_cached` path: this set
+        # becomes the terminal envelope's completed nodes, and `str(None)`
+        # would seat a fabricated `"None"` node in it.
+        nodes.update(str(n) for n in listed if n is not None)
     outputs = body.get("outputs")
     if isinstance(outputs, dict):
         nodes.update(str(n) for n in outputs)
@@ -1993,17 +1997,33 @@ def _watch_executing(state: _WatchState, data: dict[str, Any]) -> None:
 
 
 def _watch_execution_cached(state: _WatchState, data: dict[str, Any]) -> None:
-    nodes = data.get("nodes") or []
-    for n in nodes:
-        state.completed_nodes.add(str(n))
+    # ONE event per cached node, matching what `comfy run` emits
+    # (run/execution.py `on_cached`). The two streams are documented as one
+    # dialect, so a consumer counting cached nodes per event must not have to
+    # special-case a list-shaped `nodes` here. `title`/`class_type` are omitted:
+    # watch has no workflow map to resolve them from, and both are optional in
+    # the run dialect's own emission.
+    raw = data.get("nodes")
+    if not isinstance(raw, list):
+        # Server-supplied. A bare string would otherwise iterate per character
+        # and fan out one bogus event each, and a non-iterable would raise
+        # TypeError out of the handler; sibling handlers guard the same way
+        # (see `_watch_progress_state`'s isinstance check).
+        return
+    # `comfy run`'s on_cached skips null entries (run/execution.py). Do the
+    # same: stringifying one would emit a phantom `node: "None"` event and
+    # record a fabricated id in the terminal envelope's completed nodes.
+    nodes = [str(n) for n in raw if n is not None]
+    state.completed_nodes.update(nodes)
     renderer = state.renderer
     if renderer.is_pretty():
         renderer.console().print(f"[dim]✓[/dim] cached: {len(nodes)} node(s)")
-    renderer.event(
-        "execution_cached",
-        nodes=[str(n) for n in nodes],
-        prompt_id=state.prompt_id,
-    )
+    for node_id in nodes:
+        renderer.event(
+            "execution_cached",
+            node=node_id,
+            prompt_id=state.prompt_id,
+        )
 
 
 def _watch_progress(state: _WatchState, data: dict[str, Any]) -> None:
