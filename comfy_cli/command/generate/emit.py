@@ -184,8 +184,8 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
         },
         fixed={"width": 1024, "height": 768, "seed": 0, "prompt_upsampling": True},
         output="IMAGE",
-        # BE-13301: ComfyUI deprecated Flux2ProImageNode in favor of
-        # Flux2ImageNode, whose width/height live inside a dynamic combo that
+        # ComfyUI deprecated Flux2ProImageNode in favor of Flux2ImageNode,
+        # whose width/height live inside a dynamic combo that
         # the flat `param_map` cannot express. Emitting the deprecated class is
         # the status quo until that migration lands; this flag comes off with it.
         deprecated_ok=True,
@@ -410,8 +410,8 @@ def _is_link_ref(value: Any, node_ids: set[str]) -> bool:
     )
 
 
-def ops_from_api_workflow(api_wf: dict[str, Any], graph: Any) -> list[dict[str, Any]]:
-    """Re-express an API-format graph as batch specs for ``apply_specs``.
+def ops_from_api_workflow(api_wf: dict[str, Any], graph: Any, model: str) -> list[dict[str, Any]]:
+    """Re-express ``model``'s API-format graph as batch specs for ``apply_specs``.
 
     Shape: every ``add_node`` first (each with a batch-local alias), then every
     ``set_widget`` (non-dotted keys before dotted ones, so a dynamic-combo
@@ -423,7 +423,8 @@ def ops_from_api_workflow(api_wf: dict[str, Any], graph: Any) -> list[dict[str, 
     """
     del graph  # structural mapping today; see docstring
     node_ids = {str(k) for k in api_wf}
-    deprecated_ok = {ns.node_class for ns in MODEL_NODE_MAP.values() if ns.deprecated_ok} | _CORE_DEPRECATED_OK
+    _alias, ns = _resolve_model(model)
+    deprecated_ok = ({ns.node_class} if ns.deprecated_ok else set()) | _CORE_DEPRECATED_OK
 
     def alias(nid: Any) -> str:
         return f"gen{nid}"
@@ -434,8 +435,9 @@ def ops_from_api_workflow(api_wf: dict[str, Any], graph: Any) -> list[dict[str, 
     for nid in sorted(api_wf, key=str):
         node = api_wf[nid]
         # The deprecation gate exists to stop a GUESSED class, so a mapped one
-        # may opt out — but only the entry that says so. Anything else the
-        # catalog has since flagged deprecated fails here, loudly.
+        # may opt out — but only the entry being emitted, read from its own
+        # NodeSpec rather than from a union over the whole table. Anything else
+        # the catalog has since flagged deprecated fails here, loudly.
         adds.append(
             {
                 "op": "add_node",
@@ -488,16 +490,24 @@ def write_frontend_workflow(
 
     Raises ``EmitError``/``UnsupportedModelError`` like :func:`write_workflow`;
     an applier failure surfaces as ``EmitError`` (the request itself was
-    expressible — a failure here is a schema/catalog mismatch worth reporting).
+    expressible — a failure here is a schema/catalog mismatch worth reporting),
+    except ``DeprecatedNodeType``, which travels out intact.
     """
     from comfy_cli import workflow_ops
 
     api = build_workflow(model, values, output_prefix=output_prefix)
-    specs = ops_from_api_workflow(api, graph)
+    specs = ops_from_api_workflow(api, graph, model)
     try:
         workflow, _ops, _aliases = workflow_ops.apply_specs(  # noqa: F841 — wf is the product; batch below is replace-shaped
             json.loads(json.dumps(_EMPTY_FRONTEND)), graph, specs, actor=actor, base_version=base_version
         )
+    except workflow_ops.DeprecatedNodeType:
+        # Subclasses ValueError, so it has to be caught first. It already carries
+        # `node_deprecated`, the replacement class and a hint that names the fix;
+        # folding it into EmitError would render the umbrella "check the model
+        # name and that all required inputs are provided", which is not the
+        # remedy for a stale entry in MODEL_NODE_MAP.
+        raise
     except (ValueError, KeyError) as e:
         raise EmitError(f"could not materialize the {model!r} workflow as canvas ops: {e}") from e
 

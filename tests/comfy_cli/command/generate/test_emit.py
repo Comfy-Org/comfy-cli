@@ -140,8 +140,8 @@ def test_emitted_node_covers_every_widget_input(model):
 @pytest.mark.parametrize("model", sorted(emit.MODEL_NODE_MAP))
 def test_deprecated_mapped_node_must_declare_its_exemption(model):
     """The mapping is hand-written, so nothing notices a class ComfyUI has since
-    deprecated — BE-13301 shipped `Flux2ProImageNode` workflows for exactly that
-    reason. `deprecated_ok` has to match the recorded catalog in both directions:
+    deprecated — this emitter shipped `Flux2ProImageNode` workflows for exactly
+    that reason. `deprecated_ok` has to match the recorded catalog in both directions:
     set it when the class is deprecated (a deliberate, commented exemption), drop
     it when the class is live (so a stale flag cannot outlive its migration)."""
     ns = emit.MODEL_NODE_MAP[model]
