@@ -54,7 +54,7 @@ from comfy_cli.config_manager import ConfigManager
 from comfy_cli.output.renderer import Renderer, get_renderer
 from comfy_cli.output.sanitize import sanitize_markup
 
-_HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …)."
+_HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Reve, …)."
 
 _CONTEXT_SETTINGS = {
     "allow_extra_args": True,

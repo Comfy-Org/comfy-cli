@@ -4,8 +4,26 @@ Lookup order on disk:
 1. ``~/.comfy/openapi-cache.yml`` if fresher than CACHE_TTL_DAYS
 2. The vendored copy under ``comfy_cli/command/generate/spec/openapi.yml``
 
+The vendored copy is the body ``https://api.comfy.org/openapi`` serves, plus one
+trailing newline the repo's ``end-of-file-fixer`` pre-commit hook requires and
+that the served body does not carry. That endpoint is public and needs no token,
+so a refresh is a reproducible two-command download rather than a hand-edit:
+
+    curl -sS https://api.comfy.org/openapi -o comfy_cli/command/generate/spec/openapi.yml
+    printf '\n' >> comfy_cli/command/generate/spec/openapi.yml   # end-of-file-fixer
+
+Nothing else is edited into the file, so it stays comparable against upstream —
+but mind the newline when you compare, or every check reports a spurious diff:
+
+    curl -sS https://api.comfy.org/openapi | { cat; printf '\n'; } |
+        cmp - comfy_cli/command/generate/spec/openapi.yml
+
+The body is minified JSON rather than block YAML despite the ``.yml`` name;
+JSON is a subset of YAML 1.2, so the same loader reads either, and the on-disk
+user cache ``comfy generate refresh`` writes is already that same JSON.
+
 The parsed spec is cached in-process via functools.lru_cache so repeated lookups
-inside a single CLI invocation don't re-parse the 30k-line YAML.
+inside a single CLI invocation don't re-parse the ~1 MB document.
 """
 
 from __future__ import annotations
@@ -89,20 +107,12 @@ _ALIASES: dict[str, str] = {
     "flux-kontext-max": "bfl/flux-kontext-max/generate",
     "flux-fill": "bfl/flux-pro-1.0-fill/generate",
     "flux-expand": "bfl/flux-pro-1.0-expand/generate",
-    "flux-canny": "bfl/flux-pro-1.0-canny/generate",
-    "flux-depth": "bfl/flux-pro-1.0-depth/generate",
     # Ideogram
     "ideogram": "ideogram/ideogram-v3/generate",
     "ideogram-edit": "ideogram/ideogram-v3/edit",
     "ideogram-remix": "ideogram/ideogram-v3/remix",
     "ideogram-reframe": "ideogram/ideogram-v3/reframe",
     "ideogram-bg": "ideogram/ideogram-v3/replace-background",
-    # Stability
-    "stability-ultra": "stability/v2beta/stable-image/generate/ultra",
-    "stability-sd3": "stability/v2beta/stable-image/generate/sd3",
-    "stability-upscale": "stability/v2beta/stable-image/upscale/conservative",
-    "stability-upscale-creative": "stability/v2beta/stable-image/upscale/creative",
-    "stability-upscale-fast": "stability/v2beta/stable-image/upscale/fast",
     # Recraft
     "recraft": "recraft/image_generation",
     "recraft-vectorize": "recraft/images/vectorize",
@@ -205,20 +215,12 @@ _ENDPOINT_ALLOWLIST: list[tuple[str, str, str | None]] = [
     ("bfl/flux-2-pro/generate", "text-to-image", "bfl"),
     ("bfl/flux-pro-1.0-fill/generate", "inpaint", "bfl"),
     ("bfl/flux-pro-1.0-expand/generate", "outpaint", "bfl"),
-    ("bfl/flux-pro-1.0-canny/generate", "controlnet", "bfl"),
-    ("bfl/flux-pro-1.0-depth/generate", "controlnet", "bfl"),
     # Ideogram
     ("ideogram/ideogram-v3/generate", "text-to-image", None),
     ("ideogram/ideogram-v3/edit", "image-edit", None),
     ("ideogram/ideogram-v3/remix", "image-edit", None),
     ("ideogram/ideogram-v3/reframe", "image-edit", None),
     ("ideogram/ideogram-v3/replace-background", "image-edit", None),
-    # Stability
-    ("stability/v2beta/stable-image/generate/ultra", "text-to-image", None),
-    ("stability/v2beta/stable-image/generate/sd3", "text-to-image", None),
-    ("stability/v2beta/stable-image/upscale/conservative", "upscale", None),
-    ("stability/v2beta/stable-image/upscale/creative", "upscale", None),
-    ("stability/v2beta/stable-image/upscale/fast", "upscale", None),
     # Recraft
     ("recraft/image_generation", "text-to-image", None),
     ("recraft/images/vectorize", "vectorize", None),
@@ -345,7 +347,12 @@ def _registry() -> dict[str, Endpoint]:
         path = PROXY_PREFIX + endpoint_id
         node = paths.get(path)
         if not node:
-            continue  # spec drift — skip silently, surfaced via `comfy generate list`
+            # Spec drift. Skipping keeps `generate` usable against a stale user
+            # cache instead of crashing on one missing node; the BUNDLED spec is
+            # held to the stricter rule by
+            # test_every_allowlisted_endpoint_exists_in_vendored_spec, so drift
+            # is loud at test time rather than silent at runtime.
+            continue
         # All image endpoints are POST; pick the first defined method anyway.
         method = "post" if "post" in node else next(iter(node.keys()))
         op = node[method]

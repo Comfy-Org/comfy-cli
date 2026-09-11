@@ -203,7 +203,7 @@ def test_schema_surfaces_enum_values():
     by_name = {p["name"]: p for p in data["params"]}
     output_format = by_name["output_format"]
     assert output_format["type"] == "enum"
-    assert output_format["enum"] == ["jpeg", "png"]
+    assert output_format["enum"] == ["jpeg", "png", "webp"]
     assert output_format["required"] is False
 
 
