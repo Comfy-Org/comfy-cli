@@ -1934,6 +1934,9 @@ app.add_typer(_wfrag.fragment_app, name="fragment")
 
 from comfy_cli.command import workflow_edit as _wedit  # noqa: E402
 
+app.command("define-subgraph", help="Create a subgraph definition; emits one define_subgraph op.")(
+    _wedit.define_subgraph_cmd
+)
 app.command("add-node", help="Add a node to the graph; emits an add_node op.")(_wedit.add_node_cmd)
 app.command("connect", help="Wire an output slot to an input slot; emits a connect op.")(_wedit.connect_cmd)
 app.command("set-widget", help="Set a widget by name (`<id>.<widget>`); emits a set_widget op.")(_wedit.set_widget_cmd)

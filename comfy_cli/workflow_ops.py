@@ -91,7 +91,15 @@ def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str
 # ---------------------------------------------------------------------------
 
 #: Every op kind in the v1 vocabulary, including defined-but-deferred kinds.
-FROZEN_OPS: tuple[str, ...] = ("add_node", "connect", "set_widget", "delete_node", "clear", "reset_doc")
+FROZEN_OPS: tuple[str, ...] = (
+    "add_node",
+    "connect",
+    "set_widget",
+    "delete_node",
+    "clear",
+    "reset_doc",
+    "define_subgraph",
+)
 
 #: Kinds frozen in the contract whose replay is not implemented yet.
 #: ``apply_op`` must keep rejecting these. Empty since amendment v1.1:
@@ -101,7 +109,7 @@ DEFERRED_OPS: tuple[str, ...] = ()
 #: Kinds a batch (``apply_specs``) dispatches. ``clear`` and ``reset_doc`` are
 #: standalone-only: they rewrite the whole document, so they never ride inside
 #: an atomic batch.
-BATCHABLE_OPS: tuple[str, ...] = ("add_node", "connect", "set_widget", "delete_node")
+BATCHABLE_OPS: tuple[str, ...] = ("add_node", "connect", "set_widget", "delete_node", "define_subgraph")
 
 #: Per-kind rendering for :class:`NotBatchableError` — the registered error code
 #: and the standalone command that DOES do the job. One entry per frozen kind
@@ -1751,6 +1759,14 @@ def apply_specs(
                     workflow, op = delete_node(
                         workflow, graph, resolve_ref(spec["node"], aliases), actor=actor, base_version=base_version
                     )
+                elif kind == "define_subgraph":
+                    workflow, op = define_subgraph(
+                        workflow,
+                        spec["subgraph_definition"],
+                        subgraph_id=spec.get("subgraph_id"),
+                        actor=actor,
+                        base_version=base_version,
+                    )
                 elif kind in _NOT_BATCHABLE:
                     # In the frozen vocabulary but standalone-only — surfaced with
                     # its own registered code so the caller learns the standalone
@@ -1795,6 +1811,8 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     if op["op_id"] in applied:
         return workflow
     kind = op["op"]
+    if kind != "define_subgraph" and any(key in op for key in ("subgraph_id", "subgraph_definition", "definitions")):
+        raise ValueError(f"malformed_op: {kind} cannot carry a subgraph definition")
     # Snapshot the LWW bookkeeping so an exception escaping a handler cannot
     # leave a stamp committed WITHOUT its op_id recorded below. That pairing is
     # the poison state: a retry of the identical op loses to the failed
@@ -1813,6 +1831,8 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
             _apply_clear(workflow, op)
         elif kind == "reset_doc":
             _apply_reset_doc(workflow, op)
+        elif kind == "define_subgraph":
+            _apply_define_subgraph(workflow, op)
         else:
             raise ValueError(f"unknown op {kind!r}")
     except BaseException:
@@ -1826,6 +1846,72 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # no-op rather than a second wipe.
     workflow.setdefault("_applied_ops", []).append(op["op_id"])
     return workflow
+
+
+def define_subgraph(
+    workflow: dict,
+    definition: dict,
+    *,
+    subgraph_id: str | None = None,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, dict]:
+    """Create one subgraph definition and emit the matching cmp op."""
+    if not isinstance(definition, dict):
+        raise ValueError("subgraph definition must be a JSON object")
+    definition = copy.deepcopy(definition)
+    definition_id = subgraph_id or definition.get("id") or str(uuid.uuid4())
+    if not isinstance(definition_id, str) or not definition_id:
+        raise ValueError("subgraph definition requires a non-empty string id")
+    if "id" in definition and definition["id"] != definition_id:
+        raise ValueError("subgraph definition id must match --id")
+    definition["id"] = definition_id
+    if not isinstance(definition.get("nodes"), list) or not isinstance(definition.get("links"), list):
+        raise ValueError("subgraph definition nodes and links must be arrays")
+    existing = _subgraph_definition(workflow, definition_id)
+    if existing is not None:
+        raise ValueError(f"subgraph definition {definition_id!r} already exists; define-subgraph only creates new ids")
+    op = _new_op(
+        "define_subgraph",
+        actor,
+        base_version,
+        subgraph_id=definition_id,
+        subgraph_definition=definition,
+    )
+    apply_op(workflow, op, None)
+    return workflow, op
+
+
+def _subgraph_definition(workflow: dict, subgraph_id: str) -> dict | None:
+    definitions = workflow.get("definitions")
+    if definitions is None:
+        return None
+    if not isinstance(definitions, dict) or not isinstance(definitions.get("subgraphs", []), list):
+        raise ValueError("malformed workflow: definitions.subgraphs must be an array")
+    for definition in definitions.get("subgraphs", []):
+        if isinstance(definition, dict) and str(definition.get("id")) == subgraph_id:
+            return definition
+    return None
+
+
+def _apply_define_subgraph(workflow: dict, op: dict) -> None:
+    subgraph_id = op.get("subgraph_id")
+    definition = op.get("subgraph_definition")
+    if (
+        not isinstance(subgraph_id, str)
+        or not subgraph_id
+        or not isinstance(definition, dict)
+        or definition.get("id") != subgraph_id
+        or not isinstance(definition.get("nodes"), list)
+        or not isinstance(definition.get("links"), list)
+    ):
+        raise ValueError("malformed_op: subgraph_id must match a definition with nodes and links arrays")
+    existing = _subgraph_definition(workflow, subgraph_id)
+    if existing is not None:
+        if existing == definition:
+            return
+        raise ValueError(f"malformed_op: definition {subgraph_id!r} already exists with different content")
+    workflow.setdefault("definitions", {}).setdefault("subgraphs", []).append(copy.deepcopy(definition))
 
 
 def _apply_add_node(workflow: dict, op: dict) -> None:

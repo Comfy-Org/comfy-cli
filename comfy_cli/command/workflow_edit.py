@@ -133,6 +133,40 @@ def _graph_or_exit(input_path, host, port, renderer, where=None):
 
 
 # ---------------------------------------------------------------------------
+# define-subgraph
+# ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def define_subgraph_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON to update.")],
+    definition_file: Annotated[str, typer.Argument(help="Serializable subgraph definition JSON.")],
+    subgraph_id: Annotated[str | None, typer.Option("--id", show_default=False)] = None,
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+):
+    """Create one subgraph definition and emit one ``define_subgraph`` op."""
+    renderer = get_renderer()
+    renderer.command = "workflow define-subgraph"
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    try:
+        definition_path = Path(definition_file).expanduser()
+        definition = json.loads(definition_path.read_text(encoding="utf-8"))
+        workflow, op = workflow_ops.define_subgraph(
+            workflow,
+            definition,
+            subgraph_id=subgraph_id,
+            actor=actor,
+            base_version=base_version,
+        )
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+        _emit_edit_error(renderer, e, hint="provide a serializable subgraph definition JSON object")
+        raise typer.Exit(code=1) from e
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow define-subgraph")
+
+
+# ---------------------------------------------------------------------------
 # add-node
 # ---------------------------------------------------------------------------
 

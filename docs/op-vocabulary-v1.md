@@ -17,7 +17,7 @@ citation must point at a commit on that branch.
 
 ## 1. Frozen op kinds
 
-Six kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
+Seven kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
 `ValueError("unknown op ...")` — it never ignores one.
 
 | Kind | Batchable | Standalone command | Summary |
@@ -28,6 +28,7 @@ Six kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
 | `delete_node` | yes | `comfy workflow delete` | Remove one node and its incident links |
 | `clear` | no | `comfy workflow clear` | Remove every node, link, and group |
 | `reset_doc` | no | `comfy workflow reset-doc --confirm` | Reset the whole document to an empty baseline |
+| `define_subgraph` | yes | `comfy workflow define-subgraph` | Create one subgraph definition |
 
 Batchable = the kind is accepted by `apply_specs` (the `workflow apply` /
 `workflow foreach` batch surface). `clear` and `reset_doc` rewrite the whole
@@ -177,6 +178,29 @@ pre-reset `base_version` do not replay across it.
   `workflow_reset_doc_not_batchable`.
 * Never emitted implicitly: no `--emit-ops` surface and no bulk writer (§8.8)
   mints one. It exists only where a caller asked for it by name.
+
+### 1.7 `define_subgraph`
+
+Command: `comfy workflow define-subgraph <file> <definition-file> [--id <uuid>]`.
+The command validates a serializable definition, assigns its id from `--id`,
+the definition's `id`, or a new UUID, and emits exactly one stamped op:
+
+```json
+{
+  "op": "define_subgraph",
+  "op_id": "<uuid4 hex>",
+  "actor": "cli",
+  "base_version": 0,
+  "stamp": [0, "cli"],
+  "subgraph_id": "<uuid>",
+  "subgraph_definition": {"id": "<uuid>", "nodes": [], "links": []}
+}
+```
+
+Only this op may carry `subgraph_id` or definition payloads. Creation fails
+before writing when the id already exists. Exact op replay is a no-op; a
+different definition under an existing id is rejected as `malformed_op`.
+Subsequent interior edits use the existing id-addressed op scopes.
 
 ## 2. Idempotency and identity
 

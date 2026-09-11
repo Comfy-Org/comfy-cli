@@ -6,7 +6,6 @@ import pytest
 
 from comfy_cli import workflow_ops
 
-
 SUBGRAPH_ID = "12345678-1234-4123-8123-123456789abc"
 
 
@@ -45,7 +44,7 @@ def test_define_subgraph_emits_cmp_payload_and_inserts_definition():
     ("definition", "match"),
     [
         ([], "JSON object"),
-        ({"nodes": [], "links": []}, "non-empty string id"),
+        ({"id": 7, "nodes": [], "links": []}, "non-empty string id"),
         ({"id": SUBGRAPH_ID, "nodes": {}, "links": []}, "nodes and links must be arrays"),
     ],
 )
