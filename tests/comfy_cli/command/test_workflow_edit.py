@@ -16,8 +16,10 @@ import copy
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from comfy_cli import workflow_ops
@@ -527,6 +529,78 @@ def _run(args: list[str], capsys) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # add-node
 # ---------------------------------------------------------------------------
+
+
+class TestInsertWorkflow:
+    def test_reads_template_from_stdin_when_path_is_dash(self, monkeypatch, tmp_path):
+        workflow = _write(tmp_path, {"nodes": [], "links": [], "groups": []})
+        template = {"nodes": [{"id": 12, "type": "ServerValidatedNode"}], "links": [], "groups": []}
+        renderer = _force_json_renderer()
+        transport = Mock()
+        monkeypatch.setattr(renderer, "emit", transport)
+
+        result = CliRunner().invoke(
+            workflow_cmd.app,
+            ["insert-workflow", str(workflow), "-"],
+            input=json.dumps(template),
+            standalone_mode=False,
+        )
+
+        assert result.exit_code == 0
+        assert transport.call_args.args[0]["op"]["workflow"] == template
+
+    def test_transmits_op_once_through_renderer(self, monkeypatch, tmp_path):
+        workflow = _write(tmp_path, {"nodes": [], "links": [], "groups": []})
+        template = _write(tmp_path, {"nodes": [], "links": [], "groups": []}, "template.json")
+        original = workflow.read_text(encoding="utf-8")
+        renderer = _force_json_renderer()
+        transport = Mock()
+        monkeypatch.setattr(renderer, "emit", transport)
+
+        result = CliRunner().invoke(
+            workflow_cmd.app,
+            ["insert-workflow", str(workflow), str(template), "--actor", "agent", "--base-version", "4"],
+            standalone_mode=False,
+        )
+
+        assert result.exit_code == 0
+        transport.assert_called_once()
+        payload = transport.call_args.args[0]
+        assert transport.call_args.kwargs == {"command": "workflow insert-workflow", "changed": False}
+        assert payload["workflow"] == str(workflow)
+        assert payload["base_version"] == 4
+        assert payload["wrote"] is None
+        assert payload["op"]["op"] == "insert_workflow"
+        assert payload["op"]["actor"] == "agent"
+        assert payload["op"]["stamp"] == [4, "agent"]
+        assert payload["op"]["workflow"] == {"nodes": [], "links": [], "groups": []}
+        assert workflow.read_text(encoding="utf-8") == original
+
+    def test_stdout_is_not_offered_for_emit_only_command(self):
+        result = CliRunner().invoke(workflow_cmd.app, ["insert-workflow", "--help"])
+
+        assert result.exit_code == 0
+        assert "--stdout" not in result.output
+        assert "--in-place" not in result.output
+
+    def test_command_is_discoverable_in_schema_and_bundled_skill(self):
+        from comfy_cli.discovery import COMMAND_SCHEMAS
+
+        skill = Path(workflow_edit.__file__).parent.parent / "skills" / "comfy" / "SKILL.md"
+
+        assert COMMAND_SCHEMAS["comfy workflow insert-workflow"] == "workflow"
+        assert "insert-workflow" in skill.read_text(encoding="utf-8")
+
+    def test_local_validation_error_is_reported(self, tmp_path, capsys):
+        workflow = _write(tmp_path, {"nodes": [], "links": []})
+        template = _write(tmp_path, {"links": []}, "template.json")
+        _force_json_renderer()
+
+        with pytest.raises(typer.Exit) as exc:
+            workflow_edit.insert_workflow_cmd(str(workflow), str(template))
+
+        assert exc.value.exit_code == 1
+        assert "missing required field: nodes" in capsys.readouterr().out
 
 
 class TestAddNode:

@@ -17,7 +17,7 @@ citation must point at a commit on that branch.
 
 ## 1. Frozen op kinds
 
-Six kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
+Seven kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
 `ValueError("unknown op ...")` — it never ignores one.
 
 | Kind | Batchable | Standalone command | Summary |
@@ -28,6 +28,7 @@ Six kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
 | `delete_node` | yes | `comfy workflow delete` | Remove one node and its incident links |
 | `clear` | no | `comfy workflow clear` | Remove every node, link, and group |
 | `reset_doc` | no | `comfy workflow reset-doc --confirm` | Reset the whole document to an empty baseline |
+| `insert_workflow` | no | `comfy workflow insert-workflow` | Merge a complete workflow template in one transaction |
 
 Batchable = the kind is accepted by `apply_specs` (the `workflow apply` /
 `workflow foreach` batch surface). `clear` and `reset_doc` rewrite the whole
@@ -177,6 +178,32 @@ pre-reset `base_version` do not replay across it.
   `workflow_reset_doc_not_batchable`.
 * Never emitted implicitly: no `--emit-ops` surface and no bulk writer (§8.8)
   mints one. It exists only where a caller asked for it by name.
+
+### 1.7 `insert_workflow` — standalone only
+
+Command: `comfy workflow insert-workflow <file> <template>`. The CLI preserves
+the template payload verbatim and emits exactly one stamped op:
+
+```json
+{
+  "op": "insert_workflow",
+  "op_id": "<uuid4 hex>",
+  "actor": "cli",
+  "base_version": 0,
+  "stamp": [0, "cli"],
+  "workflow": {"nodes": [], "links": [], "groups": [], "definitions": {"subgraphs": []}}
+}
+```
+
+The `workflow` payload is authoritative and requires a top-level `nodes` array;
+`links`, `groups`, and `definitions` are optional. When present, `links` and
+`groups` must be arrays and `definitions` must be an object. The CLI checks only
+this outer shape. It does not validate graph semantics, remap IDs, apply the op,
+or write a mutated workflow document. Per the contract decision recorded in the TDD
+(vetoable), cmp owns deterministic ID remapping from the op envelope ID. Only `define_subgraph` and
+`insert_workflow` ops may carry definitions; edit ops reject a `definitions`
+field as `malformed_op`. The kind is not batchable and a spec batch rejects it as
+`workflow_insert_workflow_not_batchable`.
 
 ## 2. Idempotency and identity
 
