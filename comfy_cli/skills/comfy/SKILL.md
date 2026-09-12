@@ -20,7 +20,8 @@ know what exists, and reach for the right one rather than improvising its job:**
 `comfy-director` (multi-shot narrative video — story, continuity, conform),
 `comfy-build` (build a custom ComfyUI environment on the developer platform),
 `comfy-deploy` (run a build release as a serverless deployment, and stop it
-costing money), `comfy-debug` (any failed job: error code → fix), `comfy-relay`
+costing money), `comfy-custom-nodes` (write or fix a custom node pack — the V3 node API,
+layout, testing, publishing), `comfy-debug` (any failed job: error code → fix), `comfy-relay`
 (surface a workflow/result in chat, never leave it in /tmp). When a task spans
 several, load them up front instead of discovering the gap mid-render.
 

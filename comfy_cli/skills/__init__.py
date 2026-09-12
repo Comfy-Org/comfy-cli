@@ -48,6 +48,7 @@ BUNDLED_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy-director", "comfy-director"),
     ("comfy-build", "comfy-build"),
     ("comfy-deploy", "comfy-deploy"),
+    ("comfy-custom-nodes", "comfy-custom-nodes"),
 )
 
 
