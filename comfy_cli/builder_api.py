@@ -129,9 +129,13 @@ class BuilderClient:
         """POST /v1/builds/{id}/releases: freeze the definition and enqueue a
         build for ``targets``. Returns (releaseId, statusUrl).
 
-        ``targets`` is required and must be non-empty: an implicit target spends
-        build minutes the caller never asked for, so a missing or empty list is a
+        ``targets`` is required and must be non-empty: an implicit target builds
+        an artifact the caller never asked for, so a missing or empty list is a
         caller error raised here, before any request is issued.
+
+        The cut is idempotent. The builder dedupes on the definition's content hash
+        scoped to the build, so retrying this call after an ambiguous failure
+        returns the same release rather than cutting a second one.
 
         A server that predates the version-to-release rename still answers with
         ``buildVersionId``, so that key is the fallback and the CLI works against
