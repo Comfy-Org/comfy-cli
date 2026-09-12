@@ -121,9 +121,11 @@ strings/numbers so saved workflows stay portable.
 
 1. Syntax: `python -m py_compile nodes.py` with any Python you can run.
 2. Import test needs ComfyUI's own environment (torch, `comfy_api`): from the
-   install folder, `.venv/bin/python -c "import custom_nodes.<pack>.nodes"` —
-   or skip it and say so; an import failure outside that environment is not a
-   bug in the pack.
+   install folder,
+   `.venv/bin/python -c "import importlib; importlib.import_module('custom_nodes.<pack>.nodes')"`
+   (the string form works for a hyphenated pack name; an `import` statement
+   would not) — or skip it and say so; an import failure outside that
+   environment is not a bug in the pack.
 3. Restart ComfyUI. The startup log names a pack that failed to load and why.
 4. Confirm the class is registered (`/object_info/<node_id>`, or the agent's
    `refresh_catalog` + `show_node`), then run it in a small workflow.

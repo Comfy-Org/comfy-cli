@@ -101,13 +101,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def vet_path(raw: str) -> Path:
+def vet_path(raw: str, root: Path | None = None) -> Path:
     """An approvable folder: absolute, existing, not the disk, not a credential store or a parent of one.
 
     Returns the folder with symlinks resolved: the checks below run on the real
     location, the way the agent's own fence does, so a link named elsewhere
     that points into a credential store is refused and what gets recorded is
-    the folder the agent will actually open.
+    the folder the agent will actually open. ``root`` is the agent's data dir:
+    it, anything under it, and any folder that contains it are refused, so a
+    grant can never cover the agent's own state (``--data-dir /tmp/x --path /tmp``).
     """
     p = Path(raw.strip()).expanduser()
     if not raw.strip():
@@ -130,6 +132,14 @@ def vet_path(raw: str) -> Path:
             raise ValueError(f"{p} stays closed: it is a credential or agent-state folder")
         if _same_or_under(denied, p) and denied.exists():
             raise ValueError(f"{p} stays closed: it contains {denied}, a credential or agent-state folder")
+    if root is not None:
+        agent_root = Path(os.path.normpath(root.expanduser()))
+        try:
+            agent_root = agent_root.resolve()
+        except OSError:
+            pass
+        if _same_or_under(p, agent_root) or _same_or_under(agent_root, p):
+            raise ValueError(f"{p} stays closed: it is, contains, or is inside the agent's own data dir {agent_root}")
     return p
 
 
@@ -156,7 +166,7 @@ def vet_host(raw: str) -> str:
 
 def allow_path(root: Path, folder: str, reason: str) -> tuple[Path, bool]:
     """Record an approved folder. Returns (folder, added); added is False when it was already there."""
-    p = vet_path(folder)
+    p = vet_path(folder, root=root)
     file = root / PERMISSIONS_FILE
     data = _read_json(file)
     entries = [e for e in (data.get("paths") or []) if isinstance(e, dict)]

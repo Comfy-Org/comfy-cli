@@ -43,9 +43,12 @@ def _sandbox_status(port: int | None) -> dict | None:
         return None
     if not isinstance(body, dict):
         return None  # a stale port answered by something that is not the agent
-    out = {"sandbox": body.get("sandbox")}
-    cli = body.get("cli") or {}
-    if isinstance(cli, dict) and cli.get("workspace"):
+    # The envelope schema says sandbox is an object or null and comfy_path a
+    # string or null; a stale or foreign server's shapes are not passed on.
+    sandbox = body.get("sandbox")
+    out: dict = {"sandbox": sandbox if isinstance(sandbox, dict) else None}
+    cli = body.get("cli")
+    if isinstance(cli, dict) and isinstance(cli.get("workspace"), str) and cli["workspace"]:
         out["comfy_path"] = cli["workspace"]
     return out
 
@@ -114,7 +117,7 @@ def allow_cmd(
         # Vet everything before the first write so a refused --host does not
         # leave a --path approved behind a failure exit.
         if path:
-            vet_path(path)
+            vet_path(path, root=root)
         if host:
             vet_host(host)
         if path:

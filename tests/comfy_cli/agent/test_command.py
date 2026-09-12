@@ -191,3 +191,60 @@ def test_sandbox_status_treats_non_object_health_as_unavailable(monkeypatch):
 def test_agent_schema_rejects_incomplete_payloads(payload):
     with pytest.raises(jsonschema.ValidationError):
         _validate(payload)
+
+
+def test_vet_path_refuses_the_agent_data_dir_and_its_parents(tmp_path: Path):
+    """`--data-dir /tmp/x --path /tmp` would approve the agent's own state
+    (and everything beside it). The data dir, anything under it, and any
+    folder that contains it are refused; a sibling is fine."""
+    root = tmp_path / "state" / "agent"
+    root.mkdir(parents=True)
+    sibling = tmp_path / "state" / "photos"
+    sibling.mkdir()
+    with pytest.raises(ValueError, match="agent"):
+        vet_path(str(root), root=root)
+    with pytest.raises(ValueError, match="agent"):
+        vet_path(str(tmp_path / "state"), root=root)
+    with pytest.raises(ValueError, match="agent"):
+        vet_path(str(tmp_path), root=root)
+    assert vet_path(str(sibling), root=root) == sibling.resolve()
+    with pytest.raises(ValueError):
+        allow_path(root, str(tmp_path), "x")
+    assert not (root / "permissions.json").exists()
+
+
+def test_cli_allow_refuses_the_data_dirs_parent(tmp_path: Path):
+    root = tmp_path / "data"
+    root.mkdir()
+    res = CliRunner().invoke(app, ["allow", "--path", str(tmp_path), "--data-dir", str(root)])
+    assert res.exit_code == 1
+    assert _envelope(res)["error"]["code"] == "refused"
+    assert not (root / "permissions.json").exists()
+
+
+def test_sandbox_status_normalizes_malformed_nested_health(monkeypatch):
+    from comfy_cli.agent import command
+
+    class _Resp:
+        def __init__(self, body: bytes):
+            self._b = body
+
+        def read(self):
+            return self._b
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(
+        command.urllib.request, "urlopen", lambda *a, **k: _Resp(b'{"sandbox": [], "cli": {"workspace": true}}')
+    )
+    assert command._sandbox_status(8086) == {"sandbox": None}
+    monkeypatch.setattr(
+        command.urllib.request,
+        "urlopen",
+        lambda *a, **k: _Resp(b'{"sandbox": {"shell": "enabled"}, "cli": {"workspace": "/opt/ComfyUI"}}'),
+    )
+    assert command._sandbox_status(8086) == {"sandbox": {"shell": "enabled"}, "comfy_path": "/opt/ComfyUI"}
