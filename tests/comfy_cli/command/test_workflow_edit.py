@@ -532,6 +532,23 @@ def _run(args: list[str], capsys) -> dict[str, Any]:
 
 
 class TestInsertWorkflow:
+    def test_reads_template_from_stdin_when_path_is_dash(self, monkeypatch, tmp_path):
+        workflow = _write(tmp_path, {"nodes": [], "links": [], "groups": []})
+        template = {"nodes": [{"id": 12, "type": "ServerValidatedNode"}], "links": [], "groups": []}
+        renderer = _force_json_renderer()
+        transport = Mock()
+        monkeypatch.setattr(renderer, "emit", transport)
+
+        result = CliRunner().invoke(
+            workflow_cmd.app,
+            ["insert-workflow", str(workflow), "-"],
+            input=json.dumps(template),
+            standalone_mode=False,
+        )
+
+        assert result.exit_code == 0
+        assert transport.call_args.args[0]["op"]["workflow"] == template
+
     def test_transmits_op_once_through_renderer(self, monkeypatch, tmp_path):
         workflow = _write(tmp_path, {"nodes": [], "links": [], "groups": []})
         template = _write(tmp_path, {"nodes": [], "links": [], "groups": []}, "template.json")

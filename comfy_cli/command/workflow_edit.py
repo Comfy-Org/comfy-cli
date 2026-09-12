@@ -148,7 +148,7 @@ def _graph_or_exit(input_path, host, port, renderer, where=None):
 @tracking.track_command("workflow")
 def insert_workflow_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON to update.")],
-    template: Annotated[str, typer.Argument(help="Frontend-format workflow JSON to insert.")],
+    template: Annotated[str, typer.Argument(help="Frontend-format workflow JSON to insert, or '-' for stdin.")],
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
 ):
@@ -157,8 +157,13 @@ def insert_workflow_cmd(
     renderer.command = "workflow insert-workflow"
     p, workflow = _load_workflow_or_fail(renderer, file)
     try:
-        template_path = Path(template).expanduser()
-        inserted = json.loads(template_path.read_text(encoding="utf-8"))
+        if template == "-":
+            import sys
+
+            raw = sys.stdin.read()
+        else:
+            raw = Path(template).expanduser().read_text(encoding="utf-8")
+        inserted = json.loads(raw)
         if not isinstance(inserted, dict):
             raise ValueError("template must be a JSON object")
         _, op = workflow_ops.insert_workflow(workflow, inserted, actor=actor, base_version=base_version)

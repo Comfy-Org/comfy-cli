@@ -355,11 +355,14 @@ of a live graph, use the structured-edit primitives below — never raw `jq`/`se
 ## Structured graph edits — `insert-workflow` / `add-node` / `connect` / `set-widget` / `delete-node`
 
 The **sanctioned** way to mutate a graph's *structure* from code — the
-alternative to `jq`/`sed` on `nodes`/`links`/`widgets_values`. Each edit is
-validated against `object_info` (node class, widget name, widget value **shape**,
-and connection **type** are hard-checked; unknown COMBO values / out-of-range
-numbers come back as soft `warnings`) and emits a replayable **operation** in
-`data.op`.
+alternative to `jq`/`sed` on `nodes`/`links`/`widgets_values`. `insert-workflow`
+is emit-only: the CLI checks JSON shape and forwards the workflow without
+semantic validation or id remapping. The cmp applier on the server validates node
+types, links, and definition ids, remaps ids, and returns errors that the CLI
+surfaces verbatim. The other edits are validated against `object_info` (node
+class, widget name, widget value **shape**, and connection **type** are
+hard-checked; unknown COMBO values / out-of-range numbers come back as soft
+`warnings`) and emit a replayable **operation** in `data.op`.
 
 **When to use which editing path:**
 - **Reusable / human-authored workflow** → fragments + blueprint (above). *Default.*
