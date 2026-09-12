@@ -10,7 +10,9 @@ from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_t
 
 
 def _json_renderer_on(stream) -> Renderer:
-    r = Renderer.resolve(is_stdout_tty=False, env={}, caller=Caller(kind="user", agentic=False, source_env=None), json_flag=True)
+    r = Renderer.resolve(
+        is_stdout_tty=False, env={}, caller=Caller(kind="user", agentic=False, source_env=None), json_flag=True
+    )
     r.mode = OutputMode.JSON
     r.machine_stream = stream
     set_renderer(r)
