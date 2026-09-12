@@ -3630,7 +3630,9 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
             if err:
                 raise ValueError(err)
             warnings = [dict(w, field=addr) for w in port.validate_catalog(value)]
-        if target.repair is not None:
+        if target.repair is not None or any(
+            e.plan != _promoted.PLAN_PREVIEW for e in _promoted.plan_proxy_migration(workflow, instance, graph)
+        ):
             # A legacy ``proxyWidgets`` promotion: run the frontend's forward
             # migration on this instance first (forking a shared definition,
             # since the repair mutates it), exactly as the op path does.

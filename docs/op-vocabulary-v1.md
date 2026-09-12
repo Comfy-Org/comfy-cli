@@ -428,6 +428,10 @@ Current contract, pinned:
   widget)` — deterministic, never random — so replay on any replica produces
   a byte-identical document. The repair mutates the definition, so a shared
   one is forked first exactly like an interior write.
+  A write to an already-linked input also carries `promoted.repair = {ids}`
+  when the instance has pending legacy value entries: those must be consumed
+  before materializing a declaration-order host array. `entry` is omitted
+  because the written input already exists; replay still runs the same flush.
 * OPEN: the shared-definition forking semantics above are apply-time behavior
   that rewrites `instance.type` without an explicit op saying so. A full
   specification (fork visibility, interaction with concurrent interior writes
@@ -828,3 +832,5 @@ the op additionally carries `promoted.repair = {entry, ids}` with the
 subgraph-input and boundary-link ids the repair mints, derived by SHA-256 from
 `(instance path, source node, widget)` so replay anywhere is byte-identical.
 The pinned contract text in §8.7 states the full rule.
+This flush also precedes writes to already-linked inputs while legacy value
+entries remain; those ops carry `{ids}` without a newly repaired `entry`.
