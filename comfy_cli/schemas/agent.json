@@ -1,50 +1,77 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "comfy agent *",
-  "description": "Output shape for the local comfy agent's permission commands.",
-  "type": "object",
-  "properties": {
-    "data_dir": { "type": "string" },
-    "agent": {
+  "description": "Output shape for the local comfy agent's permission commands: the first shape is `comfy agent permissions`, the second `comfy agent allow`.",
+  "oneOf": [
+    {
+      "title": "comfy agent permissions",
       "type": "object",
       "properties": {
-        "running": { "type": "boolean" },
-        "port": { "type": ["integer", "null"] }
-      }
-    },
-    "sandbox": { "type": ["object", "null"] },
-    "comfy_path": { "type": ["string", "null"] },
-    "paths": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "path": { "type": "string" },
-          "reason": { "type": "string" },
-          "approved_at": { "type": "string" }
+        "data_dir": { "type": "string" },
+        "agent": {
+          "type": "object",
+          "properties": {
+            "running": { "type": "boolean" },
+            "port": { "type": ["integer", "null"] }
+          },
+          "required": ["running", "port"]
+        },
+        "sandbox": { "type": ["object", "null"] },
+        "comfy_path": { "type": ["string", "null"] },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string" },
+              "reason": { "type": "string" },
+              "approved_at": { "type": "string" }
+            },
+            "required": ["path"]
+          }
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "host": { "type": "string" },
+              "reason": { "type": "string" },
+              "approved_at": { "type": "string" }
+            },
+            "required": ["host"]
+          }
+        },
+        "grant": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" },
+            "host": { "type": "string" }
+          },
+          "required": ["path", "host"]
         }
-      }
+      },
+      "required": ["data_dir", "agent", "sandbox", "comfy_path", "paths", "hosts", "grant"]
     },
-    "hosts": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "host": { "type": "string" },
-          "reason": { "type": "string" },
-          "approved_at": { "type": "string" }
-        }
-      }
-    },
-    "grant": { "type": "object" },
-    "path": {
+    {
+      "title": "comfy agent allow",
       "type": "object",
-      "properties": { "path": { "type": "string" }, "added": { "type": "boolean" } }
-    },
-    "host": {
-      "type": "object",
-      "properties": { "host": { "type": "string" }, "added": { "type": "boolean" } }
-    },
-    "note": { "type": "string" }
-  }
+      "properties": {
+        "data_dir": { "type": "string" },
+        "path": {
+          "type": "object",
+          "properties": { "path": { "type": "string" }, "added": { "type": "boolean" } },
+          "required": ["path", "added"]
+        },
+        "host": {
+          "type": "object",
+          "properties": { "host": { "type": "string" }, "added": { "type": "boolean" } },
+          "required": ["host", "added"]
+        },
+        "note": { "type": "string" }
+      },
+      "required": ["data_dir", "note"],
+      "anyOf": [{ "required": ["path"] }, { "required": ["host"] }]
+    }
+  ]
 }

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
+import jsonschema
 import pytest
 from typer.testing import CliRunner
 
@@ -12,6 +14,8 @@ from comfy_cli.agent import allow_host, allow_path, read_state, vet_host, vet_pa
 from comfy_cli.agent.command import app
 from comfy_cli.caller import Caller
 from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
+
+SCHEMA = json.loads((Path(__file__).parents[3] / "comfy_cli" / "schemas" / "agent.json").read_text())
 
 
 def _pin_json_renderer():
@@ -32,6 +36,10 @@ def _renderer_lifecycle():
 
 def _envelope(result) -> dict:
     return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def _validate(data: dict) -> None:
+    jsonschema.Draft202012Validator(SCHEMA).validate(data)
 
 
 def test_allow_path_records_and_deduplicates(tmp_path: Path):
@@ -93,6 +101,7 @@ def test_cli_allow_and_permissions_round_trip(tmp_path: Path):
     assert env["ok"] is True
     assert env["data"]["path"]["added"] is True
     assert env["data"]["host"]["host"] == "models.example.com"
+    _validate(env["data"])
 
     _pin_json_renderer()
     res = runner.invoke(app, ["permissions", "--data-dir", str(root)])
@@ -101,6 +110,7 @@ def test_cli_allow_and_permissions_round_trip(tmp_path: Path):
     assert env["data"]["agent"]["running"] is False
     assert [e["path"] for e in env["data"]["paths"]] == [str(folder)]
     assert [e["host"] for e in env["data"]["hosts"]] == ["models.example.com"]
+    _validate(env["data"])
 
 
 def test_cli_allow_refuses_a_missing_folder(tmp_path: Path):
@@ -113,3 +123,71 @@ def test_cli_allow_refuses_a_missing_folder(tmp_path: Path):
 def test_cli_allow_needs_something(tmp_path: Path):
     res = CliRunner().invoke(app, ["allow", "--data-dir", str(tmp_path)])
     assert res.exit_code == 2
+
+
+def test_cli_allow_refuses_a_bad_host_without_persisting_the_path(tmp_path: Path):
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    res = CliRunner().invoke(app, ["allow", "--path", str(folder), "--host", "   ", "--data-dir", str(root)])
+    assert res.exit_code == 1
+    assert _envelope(res)["error"]["code"] == "refused"
+    assert not (root / "permissions.json").exists()
+    assert read_state(root).paths == []
+
+
+def test_vet_path_follows_symlinks_into_credential_stores(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    link = tmp_path / "photos"
+    os.symlink(home / ".ssh", link, target_is_directory=True)
+    with pytest.raises(ValueError, match="credential"):
+        vet_path(str(link))
+    real = tmp_path / "real"
+    real.mkdir()
+    alias = tmp_path / "alias"
+    os.symlink(real, alias, target_is_directory=True)
+    assert vet_path(str(alias)) == real.resolve()
+
+
+def test_read_state_ignores_a_boolean_or_out_of_range_port(tmp_path: Path):
+    root = tmp_path / "data"
+    root.mkdir()
+    for bad in (True, 0, 70000, "8190"):
+        (root / "agent.json").write_text(json.dumps({"port": bad}))
+        assert read_state(root).port is None
+    (root / "agent.json").write_text(json.dumps({"port": 8190}))
+    assert read_state(root).port == 8190
+
+
+def test_sandbox_status_treats_non_object_health_as_unavailable(monkeypatch):
+    import io
+
+    from comfy_cli.agent import command
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(command.urllib.request, "urlopen", lambda *a, **k: _Resp(b"[1, 2]"))
+    assert command._sandbox_status(8190) is None
+    monkeypatch.setattr(command.urllib.request, "urlopen", lambda *a, **k: _Resp(b'{"sandbox": {"mode": "seatbelt"}}'))
+    assert command._sandbox_status(8190) == {"sandbox": {"mode": "seatbelt"}}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"data_dir": "/x", "note": "n"},
+        {"data_dir": "/x", "path": {"path": "/p"}, "note": "n"},
+        {"data_dir": "/x", "agent": {"running": False}, "sandbox": None, "comfy_path": None, "paths": [], "hosts": []},
+    ],
+)
+def test_agent_schema_rejects_incomplete_payloads(payload):
+    with pytest.raises(jsonschema.ValidationError):
+        _validate(payload)

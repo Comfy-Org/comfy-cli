@@ -15,7 +15,7 @@ from typing import Annotated
 import typer
 
 from comfy_cli import tracking
-from comfy_cli.agent import allow_host, allow_path, data_dir, read_state
+from comfy_cli.agent import allow_host, allow_path, data_dir, read_state, vet_host, vet_path
 from comfy_cli.output import get_renderer, rprint
 
 app = typer.Typer(
@@ -41,6 +41,8 @@ def _sandbox_status(port: int | None) -> dict | None:
             body = json.loads(resp.read().decode("utf-8"))
     except (OSError, ValueError, urllib.error.URLError):
         return None
+    if not isinstance(body, dict):
+        return None  # a stale port answered by something that is not the agent
     out = {"sandbox": body.get("sandbox")}
     cli = body.get("cli") or {}
     if isinstance(cli, dict) and cli.get("workspace"):
@@ -109,6 +111,12 @@ def allow_cmd(
     root = data_dir(data_dir_opt)
     added: dict = {}
     try:
+        # Vet everything before the first write so a refused --host does not
+        # leave a --path approved behind a failure exit.
+        if path:
+            vet_path(path)
+        if host:
+            vet_host(host)
         if path:
             folder, is_new = allow_path(root, path, reason)
             added["path"] = {"path": str(folder), "added": is_new}

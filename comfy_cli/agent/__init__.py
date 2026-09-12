@@ -83,7 +83,9 @@ class AgentState:
 def read_state(root: Path) -> AgentState:
     """What the data dir says: whether an agent published itself, and the approvals."""
     disc = _read_json(root / DISCOVERY_FILE)
-    port = disc.get("port") if isinstance(disc.get("port"), int) else None
+    raw_port = disc.get("port")
+    # bool is an int subclass; a JSON true must not become port 1.
+    port = raw_port if type(raw_port) is int and 1 <= raw_port <= 65535 else None
     paths = _read_json(root / PERMISSIONS_FILE).get("paths") or []
     hosts = _read_json(root / EGRESS_ALLOW_FILE).get("hosts") or []
     return AgentState(
@@ -100,20 +102,30 @@ def _now() -> str:
 
 
 def vet_path(raw: str) -> Path:
-    """An approvable folder: absolute, existing, not the disk, not a credential store or a parent of one."""
+    """An approvable folder: absolute, existing, not the disk, not a credential store or a parent of one.
+
+    Returns the folder with symlinks resolved: the checks below run on the real
+    location, the way the agent's own fence does, so a link named elsewhere
+    that points into a credential store is refused and what gets recorded is
+    the folder the agent will actually open.
+    """
     p = Path(raw.strip()).expanduser()
     if not raw.strip():
         raise ValueError("a folder is required")
     if not p.is_absolute():
         raise ValueError(f"{raw!r} is not an absolute path")
     p = Path(os.path.normpath(p))
-    if p.parent == p:
-        raise ValueError(f"{p} is the whole filesystem and stays closed")
     if not p.is_dir():
         raise ValueError(f"{p} is not an existing folder")
-    home = Path.home()
+    try:
+        p = p.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"{p} cannot be resolved: {exc}") from exc
+    if p.parent == p:
+        raise ValueError(f"{p} is the whole filesystem and stays closed")
+    home = Path.home().resolve()
     for rel in _DENIED_HOME_SUBDIRS:
-        denied = Path(os.path.normpath(home / rel))
+        denied = (home / rel).resolve()
         if _same_or_under(p, denied):
             raise ValueError(f"{p} stays closed: it is a credential or agent-state folder")
         if _same_or_under(denied, p) and denied.exists():

@@ -551,7 +551,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     # --- agent ---------------------------------------------------------------
     ErrorCode(
         "agent_state_unreadable",
-        "A file in the local agent's data dir (agent.json, permissions.json, egress-allow.json) could not be read or parsed.",
+        "A file in the local agent's data dir (agent.json, permissions.json, "
+        "egress-allow.json) could not be read or parsed.",
         "fix or remove the file named in the message and try again",
     ),
     ErrorCode(
@@ -561,7 +562,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "refused",
-        "The folder or host cannot be allowed: relative or missing folder, the whole disk, a credential store or a folder containing one.",
+        "The folder or host cannot be allowed: relative or missing folder, "
+        "the whole disk, a credential store or a folder containing one.",
         "allow a narrower folder that holds only what is needed; credential stores and the whole disk never are",
     ),
     # --- skills --------------------------------------------------------------
