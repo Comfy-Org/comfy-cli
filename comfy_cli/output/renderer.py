@@ -398,7 +398,17 @@ class Renderer:
         line = json.dumps(payload, default=_json_default, ensure_ascii=False)
         stream = self.machine_stream
         try:
-            stream.write(line + "\n")
+            try:
+                stream.write(line + "\n")
+            except UnicodeEncodeError:
+                # A redirected stdout on Windows is cp1252 (or another legacy
+                # code page), and a payload with a character outside it — the
+                # "→" in a skill description, a model name — raised here. As a
+                # ValueError it fell into the clause below and the envelope
+                # silently vanished: the comfy-agent's skill import saw zero
+                # packs on Windows. JSON can spell every character in ASCII,
+                # so the same envelope is written escaped instead.
+                stream.write(json.dumps(payload, default=_json_default, ensure_ascii=True) + "\n")
             stream.flush()
         except (AttributeError, ValueError):
             # Resolving to JSON mode against an unusable stdout must not merely
