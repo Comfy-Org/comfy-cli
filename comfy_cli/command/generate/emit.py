@@ -173,22 +173,28 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
     # Flux2ProImageNode would emit a workflow for a *different* model, so
     # `flux-pro` falls through to the EmitError instead.
     "flux-2": NodeSpec(
-        node_class="Flux2ProImageNode",
+        node_class="Flux2ImageNode",
         endpoint="bfl/flux-2-pro/generate",
         param_map={
             "prompt": "prompt",
-            "width": "width",
-            "height": "height",
+            "width": "model.width",
+            "height": "model.height",
             "seed": "seed",
-            "prompt_upsampling": "prompt_upsampling",
         },
-        fixed={"width": 1024, "height": 768, "seed": 0, "prompt_upsampling": True},
+        # `model` is the dynamic-combo selector and its sub-widgets are addressed
+        # through it. It must be set before them, which `ops_from_api_workflow`
+        # guarantees by ordering plain keys ahead of dotted ones.
+        #
+        # "Flux.2 [pro]" is the option that posts to this entry's `endpoint`.
+        # The node's other option, "Flux.2 [max]", is a different model at a
+        # different price, so it needs its own alias and endpoint rather than
+        # being reachable by accident from this one.
+        #
+        # No `prompt_upsampling`: the proxy takes it, this node does not expose
+        # it, so the emitted workflow cannot carry it. `comfy generate` without
+        # --emit-workflow still sends it straight to the proxy.
+        fixed={"model": "Flux.2 [pro]", "model.width": 1024, "model.height": 768, "seed": 0},
         output="IMAGE",
-        # ComfyUI deprecated Flux2ProImageNode in favor of Flux2ImageNode,
-        # whose width/height live inside a dynamic combo that
-        # the flat `param_map` cannot express. Emitting the deprecated class is
-        # the status quo until that migration lands; this flag comes off with it.
-        deprecated_ok=True,
     ),
     # BFL Flux 1.1 [pro] Ultra (text-to-image). Node: FluxProUltraImageNode.
     # The node takes an `aspect_ratio` string where the proxy schema takes
@@ -344,6 +350,26 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
             )
         if width_given and height_given:
             node_inputs[ns.aspect_from_wh] = f"{values['width']}:{values['height']}"
+
+    # Same rule, generalized: every flag the user actually typed has to land
+    # somewhere. `parse_args` fills no defaults, so `values` holds only what argv
+    # carried — anything in it that no mapping consumes would be discarded in
+    # silence. A proxy flag the node does not expose cannot be honored by an
+    # emitted workflow at all (flux-2's `prompt_upsampling` is the live case:
+    # the proxy takes it, Flux2ImageNode has no such input), so say so instead
+    # of handing back a graph that quietly ignores it.
+    handled = set(ns.param_map) | set(ns.image_params)
+    if ns.aspect_from_wh:
+        handled |= {"width", "height"}
+    unsupported = sorted(flag for flag, value in values.items() if value is not None and flag not in handled)
+    if unsupported:
+        flags = ", ".join(f"--{flag}" for flag in unsupported)
+        raise EmitError(
+            f"--emit-workflow for {model!r} cannot carry {flags}: "
+            f"{ns.node_class} has no matching input. Drop the flag, or run "
+            f"`comfy generate {model}` without --emit-workflow to send it "
+            f"straight to the proxy."
+        )
 
     partner = {
         "class_type": ns.node_class,
