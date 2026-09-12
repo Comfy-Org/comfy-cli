@@ -98,6 +98,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow notes": "workflow",
     "comfy workflow print": "workflow",
     # structured edit primitives + recipes (CRDT op-based authoring)
+    "comfy workflow insert-workflow": "workflow",
     "comfy workflow add-node": "workflow",
     "comfy workflow connect": "workflow",
     "comfy workflow set-widget": "workflow",

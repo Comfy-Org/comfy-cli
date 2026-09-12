@@ -535,6 +535,7 @@ class TestInsertWorkflow:
     def test_transmits_op_once_through_renderer(self, monkeypatch, tmp_path):
         workflow = _write(tmp_path, {"nodes": [], "links": [], "groups": []})
         template = _write(tmp_path, {"nodes": [], "links": [], "groups": []}, "template.json")
+        original = workflow.read_text(encoding="utf-8")
         renderer = _force_json_renderer()
         transport = Mock()
         monkeypatch.setattr(renderer, "emit", transport)
@@ -556,20 +557,33 @@ class TestInsertWorkflow:
         assert payload["op"]["actor"] == "agent"
         assert payload["op"]["stamp"] == [4, "agent"]
         assert payload["op"]["workflow"] == {"nodes": [], "links": [], "groups": []}
+        assert workflow.read_text(encoding="utf-8") == original
 
-    def test_doc_host_rejection_is_surfaced_verbatim(self, monkeypatch, tmp_path, capsys):
+    def test_stdout_is_not_offered_for_emit_only_command(self):
+        result = CliRunner().invoke(workflow_cmd.app, ["insert-workflow", "--help"])
+
+        assert result.exit_code == 0
+        assert "--stdout" not in result.output
+        assert "--in-place" not in result.output
+
+    def test_command_is_discoverable_in_schema_and_bundled_skill(self):
+        from comfy_cli.discovery import COMMAND_SCHEMAS
+
+        skill = Path(workflow_edit.__file__).parent.parent / "skills" / "comfy" / "SKILL.md"
+
+        assert COMMAND_SCHEMAS["comfy workflow insert-workflow"] == "workflow"
+        assert "insert-workflow" in skill.read_text(encoding="utf-8")
+
+    def test_local_validation_error_is_reported(self, tmp_path, capsys):
         workflow = _write(tmp_path, {"nodes": [], "links": []})
-        template = _write(tmp_path, {"nodes": []}, "template.json")
-        renderer = _force_json_renderer()
-        transport = Mock(side_effect=ValueError("cmp rejected insert: node_id_collision 100"))
-        monkeypatch.setattr(renderer, "emit", transport)
+        template = _write(tmp_path, {"links": []}, "template.json")
+        _force_json_renderer()
 
         with pytest.raises(typer.Exit) as exc:
             workflow_edit.insert_workflow_cmd(str(workflow), str(template))
 
         assert exc.value.exit_code == 1
-        transport.assert_called_once()
-        assert "cmp rejected insert: node_id_collision 100" in capsys.readouterr().out
+        assert "missing required field: nodes" in capsys.readouterr().out
 
 
 class TestAddNode:
