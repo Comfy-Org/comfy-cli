@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy agent *",
+  "description": "Output shape for the local comfy agent's permission commands.",
+  "type": "object",
+  "properties": {
+    "data_dir": { "type": "string" },
+    "agent": {
+      "type": "object",
+      "properties": {
+        "running": { "type": "boolean" },
+        "port": { "type": ["integer", "null"] }
+      }
+    },
+    "sandbox": { "type": ["object", "null"] },
+    "comfy_path": { "type": ["string", "null"] },
+    "paths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "reason": { "type": "string" },
+          "approved_at": { "type": "string" }
+        }
+      }
+    },
+    "hosts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "host": { "type": "string" },
+          "reason": { "type": "string" },
+          "approved_at": { "type": "string" }
+        }
+      }
+    },
+    "grant": { "type": "object" },
+    "path": {
+      "type": "object",
+      "properties": { "path": { "type": "string" }, "added": { "type": "boolean" } }
+    },
+    "host": {
+      "type": "object",
+      "properties": { "host": { "type": "string" }, "added": { "type": "boolean" } }
+    },
+    "note": { "type": "string" }
+  }
+}
