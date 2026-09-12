@@ -548,6 +548,22 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "grammar: dot path `a.b.c`, array index `a.0.b`, wildcard `items.#.name`, comma multi-select "
         "`name,inputs`",
     ),
+    # --- agent ---------------------------------------------------------------
+    ErrorCode(
+        "agent_state_unreadable",
+        "A file in the local agent's data dir (agent.json, permissions.json, egress-allow.json) could not be read or parsed.",
+        "fix or remove the file named in the message and try again",
+    ),
+    ErrorCode(
+        "bad_args",
+        "The command was given nothing to act on (comfy agent allow needs --path and/or --host).",
+        "pass --path <folder> and/or --host <host>",
+    ),
+    ErrorCode(
+        "refused",
+        "The folder or host cannot be allowed: relative or missing folder, the whole disk, a credential store or a folder containing one.",
+        "allow a narrower folder that holds only what is needed; credential stores and the whole disk never are",
+    ),
     # --- skills --------------------------------------------------------------
     ErrorCode(
         "unknown_skill",

@@ -14,13 +14,18 @@ from comfy_cli.caller import Caller
 from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
 
 
-@pytest.fixture(autouse=True)
-def _json_renderer():
+def _pin_json_renderer():
+    """A renderer emits one envelope per process; pin a fresh JSON one per invoke."""
     r = Renderer.resolve(
         is_stdout_tty=False, env={}, caller=Caller(kind="user", agentic=False, source_env=None), json_flag=True
     )
     r.mode = OutputMode.JSON
     set_renderer(r)
+
+
+@pytest.fixture(autouse=True)
+def _renderer_lifecycle():
+    _pin_json_renderer()
     yield
     reset_renderer_for_testing()
 
@@ -89,7 +94,7 @@ def test_cli_allow_and_permissions_round_trip(tmp_path: Path):
     assert env["data"]["path"]["added"] is True
     assert env["data"]["host"]["host"] == "models.example.com"
 
-    _json_renderer()
+    _pin_json_renderer()
     res = runner.invoke(app, ["permissions", "--data-dir", str(root)])
     assert res.exit_code == 0, res.stdout
     env = _envelope(res)
