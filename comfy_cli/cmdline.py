@@ -2172,6 +2172,10 @@ _RootGroup.lazy_subcommands = {
         attr="assets_app",
         help="Push project assets to the run target (local or cloud) and track them in the lock.",
     ),
+    "agent": LazySubcommand(
+        "comfy_cli.agent.command",
+        help="The local comfy agent: what it may reach, and how to let it reach more.",
+    ),
     "skills": LazySubcommand(
         "comfy_cli.skills.command",
         help="Install the comfy agent skills into Claude Code, Cursor, Aider, and any AGENTS.md-aware tool.",

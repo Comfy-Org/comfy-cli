@@ -24,6 +24,10 @@ costing money), `comfy-debug` (any failed job: error code → fix), `comfy-relay
 (surface a workflow/result in chat, never leave it in /tmp). When a task spans
 several, load them up front instead of discovering the gap mid-render.
 
+Inside the local comfy agent (the `comfy-agent` binary on a user's machine), a permission that
+blocks you — a folder, a host, a shell — is a question for the user: the `comfy-agent-permissions`
+skill says what the agent may reach, how the user grants more, and what can never be granted.
+
 ---
 
 # Ground rules

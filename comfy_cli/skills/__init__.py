@@ -69,6 +69,7 @@ REFERENCE_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy-build-pins", "comfy-build-pins"),
     ("comfy-build-failures", "comfy-build-failures"),
     ("comfy-deploy-failures", "comfy-deploy-failures"),
+    ("comfy-agent-permissions", "comfy-agent-permissions"),
 )
 
 
