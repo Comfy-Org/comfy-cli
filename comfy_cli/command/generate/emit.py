@@ -351,6 +351,26 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
         if width_given and height_given:
             node_inputs[ns.aspect_from_wh] = f"{values['width']}:{values['height']}"
 
+    # Same rule, generalized: every flag the user actually typed has to land
+    # somewhere. `parse_args` fills no defaults, so `values` holds only what argv
+    # carried — anything in it that no mapping consumes would be discarded in
+    # silence. A proxy flag the node does not expose cannot be honored by an
+    # emitted workflow at all (flux-2's `prompt_upsampling` is the live case:
+    # the proxy takes it, Flux2ImageNode has no such input), so say so instead
+    # of handing back a graph that quietly ignores it.
+    handled = set(ns.param_map) | set(ns.image_params)
+    if ns.aspect_from_wh:
+        handled |= {"width", "height"}
+    unsupported = sorted(flag for flag, value in values.items() if value is not None and flag not in handled)
+    if unsupported:
+        flags = ", ".join(f"--{flag}" for flag in unsupported)
+        raise EmitError(
+            f"--emit-workflow for {model!r} cannot carry {flags}: "
+            f"{ns.node_class} has no matching input. Drop the flag, or run "
+            f"`comfy generate {model}` without --emit-workflow to send it "
+            f"straight to the proxy."
+        )
+
     partner = {
         "class_type": ns.node_class,
         "_meta": {"title": f"{ns.node_class} ({model})"},

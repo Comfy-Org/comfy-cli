@@ -224,6 +224,42 @@ def test_build_flux_ultra_only_height_errors_instead_of_dropping_it():
     assert "--width" in str(ei.value) and "--height" in str(ei.value)
 
 
+def test_emit_refuses_a_flag_the_node_cannot_carry():
+    """A proxy flag with no matching node input cannot reach an emitted
+    workflow, so dropping it in silence hands back a graph that ignores what the
+    user asked for. `prompt_upsampling` is the live case: the bfl/flux-2-pro
+    proxy takes it, Flux2ImageNode has no such input."""
+    with pytest.raises(emit.EmitError) as ei:
+        emit.build_workflow("flux-2", {"prompt": "a fox", "prompt_upsampling": True})
+    msg = str(ei.value)
+    assert "--prompt_upsampling" in msg
+    assert "Flux2ImageNode" in msg
+    # The remedy has to be in the message, or the user is left guessing.
+    assert "without --emit-workflow" in msg
+
+
+def test_emit_names_every_unsupported_flag_at_once():
+    """Reporting one at a time turns a single fix into a guessing loop."""
+    with pytest.raises(emit.EmitError) as ei:
+        emit.build_workflow("flux-2", {"prompt": "p", "safety_tolerance": 2, "output_format": "png"})
+    msg = str(ei.value)
+    assert "--output_format" in msg and "--safety_tolerance" in msg
+
+
+def test_emit_does_not_mistake_a_fixed_default_for_a_user_flag():
+    """`values` carries only what argv held, so NodeSpec.fixed entries that have
+    no param_map flag (flux-2's `model` selector) must not trip the check."""
+    wf = emit.build_workflow("flux-2", {"prompt": "p"})
+    assert wf["1"]["inputs"]["model"] == "Flux.2 [pro]"
+
+
+def test_emit_still_accepts_the_aspect_ratio_width_height_pair():
+    """flux-ultra folds width/height into `aspect_ratio` rather than mapping
+    them, so the check has to treat them as handled for that shape."""
+    wf = emit.build_workflow("flux-ultra", {"prompt": "p", "width": 16, "height": 9})
+    assert wf["1"]["inputs"]["aspect_ratio"] == "16:9"
+
+
 def test_emitted_workflow_is_api_format_node_ids_are_strings():
     wf = emit.build_workflow("flux-2", {"prompt": "p"})
     for k, node in wf.items():
