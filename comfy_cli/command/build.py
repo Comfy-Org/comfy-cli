@@ -2414,7 +2414,7 @@ def _without_signed_query(e: BaseException) -> str:
 def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None) -> None:
     """Emit one error envelope for a builder failure. Prefers the limited-beta 403,
     then the builder's own error body (e.g. `INVALID_DEFINITION: …` or
-    `SUBSCRIPTION_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
+    `PAYMENT_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
     generic transport error.
 
     *subject* is the id the command was acting on, spread into every envelope
