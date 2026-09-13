@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import random
 import re
 import uuid
@@ -557,6 +558,14 @@ def add_node(
         # Decided at mint time so the position freezes into the op and replay
         # stays convergent (P1). Existing nodes are never moved.
         pos = layout.cascade_pos(workflow, size)
+    if (
+        not isinstance(pos, (list, tuple))
+        or len(pos) != 2
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in pos
+        )
+    ):
+        raise ValueError(f"node position must be two finite numbers, got {pos!r}")
     node = _build_node(mint_id(), class_type, m, graph, pos, size)
     if mode:
         # Node mode (mute/bypass) is graph-semantic state — a bypassed node
