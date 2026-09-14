@@ -2032,7 +2032,10 @@ def push_cmd(
     if release:
         requested = [item.as_wire() for item in targets]
         release_id, status_url = _builder_call(
-            renderer, lambda: client.create_release(target_id, requested), {"buildId": target_id}
+            renderer,
+            lambda: client.create_release(target_id, requested),
+            {"buildId": target_id},
+            hint=_CUT_RETRY_HINT,
         )
         release_summary = {"releaseId": release_id, "statusUrl": status_url}
         payload["targets"] = requested
@@ -2411,7 +2414,7 @@ def _without_signed_query(e: BaseException) -> str:
     return _URL_QUERY_RE.sub(lambda m: m.group(0).partition("?")[0], str(e))
 
 
-def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None) -> None:
+def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None, hint: str | None = None) -> None:
     """Emit one error envelope for a builder failure. Prefers the limited-beta 403,
     then the builder's own error body (e.g. `INVALID_DEFINITION: …` or
     `SUBSCRIPTION_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
@@ -2424,7 +2427,13 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None)
     id the first attempt used. A call site that passes none invents nothing: the
     old `create` verb's orphan case is gone, because `push` writes the id into
     the spec on disk before it cuts, so a cut that fails afterwards leaves the id
-    in the user's own file rather than only in this envelope."""
+    in the user's own file rather than only in this envelope.
+
+    *hint* is the caller's chance to say what a retry of *this* call does, and it
+    reaches only the two ambiguous outcomes — an unmapped builder error and a
+    transport failure — where the envelope cannot say whether the write landed.
+    The TLS, limited-beta and mapped-refusal branches keep their own remediation,
+    which names a cause and a next step the call site does not know about."""
     import urllib.error
 
     from comfy_cli.http import tls_trust_hint, tls_verification_failed
@@ -2484,6 +2493,7 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None)
         renderer.error(
             code="build_builder_error",
             message=f"builder call failed ({e.code}): {_capped_message(str(detail))}",
+            hint=hint,
             details={**(subject or {}), "status": e.code, "body": body[:_BUILDER_BODY_CAP]},
         )
         return
@@ -2495,11 +2505,12 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None)
     renderer.error(
         code="build_builder_error",
         message=f"builder call failed: {_without_signed_query(e)}",
+        hint=hint,
         details=dict(subject or {}),
     )
 
 
-def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None):
+def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None, *, hint: str | None = None):
     """Run a builder API call, mapping every failure class to one error envelope
     + exit(1) via _report_builder_error. *subject* names the id the command is
     acting on, so a refusal an agent must act on says which one.
@@ -2508,6 +2519,10 @@ def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None):
     clause below would relabel a packaging failure as ``build_missing_input``
     and drop the node path from ``details`` — the contract
     ``_raise_node_package_error`` exists to hold. Package before the call.
+
+    ``hint`` rides through to the builder-error and transport envelopes for calls
+    whose failure leaves the caller unable to tell whether the write landed. See
+    ``_CUT_RETRY_HINT``.
     """
     import urllib.error
 
@@ -2524,7 +2539,7 @@ def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None):
     # ``InvalidURL`` and ``InvalidSchema`` subclass both, and a malformed builder-supplied upload
     # URL is the builder's failure, reported redacted, not the caller's input.
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
-        _report_builder_error(renderer, e, subject)
+        _report_builder_error(renderer, e, subject, hint)
         raise typer.Exit(code=1) from e
     except ValueError as e:
         renderer.error(code="build_missing_input", message=str(e))
@@ -2709,6 +2724,18 @@ def _release_failed(release: dict) -> bool:
     return isinstance(failed, int) and failed > 0
 
 
+# A cut that fails after the request went out is ambiguous: the builder may have
+# committed the release and lost the response. It dedupes on the definition's content
+# hash scoped to the Build and re-drives the enqueue of a release it committed but
+# never queued, so the retry is the repair and not a second cut. "Spec unchanged" is
+# load-bearing — the hash is over the definition, so a `push` in between does cut again.
+_CUT_RETRY_HINT = (
+    "a cut is idempotent — the builder dedupes on the definition's content hash, so re-running this exact "
+    "command with the spec unchanged returns the same release rather than cutting a second one; "
+    "`comfy build release ls` shows what exists"
+)
+
+
 @release_app.command("create", help="Cut a release from the current Build.")
 @tracking.track_command("build")
 def release_create(
@@ -2750,6 +2777,7 @@ def release_create(
         renderer,
         lambda: client.create_release(selected_build_id, requested),
         {"buildId": selected_build_id},
+        hint=_CUT_RETRY_HINT,
     )
     payload = {
         "buildId": selected_build_id,
