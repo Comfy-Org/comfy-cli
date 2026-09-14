@@ -20,9 +20,14 @@ know what exists, and reach for the right one rather than improvising its job:**
 `comfy-director` (multi-shot narrative video — story, continuity, conform),
 `comfy-build` (build a custom ComfyUI environment on the developer platform),
 `comfy-deploy` (run a build release as a serverless deployment, and stop it
-costing money), `comfy-debug` (any failed job: error code → fix), `comfy-relay`
+costing money), `comfy-custom-nodes` (write or fix a custom node pack — the V3 node API,
+layout, testing, publishing), `comfy-debug` (any failed job: error code → fix), `comfy-relay`
 (surface a workflow/result in chat, never leave it in /tmp). When a task spans
 several, load them up front instead of discovering the gap mid-render.
+
+Inside the local comfy agent (the `comfy-agent` binary on a user's machine), a permission that
+blocks you — a folder, a host, a shell — is a question for the user: the `comfy-agent-permissions`
+skill says what the agent may reach, how the user grants more, and what can never be granted.
 
 ---
 

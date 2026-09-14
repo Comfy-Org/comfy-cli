@@ -548,6 +548,42 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "grammar: dot path `a.b.c`, array index `a.0.b`, wildcard `items.#.name`, comma multi-select "
         "`name,inputs`",
     ),
+    # --- agent ---------------------------------------------------------------
+    ErrorCode(
+        "agent_state_unreadable",
+        "A file in the local agent's data dir (agent.json, permissions.json, "
+        "egress-allow.json) could not be read, or is not the shape the agent writes.",
+        "fix or remove the file named in the message and try again",
+    ),
+    ErrorCode(
+        "agent_state_unwritable",
+        "The local agent's data dir could not be written (permissions, a read-only location, a full disk).",
+        "check the data dir's permissions, or pass --data-dir for the dir the agent uses",
+    ),
+    ErrorCode(
+        "agent_bad_args",
+        "The command was given nothing to act on, or --approve together with --path/--host (comfy agent allow "
+        "needs --approve <id> on its own, or --path and/or --host).",
+        "pass --approve <id> for a pending request, or --path <folder> and/or --host <host>",
+    ),
+    ErrorCode(
+        "agent_refused",
+        "The folder or host cannot be allowed: relative or missing folder, the whole disk, a credential "
+        "store or a folder containing one (the home folder), a .env name, the agent's own data dir; "
+        "a wildcard, bare or multi-host value, a loopback/link-local address, or a host the agent never opens. "
+        "For --approve, the pending request named such a target: nothing was approved and it stays pending.",
+        "allow a narrower folder that holds only what is needed, or give the full host name; "
+        "credential stores, the home folder, the whole disk and telemetry endpoints never are; "
+        "`comfy agent deny <id>` clears a refused request",
+    ),
+    ErrorCode(
+        "agent_unknown_request",
+        "No pending request in the agent's permissions.json carries the id given to `comfy agent allow --approve` "
+        "or `comfy agent deny`: it was already approved or denied, the agent never recorded it, or the data dir "
+        "is not the one the agent uses.",
+        "run `comfy agent permissions` to see the requests waiting and their ids; pass --data-dir if the agent "
+        "uses another data dir",
+    ),
     # --- skills --------------------------------------------------------------
     ErrorCode(
         "unknown_skill",
