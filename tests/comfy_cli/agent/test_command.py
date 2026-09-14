@@ -674,8 +674,12 @@ def test_cli_permissions_lists_pending_and_names_approve_first(tmp_path: Path):
     assert res.exit_code == 0, res.output
     assert res.exception is None
     out = res.output
-    assert "0123456789abcdef" in out and "models.example.com" in out and "a VAE [/]" in out
-    assert out.index("0123456789abcdef") < out.index("hosts the user approved")
+    # The request's id, target and reason each appear on the pending line.
+    # (A ``find`` rather than ``in``: CodeQL reads ``"<host>" in s`` as URL
+    # sanitization and flags it, and this is an assertion, not a check.)
+    for needle in (req["id"], req["target"], req["reason"]):
+        assert out.find(needle) >= 0, f"{needle!r} missing from:\n{out}"
+    assert out.index(req["id"]) < out.index("hosts the user approved")
     assert "ago" in out
     assert "comfy agent allow --approve 0123456789abcdef" in out
 
