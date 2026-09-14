@@ -275,3 +275,54 @@ def test_find_property_descends_top_level_composition():
     nested = {"anyOf": [{"oneOf": [{"properties": {"model": {"enum": ["m2"]}}}]}]}
     assert spec._find_property(nested, "model") == {"enum": ["m2"]}
     assert spec._find_property({"allOf": [{"type": "object"}]}, "model") is None
+
+
+def test_is_deprecated_op():
+    # Machine flag wins.
+    assert spec._is_deprecated_op({"deprecated": True}) is True
+    # Upstream convention: deprecation announced in the SUMMARY (this is how
+    # the real veo/generate + veo/poll ops flag themselves — no machine flag).
+    assert (
+        spec._is_deprecated_op({"summary": "Generate a video. Deprecated. Use /proxy/veo/{modelId}/generate."}) is True
+    )
+    # sd3 guard: a live endpoint whose DESCRIPTION merely mentions deprecation
+    # of an older API must NOT be treated as deprecated.
+    assert (
+        spec._is_deprecated_op(
+            {
+                "summary": "Stable Diffusion 3.5",
+                "description": "As of April 17, 2025, we have deprecated the Stable Diffusion 3.0 APIs.",
+            }
+        )
+        is False
+    )
+    # Ordinary live op.
+    assert spec._is_deprecated_op({"summary": "Create image"}) is False
+    assert spec._is_deprecated_op({}) is False
+
+
+def test_registry_skips_deprecated_endpoint(monkeypatch, tmp_path):
+    """A deprecated allowlisted endpoint is dropped from the registry while a
+    sibling live endpoint on the same partner survives."""
+    body = (
+        '{"openapi":"3.1.0","servers":[{"url":"https://api.comfy.org"}],"paths":{'
+        '"/proxy/openai/images/generations":{"post":{"summary":"Create image. Deprecated. Use edits.",'
+        '"requestBody":{"content":{"application/json":{"schema":{"type":"object"}}}},'
+        '"responses":{"200":{"content":{"application/json":{"schema":{"type":"object"}}}}}}},'
+        '"/proxy/openai/images/edits":{"post":{"summary":"Edit image",'
+        '"requestBody":{"content":{"application/json":{"schema":{"type":"object"}}}},'
+        '"responses":{"200":{"content":{"application/json":{"schema":{"type":"object"}}}}}}}'
+        "}}"
+    )
+    cache = tmp_path / "openapi-cache.yml"
+    cache.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(spec, "_USER_CACHE", cache)
+    spec.load_raw_spec.cache_clear()
+    spec._registry.cache_clear()
+    try:
+        ids = {e.id for e in spec.list_endpoints()}
+        assert "openai/images/generations" not in ids, "deprecated endpoint must be skipped"
+        assert "openai/images/edits" in ids, "live sibling endpoint must survive"
+    finally:
+        spec.load_raw_spec.cache_clear()
+        spec._registry.cache_clear()
