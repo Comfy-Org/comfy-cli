@@ -552,19 +552,26 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "agent_state_unreadable",
         "A file in the local agent's data dir (agent.json, permissions.json, "
-        "egress-allow.json) could not be read or parsed.",
+        "egress-allow.json) could not be read, or is not the shape the agent writes.",
         "fix or remove the file named in the message and try again",
     ),
     ErrorCode(
-        "bad_args",
+        "agent_state_unwritable",
+        "The local agent's data dir could not be written (permissions, a read-only location, a full disk).",
+        "check the data dir's permissions, or pass --data-dir for the dir the agent uses",
+    ),
+    ErrorCode(
+        "agent_bad_args",
         "The command was given nothing to act on (comfy agent allow needs --path and/or --host).",
         "pass --path <folder> and/or --host <host>",
     ),
     ErrorCode(
-        "refused",
-        "The folder or host cannot be allowed: relative or missing folder, "
-        "the whole disk, a credential store or a folder containing one.",
-        "allow a narrower folder that holds only what is needed; credential stores and the whole disk never are",
+        "agent_refused",
+        "The folder or host cannot be allowed: relative or missing folder, the whole disk, a credential "
+        "store or a folder containing one (the home folder), a .env name, the agent's own data dir; "
+        "a wildcard, bare or multi-host value, a loopback/link-local address, or a host the agent never opens.",
+        "allow a narrower folder that holds only what is needed, or give the full host name; "
+        "credential stores, the home folder, the whole disk and telemetry endpoints never are",
     ),
     # --- skills --------------------------------------------------------------
     ErrorCode(

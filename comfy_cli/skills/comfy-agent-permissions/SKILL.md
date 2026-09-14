@@ -53,10 +53,15 @@ it applies at the next start.
 
 ## What can never be granted
 
-Credential and browser stores (`~/.ssh`, `~/.aws`, keychains, browser
-profiles, any `.env`), a folder that contains one (the home folder), the whole
-disk, the agent's own state files, telemetry endpoints and shared object
-storage roots. Say so and ask for a narrower folder or another source.
+Credential and browser stores (`~/.ssh`, `~/.aws`, `~/.config/gh`, keychains,
+browser profiles), a folder that contains one (the home folder, even before
+any store exists in it), the whole disk, the agent's own data dir, and any
+folder named `.env`, `.env.*` or `.envrc`. A `.env` file stays unreadable
+inside an approved folder: the name is denied wherever it lives. For hosts:
+telemetry endpoints, shared object storage roots (`storage.googleapis.com`,
+`r2.cloudflarestorage.com`), loopback and link-local addresses, wildcards and
+bare names (`*`, `com`); an approved host is matched exactly, so give the full
+host name. Say so and ask for a narrower folder or another source.
 
 ## Windows
 

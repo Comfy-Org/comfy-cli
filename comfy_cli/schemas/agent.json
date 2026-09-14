@@ -68,7 +68,11 @@
           "properties": { "host": { "type": "string" }, "added": { "type": "boolean" } },
           "required": ["host", "added"]
         },
-        "note": { "type": "string" }
+        "note": { "type": "string" },
+        "warning": {
+          "type": "string",
+          "description": "Present when no agent.json exists in data_dir: no agent has run from it, so a running agent elsewhere will not see the approval."
+        }
       },
       "required": ["data_dir", "note"],
       "anyOf": [{ "required": ["path"] }, { "required": ["host"] }]

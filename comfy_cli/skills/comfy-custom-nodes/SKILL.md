@@ -147,10 +147,13 @@ PublisherId = "<from registry.comfy.org>"
 DisplayName = "My Pack"
 ```
 
-`comfy node init` writes the skeleton; `comfy node publish` uploads the
-version in `pyproject.toml` (every git-tracked file); set `COMFY_API_KEY` in
-CI. Requirements: list only what ComfyUI does not already ship (it has torch,
-torchvision, numpy, Pillow, scipy, safetensors, transformers).
+`comfy node init` writes only this `pyproject.toml` (with defaults to check),
+not the Python files. `comfy node publish` uploads the version in
+`pyproject.toml` (every git-tracked file); it takes the registry token as
+`--token <token>` and prompts for it otherwise, so in CI pass `--token`
+(there is no environment variable for it). Requirements: list only what
+ComfyUI does not already ship (it has torch, torchvision, numpy, Pillow,
+scipy, safetensors, transformers).
 Docs: https://docs.comfy.org/registry/publishing
 
 ## Reading a V1 pack
@@ -165,7 +168,20 @@ Docs: https://docs.comfy.org/registry/publishing
 | `NODE_CLASS_MAPPINGS` / `NODE_DISPLAY_NAME_MAPPINGS` | `ComfyExtension.get_node_list()`, `display_name` |
 
 Old workflows keep working across a migration when the extension's `on_load`
-registers `io.NodeReplace(new_node_id=…, old_node_id=…, input_mapping=…)`.
+registers the replacement — building the object alone registers nothing:
+
+```python
+from comfy_api.latest import ComfyAPI, ComfyExtension, io
+
+api = ComfyAPI()
+
+
+class MyPackExtension(ComfyExtension):
+    async def on_load(self) -> None:
+        await api.node_replacement.register(
+            io.NodeReplace(new_node_id="MyPack_New", old_node_id="MyPack_Old", input_mapping=[…], output_mapping=[…])
+        )
+```
 
 ## Going deeper
 
