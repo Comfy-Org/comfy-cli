@@ -15,7 +15,17 @@ import jsonschema
 import pytest
 from typer.testing import CliRunner
 
-from comfy_cli.agent import StateError, allow_host, allow_path, read_state, vet_host, vet_path
+from comfy_cli.agent import (
+    StateError,
+    UnknownRequestError,
+    allow_host,
+    allow_path,
+    approve,
+    deny,
+    read_state,
+    vet_host,
+    vet_path,
+)
 from comfy_cli.agent.command import app
 from comfy_cli.caller import Caller
 from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
@@ -515,3 +525,260 @@ def test_cli_allow_refuses_the_data_dirs_parent(tmp_path: Path):
     assert res.exit_code == 1
     assert _envelope(res)["error"]["code"] == "agent_refused"
     assert not (root / "permissions.json").exists()
+
+
+# --- pending requests: the agent records, a human approves from here -------
+
+
+def _write_pending(root: Path, *requests: dict, paths: list | None = None) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "permissions.json").write_text(json.dumps({"paths": paths or [], "pending": list(requests)}))
+
+
+def _req(id_: str, kind: str, target: str, reason: str = "the agent asked") -> dict:
+    return {"id": id_, "kind": kind, "target": target, "reason": reason, "requested_at": "2026-09-14T10:00:00Z"}
+
+
+def test_read_state_returns_pending_and_skips_malformed_entries(tmp_path: Path):
+    root = tmp_path / "data"
+    good = _req("0123456789abcdef", "host", "models.example.com")
+    _write_pending(
+        root,
+        good,
+        {"id": "no-kind", "target": "/x"},
+        {"id": 7, "kind": "path", "target": "/x"},
+        {"id": "fedcba9876543210", "kind": "shell", "target": "x"},
+        "not an object",
+    )
+    state = read_state(root)
+    assert state.pending == [good]
+    assert state.paths == []
+    (root / "permissions.json").write_text(json.dumps({"paths": []}))
+    assert read_state(root).pending == []
+    (root / "permissions.json").write_text(json.dumps({"paths": [], "pending": "x"}))
+    assert read_state(root).pending == []
+
+
+def test_approve_path_request_records_it_and_clears_only_it(tmp_path: Path):
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    other = _req("fedcba9876543210", "host", "models.example.com", "a VAE")
+    _write_pending(root, _req("0123456789abcdef", "path", str(folder), "reference photos"), other)
+    record, kind = approve(root, "0123456789abcdef")
+    assert kind == "path"
+    assert record["path"] == str(folder.resolve()) and record["reason"] == "reference photos"
+    assert record["approved_at"].endswith("Z")
+    state = read_state(root)
+    assert [e["path"] for e in state.paths] == [str(folder.resolve())]
+    assert state.pending == [other], "approving one request never touches another"
+    assert not (root / "egress-allow.json").exists()
+
+
+def test_approve_host_request_records_it_and_clears_it(tmp_path: Path):
+    root = tmp_path / "data"
+    _write_pending(root, _req("0123456789abcdef", "host", "Models.Example.com", "a VAE"))
+    record, kind = approve(root, "0123456789abcdef")
+    assert kind == "host"
+    assert record["host"] == "models.example.com" and record["reason"] == "a VAE"
+    state = read_state(root)
+    assert [e["host"] for e in state.hosts] == ["models.example.com"]
+    assert state.pending == []
+    assert state.paths == []
+
+
+def test_approve_unknown_id_raises_and_leaves_both_requests_pending(tmp_path: Path):
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    a = _req("0123456789abcdef", "path", str(folder))
+    b = _req("fedcba9876543210", "host", "models.example.com")
+    _write_pending(root, a, b)
+    for bad in ("0000000000000000", "", "0123456789ABCDEF", "0123456789abcdef "):
+        with pytest.raises(UnknownRequestError):
+            approve(root, bad)
+        with pytest.raises(UnknownRequestError):
+            deny(root, bad)
+    state = read_state(root)
+    assert state.pending == [a, b] and state.paths == [] and state.hosts == []
+    assert not (root / "egress-allow.json").exists()
+
+
+def test_approve_refused_target_raises_and_stays_pending(home: Path, tmp_path: Path):
+    """The agent's request names the target; vetting is the human's last look.
+    A refused target is neither approved nor dropped: the request stays for
+    `comfy agent deny`."""
+    root = tmp_path / "data"
+    (home / ".ssh").mkdir()
+    reqs = [
+        _req("0123456789abcdef", "path", str(home)),
+        _req("fedcba9876543210", "host", "127.0.0.1"),
+        _req("00000000000000aa", "path", str(tmp_path / "missing")),
+    ]
+    _write_pending(root, *reqs)
+    before = (root / "permissions.json").read_text()
+    for r in reqs:
+        with pytest.raises(ValueError) as exc:
+            approve(root, r["id"])
+        assert not isinstance(exc.value, UnknownRequestError)
+    assert (root / "permissions.json").read_text() == before
+    assert not (root / "egress-allow.json").exists()
+    assert read_state(root).pending == reqs
+
+
+def test_approve_deduplicates_against_an_existing_approval(tmp_path: Path):
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    _write_pending(
+        root,
+        _req("0123456789abcdef", "path", str(folder)),
+        paths=[{"path": str(folder.resolve()), "reason": "earlier", "approved_at": "2026-01-01T00:00:00Z"}],
+    )
+    record, _ = approve(root, "0123456789abcdef")
+    assert record["reason"] == "earlier"
+    state = read_state(root)
+    assert len(state.paths) == 1 and state.pending == []
+
+
+def test_deny_removes_only_that_request(tmp_path: Path):
+    root = tmp_path / "data"
+    a = _req("0123456789abcdef", "path", "/nowhere/at/all")
+    b = _req("fedcba9876543210", "host", "*")
+    (root).mkdir()
+    (root / "permissions.json").write_text(json.dumps({"version": 2, "paths": [], "pending": [a, b, "junk"]}))
+    assert deny(root, "fedcba9876543210") == b
+    perms = json.loads((root / "permissions.json").read_text())
+    assert perms["version"] == 2 and perms["paths"] == []
+    assert perms["pending"] == [a, "junk"], "a deny drops one entry and keeps everything else, even junk"
+    assert read_state(root).pending == [a]
+    assert not (root / "egress-allow.json").exists()
+
+
+def test_cli_permissions_lists_pending_and_names_approve_first(tmp_path: Path):
+    root = tmp_path / "data"
+    req = _req("0123456789abcdef", "host", "models.example.com", "a VAE [/]")
+    _write_pending(root, req)
+    runner = CliRunner()
+    res = runner.invoke(app, ["permissions", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    data = _envelope(res)["data"]
+    assert data["pending"] == [req]
+    assert list(data["grant"])[0] == "approve"
+    assert "--approve <id>" in data["grant"]["approve"]
+    assert "comfy agent deny <id>" == data["grant"]["deny"]
+    _validate(data)
+
+    _pin_renderer(OutputMode.PRETTY)
+    res = runner.invoke(app, ["permissions", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.output
+    assert res.exception is None
+    out = res.output
+    assert "0123456789abcdef" in out and "models.example.com" in out and "a VAE [/]" in out
+    assert out.index("0123456789abcdef") < out.index("hosts the user approved")
+    assert "ago" in out
+    assert "comfy agent allow --approve 0123456789abcdef" in out
+
+
+def test_cli_allow_approve_round_trip(tmp_path: Path):
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    _write_pending(root, _req("0123456789abcdef", "path", str(folder), "reference photos"))
+    (root / "agent.json").write_text(json.dumps({"port": 8190}))
+    runner = CliRunner()
+    res = runner.invoke(app, ["allow", "--approve", "0123456789abcdef", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    env = _envelope(res)
+    assert env["ok"] is True
+    data = env["data"]
+    assert data["approved"] == {"id": "0123456789abcdef", "kind": "path", "target": str(folder.resolve())}
+    assert "warning" not in data
+    _validate(data)
+    state = read_state(root)
+    assert [e["reason"] for e in state.paths] == ["reference photos"]
+    assert state.pending == []
+
+    _pin_json_renderer()
+    res = runner.invoke(app, ["allow", "--approve", "0123456789abcdef", "--data-dir", str(root)])
+    assert res.exit_code == 1
+    assert _envelope(res)["error"]["code"] == "agent_unknown_request"
+
+
+def test_cli_allow_approve_warns_when_no_agent_ran_here(tmp_path: Path):
+    root = tmp_path / "data"
+    _write_pending(root, _req("0123456789abcdef", "host", "models.example.com"))
+    res = CliRunner().invoke(app, ["allow", "--approve", "0123456789abcdef", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    data = _envelope(res)["data"]
+    assert data["approved"]["kind"] == "host"
+    assert "no agent has run from this data dir" in data["warning"]
+    _validate(data)
+
+
+def test_cli_allow_approve_cannot_be_combined_with_path_or_host(tmp_path: Path):
+    root = tmp_path / "data"
+    folder = tmp_path / "refs"
+    folder.mkdir()
+    _write_pending(root, _req("0123456789abcdef", "path", str(folder)))
+    runner = CliRunner()
+    for extra in (["--path", str(folder)], ["--host", "models.example.com"]):
+        _pin_json_renderer()
+        res = runner.invoke(app, ["allow", "--approve", "0123456789abcdef", *extra, "--data-dir", str(root)])
+        assert res.exit_code == 2
+        assert _envelope(res)["error"]["code"] == "agent_bad_args"
+    assert read_state(root).pending != [] and read_state(root).paths == [] and read_state(root).hosts == []
+
+
+def test_cli_allow_approve_refused_target_stays_pending(home: Path, tmp_path: Path):
+    root = tmp_path / "data"
+    _write_pending(root, _req("0123456789abcdef", "path", str(home)))
+    res = CliRunner().invoke(app, ["allow", "--approve", "0123456789abcdef", "--data-dir", str(root)])
+    assert res.exit_code == 1
+    err = _envelope(res)["error"]
+    assert err["code"] == "agent_refused"
+    assert "deny" in err["hint"]
+    assert read_state(root).pending[0]["id"] == "0123456789abcdef"
+    assert read_state(root).paths == []
+
+
+def test_cli_deny_round_trip(tmp_path: Path):
+    root = tmp_path / "data"
+    _write_pending(root, _req("0123456789abcdef", "host", "evil.example.com"))
+    runner = CliRunner()
+    res = runner.invoke(app, ["deny", "0123456789abcdef", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    env = _envelope(res)
+    assert env["command"] == "agent deny"
+    data = env["data"]
+    assert data["denied"] == {"id": "0123456789abcdef", "kind": "host", "target": "evil.example.com"}
+    _validate(data)
+    assert read_state(root).pending == [] and read_state(root).hosts == []
+
+    _pin_json_renderer()
+    res = runner.invoke(app, ["deny", "0123456789abcdef", "--data-dir", str(root)])
+    assert res.exit_code == 1
+    assert _envelope(res)["error"]["code"] == "agent_unknown_request"
+
+
+def test_cli_deny_reports_a_broken_permissions_file(tmp_path: Path):
+    root = tmp_path / "data"
+    root.mkdir()
+    (root / "permissions.json").write_text("{not json")
+    res = CliRunner().invoke(app, ["deny", "0123456789abcdef", "--data-dir", str(root)])
+    assert res.exit_code == 1
+    assert _envelope(res)["error"]["code"] == "agent_state_unreadable"
+    assert (root / "permissions.json").read_text() == "{not json"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"data_dir": "/x", "approved": {"id": "0123456789abcdef", "kind": "path"}},
+        {"data_dir": "/x", "denied": {"id": "0123456789abcdef", "kind": "shell", "target": "x"}},
+        {"data_dir": "/x", "approved": {"id": "0123456789abcdef", "kind": "path", "target": "/p"}, "note": 1},
+    ],
+)
+def test_agent_schema_rejects_incomplete_approve_and_deny_payloads(payload):
+    with pytest.raises(jsonschema.ValidationError):
+        _validate(payload)

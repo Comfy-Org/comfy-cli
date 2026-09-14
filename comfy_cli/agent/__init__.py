@@ -2,17 +2,23 @@
 
 The local agent (the ``comfy-agent`` binary on the user's own machine) runs
 every command in a sandbox and every file tool behind a fence. What the user
-lets it reach beyond the defaults lives in two files in its data dir, written
-by the agent's own ``allow_path`` / ``allow_host`` tools when the user says yes
-in chat:
+lets it reach beyond the defaults lives in two files in its data dir:
 
 - ``permissions.json``  — folders (``{"paths": [{"path", "reason", "approved_at"}]}``)
+  and the agent's own requests waiting for a human
+  (``{"pending": [{"id", "kind", "target", "reason", "requested_at"}]}``)
 - ``egress-allow.json`` — hosts   (``{"hosts": [{"host", "reason", "approved_at"}]}``)
 
-This module writes the same files from a terminal. A running agent re-reads
-them every ~20 s; otherwise they apply at its next start. The data dir is
-``AGENT_DATA_DIR`` when set, else ``~/.comfy-agent`` — the same rule the agent
-and its launcher use.
+The agent's ``request_path`` / ``request_host`` tools only append to
+``pending``: the model can ask, and injected content in a workflow can make it
+ask, but nothing it can call moves a target into an approved list. A human
+does that through a channel the model cannot reach — this module from a
+terminal (``comfy agent allow --approve <id>`` / ``comfy agent deny <id>``), or
+a panel button — after vetting the exact target the request names. The same
+module also grants a folder or host outright (``comfy agent allow --path`` /
+``--host``). A running agent re-reads both files every ~20 s; otherwise they
+apply at its next start. The data dir is ``AGENT_DATA_DIR`` when set, else
+``~/.comfy-agent`` — the same rule the agent and its launcher use.
 
 The checks here are a courtesy, not the fence: the agent's sandbox deny list
 and egress proxy decide what a grant can open, and they win over anything
@@ -41,6 +47,15 @@ DISCOVERY_FILE = "agent.json"
 
 class StateError(ValueError):
     """A file in the agent's data dir cannot be read, or is not the shape the agent writes."""
+
+
+class UnknownRequestError(ValueError):
+    """No pending request carries the id given (already approved or denied, or never asked)."""
+
+
+# A request id as the agent mints it: 16 lower-case hex characters.
+_REQUEST_ID = re.compile(r"^[0-9a-f]{16}$")
+_REQUEST_KINDS = ("path", "host")
 
 
 # Folders a terminal grant may never name, in either direction. This mirrors
@@ -149,6 +164,29 @@ def _load(path: Path, key: str) -> tuple[dict, list[dict]]:
     return data, list(raw)
 
 
+def _is_request(e: object) -> bool:
+    return (
+        isinstance(e, dict)
+        and isinstance(e.get("id"), str)
+        and bool(_REQUEST_ID.match(e["id"]))
+        and e.get("kind") in _REQUEST_KINDS
+        and isinstance(e.get("target"), str)
+    )
+
+
+def _pending(data: dict) -> list[dict]:
+    """The well-formed requests in a permissions object; a malformed entry or a non-list is skipped, not an error.
+
+    A request the agent wrote badly is nothing a human can act on, and a
+    broken ``pending`` must not lock ``comfy agent permissions`` out of the
+    approvals the same file holds.
+    """
+    raw = data.get("pending")
+    if not isinstance(raw, list):
+        return []
+    return [e for e in raw if _is_request(e)]
+
+
 @dataclass(frozen=True)
 class AgentState:
     data_dir: Path
@@ -156,10 +194,11 @@ class AgentState:
     port: int | None
     paths: list[dict]
     hosts: list[dict]
+    pending: list[dict]
 
 
 def read_state(root: Path) -> AgentState:
-    """What the data dir says: whether an agent published itself, and the approvals.
+    """What the data dir says: whether an agent published itself, the approvals, and the requests waiting.
 
     Raises :class:`StateError` when any of the three files is unreadable or
     not the shape the agent writes.
@@ -168,9 +207,9 @@ def read_state(root: Path) -> AgentState:
     raw_port = disc.get("port")
     # bool is an int subclass; a JSON true must not become port 1.
     port = raw_port if type(raw_port) is int and 1 <= raw_port <= 65535 else None
-    _, paths = _load(root / PERMISSIONS_FILE, "paths")
+    perms, paths = _load(root / PERMISSIONS_FILE, "paths")
     _, hosts = _load(root / EGRESS_ALLOW_FILE, "hosts")
-    return AgentState(data_dir=root, running=bool(disc), port=port, paths=paths, hosts=hosts)
+    return AgentState(data_dir=root, running=bool(disc), port=port, paths=paths, hosts=hosts, pending=_pending(perms))
 
 
 def _now() -> str:
@@ -339,6 +378,72 @@ def allow_host(root: Path, host: str, reason: str) -> tuple[str, bool]:
     entries.append({"host": h, "reason": reason, "approved_at": _now()})
     _write(file, {**data, "hosts": entries})
     return h, True
+
+
+def _take_request(root: Path, request_id: str) -> tuple[dict, list[dict], dict, list]:
+    """The permissions object, its ``paths``, the request with ``request_id``, and ``pending`` without it.
+
+    Raises :class:`UnknownRequestError` when no well-formed request carries
+    the id, :class:`StateError` for a permissions file the agent would not load.
+    """
+    data, paths = _load(root / PERMISSIONS_FILE, "paths")
+    match = [e for e in _pending(data) if e["id"] == request_id]
+    if not match:
+        raise UnknownRequestError(f"no pending request {request_id!r} in {root / PERMISSIONS_FILE}")
+    # Only the matched entry leaves the list: another request, or an entry
+    # the agent wrote in a shape this CLI does not read, stays as it was.
+    rest = [e for e in data["pending"] if not (isinstance(e, dict) and e.get("id") == request_id)]
+    return data, paths, match[0], rest
+
+
+def _request_reason(req: dict) -> str:
+    reason = req.get("reason")
+    return reason if isinstance(reason, str) and reason.strip() else "approved with comfy agent allow --approve"
+
+
+def approve(root: Path, request_id: str) -> tuple[dict, str]:
+    """Approve one pending request: vet its target, record it, drop the request.
+
+    Returns the entry now in the approvals file (``{"path"|"host", "reason",
+    "approved_at"}``) and its kind. Vetting is the one the terminal grant
+    uses (:func:`vet_path` with the data-dir rule, :func:`vet_host`); a target
+    it refuses raises ``ValueError`` with nothing written and the request
+    still pending, so a later ``deny`` can clear it. Raises
+    :class:`UnknownRequestError` for an id no request carries,
+    :class:`StateError` for a file the agent would not load, and ``OSError``
+    when the data dir cannot be written.
+    """
+    data, paths, req, rest = _take_request(root, request_id)
+    kind = req["kind"]
+    reason = _request_reason(req)
+    perms_file = root / PERMISSIONS_FILE
+    if kind == "path":
+        p = vet_path(req["target"], root=root)
+        record = next((e for e in paths if _same_path(str(e.get("path", "")), str(p))), None)
+        if record is None:
+            record = {"path": str(p), "reason": reason, "approved_at": _now()}
+            paths.append(record)
+        _write(perms_file, {**data, "paths": paths, "pending": rest})
+        return record, kind
+    h = vet_host(req["target"])
+    egress_file = root / EGRESS_ALLOW_FILE
+    # Read the second file before the first write so a broken egress-allow.json
+    # is reported with the request still pending and nothing changed.
+    egress, hosts = _load(egress_file, "hosts")
+    record = next((e for e in hosts if str(e.get("host", "")).lower() == h), None)
+    if record is None:
+        record = {"host": h, "reason": reason, "approved_at": _now()}
+        hosts.append(record)
+        _write(egress_file, {**egress, "hosts": hosts})
+    _write(perms_file, {**data, "pending": rest})
+    return record, kind
+
+
+def deny(root: Path, request_id: str) -> dict:
+    """Drop one pending request without approving anything. Returns the request. Raises as :func:`approve` does."""
+    data, _, req, rest = _take_request(root, request_id)
+    _write(root / PERMISSIONS_FILE, {**data, "pending": rest})
+    return req
 
 
 def _same_path(a: str, b: str) -> bool:

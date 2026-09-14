@@ -120,6 +120,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     # the local comfy agent's approvals
     "comfy agent permissions": "agent",
     "comfy agent allow": "agent",
+    "comfy agent deny": "agent",
     # skill management
     "comfy skills install": "skill",
     "comfy skills uninstall": "skill",
