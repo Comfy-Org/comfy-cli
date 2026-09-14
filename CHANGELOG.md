@@ -32,6 +32,9 @@ history.
 
 ### Fixed
 
+- Writing a declared promoted widget before a legacy `proxyWidgets` slot no
+  longer shifts the host's other values. Pending proxy migration now runs before
+  the first host write, including when edits are saved in separate calls.
 - A failed blob upload during `comfy build push` no longer writes the presigned
   PUT URL's query string to stdout, into the JSON envelope, or into a CI log.
   Both a rejected upload and a dropped connection quote the URL they were talking
