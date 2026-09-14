@@ -275,11 +275,10 @@ def node_class_for(model: str) -> str | None:
     when nothing maps to a node. The per-row ``node_class`` of ``generate list``.
 
     Exposed because :data:`MODEL_NODE_MAP` is hand-written and nothing outside
-    this repo could see what it points at. Cloud's partner-catalog gate reads
-    this row to check the mapping against the catalog its deployed ComfyUI
-    actually serves, which is how a class ComfyUI has since deprecated gets
-    caught before a user meets it (BE-13301). ``deprecated_ok`` covers the same
-    ground against a snapshot recorded HERE; this covers it against a live one.
+    this repo could see what it points at. A consumer can check each class
+    against the catalog its own ComfyUI serves, which catches a class ComfyUI
+    has since deprecated. ``deprecated_ok`` covers the same ground against a
+    snapshot recorded HERE; this lets a caller cover it against a live one.
     """
     found = _lookup_model(model)
     return found[1].node_class if found else None

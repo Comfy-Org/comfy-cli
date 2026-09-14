@@ -926,7 +926,7 @@ def _model_record(e: spec.Endpoint) -> dict[str, object]:
         # The class the row above would mint, or None when unmapped. Paired with
         # `emit_supported` so a consumer outside this repo can check the
         # hand-written mapping against a live catalog instead of taking the
-        # boolean on trust (BE-13301).
+        # boolean on trust.
         "node_class": emit.node_class_for(e.id),
     }
 
