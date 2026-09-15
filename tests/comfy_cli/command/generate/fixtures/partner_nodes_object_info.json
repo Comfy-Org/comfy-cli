@@ -334,6 +334,219 @@
     "python_module": "comfy_api_nodes.nodes_bfl",
     "search_aliases": null
   },
+  "Flux2ImageNode": {
+    "input": {
+      "required": {
+        "prompt": [
+          "STRING",
+          {
+            "tooltip": "Prompt for the image generation or edit",
+            "default": "",
+            "multiline": true
+          }
+        ],
+        "model": [
+          "COMFY_DYNAMICCOMBO_V3",
+          {
+            "options": [
+              {
+                "key": "Flux.2 [pro]",
+                "inputs": {
+                  "required": {
+                    "width": [
+                      "INT",
+                      {
+                        "default": 1024,
+                        "min": 256,
+                        "max": 2048,
+                        "step": 32
+                      }
+                    ],
+                    "height": [
+                      "INT",
+                      {
+                        "default": 768,
+                        "min": 256,
+                        "max": 2048,
+                        "step": 32
+                      }
+                    ],
+                    "images": [
+                      "COMFY_AUTOGROW_V3",
+                      {
+                        "tooltip": "Optional reference image(s) for image-to-image generation. Up to 8 images.",
+                        "template": {
+                          "input": {
+                            "required": {
+                              "image": [
+                                "IMAGE",
+                                {}
+                              ]
+                            }
+                          },
+                          "names": [
+                            "image_1",
+                            "image_2",
+                            "image_3",
+                            "image_4",
+                            "image_5",
+                            "image_6",
+                            "image_7",
+                            "image_8"
+                          ],
+                          "min": 0
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "key": "Flux.2 [max]",
+                "inputs": {
+                  "required": {
+                    "width": [
+                      "INT",
+                      {
+                        "default": 1024,
+                        "min": 256,
+                        "max": 2048,
+                        "step": 32
+                      }
+                    ],
+                    "height": [
+                      "INT",
+                      {
+                        "default": 768,
+                        "min": 256,
+                        "max": 2048,
+                        "step": 32
+                      }
+                    ],
+                    "images": [
+                      "COMFY_AUTOGROW_V3",
+                      {
+                        "tooltip": "Optional reference image(s) for image-to-image generation. Up to 8 images.",
+                        "template": {
+                          "input": {
+                            "required": {
+                              "image": [
+                                "IMAGE",
+                                {}
+                              ]
+                            }
+                          },
+                          "names": [
+                            "image_1",
+                            "image_2",
+                            "image_3",
+                            "image_4",
+                            "image_5",
+                            "image_6",
+                            "image_7",
+                            "image_8"
+                          ],
+                          "min": 0
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ],
+        "seed": [
+          "INT",
+          {
+            "tooltip": "The random seed used for creating the noise.",
+            "default": 0,
+            "min": 0,
+            "max": 18446744073709551615,
+            "control_after_generate": true
+          }
+        ]
+      },
+      "hidden": {
+        "auth_token_comfy_org": [
+          "AUTH_TOKEN_COMFY_ORG"
+        ],
+        "api_key_comfy_org": [
+          "API_KEY_COMFY_ORG"
+        ],
+        "unique_id": [
+          "UNIQUE_ID"
+        ],
+        "comfy_usage_source": [
+          "COMFY_USAGE_SOURCE"
+        ]
+      }
+    },
+    "input_order": {
+      "required": [
+        "prompt",
+        "model",
+        "seed"
+      ],
+      "hidden": [
+        "auth_token_comfy_org",
+        "api_key_comfy_org",
+        "unique_id",
+        "comfy_usage_source"
+      ]
+    },
+    "is_input_list": false,
+    "output": [
+      "IMAGE"
+    ],
+    "output_is_list": [
+      false
+    ],
+    "output_name": [
+      "IMAGE"
+    ],
+    "output_tooltips": [
+      null
+    ],
+    "output_matchtypes": null,
+    "name": "Flux2ImageNode",
+    "display_name": "Flux.2 Image",
+    "description": "Generate images via Flux.2 [pro] or Flux.2 [max] from a prompt and optional reference images.",
+    "python_module": "comfy_api_nodes.nodes_bfl",
+    "category": "partner/image/BFL",
+    "output_node": false,
+    "deprecated": false,
+    "experimental": false,
+    "dev_only": false,
+    "api_node": true,
+    "price_badge": {
+      "engine": "jsonata",
+      "depends_on": {
+        "widgets": [
+          {
+            "name": "model",
+            "type": "COMFY_DYNAMICCOMBO_V3"
+          },
+          {
+            "name": "model.width",
+            "type": "INT"
+          },
+          {
+            "name": "model.height",
+            "type": "INT"
+          }
+        ],
+        "inputs": [],
+        "input_groups": [
+          "model.images"
+        ]
+      },
+      "expr": "\n                (\n                  $isMax := widgets.model = \"flux.2 [max]\";\n                  $MP := 1024 * 1024;\n                  $w := $lookup(widgets, \"model.width\");\n                  $h := $lookup(widgets, \"model.height\");\n                  $outMP := $max([1, $floor((($w * $h) + $MP - 1) / $MP)]);\n                  $outputCost := $isMax\n                    ? (0.07 + 0.03 * ($outMP - 1))\n                    : (0.03 + 0.015 * ($outMP - 1));\n                  $refMin := $isMax ? 0.03 : 0.015;\n                  $refMax := $isMax ? 0.24 : 0.12;\n                  $hasRefs := $lookup(inputGroups, \"model.images\") > 0;\n                  $hasRefs\n                    ? {\n                        \"type\": \"range_usd\",\n                        \"min_usd\": $outputCost + $refMin,\n                        \"max_usd\": $outputCost + $refMax,\n                        \"format\": { \"approximate\": true }\n                      }\n                    : {\"type\": \"usd\", \"usd\": $outputCost}\n                )\n                "
+    },
+    "search_aliases": null,
+    "essentials_category": null,
+    "has_intermediate_output": false
+  },
   "FluxProUltraImageNode": {
     "api_node": true,
     "category": "partner/image/BFL",
