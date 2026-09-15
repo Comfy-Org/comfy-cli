@@ -91,12 +91,20 @@ def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str
 # ---------------------------------------------------------------------------
 
 #: Every op kind in the v1 vocabulary, including defined-but-deferred kinds.
-FROZEN_OPS: tuple[str, ...] = ("add_node", "connect", "set_widget", "delete_node", "clear", "reset_doc")
+FROZEN_OPS: tuple[str, ...] = (
+    "add_node",
+    "connect",
+    "set_widget",
+    "delete_node",
+    "clear",
+    "reset_doc",
+    "insert_workflow",
+)
 
-#: Kinds frozen in the contract whose replay is not implemented yet.
-#: ``apply_op`` must keep rejecting these. Empty since amendment v1.1:
-#: ``reset_doc`` was un-deferred by the bulk-writers ticket (V1-038).
-DEFERRED_OPS: tuple[str, ...] = ()
+#: Kinds frozen in the contract whose replay is not implemented in the CLI.
+#: ``insert_workflow`` is emitted for cmp to validate and apply; the CLI must
+#: keep rejecting local replay to preserve that ownership boundary.
+DEFERRED_OPS: tuple[str, ...] = ("insert_workflow",)
 
 #: Kinds a batch (``apply_specs``) dispatches. ``clear`` and ``reset_doc`` are
 #: standalone-only: they rewrite the whole document, so they never ride inside
@@ -116,6 +124,11 @@ _NOT_BATCHABLE: dict[str, dict[str, str]] = {
         "code": "workflow_reset_doc_not_batchable",
         "command": "comfy workflow reset-doc <file> --confirm",
         "does": "resets the whole document to the empty baseline and erases its replay history",
+    },
+    "insert_workflow": {
+        "code": "workflow_insert_workflow_not_batchable",
+        "command": "comfy workflow insert-workflow <file> <template>",
+        "does": "inserts a complete workflow in one transaction",
     },
 }
 
@@ -1295,6 +1308,31 @@ def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int =
     return ops
 
 
+def insert_workflow(
+    workflow: dict,
+    template: dict,
+    *,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, dict]:
+    """Structurally validate and emit an insert op without applying it.
+
+    The CLI deliberately preserves all source IDs. Per the vetoable contract
+    decision recorded in the TDD, cmp owns deterministic ID remapping from the
+    op envelope ID when it applies this payload.
+    """
+    if not isinstance(template, dict):
+        raise ValueError("insert_workflow workflow must be a JSON object")
+    if "nodes" not in template:
+        raise ValueError("insert_workflow missing required field: nodes")
+    for field in ("nodes", "links", "groups"):
+        if field in template and not isinstance(template[field], list):
+            raise ValueError(f"insert_workflow field {field} must be an array")
+    if "definitions" in template and not isinstance(template["definitions"], dict):
+        raise ValueError("insert_workflow field definitions must be an object")
+    return workflow, _new_op("insert_workflow", actor, base_version, workflow=copy.deepcopy(template))
+
+
 def delete_node(
     workflow: dict,
     graph,
@@ -1795,6 +1833,8 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     if op["op_id"] in applied:
         return workflow
     kind = op["op"]
+    if kind != "insert_workflow" and "definitions" in op:
+        raise ValueError(f"malformed_op: {kind} does not accept definitions")
     # Snapshot the LWW bookkeeping so an exception escaping a handler cannot
     # leave a stamp committed WITHOUT its op_id recorded below. That pairing is
     # the poison state: a retry of the identical op loses to the failed

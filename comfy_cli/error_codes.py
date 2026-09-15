@@ -601,6 +601,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "run the standalone `comfy workflow reset-doc <file> --confirm` first, then apply the remaining ops as a batch",
     ),
     ErrorCode(
+        "workflow_insert_workflow_not_batchable",
+        "A batch contained an `insert_workflow` op. A complete workflow insertion is one standalone atomic op, "
+        "so nesting it in the spec batch protocol is rejected and nothing is applied.",
+        "run `comfy workflow insert-workflow <file> <template>` instead",
+    ),
+    ErrorCode(
         "workflow_reset_doc_unconfirmed",
         "`comfy workflow reset-doc` was called without `--confirm`. The command fails closed: it erases every "
         "node AND the document's replay history, which no later op can undo.",
