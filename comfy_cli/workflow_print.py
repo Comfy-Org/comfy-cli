@@ -1247,9 +1247,17 @@ def _render_definition_block(
             continue
         if tslot not in out_sources:
             out_sources[tslot] = (oid, oslot)
-    for slot in sorted(out_sources, key=_sort_key):
-        oid, oslot = out_sources[slot]
+    declared_out_slots = [slot for slot, output in enumerate(sg_def.get("outputs") or []) if isinstance(output, dict)]
+    output_slots = declared_out_slots + [
+        slot for slot in sorted(out_sources, key=_sort_key) if slot not in declared_out_slots
+    ]
+    for slot in output_slots:
         out_name = proxy_out_names.get(slot) or f"out{slot}"
+        source = out_sources.get(slot)
+        if source is None:
+            lines.append(f"{_member_ref('OUT', out_name)} = None")
+            continue
+        oid, oslot = source
         # "OUT", not a pre-qualified label: _resolve_edge_text runs the target
         # through ctx.qualify(), which prefixes this block's own address — so
         # anything already carrying it comes back doubled ("11/11 OUT").
