@@ -10,10 +10,13 @@ The commands here are the `comfy deploy` group from
 `comfy cloud login`; a command answers `deploy_not_signed_in` when there is no
 usable session.
 
-**Deploying spends money continuously, not once.** A build costs minutes and
-stops. A deployment holds compute until something stops it: `up` and `run` create
-paid compute, `start` resumes it, and `scale --min` sets the standing charge.
-Every other verb reads, or gives compute back.
+**Deploying spends money continuously, not once.** Building does not: it is capped
+by counts — how many builds and releases a workspace holds — and metered by nothing,
+so a finished build costs nothing to leave lying there. A deployment holds compute
+until something stops it: `up` and `run` create paid compute, `start` resumes it,
+and `scale --min` sets the standing charge which can approach 0 with a `scale --min 0`.
+Every other verb reads, or gives compute back. **This skill's surface is the one that
+bills by time.**
 
 ## What you are working with
 

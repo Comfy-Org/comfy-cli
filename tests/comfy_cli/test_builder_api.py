@@ -292,7 +292,7 @@ def test_get_artifact_download_survives_the_rename():
     ],
 )
 def test_create_release_refuses_a_missing_or_empty_target_list(recorder, targets):
-    """An implicit target spends build minutes nobody asked for, so the refusal
+    """An implicit target builds an artifact nobody asked for, so the refusal
     happens locally — before a single request leaves the client."""
     client = BuilderClient(_BASE_URL, "jwt-token")
 

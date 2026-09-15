@@ -18,10 +18,25 @@ or lists `scan` / `create` / `from-snapshot` — the verbs this surface replaced
 **A cut is not undoable and a build takes minutes**, so the user hears what is
 about to be sent, and agrees, before anything is created on the platform.
 
+**But a re-run of the same cut is not a second cut.** The builder dedupes a release
+on the definition's content hash, scoped to the Build: `release create` run twice
+over an unchanged spec returns the same release id both times, and re-drives the
+build of a release that was committed but never queued. So a retry after an
+*ambiguous* failure — a timeout, a 5xx, a dropped connection, an envelope you cannot
+tell landed — is the repair and not a risk, and `comfy build release ls` is the read
+that confirms which it was. The exception is a `push` in between: that moves the
+hash, so the next cut is genuinely a new release.
+
 ## What the platform is
 
 - **A Build is an editable definition; a release is an immutable cut of it.**
   Editing a Build changes nothing that already exists, so every fix is a new cut.
+- **What a cut spends is a slot, not metered time.** Nothing on this surface bills
+  by the minute or by the build: a workspace is capped on what it *holds*, and past
+  a cap the builder refuses the cut rather than charging for it. So the care a cap
+  asks for is "do not cut what nobody needs", never "do not leave it running" — a
+  finished release costs a slot, not a meter. *The two limits, and what clears
+  each* below is how a slot comes back.
 - **The definition lives in a file the user owns.** `comfy build init` writes
   `comfy-build.yaml` next to the install. That file is the working copy: it is
   what you edit, what the user commits, and what every later command reads. The
@@ -149,7 +164,7 @@ comfy --json build init <dir> --name <name> --from-workflow <workflow>.json
 ```
 
 - **It writes a local spec and creates no Build.** `push` only uploads; `release
-  create` is the line that starts billable build minutes.
+  create` is the line that commits a release and spends the slot.
 - **Hand it the file unchanged.** It reads both the editing format and the API
   export, so converting first only refuses files it would have taken.
 - **Save the report.** The importer's findings arrive as `advisories` in the
@@ -259,7 +274,8 @@ Say all of this in plain words, and wait for a yes:
   three promised uploads can report `uploaded: 0`. Offer to list the filenames.
 - **Which targets you will cut**, since each is a separate build. Name them, and
   take the set from `comfy build refs build-targets`.
-- **What it takes**: any upload, then a build of several minutes.
+- **What it takes**: any upload, then a build of several minutes of wall clock —
+  and one of the workspace's release slots.
 - **What a failure means**: a fix and another build, and that you stop after three.
 - **The policy**, whichever path produced the definition: the release will record
   no restriction on which models or partner nodes it permits, and that record
@@ -329,6 +345,14 @@ nothing deployable. `--watch` exits 1 when any target failed.
 
 Stop after 30 minutes and tell the user the build is still running rather than
 polling on. `--watch` itself polls without a cap.
+
+**A release sitting in `queued` with every artifact still `queued` and an empty log
+is the one case worth acting on rather than waiting out.** That is the shape of a
+cut the builder committed but never enqueued. Re-running the identical
+`release create` re-drives the enqueue for exactly this reason and returns the same
+release id, so it is the first thing to try — not an escalation, and not a second
+cut. Escalate with the release id, the artifact ids and the created-at only if a
+re-drive changes nothing.
 
 ## When something fails
 
