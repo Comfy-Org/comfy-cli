@@ -155,6 +155,59 @@ def test_list_rows_say_whether_emit_workflow_supports_them():
     assert by_alias["flux-2"]["emit_supported"] is True
 
 
+def test_list_rows_name_the_node_class_they_would_mint():
+    """`emit_supported` says a mapping exists; `node_class` says what it points
+    at. MODEL_NODE_MAP is hand-written, so without this a consumer outside this
+    repo cannot tell that an entry has gone stale against the catalog its own
+    ComfyUI serves — which is how `flux-2` kept emitting a class ComfyUI had
+    deprecated until a user reported the workflow."""
+    from comfy_cli.command.generate import emit
+
+    data = _envelope(["--json", "generate", "list"])["data"]
+    by_alias = {row["alias"]: row for row in data["models"]}
+
+    for row in data["models"]:
+        assert "node_class" in row, row
+        if row["emit_supported"]:
+            assert isinstance(row["node_class"], str) and row["node_class"], row
+        else:
+            assert row["node_class"] is None, row
+
+    # Every mapped row names the class its NodeSpec holds, not a guess.
+    for alias, ns in emit.MODEL_NODE_MAP.items():
+        assert by_alias[alias]["node_class"] == ns.node_class
+
+    assert by_alias["flux-pro"]["node_class"] is None
+
+
+@pytest.mark.parametrize(
+    "emit_supported, node_class, valid",
+    [
+        (True, "Flux2ProImageNode", True),
+        (False, None, True),
+        (True, None, False),
+        (True, "", False),
+        (False, "Flux2ProImageNode", False),
+        (True, ..., False),
+    ],
+)
+def test_list_schema_ties_node_class_to_emit_supported(emit_supported, node_class, valid):
+    """The live payload never breaks the pairing, so only a hand-built row shows
+    the schema itself enforces it for consumers that validate against it."""
+    row = {
+        "alias": "flux-2",
+        "id": "bfl/flux-2-pro/generate",
+        "partner": "bfl",
+        "category": "text-to-image",
+        "mode": "async",
+        "summary": "x",
+        "emit_supported": emit_supported,
+    }
+    if node_class is not ...:
+        row["node_class"] = node_class
+    assert _validator_for("generate_list.json").is_valid({"models": [row], "count": 1}) is valid
+
+
 def test_list_with_no_matches_is_an_empty_success_not_an_error():
     result = _run(["--json", "generate", "list", "--partner", "no-such-partner"])
     envelope = json.loads(result.stdout.splitlines()[-1])

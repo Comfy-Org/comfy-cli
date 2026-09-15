@@ -270,6 +270,20 @@ def is_supported(model: str) -> bool:
     return _lookup_model(model) is not None
 
 
+def node_class_for(model: str) -> str | None:
+    """The ComfyUI class ``--emit-workflow`` would mint for ``model``, or None
+    when nothing maps to a node. The per-row ``node_class`` of ``generate list``.
+
+    Exposed because :data:`MODEL_NODE_MAP` is hand-written and nothing outside
+    this repo could see what it points at. A consumer can check each class
+    against the catalog its own ComfyUI serves, which catches a class ComfyUI
+    has since deprecated. ``deprecated_ok`` covers the same ground against a
+    snapshot recorded HERE; this lets a caller cover it against a live one.
+    """
+    found = _lookup_model(model)
+    return found[1].node_class if found else None
+
+
 def _resolve_model(model: str) -> tuple[str, NodeSpec]:
     found = _lookup_model(model)
     if found is None:
