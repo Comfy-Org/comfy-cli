@@ -56,9 +56,13 @@
           "status": { "type": ["string", "null"], "description": "Copied from the pick's model row when that row exists." },
           "superseded_by": { "type": ["string", "null"], "description": "From the deprecations list or the pick's model row." },
           "best_for": { "type": "array", "items": { "type": "string" }, "maxItems": 1, "description": "Head of the model row's best_for list, present only when the row has one. The caveat is per capability; this is the row's own routing opinion." },
-          "fits": { "type": "object", "description": "The model row's fits block (vram_gb per variant, a credit rate, max_refs, source), present only when the row carries one." }
+          "fits": { "type": "object", "description": "The model row's fits block (vram_gb per variant, a credit rate, max_refs, source), present only when the row carries one." },
+          "available_locally": { "type": "boolean", "const": false, "description": "Present only under pick --check-local, on an oss pick the local ComfyUI cannot run." },
+          "unavailable_reason": { "type": "string", "description": "Why available_locally is false (pick --check-local)." },
+          "missing_models": { "type": "integer", "minimum": 1, "description": "How many of the pick template's model files the local ComfyUI lacks (pick --check-local). `comfy templates check <template>` names them with download URLs." }
         }
       }
-    }
+    },
+    "local_check": { "type": "string", "description": "Present only under pick --check-local. `ok` when the check ran; a pick whose template workflow could not be fetched or parsed stays unflagged. Otherwise the error code that stopped the check (server_not_running, gallery_load_failed, model_listing_too_large), and no pick is flagged." }
   }
 }
