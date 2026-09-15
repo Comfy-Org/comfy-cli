@@ -165,12 +165,12 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
         },
         output="VIDEO",
     ),
-    # BFL Flux 2 [pro] (text-to-image). Node: Flux2ProImageNode.
+    # BFL Flux 2 [pro] (text-to-image). Node: Flux2ImageNode.
     #
     # There is deliberately NO "flux-pro" entry: that alias means BFL Flux Pro
     # 1.1 (`bfl/flux-pro-1.1/generate`), and ComfyUI has no node for it — the
     # only `flux-pro-1.1` node is the Ultra variant below. Mapping it to
-    # Flux2ProImageNode would emit a workflow for a *different* model, so
+    # Flux2ImageNode would emit a workflow for a *different* model, so
     # `flux-pro` falls through to the EmitError instead.
     "flux-2": NodeSpec(
         node_class="Flux2ImageNode",
@@ -354,21 +354,21 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
     # Same rule, generalized: every flag the user actually typed has to land
     # somewhere. `parse_args` fills no defaults, so `values` holds only what argv
     # carried — anything in it that no mapping consumes would be discarded in
-    # silence. A proxy flag the node does not expose cannot be honored by an
-    # emitted workflow at all (flux-2's `prompt_upsampling` is the live case:
-    # the proxy takes it, Flux2ImageNode has no such input), so say so instead
-    # of handing back a graph that quietly ignores it.
+    # silence. Some of these the node has no input for (flux-2's
+    # `prompt_upsampling`); others it has and this table does not wire yet
+    # (flux-2's `input_image` into `model.images`). Either way the emitted graph
+    # would ignore the flag, so the error names the mapping, not the node.
     handled = set(ns.param_map) | set(ns.image_params)
     if ns.aspect_from_wh:
         handled |= {"width", "height"}
     unsupported = sorted(flag for flag, value in values.items() if value is not None and flag not in handled)
     if unsupported:
         flags = ", ".join(f"--{flag}" for flag in unsupported)
+        noun = "that flag" if len(unsupported) == 1 else "those flags"
         raise EmitError(
-            f"--emit-workflow for {model!r} cannot carry {flags}: "
-            f"{ns.node_class} has no matching input. Drop the flag, or run "
-            f"`comfy generate {model}` without --emit-workflow to send it "
-            f"straight to the proxy."
+            f"--emit-workflow for {model!r} does not map {flags} onto {ns.node_class}. "
+            f"Drop {noun}, or run `comfy generate {model}` without --emit-workflow, "
+            "which sends every flag straight to the proxy."
         )
 
     partner = {

@@ -10,7 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app as cli_app
-from comfy_cli.command.generate import emit, spec
+from comfy_cli.command.generate import emit, schema, spec
 from comfy_cli.cql.engine import Graph
 
 # Recorded object_info for the partner nodes MODEL_NODE_MAP targets, snapshotted
@@ -198,7 +198,6 @@ def test_build_flux_ultra_folds_width_height_into_aspect_ratio():
     # the node takes an aspect ratio, not w/h — the two flags fold into it
     assert wf["1"]["inputs"]["aspect_ratio"] == "1024:768"
     assert wf["1"]["inputs"]["prompt"] == "a fox"
-    # the Ultra node's own default, unlike Flux2Pro's True
     assert wf["1"]["inputs"]["prompt_upsampling"] is False
     save = [n for n in wf.values() if n["class_type"] == "SaveImage"]
     assert len(save) == 1
@@ -234,6 +233,7 @@ def test_emit_refuses_a_flag_the_node_cannot_carry():
     msg = str(ei.value)
     assert "--prompt_upsampling" in msg
     assert "Flux2ImageNode" in msg
+    assert "Drop that flag" in msg
     # The remedy has to be in the message, or the user is left guessing.
     assert "without --emit-workflow" in msg
 
@@ -244,6 +244,78 @@ def test_emit_names_every_unsupported_flag_at_once():
         emit.build_workflow("flux-2", {"prompt": "p", "safety_tolerance": 2, "output_format": "png"})
     msg = str(ei.value)
     assert "--output_format" in msg and "--safety_tolerance" in msg
+    assert "Drop those flags" in msg
+
+
+def test_emit_error_blames_the_mapping_when_the_node_has_the_input():
+    """Flux2ImageNode does take reference images (`model.images`); the flux-2
+    entry just does not wire `--input_image` into it. The message must not claim
+    the node lacks an input it has."""
+    with pytest.raises(emit.EmitError) as ei:
+        emit.build_workflow("flux-2", {"prompt": "p", "input_image": "ref.png"})
+    msg = str(ei.value)
+    assert "does not map --input_image onto Flux2ImageNode" in msg
+    assert "no matching input" not in msg
+
+
+# Flags `--emit-workflow` refuses per alias because MODEL_NODE_MAP does not wire
+# them. The CLI used to drop every one of these in silence, and the cloud agent's
+# generate_workflow tool can pass any of them. Wiring a flag removes it here.
+EMIT_REFUSED_FLAGS = {
+    "flux-2": [
+        "input_image",
+        "input_image_2",
+        "input_image_3",
+        "input_image_4",
+        "input_image_5",
+        "input_image_6",
+        "input_image_7",
+        "input_image_8",
+        "input_image_9",
+        "output_format",
+        "prompt_upsampling",
+        "safety_tolerance",
+    ],
+    "flux-ultra": ["guidance_scale", "negative_prompt", "num_images", "num_inference_steps"],
+    "kling-i2v": [
+        "callback_url",
+        "camera_control",
+        "dynamic_masks",
+        "element_list",
+        "external_task_id",
+        "image_tail",
+        "multi_prompt",
+        "multi_shot",
+        "shot_type",
+        "sound",
+        "static_mask",
+        "watermark_info",
+    ],
+    "nano-banana": [],
+    "seedance": ["fps", "return_last_frame"],
+}
+
+
+@pytest.mark.parametrize("model", sorted(emit.MODEL_NODE_MAP))
+def test_emit_refused_flags_per_alias(model):
+    ns = emit.MODEL_NODE_MAP[model]
+    refused = []
+    for flag in schema.flags_for(spec.get_endpoint(spec.resolve_alias(model))):
+        values = {flag.name: "x"}
+        if ns.aspect_from_wh and flag.name in ("width", "height"):
+            values = {"width": 16, "height": 9}
+        try:
+            emit.build_workflow(model, values)
+        except emit.EmitError as e:
+            assert f"--{flag.name}" in str(e)
+            refused.append(flag.name)
+    assert sorted(refused) == EMIT_REFUSED_FLAGS.get(model)
+
+
+def test_emit_treats_a_none_value_as_not_given():
+    """The scalar loop already skips None, so the unmapped-flag check must too."""
+    wf = emit.build_workflow("flux-2", {"prompt": "p", "prompt_upsampling": None})
+    assert "prompt_upsampling" not in wf["1"]["inputs"]
 
 
 def test_emit_does_not_mistake_a_fixed_default_for_a_user_flag():

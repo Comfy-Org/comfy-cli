@@ -277,6 +277,14 @@ def test_ops_roundtrip_with_no_image_params():
     assert got["SaveImage"]["images"] == ("link", "Flux2ImageNode")
 
 
+def test_ops_set_a_combo_selector_before_its_sub_widgets_whatever_the_dict_order():
+    """`fixed` happens to insert `model` first, so the round trip above passes
+    even without the ordering. Put the dotted key first to pin it."""
+    api = {"1": {"class_type": "Flux2ImageNode", "inputs": {"model.width": 512, "model": "Flux.2 [pro]"}}}
+    widgets = [s["widget"] for s in emit.ops_from_api_workflow(api, _graph(), "flux-2") if s["op"] == "set_widget"]
+    assert widgets == ["model", "model.width"]
+
+
 def test_ops_fold_multiple_images_through_image_batch():
     api = emit.build_workflow("nano-banana", {"prompt": "merge", "image": ["a.png", "b.png"]})
     wf = _apply(emit.ops_from_api_workflow(api, _graph(), "nano-banana"))
