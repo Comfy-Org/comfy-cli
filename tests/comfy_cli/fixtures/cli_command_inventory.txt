@@ -1,0 +1,152 @@
+comfy _watch	[hidden]
+comfy _watch _watch-job
+comfy agent-review	[hidden]
+comfy assets
+comfy assets push
+comfy auth
+comfy auth list
+comfy auth remove
+comfy auth set
+comfy cloud
+comfy cloud login
+comfy cloud logout
+comfy cloud set-base-url
+comfy cloud set-key
+comfy cloud whoami
+comfy code-search
+comfy cs	[hidden]
+comfy dependency
+comfy discover
+comfy download
+comfy env
+comfy feedback
+comfy free
+comfy generate
+comfy help
+comfy install
+comfy jobs
+comfy jobs cancel
+comfy jobs ls
+comfy jobs status
+comfy jobs wait
+comfy jobs watch
+comfy launch
+comfy logs
+comfy manager
+comfy manager clear
+comfy manager disable
+comfy manager disable-gui
+comfy manager enable-gui
+comfy manager enable-legacy-gui
+comfy manager migrate-legacy
+comfy manager uv-compile-default
+comfy model
+comfy model _download-worker	[hidden]
+comfy model download
+comfy model download-cancel
+comfy model download-status
+comfy model downloads
+comfy model list
+comfy model remove
+comfy models
+comfy models list-folder
+comfy models list-folders
+comfy models search
+comfy models show
+comfy node
+comfy node bisect
+comfy node bisect bad
+comfy node bisect good
+comfy node bisect reset
+comfy node bisect start
+comfy node deps
+comfy node deps-in-workflow
+comfy node disable
+comfy node enable
+comfy node fix
+comfy node init
+comfy node install
+comfy node install-deps
+comfy node pack
+comfy node publish
+comfy node registry-install	[hidden]
+comfy node registry-list	[hidden]
+comfy node reinstall
+comfy node restore-dependencies
+comfy node restore-snapshot
+comfy node save-snapshot
+comfy node scaffold
+comfy node show
+comfy node simple-show
+comfy node uninstall
+comfy node update
+comfy node update-cache
+comfy node uv-sync
+comfy node validate
+comfy nodes
+comfy nodes categories
+comfy nodes downstream
+comfy nodes ls
+comfy nodes path
+comfy nodes refresh
+comfy nodes search
+comfy nodes show
+comfy nodes types
+comfy nodes upstream
+comfy outdated
+comfy pr-cache
+comfy pr-cache clean
+comfy pr-cache list
+comfy preview
+comfy project
+comfy project init
+comfy project status
+comfy run
+comfy run-cli
+comfy run-template
+comfy set-default
+comfy setup
+comfy skill	[hidden]
+comfy skill install
+comfy skill list
+comfy skill show
+comfy skill status
+comfy skill uninstall
+comfy skill validate
+comfy skills
+comfy skills install
+comfy skills list
+comfy skills show
+comfy skills status
+comfy skills uninstall
+comfy skills validate
+comfy standalone
+comfy stop
+comfy system-stats
+comfy templates
+comfy templates fetch
+comfy templates ls
+comfy templates refresh
+comfy templates show
+comfy tracking
+comfy tracking disable
+comfy tracking enable
+comfy update
+comfy upload
+comfy validate
+comfy which
+comfy workflow
+comfy workflow compose
+comfy workflow decompose
+comfy workflow delete
+comfy workflow fragment
+comfy workflow fragment ls
+comfy workflow fragment show
+comfy workflow fragment validate
+comfy workflow get
+comfy workflow list
+comfy workflow notes
+comfy workflow save
+comfy workflow set-slot
+comfy workflow slots
+comfy workflow vary
