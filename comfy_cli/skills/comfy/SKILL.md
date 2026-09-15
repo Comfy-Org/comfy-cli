@@ -85,6 +85,11 @@ rather than an answer to anything. Five rules:
    it resolves to. A row flagged this way also pulls in `picks[]` for the
    capabilities that rank it, so the highest-ranked entry *without* the flag is
    the runnable alternative. Say what is missing, then name that alternative.
+   When routing is local, add `--check-local` to `knowledge pick`: it also
+   flags an `oss` pick whose model files are missing, with `missing_models`
+   counting them, and `comfy --json templates check <template>` names them with
+   download URLs. Unless `local_check` is `ok`, no files were checked. Ask
+   before downloading anything.
 3. **Verify before denying.** A missing `knowledge` key or a `nudge` means
    nothing is curated for that query, not that it is unsupported. A `nudge` on
    a block that still carries rows means your search term matched nothing
