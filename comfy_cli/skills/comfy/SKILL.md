@@ -84,9 +84,11 @@ rather than an answer to anything. Five rules:
    `comfy --json templates check <template>` on an `oss` pick's `template`
    before recommending it. On `missing-models` the pick is still the answer:
    name it, say it is not installed, and list `models.missing[]` with each
-   file's `directory`. Then check the next `oss` pick down and name the first
-   `runnable` one as what works today. Ask before downloading anything. A pick
-   with no `template` has nothing to check.
+   file's `directory`. Any other result that is not `runnable`, including a
+   `template_not_found` error, means that pick is not confirmed to run here.
+   Either way, check the next `oss` pick down and name the first `runnable` one
+   as what works today, or say that none is. Ask before downloading anything. A
+   pick with no `template` has nothing to check.
 3. **Verify before denying.** A missing `knowledge` key or a `nudge` means
    nothing is curated for that query, not that it is unsupported. A `nudge` on
    a block that still carries rows means your search term matched nothing
