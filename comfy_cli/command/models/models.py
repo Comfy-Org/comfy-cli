@@ -569,9 +569,33 @@ def download(
     # re-scan (`_enforce_claim`), then move bytes; the record is what makes this
     # run visible to whoever comes next, and it shows up in `comfy model
     # downloads` like any other.
+    #
+    # Then the same `O_EXCL` claim file `--background` takes, in the same order:
+    # record write → advisory `_enforce_claim` → claim. The advisory re-scan
+    # alone could never arbitrate here for the reason it could not arbitrate a
+    # background submit — it is check-then-act. `started_at` is second-resolution
+    # and `_claim_order` tie-breaks on a random id, so a foreground record that
+    # lands *after* a competitor's re-scan and happens to sort first survives its
+    # own `_enforce_claim` while the competitor holds the claim, and both
+    # transfers write the destination. Creating the claim file has no such
+    # window: the kernel hands it to exactly one caller.
     claim = _claim_foreground(url=url, dest=local_filepath, downloader=resolved_downloader)
+    claim_file: pathlib.Path | None = None
     if claim is not None:
         _enforce_claim(claim, local_filepath)
+        claim_file = _dest_claim_path(local_filepath)
+        if claim_file is not None:
+            # Withdraws our record and raises the `model_download_in_flight`
+            # refusal if we lost — before the `try` below, so the release in its
+            # `finally` never runs for a claim that was never ours.
+            _acquire_dest_claim(claim, local_filepath, claim_file)
+        # else: the claims directory is unusable, exactly as in
+        # `_submit_background_download` — degrade to the advisory guard rather
+        # than turn a working download into an error.
+    # `claim is None` (record unwritable, or no `pid_create_time`) skips the
+    # claim file entirely: a claim pointing at a record that does not exist reads
+    # stale to the next submitter and is swept, so taking one buys nothing and
+    # costs a round of cleanup.
 
     try:
         if needs_hf_auth:
@@ -727,6 +751,18 @@ def download(
         # pid_create_time no longer match a live process demotes to `failed`, so a
         # hard-killed foreground run self-clears just like a dead worker.
         _persist_record(claim)
+        # Released *after* the terminal status lands, never before: a competitor
+        # that takes the claim the instant we drop it re-scans for records, and
+        # our still-`downloading` one would be an earlier `_claim_order` than
+        # theirs — so they would withdraw against a run that is already over.
+        # Unconditional here because `release_claim` no-ops unless the claim
+        # still names us, so the degraded paths above (no claim taken, or one a
+        # later submitter already cleared and replaced) unlink nothing. Same
+        # contract as `_download_worker`'s `release()`; a SIGKILL leaves the
+        # claim behind and it self-clears on the next submit, like a dead
+        # worker's.
+        if claim is not None and claim_file is not None:
+            download_state.release_claim(claim_file, owner_id=claim.id)
 
     elapsed = time.monotonic() - start_time
     print(f"Done in {_format_elapsed(elapsed)}")
@@ -881,16 +917,15 @@ def _submit_background_download(
     # pointing at a record of ours that does not exist yet — it would read as
     # stale and be cleared out from under us.
     #
-    # Unchanged non-goals. A *foreground* transfer still writes no claim file —
-    # it claims with its state record only — and the claim lives under
-    # `get_workspace()`, so two invocations run from different workspaces at one
-    # destination still consult different claim directories (the documented
-    # cross-workspace residual).
+    # Unchanged non-goal: the claim lives under `get_workspace()`, so two
+    # invocations run from different workspaces at one destination still consult
+    # different claim directories (the documented cross-workspace residual).
     #
     # Which is why the advisory re-scan survives, and runs *first*, before the
     # claim. It is the only thing that sees a competitor writing no claim file —
-    # live foreground transfer, or a background record written by a version that
-    # predates this code — and running it before the claim is what keeps it from
+    # a background record written by a version that predates this code, or a
+    # foreground run degraded past its own claim (unusable claims directory, or
+    # no record at all) — and running it before the claim is what keeps it from
     # undoing the claim: after the claim, the records of the submitters we just
     # beat are still on disk for the moment it takes them to withdraw, and a
     # winner that re-scanned then would withdraw against its own losers (every
@@ -1168,18 +1203,21 @@ def _claim_order(state: download_state.DownloadState) -> tuple[str, str]:
     chars) breaks them, and because both racers compute the same order over the
     same two records they always agree on who won.
 
-    It no longer decides a background submit. Ordering records can only rank the
-    ones a racer happens to *see*, and a racer that scans before the other's
-    record lands sees no competitor at all — so two submits could rank each other
-    into a pair of winners. What decides a background submit now is the `O_EXCL`
-    claim file (:func:`_acquire_dest_claim`), where the kernel's create is the
-    order and nobody has to see anybody.
+    It no longer decides a download of either kind. Ordering records can only
+    rank the ones a racer happens to *see*, and a racer that scans before the
+    other's record lands sees no competitor at all — so two runs could rank each
+    other into a pair of winners. What decides now is the `O_EXCL` claim file
+    (:func:`_acquire_dest_claim`), taken by the foreground path as well as by a
+    background submit, where the kernel's create is the order and nobody has to
+    see anybody.
 
     This order survives for the readers that are still advisory and still want a
     deterministic pick: :func:`_active_download_for`'s winner-pick (one live
-    claim reported out of several), and :func:`_enforce_claim`, which is the
-    whole guard on the *foreground* path — a foreground transfer writes a record
-    but no claim file, so its two racers still have nothing else to agree on.
+    claim reported out of several), and :func:`_enforce_claim`, which still runs
+    first on both paths — it is what catches a competitor that took no claim
+    file at all (a record written by a version predating the claim, or a run
+    degraded past it), and it is the only guard left when the claims directory
+    is unusable.
     """
     return (state.started_at or "", state.id)
 
@@ -1501,10 +1539,11 @@ def _enforce_claim(state: download_state.DownloadState, dest: pathlib.Path) -> N
     ``check_unauthorized`` round trip between it and the write.
 
     It is check-then-act and cannot be otherwise — hence the `O_EXCL` claim file
-    that now decides the background path (:func:`_acquire_dest_claim`). This
-    stays because it is the only guard the *foreground* path has (a foreground
-    transfer writes no claim file), and because it is what lets a background
-    submit that already holds its claim still notice a live foreground competitor.
+    that now decides both paths (:func:`_acquire_dest_claim`). This stays because
+    it is the only thing that sees a competitor holding no claim file: a record
+    written by a version that predates the claim, or a run that degraded past it
+    (an unusable claims directory, a filesystem with no hard links). It is also
+    the whole guard when *we* are the degraded one.
 
     Both racers run this over the same two records and rank them with the same
     :func:`_claim_order`, so they agree on the winner instead of both backing off
