@@ -80,6 +80,13 @@ rather than an answer to anything. Five rules:
    it resolves to. A row flagged this way also pulls in `picks[]` for the
    capabilities that rank it, so the highest-ranked entry *without* the flag is
    the runnable alternative. Say what is missing, then name that alternative.
+   The flag never looks at model files. When routing is local, run
+   `comfy --json templates check <template>` on an `oss` pick's `template`
+   before recommending it. On `missing-models` the pick is still the answer:
+   name it, say it is not installed, and list `models.missing[]` with each
+   file's `directory`. Then check the next `oss` pick down and name the first
+   `runnable` one as what works today. Ask before downloading anything. A pick
+   with no `template` has nothing to check.
 3. **Verify before denying.** A missing `knowledge` key or a `nudge` means
    nothing is curated for that query, not that it is unsupported. A `nudge` on
    a block that still carries rows means your search term matched nothing
