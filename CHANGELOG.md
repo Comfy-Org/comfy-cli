@@ -29,6 +29,14 @@ history.
   release, or one of the build's releases). The builder's message is carried
   whole up to 8 KiB, so the blocking deployment ids it names are no longer lost
   to the 1000-byte cap on the raw body.
+- `comfy knowledge pick CAPABILITY --check-local` checks each `oss` pick's
+  template against the local ComfyUI's model folders, the same check
+  `comfy templates check` runs. A pick whose model files are missing gets
+  `available_locally: false`, an `unavailable_reason` and a `missing_models`
+  count, and a template absent from the gallery is flagged too. `local_check`
+  is `ok` when the check ran; when the server is down or the gallery cannot load
+  it carries that error code and no pick is flagged. The flag is off by default
+  because it fetches uncached template workflows and calls the local server.
 
 ### Fixed
 
