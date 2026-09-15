@@ -118,6 +118,10 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow fragment ls": "workflow",
     "comfy workflow fragment show": "workflow",
     "comfy workflow fragment validate": "workflow",
+    # the local comfy agent's approvals
+    "comfy agent permissions": "agent",
+    "comfy agent allow": "agent",
+    "comfy agent deny": "agent",
     # skill management
     "comfy skills install": "skill",
     "comfy skills uninstall": "skill",
