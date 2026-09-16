@@ -1322,7 +1322,7 @@ def _list_local_folder(target, folder: str) -> list[str] | None:
     # Reuse the exact target/URL plumbing `comfy models list-folder` uses.
     from comfy_cli.command.models.search import _http_get_json, _models_path_parts
 
-    url = target.url(*_models_path_parts(target), folder)
+    url = target.url(*_models_path_parts(target), urllib.parse.quote(folder, safe=""))
     try:
         data = _http_get_json(url, target)
     except urllib.error.HTTPError as e:
@@ -1365,6 +1365,158 @@ def _compute_verdict(*, api_dependent: bool, missing: list, required_count: int,
     return "unknown" if loaderish else "runnable"
 
 
+class TemplateCheckError(Exception):
+    """A template-check failure, carrying the fields of its error envelope."""
+
+    def __init__(self, code: str, message: str, *, hint: str | None = None, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.hint = hint
+        self.details = details
+
+
+def _gallery_rows(gallery_path: str | None, *, refresh: bool) -> list[dict[str, Any]]:
+    try:
+        cats = _load_gallery(gallery_path, refresh=refresh, background_ok=False)
+    except _GALLERY_LOAD_ERRORS as e:
+        raise TemplateCheckError("gallery_load_failed", str(e)) from e
+    return _flatten_templates(cats)
+
+
+def _template_workflow(
+    name: str, rows: list[dict[str, Any]], *, refresh: bool
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Resolve ``name`` against the gallery ``rows`` and return ``(row, workflow)``,
+    reading the workflow JSON from the per-template cache or fetching it."""
+    match = next((r for r in rows if r["name"] == name), None)
+    if match is None:
+        lower = name.lower()
+        close = [r["name"] for r in rows if lower in r["name"].lower()][:5]
+        raise TemplateCheckError(
+            "template_not_found",
+            f"no template named {name!r} in the gallery",
+            hint="try `comfy templates ls --name <substring>` to search",
+            details={"close_matches": close},
+        )
+
+    cache_path = _template_workflow_cache_path(name)
+    body: bytes | None = None
+    if not refresh and cache_path.exists():
+        try:
+            body = cache_path.read_bytes()
+        except OSError:
+            body = None
+    if body is None:
+        try:
+            body = _fetch_template_workflow(name)
+        except (urllib.error.URLError, OSError, RuntimeError, ResponseTooLarge) as e:
+            status = getattr(e, "code", None)
+            raise TemplateCheckError(
+                "template_fetch_failed",
+                f"failed to fetch workflow for {name!r}: {e}",
+                hint=(
+                    "the gallery index references a template whose workflow JSON "
+                    "is missing upstream — report at "
+                    "https://github.com/Comfy-Org/workflow_templates/issues"
+                    if status == 404
+                    else "check network connectivity"
+                ),
+                details={"status": status} if status else None,
+            ) from e
+        # Write atomically: a truncated file (interrupted write / full disk) would
+        # otherwise be trusted by the read path above on the next non-refresh run
+        # and fail `template_workflow_invalid_json` until the user passed --refresh.
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = cache_path.parent / f"{cache_path.name}.{os.getpid()}.tmp"
+            try:
+                tmp_path.write_bytes(body)
+                os.replace(tmp_path, cache_path)
+            except OSError:
+                tmp_path.unlink(missing_ok=True)
+                raise
+        except OSError:
+            pass  # a non-writable cache dir must not fail the check
+
+    try:
+        wf = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
+        raise TemplateCheckError(
+            "template_workflow_invalid_json",
+            f"template workflow for {name!r} is not valid JSON: {e}",
+            hint="re-run with --refresh to re-fetch, or report upstream",
+        ) from e
+    if not isinstance(wf, dict):
+        raise TemplateCheckError(
+            "template_workflow_invalid_json",
+            f"template workflow for {name!r} is not a JSON object",
+            hint="re-run with --refresh to re-fetch, or report upstream",
+        )
+    return match, wf
+
+
+def _match_local_models(
+    required: list[dict[str, str]], listings: dict[str, list[str] | None]
+) -> tuple[list[str], list[dict[str, str]], list[str]]:
+    """Split ``required`` into ``(present, missing, warnings)`` against the local
+    server's model folders, matching by basename.
+
+    ``listings`` caches each folder's listing by directory, so a caller checking
+    several templates lists a shared folder once.
+    """
+    warnings: list[str] = []
+    present: list[str] = []
+    missing: list[dict[str, str]] = []
+    if not required:
+        return present, missing, warnings
+
+    from comfy_cli.command.models.search import _is_walkable_folder_name
+    from comfy_cli.target import resolve_target
+
+    target = resolve_target(where="local")
+    try:
+        for directory in dict.fromkeys(req["directory"] for req in required):
+            if not _is_walkable_folder_name(directory):
+                # Not addressable as a `/models/<folder>` segment — treat as absent.
+                listings[directory] = None
+                warnings.append(
+                    f"model directory {directory!r} isn't a valid model folder — its files are reported missing"
+                )
+                continue
+            if directory not in listings:
+                listings[directory] = _list_local_folder(target, directory)
+            if listings[directory] is None:
+                warnings.append(
+                    f"model folder {directory!r} not found on the local server "
+                    f"(custom-node folder?) — its files are reported missing"
+                )
+    except ResponseTooLarge as e:
+        raise TemplateCheckError(
+            code="model_listing_too_large",
+            message=f"a local model folder listing is over the response size cap: {e}",
+            hint="check that the server on this host:port is ComfyUI",
+        ) from e
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise TemplateCheckError(
+            "server_not_running",
+            f"local ComfyUI server is unreachable, cannot check installed models: {e}",
+            hint="run `comfy launch` to start a local server",
+        ) from e
+
+    for req in required:
+        listing = listings.get(req["directory"])
+        # Normalize BOTH sides: a model ref may itself carry a subfolder
+        # (e.g. ``SDXL/model.safetensors``, as ComfyUI loader widgets emit),
+        # so compare basenames on the required side too.
+        req_base = _basename(req["name"])
+        if listing and any(_basename(entry) == req_base for entry in listing):
+            present.append(req["name"])
+        else:
+            missing.append(dict(req))
+    return present, missing, warnings
+
+
 @app.command(
     "check",
     help=(
@@ -1387,87 +1539,15 @@ def check_cmd(
         typer.Option("--refresh", help="Re-fetch the gallery index AND the template workflow before checking."),
     ] = False,
 ):
-    from comfy_cli.target import resolve_target
-
     renderer = get_renderer()
 
-    # 1. Resolve the name against the gallery index (same affordance as `fetch`).
+    # 1-2. Resolve the name against the gallery index (same affordance as `fetch`)
+    #      and read the per-template workflow JSON from cache or fetch it.
     try:
-        cats = _load_gallery(gallery_path, refresh=refresh)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
-        renderer.error(code="gallery_load_failed", message=str(e))
+        match, wf = _template_workflow(name, _gallery_rows(gallery_path, refresh=refresh), refresh=refresh)
+    except TemplateCheckError as e:
+        renderer.error(code=e.code, message=e.message, hint=e.hint, details=e.details)
         raise typer.Exit(code=1) from e
-
-    rows = _flatten_templates(cats)
-    match = next((r for r in rows if r["name"] == name), None)
-    if match is None:
-        lower = name.lower()
-        close = [r["name"] for r in rows if lower in r["name"].lower()][:5]
-        renderer.error(
-            code="template_not_found",
-            message=f"no template named {name!r} in the gallery",
-            hint="try `comfy templates ls --name <substring>` to search",
-            details={"close_matches": close},
-        )
-        raise typer.Exit(code=1)
-
-    # 2. Fetch (or read from cache) the per-template workflow JSON.
-    cache_path = _template_workflow_cache_path(name)
-    body: bytes | None = None
-    if not refresh and cache_path.exists():
-        try:
-            body = cache_path.read_bytes()
-        except OSError:
-            body = None
-    if body is None:
-        try:
-            body = _fetch_template_workflow(name)
-        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
-            status = getattr(e, "code", None)
-            renderer.error(
-                code="template_fetch_failed",
-                message=f"failed to fetch workflow for {name!r}: {e}",
-                hint=(
-                    "the gallery index references a template whose workflow JSON "
-                    "is missing upstream — report at "
-                    "https://github.com/Comfy-Org/workflow_templates/issues"
-                    if status == 404
-                    else "check network connectivity"
-                ),
-                details={"status": status} if status else None,
-            )
-            raise typer.Exit(code=1) from e
-        # Write atomically: a truncated file (interrupted write / full disk) would
-        # otherwise be trusted by the read path above on the next non-refresh run
-        # and fail `template_workflow_invalid_json` until the user passed --refresh.
-        try:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = cache_path.parent / f"{cache_path.name}.{os.getpid()}.tmp"
-            try:
-                tmp_path.write_bytes(body)
-                os.replace(tmp_path, cache_path)
-            except OSError:
-                tmp_path.unlink(missing_ok=True)
-                raise
-        except OSError:
-            pass  # a non-writable cache dir must not fail the check
-
-    try:
-        wf = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        renderer.error(
-            code="template_workflow_invalid_json",
-            message=f"template workflow for {name!r} is not valid JSON: {e}",
-            hint="re-run with --refresh to re-fetch, or report upstream",
-        )
-        raise typer.Exit(code=1) from e
-    if not isinstance(wf, dict):
-        renderer.error(
-            code="template_workflow_invalid_json",
-            message=f"template workflow for {name!r} is not a JSON object",
-            hint="re-run with --refresh to re-fetch, or report upstream",
-        )
-        raise typer.Exit(code=1)
 
     # 3. Model requirements (top-level + subgraph walk) and node class types.
     required = _collect_model_requirements(wf)
@@ -1498,47 +1578,11 @@ def check_cmd(
 
     # 5. Installed intersection: list each distinct folder once on the local server
     #    and match required files by basename.
-    warnings: list[str] = []
-    present: list[str] = []
-    missing: list[dict[str, str]] = []
-    distinct_dirs = list(dict.fromkeys(req["directory"] for req in required))
-    if required:
-        target = resolve_target(where="local")
-        listings: dict[str, list[str] | None] = {}
-        try:
-            for directory in distinct_dirs:
-                if not directory or ".." in directory or "/" in directory or "\\" in directory:
-                    # Not addressable as a `/models/<folder>` segment — treat as absent.
-                    listings[directory] = None
-                    warnings.append(
-                        f"model directory {directory!r} isn't a valid model folder — its files are reported missing"
-                    )
-                    continue
-                folder_files = _list_local_folder(target, directory)
-                listings[directory] = folder_files
-                if folder_files is None:
-                    warnings.append(
-                        f"model folder {directory!r} not found on the local server "
-                        f"(custom-node folder?) — its files are reported missing"
-                    )
-        except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as e:
-            renderer.error(
-                code="server_not_running",
-                message=f"local ComfyUI server is unreachable, cannot check installed models: {e}",
-                hint="run `comfy launch` to start a local server",
-            )
-            raise typer.Exit(code=1) from e
-
-        for req in required:
-            listing = listings.get(req["directory"])
-            # Normalize BOTH sides: a model ref may itself carry a subfolder
-            # (e.g. ``SDXL/model.safetensors``, as ComfyUI loader widgets emit),
-            # so compare basenames on the required side too.
-            req_base = _basename(req["name"])
-            if listing and any(_basename(entry) == req_base for entry in listing):
-                present.append(req["name"])
-            else:
-                missing.append(dict(req))
+    try:
+        present, missing, warnings = _match_local_models(required, {})
+    except TemplateCheckError as e:
+        renderer.error(code=e.code, message=e.message, hint=e.hint, details=e.details)
+        raise typer.Exit(code=1) from e
 
     # 6. Custom nodes are report-only in v1 (surfaced verbatim, not verified).
     custom_nodes_required = list(match.get("requires_custom_nodes") or [])

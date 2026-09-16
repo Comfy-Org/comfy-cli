@@ -29,9 +29,24 @@ history.
   release, or one of the build's releases). The builder's message is carried
   whole up to 8 KiB, so the blocking deployment ids it names are no longer lost
   to the 1000-byte cap on the raw body.
+- `comfy knowledge pick CAPABILITY --check-local` checks each `oss` pick's
+  template against the local ComfyUI's model folders, the same check
+  `comfy templates check` runs. A pick whose model files are missing gets
+  `available_locally: false`, an `unavailable_reason` and a `missing_models`
+  count, and a template absent from a fresh gallery index is flagged too. A pick
+  that could not be checked carries its own `local_check` naming why. The
+  payload's `local_check` is `ok` when the check ran. When the server is down, a
+  model folder listing is over the size cap, or the gallery cannot load, it
+  carries that error code and no pick is marked. The flag is off by default
+  because it fetches uncached template workflows and calls the local server.
 
 ### Fixed
 
+- `comfy templates check` returns an error envelope instead of a traceback when
+  the gallery or workflow fetch gets a non-200 status or an over-cap body, or
+  when a model folder listing is over the size cap. It also percent-encodes the
+  model folder name it asks the local server for, accepts a folder name with
+  `..` inside it, and refreshes a stale gallery index before looking up the name.
 - A failed blob upload during `comfy build push` no longer writes the presigned
   PUT URL's query string to stdout, into the JSON envelope, or into a CI log.
   Both a rejected upload and a dropped connection quote the URL they were talking

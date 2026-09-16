@@ -356,6 +356,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`--relative-path` instead",
     ),
     ErrorCode(
+        "model_listing_too_large",
+        "A local model folder listing was over the response size cap, so `templates check` or "
+        "`knowledge pick --check-local` could not check which model files are installed.",
+        "check that the server on this host:port is ComfyUI",
+    ),
+    ErrorCode(
         "folder_not_found",
         "Cloud or local server returned 404 for the requested model folder.",
         "list available folders via `comfy models list-folders`",
