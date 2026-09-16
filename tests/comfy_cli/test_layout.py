@@ -109,3 +109,75 @@ def test_assign_positions_reverse_order_connects_full_depth():
     out = layout.assign_positions(wf, _FakeGraph(), specs)
     xa, xb, xc, xd = (out[i]["at"][0] for i in range(4))
     assert xa < xb < xc < xd
+
+
+# --- title-band regression (layout-15) ------------------------------------------------
+# A node's `pos` is its BODY top-left; LiteGraph draws the title bar ABOVE it at
+# `pos[1] - NODE_TITLE_HEIGHT`. layout.py used to treat `pos` as the top of the whole
+# box, so its collision check was blind to the top 30px of every node and, against a
+# 10px margin, let nodes it called clear sit 20px inside each other on screen.
+
+
+def test_occupied_includes_the_title_band_above_pos():
+    x, y, w, h = layout.occupied((100.0, 200.0), (240.0, 120.0))
+    assert (x, w) == (100.0, 240.0)
+    assert y == 200.0 - layout.TITLE_H, "occupied rect must start at the title bar, not the body"
+    assert h == 120.0 + layout.TITLE_H
+
+
+def test_widget_height_matches_litegraph():
+    # LiteGraph NODE_WIDGET_HEIGHT is 20 (LiteGraphGlobal.ts:64); this was 24.
+    assert layout.WIDGET_H == 20.0
+    one, two = layout.estimate_size(1, 1, 1), layout.estimate_size(1, 1, 2)
+    assert two[1] - one[1] == 20.0
+
+
+def test_cascade_leaves_room_for_the_next_node_title():
+    """Regression: stacking must clear the title bar, not just the bodies.
+
+    Pre-fix, a node forced to slide down could land with its title bar overlapping the
+    body of the node above it, because neither rectangle modelled the band.
+    """
+    wf = {"nodes": [{"id": 1, "pos": [0.0, 0.0], "size": [240.0, 100.0]}]}
+    # Same column: force a vertical slide by asking for a spot the cascade must move.
+    size = [240.0, 100.0]
+    pos = layout.cascade_pos(wf, size)
+    placed = layout.occupied(pos, size)
+    existing = layout._rect(wf["nodes"][0])
+    assert not layout._overlaps(placed, existing)
+    # And the occupied rects genuinely do not intersect, margin aside.
+    px, py, pw, ph = placed
+    ex, ey, ew, eh = existing
+    assert px >= ex + ew or ex >= px + pw or py >= ey + eh or ey >= py + ph
+
+
+def test_stacked_column_bodies_clear_by_at_least_the_title_band():
+    """Two new nodes in one column must not have the lower one's title in the upper's body."""
+
+    class _Port:
+        is_link = True
+
+    class _Meta:
+        inputs = [_Port()]
+        outputs = [_Port()]
+
+    class _Graph:
+        def node(self, _ct):
+            return _Meta()
+
+        def widget_order(self, _ct):
+            return []
+
+    specs = [
+        {"op": "add_node", "class_type": "A", "as": "a"},
+        {"op": "add_node", "class_type": "B", "as": "b"},
+    ]
+    out = layout.assign_positions({"nodes": []}, _Graph(), specs)
+    ats = [s["at"] for s in out]
+    assert len(ats) == 2
+    if ats[0][0] == ats[1][0]:  # same column -> stacked
+        upper, lower = sorted(ats, key=lambda p: p[1])
+        size = layout.estimate_size(1, 1, 0)
+        upper_bottom = upper[1] + size[1]
+        lower_title_top = lower[1] - layout.TITLE_H
+        assert lower_title_top >= upper_bottom, "lower node's title bar overlaps the upper node's body"
