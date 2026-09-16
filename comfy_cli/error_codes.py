@@ -165,8 +165,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "ws_timeout",
-        "WebSocket idle past `--timeout` while waiting for the server.",
-        "re-run with a larger `--timeout` (e.g. `--timeout 300`)",
+        "WebSocket idle past `--timeout` (wall-clock) while waiting for the server.",
+        "re-run with a larger `--timeout` (e.g. `--timeout 300`); if the machine slept mid-run, "
+        "the job may still be running — check `comfy jobs status <id>`, and use `caffeinate` for long local batches",
     ),
     ErrorCode(
         "prompt_rejected",
