@@ -591,16 +591,20 @@ def list_all(workspace: Path) -> list[DownloadState]:
     return states
 
 
-def _has_partials(dest: str) -> bool:
+def _has_partials(dest: str, tag: str | None = None) -> bool:
     """True while a ``.part`` sibling of ``dest`` still holds bytes on disk.
 
     This is the same set of files ``download-cancel`` reclaims, so it is also
-    the only handle a user has left on those bytes once a download has failed.
+    the only handle a user has left on those bytes once a download has failed —
+    which is why the ``tag`` must match what the cancel path sweeps. A background
+    worker streams into a temp tagged with its download id, so pruning has to look
+    for that same tagged shape (plus the legacy untagged one) or it would evict a
+    failed record whose gigabytes are still on disk, orphaning them.
     """
     from comfy_cli import file_utils
 
     try:
-        return bool(file_utils.partial_paths_for(Path(dest)))
+        return bool(file_utils.partial_paths_for(Path(dest), tag))
     except (OSError, ValueError):
         # An unreadable parent or a nonsense dest tells us nothing about the
         # partial; assume there is one rather than deleting the record that
@@ -731,7 +735,7 @@ def prune(workspace: Path) -> int:
             updated = _parse_iso(state.updated_at)
             if updated is None or updated >= cutoff:
                 continue
-            if state.status in ("failed", "cancelled") and _has_partials(state.dest):
+            if state.status in ("failed", "cancelled") and _has_partials(state.dest, state.id):
                 continue
         if _remove_record(path):
             removed += 1
