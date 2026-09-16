@@ -1517,3 +1517,201 @@ def test_ls_self_heals_from_a_cache_poisoned_by_an_older_build(cache_file, monke
     assert result.exit_code == 0, result.output
     assert _envelope(result.output)["data"]["total_in_gallery"] > 0
     assert json.loads(cache_file.read_bytes()) == FIXTURE  # healed on disk too
+
+
+# ---------------------------------------------------------------------------
+# templates ls --local-only / --runnable  (BE-3377)
+# ---------------------------------------------------------------------------
+
+
+def _count_workflow_fetches(monkeypatch, body_by_name=None, fail_names=None):
+    """Stub `_fetch_template_workflow` with a call counter.
+
+    `body_by_name` maps name -> bytes (default: a trivial zero-node workflow);
+    `fail_names` are names whose fetch raises an upstream 404.
+    """
+    import urllib.error
+
+    calls = {"count": 0, "names": []}
+    fail_names = set(fail_names or [])
+
+    def _impl(name, *args, **kwargs):
+        calls["count"] += 1
+        calls["names"].append(name)
+        if name in fail_names:
+            raise urllib.error.HTTPError(url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+        if body_by_name and name in body_by_name:
+            return body_by_name[name]
+        return json.dumps({"nodes": []}).encode()
+
+    monkeypatch.setattr(templates_cmd, "_fetch_template_workflow", _impl)
+    return calls
+
+
+def _count_folder_listings(monkeypatch, mapping):
+    """Stub `_list_local_folder` with a per-folder call counter."""
+    calls = {"count": 0, "folders": []}
+
+    def _impl(target, folder):
+        calls["count"] += 1
+        calls["folders"].append(folder)
+        return mapping.get(folder)
+
+    monkeypatch.setattr(templates_cmd, "_list_local_folder", _impl)
+    return calls
+
+
+def _run_ls(gallery_file, tmp_path, monkeypatch, extra):
+    # Isolate the on-disk per-template workflow cache so tests never read/write real cache.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    return CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, *extra])
+
+
+def test_ls_local_only_drops_api_rows_without_any_fetch(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    fetches = _count_workflow_fetches(monkeypatch)
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--local-only"])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    names = [r["name"] for r in env["data"]["rows"]]
+    # image_flux2 + gsc_starter_1 both carry the API tag → dropped; image_z_image stays.
+    assert names == ["image_z_image"]
+    # `matched` counts the flag-filter survivors, unchanged by the pre-filter.
+    assert env["data"]["matched"] == 3
+    assert env["data"]["shown"] == 1
+    assert env["data"]["local_only"] is True
+    # Index-only pre-filter: zero network beyond the index.
+    assert fetches["count"] == 0
+
+
+def test_ls_runnable_implies_local_only_prefilter(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)  # object_info unavailable → index-only API tier
+    fetches = _count_workflow_fetches(monkeypatch)
+    _count_folder_listings(monkeypatch, {})
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert [r["name"] for r in env["data"]["rows"]] == ["image_z_image"]
+    # Only the non-API survivor's workflow was fetched (API rows never reach the check).
+    assert fetches["names"] == ["image_z_image"]
+    row = env["data"]["rows"][0]
+    assert row["verdict"] == "runnable"  # zero models, no loader node → runnable
+    assert row["missing_count"] == 0
+    assert env["data"]["runnable"] is True
+
+
+def test_ls_runnable_cache_hit_skips_fetch(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    # Pre-seed the phase-1 per-template cache for the surviving template.
+    cache_path = templates_cmd._template_workflow_cache_path("image_z_image")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(json.dumps({"nodes": []}).encode())
+    fetches = _count_workflow_fetches(monkeypatch)
+    _count_folder_listings(monkeypatch, {})
+
+    result = CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--runnable"])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert [r["name"] for r in env["data"]["rows"]] == ["image_z_image"]
+    assert env["data"]["rows"][0]["verdict"] == "runnable"
+    # Cache hit → no network fetch at all.
+    assert fetches["count"] == 0
+
+
+def test_ls_runnable_single_fetch_failure_degrades_to_unknown(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _count_workflow_fetches(monkeypatch, fail_names={"image_z_image"})
+    _count_folder_listings(monkeypatch, {})
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--runnable"])
+    # A single template's fetch failure must NOT abort the listing.
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    row = env["data"]["rows"][0]
+    assert row["name"] == "image_z_image"
+    assert row["verdict"] == "unknown"
+    assert row["missing_count"] == 0
+    assert any("image_z_image" in w for w in env["data"]["warnings"])
+
+
+def test_ls_runnable_lists_each_directory_once(tmp_path, monkeypatch):
+    # Two surviving templates that BOTH reference the `checkpoints` folder: it must
+    # be listed exactly once for the whole run, not once per template.
+    fixture = [
+        {
+            "moduleName": "default",
+            "category": "GEN",
+            "title": "Image",
+            "type": "image",
+            "templates": [
+                {"name": "local_a", "title": "A", "tags": ["Local"], "models": []},
+                {"name": "local_b", "title": "B", "tags": ["Local"], "models": []},
+            ],
+        }
+    ]
+    gf = tmp_path / "idx.json"
+    gf.write_text(json.dumps(fixture))
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    wf = json.dumps(_TOP_LEVEL_WF).encode()  # references checkpoints/v1-5-pruned-emaonly
+    _count_workflow_fetches(monkeypatch, body_by_name={"local_a": wf, "local_b": wf})
+    listings = _count_folder_listings(monkeypatch, {"checkpoints": ["v1-5-pruned-emaonly.safetensors"]})
+
+    result = _run_ls(str(gf), tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 0, result.output
+    # checkpoints listed exactly ONCE despite two templates needing it.
+    assert listings["folders"] == ["checkpoints"]
+    env = _envelope(result.output)
+    verdicts = {r["name"]: r["verdict"] for r in env["data"]["rows"]}
+    assert verdicts == {"local_a": "runnable", "local_b": "runnable"}
+
+
+def test_ls_limit_applied_after_prefilter_not_before(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    fetches = _count_workflow_fetches(monkeypatch)
+    # image_flux2 (API) is FIRST in the fixture. A naive pre-filter `rows[:1]` would
+    # grab it and the pre-filter would then drop it → zero rows. Correct ordering
+    # filters first, so the single local template survives the limit.
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--local-only", "--limit", "1"])
+    assert result.exit_code == 0, result.output
+    env = _envelope(result.output)
+    assert [r["name"] for r in env["data"]["rows"]] == ["image_z_image"]
+    assert fetches["count"] == 0
+
+
+def test_ls_runnable_server_unreachable_is_fatal_when_models_required(gallery_file, tmp_path, monkeypatch):
+    import urllib.error
+
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _count_workflow_fetches(monkeypatch, body_by_name={"image_z_image": json.dumps(_TOP_LEVEL_WF).encode()})
+    # Folder listing raises (server down) — fatal, because --runnable means
+    # "runnable on THIS install" and the install can't be inspected.
+    _stub_folder_listing(monkeypatch, urllib.error.URLError("connection refused"))
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["error"]["code"] == "server_not_running"
+
+
+def test_check_template_helper_is_pure_over_shared_listings():
+    # _check_template intersects against a caller-provided listings map with no
+    # network of its own — the batching contract ls --runnable relies on.
+    row = {"name": "image_z_image", "title": "Z", "tags": ["Local"], "requires_custom_nodes": []}
+    listings = {"checkpoints": ["v1-5-pruned-emaonly.safetensors"]}
+    res = templates_cmd._check_template(row, _TOP_LEVEL_WF, listings)
+    assert res["verdict"] == "runnable"
+    assert res["models"]["present"] == ["v1-5-pruned-emaonly.safetensors"]
+
+    # A 404/absent folder (None in the map) → missing, with a warning, no raise.
+    res_missing = templates_cmd._check_template(row, _TOP_LEVEL_WF, {"checkpoints": None})
+    assert res_missing["verdict"] == "missing-models"
+    assert res_missing["models"]["missing"][0]["name"] == "v1-5-pruned-emaonly.safetensors"
+    assert any("checkpoints" in w for w in res_missing["warnings"])
