@@ -33,15 +33,74 @@ _GUARD = 1000  # bounded collision-shift loop
 TITLE_H = 30.0
 
 
-def estimate_size(n_link_inputs: int, n_outputs: int, n_widgets: int) -> list[float]:
+# --- width model, ported from LiteGraph's own computeSize (LGraphNode.ts:2020-2072) ---
+#
+# Width was a flat NODE_W for every node, while LiteGraph derives it from label text.
+# COL_GAP absorbs 80px of error and then fails: a node rendering 360px wide overlaps its
+# neighbour by 40px, 420px by 100px. That is the n8n#38093 failure mode (their SDK sized a
+# node 96x96 while the editor drew a 320x128 card).
+#
+# The port is faithful rather than invented: when no canvas is available LiteGraph itself
+# falls back to `font_size * text.length * 0.6` (its compute_text_size), which is exactly
+# what a CLI can compute. It is NOT pixel-identical to a browser with real font metrics —
+# proportional fonts vary per glyph — but it tracks content instead of ignoring it.
+NODE_TEXT_SIZE = 14.0  # LiteGraph NODE_TEXT_SIZE (LiteGraphGlobal.ts:71)
+LG_NODE_WIDTH = 140.0  # LiteGraph NODE_WIDTH (LiteGraphGlobal.ts:65)
+_CHAR_W = 0.6  # LiteGraph's no-canvas glyph-width fallback
+# BaseWidget.minValueWidth(42) + 2 * (margin(15) + arrowMargin(6) + arrowWidth(10))
+_WIDGET_PADDING = 42.0 + 2.0 * (15.0 + 6.0 + 10.0)
+
+
+def _text_w(text: str | None) -> float:
+    return NODE_TEXT_SIZE * len(text or "") * _CHAR_W
+
+
+def estimate_width(
+    title: str | None = None,
+    input_labels: tuple[str, ...] = (),
+    output_labels: tuple[str, ...] = (),
+    widget_labels: tuple[str, ...] = (),
+) -> float:
+    """LiteGraph's computeSize width, using its own no-canvas text metric."""
+    title_width = TITLE_H + _text_w(title) + TITLE_H * 0.33
+    input_width = max((_text_w(t) for t in input_labels), default=0.0)
+    output_width = max((_text_w(t) for t in output_labels), default=0.0)
+    widget_width = max((_text_w(t) for t in widget_labels), default=0.0)
+    if widget_width:
+        widget_width += _WIDGET_PADDING
+    min_width = LG_NODE_WIDTH * (1.5 if widget_labels else 1.0)
+    centre_padding = 5.0 if (input_width and output_width) else 0.0
+    slots_width = input_width + output_width + 2.0 * SLOT_H + centre_padding
+    return max(slots_width, widget_width, title_width, min_width)
+
+
+def estimate_size(
+    n_link_inputs: int,
+    n_outputs: int,
+    n_widgets: int,
+    *,
+    title: str | None = None,
+    input_labels: tuple[str, ...] = (),
+    output_labels: tuple[str, ...] = (),
+    widget_labels: tuple[str, ...] = (),
+) -> list[float]:
     """Estimated BODY size, excluding the title bar (see TITLE_H).
+
+    Pass the label strings to get a content-derived width (see `estimate_width`). Without
+    them the width falls back to the flat NODE_W, which is what every caller used before
+    and is kept so this stays additive — but it is the weaker estimate, and callers that
+    have the catalog metadata should pass it.
 
     Deliberately conservative on height: HEADER_H is retained even though the title is
     now modelled separately, so the estimate runs ~30px tall. Over-spacing is invisible;
     under-spacing is the overlap users report.
     """
     h = HEADER_H + SLOT_H * max(n_link_inputs, n_outputs) + WIDGET_H * n_widgets + PAD_H
-    return [NODE_W, max(h, MIN_H)]
+    if title is None and not (input_labels or output_labels or widget_labels):
+        w = NODE_W
+    else:
+        w = estimate_width(title, input_labels, output_labels, widget_labels)
+    return [w, max(h, MIN_H)]
 
 
 def occupied(pos, size) -> tuple[float, float, float, float]:
@@ -117,10 +176,15 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
             continue
         m = graph.node(spec.get("class_type") or "")
         if m is not None:
+            widget_names = tuple(graph.widget_order(spec["class_type"]))
             size = estimate_size(
                 len([p for p in m.inputs if p.is_link]),
                 len(m.outputs),
-                len(graph.widget_order(spec["class_type"])),
+                len(widget_names),
+                title=spec["class_type"],
+                input_labels=tuple(p.name for p in m.inputs if p.is_link),
+                output_labels=tuple(p.name for p in m.outputs),
+                widget_labels=widget_names,
             )
         else:
             size = list(DEFAULT_SIZE)  # unknown type: apply_specs will error later

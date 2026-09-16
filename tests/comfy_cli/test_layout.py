@@ -156,6 +156,7 @@ def test_stacked_column_bodies_clear_by_at_least_the_title_band():
 
     class _Port:
         is_link = True
+        name = "samples"
 
     class _Meta:
         inputs = [_Port()]
@@ -181,3 +182,50 @@ def test_stacked_column_bodies_clear_by_at_least_the_title_band():
         upper_bottom = upper[1] + size[1]
         lower_title_top = lower[1] - layout.TITLE_H
         assert lower_title_top >= upper_bottom, "lower node's title bar overlaps the upper node's body"
+
+
+# --- content-derived width (layout-16) ------------------------------------------------
+# Width used to be a flat NODE_W=240 for every node while LiteGraph derives it from label
+# text. COL_GAP absorbs 80px of error and then fails, which is the n8n#38093 failure mode.
+
+
+def test_width_tracks_content_instead_of_being_constant():
+    narrow = layout.estimate_width("Reroute", ("in",), ("out",), ())
+    wide = layout.estimate_width(
+        "CheckpointLoaderSimple",
+        (),
+        ("MODEL", "CLIP", "VAE"),
+        ("ckpt_name",),
+    )
+    assert wide > narrow, "a long-titled, widget-bearing node must estimate wider than a Reroute"
+
+
+def test_width_respects_litegraph_minimums():
+    # No widgets -> NODE_WIDTH floor; widgets -> NODE_WIDTH * 1.5.
+    assert layout.estimate_width("x", (), (), ()) >= layout.LG_NODE_WIDTH
+    assert layout.estimate_width("x", (), (), ("w",)) >= layout.LG_NODE_WIDTH * 1.5
+
+
+def test_long_title_widens_the_node():
+    short = layout.estimate_width("A", (), (), ())
+    long = layout.estimate_width("A" * 60, (), (), ())
+    assert long > short + 200, "title text must drive width like LiteGraph's title_width does"
+
+
+def test_estimate_size_without_labels_keeps_the_old_constant_width():
+    # Additive: existing callers that pass only counts are unchanged.
+    assert layout.estimate_size(1, 1, 0)[0] == layout.NODE_W
+
+
+def test_wide_node_does_not_get_a_neighbour_placed_inside_it():
+    """Regression: the pre-fix flat 240 put the next node inside a wide one.
+
+    A node whose real width is 360 covers x=[0,360]; the old model thought 240, so the
+    cascade placed the next at 240+80=320 — 40px inside it.
+    """
+    wide = layout.estimate_width(
+        "CheckpointLoaderSimpleWithNoiseSelect", (), ("MODEL", "CLIP", "VAE"), ("ckpt_name",)
+    )
+    wf = {"nodes": [{"id": 1, "pos": [0.0, 0.0], "size": [wide, 100.0]}]}
+    nxt = layout.cascade_pos(wf, [240.0, 100.0])
+    assert nxt[0] >= wide + layout.COL_GAP, "next node must clear the wide node's real extent"
