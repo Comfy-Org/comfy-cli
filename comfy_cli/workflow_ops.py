@@ -553,7 +553,7 @@ def add_node(
         len([p for p in m.inputs if p.is_link]),
         len(m.outputs),
         len(_widget_names),
-        title=class_type,
+        title=(getattr(m, "display_name", "") or class_type),
         input_labels=tuple(p.name for p in m.inputs if p.is_link),
         output_labels=tuple(p.name for p in m.outputs),
         widget_labels=_widget_names,

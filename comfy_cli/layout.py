@@ -47,7 +47,9 @@ TITLE_H = 30.0
 NODE_TEXT_SIZE = 14.0  # LiteGraph NODE_TEXT_SIZE (LiteGraphGlobal.ts:71)
 LG_NODE_WIDTH = 140.0  # LiteGraph NODE_WIDTH (LiteGraphGlobal.ts:65)
 _CHAR_W = 0.6  # LiteGraph's no-canvas glyph-width fallback
-# BaseWidget.minValueWidth(42) + 2 * (margin(15) + arrowMargin(6) + arrowWidth(10))
+# Horizontal room a widget row needs beyond its label, from BaseWidget: a minimum value
+# width of 42, plus a margin of 15, an arrow margin of 6 and an arrow width of 10 on each
+# side (BaseWidget.ts:100-106).
 _WIDGET_PADDING = 42.0 + 2.0 * (15.0 + 6.0 + 10.0)
 
 
@@ -103,6 +105,26 @@ def estimate_size(
     return [w, max(h, MIN_H)]
 
 
+def _pair(value) -> tuple[float, float] | None:
+    """Read a geometry pair, tolerating both shapes litegraph serialises.
+
+    `schemas/workflow.json` documents `pos`/`size` as "passed through verbatim --
+    litegraph has serialized this as both [x, y] and {"0": x, "1": y}". Integer indexing
+    a mapping raises KeyError, so the object form has to be read by string key rather
+    than merely caught: falling back to a default here would discard geometry that is
+    present and usable, and silently mis-place a real node.
+    """
+    if isinstance(value, dict):
+        try:
+            return float(value["0"]), float(value["1"])
+        except (KeyError, TypeError, ValueError):
+            return None
+    try:
+        return float(value[0]), float(value[1])
+    except (TypeError, ValueError, IndexError, KeyError):
+        return None
+
+
 def occupied(pos, size) -> tuple[float, float, float, float]:
     """The rectangle a node actually covers on the canvas, title bar included.
 
@@ -110,12 +132,13 @@ def occupied(pos, size) -> tuple[float, float, float, float]:
     same convention as `_rect` does for placed ones. Mixing the two spaces silently
     reintroduces the title-band blindness this function exists to remove.
     """
-    try:
-        x, y = float(pos[0]), float(pos[1])
-        w, h = float(size[0]), float(size[1])
-    except (TypeError, ValueError, IndexError):
-        return (0.0, -TITLE_H, *DEFAULT_SIZE)
-    return (x, y - TITLE_H, w, h + TITLE_H)
+    xy, wh = _pair(pos), _pair(size)
+    if xy is None or wh is None:
+        # Unreadable geometry: fall back to the default BODY, then apply the same title
+        # band the normal path does. Returning the bare DEFAULT_SIZE here would
+        # under-report the node's lower 30px and let a collision check accept an overlap.
+        return (0.0, -TITLE_H, DEFAULT_SIZE[0], DEFAULT_SIZE[1] + TITLE_H)
+    return (xy[0], xy[1] - TITLE_H, wh[0], wh[1] + TITLE_H)
 
 
 def _rect(node: dict) -> tuple[float, float, float, float]:
@@ -181,7 +204,9 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
                 len([p for p in m.inputs if p.is_link]),
                 len(m.outputs),
                 len(widget_names),
-                title=spec["class_type"],
+                # LiteGraph renders `display_name || name`, and width is derived from the
+                # title, so sizing from class_type under-estimates whenever they differ.
+                title=(getattr(m, "display_name", "") or spec["class_type"]),
                 input_labels=tuple(p.name for p in m.inputs if p.is_link),
                 output_labels=tuple(p.name for p in m.outputs),
                 widget_labels=widget_names,
@@ -242,6 +267,24 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
 
     movable = [k for k in order if adds[k]["pinned"] is None]
 
+    # Column stride must follow the widest node in each depth, not a constant.
+    # Widths are content-derived now (see estimate_width), so a fixed NODE_W + COL_GAP
+    # stride of 320 lets a 360px depth-0 node reach 40px into depth 1 — an overlap
+    # `collides()` cannot catch, because it only compares new nodes against EXISTING
+    # workflow nodes, never against each other.
+    depth_w: dict[int, float] = {}
+    for k in movable:
+        d = adds[k]["depth"]
+        depth_w[d] = max(depth_w.get(d, 0.0), adds[k]["size"][0])
+    max_depth = max(depth_w, default=0)
+    # x offset of each depth from the block's left edge.
+    depth_dx: dict[int, float] = {}
+    _run = 0.0
+    for d in range(max_depth + 1):
+        depth_dx[d] = _run
+        _run += depth_w.get(d, NODE_W) + COL_GAP
+    block_width = max(_run - COL_GAP, 0.0)  # trailing gap is not part of the block
+
     if src_anchors:
         # New nodes fed by existing ones: place right of the feeders, as before.
         arects = [_rect(a) for a in src_anchors]
@@ -251,8 +294,9 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
         # New nodes that feed INTO existing ones: place the whole new block to
         # the left so the edge still reads left-to-right, not backwards.
         drects = [_rect(a) for a in dst_anchors]
-        max_depth = max((adds[k]["depth"] for k in movable), default=0)
-        base_x = min(r[0] for r in drects) - (max_depth + 1) * (NODE_W + COL_GAP)
+        # Offset by the block's REAL width so its rightmost column clears the
+        # destination; the old fixed stride let a wide deepest node overlap it.
+        base_x = min(r[0] for r in drects) - block_width - COL_GAP
         base_y = min(r[1] for r in drects) + TITLE_H  # occupied-space top -> pos
     else:
         box = _bbox(list(existing.values()))
@@ -261,7 +305,7 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
     col_y: dict[int, float] = {}
     for k in movable:
         a = adds[k]
-        x = base_x + a["depth"] * (NODE_W + COL_GAP)
+        x = base_x + depth_dx[a["depth"]]
         y = col_y.get(a["depth"], base_y)
         # Clear this node's body bottom, the gap, AND the next node's title bar.
         col_y[a["depth"]] = y + a["size"][1] + ROW_GAP + TITLE_H
@@ -269,9 +313,7 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
 
     def collides() -> bool:
         return any(
-            _overlaps(occupied(adds[k]["pos"], adds[k]["size"]), _rect(n))
-            for k in movable
-            for n in existing.values()
+            _overlaps(occupied(adds[k]["pos"], adds[k]["size"]), _rect(n)) for k in movable for n in existing.values()
         )
 
     for _ in range(_GUARD):

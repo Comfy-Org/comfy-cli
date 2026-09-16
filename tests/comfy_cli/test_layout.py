@@ -181,7 +181,12 @@ def test_stacked_column_bodies_clear_by_at_least_the_title_band():
         size = layout.estimate_size(1, 1, 0)
         upper_bottom = upper[1] + size[1]
         lower_title_top = lower[1] - layout.TITLE_H
-        assert lower_title_top >= upper_bottom, "lower node's title bar overlaps the upper node's body"
+        # Require the FULL row gap, not merely non-overlap: the pre-fix stride (which
+        # omitted TITLE_H) still left the lower title 10px below the upper body, so a
+        # bare non-overlap assertion passes on the broken code and protects nothing.
+        assert lower_title_top - upper_bottom >= layout.ROW_GAP, (
+            f"stacked column must clear ROW_GAP between bodies and the next title; got {lower_title_top - upper_bottom}"
+        )
 
 
 # --- content-derived width (layout-16) ------------------------------------------------
@@ -223,9 +228,73 @@ def test_wide_node_does_not_get_a_neighbour_placed_inside_it():
     A node whose real width is 360 covers x=[0,360]; the old model thought 240, so the
     cascade placed the next at 240+80=320 — 40px inside it.
     """
-    wide = layout.estimate_width(
-        "CheckpointLoaderSimpleWithNoiseSelect", (), ("MODEL", "CLIP", "VAE"), ("ckpt_name",)
-    )
+    wide = layout.estimate_width("CheckpointLoaderSimpleWithNoiseSelect", (), ("MODEL", "CLIP", "VAE"), ("ckpt_name",))
     wf = {"nodes": [{"id": 1, "pos": [0.0, 0.0], "size": [wide, 100.0]}]}
     nxt = layout.cascade_pos(wf, [240.0, 100.0])
     assert nxt[0] >= wide + layout.COL_GAP, "next node must clear the wide node's real extent"
+
+
+# --- review findings on PR #882 -------------------------------------------------------
+
+
+def test_mapping_shaped_geometry_is_read_not_discarded():
+    """litegraph serialises pos/size as both [x, y] and {"0": x, "1": y}.
+
+    schemas/workflow.json documents both shapes. Integer-indexing the object form raises
+    KeyError; falling back to a default would silently mis-place a node whose real
+    geometry was right there.
+    """
+    node = {"pos": {"0": 100.0, "1": 200.0}, "size": {"0": 240.0, "1": 120.0}}
+    x, y, w, h = layout._rect(node)
+    assert (x, w) == (100.0, 240.0)
+    assert y == 200.0 - layout.TITLE_H
+    assert h == 120.0 + layout.TITLE_H
+
+
+def test_unreadable_geometry_fallback_still_includes_the_title_band():
+    x, y, w, h = layout.occupied(None, None)
+    assert y == -layout.TITLE_H
+    assert h == layout.DEFAULT_SIZE[1] + layout.TITLE_H, "fallback must not under-report the body"
+
+
+def test_batch_columns_use_the_widest_node_not_a_fixed_stride():
+    """A wide depth-0 node must not reach into depth 1.
+
+    collides() only compares new nodes against EXISTING workflow nodes, never against
+    each other, so a fixed NODE_W + COL_GAP stride hides this overlap entirely.
+    """
+
+    class _P:
+        is_link = True
+        name = "a_very_long_input_slot_name_to_force_width"
+
+    class _Wide:
+        display_name = "A Node With A Deliberately Very Long Display Name"
+        inputs = [_P()]
+        outputs = [_P()]
+
+    class _Graph:
+        def node(self, _ct):
+            return _Wide()
+
+        def widget_order(self, _ct):
+            return ["a_long_widget_name"]
+
+    specs = [
+        {"op": "add_node", "class_type": "Wide", "as": "a"},
+        {"op": "add_node", "class_type": "Wide", "as": "b"},
+        {"op": "connect", "from": "a.out", "to": "b.in"},
+    ]
+    out = layout.assign_positions({"nodes": []}, _Graph(), specs)
+    at = {s["as"]: s["at"] for s in out if s.get("op") == "add_node"}
+    width = layout.estimate_size(
+        1,
+        1,
+        1,
+        title="A Node With A Deliberately Very Long Display Name",
+        input_labels=("a_very_long_input_slot_name_to_force_width",),
+        output_labels=("a_very_long_input_slot_name_to_force_width",),
+        widget_labels=("a_long_widget_name",),
+    )[0]
+    assert width > layout.NODE_W + layout.COL_GAP, "fixture must be wide enough to expose a fixed stride"
+    assert at["b"][0] - at["a"][0] >= width + layout.COL_GAP, "depth-1 column must clear the widest depth-0 node"
