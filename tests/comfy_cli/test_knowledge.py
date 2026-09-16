@@ -1084,11 +1084,15 @@ class TestPickCheckLocal:
         self.templates_cmd = templates_cmd
         self.fetched: list[str] = []
         self.listed: list[str] = []
+        self.undeclared_models = False
         self.set_gallery(self.OSS_TEMPLATES)
         self.set_installed({"checkpoints": []})
+        monkeypatch.setattr(templates_cmd, "_cache_is_stale", lambda _path: False)
 
         def _fetch(name, **_kw):
             self.fetched.append(name)
+            if name == "video_testwan1_talk" and self.undeclared_models:
+                return json.dumps({"nodes": [{"id": 1, "type": "CheckpointLoaderSimple"}]}).encode()
             models = [{"name": f"{name}.safetensors", "directory": "checkpoints", "url": "https://example.test/m"}]
             if name == "video_testwan2_s2v":
                 models.append({"name": "testwan2_vae.safetensors", "directory": "vae", "url": "https://example.test/v"})
@@ -1099,13 +1103,13 @@ class TestPickCheckLocal:
         monkeypatch.setattr(templates_cmd, "_fetch_template_workflow", _fetch)
 
     def set_gallery(self, names, exc=None):
-        def _rows(_path, **kw):
+        def _load(_path, **kw):
             self.gallery_kwargs = kw
             if exc is not None:
                 raise exc
-            return [{"name": n, "title": n} for n in names]
+            return [{"type": "video", "templates": [{"name": n} for n in names]}]
 
-        self.monkeypatch.setattr(self.templates_cmd, "_gallery_rows", _rows)
+        self.monkeypatch.setattr(self.templates_cmd, "_load_gallery", _load)
 
     def set_installed(self, mapping_or_exc):
         def _list(_target, folder):
@@ -1146,10 +1150,35 @@ class TestPickCheckLocal:
         assert "missing_models" not in by_model["testwan2"]
         assert [m for m, p in by_model.items() if "available_locally" in p] == ["testwan2"]
 
+    def test_a_stale_gallery_index_leaves_a_template_it_lacks_unchecked(self, capsys, monkeypatch):
+        monkeypatch.setattr(self.templates_cmd, "_cache_is_stale", lambda _path: True)
+        self.set_gallery([t for t in self.OSS_TEMPLATES if t != "video_testwan2_s2v"])
+        self.set_installed({"checkpoints": [f"{t}.safetensors" for t in self.OSS_TEMPLATES]})
+        data, by_model = self._picks(capsys, "--check-local")
+        assert data["local_check"] == "ok"
+        assert by_model["testwan2"]["local_check"] == "template_not_found"
+        assert not any("available_locally" in p for p in by_model.values())
+
+    def test_a_folder_the_server_does_not_have_gets_its_own_reason(self, capsys):
+        self.set_installed({"checkpoints": [f"{t}.safetensors" for t in self.OSS_TEMPLATES]})
+        data, by_model = self._picks(capsys, "--check-local")
+        assert data["local_check"] == "ok"
+        assert by_model["testwan2"]["unavailable_reason"] == knowledge.UNAVAILABLE_MODEL_FOLDER_NOT_FOUND
+        assert by_model["testwan2"]["missing_models"] == 1
+        assert [m for m, p in by_model.items() if "available_locally" in p] == ["testwan2"]
+
+    def test_a_loader_with_no_declared_models_is_unknown(self, capsys):
+        self.undeclared_models = True
+        self.set_installed({"checkpoints": [f"{t}.safetensors" for t in self.OSS_TEMPLATES], "vae": []})
+        data, by_model = self._picks(capsys, "--check-local")
+        assert data["local_check"] == "ok"
+        assert by_model["testwan1-talk"]["local_check"] == "unknown"
+        assert "available_locally" not in by_model["testwan1-talk"]
+
     @pytest.mark.parametrize(
         "exc", [urllib.error.URLError("offline"), RuntimeError("HTTP 204"), ResponseTooLarge("too big")]
     )
-    def test_a_failed_workflow_fetch_leaves_only_that_pick_unflagged(self, capsys, monkeypatch, exc):
+    def test_a_failed_workflow_fetch_marks_only_that_pick_unchecked(self, capsys, monkeypatch, exc):
         real_fetch = self.templates_cmd._fetch_template_workflow
 
         def _fetch(name, **kw):
@@ -1160,29 +1189,25 @@ class TestPickCheckLocal:
         monkeypatch.setattr(self.templates_cmd, "_fetch_template_workflow", _fetch)
         data, by_model = self._picks(capsys, "--check-local")
         assert data["local_check"] == "ok"
+        assert by_model["testlx"]["local_check"] == "template_fetch_failed"
         assert "available_locally" not in by_model["testlx"]
+        assert "local_check" not in by_model["testwan2"]
         assert by_model["testwan2"]["missing_models"] == 2
 
-    @pytest.mark.parametrize(
-        "server_exc, code",
-        [
-            (urllib.error.URLError("connection refused"), "server_not_running"),
-            (ResponseTooLarge("listing too big"), "model_listing_too_large"),
-        ],
-    )
-    def test_a_server_failure_drops_flags_already_made(self, capsys, server_exc, code):
+    @pytest.mark.parametrize("server_exc", [urllib.error.URLError("connection refused"), ResponseTooLarge("too big")])
+    def test_a_server_failure_drops_flags_already_made(self, capsys, server_exc):
         # testlx is rank 1 and absent from the gallery, so it is flagged before the
         # first folder listing fails.
         self.set_gallery([t for t in self.OSS_TEMPLATES if t != "video_testlx_ia2v"])
         self.set_installed(server_exc)
         data, by_model = self._picks(capsys, "--check-local")
-        assert data["local_check"] == code
+        assert data["local_check"] == "server_not_running"
         assert not any("available_locally" in p for p in by_model.values())
 
-    @pytest.mark.parametrize("gallery_exc", ["check_error", RuntimeError("wrong-shape index")])
+    @pytest.mark.parametrize(
+        "gallery_exc", [urllib.error.URLError("offline"), RuntimeError("wrong-shape index"), ResponseTooLarge("big")]
+    )
     def test_a_gallery_that_cannot_load_flags_nothing(self, capsys, gallery_exc):
-        if gallery_exc == "check_error":
-            gallery_exc = self.templates_cmd.TemplateCheckError("gallery_load_failed", "offline")
         self.set_gallery((), exc=gallery_exc)
         data, by_model = self._picks(capsys, "--check-local")
         assert data["local_check"] == "gallery_load_failed"

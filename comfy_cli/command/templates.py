@@ -1322,7 +1322,7 @@ def _list_local_folder(target, folder: str) -> list[str] | None:
     # Reuse the exact target/URL plumbing `comfy models list-folder` uses.
     from comfy_cli.command.models.search import _http_get_json, _models_path_parts
 
-    url = target.url(*_models_path_parts(target), folder)
+    url = target.url(*_models_path_parts(target), urllib.parse.quote(folder, safe=""))
     try:
         data = _http_get_json(url, target)
     except urllib.error.HTTPError as e:
@@ -1376,10 +1376,10 @@ class TemplateCheckError(Exception):
         self.details = details
 
 
-def _gallery_rows(gallery_path: str | None, *, refresh: bool, background_ok: bool = True) -> list[dict[str, Any]]:
+def _gallery_rows(gallery_path: str | None, *, refresh: bool) -> list[dict[str, Any]]:
     try:
-        cats = _load_gallery(gallery_path, refresh=refresh, background_ok=background_ok)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        cats = _load_gallery(gallery_path, refresh=refresh, background_ok=False)
+    except _GALLERY_LOAD_ERRORS as e:
         raise TemplateCheckError("gallery_load_failed", str(e)) from e
     return _flatten_templates(cats)
 
@@ -1410,7 +1410,7 @@ def _template_workflow(
     if body is None:
         try:
             body = _fetch_template_workflow(name)
-        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
+        except (urllib.error.URLError, OSError, RuntimeError, ResponseTooLarge) as e:
             status = getattr(e, "code", None)
             raise TemplateCheckError(
                 "template_fetch_failed",
@@ -1441,7 +1441,7 @@ def _template_workflow(
 
     try:
         wf = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
         raise TemplateCheckError(
             "template_workflow_invalid_json",
             f"template workflow for {name!r} is not valid JSON: {e}",
@@ -1471,12 +1471,13 @@ def _match_local_models(
     if not required:
         return present, missing, warnings
 
+    from comfy_cli.command.models.search import _is_walkable_folder_name
     from comfy_cli.target import resolve_target
 
     target = resolve_target(where="local")
     try:
         for directory in dict.fromkeys(req["directory"] for req in required):
-            if not directory or ".." in directory or "/" in directory or "\\" in directory:
+            if not _is_walkable_folder_name(directory):
                 # Not addressable as a `/models/<folder>` segment — treat as absent.
                 listings[directory] = None
                 warnings.append(
@@ -1490,10 +1491,10 @@ def _match_local_models(
                     f"model folder {directory!r} not found on the local server "
                     f"(custom-node folder?) — its files are reported missing"
                 )
-    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as e:
+    except (urllib.error.URLError, OSError, ValueError, ResponseTooLarge) as e:
         raise TemplateCheckError(
             "server_not_running",
-            f"local ComfyUI server is unreachable, cannot check installed models: {e}",
+            f"cannot list model folders on the local ComfyUI server: {e}",
             hint="run `comfy launch` to start a local server",
         ) from e
 

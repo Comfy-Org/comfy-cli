@@ -62,6 +62,7 @@ UNAVAILABLE_LOCALLY = "the templates or nodes this row resolves to are absent fr
 # `knowledge pick --check-local` reasons, kept short: each flagged pick repeats one.
 UNAVAILABLE_MISSING_MODELS = "model files are missing locally"
 UNAVAILABLE_TEMPLATE_NOT_FOUND = "template is not in the gallery"
+UNAVAILABLE_MODEL_FOLDER_NOT_FOUND = "model folder not found locally"
 
 # Grammatical filler dropped before subset matching. Deliberately generic English:
 # naming a capability, model or gallery tag here would be a second copy of the

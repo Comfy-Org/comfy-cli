@@ -184,65 +184,57 @@ def _emit_capabilities(renderer, bundle: knowledge.Bundle, *, query: str | None 
 def _check_picks_locally(picks: list[dict[str, Any]]) -> str:
     """Flag each ``oss`` pick whose template the local ComfyUI cannot run.
 
-    Returns ``ok`` when the check ran. A pick whose workflow could not be
-    fetched or parsed is skipped and stays unflagged. A failure that would
-    repeat for every pick (server down, no gallery) returns its error code
-    instead and flags nothing.
+    Returns ``ok`` when the check ran. A pick that could not be checked carries
+    its own ``local_check`` instead of a flag. A failure that would repeat for
+    every pick (server down, no gallery) returns its error code instead and
+    marks nothing.
     """
     from comfy_cli.command import templates as templates_cmd
-    from comfy_cli.http import ResponseTooLarge
 
-    flags: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    marks: list[tuple[dict[str, Any], dict[str, Any]]] = []
     listings: dict[str, list[str] | None] = {}
     rows: list[dict[str, Any]] | None = None
+    index_fresh = False
     try:
         for pick in picks:
             template = pick.get("template")
             if pick.get("route") != "oss" or not template:
                 continue
             if rows is None:
-                # Not stale-while-revalidate: a stale index would flag a template
-                # added upstream since as missing from the gallery.
-                try:
-                    rows = templates_cmd._gallery_rows(None, refresh=False, background_ok=False)
-                except templates_cmd._GALLERY_LOAD_ERRORS:
-                    return "gallery_load_failed"
+                rows = templates_cmd._gallery_rows(None, refresh=False)
+                # A failed re-fetch serves the stale cache, which cannot show that
+                # a template is absent upstream.
+                index_fresh = not templates_cmd._cache_is_stale(templates_cmd._cache_path())
             try:
                 _row, wf = templates_cmd._template_workflow(template, rows, refresh=False)
-            except (RuntimeError, ResponseTooLarge):
-                continue
             except templates_cmd.TemplateCheckError as e:
-                if e.code == "template_not_found":
-                    flags.append(
-                        (
-                            pick,
-                            {
-                                "available_locally": False,
-                                "unavailable_reason": knowledge.UNAVAILABLE_TEMPLATE_NOT_FOUND,
-                            },
-                        )
-                    )
+                if e.code == "template_not_found" and index_fresh:
+                    flag = {"available_locally": False, "unavailable_reason": knowledge.UNAVAILABLE_TEMPLATE_NOT_FOUND}
+                    marks.append((pick, flag))
+                else:
+                    marks.append((pick, {"local_check": e.code}))
                 continue
-            _present, missing, _warnings = templates_cmd._match_local_models(
-                templates_cmd._collect_model_requirements(wf), listings
+            required = templates_cmd._collect_model_requirements(wf)
+            _present, missing, _warnings = templates_cmd._match_local_models(required, listings)
+            verdict = templates_cmd._compute_verdict(
+                api_dependent=False,
+                missing=missing,
+                required_count=len(required),
+                node_types=templates_cmd._collect_node_class_types(wf),
             )
-            if missing:
-                flags.append(
-                    (
-                        pick,
-                        {
-                            "available_locally": False,
-                            "unavailable_reason": knowledge.UNAVAILABLE_MISSING_MODELS,
-                            "missing_models": len(missing),
-                        },
-                    )
-                )
+            if verdict == "unknown":
+                marks.append((pick, {"local_check": "unknown"}))
+            elif missing:
+                if all(listings.get(m["directory"]) is None for m in missing):
+                    reason = knowledge.UNAVAILABLE_MODEL_FOLDER_NOT_FOUND
+                else:
+                    reason = knowledge.UNAVAILABLE_MISSING_MODELS
+                flag = {"available_locally": False, "unavailable_reason": reason, "missing_models": len(missing)}
+                marks.append((pick, flag))
     except templates_cmd.TemplateCheckError as e:
         return e.code
-    except ResponseTooLarge:
-        return "model_listing_too_large"
-    for pick, flag in flags:
-        pick.update(flag)
+    for pick, mark in marks:
+        pick.update(mark)
     return "ok"
 
 
@@ -300,7 +292,7 @@ def pick_cmd(
 
         columns = ("rank", "model", "route", "template", "status", "caveat", "best_for")
         if check_local:
-            columns += ("unavailable_reason",)
+            columns += ("unavailable_reason", "local_check")
         tbl = Table(show_header=True, header_style="bold")
         for col in columns:
             tbl.add_column(col)
