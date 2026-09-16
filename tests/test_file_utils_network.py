@@ -988,6 +988,162 @@ class TestPartialPaths:
         assert cleanup_partials(dest) == 1
 
 
+class TestTaggedPartials:
+    """A ``part_tag`` scopes a `.part` temp to one download, so a cancel of one
+    download can't reach a *sibling* download streaming to the same destination.
+
+    The matcher then answers a tag-scoped query with the union of that tag's own
+    temps and the legacy untagged shape (so a `.part` from a foreground transfer
+    or a pre-change binary is still reclaimable).
+    """
+
+    # A 12-char lowercase-hex id, the exact shape `download_state.new_id` mints.
+    TAG_X = "abc123def456"
+    TAG_Y = "0f1e2d3c4b5a"
+
+    def _tagged(self, dest, tag, token="a1b2c3d4", data=b"bytes"):
+        p = dest.parent / f"{dest.name}.{tag}.{token}.part"
+        p.write_bytes(data)
+        return p
+
+    def _untagged(self, dest, token="c3d4e5f6", data=b"legacy"):
+        p = dest.parent / f"{dest.name}.{token}.part"
+        p.write_bytes(data)
+        return p
+
+    @patch("httpx.stream")
+    def test_a_failed_tagged_download_leaves_a_tag_shaped_temp(self, mock_stream, tmp_path):
+        """Case 1: a mid-stream failure leaves `<dest>.<tag>.<8>.part`, and the
+        tag-scoped matcher/cleaner find exactly it."""
+        dest = tmp_path / "model.safetensors"
+
+        def killed_iter():
+            yield b"partial"
+            raise KeyboardInterrupt()
+
+        resp = Mock()
+        resp.status_code = 200
+        resp.headers = {}
+        resp.iter_bytes = Mock(side_effect=killed_iter)
+        resp.__enter__ = Mock(return_value=resp)
+        resp.__exit__ = Mock(return_value=None)
+        mock_stream.return_value = resp
+
+        with (
+            patch("comfy_cli.file_utils.ui.prompt_confirm_action", return_value=False),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            download_file("http://example.com/model.safetensors", dest, part_tag=self.TAG_X)
+
+        parts = partial_paths_for(dest, tag=self.TAG_X)
+        assert [p.read_bytes() for p in parts] == [b"partial"]
+        name = parts[0].name
+        prefix = f"{dest.name}.{self.TAG_X}."
+        assert name.startswith(prefix) and name.endswith(".part")
+        token = name[len(prefix) : -len(".part")]
+        assert len(token) == 8 and set(token) <= file_utils._MKSTEMP_TOKEN_CHARS
+        assert cleanup_partials(dest, tag=self.TAG_X) == 1
+
+    @patch("httpx.stream")
+    def test_a_successful_tagged_download_lands_via_rename(self, mock_stream, tmp_path):
+        """Case 1 (success half): the tagged temp is consumed by the rename onto
+        the destination, leaving nothing behind."""
+        mock_stream.return_value = _make_ok_response(content=b"full model", content_length=10)
+        dest = tmp_path / "model.safetensors"
+
+        renames = []
+        real_replace = os.replace
+
+        def spy(src, dst, *args, **kwargs):
+            renames.append((str(src), str(dst)))
+            return real_replace(src, dst, *args, **kwargs)
+
+        with patch("comfy_cli.file_utils.os.replace", side_effect=spy):
+            download_file("http://example.com/model.safetensors", dest, part_tag=self.TAG_X)
+
+        assert dest.read_bytes() == b"full model"
+        src, dst = renames[0]
+        assert dst == str(dest)
+        assert src.startswith(f"{dest}.{self.TAG_X}.") and src.endswith(".part")
+        assert partial_paths_for(dest, tag=self.TAG_X) == []
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["model.safetensors"]
+
+    def test_a_tag_scoped_cleanup_removes_only_that_tags_temp(self, tmp_path):
+        """Case 2: two downloads to one destination, and cancelling X must not
+        touch Y's in-flight temp."""
+        dest = tmp_path / "model.safetensors"
+        x_part = self._tagged(dest, self.TAG_X, token="a1b2c3d4", data=b"X")
+        y_part = self._tagged(dest, self.TAG_Y, token="b2c3d4e5", data=b"Y")
+
+        assert partial_paths_for(dest, tag=self.TAG_X) == [x_part]
+        assert cleanup_partials(dest, tag=self.TAG_X) == 1
+        assert not x_part.exists()
+        assert y_part.read_bytes() == b"Y"
+
+    def test_a_tag_scoped_cleanup_still_reclaims_a_legacy_untagged_temp(self, tmp_path):
+        """Case 3: a `.part` left by a foreground transfer or a pre-change binary
+        (untagged shape) is still swept by a tag-scoped cancel."""
+        dest = tmp_path / "model.safetensors"
+        legacy = self._untagged(dest, token="c3d4e5f6")
+
+        assert partial_paths_for(dest, tag=self.TAG_X) == [legacy]
+        assert cleanup_partials(dest, tag=self.TAG_X) == 1
+        assert not legacy.exists()
+
+    def test_the_shapes_never_cross_match(self, tmp_path):
+        """Case 4: an untagged sweep ignores a tagged temp (its 21-char "token"
+        contains a `.`), and a tag-scoped sweep ignores a temp whose token slice
+        is 21 chars — i.e. another download's tagged temp."""
+        dest = tmp_path / "model.safetensors"
+        x_part = self._tagged(dest, self.TAG_X, token="a1b2c3d4", data=b"X")
+        y_part = self._tagged(dest, self.TAG_Y, token="b2c3d4e5", data=b"Y")
+
+        # An untagged sweep must not claim any tagged temp.
+        assert partial_paths_for(dest) == []
+        assert cleanup_partials(dest) == 0
+        assert x_part.exists() and y_part.exists()
+
+        # A sweep scoped to X must not claim Y (whose token slice under X's own
+        # untagged legacy arm is `<TAG_Y>.<8>` = 21 chars).
+        under_untagged = y_part.name[len(f"{dest.name}.") : -len(".part")]
+        assert len(under_untagged) == 21 and "." in under_untagged
+        assert partial_paths_for(dest, tag=self.TAG_X) == [x_part]
+
+    @patch("httpx.stream")
+    def test_a_long_name_with_a_tag_still_fits_and_both_shapes_are_found(self, mock_stream, tmp_path):
+        """Case 5: a destination name over the tagged stem budget truncates to a
+        different stem than the untagged prefix, the full tagged temp name still
+        fits in NAME_MAX, and the union matcher finds both shapes for that name."""
+        # 250 bytes: past both the 241-byte untagged and 228-byte tagged budgets.
+        dest = tmp_path / ("m" * 238 + ".safetensors")
+        assert len(dest.name.encode()) > 228
+
+        tagged_prefix = file_utils._part_prefix(dest.name, self.TAG_X)
+        untagged_prefix = file_utils._part_prefix(dest.name)
+        # Different truncated stems — neither prefix extends the other, so a long
+        # name's two shapes can't be conflated.
+        assert tagged_prefix != untagged_prefix
+        assert not tagged_prefix.startswith(untagged_prefix)
+        assert not untagged_prefix.startswith(tagged_prefix)
+        # The full tagged temp name fits in one path component.
+        assert len((tagged_prefix + "a1b2c3d4" + file_utils._PART_SUFFIX).encode()) <= file_utils._NAME_MAX
+
+        # A real tagged download of this over-long name still succeeds (mirrors the
+        # untagged ENAMETOOLONG regression test).
+        mock_stream.return_value = _make_ok_response(content=b"data")
+        download_file("http://example.com/model.safetensors", dest, part_tag=self.TAG_X)
+        assert dest.read_bytes() == b"data"
+        assert partial_paths_for(dest, tag=self.TAG_X) == []
+
+        # Both shapes for this long name are reclaimed by one tag-scoped query.
+        tagged_temp = dest.parent / (tagged_prefix + "a1b2c3d4" + file_utils._PART_SUFFIX)
+        untagged_temp = dest.parent / (untagged_prefix + "b2c3d4e5" + file_utils._PART_SUFFIX)
+        tagged_temp.write_bytes(b"tagged")
+        untagged_temp.write_bytes(b"untagged")
+        assert set(partial_paths_for(dest, tag=self.TAG_X)) == {tagged_temp, untagged_temp}
+        assert cleanup_partials(dest, tag=self.TAG_X) == 2
+
+
 class TestDownloadHTTPStatusRetry:
     """Retry behavior for transient HTTP status codes (5xx, 429, 408)."""
 
