@@ -1491,10 +1491,16 @@ def _match_local_models(
                     f"model folder {directory!r} not found on the local server "
                     f"(custom-node folder?) — its files are reported missing"
                 )
-    except (urllib.error.URLError, OSError, ValueError, ResponseTooLarge) as e:
+    except ResponseTooLarge as e:
+        raise TemplateCheckError(
+            code="model_listing_too_large",
+            message=f"a local model folder listing is over the response size cap: {e}",
+            hint="check that the server on this host:port is ComfyUI",
+        ) from e
+    except (urllib.error.URLError, OSError, ValueError) as e:
         raise TemplateCheckError(
             "server_not_running",
-            f"cannot list model folders on the local ComfyUI server: {e}",
+            f"local ComfyUI server is unreachable, cannot check installed models: {e}",
             hint="run `comfy launch` to start a local server",
         ) from e
 

@@ -33,12 +33,12 @@ history.
   template against the local ComfyUI's model folders, the same check
   `comfy templates check` runs. A pick whose model files are missing gets
   `available_locally: false`, an `unavailable_reason` and a `missing_models`
-  count, and a template absent from the gallery is flagged too. A pick that
-  could not be checked carries its own `local_check` naming why. The payload's
-  `local_check` is `ok` when the check ran; when the server is down or the
-  gallery cannot load it carries that error code and no pick is marked. The flag
-  is off by default because it fetches uncached template workflows and calls the
-  local server.
+  count, and a template absent from a fresh gallery index is flagged too. A pick
+  that could not be checked carries its own `local_check` naming why. The
+  payload's `local_check` is `ok` when the check ran. When the server is down, a
+  model folder listing is over the size cap, or the gallery cannot load, it
+  carries that error code and no pick is marked. The flag is off by default
+  because it fetches uncached template workflows and calls the local server.
 
 ### Fixed
 

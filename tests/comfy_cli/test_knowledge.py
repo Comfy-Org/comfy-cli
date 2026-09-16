@@ -1194,14 +1194,20 @@ class TestPickCheckLocal:
         assert "local_check" not in by_model["testwan2"]
         assert by_model["testwan2"]["missing_models"] == 2
 
-    @pytest.mark.parametrize("server_exc", [urllib.error.URLError("connection refused"), ResponseTooLarge("too big")])
-    def test_a_server_failure_drops_flags_already_made(self, capsys, server_exc):
+    @pytest.mark.parametrize(
+        "server_exc, code",
+        [
+            (urllib.error.URLError("connection refused"), "server_not_running"),
+            (ResponseTooLarge("too big"), "model_listing_too_large"),
+        ],
+    )
+    def test_a_server_failure_drops_flags_already_made(self, capsys, server_exc, code):
         # testlx is rank 1 and absent from the gallery, so it is flagged before the
         # first folder listing fails.
         self.set_gallery([t for t in self.OSS_TEMPLATES if t != "video_testlx_ia2v"])
         self.set_installed(server_exc)
         data, by_model = self._picks(capsys, "--check-local")
-        assert data["local_check"] == "server_not_running"
+        assert data["local_check"] == code
         assert not any("available_locally" in p for p in by_model.values())
 
     @pytest.mark.parametrize(

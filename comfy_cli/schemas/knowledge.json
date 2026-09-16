@@ -64,6 +64,6 @@
         }
       }
     },
-    "local_check": { "type": "string", "description": "Present only under pick --check-local. `ok` when the check ran, though a pick may still carry its own local_check. Otherwise the error code that stopped the check (server_not_running, gallery_load_failed), and no pick is marked." }
+    "local_check": { "type": "string", "description": "Present only under pick --check-local. `ok` when the check ran, though a pick may still carry its own local_check. Otherwise the error code that stopped the check (server_not_running, model_listing_too_large, gallery_load_failed), and no pick is marked." }
   }
 }

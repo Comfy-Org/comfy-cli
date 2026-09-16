@@ -301,5 +301,5 @@ def pick_cmd(
             tbl.add_row(*(sanitize_markup("" if cells.get(c) is None else cells[c]) for c in columns))
         renderer.console().print(tbl)
         if check_local and payload["local_check"] != "ok":
-            rprint(f"[yellow]local check did not run:[/yellow] {payload['local_check']}")
+            rprint(f"[yellow]local check did not finish:[/yellow] {payload['local_check']}")
     renderer.emit(payload, command="knowledge pick")

@@ -673,8 +673,10 @@ def test_check_basename_match_against_subfoldered_listing(gallery_file, tmp_path
     assert env["data"]["models"]["present"] == ["v1-5-pruned-emaonly.safetensors"]
 
 
-@pytest.mark.parametrize("exc", ["url_error", ResponseTooLarge("listing too big")])
-def test_check_server_down_surfaces_server_not_running(gallery_file, tmp_path, monkeypatch, exc):
+@pytest.mark.parametrize(
+    "exc, code", [("url_error", "server_not_running"), (ResponseTooLarge("too big"), "model_listing_too_large")]
+)
+def test_check_listing_failure_surfaces_its_error_code(gallery_file, tmp_path, monkeypatch, exc, code):
     import urllib.error
 
     _force_json_renderer()
@@ -686,7 +688,7 @@ def test_check_server_down_surfaces_server_not_running(gallery_file, tmp_path, m
     assert result.exit_code != 0
     env = _envelope(result.output)
     assert env["ok"] is False
-    assert env["error"]["code"] == "server_not_running"
+    assert env["error"]["code"] == code
 
 
 def test_check_unknown_template_surfaces_template_not_found(gallery_file, tmp_path, monkeypatch):
