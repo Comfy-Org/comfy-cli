@@ -30,6 +30,14 @@ from dataclasses import dataclass
 # itself wrong before the title band was modelled.
 TITLE_H = 30.0
 
+# Horizontal slack within which two nodes count as the same column.
+#
+# Chosen against the placer's own geometry rather than picked: adjacent columns are at
+# least a node width plus COL_GAP apart (140 + 80 = 220 at the narrowest), so 40 cannot
+# merge two real columns, while absorbing the drag, snap and float-round-trip jitter
+# that makes exact equality useless on any workflow a user has touched.
+COLUMN_TOLERANCE = 40.0
+
 
 @dataclass(frozen=True)
 class LayoutScore:
@@ -89,6 +97,25 @@ def _centre_y(node: dict) -> float:
     return y + h / 2
 
 
+def _columns(rects: dict) -> dict:
+    """Group nodes into columns, tolerating small horizontal drift.
+
+    Single-pass clustering over sorted x, starting a new column whenever the gap to
+    the previous node exceeds COLUMN_TOLERANCE. Deliberately not `round(x / tol)`:
+    fixed buckets put x=19 and x=21 in different columns while claiming a 40px
+    tolerance, so the tolerance would be real only for pairs that happen to miss a
+    bucket boundary.
+    """
+    order = sorted(rects, key=lambda k: rects[k][0])
+    column: dict = {}
+    index = 0
+    for at, key in enumerate(order):
+        if at and rects[key][0] - rects[order[at - 1]][0] > COLUMN_TOLERANCE:
+            index += 1
+        column[key] = index
+    return column
+
+
 def score(nodes: dict, edges: list[tuple]) -> LayoutScore:
     """Score a layout.
 
@@ -116,9 +143,18 @@ def score(nodes: dict, edges: list[tuple]) -> LayoutScore:
     # geometric intersection instead would make the number depend on column spacing,
     # which is not what crossing reduction optimises and would drift whenever COL_GAP
     # changed.
+    #
+    # Columns are matched within COLUMN_TOLERANCE rather than by equality. Exact
+    # equality holds for freshly placed nodes and for nothing else: one drag, one
+    # snap, one float round-trip through JSON and every node is in its own column, so
+    # every pair is skipped and the metric reports a confident zero. For a telemetry
+    # signal read off user-edited workflows that is the whole failure mode -- a broken
+    # measurement and a perfect score are the same number.
+    column = _columns(rects)
+
     crossings = 0
     for (a1, b1), (a2, b2) in itertools.combinations(live, 2):
-        if rects[a1][0] != rects[a2][0] or rects[b1][0] != rects[b2][0]:
+        if column[a1] != column[a2] or column[b1] != column[b2]:
             continue
         if (_centre_y(nodes[a1]) - _centre_y(nodes[a2])) * (_centre_y(nodes[b1]) - _centre_y(nodes[b2])) < 0:
             crossings += 1
