@@ -111,7 +111,7 @@ def test_assign_positions_reverse_order_connects_full_depth():
     assert xa < xb < xc < xd
 
 
-# --- title-band regression (layout-15) ------------------------------------------------
+# --- title-band regression ------------------------------------------------
 # A node's `pos` is its BODY top-left; LiteGraph draws the title bar ABOVE it at
 # `pos[1] - NODE_TITLE_HEIGHT`. layout.py used to treat `pos` as the top of the whole
 # box, so its collision check was blind to the top 30px of every node and, against a
@@ -189,7 +189,7 @@ def test_stacked_column_bodies_clear_by_at_least_the_title_band():
         )
 
 
-# --- content-derived width (layout-16) ------------------------------------------------
+# --- content-derived width ------------------------------------------------
 # Width used to be a flat NODE_W=240 for every node while LiteGraph derives it from label
 # text. COL_GAP absorbs 80px of error and then fails, which is the n8n#38093 failure mode.
 
