@@ -55,32 +55,35 @@ jobs:
 
       - name: Check constants against upstream
         id: check
-        continue-on-error: true
-        run: uv run --locked --extra dev python scripts/check_litegraph_parity.py --ref "${{ inputs.ref || 'main' }}"
+        run: |
+          set +e
+          uv run --locked --extra dev python scripts/check_litegraph_parity.py --ref "${{ inputs.ref || 'main' }}"
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
 
       - name: Report
         # Exit 1 (drift) and exit 2 (could not read upstream) are different outcomes and
         # must not be collapsed: a moved file or a network blip is not evidence that the
         # constants diverged, and treating it as such trains people to ignore this job.
         run: |
-          if [ "${{ steps.check.outcome }}" = "success" ]; then
-            echo "geometry constants match upstream" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          {
-            echo "## LiteGraph geometry parity failed"
-            echo
-            echo "\`comfy_cli/layout.py\` models LiteGraph's node geometry. When the two"
-            echo "diverge the CLI places nodes against a picture the browser no longer"
-            echo "draws, and agent-built workflows come out overlapping."
-            echo
-            echo "Re-run the check locally for the detail:"
-            echo
-            echo '```'
-            echo "python scripts/check_litegraph_parity.py"
-            echo '```'
-            echo
-            echo "If upstream genuinely changed: update the constants, then re-baseline the"
-            echo "layout quality metrics in \`tests/comfy_cli/test_layout.py\`."
-          } >> "$GITHUB_STEP_SUMMARY"
-          exit 1
+          case "${{ steps.check.outputs.status }}" in
+            0)
+              echo "geometry constants match upstream" >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            1)
+              echo "## CONSTANTS HAVE DRIFTED" >> "$GITHUB_STEP_SUMMARY"
+              echo "\`comfy_cli/layout.py\` no longer matches upstream LiteGraph geometry. Re-run \`python scripts/check_litegraph_parity.py\` locally, update the model, and re-baseline \`tests/comfy_cli/test_layout.py\`." >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+            2)
+              echo "## CHECK INCONCLUSIVE" >> "$GITHUB_STEP_SUMMARY"
+              echo "The upstream or production source could not be read. No parity conclusion was reached; inspect and re-run \`python scripts/check_litegraph_parity.py\`." >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+            *)
+              echo "## CHECK INCONCLUSIVE" >> "$GITHUB_STEP_SUMMARY"
+              echo "The parity script returned an unexpected status; inspect the job log." >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+          esac

@@ -29,6 +29,7 @@ so CI can treat "could not check" differently from "constants have drifted".
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import re
 import sys
 import urllib.request
@@ -40,22 +41,15 @@ GLOBALS_PATH = "src/lib/litegraph/src/LiteGraphGlobal.ts"
 WIDGET_PATH = "src/lib/litegraph/src/widgets/BaseWidget.ts"
 NODE_PATH = "src/lib/litegraph/src/LGraphNode.ts"
 
-# (upstream file, upstream symbol, layout.py constant, our value)
-#
-# Our value is written out literally rather than imported so a reviewer can see both
-# numbers side by side in the diff, and so this script keeps working if layout.py's
-# constants are ever restructured.
+# (upstream file, upstream symbol, layout.py constant)
 CHECKS = [
-    (GLOBALS_PATH, "NODE_TITLE_HEIGHT", "TITLE_H", 30.0),
-    (GLOBALS_PATH, "NODE_SLOT_HEIGHT", "SLOT_H", 20.0),
-    (GLOBALS_PATH, "NODE_WIDGET_HEIGHT", "WIDGET_H", 20.0),
-    (GLOBALS_PATH, "NODE_WIDTH", "LG_NODE_WIDTH", 140.0),
-    (GLOBALS_PATH, "NODE_TEXT_SIZE", "NODE_TEXT_SIZE", 14.0),
-    (WIDGET_PATH, "margin", "_WIDGET_PADDING term", 15.0),
-    (WIDGET_PATH, "arrowMargin", "_WIDGET_PADDING term", 6.0),
-    (WIDGET_PATH, "arrowWidth", "_WIDGET_PADDING term", 10.0),
-    (WIDGET_PATH, "minValueWidth", "_WIDGET_PADDING term", 42.0),
+    (GLOBALS_PATH, "NODE_TITLE_HEIGHT", "TITLE_H"),
+    (GLOBALS_PATH, "NODE_SLOT_HEIGHT", "SLOT_H"),
+    (GLOBALS_PATH, "NODE_WIDGET_HEIGHT", "WIDGET_H"),
+    (GLOBALS_PATH, "NODE_WIDTH", "LG_NODE_WIDTH"),
+    (GLOBALS_PATH, "NODE_TEXT_SIZE", "NODE_TEXT_SIZE"),
 ]
+WIDGET_TERMS = ("margin", "arrowMargin", "arrowWidth", "minValueWidth")
 
 
 def fetch(path: str, ref: str, source_dir: str | None) -> str:
@@ -93,10 +87,26 @@ def find_char_fallback(text: str) -> float | None:
     return float(m.group(1)) if m else None
 
 
+def load_layout(path: Path):
+    """Load the production constants without importing comfy_cli or its dependencies."""
+    spec = importlib.util.spec_from_file_location("_comfy_cli_layout_parity", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not create an import spec for {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ref", default="main", help="ComfyUI_frontend git ref (default: main)")
     ap.add_argument("--source-dir", help="local ComfyUI_frontend checkout instead of fetching")
+    ap.add_argument(
+        "--layout-file",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "comfy_cli" / "layout.py",
+        help=argparse.SUPPRESS,
+    )
     args = ap.parse_args()
 
     sources: dict[str, str] = {}
@@ -107,25 +117,66 @@ def main() -> int:
             print(f"could not read {path}: {exc}", file=sys.stderr)
             return 2
 
+    try:
+        layout = load_layout(args.layout_file)
+    except Exception as exc:  # noqa: BLE001 - an unreadable model is inconclusive
+        print(f"could not read production layout constants from {args.layout_file}: {exc}", file=sys.stderr)
+        return 2
+
     mismatches: list[str] = []
     missing: list[str] = []
 
-    for path, symbol, ours_name, ours in CHECKS:
+    for path, symbol, ours_name in CHECKS:
         theirs = find_assignment(sources[path], symbol)
         if theirs is None:
             missing.append(f"{symbol} not found in {path} -- renamed or moved upstream")
-        elif theirs != ours:
+            continue
+        try:
+            ours = float(getattr(layout, ours_name))
+        except (AttributeError, TypeError, ValueError):
+            missing.append(f"{ours_name} not readable in {args.layout_file}")
+            continue
+        if theirs != ours:
             mismatches.append(f"{symbol}: upstream {theirs}, layout.py {ours_name} = {ours}")
         else:
             print(f"ok  {symbol:20} {theirs}")
 
+    widget_values = {symbol: find_assignment(sources[WIDGET_PATH], symbol) for symbol in WIDGET_TERMS}
+    absent_widget_terms = [symbol for symbol, value in widget_values.items() if value is None]
+    if absent_widget_terms:
+        missing.extend(
+            f"{symbol} not found in {WIDGET_PATH} -- renamed or moved upstream" for symbol in absent_widget_terms
+        )
+    else:
+        upstream_padding = widget_values["minValueWidth"] + 2.0 * (
+            widget_values["margin"] + widget_values["arrowMargin"] + widget_values["arrowWidth"]
+        )
+        try:
+            layout_padding = float(layout._WIDGET_PADDING)
+        except (AttributeError, TypeError, ValueError):
+            missing.append(f"_WIDGET_PADDING not readable in {args.layout_file}")
+        else:
+            if upstream_padding != layout_padding:
+                mismatches.append(
+                    f"widget padding: upstream composed value {upstream_padding}, "
+                    f"layout.py _WIDGET_PADDING = {layout_padding}"
+                )
+            else:
+                print(f"ok  {'_WIDGET_PADDING':20} {upstream_padding}")
+
     char_w = find_char_fallback(sources[NODE_PATH])
     if char_w is None:
         missing.append(f"compute_text_size glyph fallback not found in {NODE_PATH}")
-    elif char_w != 0.6:
-        mismatches.append(f"glyph width fallback: upstream {char_w}, layout.py _CHAR_W = 0.6")
     else:
-        print(f"ok  {'_CHAR_W':20} {char_w}")
+        try:
+            layout_char_w = float(layout._CHAR_W)
+        except (AttributeError, TypeError, ValueError):
+            missing.append(f"_CHAR_W not readable in {args.layout_file}")
+            layout_char_w = None
+        if layout_char_w is not None and char_w != layout_char_w:
+            mismatches.append(f"glyph width fallback: upstream {char_w}, layout.py _CHAR_W = {layout_char_w}")
+        elif layout_char_w is not None:
+            print(f"ok  {'_CHAR_W':20} {char_w}")
 
     if missing:
         print("\nSYMBOLS NOT FOUND (the check could not run, not a proven mismatch):", file=sys.stderr)

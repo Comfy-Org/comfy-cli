@@ -12,6 +12,8 @@ source rather than a shape invented to satisfy the regex.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -69,6 +71,97 @@ NODE_FIXTURE_LEGACY = """
         : font_size * (text?.length ?? 0) * 0.6
     }
 """
+
+
+def _write_frontend_fixture(root: Path) -> None:
+    files = {
+        parity.GLOBALS_PATH: GLOBALS_FIXTURE,
+        parity.WIDGET_PATH: WIDGET_FIXTURE,
+        parity.NODE_PATH: NODE_FIXTURE,
+    }
+    for relative, contents in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents, encoding="utf-8")
+
+
+def _run_guard(source_dir: Path, layout_file: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(_SCRIPT),
+            "--source-dir",
+            str(source_dir),
+            "--layout-file",
+            str(layout_file),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_guard_reads_actual_layout_constants(tmp_path):
+    """Regression: changing production layout must fail, not compare two literals."""
+    source_dir = tmp_path / "frontend"
+    _write_frontend_fixture(source_dir)
+    layout_file = tmp_path / "layout.py"
+    production_layout = Path(__file__).resolve().parents[2] / "comfy_cli" / "layout.py"
+    layout_file.write_text(
+        production_layout.read_text(encoding="utf-8").replace("TITLE_H = 30.0", "TITLE_H = 31.0"),
+        encoding="utf-8",
+    )
+
+    result = _run_guard(source_dir, layout_file)
+
+    assert result.returncode == 1
+    assert "layout.py TITLE_H = 31.0" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_name"),
+    [
+        ("_CHAR_W = 0.61", "_CHAR_W"),
+        ("_WIDGET_PADDING = 43.0 + 2.0 * (15.0 + 6.0 + 10.0)", "_WIDGET_PADDING"),
+    ],
+)
+def test_guard_reads_composed_production_values(tmp_path, mutation, expected_name):
+    source_dir = tmp_path / "frontend"
+    _write_frontend_fixture(source_dir)
+    production_layout = Path(__file__).resolve().parents[2] / "comfy_cli" / "layout.py"
+    text = production_layout.read_text(encoding="utf-8")
+    if expected_name == "_CHAR_W":
+        text = text.replace("_CHAR_W = 0.6", mutation)
+    else:
+        text = text.replace("_WIDGET_PADDING = 42.0 + 2.0 * (15.0 + 6.0 + 10.0)", mutation)
+    layout_file = tmp_path / "layout.py"
+    layout_file.write_text(text, encoding="utf-8")
+
+    result = _run_guard(source_dir, layout_file)
+
+    assert result.returncode == 1
+    assert expected_name in result.stderr
+
+
+def test_guard_reports_unreadable_source_as_inconclusive(tmp_path):
+    production_layout = Path(__file__).resolve().parents[2] / "comfy_cli" / "layout.py"
+
+    result = _run_guard(tmp_path / "missing-frontend", production_layout)
+
+    assert result.returncode == 2
+    assert "could not read" in result.stderr
+
+
+def test_workflow_preserves_mismatch_and_inconclusive_statuses():
+    workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/litegraph-parity.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "status=$?" in workflow
+    assert 'echo "status=$status" >> "$GITHUB_OUTPUT"' in workflow
+    assert 'case "${{ steps.check.outputs.status }}" in' in workflow
+    assert "1)" in workflow and "CONSTANTS HAVE DRIFTED" in workflow
+    assert "2)" in workflow and "CHECK INCONCLUSIVE" in workflow
 
 
 def test_finds_each_constant():
