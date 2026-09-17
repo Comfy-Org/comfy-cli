@@ -298,3 +298,118 @@ def test_batch_columns_use_the_widest_node_not_a_fixed_stride():
     )[0]
     assert width > layout.NODE_W + layout.COL_GAP, "fixture must be wide enough to expose a fixed stride"
     assert at["b"][0] - at["a"][0] >= width + layout.COL_GAP, "depth-1 column must clear the widest depth-0 node"
+
+
+# --- batch layout quality (crossing reduction + coordinate assignment) ----------------
+# `assign_positions` implemented only Sugiyama's step 1 (layer assignment). Nodes stacked
+# within a column in ops-array order, and y ignored what a node connected to. These
+# helpers score a placement so the improvement is measured rather than asserted by eye.
+
+
+def _score(nodes, edges):
+    """(crossings, mean |node centre - mean centre of its inputs|)."""
+    import itertools
+
+    crossings = 0
+    for (a1, b1), (a2, b2) in itertools.combinations(edges, 2):
+        if not all(n in nodes for n in (a1, b1, a2, b2)):
+            continue
+        if nodes[a1]["pos"][0] != nodes[a2]["pos"][0]:
+            continue
+        if nodes[b1]["pos"][0] != nodes[b2]["pos"][0]:
+            continue
+        if (nodes[a1]["pos"][1] - nodes[a2]["pos"][1]) * (nodes[b1]["pos"][1] - nodes[b2]["pos"][1]) < 0:
+            crossings += 1
+
+    preds = {}
+    for a, b in edges:
+        preds.setdefault(b, []).append(a)
+    devs = []
+    for k, ps in preds.items():
+        ps = [p for p in ps if p in nodes]
+        if k not in nodes or not ps:
+            continue
+        me = nodes[k]["pos"][1] + nodes[k]["size"][1] / 2
+        theirs = sum(nodes[p]["pos"][1] + nodes[p]["size"][1] / 2 for p in ps) / len(ps)
+        devs.append(abs(me - theirs))
+    return crossings, (sum(devs) / len(devs) if devs else 0.0)
+
+
+class _QPort:
+    def __init__(self, n):
+        self.name, self.is_link = n, True
+
+
+class _QMeta:
+    display_name = "N"
+    inputs = [_QPort("in")]
+    outputs = [_QPort("out")]
+
+
+class _QGraph:
+    def node(self, _ct):
+        return _QMeta()
+
+    def widget_order(self, _ct):
+        return []
+
+
+def _place(specs):
+    out = layout.assign_positions({"nodes": []}, _QGraph(), [dict(s) for s in specs])
+    size = layout.estimate_size(1, 1, 0, title="N", input_labels=("in",), output_labels=("out",))
+    return {s["as"]: {"pos": s["at"], "size": size} for s in out if s.get("op") == "add_node"}
+
+
+def test_crossing_reduction_orders_columns_by_barycentre():
+    """Three parallel chains authored in an order that crosses every wire.
+
+    Pre-fix this produced 3 crossings, because a column stacked in ops-array order.
+    """
+    specs = [{"op": "add_node", "class_type": "N", "as": n} for n in ("a1", "b1", "c1", "a2", "b2", "c2")]
+    specs += [
+        {"op": "connect", "from": "a1.out", "to": "c2.in"},
+        {"op": "connect", "from": "b1.out", "to": "b2.in"},
+        {"op": "connect", "from": "c1.out", "to": "a2.in"},
+    ]
+    edges = [(s["from"].split(".")[0], s["to"].split(".")[0]) for s in specs if s["op"] == "connect"]
+    crossings, _ = _score(_place(specs), edges)
+    assert crossings == 0, f"barycentre ordering should remove all crossings, got {crossings}"
+
+
+def test_coordinate_assignment_centres_a_node_on_its_inputs():
+    """A node should sit level with what feeds it, not flush with the column top."""
+    specs = [{"op": "add_node", "class_type": "N", "as": n} for n in ("a1", "b1", "c1", "a2", "b2", "c2")]
+    specs += [
+        {"op": "connect", "from": "a1.out", "to": "c2.in"},
+        {"op": "connect", "from": "b1.out", "to": "b2.in"},
+        {"op": "connect", "from": "c1.out", "to": "a2.in"},
+    ]
+    edges = [(s["from"].split(".")[0], s["to"].split(".")[0]) for s in specs if s["op"] == "connect"]
+    _, align_dev = _score(_place(specs), edges)
+    assert align_dev == 0.0, f"each target should be centred on its source; mean deviation {align_dev}px"
+
+
+def test_pinned_siblings_are_obstacles_for_movable_nodes():
+    """A new node pinned to an explicit `at` is as real as an existing one.
+
+    collides() only ever compared movable nodes against EXISTING workflow nodes, so a
+    movable node could be placed straight on top of a pinned sibling.
+    """
+    size = layout.estimate_size(1, 1, 0, title="N", input_labels=("in",), output_labels=("out",))
+    specs = [
+        {"op": "add_node", "class_type": "N", "as": "pinned", "at": [40.0, 60.0]},
+        {"op": "add_node", "class_type": "N", "as": "free"},
+    ]
+    out = layout.assign_positions({"nodes": []}, _QGraph(), specs)
+    at = {s["as"]: s["at"] for s in out}
+    assert not layout._overlaps(layout.occupied(at["free"], size), layout.occupied(at["pinned"], size)), (
+        "movable node was placed on top of a pinned sibling"
+    )
+
+
+# NOTE: the direct-jump collision change (replacing a ROW_GAP-at-a-time march that could
+# run _GUARD * ROW_GAP = 40,000px) ships WITHOUT a red-green regression test. Every fixture
+# tried either did not reach the collision branch or was cleared by the old march too, so
+# the intended proof -- old code exhausts its budget and leaves an overlap -- was not
+# demonstrated. It is a robustness and efficiency change, not a verified bug fix; treat it
+# as unproven until someone builds a case that actually exhausts the guard.
