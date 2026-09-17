@@ -7,8 +7,8 @@ These are the numbers that replace them.
 A pure function of a workflow's geometry and links: no rendering, no canvas, no I/O.
 That is what makes it usable in three places at once -- as test assertions, as a
 regression baseline in CI, and as a telemetry signal emitted at op-mint time so a
-layout regression surfaces before a user files it. The overlap Jo reported in
-September 2026 took two months to reach us through FE-1653.
+layout regression surfaces before a user files it. The overlap this module was built
+to detect took two months to reach the team through a user-reported ticket.
 
 Every metric is "lower is better" and 0.0 is the ideal, so they compose into a
 single score and a threshold reads the same way for all of them.
