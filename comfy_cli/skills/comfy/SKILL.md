@@ -389,6 +389,7 @@ CAT="--where cloud"
 echo '{"nodes":[],"links":[],"last_node_id":0,"last_link_id":0}' > wf.json
 
 comfy --json workflow insert-workflow wf.json template.json                # emits one atomic insert_workflow op
+cat template.json | comfy --json workflow insert-workflow wf.json -        # '-' reads the template from stdin
 comfy --json workflow add-node    wf.json KSampler --at 400,200 $CAT  # → data.op.node_id (minted)
 comfy --json workflow connect     wf.json 7.LATENT 3.samples $CAT     # source out-slot → target in-slot
 comfy --json workflow set-widget  wf.json 3.steps 35 $CAT             # widget by NAME; op carries {old,value}

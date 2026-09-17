@@ -181,8 +181,9 @@ pre-reset `base_version` do not replay across it.
 
 ### 1.7 `insert_workflow` — standalone only
 
-Command: `comfy workflow insert-workflow <file> <template>`. The CLI preserves
-the template payload verbatim and emits exactly one stamped op:
+Command: `comfy workflow insert-workflow <file> <template>`, where `<template>`
+may be `-` to read the template payload from stdin. The CLI preserves the
+template payload verbatim and emits exactly one stamped op:
 
 ```json
 {
