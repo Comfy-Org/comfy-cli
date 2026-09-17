@@ -22,6 +22,7 @@ human-judged fixture alongside any gate built on this.
 from __future__ import annotations
 
 import itertools
+import math
 from dataclasses import dataclass
 
 # LiteGraph draws a node's title bar ABOVE its `pos`, so the rectangle a user sees is
@@ -71,37 +72,50 @@ class LayoutScore:
 
 def _rect(node: dict) -> tuple[float, float, float, float] | None:
     """(x, y, w, h) including the title band, or None if the node lacks geometry."""
+    if not isinstance(node, dict):
+        return None
     pos, size = node.get("pos"), node.get("size")
     if not pos or not size:
         return None
-    x, y = _pair(pos)
-    w, h = _pair(size)
+    position = _pair(pos)
+    dimensions = _pair(size)
+    if position is None or dimensions is None:
+        return None
+    x, y = position
+    w, h = dimensions
     return (x, y - TITLE_H, w, h + TITLE_H)
 
 
-def _pair(value) -> tuple[float, float]:
-    """Read `[x, y]` or `{"0": x, "1": y}`.
+def _pair(value) -> tuple[float, float] | None:
+    """Read a finite `[x, y]` or `{"0": x, "1": y}`, else return None.
 
     Both shapes occur in real workflow JSON: the mapping form comes out of some
-    serialisation paths, and assuming the list form raises KeyError on files that
-    are otherwise perfectly valid.
+    serialisation paths. Malformed and non-finite values are absent geometry for
+    scoring purposes, rather than errors or inputs to nonsensical metrics.
     """
-    if isinstance(value, dict):
-        return float(value["0"]), float(value["1"])
-    return float(value[0]), float(value[1])
+    try:
+        if isinstance(value, dict):
+            pair = float(value["0"]), float(value["1"])
+        elif isinstance(value, (list, tuple)):
+            pair = float(value[0]), float(value[1])
+        else:
+            return None
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+    return pair if all(math.isfinite(item) for item in pair) else None
 
 
-def _centre_y(node: dict) -> float:
-    _, y = _pair(node["pos"])
-    _, h = _pair(node["size"])
-    return y + h / 2
+def _centre_y(rect: tuple[float, float, float, float]) -> float:
+    """Return the node body's vertical centre from its title-inclusive rectangle."""
+    _, y, _, h = rect
+    return y + TITLE_H + (h - TITLE_H) / 2
 
 
 def _columns(rects: dict) -> dict:
     """Group nodes into columns, tolerating small horizontal drift.
 
     Single-pass clustering over sorted x, starting a new column whenever the gap to
-    the previous node exceeds COLUMN_TOLERANCE. Deliberately not `round(x / tol)`:
+    that column's left bound exceeds COLUMN_TOLERANCE. Deliberately not `round(x / tol)`:
     fixed buckets put x=19 and x=21 in different columns while claiming a 40px
     tolerance, so the tolerance would be real only for pairs that happen to miss a
     bucket boundary.
@@ -109,9 +123,11 @@ def _columns(rects: dict) -> dict:
     order = sorted(rects, key=lambda k: rects[k][0])
     column: dict = {}
     index = 0
+    left = rects[order[0]][0] if order else 0.0
     for at, key in enumerate(order):
-        if at and rects[key][0] - rects[order[at - 1]][0] > COLUMN_TOLERANCE:
+        if at and rects[key][0] - left > COLUMN_TOLERANCE:
             index += 1
+            left = rects[key][0]
         column[key] = index
     return column
 
@@ -156,13 +172,13 @@ def score(nodes: dict, edges: list[tuple]) -> LayoutScore:
     for (a1, b1), (a2, b2) in itertools.combinations(live, 2):
         if column[a1] != column[a2] or column[b1] != column[b2]:
             continue
-        if (_centre_y(nodes[a1]) - _centre_y(nodes[a2])) * (_centre_y(nodes[b1]) - _centre_y(nodes[b2])) < 0:
+        if (_centre_y(rects[a1]) - _centre_y(rects[a2])) * (_centre_y(rects[b1]) - _centre_y(rects[b2])) < 0:
             crossings += 1
 
     preds: dict = {}
     for a, b in live:
         preds.setdefault(b, []).append(a)
-    devs = [abs(_centre_y(nodes[k]) - sum(_centre_y(nodes[p]) for p in ps) / len(ps)) for k, ps in preds.items() if ps]
+    devs = [abs(_centre_y(rects[k]) - sum(_centre_y(rects[p]) for p in ps) / len(ps)) for k, ps in preds.items() if ps]
 
     return LayoutScore(
         overlap_area=overlap,

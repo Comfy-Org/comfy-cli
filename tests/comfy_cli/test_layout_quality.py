@@ -7,6 +7,8 @@ screenshot, so its own correctness has to be established first: a metric that re
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from comfy_cli.layout_quality import TITLE_H, score, score_workflow
@@ -88,6 +90,21 @@ class TestCrossings:
         nodes = {"a": _n(0, 0), "b": _n(0, 300), "c": _n(400, 0), "d": _n(800, 300)}
         assert score(nodes, [("a", "d"), ("b", "c")]).crossings == 0
 
+    @pytest.mark.parametrize("offset, expected", [(40.0, 1), (math.nextafter(40.0, math.inf), 0)])
+    def test_tolerance_boundary_is_inclusive(self, offset, expected):
+        nodes = {"a": _n(0, 0), "b": _n(offset, 300), "c": _n(400, 0), "d": _n(400, 300)}
+        assert score(nodes, [("a", "d"), ("b", "c")]).crossings == expected
+
+    def test_nearby_nodes_cannot_bridge_columns_beyond_tolerance(self):
+        nodes = {
+            "a": _n(0, 0),
+            "bridge": _n(39, 150),
+            "b": _n(78, 300),
+            "c": _n(400, 0),
+            "d": _n(400, 300),
+        }
+        assert score(nodes, [("a", "d"), ("b", "c")]).crossings == 0
+
     def test_edges_in_different_columns_are_not_compared(self):
         """Only edges sharing both columns are counted.
 
@@ -144,6 +161,30 @@ class TestEdgeRobustness:
             "b": {"pos": {"0": 50.0, "1": 50.0}, "size": {"0": 100.0, "1": 100.0}},
         }
         assert score(nodes, []).overlap_area == pytest.approx(50 * 80)
+
+    @pytest.mark.parametrize(
+        "geometry",
+        [
+            {"pos": [0], "size": [100, 100]},
+            {"pos": [0, 0], "size": [100]},
+            {"pos": {"0": 0}, "size": {"0": 100, "1": 100}},
+            {"pos": {"0": 0, "1": 0}, "size": {"0": 100}},
+            {"pos": ["not-a-number", 0], "size": [100, 100]},
+            {"pos": [math.nan, 0], "size": [100, 100]},
+            {"pos": [0, 0], "size": [math.inf, 100]},
+        ],
+    )
+    def test_malformed_geometry_is_skipped(self, geometry):
+        nodes = {
+            "valid_a": _n(0, 0, 100, 100),
+            "invalid": geometry,
+            "valid_b": _n(50, 50, 100, 100),
+        }
+        result = score(nodes, [("valid_a", "valid_b"), ("invalid", "valid_b")])
+        assert result.overlap_area == pytest.approx(4000.0)
+        assert result.crossings == 0
+        assert result.align_deviation == pytest.approx(50.0)
+        assert result.backward_edges == 0
 
 
 class TestIsClean:
