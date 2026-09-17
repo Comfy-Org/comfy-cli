@@ -154,6 +154,9 @@ class NotBatchableError(ValueError):
         command = entry["command"]
         self.code = entry["code"]
         self.kind = kind
+        self.spec_index = index
+        self.spec_op = kind
+        self.applied_count = 0
         self.hint = f"run the standalone `{command}` first, then apply the remaining ops as a batch"
         super().__init__(
             f"spec #{index}: `{kind}` {entry['does']} and is standalone-only (op-vocabulary-v1: "

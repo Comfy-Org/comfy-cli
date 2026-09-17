@@ -796,7 +796,13 @@ def apply_cmd(
     except workflow_ops.NotBatchableError as e:
         # A standalone-only op (clear) inside the batch: its own registered code,
         # with the hint naming the standalone command to run instead.
-        renderer.error(code=e.code, message=f"batch failed: {e}", hint=e.hint)
+        details = None
+        if ack == "summary":
+            details = {
+                "failed": {"index": e.spec_index, "op": e.spec_op, "code": e.code},
+                "applied_count": e.applied_count,
+            }
+        renderer.error(code=e.code, message=f"batch failed: {e}", hint=e.hint, details=details)
         raise typer.Exit(code=1) from e
     except workflow_ops.DeprecatedNodeType as e:
         renderer.error(
