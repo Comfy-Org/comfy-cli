@@ -580,6 +580,8 @@ class TestInsertWorkflow:
         result = CliRunner().invoke(workflow_cmd.app, ["insert-workflow", "--help"])
 
         assert result.exit_code == 0
+        assert "emit-only" in result.output
+        assert "file is not modified" in result.output
         assert "--stdout" not in result.output
         assert "--in-place" not in result.output
 

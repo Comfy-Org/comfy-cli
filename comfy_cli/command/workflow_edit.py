@@ -147,7 +147,7 @@ def _graph_or_exit(input_path, host, port, renderer, where=None):
 
 @tracking.track_command("workflow")
 def insert_workflow_cmd(
-    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON to update.")],
+    file: Annotated[str, typer.Argument(help="Source frontend-format workflow JSON; emit-only, file is not modified.")],
     template: Annotated[str, typer.Argument(help="Frontend-format workflow JSON to insert, or '-' for stdin.")],
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
