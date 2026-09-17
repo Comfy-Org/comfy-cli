@@ -548,10 +548,15 @@ def add_node(
         raise UnknownNodeType(class_type, close_matches=difflib.get_close_matches(class_type, names, n=5, cutoff=0.6))
     if m.deprecated and not allow_deprecated:
         raise DeprecatedNodeType(class_type, replacement=_deprecated_replacement(graph, m))
+    _widget_names = tuple(graph.widget_order_default(class_type))
     size = layout.estimate_size(
         len([p for p in m.inputs if p.is_link]),
         len(m.outputs),
-        len(graph.widget_order_default(class_type)),
+        len(_widget_names),
+        title=(getattr(m, "display_name", "") or class_type),
+        input_labels=tuple(p.name for p in m.inputs if p.is_link),
+        output_labels=tuple(p.name for p in m.outputs),
+        widget_labels=_widget_names,
     )
     if pos is None:
         # Layout-aware default: right of the current graph, collision-free.
