@@ -535,3 +535,69 @@ def test_count_multiline_tolerates_a_port_without_options():
 def test_estimate_size_default_is_unchanged_without_multiline():
     """Additive: every existing caller keeps its old result."""
     assert layout.estimate_size(2, 1, 3) == layout.estimate_size(2, 1, 3, n_multiline=0)
+
+
+# --- minimum rendered width, measured across 27 classes --------------------------------
+#
+# LiteGraph's own formula is NODE_WIDTH * (1.5 if widgets else 1.0) = 210, which no
+# widget-bearing node actually renders at. Measured in a real browser: every node with a
+# widget renders at 270 or wider, every node with a MULTILINE widget at 400 or wider.
+# Fourteen of fourteen non-multiline widget classes sit at exactly 270 when their content
+# is narrower, and seven of seven multiline classes at exactly 400 -- a floor, not a fixed
+# width. Classes that exceed it on content (KSamplerAdvanced 312, ControlNetApply 317.9,
+# CheckpointLoader 396.9) confirm the shape.
+
+# (class, rendered width, has widgets, multiline count)
+_RENDERED_WIDTHS = [
+    ("CLIPTextEncode", 400, True, 1),
+    ("CLIPTextEncodeSDXL", 400, True, 2),
+    ("CLIPTextEncodeFlux", 400, True, 2),
+    ("PrimitiveStringMultiline", 400, True, 1),
+    ("KSampler", 270, True, 0),
+    ("EmptyLatentImage", 270, True, 0),
+    ("CheckpointLoaderSimple", 270, True, 0),
+    ("SaveImage", 270, True, 0),
+    ("LatentUpscale", 270, True, 0),
+    ("PrimitiveString", 270, True, 0),
+    ("UNETLoader", 270, True, 0),
+    ("KSamplerAdvanced", 312, True, 0),
+    ("ControlNetApply", 317.9, True, 0),
+    ("CheckpointLoader", 396.9, True, 0),
+    ("VAEDecode", 140, False, 0),
+    ("VAEEncode", 140, False, 0),
+    ("ConditioningCombine", 215, False, 0),
+]
+
+
+@pytest.mark.parametrize("name,width,has_widgets,multiline", _RENDERED_WIDTHS)
+def test_min_width_never_exceeds_what_the_class_renders(name, width, has_widgets, multiline):
+    """The floor must be a floor: never above the narrowest real node of its kind.
+
+    A floor above the rendered width would over-space every node of that shape, which is
+    the harmless direction but still wrong.
+    """
+    assert layout._min_width(has_widgets, multiline) <= width, name
+
+
+def test_widget_nodes_floor_at_the_measured_270():
+    assert layout._min_width(True, 0) == layout.WIDGET_MIN_WIDTH == 270.0
+
+
+def test_multiline_nodes_floor_at_the_measured_400():
+    assert layout._min_width(True, 1) == layout.MULTILINE_MIN_WIDTH == 400.0
+
+
+def test_widgetless_nodes_keep_litegraphs_own_floor():
+    """Only widget-bearing nodes get the raised floor; a Reroute must stay narrow."""
+    assert layout._min_width(False, 0) == layout.LG_NODE_WIDTH == 140.0
+
+
+def test_under_estimating_width_is_what_causes_overlap():
+    """Direction check, and the reason this fix exists.
+
+    Before the floors, a CLIPTextEncode was estimated at 250 against a rendered 400, so the
+    placer put the next column 330px away and the real node reached 400 -- a 70px overlap
+    that the model believed was a 80px gap. Over-estimating only wastes canvas.
+    """
+    w = layout.estimate_width("CLIP Text Encode (Prompt)", ("clip",), ("CONDITIONING",), ("text",), 1)
+    assert w >= 400.0
