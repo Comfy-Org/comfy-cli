@@ -126,10 +126,36 @@ def test_occupied_includes_the_title_band_above_pos():
 
 
 def test_widget_height_matches_litegraph():
-    # LiteGraph NODE_WIDGET_HEIGHT is 20 (LiteGraphGlobal.ts:64); this was 24.
-    assert layout.WIDGET_H == 20.0
+    """Each extra widget row costs its height PLUS LiteGraph's 4px inter-row gap.
+
+    This test previously asserted a delta of exactly 20 and so encoded the bug it was
+    named after: `LGraphNode.computeSize` accumulates `widget_height + 4` per row, and
+    modelling only the 20 under-measures every node with more than one widget. The
+    browser harness caught the consequence -- two agent-added CLIPTextEncode nodes
+    rendered 20 graph px taller than this module predicted and overlapped by 6px.
+    """
+    assert layout.WIDGET_H == 20.0  # LiteGraph NODE_WIDGET_HEIGHT; this was 24
     one, two = layout.estimate_size(1, 1, 1), layout.estimate_size(1, 1, 2)
-    assert two[1] - one[1] == 20.0
+    assert two[1] - one[1] == layout.WIDGET_H + layout._WIDGET_ROW_GAP == 24.0
+
+
+def test_widgetless_node_pays_no_widget_block_padding():
+    """Upstream's block padding lives inside `if (widgets?.length)`.
+
+    A node with no widgets must not be charged the 8px, or every Reroute and every
+    pure-routing node is modelled 8px taller than it draws -- harmless for overlap,
+    but it would make the estimate wrong in the direction that wastes canvas.
+    """
+    none_, one = layout.estimate_size(1, 1, 0), layout.estimate_size(1, 1, 1)
+    assert one[1] - none_[1] == layout.WIDGET_H + layout._WIDGET_ROW_GAP + layout._WIDGET_BLOCK_PAD
+
+
+def test_widget_block_grows_the_way_litegraph_accumulates():
+    """Three widgets cost 3*(20+4)+8, not 3*20 -- a 20px difference at three rows."""
+    base = layout.estimate_size(1, 1, 0)[1]
+    three = layout.estimate_size(1, 1, 3)[1]
+    assert three - base == 3 * (20.0 + 4.0) + 8.0
+    assert three - base > 3 * 20.0, "the old flat model under-measured a three-widget node"
 
 
 def test_cascade_leaves_room_for_the_next_node_title():

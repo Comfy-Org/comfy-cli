@@ -54,6 +54,34 @@ _CHAR_W = 0.6  # LiteGraph's no-canvas glyph-width fallback
 _WIDGET_PADDING = 42.0 + 2.0 * (15.0 + 6.0 + 10.0)
 
 
+# LiteGraph does not stack widget rows flush. `LGraphNode.computeSize` accumulates
+# each widget's own height plus a 4px inter-row gap, looping over the node's widgets, and
+# then adds a single 8px pad for the whole block after the loop finishes.
+#
+# The flat PAD_H this module used instead happens to land within 4px at exactly ONE
+# widget and drifts further with every additional row: at three widgets it under-measures
+# by 8px, at six by 20px. Under-measurement is the direction that produces the overlap
+# users report, because the placer leaves a gap it believes is clear.
+#
+# Found by the browser harness rather than by reading: ComfyUI_frontend
+# `browser_tests/tests/agent/agentLayoutQuality.spec.ts` measured two agent-added
+# CLIPTextEncode nodes overlapping by 6 graph px on a recording whose positions this
+# module chose. See that spec for the full measurement.
+_WIDGET_ROW_GAP = 4.0
+_WIDGET_BLOCK_PAD = 8.0
+
+
+def _widgets_height(n_widgets: int) -> float:
+    """Vertical space n widget rows occupy, using LiteGraph's own accumulation.
+
+    Zero widgets take zero space -- the block padding is inside the `if (widgets?.length)`
+    guard upstream, so a node with no widgets must not pay for it.
+    """
+    if n_widgets <= 0:
+        return 0.0
+    return n_widgets * (WIDGET_H + _WIDGET_ROW_GAP) + _WIDGET_BLOCK_PAD
+
+
 def _text_w(text: str | None) -> float:
     return NODE_TEXT_SIZE * len(text or "") * _CHAR_W
 
@@ -98,7 +126,7 @@ def estimate_size(
     now modelled separately, so the estimate runs ~30px tall. Over-spacing is invisible;
     under-spacing is the overlap users report.
     """
-    h = HEADER_H + SLOT_H * max(n_link_inputs, n_outputs) + WIDGET_H * n_widgets + PAD_H
+    h = HEADER_H + SLOT_H * max(n_link_inputs, n_outputs) + _widgets_height(n_widgets) + PAD_H
     if title is None and not (input_labels or output_labels or widget_labels):
         w = NODE_W
     else:
