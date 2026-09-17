@@ -58,6 +58,36 @@ class TestCrossings:
         nodes = {"a": _n(0, 0), "b": _n(0, 200), "c": _n(400, 0), "d": _n(400, 200)}
         assert score(nodes, [("a", "d"), ("b", "c")]).crossings == 1
 
+    def test_a_dragged_node_still_counts_as_its_column(self):
+        """The bug that made this metric useless as telemetry.
+
+        Exact x equality holds for freshly placed nodes and for nothing else. One
+        drag, one snap, one float round-trip through JSON, and every node sits in its
+        own column, so every pair is skipped and the score reads a confident 0. For a
+        signal read off user-edited workflows a broken measurement and a perfect score
+        would be the same number.
+        """
+        nodes = {"a": _n(0, 0), "b": _n(1, 300), "c": _n(400, 0), "d": _n(400, 300)}
+        assert score(nodes, [("a", "d"), ("b", "c")]).crossings == 1
+
+    def test_tolerance_is_not_a_fixed_bucket(self):
+        """`round(x / 40)` would split 19 and 21 into different columns.
+
+        A fixed bucket advertises a 40px tolerance but only delivers it to pairs that
+        happen not to straddle a boundary, which is worse than no tolerance because it
+        fails intermittently and looks deliberate.
+        """
+        straddling = {"a": _n(19, 0), "b": _n(21, 300), "c": _n(400, 0), "d": _n(400, 300)}
+        assert score(straddling, [("a", "d"), ("b", "c")]).crossings == 1
+
+        near_edge = {"a": _n(0, 0), "b": _n(39, 300), "c": _n(400, 0), "d": _n(400, 300)}
+        assert score(near_edge, [("a", "d"), ("b", "c")]).crossings == 1
+
+    def test_tolerance_cannot_merge_two_real_columns(self):
+        """40px is under the narrowest real column stride (NODE_WIDTH 140 + COL_GAP 80)."""
+        nodes = {"a": _n(0, 0), "b": _n(0, 300), "c": _n(400, 0), "d": _n(800, 300)}
+        assert score(nodes, [("a", "d"), ("b", "c")]).crossings == 0
+
     def test_edges_in_different_columns_are_not_compared(self):
         """Only edges sharing both columns are counted.
 
