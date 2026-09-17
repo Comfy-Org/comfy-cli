@@ -13,8 +13,8 @@ drifted (they say LiteGraphGlobal.ts:61/64/65/71; the declarations are at 48/51/
 which is the smaller version of exactly the problem this guard exists to catch.
 
 What it does NOT catch: a change to the *algorithm* computeSize uses, or to how the
-canvas measures text. Only a rendered-geometry comparison catches that; see
-`layout-26` in the in-app-agent program repo.
+canvas measures text. Only a rendered-geometry comparison catches
+that, which needs a browser and therefore lives in the frontend's Playwright harness.
 
 Usage:
     python scripts/check_litegraph_parity.py            # fetch from upstream main
