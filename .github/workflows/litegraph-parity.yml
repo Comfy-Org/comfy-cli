@@ -1,0 +1,79 @@
+name: litegraph-parity
+
+# comfy_cli/layout.py places nodes from a model of how ComfyUI_frontend's LiteGraph
+# renders them. That renderer lives in another repository on another release cadence,
+# and until this job existed nothing failed when it moved -- the symptom would surface
+# as overlapping nodes on an agent-built canvas, reported by a user, weeks later.
+#
+# Scheduled rather than per-PR on purpose: the input that changes is upstream, not this
+# repo's diff, so a PR gate would burn a network call on every push and still miss the
+# drift that happens between them. It also runs on PRs that touch the layout model, and
+# on demand.
+
+on:
+  schedule:
+    - cron: "0 13 * * 1" # Mondays, so a drift is found at the start of a week
+  pull_request:
+    paths:
+      - "comfy_cli/layout.py"
+      - "scripts/check_litegraph_parity.py"
+      - ".github/workflows/litegraph-parity.yml"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "ComfyUI_frontend ref to check against"
+        required: false
+        default: "main"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Parser unit tests
+        # Offline. The regex is the part most likely to break silently, and it must be
+        # known-good before a failure of the step below can be read as real drift.
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest tests/comfy_cli/test_litegraph_parity.py -q
+
+      - name: Check constants against upstream
+        id: check
+        continue-on-error: true
+        run: python scripts/check_litegraph_parity.py --ref "${{ inputs.ref || 'main' }}"
+
+      - name: Report
+        # Exit 1 (drift) and exit 2 (could not read upstream) are different outcomes and
+        # must not be collapsed: a moved file or a network blip is not evidence that the
+        # constants diverged, and treating it as such trains people to ignore this job.
+        run: |
+          if [ "${{ steps.check.outcome }}" = "success" ]; then
+            echo "geometry constants match upstream" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## LiteGraph geometry parity failed"
+            echo
+            echo "\`comfy_cli/layout.py\` models LiteGraph's node geometry. When the two"
+            echo "diverge the CLI places nodes against a picture the browser no longer"
+            echo "draws, and agent-built workflows come out overlapping."
+            echo
+            echo "Re-run the check locally for the detail:"
+            echo
+            echo '```'
+            echo "python scripts/check_litegraph_parity.py"
+            echo '```'
+            echo
+            echo "If upstream genuinely changed: update the constants, then re-baseline the"
+            echo "layout quality metrics in \`tests/comfy_cli/test_layout.py\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
