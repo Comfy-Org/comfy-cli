@@ -1,4 +1,5 @@
 from comfy_cli import layout
+from comfy_cli import layout_quality as quality
 
 
 def _node(nid, pos, size=(210, 100)):
@@ -307,32 +308,14 @@ def test_batch_columns_use_the_widest_node_not_a_fixed_stride():
 
 
 def _score(nodes, edges):
-    """(crossings, mean |node centre - mean centre of its inputs|)."""
-    import itertools
+    """(crossings, mean input-alignment deviation).
 
-    crossings = 0
-    for (a1, b1), (a2, b2) in itertools.combinations(edges, 2):
-        if not all(n in nodes for n in (a1, b1, a2, b2)):
-            continue
-        if nodes[a1]["pos"][0] != nodes[a2]["pos"][0]:
-            continue
-        if nodes[b1]["pos"][0] != nodes[b2]["pos"][0]:
-            continue
-        if (nodes[a1]["pos"][1] - nodes[a2]["pos"][1]) * (nodes[b1]["pos"][1] - nodes[b2]["pos"][1]) < 0:
-            crossings += 1
-
-    preds = {}
-    for a, b in edges:
-        preds.setdefault(b, []).append(a)
-    devs = []
-    for k, ps in preds.items():
-        ps = [p for p in ps if p in nodes]
-        if k not in nodes or not ps:
-            continue
-        me = nodes[k]["pos"][1] + nodes[k]["size"][1] / 2
-        theirs = sum(nodes[p]["pos"][1] + nodes[p]["size"][1] / 2 for p in ps) / len(ps)
-        devs.append(abs(me - theirs))
-    return crossings, (sum(devs) / len(devs) if devs else 0.0)
+    Delegates to comfy_cli.layout_quality rather than keeping a second copy. The two
+    used to be separate implementations of the same metric, which is the shape of bug
+    where the tests and the telemetry quietly disagree about whether a layout improved.
+    """
+    s = quality.score(nodes, edges)
+    return s.crossings, s.align_deviation
 
 
 class _QPort:
