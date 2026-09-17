@@ -22,6 +22,7 @@ ORIGIN = (40.0, 60.0)
 DEFAULT_SIZE = (210.0, 100.0)
 _MARGIN = 10.0
 _GUARD = 1000  # bounded collision-shift loop
+_ORDER_SWEEPS = 4  # barycentre passes for crossing reduction; converges well before this
 
 # LiteGraph's NODE_TITLE_HEIGHT (LiteGraphGlobal.ts:61). A node's `pos` is the top-left
 # of its BODY; the title bar is drawn ABOVE it, at `pos[1] - NODE_TITLE_HEIGHT`
@@ -302,25 +303,93 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
         box = _bbox(list(existing.values()))
         base_x, base_y = (box[2] + COL_GAP, box[1] + TITLE_H) if box else ORIGIN
 
-    col_y: dict[int, float] = {}
+    # --- Sugiyama step 2: crossing reduction -----------------------------------
+    # Layer assignment alone (step 1, above) decides WHICH column a node is in but not
+    # its order WITHIN the column, so nodes used to stack in the order they happened to
+    # appear in the ops array. Three inputs feeding one sampler crossed their wires for
+    # no reason other than authoring order. Order each column by the barycentre of its
+    # neighbours, the standard heuristic, with the insertion rank as a deterministic
+    # tiebreak so the result stays replay-convergent.
+    preds: dict[str, list[str]] = {k: [] for k in movable}
+    succs: dict[str, list[str]] = {k: [] for k in movable}
+    for s, t in edges:
+        if s in preds and t in preds:
+            succs[s].append(t)
+            preds[t].append(s)
+
+    rank = {k: i for i, k in enumerate(order)}
+    cols: dict[int, list[str]] = {}
     for k in movable:
-        a = adds[k]
-        x = base_x + depth_dx[a["depth"]]
-        y = col_y.get(a["depth"], base_y)
-        # Clear this node's body bottom, the gap, AND the next node's title bar.
-        col_y[a["depth"]] = y + a["size"][1] + ROW_GAP + TITLE_H
-        a["pos"] = [x, y]
+        cols.setdefault(adds[k]["depth"], []).append(k)
+    slot = {k: i for d in cols for i, k in enumerate(cols[d])}
 
-    def collides() -> bool:
-        return any(
-            _overlaps(occupied(adds[k]["pos"], adds[k]["size"]), _rect(n)) for k in movable for n in existing.values()
-        )
+    def _bary(k: str, side: dict[str, list[str]]) -> float:
+        ns = [slot[n] for n in side[k] if n in slot]
+        return sum(ns) / len(ns) if ns else float(slot[k])
 
-    for _ in range(_GUARD):
-        if not movable or not collides():
+    for _ in range(_ORDER_SWEEPS):
+        moved = False
+        for forward in (True, False):
+            side = preds if forward else succs
+            for d in sorted(cols, reverse=not forward):
+                reordered = sorted(cols[d], key=lambda k: (_bary(k, side), rank[k]))
+                if reordered != cols[d]:
+                    cols[d] = reordered
+                    moved = True
+                for i, k in enumerate(cols[d]):
+                    slot[k] = i
+        if not moved:
             break
-        for k in movable:  # shift the whole new block, never existing nodes
-            adds[k]["pos"][1] += ROW_GAP
+
+    # --- Sugiyama step 3: coordinate assignment --------------------------------
+    # y used to stack from base_y regardless of what a node connects to, so a one-node
+    # column sat flush against the top of a five-node column instead of level with the
+    # node it feeds. Centre each node on the mean centre of its predecessors, then push
+    # down only as far as the column order requires. Depths are processed in increasing
+    # order and edges always run to a strictly greater depth, so predecessors are placed.
+    for d in sorted(cols):
+        cursor = base_y
+        for k in cols[d]:
+            h = adds[k]["size"][1]
+            want = cursor
+            centres = [adds[p]["pos"][1] + adds[p]["size"][1] / 2.0 for p in preds[k] if "pos" in adds[p]]
+            if centres:
+                want = sum(centres) / len(centres) - h / 2.0
+            y = max(want, cursor)
+            adds[k]["pos"] = [base_x + depth_dx[d], y]
+            # Clear this node's body bottom, the gap, AND the next node's title bar.
+            cursor = y + h + ROW_GAP + TITLE_H
+
+    # --- collision resolution ---------------------------------------------------
+    # Obstacles are every EXISTING node plus any new node pinned to an explicit `at`:
+    # a pinned sibling is as real on the canvas as a pre-existing one, and nothing
+    # used to check against it. New-vs-new among MOVABLE nodes needs no check: columns
+    # are spaced by the widest node at each depth and `cursor` is monotone within a
+    # column, so the construction above cannot produce an internal overlap.
+    obstacles = [_rect(n) for n in existing.values()]
+    obstacles += [occupied(adds[k]["pinned"], adds[k]["size"]) for k in order if adds[k]["pinned"] is not None]
+
+    def _overlap_depth() -> float:
+        """How far down the block must move to clear every obstacle, 0 if clear."""
+        worst = 0.0
+        for k in movable:
+            r = occupied(adds[k]["pos"], adds[k]["size"])
+            for o in obstacles:
+                if _overlaps(r, o):
+                    worst = max(worst, (o[1] + o[3] + _MARGIN) - r[1])
+        return worst
+
+    # Jump straight past the blocking obstacle instead of stepping ROW_GAP at a time.
+    # The old loop could march 1000 * ROW_GAP = 40,000px in 40px increments, which is
+    # both slow and lands the block far below where it needed to be.
+    for _ in range(_GUARD):
+        if not movable:
+            break
+        delta = _overlap_depth()
+        if delta <= 0:
+            break
+        for k in movable:
+            adds[k]["pos"][1] += delta
 
     for k in movable:
         out[adds[k]["i"]]["at"] = adds[k]["pos"]
