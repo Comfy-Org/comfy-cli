@@ -1,17 +1,11 @@
-"""Shape and load CQL ``object_info`` graphs.
+"""Load CQL ``object_info`` graphs resiliently.
 
-This module contains two things:
-
-- ``normalize`` — turn any supported input (a raw ``object_info`` dump, an
-  API-format workflow, or an already-shaped CQL graph) into the uniform
-  ``{"nodes": [...], "inputs": [...], "categories": [...]}`` dict the engine
-  runs on. It is intentionally permissive: anything dict-shaped that looks
-  like one of those formats is accepted.
-- ``resilient_load_object_info`` — a cache + refresh-retry + stale-fallback
-  wrapper over the engine's loaders (``comfy_cli.cql.engine._load_from_file``
-  / ``_load_from_target``). It auto-caches every successful fetch per host,
-  retries once after a token refresh on failure, and falls back to the cached
-  dump (with a stderr warning) when the retry still fails.
+This module is the resilient object_info cache/fetch wrapper.
+``resilient_load_object_info`` wraps the engine's loaders
+(``comfy_cli.cql.engine._load_from_file`` / ``_load_from_target``) with a
+cache-first TTL gate, auto-caches every successful fetch per host, retries
+once after a token refresh on failure, and falls back to the cached dump
+(with a stderr warning) when the retry still fails.
 
 The live network fetch and its security guards (loopback check, no-redirect
 opener, byte cap, cloud HTTPS+auth) live in ``comfy_cli.cql.engine`` — this
@@ -28,151 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from comfy_cli.cql.errors import CQLRuntimeError
 from comfy_cli.file_utils import atomic_write_text, cache_dir
-
-# ---- normalization --------------------------------------------------------
-
-
-def normalize(data: Any) -> dict[str, Any]:
-    """Turn any supported input into ``{nodes, inputs, categories}``."""
-    if not isinstance(data, dict):
-        raise CQLRuntimeError("expected a JSON object at the top level")
-
-    # Already CQL-shaped — trust it.
-    if any(isinstance(data.get(k), list) for k in ("nodes", "inputs", "categories")):
-        graph: dict[str, Any] = {
-            "nodes": list(data.get("nodes") or []),
-            "inputs": list(data.get("inputs") or []),
-            "categories": list(data.get("categories") or []),
-        }
-        return graph
-
-    if _looks_like_object_info(data):
-        return _from_object_info(data)
-    if _looks_like_api_workflow(data):
-        return _from_api_workflow(data)
-
-    raise CQLRuntimeError(
-        "unrecognized graph shape",
-        details={"keys_sample": sorted(list(data.keys()))[:10]},
-    )
-
-
-def _looks_like_object_info(data: dict[str, Any]) -> bool:
-    # /object_info maps "ClassName" -> { "input": {...}, "category": "...",
-    # "display_name": "...", "description": "...", "output": [...], ... }
-    if not data:
-        return False
-    return any(isinstance(v, dict) and ("input" in v or "category" in v) for v in data.values())
-
-
-def _looks_like_api_workflow(data: dict[str, Any]) -> bool:
-    if not data:
-        return False
-    return any(isinstance(v, dict) and "class_type" in v for v in data.values())
-
-
-def _from_object_info(data: dict[str, Any]) -> dict[str, Any]:
-    nodes: list[dict[str, Any]] = []
-    inputs: list[dict[str, Any]] = []
-    categories: dict[str, int] = {}
-
-    for class_name, raw in data.items():
-        if not isinstance(raw, dict):
-            continue
-        category = raw.get("category")
-        node = {
-            "name": class_name,
-            "display_name": raw.get("display_name") or class_name,
-            "category": category,
-            "description": raw.get("description"),
-            "output_node": bool(raw.get("output_node", False)),
-            "output_types": list(raw.get("output") or []),
-        }
-        nodes.append(node)
-        if category:
-            categories[category] = categories.get(category, 0) + 1
-
-        sections = raw.get("input") or {}
-        if isinstance(sections, dict):
-            for section, body in sections.items():  # "required" / "optional" / "hidden"
-                if not isinstance(body, dict):
-                    continue
-                for input_name, spec in body.items():
-                    inputs.append(_normalize_input(class_name, section, input_name, spec))
-
-    return {
-        "nodes": nodes,
-        "inputs": inputs,
-        "categories": [{"name": k, "node_count": v} for k, v in sorted(categories.items())],
-    }
-
-
-def _normalize_input(class_name: str, section: str, name: str, spec: Any) -> dict[str, Any]:
-    type_name: Any = None
-    options: dict[str, Any] = {}
-    choices: list[Any] = []
-    if isinstance(spec, list) and spec:
-        type_name = spec[0]
-        if isinstance(type_name, list):
-            choices = list(type_name)
-            type_name = "ENUM"
-        if len(spec) > 1 and isinstance(spec[1], dict):
-            options = dict(spec[1])
-    elif isinstance(spec, str):
-        type_name = spec
-    return {
-        "node": class_name,
-        "section": section,
-        "name": name,
-        "type": type_name,
-        "choices": choices,
-        "options": options,
-    }
-
-
-def _from_api_workflow(data: dict[str, Any]) -> dict[str, Any]:
-    nodes: list[dict[str, Any]] = []
-    inputs: list[dict[str, Any]] = []
-    node_ids = {str(k) for k in data}
-    for nid, node in data.items():
-        if not isinstance(node, dict):
-            continue
-        class_type = node.get("class_type")
-        title = (node.get("_meta") or {}).get("title") if isinstance(node.get("_meta"), dict) else None
-        nodes.append(
-            {
-                "id": nid,
-                "name": class_type or "?",
-                "class_type": class_type,
-                "title": title,
-                "category": None,
-            }
-        )
-        raw_inputs = node.get("inputs") or {}
-        if isinstance(raw_inputs, dict):
-            for in_name, value in raw_inputs.items():
-                ref = (
-                    isinstance(value, list)
-                    and len(value) == 2
-                    and isinstance(value[1], int)
-                    and not isinstance(value[1], bool)
-                    and str(value[0]) in node_ids
-                )
-                inputs.append(
-                    {
-                        "node_id": nid,
-                        "node": class_type,
-                        "name": in_name,
-                        "value": None if ref else value,
-                        "ref_node": value[0] if ref else None,
-                        "ref_slot": value[1] if ref else None,
-                        "is_reference": ref,
-                    }
-                )
-    return {"nodes": nodes, "inputs": inputs, "categories": []}
-
 
 # ---------------------------------------------------------------------------
 # Resilient object_info loading (cache + refresh-retry + stale fallback)
