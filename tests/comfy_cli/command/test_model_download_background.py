@@ -202,6 +202,27 @@ class TestPrune:
         assert download_state.prune(workspace) == 1
         assert download_state.read(workspace, state.id) is None
 
+    @pytest.mark.parametrize("status", ["failed", "cancelled"])
+    def test_a_tagged_partial_pins_a_failed_or_cancelled_record(self, workspace, status):
+        """A background worker streams into a temp tagged with its download id, so
+        prune's pin check has to find *that* shape — not just the legacy untagged
+        one — or it would evict a record whose gigabytes are still on disk."""
+        dest = workspace / "models" / "m.safetensors"
+        state = _record(workspace, status=status, age_s=_OLD_S, dest=dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tagged = dest.parent / f"{dest.name}.{state.id}.ab3d9f01.part"
+        tagged.write_bytes(b"partial bytes")
+        # The fixture is only meaningful if the untagged matcher would have missed it.
+        assert file_utils.partial_paths_for(dest) == []
+        assert file_utils.partial_paths_for(dest, tag=state.id) == [tagged]
+
+        assert download_state.prune(workspace) == 0
+        assert download_state.read(workspace, state.id) is not None
+
+        tagged.unlink()
+        assert download_state.prune(workspace) == 1
+        assert download_state.read(workspace, state.id) is None
+
     def test_a_partial_does_not_pin_a_completed_record(self, workspace):
         """The carve-out is about unreclaimed bytes; a completed download's are
         at `dest`, and any leftover `.part` is unrelated debris."""
@@ -560,7 +581,7 @@ class TestProgressCallback:
 
         original = _download_file_httpx
 
-        def flaky(url, path, headers=None, *, state=None, progress_callback=None):
+        def flaky(url, path, headers=None, *, state=None, progress_callback=None, part_tag=None):
             if attempts["n"] == 0:
                 attempts["n"] = 1
                 if state is not None:
@@ -569,7 +590,7 @@ class TestProgressCallback:
                 progress_callback(0, 8)
                 progress_callback(4, 8)
                 raise httpx.ReadTimeout("boom")
-            return original(url, path, headers, state=state, progress_callback=progress_callback)
+            return original(url, path, headers, state=state, progress_callback=progress_callback, part_tag=part_tag)
 
         with (
             patch("comfy_cli.file_utils._download_file_httpx", side_effect=flaky),
@@ -653,7 +674,7 @@ class TestWorkerThrottle:
         clock = {"t": 1000.0}
         monkeypatch.setattr(models.time, "monotonic", lambda: clock["t"])
 
-        def fake_download_file(url, filepath, headers, downloader, progress_callback):
+        def fake_download_file(url, filepath, headers, downloader, progress_callback, part_tag=None):
             for completed, tick in [(3, 0.1), (6, 0.2), (9, 5.0)]:
                 clock["t"] += tick
                 progress_callback(completed, 9)
@@ -692,7 +713,7 @@ class TestWorkerThrottle:
 
         recorded = {}
 
-        def capture(url, filepath, headers, downloader, progress_callback):
+        def capture(url, filepath, headers, downloader, progress_callback, part_tag=None):
             recorded.update(download_state.read(workspace, state.id).to_dict())
             filepath.write_bytes(b"ok")
 
@@ -719,7 +740,7 @@ class TestWorkerThrottle:
         monkeypatch.setattr(models, "_civitai_headers", lambda: {"Authorization": "Bearer from-config"})
         seen = {}
 
-        def capture(url, filepath, headers, downloader, progress_callback):
+        def capture(url, filepath, headers, downloader, progress_callback, part_tag=None):
             seen["headers"] = headers
             filepath.write_bytes(b"ok")
 
@@ -1666,7 +1687,7 @@ class TestWorkerReleasesTheClaim:
         monkeypatch.setattr(
             models,
             "download_file",
-            lambda url, filepath, headers, downloader, progress_callback: filepath.write_bytes(b"ok"),
+            lambda url, filepath, headers, downloader, progress_callback, part_tag=None: filepath.write_bytes(b"ok"),
         )
 
         models._download_worker(state_file=str(path))
@@ -1704,7 +1725,7 @@ class TestWorkerReleasesTheClaim:
         state, path, claim = self._prepare(workspace, tmp_path)
         marker = download_state.cancel_marker_for(path)
 
-        def transfer(url, filepath, headers, downloader, progress_callback):
+        def transfer(url, filepath, headers, downloader, progress_callback, part_tag=None):
             marker.touch()
             monkeypatch.setattr(models.time, "monotonic", lambda: 1e9)
             progress_callback(1, 2)
@@ -1722,7 +1743,7 @@ class TestWorkerReleasesTheClaim:
         that window. An unconditional unlink would delete a live claim."""
         state, path, claim = self._prepare(workspace, tmp_path)
 
-        def transfer(url, filepath, headers, downloader, progress_callback):
+        def transfer(url, filepath, headers, downloader, progress_callback, part_tag=None):
             filepath.write_bytes(b"ok")
             claim.unlink()
             assert download_state.acquire_claim(claim, download_id="ffffffffffff", dest=state.dest)
@@ -1743,7 +1764,7 @@ class TestWorkerReleasesTheClaim:
         monkeypatch.setattr(
             models,
             "download_file",
-            lambda url, filepath, headers, downloader, progress_callback: filepath.write_bytes(b"ok"),
+            lambda url, filepath, headers, downloader, progress_callback, part_tag=None: filepath.write_bytes(b"ok"),
         )
 
         def submit():
@@ -2975,7 +2996,7 @@ class TestCancellationReachesTheWorker:
         state = _state(dest=str(dest), status="starting", downloader="aria2", pid=None)
         path = download_state.write(workspace, state)
 
-        def transfer(url, filepath, headers, downloader, progress_callback):
+        def transfer(url, filepath, headers, downloader, progress_callback, part_tag=None):
             filepath.write_bytes(b"partial")
             # The cancel lands after the transfer is already under way.
             download_state.request_cancel(download_state.cancel_path(workspace, state.id))
@@ -3002,7 +3023,7 @@ class TestCancellationReachesTheWorker:
         state = _state(dest=str(dest), status="starting", pid=None)
         path = download_state.write(workspace, state)
 
-        def transfer(url, filepath, headers, downloader, progress_callback):
+        def transfer(url, filepath, headers, downloader, progress_callback, part_tag=None):
             download_state.request_cancel(download_state.cancel_path(workspace, state.id))
             progress_callback(7, 4096)
 
@@ -3023,7 +3044,7 @@ class TestCancellationReachesTheWorker:
         state = _state(dest=str(dest), status="starting", pid=None)
         path = download_state.write(workspace, state)
 
-        def transfer(url, filepath, headers, downloader, progress_callback):
+        def transfer(url, filepath, headers, downloader, progress_callback, part_tag=None):
             filepath.write_bytes(b"done")
             download_state.request_cancel(download_state.cancel_path(workspace, state.id))
 
@@ -3134,6 +3155,57 @@ class TestCancellationReachesTheWorker:
 
         assert dest.exists(), "cancel must not delete a model the worker had already finished"
         assert json_renderer()["data"]["status"] == "completed"
+
+
+class TestCancelIsolatesSiblingDownloads:
+    """Two background downloads can legitimately target one destination (the only
+    submit-time guard is ``local_filepath.exists()``). Each streams into its own
+    ``<dest>.<id>.<token>.part``, so cancelling A must reclaim A's temp (and any
+    legacy untagged debris) while leaving B's live temp untouched — otherwise B
+    keeps writing into a deleted inode and its closing rename dies with a
+    non-retriable ``FileNotFoundError``.
+    """
+
+    def _siblings(self, workspace, tmp_path, *, a_status):
+        dest = tmp_path / "m.safetensors"
+        a = _state(dest=str(dest), status=a_status, pid=5150, total_bytes=13000, completed_bytes=3600)
+        b = _state(dest=str(dest), status="downloading", pid=6000, total_bytes=13000, completed_bytes=1000)
+        download_state.write(workspace, a)
+        download_state.write(workspace, b)
+
+        a_part = tmp_path / f"m.safetensors.{a.id}.a1b2c3d4.part"
+        a_part.write_bytes(b"A" * 3600)
+        b_part = tmp_path / f"m.safetensors.{b.id}.b2c3d4e5.part"
+        b_part.write_bytes(b"B" * 1000)
+        legacy = tmp_path / "m.safetensors.c3d4e5f6.part"
+        legacy.write_bytes(b"legacy")
+        return dest, a, b, a_part, b_part, legacy
+
+    def test_terminal_status_cancel_of_A_spares_Bs_partial(self, workspace, json_renderer, tmp_path):
+        """The ``models.py`` terminal-status sweep: A is already ``failed`` (its
+        first status poll persisted reconcile's verdict) and its worker is gone."""
+        dest, a, b, a_part, b_part, legacy = self._siblings(workspace, tmp_path, a_status="failed")
+
+        with patch.object(download_state, "is_worker_process", return_value=False):
+            models.download_cancel(None, download_id=a.id)
+
+        assert not a_part.exists(), "A's own tagged temp must be reclaimed"
+        assert not legacy.exists(), "an untagged legacy temp is still reclaimed"
+        assert b_part.read_bytes() == b"B" * 1000, "B's live temp must survive A's cancel"
+        assert json_renderer()["changed"] is True
+
+    def test_live_cancel_of_A_spares_Bs_partial(self, workspace, json_renderer, monkeypatch, tmp_path):
+        """The ``models.py`` live-cancel sweep: A is still ``downloading`` and is
+        stopped before its `.part` is swept."""
+        dest, a, b, a_part, b_part, legacy = self._siblings(workspace, tmp_path, a_status="downloading")
+
+        monkeypatch.setattr(download_state, "stop_worker", lambda *_a, **_k: True)
+        models.download_cancel(None, download_id=a.id)
+
+        assert not a_part.exists(), "A's own tagged temp must be reclaimed"
+        assert not legacy.exists(), "an untagged legacy temp is still reclaimed"
+        assert b_part.read_bytes() == b"B" * 1000, "B's live temp must survive A's cancel"
+        assert json_renderer()["data"]["status"] == "cancelled"
 
 
 class TestStateFilePermissions:
