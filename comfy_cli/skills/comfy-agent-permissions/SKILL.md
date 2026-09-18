@@ -35,7 +35,7 @@ ask; it can never make the answer.
 | Blocked | Do | Then |
 |---|---|---|
 | A folder (write refused as outside the project; "Access is denied" from the shell on Windows) | call `request_path` with the folder and what you need it for | tell the user a request is waiting and how to approve it; retry only after it is approved |
-| A host (`egress denied: <host>`) | call `request_host` with the host and what the download or install is for | same; rerun the command after the approval |
+| A host (`egress denied: <host>`; from a CLI command, `Tunnel connection failed: 403`, which is the same refusal) | call `request_host` with the host and what the download or install is for. It is one host missing from the list, not a shell cut off from the network | same; rerun the command after the approval |
 | No shell on this machine | say that the environment block names the start-time setting that enables one | the user restarts the agent with it |
 
 The user approves or refuses from a terminal, naming the request by the id
@@ -46,6 +46,15 @@ comfy agent permissions                       # what is waiting (id, kind, targe
 comfy agent allow --approve <id>              # approve that request's exact target
 comfy agent deny <id>                         # drop it; nothing is approved
 ```
+
+**Hand the user the command for this agent's data dir.** Run
+`comfy --json agent permissions` yourself: it prints the `data_dir` the agent
+uses. The user's terminal reads `AGENT_DATA_DIR`, else `~/.comfy-agent`; when
+that is not the agent's dir, their `--approve` answers `agent_unknown_request`
+and `permissions` shows the agent `not running`, though the request is waiting.
+So unless `data_dir` is the default, give them the command with it:
+`comfy agent allow --approve <id> --data-dir "<data_dir>"`. Point to a panel
+button only when you know this panel has one; otherwise the command is the way.
 
 Approving vets the target the way a direct grant does (below) and then records
 it; a target that can never be granted stays pending until denied. The user
@@ -90,3 +99,15 @@ ComfyUI install, and console utilities (`choice`, `waitfor`, `timeout`,
 `for %f in (<folder>\*) do @echo %f`, use absolute paths, and read exit
 `0xC0000142` as "did not run". Python from the install's venv runs pure-Python
 code (`py_compile`) but cannot import torch there.
+
+- **Run the CLI as `comfy`, by that name only.** The `comfy` on your PATH is
+  the one that works from this shell. The CLI's own `comfy.exe`, or
+  `python -m comfy_cli`, from its venv folder answers "Access is denied": that
+  means the path is wrong, not that the CLI is out of reach. Retry as
+  `comfy …` before telling the user a step needs their terminal, and do not
+  hand them a venv path to paste.
+- **A refused look is not an empty folder.** `dir` or `if exist` on a folder
+  you may not reach prints "Access is denied", or nothing at all behind `2>nul`,
+  and `if exist` answers no. Never report a file or folder as missing from
+  that. Ask for the folder (above), or let `comfy` look (`comfy which`, a
+  `comfy build init` scan), since it does not run in the sandbox.
