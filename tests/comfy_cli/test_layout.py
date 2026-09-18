@@ -147,7 +147,7 @@ def test_widgetless_node_pays_no_widget_block_padding():
     but it would make the estimate wrong in the direction that wastes canvas.
     """
     none_, one = layout.estimate_size(1, 1, 0), layout.estimate_size(1, 1, 1)
-    assert one[1] - none_[1] == layout.WIDGET_H + layout._WIDGET_ROW_GAP + layout._WIDGET_BLOCK_PAD
+    assert one[1] - none_[1] == 32.0
 
 
 def test_widget_block_grows_the_way_litegraph_accumulates():
