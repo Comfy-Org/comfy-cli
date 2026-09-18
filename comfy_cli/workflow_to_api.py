@@ -1096,14 +1096,12 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
     if isinstance(input_type, (list, tuple)):
         return True, False  # combo of choices
     if isinstance(input_type, str):
-        # ``*`` and ``""`` are wildcard *connection* types — the frontend
-        # never renders a widget for them. They slipped through the
-        # lowercase fallback below because they have no cased characters
-        # (``"*".isupper()`` returns ``False``), so we have to filter them
-        # out explicitly. PreviewAny.source: ["*", {}] is the canonical
-        # case this used to mis-handle.
-        if input_type in ("", "*"):
-            return False, False
+        # The frontend renders a widget only for a type with a registered
+        # widget constructor (``widgetStore.inputIsWidget``); every other type,
+        # whatever its casing, is a connection socket that owns no
+        # ``widgets_values`` slot. A letter-case guess here once gave the
+        # mixed-case link ``VHS_LoadVideo.meta_batch`` (``VHS_BatchManager``) a
+        # slot, shifting the ``format`` value into it and crashing the node.
         if input_type in {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"}:
             return True, False
         if input_type in _FRONTEND_DOM_WIDGET_TYPES:
@@ -1112,8 +1110,6 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
             return True, False
         if input_type.startswith("COMFY_") and "COMBO" in input_type:
             return True, True
-        if not input_type.isupper():
-            return True, False  # custom (lowercase) widget types
     return False, False
 
 
