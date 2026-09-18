@@ -64,7 +64,7 @@ from comfy_cli.cql.engine import frontend_injected_widget_error
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
 _ID_FLOOR = 1 << 40
-_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
+_SUBGRAPH_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
 
 
 def mint_id() -> int:
@@ -1865,7 +1865,7 @@ def define_subgraph(
         definition_id = str(uuid.uuid4())
     if not isinstance(definition_id, str) or not definition_id:
         raise ValueError("subgraph definition requires a non-empty string id")
-    if not _UUID_RE.fullmatch(definition_id):
+    if not _SUBGRAPH_UUID_RE.fullmatch(definition_id):
         raise ValueError("subgraph definition id must be a valid UUID")
     if "id" in definition and definition["id"] != definition_id:
         raise ValueError("subgraph definition id must match --id")

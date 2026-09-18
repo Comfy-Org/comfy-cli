@@ -70,6 +70,14 @@ def test_define_subgraph_can_assign_an_explicit_new_id():
     assert op["subgraph_definition"]["id"] == SUBGRAPH_ID
 
 
+@pytest.mark.parametrize(
+    "subgraph_id", ["12345678-1234-0123-8123-123456789abc", "12345678-1234-4123-7123-123456789abc"]
+)
+def test_define_subgraph_rejects_invalid_uuid_version_or_variant(subgraph_id):
+    with pytest.raises(ValueError, match="valid UUID"):
+        workflow_ops.define_subgraph({"nodes": [], "links": []}, _definition(), subgraph_id=subgraph_id)
+
+
 def test_define_subgraph_command_emits_without_writing_workflow(tmp_path, monkeypatch):
     workflow = tmp_path / "workflow.json"
     original = {"nodes": [], "links": []}
