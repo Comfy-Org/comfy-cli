@@ -815,6 +815,11 @@ def apply_cmd(
         raise typer.Exit(code=1) from e
 
     try:
+        deferred = [
+            spec.get("op") for spec in specs if isinstance(spec, dict) and spec.get("op") in workflow_ops.DEFERRED_OPS
+        ]
+        if deferred:
+            raise ValueError(f"local apply cannot persist deferred operation(s): {', '.join(deferred)}")
         workflow, ops, aliases = workflow_ops.apply_specs(
             workflow, graph, specs, actor=actor, base_version=base_version
         )
@@ -978,6 +983,13 @@ def foreach_cmd(
     out.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
     try:
+        deferred = [
+            spec.get("op")
+            for spec in specs_template
+            if isinstance(spec, dict) and spec.get("op") in workflow_ops.DEFERRED_OPS
+        ]
+        if deferred:
+            raise ValueError(f"local foreach cannot persist deferred operation(s): {', '.join(deferred)}")
         for i, pset in enumerate(param_sets):
             if not isinstance(pset, dict):
                 raise workflow_ops.RecipeError(f"param-set #{i} must be a JSON object")
