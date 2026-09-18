@@ -40,6 +40,23 @@ it reconnects.
 is the union of what the watch observed and what `/history` records for the
 prompt, so it is populated even for a watch that attached after the job ended.
 
+The per-node events `jobs watch` streams carry the **same shape** as the `comfy
+run` ones — one event per node, keyed by `node`. ComfyUI's websocket delivers
+`execution_cached` as a single message listing every cached node, and `jobs
+watch` fans that out into one `execution_cached` event per node, exactly as
+`comfy run` does, so a consumer written against the run dialect counts cached
+nodes correctly on either stream. `jobs watch` has no workflow graph in hand,
+so it omits the optional `title` / `class_type` fields that `comfy run`
+attaches to `executing`, `execution_cached` and `executed`; it also does not
+carry the `outputs` array on `executed`, reporting each artifact as its own
+`output` event instead. *(Changed since 1.16.0, whose `jobs watch` emitted one
+`execution_cached` carrying a `nodes` array — a run-dialect consumer counting
+cached nodes per event undercounted every cached node beyond the first. If you
+wrote a watch consumer against 1.16.0 and read `ev["nodes"]` on this event,
+read `ev["node"]` instead, once per event. The `nodes` array form is still
+accepted by the published event schema so a stream captured from 1.16.0 keeps
+validating, but nothing emits it.)*
+
 ## Overview
 
 When `--json` is passed, `comfy run` switches into a strict
@@ -306,9 +323,19 @@ closing the previous one.
 ### `execution_cached`
 
 One event per node whose outputs were retrieved from the execution cache
-(from ComfyUI's `execution_cached` websocket message). Same fields as
+(from ComfyUI's `execution_cached` websocket message, which lists every
+cached node in one frame and is fanned out here). Same fields as
 `executing`. A cached output-bearing node (e.g., a cached `SaveImage`)
 may emit both `execution_cached` AND `executed`.
+
+```json
+{"schema": "event/1", "type": "execution_cached", "node": "1", "title": "Latent", "class_type": "EmptyLatentImage", "prompt_id": "9b1c…"}
+```
+
+`comfy jobs watch` emits the same per-node event without `title` /
+`class_type` (see [`jobs watch` attaches as the submitting
+session](#jobs-watch-attaches-as-the-submitting-session)). It never emits a
+list-shaped `nodes` field on this event.
 
 ### `progress`
 
