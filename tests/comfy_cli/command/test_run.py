@@ -316,6 +316,49 @@ class TestWatchExecution:
         mock_execution.watch_execution()
         assert len(mock_execution.remaining_nodes) == 0
 
+    def test_wall_clock_backstop_aborts_after_sleep(self, mock_execution):
+        """A dead connection whose socket timeout under-counted a system sleep
+        must still abort: once the WALL clock is past the silence budget, a
+        recv timeout re-raises instead of hanging."""
+        mock_execution.prompt_id = "p"
+        mock_ws = MagicMock()
+        # recv only ever times out (server silent / connection dead on wake).
+        mock_ws.recv.side_effect = WebSocketTimeoutException("timed out")
+        mock_execution.ws = mock_ws
+
+        # last_activity=1000, then a wake with the wall clock jumped ~999s.
+        times = iter([1000.0, 1999.0])
+        with patch("comfy_cli.command.run.execution.time.time", lambda: next(times)):
+            with pytest.raises(WebSocketTimeoutException):
+                mock_execution.watch_execution()
+
+    def test_recv_timeout_within_budget_keeps_waiting(self, mock_execution):
+        """A poll-interval timeout BEFORE the wall-clock budget elapses must not
+        abort — the loop keeps waiting for the server."""
+        mock_execution.prompt_id = "p"
+        mock_ws = MagicMock()
+        mock_ws.recv.side_effect = [
+            WebSocketTimeoutException("poll tick"),  # 5s in — under the 30s budget
+            _make_msg("executing", "p", node=None),  # then the server finishes
+        ]
+        mock_execution.ws = mock_ws
+
+        times = iter([1000.0, 1005.0, 1005.0])
+        with patch("comfy_cli.command.run.execution.time.time", lambda: next(times)):
+            mock_execution.watch_execution()  # returns normally, no raise
+
+    def test_recv_poll_interval_is_capped(self, mock_execution):
+        """The per-recv socket timeout is capped so the loop regains control
+        regularly even when --timeout is large."""
+        mock_execution.timeout = 3600
+        mock_execution.prompt_id = "p"
+        mock_ws = MagicMock()
+        mock_ws.recv.side_effect = [_make_msg("executing", "p", node=None)]
+        mock_execution.ws = mock_ws
+
+        mock_execution.watch_execution()
+        mock_ws.settimeout.assert_called_once_with(30)
+
     def test_skips_other_prompt_messages(self, mock_execution):
         prompt_id = "my-prompt"
         mock_execution.prompt_id = prompt_id

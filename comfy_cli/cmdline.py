@@ -1009,10 +1009,12 @@ def run(
         typer.Option(
             help=(
                 "Per-event timeout in seconds: bails out if the server is silent "
-                "for this long. Also caps HTTP connect, /prompt POST, and websocket "
-                "handshake. NOT a wall-clock execution deadline — a workflow that "
-                "streams progress events faster than the timeout can run "
-                "indefinitely."
+                "for this long (measured against the wall clock, so it still fires "
+                "after the machine wakes from sleep). Also caps HTTP connect, "
+                "/prompt POST, and websocket handshake. NOT a wall-clock execution "
+                "deadline — a workflow that streams progress events faster than the "
+                "timeout can run indefinitely. For long local batches, prevent sleep "
+                "with `caffeinate` (macOS)."
             ),
         ),
     ] = 120,
