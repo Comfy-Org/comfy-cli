@@ -141,3 +141,61 @@ def test_non_multiline_nodes_are_unaffected():
         widget_labels=("width", "height", "batch_size"),
     )
     assert list(saved) == list(expected)
+
+
+def test_a_second_call_does_not_overlap_the_first_batch():
+    """The reviewer's repro, and it only reproduces once width is floored too.
+
+    Two multiline nodes in one batch, then one more in a second call. The second call reads
+    the SAVED sizes; under-measure those and it places the new node inside the first.
+
+    This belongs on this branch rather than the height PR: with a text-derived width
+    (249.9) the third node lands at x=369.9 and clears, so the case passes for the wrong
+    reason. At the 400px floor the first node truly spans 40..440 and the overlap is real.
+
+    Measured against the size the node TRULY renders at, not the size that was saved.
+    Scoring against the saved size lets the bug hide: an under-measured node "does not
+    overlap" precisely because the record of it is too small.
+    """
+    wf = {"nodes": [], "links": []}
+    g = _graph()
+    W.apply_specs(
+        wf,
+        g,
+        [
+            {"op": "add_node", "class_type": "CLIPTextEncode", "as": "a"},
+            {"op": "add_node", "class_type": "CLIPTextEncode", "as": "b"},
+        ],
+        actor="agent",
+        base_version=1,
+    )
+    W.apply_specs(
+        wf,
+        g,
+        [{"op": "add_node", "class_type": "CLIPTextEncode", "as": "c"}],
+        actor="agent",
+        base_version=2,
+    )
+
+    meta = g.node("CLIPTextEncode")
+    widgets = tuple(g.widget_order_default("CLIPTextEncode"))
+    true_size = layout.estimate_size(
+        len([p for p in meta.inputs if p.is_link]),
+        len(meta.outputs),
+        len(widgets),
+        n_multiline=layout.count_multiline(meta, widgets),
+        title=meta.display_name,
+        input_labels=tuple(p.name for p in meta.inputs if p.is_link),
+        output_labels=tuple(p.name for p in meta.outputs),
+        widget_labels=widgets,
+    )
+    assert true_size[0] >= layout.MULTILINE_MIN_WIDTH, (
+        "this test is only meaningful once the multiline width floor applies"
+    )
+
+    rects = [layout.occupied(n["pos"], true_size) for n in wf["nodes"]]
+    for i in range(len(rects)):
+        for j in range(i + 1, len(rects)):
+            assert not layout._overlaps(rects[i], rects[j]), (
+                f"node {i} at {wf['nodes'][i]['pos']} overlaps node {j} at {wf['nodes'][j]['pos']}"
+            )
