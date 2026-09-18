@@ -129,6 +129,16 @@ def test_returns_none_when_renamed():
     assert parity.find_assignment(renamed, "NODE_TITLE_HEIGHT") is None
 
 
+def test_assignment_ignores_stale_comment_and_string_matches():
+    source = """
+// NODE_TITLE_HEIGHT = 99
+const note = 'NODE_TITLE_HEIGHT = 88 // not a comment';
+/* NODE_TITLE_HEIGHT = 77 */
+NODE_TITLE_HEIGHT = 30
+"""
+    assert parity.find_assignment(source, "NODE_TITLE_HEIGHT") == 30.0
+
+
 def test_finds_glyph_width_fallback():
     assert parity.find_char_fallback(NODE_FIXTURE) == 0.6
 
@@ -141,6 +151,16 @@ def test_finds_glyph_width_fallback_in_the_pre_refactor_shape():
     `--ref` at an older frontend, and the constant being checked did not move.
     """
     assert parity.find_char_fallback(NODE_FIXTURE_LEGACY) == 0.6
+
+
+def test_glyph_fallback_ignores_stale_comment_and_template_matches():
+    source = """
+// return font_size * old.length * 9.9
+const note = `font_size * old.length * 8.8 // literal`;
+/* return font_size * old.length * 7.7 */
+return font_size * value.length * 0.6
+"""
+    assert parity.find_char_fallback(source) == 0.6
 
 
 def test_glyph_width_fallback_absent_returns_none():

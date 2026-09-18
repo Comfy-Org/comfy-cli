@@ -68,13 +68,72 @@ def fetch(path: str, ref: str, source_dir: str | None) -> str:
         return r.read().decode("utf-8")
 
 
+def active_typescript(text: str) -> str:
+    """Mask comments and literals while preserving source positions and newlines."""
+    chars = list(text)
+    i = 0
+    state = "code"
+    quote = ""
+    while i < len(chars):
+        char = chars[i]
+        following = chars[i + 1] if i + 1 < len(chars) else ""
+
+        if state == "code":
+            if char == "/" and following == "/":
+                chars[i] = chars[i + 1] = " "
+                state = "line_comment"
+                i += 2
+                continue
+            if char == "/" and following == "*":
+                chars[i] = chars[i + 1] = " "
+                state = "block_comment"
+                i += 2
+                continue
+            if char in {"'", '"', "`"}:
+                quote = char
+                chars[i] = " "
+                state = "literal"
+                i += 1
+                continue
+        elif state == "line_comment":
+            if char == "\n":
+                state = "code"
+            else:
+                chars[i] = " "
+        elif state == "block_comment":
+            if char == "*" and following == "/":
+                chars[i] = chars[i + 1] = " "
+                state = "code"
+                i += 2
+                continue
+            if char != "\n":
+                chars[i] = " "
+        else:
+            if char == "\\":
+                chars[i] = " "
+                if i + 1 < len(chars):
+                    if chars[i + 1] != "\n":
+                        chars[i + 1] = " "
+                    i += 2
+                    continue
+            if char == quote:
+                state = "code"
+            if char != "\n":
+                chars[i] = " "
+        i += 1
+    return "".join(chars)
+
+
 def find_assignment(text: str, symbol: str) -> float | None:
     """Find `[static] NAME = <number>` for an exact symbol name.
 
     Anchored on a word boundary so NODE_WIDTH does not match NODE_WIDGET_HEIGHT and
     margin does not match arrowMargin.
     """
-    m = re.search(rf"(?:^|\s)(?:static\s+)?{re.escape(symbol)}\s*=\s*(-?[\d.]+)", text)
+    m = re.search(
+        rf"(?:^|\s)(?:static\s+)?{re.escape(symbol)}\s*=\s*(-?[\d.]+)",
+        active_typescript(text),
+    )
     return float(m.group(1)) if m else None
 
 
@@ -92,7 +151,7 @@ def find_char_fallback(text: str) -> float | None:
     third factor, or stops multiplying by a constant at all, this returns None and the
     caller reports "could not check" instead of inventing parity.
     """
-    m = re.search(r"font_size\s*\*\s*[^*;\n]+?\*\s*(-?[\d.]+)", text)
+    m = re.search(r"font_size\s*\*\s*[^*;\n]+?\*\s*(-?[\d.]+)", active_typescript(text))
     return float(m.group(1)) if m else None
 
 
