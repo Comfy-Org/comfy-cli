@@ -79,6 +79,26 @@ _WIDGET_BLOCK_PAD = 8.0
 MULTILINE_WIDGET_H = 166.0
 
 
+def count_multiline(node_meta, widget_names) -> int:
+    """How many of `widget_names` are multiline, per the catalog.
+
+    Both callers that size a node must derive this the SAME way, and they did not. The
+    planner passed a multiline count; `workflow_ops.add_node` computed its own size without
+    one, and that is the size PERSISTED onto the node -- the size every later collision
+    check reads. So the planner was right and the saved state was wrong, and a second call
+    would place a node on top of one it had itself under-measured.
+
+    Matching is by name because widget order is the render order, not the declaration
+    order, and `options` is guarded because a port may carry none at all.
+    """
+    names = set(widget_names)
+    return sum(
+        1
+        for p in getattr(node_meta, "inputs", [])
+        if p.name in names and getattr(getattr(p, "options", None), "multiline", False)
+    )
+
+
 def _widgets_height(n_widgets: int, n_multiline: int = 0) -> float:
     """Vertical space n widget rows occupy, using LiteGraph's own accumulation.
 
@@ -112,7 +132,12 @@ def _widgets_height(n_widgets: int, n_multiline: int = 0) -> float:
     """
     if n_widgets <= 0:
         return 0.0
-    ordinary = max(0, n_widgets - n_multiline)
+    # Clamp rather than trust. A node cannot have more multiline widgets than widgets, and
+    # charging five multiline areas to a one-widget node is not a case worth codifying --
+    # it only arises from a bad catalog or a caller bug, and silently over-measuring by
+    # 700px hides both.
+    n_multiline = min(max(n_multiline, 0), n_widgets)
+    ordinary = n_widgets - n_multiline
     return ordinary * (WIDGET_H + _WIDGET_ROW_GAP) + n_multiline * MULTILINE_WIDGET_H + _WIDGET_BLOCK_PAD
 
 
@@ -277,7 +302,7 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
                 len([p for p in m.inputs if p.is_link]),
                 len(m.outputs),
                 len(widget_names),
-                n_multiline=sum(1 for w in widget_names if w in _multiline),
+                n_multiline=count_multiline(m, widget_names),
                 # LiteGraph renders `display_name || name`, and width is derived from the
                 # title, so sizing from class_type under-estimates whenever they differ.
                 title=(getattr(m, "display_name", "") or spec["class_type"]),

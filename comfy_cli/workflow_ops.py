@@ -553,6 +553,11 @@ def add_node(
         len([p for p in m.inputs if p.is_link]),
         len(m.outputs),
         len(_widget_names),
+        # This is the size PERSISTED onto the node, and every later collision check reads
+        # it. Omitting the multiline term here left the planner correct and the saved state
+        # wrong, so a second call would place the next node on top of a node it had itself
+        # under-measured.
+        n_multiline=layout.count_multiline(m, _widget_names),
         title=(getattr(m, "display_name", "") or class_type),
         input_labels=tuple(p.name for p in m.inputs if p.is_link),
         output_labels=tuple(p.name for p in m.outputs),

@@ -492,9 +492,44 @@ def test_multiline_widget_is_not_charged_as_an_ordinary_row():
     assert multiline - ordinary == 142.0
 
 
-def test_multiline_count_cannot_exceed_widget_count():
-    """Defensive: a bad catalog must not produce a negative ordinary count."""
-    assert layout._widgets_height(1, 5) == 5 * layout.MULTILINE_WIDGET_H + layout._WIDGET_BLOCK_PAD
+def test_multiline_count_is_clamped_to_the_widget_count():
+    """A node cannot have more multiline widgets than widgets.
+
+    This previously asserted that `_widgets_height(1, 5)` charged FIVE multiline areas to a
+    one-widget node, codifying a 700px over-measure as intended behaviour. It only arises
+    from a bad catalog or a caller bug, and silently over-measuring hides both. Clamped.
+    """
+    assert layout._widgets_height(1, 5) == layout._widgets_height(1, 1)
+    assert layout._widgets_height(3, -2) == layout._widgets_height(3, 0)
+
+
+def test_count_multiline_matches_by_name_not_position():
+    """Widget order is the render order, not the declaration order."""
+
+    class _P:
+        def __init__(self, name, multiline=False):
+            self.name = name
+            self.options = type("O", (), {"multiline": multiline})()
+
+    class _M:
+        inputs = [_P("clip"), _P("text", True), _P("seed")]
+
+    assert layout.count_multiline(_M(), ("text", "seed")) == 1
+    assert layout.count_multiline(_M(), ("seed",)) == 0
+
+
+def test_count_multiline_tolerates_a_port_without_options():
+    """Every test double here is such a port, and so is a catalog entry whose object_info
+    omitted the options block."""
+
+    class _Bare:
+        def __init__(self, name):
+            self.name = name
+
+    class _M:
+        inputs = [_Bare("text")]
+
+    assert layout.count_multiline(_M(), ("text",)) == 0
 
 
 def test_estimate_size_default_is_unchanged_without_multiline():
