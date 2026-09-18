@@ -35,7 +35,7 @@ ask; it can never make the answer.
 | Blocked | Do | Then |
 |---|---|---|
 | A folder (write refused as outside the project; "Access is denied" from the shell on Windows) | call `request_path` with the folder and what you need it for | tell the user a request is waiting and how to approve it; retry only after it is approved |
-| A host (`egress denied: <host>`) | call `request_host` with the host and what the download or install is for | same; rerun the command after the approval |
+| A host (`egress denied: <host>`; from a CLI command, `Tunnel connection failed: 403`, which is the same refusal) | call `request_host` with the host and what the download or install is for. It is one host missing from the list, not a shell cut off from the network | same; rerun the command after the approval |
 | No shell on this machine | say that the environment block names the start-time setting that enables one | the user restarts the agent with it |
 
 The user approves or refuses from a terminal, naming the request by the id
