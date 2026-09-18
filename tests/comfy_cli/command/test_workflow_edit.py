@@ -2315,6 +2315,7 @@ class TestOpModel:
             " form the spec path can resolve."
         ),
         strict=True,
+        raises=ValueError,
     )
     def test_replace_ops_batch_is_replayable_through_apply_specs(self):
         """The other half of §8.8: the same array must be accepted verbatim by
