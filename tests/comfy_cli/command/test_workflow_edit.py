@@ -2205,6 +2205,17 @@ class TestOpModel:
         return [(i["name"], i.get("link") is not None) for i in node["inputs"]]
 
     @staticmethod
+    def _batchimages_topology(workflow: dict) -> list[tuple[str, tuple[float, float], int]]:
+        nodes = {node["id"]: node for node in workflow["nodes"]}
+        links = {link[0]: link for link in workflow["links"]}
+        batch = next(node for node in workflow["nodes"] if node["type"] == "BatchImagesNode")
+        return [
+            (slot["name"], tuple(nodes[links[slot["link"]][1]]["pos"]), links[slot["link"]][2])
+            for slot in batch["inputs"]
+            if slot.get("link") is not None
+        ]
+
+    @staticmethod
     def _replay_ops(batch: list[dict], graph) -> dict:
         from comfy_cli import workflow_ops
 
@@ -2226,6 +2237,7 @@ class TestOpModel:
         batch = workflow_ops.replace_ops(old, new)
         doc = self._replay_ops(batch, g)
         assert self._batchimages_slots(doc) == self._batchimages_slots(new)
+        assert self._batchimages_topology(doc) == self._batchimages_topology(new)
         assert len(doc["links"]) == len(new["links"])
 
     def test_replace_ops_replays_a_holed_autogrow_canvas_verbatim(self):
@@ -2288,6 +2300,7 @@ class TestOpModel:
             ("images.image0", True),
             ("images.image2", True),
         ]
+        assert self._batchimages_topology(doc) == self._batchimages_topology(new)
         assert len(doc["links"]) == len(new["links"])
 
     @pytest.mark.xfail(
