@@ -2222,6 +2222,24 @@ class TestOpModel:
             assert names == {"images.first", "images.second"}, names
         assert ops.canonical(ab) == ops.canonical(ba)
 
+    def test_p9_autogrow_template_converges_without_catalog(self):
+        """The mint-time template travels with an op so catalog-free replicas
+        preserve schema names while reranking concurrent grows."""
+        ops = self._ops()
+        graph = _graph_with_autogrow_template({"prefix": "frame"})
+        base = _autogrow_workflow()
+        _, op1 = ops.connect(copy.deepcopy(base), graph, 20, "IMAGE", 10, "images", actor="a")
+        _, op2 = ops.connect(copy.deepcopy(base), graph, 21, "IMAGE", 10, "images", actor="b")
+
+        ab = ops.apply_op(ops.apply_op(copy.deepcopy(base), op1, None), op2, None)
+        ba = ops.apply_op(ops.apply_op(copy.deepcopy(base), op2, None), op1, None)
+
+        for out in (ab, ba):
+            inputs = next(node for node in out["nodes"] if node["id"] == 10)["inputs"]
+            names = {item["name"] for item in inputs if item.get("grow_id") is not None}
+            assert names == {"images.frame0", "images.frame1"}
+        assert ops.canonical(ab) == ops.canonical(ba)
+
     def test_p9_autogrow_grow_id_survives_api_conversion(self):
         """The ``grow_id`` bookkeeping (persisted on grown slots as their
         convergence identity) must not break API conversion — both wired sources

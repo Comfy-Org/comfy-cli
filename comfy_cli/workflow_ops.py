@@ -2061,7 +2061,9 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
         if not grow.get("promoted") and not grow.get("widget") and inputcount is None:
             base = _autogrow_base(str(grow["name"]))
             port = _autogrow_group_port(graph, dst, base)
-            template = None if port is None else port.autogrow_template
+            template = grow.get("template")
+            if template is None and port is not None:
+                template = port.autogrow_template
         if grow.get("promoted"):
             # A promoted subgraph input is ONE register named by the definition
             # (``("input", to_node, "grow", name)``), not a fresh slot per
@@ -2944,7 +2946,10 @@ def _resolve_schema_autogrow(
                 f"(existing: {grown}) — connect to the base {base!r} to auto-append, "
                 f"or use the next free key {name!r}"
             )
-        return None, {"name": name, "type": declared or elem_type or "*"}
+        grow: dict[str, Any] = {"name": name, "type": declared or elem_type or "*"}
+        if template is not None:
+            grow["template"] = dict(template)
+        return None, grow
     return None
 
 
@@ -2977,4 +2982,7 @@ def _plan_autogrow(ins: list, base: str, elem_type: str | None, template: dict |
     explicitly requested key against this name before growing."""
     taken = {str(i.get("name", "")) for i in ins}
     elem = _autogrow_elem_name(base, _first_free_autogrow_index(taken, base, template), template)
-    return {"name": f"{base}.{elem}", "type": elem_type or "*"}
+    grow = {"name": f"{base}.{elem}", "type": elem_type or "*"}
+    if template is not None:
+        grow["template"] = dict(template)
+    return grow
