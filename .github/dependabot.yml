@@ -9,3 +9,16 @@ updates:
       ci-dependencies:
         patterns:
           - "*"
+    ignore:
+      # NEVER let Dependabot bump the Comfy-Org/github-workflows reusables: a caller
+      # pins them TWICE (`uses:` SHA + `workflows_ref:` input) and Dependabot only
+      # rewrites `uses:`, splitting the pair. The bump-*-callers fleet in
+      # github-workflows moves both pins together. Both entries are needed:
+      # Dependabot names a reusable by its FULL path, and a bare `dependency-name`
+      # is an exact match (the exact form covers `owner/repo`, the `/*` form the
+      # per-file names). Do NOT collapse to `Comfy-Org/github-workflows*`.
+      #
+      # Consequence for this repo: detect-unreviewed-merge.yml has no `workflows_ref`
+      # and no bumper fleet upstream, so its `uses:` pin is now bumped by hand.
+      - dependency-name: "Comfy-Org/github-workflows"
+      - dependency-name: "Comfy-Org/github-workflows/*"
