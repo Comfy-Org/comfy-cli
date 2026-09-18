@@ -28,11 +28,13 @@ so CI can treat "could not check" differently from "constants have drifted".
 
 from __future__ import annotations
 
-import argparse
 import re
-import sys
 import urllib.request
 from pathlib import Path
+from typing import Annotated
+
+import typer
+from rich.console import Console
 
 from comfy_cli import layout
 
@@ -41,6 +43,9 @@ RAW = "https://raw.githubusercontent.com/Comfy-Org/ComfyUI_frontend/{ref}/{path}
 GLOBALS_PATH = "src/lib/litegraph/src/LiteGraphGlobal.ts"
 WIDGET_PATH = "src/lib/litegraph/src/widgets/BaseWidget.ts"
 NODE_PATH = "src/lib/litegraph/src/LGraphNode.ts"
+
+console = Console(highlight=False)
+error_console = Console(stderr=True, highlight=False)
 
 # (upstream file, upstream symbol, layout.py constant, current local value)
 CHECKS = [
@@ -155,18 +160,13 @@ def find_char_fallback(text: str) -> float | None:
     return float(m.group(1)) if m else None
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", default="main", help="ComfyUI_frontend git ref (default: main)")
-    ap.add_argument("--source-dir", help="local ComfyUI_frontend checkout instead of fetching")
-    args = ap.parse_args()
-
+def main(ref: str = "main", source_dir: str | None = None) -> int:
     sources: dict[str, str] = {}
     for path in {GLOBALS_PATH, WIDGET_PATH, NODE_PATH}:
         try:
-            sources[path] = fetch(path, args.ref, args.source_dir)
+            sources[path] = fetch(path, ref, source_dir)
         except Exception as exc:  # noqa: BLE001 - any read failure is the same outcome here
-            print(f"could not read {path}: {exc}", file=sys.stderr)
+            error_console.print(f"could not read {path}: {exc}")
             return 2
 
     mismatches: list[str] = []
@@ -179,7 +179,7 @@ def main() -> int:
         elif theirs != ours:
             mismatches.append(f"{symbol}: upstream {theirs}, layout.py {ours_name} = {ours}")
         else:
-            print(f"ok  {symbol:20} {theirs}")
+            console.print(f"ok  {symbol:20} {theirs}")
 
     char_w = find_char_fallback(sources[NODE_PATH])
     if char_w is None:
@@ -187,30 +187,43 @@ def main() -> int:
     elif char_w != layout._CHAR_W:
         mismatches.append(f"glyph width fallback: upstream {char_w}, layout.py _CHAR_W = {layout._CHAR_W}")
     else:
-        print(f"ok  {'_CHAR_W':20} {char_w}")
+        console.print(f"ok  {'_CHAR_W':20} {char_w}")
 
     if missing:
-        print("\nSYMBOLS NOT FOUND (the check could not run, not a proven mismatch):", file=sys.stderr)
+        error_console.print("\nSYMBOLS NOT FOUND (the check could not run, not a proven mismatch):")
         for m in missing:
-            print(f"  {m}", file=sys.stderr)
+            error_console.print(f"  {m}")
     if mismatches:
-        print("\nCONSTANTS HAVE DRIFTED:", file=sys.stderr)
+        error_console.print("\nCONSTANTS HAVE DRIFTED:")
         for m in mismatches:
-            print(f"  {m}", file=sys.stderr)
-        print(
+            error_console.print(f"  {m}")
+        error_console.print(
             "\ncomfy_cli/layout.py models LiteGraph's geometry. When these diverge the CLI\n"
             "places nodes against a picture the browser no longer draws, and the symptom is\n"
             "overlapping nodes on an agent-built canvas. Update layout.py to match, and\n"
             "re-baseline the quality metrics in tests/comfy_cli/test_layout.py.",
-            file=sys.stderr,
         )
     if mismatches:
         return 1
     if missing:
         return 2
-    print("\nall geometry constants match upstream")
+    console.print("\nall geometry constants match upstream")
     return 0
 
 
+def cli(
+    ref: Annotated[
+        str,
+        typer.Option(help="ComfyUI_frontend git ref."),
+    ] = "main",
+    source_dir: Annotated[
+        Path | None,
+        typer.Option(help="Local ComfyUI_frontend checkout instead of fetching."),
+    ] = None,
+) -> None:
+    """Compare local layout constants with ComfyUI_frontend's LiteGraph values."""
+    raise typer.Exit(main(ref=ref, source_dir=str(source_dir) if source_dir else None))
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    typer.run(cli)
