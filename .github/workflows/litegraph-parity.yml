@@ -55,17 +55,40 @@ jobs:
       - name: Check constants against upstream
         id: check
         continue-on-error: true
-        run: uv run --locked --extra dev python scripts/check_litegraph_parity.py --ref "${{ inputs.ref || 'main' }}"
+        run: |
+          set +e
+          uv run --locked --extra dev python scripts/check_litegraph_parity.py --ref "${{ inputs.ref || 'main' }}"
+          status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          exit "$status"
 
       - name: Report
         # Exit 1 (drift) and exit 2 (could not read upstream) are different outcomes and
         # must not be collapsed: a moved file or a network blip is not evidence that the
         # constants diverged, and treating it as such trains people to ignore this job.
         run: |
-          if [ "${{ steps.check.outcome }}" = "success" ]; then
-            echo "geometry constants match upstream" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
+          status="${{ steps.check.outputs.exit_code }}"
+          case "$status" in
+            0)
+              echo "geometry constants match upstream" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+              ;;
+            2)
+              {
+                echo "## LiteGraph geometry parity could not run"
+                echo
+                echo "The checker could not read or parse the upstream source. This is not"
+                echo "evidence of geometry drift. Check the upstream ref, source paths, and"
+                echo "network access, then re-run the job."
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+            1) ;;
+            *)
+              echo "## LiteGraph parity checker exited unexpectedly (code: $status)" >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+          esac
           {
             echo "## LiteGraph geometry parity failed"
             echo
