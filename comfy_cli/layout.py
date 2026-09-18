@@ -56,7 +56,11 @@ _CHAR_W = 0.6  # LiteGraph's no-canvas glyph-width fallback
 # Horizontal room a widget row needs beyond its label, from BaseWidget: a minimum value
 # width of 42, plus a margin of 15, an arrow margin of 6 and an arrow width of 10 on each
 # side (BaseWidget.ts).
-_WIDGET_PADDING = 42.0 + 2.0 * (15.0 + 6.0 + 10.0)
+_WIDGET_MIN_VALUE_WIDTH = 42.0
+_WIDGET_MARGIN = 15.0
+_WIDGET_ARROW_MARGIN = 6.0
+_WIDGET_ARROW_WIDTH = 10.0
+_WIDGET_PADDING = _WIDGET_MIN_VALUE_WIDTH + 2.0 * (_WIDGET_MARGIN + _WIDGET_ARROW_MARGIN + _WIDGET_ARROW_WIDTH)
 
 
 def _text_w(text: str | None) -> float:

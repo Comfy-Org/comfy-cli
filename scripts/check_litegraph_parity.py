@@ -34,27 +34,30 @@ import sys
 import urllib.request
 from pathlib import Path
 
+from comfy_cli import layout
+
 RAW = "https://raw.githubusercontent.com/Comfy-Org/ComfyUI_frontend/{ref}/{path}"
 
 GLOBALS_PATH = "src/lib/litegraph/src/LiteGraphGlobal.ts"
 WIDGET_PATH = "src/lib/litegraph/src/widgets/BaseWidget.ts"
 NODE_PATH = "src/lib/litegraph/src/LGraphNode.ts"
 
-# (upstream file, upstream symbol, layout.py constant, our value)
-#
-# Our value is written out literally rather than imported so a reviewer can see both
-# numbers side by side in the diff, and so this script keeps working if layout.py's
-# constants are ever restructured.
+# (upstream file, upstream symbol, layout.py constant, current local value)
 CHECKS = [
-    (GLOBALS_PATH, "NODE_TITLE_HEIGHT", "TITLE_H", 30.0),
-    (GLOBALS_PATH, "NODE_SLOT_HEIGHT", "SLOT_H", 20.0),
-    (GLOBALS_PATH, "NODE_WIDGET_HEIGHT", "WIDGET_H", 20.0),
-    (GLOBALS_PATH, "NODE_WIDTH", "LG_NODE_WIDTH", 140.0),
-    (GLOBALS_PATH, "NODE_TEXT_SIZE", "NODE_TEXT_SIZE", 14.0),
-    (WIDGET_PATH, "margin", "_WIDGET_PADDING term", 15.0),
-    (WIDGET_PATH, "arrowMargin", "_WIDGET_PADDING term", 6.0),
-    (WIDGET_PATH, "arrowWidth", "_WIDGET_PADDING term", 10.0),
-    (WIDGET_PATH, "minValueWidth", "_WIDGET_PADDING term", 42.0),
+    (GLOBALS_PATH, "NODE_TITLE_HEIGHT", "TITLE_H", layout.TITLE_H),
+    (GLOBALS_PATH, "NODE_SLOT_HEIGHT", "SLOT_H", layout.SLOT_H),
+    (GLOBALS_PATH, "NODE_WIDGET_HEIGHT", "WIDGET_H", layout.WIDGET_H),
+    (GLOBALS_PATH, "NODE_WIDTH", "LG_NODE_WIDTH", layout.LG_NODE_WIDTH),
+    (GLOBALS_PATH, "NODE_TEXT_SIZE", "NODE_TEXT_SIZE", layout.NODE_TEXT_SIZE),
+    (WIDGET_PATH, "margin", "_WIDGET_MARGIN", layout._WIDGET_MARGIN),
+    (WIDGET_PATH, "arrowMargin", "_WIDGET_ARROW_MARGIN", layout._WIDGET_ARROW_MARGIN),
+    (WIDGET_PATH, "arrowWidth", "_WIDGET_ARROW_WIDTH", layout._WIDGET_ARROW_WIDTH),
+    (
+        WIDGET_PATH,
+        "minValueWidth",
+        "_WIDGET_MIN_VALUE_WIDTH",
+        layout._WIDGET_MIN_VALUE_WIDTH,
+    ),
 ]
 
 
@@ -122,8 +125,8 @@ def main() -> int:
     char_w = find_char_fallback(sources[NODE_PATH])
     if char_w is None:
         missing.append(f"compute_text_size glyph fallback not found in {NODE_PATH}")
-    elif char_w != 0.6:
-        mismatches.append(f"glyph width fallback: upstream {char_w}, layout.py _CHAR_W = 0.6")
+    elif char_w != layout._CHAR_W:
+        mismatches.append(f"glyph width fallback: upstream {char_w}, layout.py _CHAR_W = {layout._CHAR_W}")
     else:
         print(f"ok  {'_CHAR_W':20} {char_w}")
 
