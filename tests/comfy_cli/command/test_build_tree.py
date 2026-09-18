@@ -71,7 +71,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> RemoteBuilder:
 
 
 def invoke_build(*args: str, agentic: bool = True):
-    return CliRunner(mix_stderr=False).invoke(
+    return CliRunner().invoke(
         cli_app,
         ["build", *args],
         env={

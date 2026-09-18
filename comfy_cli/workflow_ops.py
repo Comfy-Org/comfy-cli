@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import random
 import re
 import uuid
@@ -578,16 +579,29 @@ def add_node(
         raise UnknownNodeType(class_type, close_matches=difflib.get_close_matches(class_type, names, n=5, cutoff=0.6))
     if m.deprecated and not allow_deprecated:
         raise DeprecatedNodeType(class_type, replacement=_deprecated_replacement(graph, m))
+    _widget_names = tuple(graph.widget_order_default(class_type))
     size = layout.estimate_size(
         len([p for p in m.inputs if p.is_link]),
         len(m.outputs),
-        len(graph.widget_order_default(class_type)),
+        len(_widget_names),
+        title=(getattr(m, "display_name", "") or class_type),
+        input_labels=tuple(p.name for p in m.inputs if p.is_link),
+        output_labels=tuple(p.name for p in m.outputs),
+        widget_labels=_widget_names,
     )
     if pos is None:
         # Layout-aware default: right of the current graph, collision-free.
         # Decided at mint time so the position freezes into the op and replay
         # stays convergent (P1). Existing nodes are never moved.
         pos = layout.cascade_pos(workflow, size)
+    if (
+        not isinstance(pos, (list, tuple))
+        or len(pos) != 2
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in pos
+        )
+    ):
+        raise ValueError(f"node position must be two finite numbers, got {pos!r}")
     node = _build_node(mint_id(), class_type, m, graph, pos, size)
     if mode:
         # Node mode (mute/bypass) is graph-semantic state — a bypassed node
@@ -808,6 +822,15 @@ def _set_widget_impl(
     value, norm_note = _normalize_combo(graph, class_type, widget, value)
     old = widgets[idx] if idx < len(widgets) else None
     warnings = _validate_widget(graph, class_type, widget, value)  # raises on shape mismatch
+    morphism = graph.node(class_type)
+    port = next((p for p in morphism.inputs if p.name == widget), None) if morphism is not None else None
+    if port is not None and port.dynamic_options:
+        # Preview through the same value-aware writer apply/replay uses. A
+        # selector change owns a variable-width positional span, so its roster
+        # rebuild warning cannot be derived by scalar validation alone.
+        for warning in _engine._write_widget(copy.deepcopy(node), widget, value, graph, extend=True):
+            if warning not in warnings:
+                warnings.append(warning)
     if norm_note:
         warnings = [norm_note, *warnings]
     op = _new_op(
@@ -1935,12 +1958,10 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
         return  # target concurrently deleted => no-op (delete wins).
     from comfy_cli.cql import engine as _engine
 
-    widgets = _engine._widgets_as_positional(node.get("widgets_values"), graph, node.get("type", ""))
-    node["widgets_values"] = widgets
-    idx = _widget_index(graph, node.get("type", ""), op["widget"], widgets)
-    if idx >= len(widgets):
-        widgets.extend([None] * (idx + 1 - len(widgets)))
-    widgets[idx] = op["value"]
+    # The CQL writer is the schema-aware positional owner. In particular, a
+    # dynamic-combo selector change must replace the old option's variable-width
+    # sub-widget span before preserving trailing values such as seed/watermark.
+    _engine._write_widget(node, op["widget"], op["value"], graph, extend=True)
     _lww_commit(workflow, op)
 
 
@@ -2301,7 +2322,16 @@ def detect_conflict(a: dict, b: dict) -> bool:
     ask-to-merge raises instead of silently clobbering. Ordinary autogrow
     connects are not conflicts: their names and positions use ``_stamp_key``'s
     deterministic total order."""
-    if _write_target(a) != _write_target(b):
+    target_a = _write_target(a)
+    target_b = _write_target(b)
+    if a["op"] == "set_widget" and b["op"] == "set_widget" and target_a[:-1] == target_b[:-1]:
+        widget_a, widget_b = str(target_a[-1]), str(target_b[-1])
+        # A dynamic-combo selector owns the dotted sub-widget roster below it.
+        # A concurrent selector/sub-widget pair can therefore be order-dependent
+        # even though their leaf names differ; route it through ask-to-merge.
+        if widget_a.startswith(f"{widget_b}.") or widget_b.startswith(f"{widget_a}."):
+            return True
+    if target_a != target_b:
         return False
     if all(op.get("op") == "connect" and op.get("grow") for op in (a, b)):
         if all(

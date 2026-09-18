@@ -386,13 +386,28 @@ def test_zero_matching_deployments_returns_none() -> None:
 
 
 @pytest.mark.parametrize(
-    "row",
+    ("row", "message", "details"),
     [
-        pytest.param(_deployment("deployment-bad", created_at="not-a-timestamp"), id="unparsable-createdAt"),
-        pytest.param(_deployment("deployment-bad", status="unheard-of"), id="unknown-status"),
+        pytest.param(
+            _deployment("deployment-bad", created_at="not-a-timestamp"),
+            "unparsable createdAt",
+            {"createdAt": "not-a-timestamp"},
+            id="unparsable-createdAt",
+        ),
+        pytest.param(
+            _deployment("deployment-bad", status="unheard-of"),
+            "unknown status",
+            {"status": "unheard-of"},
+            id="unknown-status",
+        ),
     ],
 )
-def test_a_malformed_selection_field_is_a_server_shape_error_not_a_traceback(row: JsonObject) -> None:
+def test_a_malformed_selection_field_is_a_server_shape_error_naming_only_that_field(
+    row: JsonObject, message: str, details: JsonObject
+) -> None:
+    """A message hedging across both fields reported a valid ``provisioning``
+    status as the evidence for a timestamp it could not parse, so each failure
+    has to carry the value it actually rejected."""
     # Given
     builder = RecordingBuilder(pages=[[{"id": "release-1"}]])
     deployments = RecordingDeployments([[row]])
@@ -401,6 +416,8 @@ def test_a_malformed_selection_field_is_a_server_shape_error_not_a_traceback(row
     with pytest.raises(DeployAPIError) as raised:
         resolve_deployment(builder, deployments, "build-1")
     assert raised.value.code == "deploy_server_error"
+    assert message in str(raised.value)
+    assert raised.value.details == details
 
 
 def test_a_naive_timestamp_never_makes_the_ranking_comparison_raise() -> None:
@@ -420,6 +437,40 @@ def test_a_naive_timestamp_never_makes_the_ranking_comparison_raise() -> None:
     # Then
     assert resolved is not None
     assert resolved["id"] == "deployment-naive"
+
+
+def test_a_zero_trimmed_timestamp_ranks_instead_of_failing_the_command() -> None:
+    """Go marshals ``time.Time`` as RFC3339Nano, which trims trailing zeros, so
+    microseconds of ``437450`` ship as five digits — the shape that made
+    ``comfy deploy status`` report a server error against a healthy deployment
+    and blame its perfectly valid ``provisioning`` status for it."""
+    # Given
+    builder = RecordingBuilder(pages=[[{"id": "release-1"}]])
+    trimmed = _deployment("deployment-provisioning", "provisioning", created_at="2026-08-28T03:26:09.43745Z")
+    deployments = RecordingDeployments([[trimmed]])
+
+    # When
+    resolved = resolve_deployment(builder, deployments, "build-1")
+
+    # Then
+    assert resolved == trimmed
+
+
+def test_mixed_precision_timestamps_rank_by_instant_not_by_digit_count() -> None:
+    """Both rows tie on status, so ``max`` falls to the timestamps: compared as
+    strings rather than instants, the trimmed ``.43745`` would sort above the
+    genuinely later ``.5``."""
+    # Given
+    builder = RecordingBuilder(pages=[[{"id": "release-1"}]])
+    earlier = _deployment("deployment-earlier", "ready", created_at="2026-08-28T03:26:09.43745Z")
+    later = _deployment("deployment-later", "ready", created_at="2026-08-28T03:26:09.5Z")
+    deployments = RecordingDeployments([[earlier, later]])
+
+    # When
+    resolved = resolve_deployment(builder, deployments, "build-1")
+
+    # Then
+    assert resolved == later
 
 
 def test_join_consumes_three_pages_from_each_exhaustive_collector() -> None:

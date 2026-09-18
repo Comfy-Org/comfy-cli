@@ -34,10 +34,11 @@ import subprocess
 import tempfile
 import time
 import urllib.error
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, NoReturn
+from typing import TYPE_CHECKING, Annotated, Final, NoReturn
 from urllib.parse import urlsplit
 
 import requests
@@ -96,6 +97,7 @@ from comfy_cli.constants import SUPPORTED_PT_EXTENSIONS
 from comfy_cli.interaction import confirm, require_option
 from comfy_cli.output import get_renderer
 from comfy_cli.registry.api import sanitize_error_body
+from comfy_cli.utils import parse_rfc3339
 
 if TYPE_CHECKING:
     from comfy_cli.builder_api import BuilderClient
@@ -1003,6 +1005,21 @@ class ScanRequest:
     comfy_url: str | None = None
 
 
+class ScanUnavailableError(Exception):
+    """This directory cannot be scanned as a ComfyUI installation.
+
+    Raised rather than rendered so the caller decides what it means: fatal for
+    `init` and `update`, where a scan is the whole command, but only a skipped
+    section for `status`, whose spec-vs-remote half needs no install.
+    """
+
+    def __init__(self, code: str, message: str, *, hint: str | None = None, details: dict | None = None) -> None:
+        self.code = code
+        self.hint = hint
+        self.details = details or {}
+        super().__init__(message)
+
+
 @dataclass(frozen=True, slots=True)
 class ScanResult:
     """One local scan. ``definition`` is the builder-ready document; the rest is
@@ -1014,26 +1031,26 @@ class ScanResult:
     skipped_symlinks: tuple[dict, ...] = ()
 
 
-def _scan_install(renderer, ctx, request: ScanRequest) -> ScanResult:
+def _scan_install(renderer, ctx, request: ScanRequest, *, optional: bool = False) -> ScanResult:
     """Scan an installation into a ``definition`` — the path `init` and `update`
     share, so a rescan can never drift from the original scan.
 
-    Every failure is rendered as one error envelope and raises ``typer.Exit``,
-    which is why this takes the renderer rather than returning a union: both
-    callers do exactly the same thing with every one of them.
+    Every reason the scan cannot run raises :class:`ScanUnavailableError`, so a
+    caller for which "no install here" is an ordinary answer can say so instead
+    of exiting. ``optional=True`` marks such a caller: nothing prompts, and even
+    the packaging failure that otherwise renders itself and exits is raised.
     """
     paths = request.paths
     if not paths.models_dir.is_dir():
-        renderer.error(
+        raise ScanUnavailableError(
             code="build_models_dir_missing",
             message=f"No models/ directory to scan at {paths.models_dir}.",
             details={"path": str(paths.models_dir)},
         )
-        raise typer.Exit(code=1)
 
     explicit_python = str(paths.python) if paths.python is not None else None
     python_exe = find_comfy_python(paths.install_root, explicit_python)
-    if python_exe is None:
+    if python_exe is None and not optional:
         selected_python = require_option(
             "--python",
             None,
@@ -1043,23 +1060,25 @@ def _scan_install(renderer, ctx, request: ScanRequest) -> ScanResult:
         )
         python_exe = find_comfy_python(paths.install_root, selected_python)
     if python_exe is None:
-        renderer.error(
+        raise ScanUnavailableError(
             code="build_missing_input",
-            message="The selected --python executable could not be resolved.",
+            message=(
+                f"No ComfyUI Python executable under {paths.install_root}."
+                if optional
+                else "The selected --python executable could not be resolved."
+            ),
             hint="pass --python <path> pointing at the ComfyUI environment's Python executable",
             details={"missing": ["--python"], "path": explicit_python},
         )
-        raise typer.Exit(code=1)
 
     provenance = capture_pip_provenance(str(python_exe))
     if provenance is None:
-        renderer.error(
+        raise ScanUnavailableError(
             code="build_missing_input",
             message=f"Could not capture dependency provenance from {python_exe}.",
             hint="pass --python <path> pointing at a working ComfyUI environment",
             details={"missing": ["--python"], "path": str(python_exe)},
         )
-        raise typer.Exit(code=1)
 
     renderer.info(f"Scanning models in {paths.models_dir} …")
     models = scan_models(paths.models_dir)
@@ -1072,6 +1091,10 @@ def _scan_install(renderer, ctx, request: ScanRequest) -> ScanResult:
         try:
             nodes = scan_custom_nodes(paths.custom_nodes_dir, on_skip=skipped.append)
         except NodePackageError as error:
+            if optional:
+                raise ScanUnavailableError(
+                    code="build_spec_invalid", message=str(error), details={"path": str(error.path)}
+                ) from error
             _raise_node_package_error(renderer, error)
         reported_symlinks = _warn_skipped_symlinks(renderer, skipped)
 
@@ -1096,6 +1119,15 @@ def _scan_install(renderer, ctx, request: ScanRequest) -> ScanResult:
         total_bytes=sum(m["sizeBytes"] for m in models),
         skipped_symlinks=tuple(reported_symlinks),
     )
+
+
+def _require_scan(renderer, ctx, request: ScanRequest) -> ScanResult:
+    """Scan, or render the reason and exit — for the commands a scan IS."""
+    try:
+        return _scan_install(renderer, ctx, request)
+    except ScanUnavailableError as error:
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
+        raise typer.Exit(code=1) from error
 
 
 def _reject_scan_options(
@@ -1487,7 +1519,7 @@ def init_cmd(
         definition = imported.definition
         payload = _imported_payload(imported)
     else:
-        scan = _scan_install(renderer, ctx, ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url))
+        scan = _require_scan(renderer, ctx, ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url))
         definition = scan.definition
         payload = _scanned_payload(paths, scan)
         renderer.event(
@@ -1627,7 +1659,7 @@ def update_cmd(
             overrides=InstallOverrides.from_options(models_dir, custom_nodes_dir, python),
         )
     except BuildSpecNotFoundError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
 
     spec = _read_spec(renderer, paths.spec_file)
@@ -1644,7 +1676,7 @@ def update_cmd(
         )
         incoming = imported.definition
     else:
-        scanned = _scan_install(renderer, ctx, ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url))
+        scanned = _require_scan(renderer, ctx, ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url))
         incoming = scanned.definition
     definition = merge_definition(stored, incoming)
     # After the merge, never before: a scan reports no base image, so the merge
@@ -1870,7 +1902,7 @@ def push_cmd(
             overrides=InstallOverrides.from_options(models_dir, custom_nodes_dir),
         )
     except BuildSpecNotFoundError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
     stored_id = spec.get("id")
@@ -1999,7 +2031,12 @@ def push_cmd(
     release_summary: dict[str, str] | None = None
     if release:
         requested = [item.as_wire() for item in targets]
-        release_id, status_url = _builder_call(renderer, lambda: client.create_release(target_id, requested))
+        release_id, status_url = _builder_call(
+            renderer,
+            lambda: client.create_release(target_id, requested),
+            {"buildId": target_id},
+            hint=_CUT_RETRY_HINT,
+        )
         release_summary = {"releaseId": release_id, "statusUrl": status_url}
         payload["targets"] = requested
         payload["release"] = release_summary
@@ -2060,7 +2097,7 @@ def pull_cmd(
             overrides=InstallOverrides.from_options(models_dir, custom_nodes_dir),
         )
     except BuildSpecNotFoundError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
     target_id = require_option(
@@ -2150,13 +2187,15 @@ def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _render_status(renderer, payload: dict, drift: DefinitionDiff) -> None:
+def _render_status(renderer, payload: dict, drift: DefinitionDiff | None) -> None:
     build = payload["build"]
     remote = payload["remote"]
     renderer.print(f"build:  {build['id']}" + (f"  {build['name']}" if build["name"] else ""))
     renderer.print(f"spec:   {payload['spec']['path']}")
     renderer.print(f"remote: {'behind' if remote['behind'] else 'in sync'} (revision {remote['revision'] or '—'})")
-    renderer.print(f"local:  {summarize_definition_diff(drift)}")
+    # "not compared" rather than a dash: silence here would read as "no drift".
+    local = summarize_definition_diff(drift) if drift is not None else f"not compared ({payload['local']['reason']})"
+    renderer.print(f"local:  {local}")
     if payload["hint"]:
         renderer.warn("the remote Build has moved since this spec was synchronized", hint=payload["hint"])
 
@@ -2194,6 +2233,10 @@ def status_cmd(
             "--comfy-url", help=f"Running ComfyUI URL to read the version from. Default: {DEFAULT_COMFY_URL}."
         ),
     ] = None,
+    no_scan: Annotated[
+        bool,
+        typer.Option("--no-scan", help="Report spec-vs-remote only; never scan the install."),
+    ] = False,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
@@ -2207,7 +2250,7 @@ def status_cmd(
             overrides=InstallOverrides.from_options(models_dir, custom_nodes_dir, python),
         )
     except BuildSpecNotFoundError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
     target_id = require_option(
@@ -2225,19 +2268,17 @@ def status_cmd(
     behind = _optional_str(spec.get("syncedRevision")) != revision
 
     stored = spec["definition"]
-    scanned = _scan_install(
-        renderer, ctx, ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url)
-    ).definition
-    # Merged before diffing, exactly as `update` does, so drift means "an
-    # `update` would rewrite the spec": the cached keys a scan never reports
-    # (`blobId`, a resolver's `sourceUri`) must not read as differences.
-    drift = diff_definitions(stored, merge_definition(stored, scanned))
+    # Independent halves: only the drift one needs an install, so a hand-authored
+    # spec must still be comparable against its remote.
+    drift, local = _status_drift(
+        renderer, ctx, paths, stored, no_scan=no_scan, comfy_version=comfy_version, comfy_url=comfy_url
+    )
 
     payload = {
         "build": {"id": target_id, "name": _optional_str(remote.get("name"))},
         "spec": {"path": str(paths.spec_file), "syncedRevision": _optional_str(spec.get("syncedRevision"))},
         "remote": {"revision": revision, "behind": behind},
-        "local": {"drift": drift.as_drift()},
+        "local": local,
         # In the payload rather than only on stderr: `emit` has no hint field,
         # and the agent reading this envelope is who needs the next step.
         "hint": "run `comfy build pull` to take the remote changes" if behind else None,
@@ -2245,6 +2286,29 @@ def status_cmd(
     if renderer.is_pretty():
         _render_status(renderer, payload, drift)
     renderer.emit(payload, command="build status", changed=False)
+
+
+def _status_drift(renderer, ctx, paths, stored: dict, *, no_scan: bool, comfy_version, comfy_url):
+    """Spec-vs-install drift, or a stated reason there is none to compute.
+
+    Returns ``(diff | None, local_payload)``. ``local.scanned`` is the flag a
+    consumer branches on: ``false`` means the drift half was not computed and
+    ``local.reason`` says why, NOT that the spec and the install agree.
+    """
+    if no_scan:
+        return None, {"scanned": False, "reason": "--no-scan was passed", "drift": None}
+    try:
+        scanned = _scan_install(
+            renderer, ctx, ScanRequest(paths, comfy_version=comfy_version, comfy_url=comfy_url), optional=True
+        ).definition
+    except ScanUnavailableError as error:
+        renderer.warn(f"Skipping spec-vs-install drift: {error}", hint=error.hint)
+        return None, {"scanned": False, "reason": str(error), "drift": None}
+    # Merged before diffing, exactly as `update` does, so drift means "an
+    # `update` would rewrite the spec": the cached keys a scan never reports
+    # (`blobId`, a resolver's `sourceUri`) must not read as differences.
+    drift = diff_definitions(stored, merge_definition(stored, scanned))
+    return drift, {"scanned": True, "drift": drift.as_drift()}
 
 
 def _builder_client(renderer, builder_url: str | None):
@@ -2268,22 +2332,128 @@ def _builder_client(renderer, builder_url: str | None):
         raise typer.Exit(code=1) from e
 
 
-def _report_builder_error(renderer, e) -> None:
+#: comfy-builder refusals the caller can clear itself, keyed on the builder's own
+#: ``error`` field under a 409. That field is the contract and its ``message`` is
+#: explicitly rewordable, so matching the field beats matching a substring of the
+#: body -- which would also break the day the body grows past the cap below. Each
+#: row's ``message`` stands in only for a builder that sent none. Everything
+#: absent from this table stays on ``build_builder_error``.
+_BUILDER_REFUSALS: Final = {
+    "RELEASE_LIMIT": {
+        "code": "build_release_limit",
+        "message": "the workspace already holds as many releases as its limit allows",
+    },
+    "RELEASE_IN_USE": {
+        "code": "build_release_in_use",
+        "message": "a deployment still references this release",
+    },
+    "BUILD_IN_USE": {
+        "code": "build_in_use",
+        "message": "a deployment still references one of this build's releases",
+    },
+}
+
+#: A hostile endpoint can be reached through the env-configurable base URL, so
+#: nothing it sends reaches the envelope unbounded: the body is read under
+#: ``_BUILDER_ERROR_READ``, excerpted into ``details.body`` at
+#: ``_BUILDER_BODY_CAP``, and a carried message is capped at
+#: ``_BUILDER_MESSAGE_CAP`` -- room enough for a long list of blocking
+#: deployments and their prose without letting one endpoint decide how big an
+#: envelope is. The message cap counts **bytes** (see ``_capped_message``),
+#: because a cap on characters is one the sender picks the multiplier for: a
+#: message of four-byte characters costs four times what it promises. The body
+#: excerpt is a debugging aid rather than the envelope's payload, so it keeps its
+#: cheaper slice and is bounded in turn by the byte-counted ``_BUILDER_ERROR_READ``.
+#:
+#: Bounded, not sanitized. What reaches a terminal is sanitized at the terminal
+#: (``error_panel``); the envelope stays byte-faithful -- see
+#: ``_report_builder_error``.
+_BUILDER_BODY_CAP: Final = 1000
+_BUILDER_MESSAGE_CAP: Final = 8 * 1024
+_BUILDER_ERROR_READ: Final = 64 * 1024
+
+
+def _capped_message(text: str) -> str:
+    """``text`` truncated to ``_BUILDER_MESSAGE_CAP`` UTF-8 bytes, whole characters only.
+
+    Slicing the ``str`` would cap Python characters instead, which bounds the
+    envelope only for ASCII. Truncation happens on the encoded form and the
+    partial character a byte cut can leave behind is dropped, so what the JSON
+    writer receives is always decodable. Text that already fits is returned
+    unchanged rather than round-tripped, so the common case stays byte-identical.
+    """
+    encoded = text.encode("utf-8", "replace")
+    if len(encoded) <= _BUILDER_MESSAGE_CAP:
+        return text
+    return encoded[:_BUILDER_MESSAGE_CAP].decode("utf-8", "ignore")
+
+
+#: Any URL in an exception's text, with its query string. Both shapes ``requests``
+#: produces quote what they were talking to: ``raise_for_status`` gives the whole
+#: URL ("... for url: https://host/o?sig=..."), while a ``ConnectionError`` gives
+#: the path alone ("Max retries exceeded with url: /o?sig=..."), so both forms are
+#: matched. The query is lazy-anchored to the FIRST ``?`` in the run, and must be
+#: non-empty, so a sentence ending in a question mark is left alone.
+_URL_QUERY_RE: Final = re.compile(r"(?:[a-z][a-z0-9+.\-]*://\S*?|/\S*?)\?\S+", re.IGNORECASE)
+
+
+def _without_signed_query(e: BaseException) -> str:
+    """``str(e)`` with the query string cut off every URL it quotes.
+
+    ``upload_assets`` runs inside ``_builder_call``, and it talks to a presigned
+    GCS PUT whose query string *is* the credential: an ordinary failed upload
+    would otherwise write a still-valid ``X-Goog-Credential`` and
+    ``X-Goog-Signature`` to stdout, into the JSON envelope, and into any CI log
+    that captured either. Only the query comes off -- the host and the path are
+    what make the failure diagnosable.
+
+    This errs toward removing too much: a path with a legitimate ``?`` in it
+    loses its tail. That is the correct bias for a redaction, and the same one
+    ``tracking._scrub_value`` takes for a URL standing alone as a value.
+    """
+    return _URL_QUERY_RE.sub(lambda m: m.group(0).partition("?")[0], str(e))
+
+
+def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None, hint: str | None = None) -> None:
     """Emit one error envelope for a builder failure. Prefers the limited-beta 403,
     then the builder's own error body (e.g. `INVALID_DEFINITION: …` or
-    `SUBSCRIPTION_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
+    `PAYMENT_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
     generic transport error.
 
-    It carries no Build id, because the old `create` verb's orphan case is gone:
-    `push` writes the id into the spec on disk before it cuts, so a cut that
-    fails afterwards leaves the id in the user's own file rather than only in
-    this envelope."""
+    *subject* is the id the command was acting on, spread into every envelope
+    that carries details, and spread first so it can never displace `status` or
+    `body`. A mapped refusal needs it because clearing the state means deleting
+    the named thing; a lost response needs it because retrying means naming the
+    id the first attempt used. A call site that passes none invents nothing: the
+    old `create` verb's orphan case is gone, because `push` writes the id into
+    the spec on disk before it cuts, so a cut that fails afterwards leaves the id
+    in the user's own file rather than only in this envelope.
+
+    *hint* is the caller's chance to say what a retry of *this* call does, and it
+    reaches only the two ambiguous outcomes — an unmapped builder error and a
+    transport failure — where the envelope cannot say whether the write landed.
+    The TLS, limited-beta and mapped-refusal branches keep their own remediation,
+    which names a cause and a next step the call site does not know about."""
     import urllib.error
 
+    from comfy_cli.http import tls_trust_hint, tls_verification_failed
+
+    # Ahead of the transport clause below, whose hint ("check the builder URL and
+    # your access") points away from a failure that is neither: the endpoint and
+    # the credential are both fine and the CA store is the problem.
+    # Redacted like the transport branch below: a verification failure on the
+    # presigned blob PUT quotes that URL, whose query string is the credential.
+    if tls_verification_failed(e):
+        renderer.error(
+            code="tls_verify_failed",
+            message=f"TLS certificate verification failed: {_without_signed_query(e)}",
+            hint=tls_trust_hint(),
+        )
+        return
     if isinstance(e, urllib.error.HTTPError):
         body = ""
         try:
-            body = e.read().decode("utf-8", "replace")
+            body = (e.read(_BUILDER_ERROR_READ) or b"").decode("utf-8", "replace")
         except Exception:
             pass
         if e.code == 403 and "FEATURE_NOT_ENABLED" in body:
@@ -2292,24 +2462,67 @@ def _report_builder_error(renderer, e) -> None:
                 message="The developer platform is in limited beta and your account isn't enabled yet.",
             )
             return
+        builder_error, builder_message = _builder_error_fields(body)
+        # All three refusals are 409 in the builder's contract and nothing else
+        # sends them, so a mapped code under any other status came from something
+        # that is not the builder and must not be answered with its remediation.
+        refusal = _BUILDER_REFUSALS.get(builder_error) if e.code == 409 else None
+        if refusal is not None:
+            # The blocking deployment ids ride in the builder's prose and nowhere
+            # else in its contract, so the message is carried unparsed under its
+            # own cap: a regex over a rewordable sentence is a contract nobody
+            # wrote, and the body excerpt would lose the tail of a long one.
+            #
+            # Carried BYTE-FAITHFULLY, and deliberately not sanitized. The
+            # sanitizer's module docstring rules the JSON/NDJSON paths out, and
+            # here the cost is concrete: its unterminated-introducer rule cuts
+            # from a stray introducer to the end of the string, so one byte of
+            # ordinary mojibake would silently delete every blocking id after it
+            # -- the ids being the whole reason an agent reads this refusal.
+            # Stripping buys nothing either, since `details.body` beside it
+            # carries the same bytes raw. A terminal is protected where the
+            # terminal is: `error_panel` sanitizes `message` and every details
+            # row on the pretty path.
+            renderer.error(
+                code=refusal["code"],
+                message=_capped_message(builder_message or refusal["message"]),
+                details={**(subject or {}), "status": e.code, "body": body[:_BUILDER_BODY_CAP]},
+            )
+            return
         detail = _builder_msg(body) or getattr(e, "reason", None) or str(e)
         renderer.error(
             code="build_builder_error",
-            message=f"builder call failed ({e.code}): {detail}",
-            details={"status": e.code, "body": body[:1000]},
+            message=f"builder call failed ({e.code}): {_capped_message(str(detail))}",
+            hint=hint,
+            details={**(subject or {}), "status": e.code, "body": body[:_BUILDER_BODY_CAP]},
         )
         return
-    renderer.error(code="build_builder_error", message=f"builder call failed: {e}")
+    # A dropped connection, a reset or a timeout: the caller's own remediation is
+    # to retry, which needs the id the lost attempt named. The exception is
+    # redacted rather than interpolated raw -- a failed blob upload quotes its
+    # presigned PUT URL, whose query string is a live credential (see
+    # ``_without_signed_query``).
+    renderer.error(
+        code="build_builder_error",
+        message=f"builder call failed: {_without_signed_query(e)}",
+        hint=hint,
+        details=dict(subject or {}),
+    )
 
 
-def _builder_call(renderer, fn):
+def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None, *, hint: str | None = None):
     """Run a builder API call, mapping every failure class to one error envelope
-    + exit(1) via _report_builder_error.
+    + exit(1) via _report_builder_error. *subject* names the id the command is
+    acting on, so a refusal an agent must act on says which one.
 
     Never package inside *fn*. ``NodePackageError`` is a ``ValueError``, so the
     clause below would relabel a packaging failure as ``build_missing_input``
     and drop the node path from ``details`` — the contract
     ``_raise_node_package_error`` exists to hold. Package before the call.
+
+    ``hint`` rides through to the builder-error and transport envelopes for calls
+    whose failure leaves the caller unable to tell whether the write landed. See
+    ``_CUT_RETRY_HINT``.
     """
     import urllib.error
 
@@ -2322,25 +2535,53 @@ def _builder_call(renderer, fn):
         # beats an unhandled traceback.
         renderer.error(code="build_builder_error", message=f"builder response exceeded the client size cap ({e})")
         raise typer.Exit(code=1) from e
+    # Transport before ValueError: ``requests.exceptions.MissingSchema``,
+    # ``InvalidURL`` and ``InvalidSchema`` subclass both, and a malformed builder-supplied upload
+    # URL is the builder's failure, reported redacted, not the caller's input.
+    except (urllib.error.URLError, requests.RequestException, KeyError) as e:
+        _report_builder_error(renderer, e, subject, hint)
+        raise typer.Exit(code=1) from e
     except ValueError as e:
         renderer.error(code="build_missing_input", message=str(e))
         raise typer.Exit(code=1) from e
-    except (urllib.error.URLError, requests.RequestException, KeyError) as e:
-        _report_builder_error(renderer, e)
-        raise typer.Exit(code=1) from e
+
+
+def _encodable(text: str) -> str:
+    """``text`` with anything unencodable replaced, so it can reach stdout.
+
+    A lone surrogate is legal in a JSON string and legal in a Python ``str``, but
+    encoding one raises ``UnicodeEncodeError`` — a ``ValueError``, which the JSON
+    writer's own except clause swallows, so a crafted ``message`` would cost the
+    caller the whole envelope rather than one bad character. Scrubbed where the
+    strings are produced, because that writer belongs to every command.
+    """
+    return text.encode("utf-8", "replace").decode("utf-8", "replace")
+
+
+def _builder_error_fields(body: str) -> tuple[str, str]:
+    """Split a builder JSON error body ({error, message}) into its two fields,
+    or ``("", "")`` when the body isn't the expected shape.
+
+    ``RecursionError`` is a ``RuntimeError``, so a deeply nested body escapes the
+    ``ValueError`` clause and, uncaught, every clause up to the CLI — leaving the
+    caller exit 1 and no envelope on any builder HTTP error path.
+    """
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        return "", ""
+    if not isinstance(parsed, dict):
+        return "", ""
+    return (
+        _encodable(str(parsed.get("error") or "").strip()),
+        _encodable(str(parsed.get("message") or "").strip()),
+    )
 
 
 def _builder_msg(body: str) -> str:
     """Pull ``"<error>: <message>"`` out of a builder JSON error body ({error, message}),
     or ``""`` when the body isn't the expected shape."""
-    try:
-        parsed = json.loads(body)
-    except (json.JSONDecodeError, ValueError):
-        return ""
-    if not isinstance(parsed, dict):
-        return ""
-    err = str(parsed.get("error") or "").strip()
-    msg = str(parsed.get("message") or "").strip()
+    err, msg = _builder_error_fields(body)
     return f"{err}: {msg}".strip(": ").strip() if (err or msg) else ""
 
 
@@ -2357,7 +2598,7 @@ def _resolve_build_id(renderer, client, scope: _BuildScope) -> str:
     try:
         paths = resolve_build_paths(scope.path)
     except BuildSpecNotFoundError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
     return require_option(
@@ -2406,13 +2647,28 @@ def show_cmd(
 _RELEASE_POLL_SECONDS = 2.0
 
 
-def _release_order(release: dict) -> tuple[int, str]:
+#: Sorts below every usable timestamp, so a release the builder dated badly loses
+#: the tiebreak instead of winning it on a value nobody can read. A Go zero
+#: ``time.Time`` marshals to ``0001-01-01T00:00:00Z`` and ties with it, which is
+#: the same answer: neither row carries a date worth ordering on.
+_UNDATED: Final = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _release_order(release: dict) -> tuple[int, datetime]:
+    """Order releases by version, breaking ties on the instant they were cut.
+
+    The instant, not its spelling: the builder marshals Go ``time.Time``, whose
+    trailing-zero trimming leaves the fractional part a variable width, and
+    comparing those as text sorts a whole-second ``...:16Z`` above the strictly
+    later ``...:16.5Z`` — ``.`` precedes ``Z`` in ASCII.
+    """
     version = release.get("version")
     created_at = release.get("createdAt")
-    return (
-        version if isinstance(version, int) else -1,
-        created_at if isinstance(created_at, str) else "",
-    )
+    try:
+        created = parse_rfc3339(created_at) if isinstance(created_at, str) else _UNDATED
+    except ValueError:
+        created = _UNDATED
+    return (version if isinstance(version, int) else -1, created)
 
 
 def _newest_release_id(renderer, client, build_id: str) -> str:
@@ -2468,6 +2724,18 @@ def _release_failed(release: dict) -> bool:
     return isinstance(failed, int) and failed > 0
 
 
+# A cut that fails after the request went out is ambiguous: the builder may have
+# committed the release and lost the response. It dedupes on the definition's content
+# hash scoped to the Build and re-drives the enqueue of a release it committed but
+# never queued, so the retry is the repair and not a second cut. "Spec unchanged" is
+# load-bearing — the hash is over the definition, so a `push` in between does cut again.
+_CUT_RETRY_HINT = (
+    "a cut is idempotent — the builder dedupes on the definition's content hash, so re-running this exact "
+    "command with the spec unchanged returns the same release rather than cutting a second one; "
+    "`comfy build release ls` shows what exists"
+)
+
+
 @release_app.command("create", help="Cut a release from the current Build.")
 @tracking.track_command("build")
 def release_create(
@@ -2508,6 +2776,8 @@ def release_create(
     release_id, status_url = _builder_call(
         renderer,
         lambda: client.create_release(selected_build_id, requested),
+        {"buildId": selected_build_id},
+        hint=_CUT_RETRY_HINT,
     )
     payload = {
         "buildId": selected_build_id,
@@ -2669,7 +2939,7 @@ def validate_cmd(
             overrides=InstallOverrides.from_options(models_dir, custom_nodes_dir),
         )
     except BuildSpecNotFoundError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
     try:
@@ -2723,7 +2993,7 @@ def delete_cmd(
         # `build_delete_needs_confirm` rather than reaching this branch.
         renderer.info("Aborted.")
         return
-    _builder_call(renderer, lambda: client.delete_build(selected_build_id))
+    _builder_call(renderer, lambda: client.delete_build(selected_build_id), {"buildId": selected_build_id})
     if renderer.is_pretty():
         renderer.success(f"Deleted build {selected_build_id}")
     renderer.emit({"buildId": selected_build_id, "deleted": True}, command="build delete", changed=True)
@@ -2813,6 +3083,63 @@ def release_manifest(
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(manifest))
     renderer.emit(manifest, command="build release manifest")
+
+
+@release_app.command("delete", help="Delete a release, freeing its slot against the workspace release limit.")
+@tracking.track_command("build")
+def release_delete(
+    ctx: typer.Context,
+    release: Annotated[str, typer.Argument(help="Release id to delete.")],
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
+    # The one release verb that destroys something names its target and takes no
+    # other selector: a caller whose connection dropped retries, and a resolved
+    # default would re-resolve against a list the builder has already filtered the
+    # first delete out of, destroying a second release nobody asked for.
+    renderer = get_renderer()
+    # Normalized and refused once, above both the client and the prompt, so the
+    # id confirmed, the id deleted and the id reported are one string rather than
+    # three. Above the client because `_builder_client` can exit with
+    # `build_not_signed_in` after an OAuth round trip: a signed-out caller
+    # passing a blank id would be told to sign in, do so, and only then learn the
+    # id was never usable. This check needs nothing but the argument, so the
+    # first envelope is the actionable one.
+    #
+    # A segment of only dots is refused rather than encoded: `quote(safe="")`
+    # leaves it alone (RFC 3986 unreserved) and nothing between here and the
+    # service resolves dot segments, so `.` would aim this DELETE at the
+    # collection and `..` a level above it -- and `.` is a plausible argument,
+    # since every other `comfy build` verb takes a path defaulting to it.
+    # `delete_release` refuses the same ids for any other caller; this is the
+    # copy that produces the readable refusal. What else an id may look like is
+    # the builder's to say, so nothing here spells out its grammar.
+    release = release.strip()
+    if not release or set(release) == {"."}:
+        renderer.error(
+            code="build_missing_input",
+            message="RELEASE must name one release, not an empty or dot-only path segment.",
+            hint="pass the release id shown by `comfy build release ls`",
+            details={"invalid": [release]},
+        )
+        raise typer.Exit(code=1)
+    client = _builder_client(renderer, builder_url)
+    if not confirm(
+        f"Delete release {release}?",
+        yes=yes,
+        error_code="build_release_delete_needs_confirm",
+        details={"releaseId": release},
+        ctx=ctx,
+    ):
+        # Declining needs a prompt, and a prompt needs pretty mode, where `emit`
+        # is a no-op; a machine caller is refused above with
+        # `build_release_delete_needs_confirm` rather than reaching this branch.
+        renderer.info("Aborted.")
+        return
+    _builder_call(renderer, lambda: client.delete_release(release), {"releaseId": release})
+    if renderer.is_pretty():
+        renderer.success(f"Deleted release {release}")
+    renderer.emit({"releaseId": release, "deleted": True}, command="build release delete", changed=True)
 
 
 @blob_app.command("ls", help="List the workspace's private blobs.")

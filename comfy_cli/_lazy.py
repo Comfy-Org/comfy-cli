@@ -28,12 +28,14 @@ import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import click
 import typer
 from typer.core import TyperGroup
 from typer.models import CommandInfo, TyperInfo
+
+if TYPE_CHECKING:
+    import click
 
 
 class LazyModule:

@@ -3,64 +3,151 @@
   "$id": "https://comfy.org/schemas/build_status.json",
   "title": "comfy build status --json data payload",
   "type": "object",
-  "required": ["build", "spec", "remote", "local", "hint"],
+  "required": [
+    "build",
+    "spec",
+    "remote",
+    "local",
+    "hint"
+  ],
   "additionalProperties": false,
   "$defs": {
     "counts": {
       "type": "object",
-      "required": ["added", "removed", "changed"],
+      "required": [
+        "added",
+        "removed",
+        "changed"
+      ],
       "additionalProperties": false,
       "properties": {
-        "added": {"type": "integer", "minimum": 0},
-        "removed": {"type": "integer", "minimum": 0},
-        "changed": {"type": "integer", "minimum": 0}
+        "added": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "removed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "changed": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     }
   },
   "properties": {
     "build": {
       "type": "object",
-      "required": ["id", "name"],
+      "required": [
+        "id",
+        "name"
+      ],
       "additionalProperties": false,
       "properties": {
-        "id": {"type": "string", "minLength": 1},
-        "name": {"type": ["string", "null"]}
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
     "spec": {
       "type": "object",
-      "required": ["path", "syncedRevision"],
+      "required": [
+        "path",
+        "syncedRevision"
+      ],
       "additionalProperties": false,
       "properties": {
-        "path": {"type": "string"},
-        "syncedRevision": {"type": ["string", "null"]}
+        "path": {
+          "type": "string"
+        },
+        "syncedRevision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
       }
     },
     "remote": {
       "type": "object",
-      "required": ["revision", "behind"],
+      "required": [
+        "revision",
+        "behind"
+      ],
       "additionalProperties": false,
       "properties": {
-        "revision": {"type": ["string", "null"]},
-        "behind": {"type": "boolean"}
+        "revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "behind": {
+          "type": "boolean"
+        }
       }
     },
     "local": {
       "type": "object",
-      "required": ["drift"],
+      "required": [
+        "scanned",
+        "drift"
+      ],
       "additionalProperties": false,
       "properties": {
+        "scanned": {
+          "type": "boolean",
+          "description": "Whether the install was scanned. False when --no-scan was passed or no install is present."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why the install was not scanned. Present only when `scanned` is false."
+        },
         "drift": {
-          "type": "object",
-          "required": ["models", "customNodes"],
-          "properties": {
-            "models": {"$ref": "#/$defs/counts"},
-            "customNodes": {"$ref": "#/$defs/counts"}
-          },
-          "additionalProperties": {"enum": ["changed", "unchanged"]}
+          "description": "Definition drift between the spec and the install, or null when `scanned` is false.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "required": [
+                "models",
+                "customNodes"
+              ],
+              "properties": {
+                "models": {
+                  "$ref": "#/$defs/counts"
+                },
+                "customNodes": {
+                  "$ref": "#/$defs/counts"
+                }
+              },
+              "additionalProperties": {
+                "enum": [
+                  "changed",
+                  "unchanged"
+                ]
+              }
+            }
+          ]
         }
-      }
+      },
+      "description": "The spec-vs-install comparison. `scanned` is the flag to branch on: false means this half was NOT computed -- `reason` says why and `drift` is null -- not that the spec and the install agree. A spec written by hand has no install to scan, and that must not fail the spec-vs-remote half."
     },
-    "hint": {"type": ["string", "null"]}
+    "hint": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
   }
 }

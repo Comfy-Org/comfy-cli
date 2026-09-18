@@ -4,7 +4,7 @@ import json
 import urllib.error
 from typing import Final
 
-from comfy_cli.http import assert_safe_url, read_capped
+from comfy_cli.http import assert_safe_url, read_capped, tls_trust_hint, tls_verification_failed
 
 _MAX_JSON: Final = 5 * 1024 * 1024
 
@@ -106,10 +106,26 @@ STATUS_ERRORS: Final = {
 
 
 class DeployAPIError(Exception):
-    def __init__(self, code: str, message: str, *, status: int | None = None, details: dict | None = None) -> None:
+    """A deploy failure, with the navigation its handler renders.
+
+    ``hint`` is specific to THIS failure rather than to its code — the CA store
+    actually in use, say. ``None`` for almost every instance, and
+    ``Renderer.error`` substitutes the registered hint for ``None``.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        status: int | None = None,
+        details: dict | None = None,
+        hint: str | None = None,
+    ) -> None:
         self.code = code
         self.status = status
         self.details = details or {}
+        self.hint = hint
         super().__init__(message)
 
 
@@ -203,4 +219,13 @@ def assert_safe_deploy_url(url: str, *, source: str) -> None:
 
 
 def transport_error(operation: str, error: TimeoutError | urllib.error.URLError) -> DeployAPIError:
+    # A local trust problem, not the unavailable service `_SERVER_ERROR`
+    # describes — the two send the reader to opposite places.
+    if tls_verification_failed(error):
+        return DeployAPIError(
+            "tls_verify_failed",
+            f"TLS certificate verification failed: {error}",
+            details={"operation": operation},
+            hint=tls_trust_hint(),
+        )
     return DeployAPIError(_SERVER_ERROR["code"], str(error), details={"operation": operation})

@@ -1237,13 +1237,27 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
         ):
             vidx += 1
 
-    # Flatten required+optional first so each input knows its successor's schema.
+    # Flatten required+optional first so each input knows its successor's
+    # schema. Within each section, honor ``input_order`` the way the cql
+    # engine's ``_ordered_names`` does (listed names first, leftovers in dict
+    # order): the input DICT's own order is only trustworthy on a catalog that
+    # was never re-serialized, and pairing widgets positionally from a sorted
+    # dict silently swaps neighboring values (observed: GeminiImageNode's
+    # prompt/model traded places on an alphabetized fixture).
+    input_order = schema.get("input_order") if isinstance(schema, dict) else None
+    if not isinstance(input_order, dict):
+        input_order = {}
     ordered: list[tuple[str, Any]] = []
     for section in ("required", "optional"):
         section_def = input_def.get(section) or {}
         if not isinstance(section_def, dict):
             continue
-        ordered.extend(section_def.items())
+        section_order = input_order.get(section)
+        names = list(section_def.keys())
+        if isinstance(section_order, list):
+            listed = [n for n in section_order if n in section_def]
+            names = listed + [n for n in names if n not in listed]
+        ordered.extend((n, section_def[n]) for n in names)
     for i, (input_name, input_spec) in enumerate(ordered):
         consume(input_name, input_spec, 0, next_widget_spec(ordered, i + 1))
     return pairs

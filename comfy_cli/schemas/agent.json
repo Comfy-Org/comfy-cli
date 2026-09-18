@@ -1,0 +1,300 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy agent *",
+  "description": "Output shape for the local comfy agent's permission commands: the first shape is `comfy agent permissions`, the second `comfy agent allow --path/--host`, the third `comfy agent allow --approve <id>`, the fourth `comfy agent deny <id>`.",
+  "oneOf": [
+    {
+      "title": "comfy agent permissions",
+      "type": "object",
+      "properties": {
+        "data_dir": {
+          "type": "string"
+        },
+        "agent": {
+          "type": "object",
+          "properties": {
+            "running": {
+              "type": "boolean"
+            },
+            "port": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "running",
+            "port"
+          ]
+        },
+        "sandbox": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "comfy_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pending": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "description": "A request the agent's request_path / request_host tool recorded; only a human approves it.",
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{16}$"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "path",
+                  "host"
+                ]
+              },
+              "target": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "requested_at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "target"
+            ]
+          }
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "approved_at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path"
+            ]
+          }
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "host": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "approved_at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "host"
+            ]
+          }
+        },
+        "grant": {
+          "type": "object",
+          "description": "The commands that grant more, approving a pending request first.",
+          "properties": {
+            "approve": {
+              "type": "string"
+            },
+            "deny": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "host": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "approve",
+            "deny",
+            "path",
+            "host"
+          ]
+        }
+      },
+      "required": [
+        "data_dir",
+        "agent",
+        "sandbox",
+        "comfy_path",
+        "pending",
+        "paths",
+        "hosts",
+        "grant"
+      ]
+    },
+    {
+      "title": "comfy agent allow --path/--host",
+      "type": "object",
+      "properties": {
+        "data_dir": {
+          "type": "string"
+        },
+        "path": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "added": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "path",
+            "added"
+          ]
+        },
+        "host": {
+          "type": "object",
+          "properties": {
+            "host": {
+              "type": "string"
+            },
+            "added": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "host",
+            "added"
+          ]
+        },
+        "note": {
+          "type": "string"
+        },
+        "warning": {
+          "type": "string",
+          "description": "Present when no agent.json exists in data_dir: no agent has run from it, so a running agent elsewhere will not see the approval."
+        }
+      },
+      "required": [
+        "data_dir",
+        "note"
+      ],
+      "anyOf": [
+        {
+          "required": [
+            "path"
+          ]
+        },
+        {
+          "required": [
+            "host"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "comfy agent allow --approve <id>",
+      "type": "object",
+      "properties": {
+        "data_dir": {
+          "type": "string"
+        },
+        "approved": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{16}$"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "path",
+                "host"
+              ]
+            },
+            "target": {
+              "type": "string",
+              "description": "The vetted target as recorded (a resolved folder or a bare, lower-case host)."
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "target"
+          ]
+        },
+        "note": {
+          "type": "string"
+        },
+        "warning": {
+          "type": "string",
+          "description": "Present when no agent.json exists in data_dir: no agent has run from it, so a running agent elsewhere will not see the approval."
+        }
+      },
+      "required": [
+        "data_dir",
+        "approved",
+        "note"
+      ]
+    },
+    {
+      "title": "comfy agent deny <id>",
+      "type": "object",
+      "properties": {
+        "data_dir": {
+          "type": "string"
+        },
+        "denied": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{16}$"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "path",
+                "host"
+              ]
+            },
+            "target": {
+              "type": "string",
+              "description": "The vetted target as recorded (a resolved folder or a bare, lower-case host)."
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "target"
+          ]
+        }
+      },
+      "required": [
+        "data_dir",
+        "denied"
+      ]
+    }
+  ]
+}

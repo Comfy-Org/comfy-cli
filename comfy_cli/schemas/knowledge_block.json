@@ -2,10 +2,11 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://comfy.org/schemas/knowledge_block.json",
   "title": "knowledge block",
-  "description": "Curated model knowledge attached as `data.knowledge` by discovery commands (generate schema|list, templates ls|show|get, nodes search|ls, models search). Absent when no bundle is loaded, or when the call named no subject at all (an unfiltered listing). A query term nothing curated answers attaches a rowless block: `bundle_version`, `stale`, `as_of`, `hit_ids: []`, `zero_hit` and `uncurated_queries`, with no models and no picks. That block is itself dropped in the one case where the terms alone overrun the byte ceiling. Every field is optional; readers must ignore unknown fields.",
+  "description": "Curated model knowledge attached as `data.knowledge` by discovery commands (generate schema|list, templates ls|show|get, nodes search|ls, models search). Absent when no bundle is loaded, or when the call named no subject at all (an unfiltered listing). A query term nothing curated answers attaches a rowless block: `bundle_version`, `compiled_at`, `stale`, `as_of`, `hit_ids: []`, `zero_hit` and `uncurated_queries`, with no models and no picks. That block is itself dropped in the one case where the terms alone overrun the byte ceiling. Every field is optional; readers must ignore unknown fields.",
   "type": "object",
   "properties": {
     "bundle_version": { "type": "string", "description": "Version of the comfy-knowledge bundle the block came from." },
+    "compiled_at": { "type": ["string", "null"], "description": "Committer date of the commit the bundle was compiled from, ISO-8601 UTC. The content's date, unlike `as_of` (when this machine got the file) and `stale` (a fetch-failure flag). Null for a bundle compiled before the manifest carried the key. Treat as an opaque string; it is not validated." },
     "stale": { "type": "boolean", "description": "True when the bundle was served from an expired cache." },
     "as_of": { "type": "string", "description": "ISO-8601 UTC timestamp of the loaded bundle file." },
     "models": {

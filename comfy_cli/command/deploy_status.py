@@ -24,6 +24,7 @@ from comfy_cli.command.deploy_runtime import (
 from comfy_cli.command.deploy_runtime import (
     poll_deployment,
     render_spec_error,
+    terminal_status_error,
 )
 from comfy_cli.command.deploy_runtime import (
     sleep as _sleep,
@@ -244,13 +245,15 @@ def render_status(renderer: Renderer, result: StatusResult) -> None:
             f"release v{required_int(latest, 'version')} is deployable.",
             hint="running `comfy deploy up` creates a new deployment with a new URL",
         )
+    terminal = status in {"failed", "stop_failed"}
     renderer.emit(
         result.payload(),
         command="deploy status",
         changed=False,
-        ok=status not in {"failed", "stop_failed"},
+        ok=not terminal,
+        error=terminal_status_error(required_string(deployment, "id"), status) if terminal else None,
     )
-    if status in {"failed", "stop_failed"}:
+    if terminal:
         raise typer.Exit(code=1)
 
 
@@ -270,7 +273,7 @@ def run_status(path: str | None, *, deployment_id: str | None = None, watch: boo
         renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     except DeployAPIError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     except BuilderAuthError as error:
         renderer.error(code="deploy_not_signed_in", message=str(error))

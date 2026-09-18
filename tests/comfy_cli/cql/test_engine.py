@@ -1131,19 +1131,45 @@ class TestValidateWorkflow:
     def test_edge_type_mismatch(self, graph: Graph):
         """Edge connects wrong type: CLIP fed into a MODEL input.
 
-        This is advisory (warning, not error) — ComfyUI allows cross-type
-        wiring via reroutes and converters; the server is the authority."""
+        A hard ERROR on a node the server will run: `validate_prompt` rejects
+        the same graph with `return_type_mismatch` ("Return type mismatch
+        between linked nodes"), so reporting it as a warning produced an
+        `ok:true, valid:true` envelope for a prompt that cannot run."""
         wf = self._valid_workflow()
-        # Output index 1 is CLIP, but the model input expects MODEL — still a
-        # present input, so only an advisory warning (not a hard error).
+        # Output index 1 is CLIP, but the model input expects MODEL. Node "2"
+        # feeds SaveImage, so the server validates it.
         wf["2"]["inputs"]["model"] = ["1", 1]
         result = graph.validate_workflow(wf)
-        # edge_type_mismatch is a warning, not a hard error
-        assert result["valid"] is True, result["errors"]
+        assert result["valid"] is False
+        errs = [e for e in result["errors"] if e["code"] == "edge_type_mismatch"]
+        assert len(errs) == 1
+        assert errs[0]["node_id"] == "2"
+        assert errs[0]["field"] == "model"
+        assert "CLIP" in errs[0]["message"]
+        assert "MODEL" in errs[0]["message"]
+        assert [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"] == []
+
+    def test_edge_type_mismatch_on_pruned_node_stays_a_warning(self, graph: Graph):
+        """The same mismatch on a node that reaches no output stays advisory.
+
+        The server prunes such a node and never validates it (execution.py), so
+        hard-rejecting here would refuse a prompt the server would run — the
+        same reachability gate `required_input_missing` and `below_min` use."""
+        wf = self._valid_workflow()
+        # A second KSampler wired to nothing downstream: mis-wired the identical
+        # way, but unreachable from SaveImage.
+        wf["20"] = {
+            "class_type": "KSampler",
+            "inputs": {
+                **wf["2"]["inputs"],
+                "model": ["1", 1],  # CLIP into MODEL
+            },
+        }
+        result = graph.validate_workflow(wf)
+        assert [e for e in result["errors"] if e["code"] == "edge_type_mismatch"] == []
         warns = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
-        assert len(warns) == 1
-        assert "CLIP" in warns[0]["message"]
-        assert "MODEL" in warns[0]["message"]
+        assert [w["node_id"] for w in warns] == ["20"]
+        assert result["valid"] is True, result["errors"]
 
     def test_int_valued_combo_accepts_int(self, graph: Graph):
         """Server combos can be int-valued (LTXV duration/fps). An int value
@@ -1762,6 +1788,19 @@ class TestValidateEmptyCombo:
                 "output_node": True,
                 "python_module": "nodes",
             },
+            # Wildcard sink: these cases only need the loader under test to be
+            # output-reachable, and a loader's own type (MODEL/VAE/...) does not
+            # fit SaveImage.images. Wiring it there anyway is now a real
+            # edge_type_mismatch error, which would drown the combo finding the
+            # test is actually about.
+            "PreviewAny": {
+                "input": {"required": {"source": ["*", {}]}},
+                "input_order": {"required": ["source"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
         }
         oi.update(extra)
         return oi
@@ -1835,7 +1874,7 @@ class TestValidateEmptyCombo:
         result = g.validate_workflow(
             {
                 "1": {"class_type": "VAELoader", "inputs": {"vae_name": "pixel_space"}},
-                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+                "2": {"class_type": "PreviewAny", "inputs": {"source": ["1", 0]}},
             }
         )
         assert result["valid"] is True, result["errors"]
@@ -1879,7 +1918,7 @@ class TestValidateEmptyCombo:
         result = g.validate_workflow(
             {
                 "1": {"class_type": "RemoteNode", "inputs": {"model": "whatever-the-route-returns"}},
-                "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0]}},
+                "2": {"class_type": "PreviewAny", "inputs": {"source": ["1", 0]}},
             }
         )
         assert result["valid"] is True, result["errors"]
@@ -3753,6 +3792,16 @@ def test_input_path_load_does_not_touch_the_network(tmp_path, monkeypatch):
     assert seen == {"allow_network": False}
 
 
+def _edge_findings(result: dict) -> list[dict]:
+    """Every ``edge_type_mismatch`` finding, whichever bucket it landed in.
+
+    The check is reachability-gated — an error on a node the server runs, a
+    warning on one it prunes — so a test that scans only one bucket silently
+    stops testing anything when a finding moves between them.
+    """
+    return [f for f in [*result["errors"], *result["warnings"]] if f["code"] == "edge_type_mismatch"]
+
+
 class TestMatchTypeWildcard:
     """COMFY_MATCHTYPE_V3 is the V3 schema's generic port: its concrete type is
     resolved at runtime from whatever it is wired to. It was not recognised as a
@@ -3803,8 +3852,8 @@ class TestMatchTypeWildcard:
             "2": {"class_type": "ComfySwitchNode", "inputs": {"on_true": ["1", 0]}},
         }
         result = graph.validate_workflow(wf)
-        warns = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
-        assert warns == [], f"match-type input must accept any type, got {warns}"
+        found = _edge_findings(result)
+        assert found == [], f"match-type input must accept any type, got {found}"
 
     def test_matchtype_output_into_concrete_input_is_not_a_mismatch(self, graph: Graph):
         """COMFY_MATCHTYPE_V3 → IMAGE input: the observed
@@ -3816,10 +3865,10 @@ class TestMatchTypeWildcard:
             "3": {"class_type": "PreviewImage", "inputs": {"images": ["2", 0]}},
         }
         result = graph.validate_workflow(wf)
-        warns = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
-        assert warns == [], f"match-type output must satisfy any input, got {warns}"
+        found = _edge_findings(result)
+        assert found == [], f"match-type output must satisfy any input, got {found}"
 
-    def test_genuine_mismatch_between_concrete_types_still_warns(self, graph: Graph):
+    def test_genuine_mismatch_between_concrete_types_is_still_reported(self, graph: Graph):
         """The wildcard must not blanket-silence real mismatches — otherwise the
         fix trades false positives for false negatives."""
         oi = self._object_info()
@@ -3837,8 +3886,10 @@ class TestMatchTypeWildcard:
             "2": {"class_type": "MaskOnly", "inputs": {"mask": ["1", 0]}},
         }
         result = g.validate_workflow(wf)
-        warns = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
-        assert len(warns) == 1, "IMAGE → MASK is a real mismatch and must still warn"
+        # MaskOnly is an output node, so the server validates it and rejects it.
+        errs = [e for e in result["errors"] if e["code"] == "edge_type_mismatch"]
+        assert len(errs) == 1, "IMAGE → MASK is a real mismatch and must still be reported"
+        assert result["valid"] is False
 
     def test_future_matchtype_revisions_are_wildcards_too(self):
         """Prefix match, so a V4 match-type cannot silently reintroduce the
@@ -3927,7 +3978,10 @@ class TestMultiTypeEdge:
 
     @staticmethod
     def _mismatches(result: dict) -> list[str]:
-        return [w["message"] for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
+        # Errors AND warnings: a mismatch is an error on a server-reachable node
+        # and a warning on a pruned one, so a warnings-only scan would let a
+        # regression pass every ``== []`` assertion below vacuously.
+        return [f["message"] for f in _edge_findings(result)]
 
     def test_member_of_accept_list_is_not_a_mismatch(self, graph: Graph):
         result = graph.validate_workflow(
@@ -3959,6 +4013,8 @@ class TestMultiTypeEdge:
             }
         )
         assert self._mismatches(result) == ["input 'b' expects INT,FLOAT but LoadImage[0] produces IMAGE"]
+        # Node "5" feeds PreviewAny, so this is a hard error, not advice.
+        assert [e["code"] for e in result["errors"] if e["node_id"] == "5"] == ["edge_type_mismatch"]
 
     def test_hint_names_the_output_whose_type_is_in_the_accept_list(self, graph: Graph):
         """When the source has a compatible output at another index, the hint
@@ -3980,8 +4036,235 @@ class TestMultiTypeEdge:
                 "6": {"class_type": "PreviewAny", "inputs": {"source": ["5", 1]}},
             }
         )
-        [w] = [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"]
-        assert w["hint"] == "use Splitter[1] instead"
+        [f] = _edge_findings(result)
+        assert f["hint"] == "use Splitter[1] instead"
+
+
+class TestEdgeTypeMismatchIsAHardError:
+    """A type-mismatched link on a node the server will run is an ERROR.
+
+    ComfyUI's ``validate_prompt`` rejects the prompt outright
+    (``return_type_mismatch``, "Return type mismatch between linked nodes" —
+    ``execution.py``'s ``validate_inputs``), while this validator reported it as
+    a warning: the envelope came back ``ok:true, valid:true``, an agent computing
+    readiness from errors alone read the graph as runnable, submitted it, and the
+    run died server-side — a wasted submit and run slot every time.
+
+    Reachability-gated like every other promoted hard check: the server prunes a
+    node no output depends on and never validates it, so a mismatch there stays
+    advisory.
+
+    KNOWN over-rejection risk, accepted: the server SKIPS its type check when the
+    destination node's ``VALIDATE_INPUTS`` declares an ``input_types`` argument,
+    and ``object_info`` does not expose that signature. Mitigation is that only an
+    exact known-type/empty-intersection mismatch is promoted — wildcards, union
+    overlap, dynamic combos and blank types all stay silent or advisory.
+    """
+
+    def test_the_reported_repro_now_fails_validation(self, graph_sd15: Graph):
+        """The ticket's repro against the real sd15 catalog: ``SaveImage.images``
+        (IMAGE) fed from ``KSampler[0]`` (LATENT) used to validate clean."""
+        wf = {
+            "4": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors"},
+            },
+            "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": "a cat"}},
+            "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": ""}},
+            "5": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+            "3": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "model": ["4", 0],
+                    "positive": ["6", 0],
+                    "negative": ["7", 0],
+                    "latent_image": ["5", 0],
+                    "seed": 0,
+                    "steps": 20,
+                    "cfg": 8.0,
+                    "sampler_name": "euler",
+                    "scheduler": "normal",
+                    "denoise": 1.0,
+                },
+            },
+            # The mis-wire: LATENT straight into an IMAGE input.
+            "9": {"class_type": "SaveImage", "inputs": {"images": ["3", 0], "filename_prefix": "ComfyUI"}},
+        }
+        result = graph_sd15.validate_workflow(wf)
+        assert result["valid"] is False
+        [err] = [e for e in result["errors"] if e["code"] == "edge_type_mismatch"]
+        assert err["node_id"] == "9"
+        assert err["field"] == "images"
+        assert err["message"] == "input 'images' expects IMAGE but KSampler[0] produces LATENT"
+        assert [w for w in result["warnings"] if w["code"] == "edge_type_mismatch"] == []
+
+    def test_correctly_wired_repro_stays_clean(self, graph_sd15: Graph):
+        """The counter-experiment: route the same graph through VAEDecode and
+        nothing is reported — the promotion did not turn the check permissive
+        in the other direction."""
+        wf = {
+            "4": {
+                "class_type": "CheckpointLoaderSimple",
+                "inputs": {"ckpt_name": "v1-5-pruned-emaonly-fp16.safetensors"},
+            },
+            "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": "a cat"}},
+            "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["4", 1], "text": ""}},
+            "5": {"class_type": "EmptyLatentImage", "inputs": {"width": 512, "height": 512, "batch_size": 1}},
+            "3": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "model": ["4", 0],
+                    "positive": ["6", 0],
+                    "negative": ["7", 0],
+                    "latent_image": ["5", 0],
+                    "seed": 0,
+                    "steps": 20,
+                    "cfg": 8.0,
+                    "sampler_name": "euler",
+                    "scheduler": "normal",
+                    "denoise": 1.0,
+                },
+            },
+            "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+            "9": {"class_type": "SaveImage", "inputs": {"images": ["8", 0], "filename_prefix": "ComfyUI"}},
+        }
+        result = graph_sd15.validate_workflow(wf)
+        assert _edge_findings(result) == []
+        assert result["valid"] is True, result["errors"]
+
+    @staticmethod
+    def _object_info() -> dict[str, Any]:
+        return {
+            "IntSource": {
+                "input": {"required": {}},
+                "input_order": {"required": []},
+                "output": ["INT"],
+                "output_name": ["INT"],
+                "python_module": "nodes",
+            },
+            "MaskSink": {
+                "input": {"required": {"mask": ["MASK", {}]}},
+                "input_order": {"required": ["mask"]},
+                "output": ["MASK"],
+                "output_name": ["MASK"],
+                "python_module": "nodes",
+            },
+            "NumberSink": {
+                "input": {"required": {"n": ["INT,FLOAT", {}]}},
+                "input_order": {"required": ["n"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+            "AnySink": {
+                "input": {"required": {"source": ["*", {}]}},
+                "input_order": {"required": ["source"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+            "DynSink": {
+                "input": {"required": {"mode": ["COMFY_DYNAMICCOMBO_V3", {"options": [{"key": "go"}]}]}},
+                "input_order": {"required": ["mode"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            },
+        }
+
+    @pytest.fixture
+    def graph(self) -> Graph:
+        return Graph.from_object_info(self._object_info())
+
+    def test_mismatch_on_a_pruned_node_stays_a_warning(self, graph: Graph):
+        """MaskSink is fed an INT but reaches no output, so the server never
+        validates it. Hard-rejecting here would refuse a prompt that runs."""
+        result = graph.validate_workflow(
+            {
+                "1": {"class_type": "IntSource", "inputs": {}},
+                "2": {"class_type": "MaskSink", "inputs": {"mask": ["1", 0]}},
+                "3": {"class_type": "AnySink", "inputs": {"source": ["1", 0]}},
+            }
+        )
+        assert [e for e in result["errors"] if e["code"] == "edge_type_mismatch"] == []
+        assert [w["node_id"] for w in result["warnings"] if w["code"] == "edge_type_mismatch"] == ["2"]
+        assert result["valid"] is True, result["errors"]
+
+    def test_the_same_mismatch_becomes_an_error_once_it_reaches_an_output(self, graph: Graph):
+        """Identical wiring, one extra link: MaskSink now feeds AnySink, so the
+        server validates it. This is the pair the reachability gate turns on."""
+        result = graph.validate_workflow(
+            {
+                "1": {"class_type": "IntSource", "inputs": {}},
+                "2": {"class_type": "MaskSink", "inputs": {"mask": ["1", 0]}},
+                "3": {"class_type": "AnySink", "inputs": {"source": ["2", 0]}},
+            }
+        )
+        assert [e["node_id"] for e in result["errors"] if e["code"] == "edge_type_mismatch"] == ["2"]
+        assert result["valid"] is False
+
+    def test_union_overlap_is_not_a_finding(self, graph: Graph):
+        """INT into ``INT,FLOAT`` on a reachable node: the intersection is
+        non-empty, so there is nothing to report — not an error, not a warning."""
+        result = graph.validate_workflow(
+            {
+                "1": {"class_type": "IntSource", "inputs": {}},
+                "2": {"class_type": "NumberSink", "inputs": {"n": ["1", 0]}},
+            }
+        )
+        assert _edge_findings(result) == []
+        assert result["valid"] is True, result["errors"]
+
+    def test_wildcard_destination_is_not_a_finding(self, graph: Graph):
+        """A ``*`` input accepts anything, on a reachable node as anywhere else."""
+        result = graph.validate_workflow(
+            {
+                "1": {"class_type": "IntSource", "inputs": {}},
+                "2": {"class_type": "AnySink", "inputs": {"source": ["1", 0]}},
+            }
+        )
+        assert _edge_findings(result) == []
+        assert result["valid"] is True, result["errors"]
+
+    def test_wildcard_source_is_not_a_finding(self):
+        """And the mirror case — a ``*`` OUTPUT satisfies any input."""
+        oi = self._object_info()
+        oi["AnySource"] = {
+            "input": {"required": {}},
+            "input_order": {"required": []},
+            "output": ["*"],
+            "output_name": ["any"],
+            "python_module": "nodes",
+        }
+        g = Graph.from_object_info(oi)
+        result = g.validate_workflow(
+            {
+                "1": {"class_type": "AnySource", "inputs": {}},
+                "2": {"class_type": "MaskSink", "inputs": {"mask": ["1", 0]}},
+                "3": {"class_type": "AnySink", "inputs": {"source": ["2", 0]}},
+            }
+        )
+        assert _edge_findings(result) == []
+        assert result["valid"] is True, result["errors"]
+
+    def test_dynamic_combo_selector_stays_advisory(self, graph: Graph):
+        """A wired ``COMFY_DYNAMICCOMBO_V3`` selector resolves its option — and
+        the sub-inputs that option contributes — at execution time, which is why
+        the expansion checks skip it. Its declared type is not what the server
+        ends up comparing, so it keeps the advisory warning it has always had
+        rather than joining the promotion."""
+        result = graph.validate_workflow(
+            {
+                "1": {"class_type": "IntSource", "inputs": {}},
+                "2": {"class_type": "DynSink", "inputs": {"mode": ["1", 0]}},
+            }
+        )
+        assert [e for e in result["errors"] if e["code"] == "edge_type_mismatch"] == []
+        assert [w["node_id"] for w in result["warnings"] if w["code"] == "edge_type_mismatch"] == ["2"]
+        assert result["valid"] is True, result["errors"]
 
 
 class TestUnreachableNodeIsVisible:

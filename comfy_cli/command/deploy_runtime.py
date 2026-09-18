@@ -54,12 +54,30 @@ def sleep(seconds: float) -> None:
 def render_spec_error(renderer: Renderer, error: BuildSpecNotFoundError | BuildSpecInvalidError) -> None:
     match error:
         case BuildSpecNotFoundError():
-            renderer.error(code=error.code, message=str(error), details=error.details)
+            renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         case BuildSpecInvalidError():
             details = {"path": str(error.path)} if error.path is not None else None
             renderer.error(code=error.code, message=str(error), details=details)
         case unreachable:
             assert_never(unreachable)
+
+
+def terminal_status_error(deployment_id: str, status: str) -> JsonObject:
+    """The error block a not-ok deployment envelope carries.
+
+    The read itself succeeded, so ``data`` still holds the whole payload; this
+    is the machine-readable statement of the verdict that sat beside it as
+    ``error: null``.
+    """
+    from comfy_cli import error_codes
+
+    registered = error_codes.get("deploy_status_terminal")
+    return {
+        "code": "deploy_status_terminal",
+        "message": f"deployment {deployment_id} is {status}",
+        "hint": registered.hint if registered is not None else None,
+        "details": {"deployment_id": deployment_id, "status": status},
+    }
 
 
 def poll_deployment(client: DeployUpClient, deployment_id: str, sleep_fn: Callable[[float], None]) -> JsonObject:

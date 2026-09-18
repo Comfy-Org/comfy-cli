@@ -673,19 +673,22 @@ def test_check_basename_match_against_subfoldered_listing(gallery_file, tmp_path
     assert env["data"]["models"]["present"] == ["v1-5-pruned-emaonly.safetensors"]
 
 
-def test_check_server_down_surfaces_server_not_running(gallery_file, tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "exc, code", [("url_error", "server_not_running"), (ResponseTooLarge("too big"), "model_listing_too_large")]
+)
+def test_check_listing_failure_surfaces_its_error_code(gallery_file, tmp_path, monkeypatch, exc, code):
     import urllib.error
 
     _force_json_renderer()
     _no_local_server(monkeypatch)
     _stub_template_workflow_fetch(monkeypatch, json.dumps(_TOP_LEVEL_WF).encode())
-    _stub_folder_listing(monkeypatch, urllib.error.URLError("connection refused"))
+    _stub_folder_listing(monkeypatch, urllib.error.URLError("connection refused") if exc == "url_error" else exc)
 
     result = _run_check(gallery_file, "image_z_image", tmp_path, monkeypatch)
     assert result.exit_code != 0
     env = _envelope(result.output)
     assert env["ok"] is False
-    assert env["error"]["code"] == "server_not_running"
+    assert env["error"]["code"] == code
 
 
 def test_check_unknown_template_surfaces_template_not_found(gallery_file, tmp_path, monkeypatch):
@@ -806,17 +809,61 @@ def test_check_api_source_stays_index_when_object_info_finds_nothing(gallery_fil
     assert env["data"]["api"]["api_nodes"] == []
 
 
-def test_check_invalid_utf8_workflow_surfaces_invalid_json(gallery_file, tmp_path, monkeypatch):
-    # Invalid UTF-8 in the cached/fetched body raises UnicodeDecodeError (not a
-    # subclass of JSONDecodeError) — it must be caught as a clean error, not crash.
+@pytest.mark.parametrize("body", [b"\xff\xfe not valid utf-8", b"[" * 100_000], ids=["non_utf8", "deep_nesting"])
+def test_check_invalid_utf8_workflow_surfaces_invalid_json(gallery_file, tmp_path, monkeypatch, body):
+    # Invalid UTF-8 raises UnicodeDecodeError and deep nesting raises RecursionError,
+    # neither a JSONDecodeError — both must be caught as a clean error, not crash.
     _force_json_renderer()
     _no_local_server(monkeypatch)
-    _stub_template_workflow_fetch(monkeypatch, b"\xff\xfe not valid utf-8")
+    _stub_template_workflow_fetch(monkeypatch, body)
 
     result = _run_check(gallery_file, "image_z_image", tmp_path, monkeypatch)
     assert result.exit_code != 0
     env = _envelope(result.output)
     assert env["error"]["code"] == "template_workflow_invalid_json"
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("template workflow fetch failed: HTTP 204"), ResponseTooLarge("big")])
+def test_check_non_200_or_over_cap_workflow_surfaces_fetch_failed(gallery_file, tmp_path, monkeypatch, exc):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _stub_template_workflow_fetch(monkeypatch, exc)
+
+    result = _run_check(gallery_file, "image_z_image", tmp_path, monkeypatch)
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["error"]["code"] == "template_fetch_failed"
+
+
+def test_check_wrong_shape_gallery_surfaces_gallery_load_failed(tmp_path, monkeypatch):
+    _force_json_renderer()
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"error": "rate limited"}')
+
+    result = _run_check(str(bad), "image_z_image", tmp_path, monkeypatch)
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["error"]["code"] == "gallery_load_failed"
+
+
+def test_local_folder_listing_encodes_the_folder_as_one_segment(monkeypatch):
+    from comfy_cli.command.models import search
+    from comfy_cli.target import Target
+
+    urls = []
+    monkeypatch.setattr(search, "_http_get_json", lambda url, target: urls.append(url) or [])
+    target = Target(kind="local", base_url="http://127.0.0.1:8188")
+    templates_cmd._list_local_folder(target, "checkpoints#x")
+    assert urls == ["http://127.0.0.1:8188/models/checkpoints%23x"]
+
+
+def test_match_local_models_lists_a_folder_with_dots_inside_its_name(monkeypatch):
+    _stub_folder_listing(monkeypatch, {"model..v2": ["a.safetensors"]})
+    monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **_kw: None)
+    present, missing, warnings = templates_cmd._match_local_models(
+        [{"name": "a.safetensors", "directory": "model..v2", "url": ""}], {}
+    )
+    assert (present, missing, warnings) == (["a.safetensors"], [], [])
 
 
 # ---------------------------------------------------------------------------

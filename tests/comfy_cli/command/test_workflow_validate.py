@@ -132,6 +132,14 @@ def test_workflow_validate_invalid_exits_nonzero(tmp_path, capsys):
     assert env["ok"] is False
     assert env["data"]["valid"] is False
     assert env["data"]["error_count"] >= 1
+    # `ok: false` with `error: null` says a command failed and refuses to say
+    # how — and every consumer branches on `error.code`. The verdict rides in
+    # BOTH places: the payload for detail, the error block to be found at all.
+    assert env["error"]["code"] == "workflow_unknown_nodes"
+    assert env["error"]["details"]["errors"] == env["data"]["errors"]
+    # Built from the errors, not the code's registered remedy: that one reads
+    # "fix the class_type names", which is wrong for a shape mismatch.
+    assert "node " in env["error"]["hint"]
 
 
 def test_deprecated_alias_still_works_and_warns(tmp_path, capsys):

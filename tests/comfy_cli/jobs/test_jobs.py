@@ -49,6 +49,34 @@ _HISTORY_FIXTURE = {
 }
 
 
+@pytest.mark.parametrize(
+    "updated_at",
+    [
+        pytest.param("2026-08-28T03:26:09+00:00", id="what-state-files-write-today"),
+        pytest.param("2026-08-28T03:26:09Z", id="bare-z"),
+        pytest.param("2026-08-28T03:26:09.43745Z", id="zero-trimmed-fraction"),
+    ],
+)
+def test_a_dated_terminal_row_never_sinks_to_the_epoch_zero_floor(updated_at: str):
+    """0.0 doubles as "undated", so a stamp the parser cannot read sorts the row
+    below every dated one — right where ``jobs ls`` takes its ``[:limit]`` slice
+    and drops a fresh completion."""
+    assert jobs_mod._parse_epoch(updated_at) > 0.0
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(None, id="missing"),
+        pytest.param("", id="empty"),
+        pytest.param("not-a-timestamp", id="unparsable"),
+        pytest.param(1234, id="not-even-a-string"),
+    ],
+)
+def test_an_unreadable_updated_at_falls_back_to_the_floor(value: object):
+    assert jobs_mod._parse_epoch(value) == 0.0
+
+
 def test_gather_jobs_combines_queue_and_history(monkeypatch: pytest.MonkeyPatch):
     def fake_get(url, timeout=10.0):
         if url.endswith("/queue"):

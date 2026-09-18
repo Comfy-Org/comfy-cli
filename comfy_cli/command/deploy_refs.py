@@ -104,7 +104,7 @@ def run_compute(region: str | None) -> None:
             _render_pretty(renderer, visible_regions)
         renderer.emit(result, command="deploy refs compute", changed=False)
     except DeployAPIError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     except (ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError) as error:
         renderer.error(code="deploy_server_error", message=str(error))

@@ -61,7 +61,7 @@ def test_up_refuses_one_worker_bound_without_the_other(tmp_path, monkeypatch, fl
     monkeypatch.setattr(module, "_command_clients", _unreachable)
 
     # When
-    result = CliRunner(mix_stderr=False).invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path)), flag, "3"])
+    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path)), flag, "3"])
 
     # Then
     error = _json_envelope(result)["error"]
@@ -87,7 +87,7 @@ def test_a_bounds_free_deployment_validates_against_the_published_up_schema(tmp_
     monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
 
     # When
-    result = CliRunner(mix_stderr=False).invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path))])
+    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path))])
 
     # Then
     assert result.exit_code == 0, result.stderr
@@ -115,7 +115,7 @@ def test_up_edits_the_named_deployment_not_the_highest_ranked_one(tmp_path, monk
     monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
 
     # When the older one is named explicitly
-    result = CliRunner(mix_stderr=False).invoke(
+    result = CliRunner().invoke(
         app,
         ["--json", "deploy", "up", str(write_spec(tmp_path)), "--deployment", "dep-1", "--min", "2", "--max", "4"],
     )
@@ -141,7 +141,7 @@ def test_a_named_deployment_that_matches_nothing_never_creates_one(tmp_path, mon
 
     # When
     # When compute is supplied, so the create branch would otherwise succeed
-    result = CliRunner(mix_stderr=False).invoke(
+    result = CliRunner().invoke(
         app,
         [
             "--json",
@@ -384,7 +384,7 @@ def test_a_bare_up_after_a_scale_does_not_unscale_the_deployment(tmp_path, monke
     monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
 
     # When
-    result = CliRunner(mix_stderr=False).invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path))])
+    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path))])
 
     # Then
     assert result.exit_code == 0
@@ -443,9 +443,7 @@ def test_the_dropped_bound_warning_reaches_a_json_caller_on_stderr(tmp_path, mon
     monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
 
     # When
-    result = CliRunner(mix_stderr=False).invoke(
-        app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3", "--max", "8"]
-    )
+    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3", "--max", "8"])
 
     # Then
     assert "--min had no effect" in result.stderr
@@ -463,9 +461,7 @@ def test_a_stop_failed_deployment_is_not_pointed_at_a_scale_that_would_bounce(tm
     monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
 
     # When
-    result = CliRunner(mix_stderr=False).invoke(
-        app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3", "--max", "8"]
-    )
+    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3", "--max", "8"])
 
     # Then
     assert "--min had no effect" in result.stderr
@@ -527,7 +523,7 @@ def test_agentic_create_names_both_missing_compute_options(tmp_path, monkeypatch
     monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), FakeDeploy()))
 
     # When
-    result = CliRunner(mix_stderr=False).invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path))])
+    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path))])
 
     # Then
     assert result.exit_code == 1
@@ -571,7 +567,7 @@ def test_watch_exits_immediately_on_stop_failed_with_stop_remedy(tmp_path, monke
     monkeypatch.setattr(module, "_sleep", sleeps.append)
 
     # When
-    result = CliRunner(mix_stderr=False).invoke(
+    result = CliRunner().invoke(
         app,
         ["--json", "deploy", "up", str(write_spec(tmp_path)), "--gpu", "l4", "--region", "US-MO-2", "--watch"],
     )
@@ -592,7 +588,7 @@ def test_watch_continues_through_unhealthy_until_ready(tmp_path, monkeypatch) ->
     monkeypatch.setattr(module, "_sleep", sleeps.append)
 
     # When
-    result = CliRunner(mix_stderr=False).invoke(
+    result = CliRunner().invoke(
         app,
         ["--json", "deploy", "up", str(write_spec(tmp_path)), "--gpu", "l4", "--region", "US-MO-2", "--watch"],
     )

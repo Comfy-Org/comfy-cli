@@ -1,10 +1,14 @@
 import http.client
 import json
+import pathlib
+import ssl
+import sys
 import types
 import urllib.error
 import urllib.request
 from unittest.mock import patch
 
+import certifi
 import pytest
 
 import comfy_cli.http as http_mod
@@ -535,3 +539,304 @@ def test_read_capped_asks_for_exactly_one_byte_past_the_cap():
 
     read_capped(_Recording(), "https://example.com/x", max_bytes=8)
     assert reads == [9]
+
+
+# --- the CA trust store -------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_trust_store_cache():
+    """`trust_store`/`ssl_context` are process-wide caches, so every case must
+    resolve the environment it set rather than the first one any test saw."""
+    http_mod.trust_store.cache_clear()
+    http_mod.ssl_context.cache_clear()
+    yield
+    http_mod.trust_store.cache_clear()
+    http_mod.ssl_context.cache_clear()
+
+
+def _no_env(monkeypatch):
+    for name in (http_mod.CA_FILE_ENV_VAR, http_mod.CA_DIR_ENV_VAR):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_an_explicit_bundle_outranks_certifi(tmp_path, monkeypatch):
+    """Given SSL_CERT_FILE, When the store resolves, Then the named bundle wins.
+
+    The documented escape hatch has to be real: an explicitly supplied context
+    bypasses the env vars OpenSSL would have read for itself.
+    """
+    # Given
+    bundle = tmp_path / "corporate.pem"
+    bundle.write_bytes(pathlib.Path(certifi.where()).read_bytes())
+    monkeypatch.setenv(http_mod.CA_FILE_ENV_VAR, str(bundle))
+    monkeypatch.delenv(http_mod.CA_DIR_ENV_VAR, raising=False)
+
+    # When
+    store = http_mod.trust_store()
+
+    # Then
+    assert store.cafile == str(bundle)
+    assert store.error is None
+    assert store.pinned is True, "an operator named it, so a load failure is fatal"
+    assert http_mod.ssl_context().verify_mode is ssl.CERT_REQUIRED
+
+
+def test_certifi_is_used_when_nothing_is_configured(monkeypatch):
+    """Given no override, When the store resolves, Then certifi supplies the CAs."""
+    # Given
+    _no_env(monkeypatch)
+
+    # When
+    store = http_mod.trust_store()
+
+    # Then
+    assert store.cafile == certifi.where()
+    assert "certifi" in store.source
+    assert store.pinned is False
+
+
+def test_a_system_bundle_covers_a_machine_without_certifi(tmp_path, monkeypatch):
+    """Given no certifi, When a system bundle exists, Then it is used.
+
+    The failure this exists for: a distribution whose Python has neither certifi
+    nor a compiled-in OpenSSL trust path, where every https call died with
+    CERTIFICATE_VERIFY_FAILED while `curl` to the same host succeeded.
+    """
+    # Given
+    _no_env(monkeypatch)
+    system = tmp_path / "ca-certificates.crt"
+    system.write_text("", encoding="utf-8")
+    monkeypatch.setattr(http_mod, "_SYSTEM_CA_FILES", (str(system),))
+    monkeypatch.setitem(sys.modules, "certifi", None)
+
+    # When
+    store = http_mod.trust_store()
+
+    # Then
+    assert store.cafile == str(system)
+    assert "system bundle" in store.source
+
+
+def test_no_store_anywhere_falls_back_to_the_interpreter(monkeypatch):
+    """Given nothing at all, When the store resolves, Then the interpreter decides."""
+    # Given
+    _no_env(monkeypatch)
+    monkeypatch.setattr(http_mod, "_SYSTEM_CA_FILES", ())
+    monkeypatch.setitem(sys.modules, "certifi", None)
+
+    # When
+    store = http_mod.trust_store()
+
+    # Then
+    assert store.cafile is None and store.capath is None
+    assert store.error is None
+
+
+def test_an_unusable_override_fails_closed_rather_than_silently_substituting(tmp_path, monkeypatch):
+    """Given a bogus SSL_CERT_FILE, When a context is built, Then it trusts nothing.
+
+    The caller named a trust root on purpose. Quietly verifying against certifi
+    instead would answer a question nobody asked, and would hide a typo in the
+    one setting an operator uses to pin a corporate CA.
+    """
+    # Given
+    missing = tmp_path / "nope.pem"
+    monkeypatch.setenv(http_mod.CA_FILE_ENV_VAR, str(missing))
+    monkeypatch.delenv(http_mod.CA_DIR_ENV_VAR, raising=False)
+
+    # When
+    store = http_mod.trust_store()
+
+    # Then
+    assert store.error is not None and str(missing) in store.error
+    assert http_mod.ssl_context().cert_store_stats()["x509_ca"] == 0
+    hint = http_mod.tls_trust_hint()
+    assert str(missing) in hint and http_mod.CA_FILE_ENV_VAR in hint
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        pytest.param(ssl.SSLCertVerificationError("unable to get local issuer certificate"), True, id="bare"),
+        pytest.param(
+            urllib.error.URLError(ssl.SSLCertVerificationError("unable to get local issuer certificate")),
+            True,
+            id="wrapped-in-urlerror",
+        ),
+        pytest.param(
+            urllib.error.URLError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed (_ssl.c:1017)"),
+            True,
+            id="reason-string-only",
+        ),
+        pytest.param(urllib.error.URLError("connection refused"), False, id="unrelated-transport"),
+        pytest.param(TimeoutError("timed out"), False, id="timeout"),
+    ],
+)
+def test_verification_failures_are_told_apart_from_other_transport_errors(error, expected):
+    """Given a transport error, When classified, Then only trust failures match.
+
+    The failure arrives wrapped and does not always keep its class, so the chain
+    is walked and the OpenSSL reason string counts as evidence.
+    """
+    # Given / When / Then
+    assert http_mod.tls_verification_failed(error) is expected
+
+
+def test_the_classifier_terminates_on_a_self_referential_chain():
+    """Given a cyclic cause chain, When classified, Then it returns rather than hangs."""
+    # Given
+    first = urllib.error.URLError("outer")
+    second = urllib.error.URLError("inner")
+    first.reason = second
+    second.reason = first
+
+    # When / Then
+    assert http_mod.tls_verification_failed(first) is False
+
+
+def test_every_opener_verifies_against_the_shared_context(monkeypatch):
+    """Given an opener, When it is built, Then its https handler carries the context."""
+    # Given
+    _no_env(monkeypatch)
+
+    # When
+    opener = http_mod.build_http_only_opener()
+
+    # Then
+    handlers = [h for h in opener.handlers if isinstance(h, urllib.request.HTTPSHandler)]
+    assert len(handlers) == 1
+    assert handlers[0]._context is http_mod.ssl_context()
+
+
+def _spy_on_default_context(monkeypatch) -> list[dict]:
+    """Record the kwargs `ssl.create_default_context` is built with.
+
+    The distinction under test is which CPython branch runs, and it is not
+    visible in the resulting store on a machine whose platform default is empty
+    — which is exactly the machine this bug was found on. `cafile=` given means
+    `load_default_certs()` is skipped; absent means it runs.
+    """
+    calls: list[dict] = []
+    real = ssl.create_default_context
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ssl, "create_default_context", spy)
+    return calls
+
+
+def test_certifi_is_added_to_the_default_roots_not_substituted_for_them(tmp_path, monkeypatch):
+    """Given an extra bundle, When the context is built, Then the OS roots survive.
+
+    `create_default_context(cafile=...)` and `load_default_certs()` are EXCLUSIVE
+    branches in CPython, so supplying certifi as `cafile` narrows the trust store
+    to certifi alone. That breaks every environment whose CA lives only in the OS
+    store — a TLS-inspecting corporate proxy, a private root installed with
+    `update-ca-certificates`, a Windows root pushed by policy — while the bug
+    being fixed is the opposite one, an interpreter whose default store is empty.
+    The two sources have to add up.
+    """
+    # Given
+    extra = tmp_path / "extra-ca.pem"
+    extra.write_bytes(pathlib.Path(certifi.where()).read_bytes())
+    added = extra.read_text().count("-----BEGIN CERTIFICATE-----")
+    _no_env(monkeypatch)
+    monkeypatch.setattr(http_mod, "_SYSTEM_CA_FILES", ())
+    monkeypatch.setitem(sys.modules, "certifi", types.SimpleNamespace(where=lambda: str(extra)))
+    calls = _spy_on_default_context(monkeypatch)
+
+    # When
+    context = http_mod.ssl_context()
+
+    # Then
+    assert calls == [{}], "the platform default roots must be loaded, so no cafile/capath is passed"
+    assert context.cert_store_stats()["x509_ca"] >= added, "and the extra bundle is loaded on top of them"
+
+
+def test_an_explicit_bundle_is_loaded_without_overriding_the_ca_directory(tmp_path, monkeypatch):
+    """Given only SSL_CERT_FILE, When the context is built, Then OpenSSL's rule holds.
+
+    `SSL_CERT_FILE` overrides the default CA *file* and leaves the default CA
+    *directory* alone; only setting both replaces everything. `load_default_certs`
+    already applies exactly that rule, so the context has to be built WITHOUT
+    `cafile=` — passing it takes the exclusive branch and discards the directory
+    too, which is stricter than the variable has ever meant.
+
+    The explicit load on top is what makes a Windows build, whose
+    `load_default_certs` ignores the variables entirely, honour them as well.
+    """
+    # Given
+    only = tmp_path / "only.pem"
+    only.write_bytes(pathlib.Path(certifi.where()).read_bytes())
+    monkeypatch.setenv(http_mod.CA_FILE_ENV_VAR, str(only))
+    monkeypatch.delenv(http_mod.CA_DIR_ENV_VAR, raising=False)
+    calls = _spy_on_default_context(monkeypatch)
+
+    # When
+    context = http_mod.ssl_context()
+
+    # Then
+    assert {} in calls, "the context itself must be built with no cafile, so OpenSSL applies its own rule"
+    assert context.cert_store_stats()["x509_ca"] >= only.read_text().count("-----BEGIN CERTIFICATE-----")
+
+
+def test_an_unloadable_supplement_falls_through_to_the_platform_roots(tmp_path, monkeypatch):
+    """Given a bundle that exists but will not parse, When built, Then the roots remain.
+
+    `os.path.isfile` proves existence, not loadability — an empty, truncated or
+    unreadable bundle raises from `load_verify_locations`. These openers are
+    built at MODULE scope, so that surfaced as a bare traceback out of
+    `import comfy_cli.http`, before any renderer existed to turn it into an
+    envelope: the exact unparseable non-envelope failure this work exists to
+    remove. A supplement that will not load must be skipped, not fatal.
+
+    The platform default is stubbed to a NON-EMPTY store on purpose. A host whose
+    real default is empty — the very kind this change exists for — cannot tell
+    "fell through to the platform roots" from "trusts nothing" by counting, and a
+    context that trusts nothing also reports CERT_REQUIRED.
+    """
+    # Given
+    broken = tmp_path / "broken.pem"
+    broken.write_text("")
+    _no_env(monkeypatch)
+    monkeypatch.setattr(http_mod, "_SYSTEM_CA_FILES", ())
+    monkeypatch.setitem(sys.modules, "certifi", types.SimpleNamespace(where=lambda: str(broken)))
+
+    real = ssl.create_default_context
+    populated = len(pathlib.Path(certifi.where()).read_text().split("-----BEGIN CERTIFICATE-----")) - 1
+
+    def platform_with_roots(*args, **kwargs):
+        context = real(*args, **kwargs)
+        if not kwargs.get("cafile") and not kwargs.get("capath"):
+            context.load_verify_locations(cafile=certifi.where())
+        return context
+
+    monkeypatch.setattr(ssl, "create_default_context", platform_with_roots)
+
+    # When
+    context = http_mod.ssl_context()
+
+    # Then
+    assert context.cert_store_stats()["x509_ca"] == populated, (
+        "the platform roots must survive a supplement that would not load"
+    )
+
+
+def test_an_unloadable_PINNED_store_still_fails_closed(tmp_path, monkeypatch):
+    """Given a pinned store that will not load, When built, Then nothing is trusted.
+
+    The other side of the same guard: the caller named this root on purpose, so
+    falling through to the platform's would verify against something they did
+    not choose.
+    """
+    # Given
+    broken = tmp_path / "broken.pem"
+    broken.write_text("")
+    monkeypatch.setenv(http_mod.CA_FILE_ENV_VAR, str(broken))
+    monkeypatch.delenv(http_mod.CA_DIR_ENV_VAR, raising=False)
+
+    # When / Then
+    assert http_mod.ssl_context().cert_store_stats()["x509_ca"] == 0

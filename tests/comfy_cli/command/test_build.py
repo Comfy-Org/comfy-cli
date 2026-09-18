@@ -479,9 +479,7 @@ def test_delete_declined_at_the_prompt_aborts_without_touching_the_builder(monke
     monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: False)
     monkeypatch.setattr("comfy_cli.interaction._ask_confirm", lambda _question: False)
 
-    result = CliRunner(mix_stderr=False).invoke(
-        cli_app, ["--no-json", "build", "delete", "--id", "build-1"], env={"COLUMNS": "400"}
-    )
+    result = CliRunner().invoke(cli_app, ["--no-json", "build", "delete", "--id", "build-1"], env={"COLUMNS": "400"})
 
     assert result.exit_code == 0
     assert "Aborted." in result.stdout
@@ -502,7 +500,7 @@ def test_json_delete_on_a_tty_refuses_instead_of_opening_a_prompt(monkeypatch):
     monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: False)
     monkeypatch.setattr("comfy_cli.interaction._ask_confirm", lambda _q: pytest.fail("prompted a --json caller"))
 
-    result = CliRunner(mix_stderr=False).invoke(cli_app, ["--json", "build", "delete", "--id", "build-1"])
+    result = CliRunner().invoke(cli_app, ["--json", "build", "delete", "--id", "build-1"])
 
     envelope = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
     assert result.exit_code == 1
@@ -526,7 +524,7 @@ def test_json_delete_with_skip_prompt_runs_to_completion(monkeypatch):
     monkeypatch.setattr("comfy_cli.interaction._skip_prompt_flag", lambda: True)
     monkeypatch.setattr("comfy_cli.interaction._ask_confirm", lambda _question: pytest.fail("prompted"))
 
-    result = CliRunner(mix_stderr=False).invoke(cli_app, ["--json", "build", "delete", "--id", "build-1"])
+    result = CliRunner().invoke(cli_app, ["--json", "build", "delete", "--id", "build-1"])
 
     envelope = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
     assert result.exit_code == 0
@@ -823,13 +821,15 @@ def test_delete_command_needs_confirm_non_interactive():
 
 
 class _RecordingRenderer:
-    """Minimal renderer stand-in that records the error code emitted."""
+    """Minimal renderer stand-in that records the error code and hint emitted."""
 
     def __init__(self):
         self.codes = []
+        self.hints = []
 
-    def error(self, code, message, details=None):
+    def error(self, code, message, *, hint=None, details=None):
         self.codes.append(code)
+        self.hints.append(hint)
 
 
 def test_builder_client_uses_injected_token(monkeypatch):
@@ -889,6 +889,48 @@ def test_builder_call_maps_other_errors_to_builder_error():
     with pytest.raises(typer.Exit):
         _builder_call(r, raise_500)
     assert r.codes == ["build_builder_error"]
+
+
+@pytest.mark.parametrize("failure", ["server-error", "transport-failure"])
+def test_a_failed_cut_says_the_retry_cannot_double_cut(failure):
+    # The two outcomes where the caller cannot tell whether the release landed. Left
+    # unexplained, the safe-looking read is "do not retry", which strands a release
+    # the builder would have re-driven — so the idempotency has to reach the envelope.
+    import io
+    import urllib.error
+
+    from comfy_cli.command.build import _CUT_RETRY_HINT, _builder_call
+
+    def raise_it():
+        if failure == "server-error":
+            raise urllib.error.HTTPError("https://x", 500, "Server Error", None, io.BytesIO(b"boom"))
+        raise urllib.error.URLError("connection reset")
+
+    r = _RecordingRenderer()
+    with pytest.raises(typer.Exit):
+        _builder_call(r, raise_it, hint=_CUT_RETRY_HINT)
+    assert r.codes == ["build_builder_error"]
+    assert r.hints == [_CUT_RETRY_HINT]
+
+
+def test_the_limited_beta_403_keeps_its_own_hint_over_the_cut_hint():
+    # build_not_enabled is a dead end, not an ambiguous write: telling that caller to
+    # re-run the cut would be advice for a different failure.
+    import io
+    import urllib.error
+
+    from comfy_cli.command.build import _CUT_RETRY_HINT, _builder_call
+
+    def raise_403():
+        raise urllib.error.HTTPError(
+            "https://x", 403, "Forbidden", None, io.BytesIO(b'{"error":"FEATURE_NOT_ENABLED"}')
+        )
+
+    r = _RecordingRenderer()
+    with pytest.raises(typer.Exit):
+        _builder_call(r, raise_403, hint=_CUT_RETRY_HINT)
+    assert r.codes == ["build_not_enabled"]
+    assert r.hints == [None]
 
 
 def test_upload_blob_sends_generation_match_header(monkeypatch, tmp_path):

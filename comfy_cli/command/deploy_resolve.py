@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Final, Protocol
 
 from comfy_cli.command.build_spec import BuildSpec, JsonObject, JsonValue
 from comfy_cli.command.deploy_types import required_string, server_shape_error
+from comfy_cli.utils import parse_rfc3339
 
 # Wave 8 status formatting must import this table rather than redefine the order.
 _STATUS_RANK: Final[dict[str, int]] = {
@@ -160,18 +161,21 @@ def deployment_selection_key(deployment: JsonObject) -> tuple[int, datetime]:
 
     Every failure is a server-shape failure, never a traceback: an unknown
     status or an unparsable ``createdAt`` surfaces as ``deploy_server_error``
-    like any other bad field. A naive timestamp is read as UTC because the wire
-    format is RFC 3339 — leaving it naive would make the ``max()`` over these
-    keys raise on a batch that mixes aware and naive values.
+    like any other bad field. The two are reported apart, and each names the
+    value it rejected, because a message hedging across both fields sent
+    everyone after the wrong one — a valid ``provisioning`` was printed as the
+    evidence while the timestamp that actually failed went unmentioned.
     """
     status = required_string(deployment, "status")
     created_at = required_string(deployment, "createdAt")
+    rank = _STATUS_RANK.get(status)
+    if rank is None:
+        raise server_shape_error("the deployment has an unknown status", status=status)
     try:
-        rank = _STATUS_RANK[status]
-        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-    except (KeyError, ValueError) as error:
-        raise server_shape_error("the deployment has an invalid status or createdAt", status=status) from error
-    return rank, created if created.tzinfo is not None else created.replace(tzinfo=timezone.utc)
+        created = parse_rfc3339(created_at)
+    except ValueError as error:
+        raise server_shape_error("the deployment has an unparsable createdAt", createdAt=created_at) from error
+    return rank, created
 
 
 def resolve_release(

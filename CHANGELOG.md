@@ -15,8 +15,59 @@ history.
 
 ## [Unreleased]
 
+### Added
+
+- `comfy build release delete RELEASE` deletes the named release, freeing the slot
+  it held against the workspace's release limit. It confirms first (`--yes` skips
+  the prompt, `build_release_delete_needs_confirm` refuses a caller that cannot
+  answer one), and repeating the same id is safe: the builder answers success
+  again for a release already deleted.
+- Three builder refusals an agent can act on now arrive under their own error
+  codes instead of the one `build_builder_error` envelope: `build_release_limit`
+  (the workspace holds as many releases as its limit allows),
+  `build_release_in_use` and `build_in_use` (a deployment still references the
+  release, or one of the build's releases). The builder's message is carried
+  whole up to 8 KiB, so the blocking deployment ids it names are no longer lost
+  to the 1000-byte cap on the raw body.
+- `comfy knowledge pick CAPABILITY --check-local` checks each `oss` pick's
+  template against the local ComfyUI's model folders, the same check
+  `comfy templates check` runs. A pick whose model files are missing gets
+  `available_locally: false`, an `unavailable_reason` and a `missing_models`
+  count, and a template absent from a fresh gallery index is flagged too. A pick
+  that could not be checked carries its own `local_check` naming why. The
+  payload's `local_check` is `ok` when the check ran. When the server is down, a
+  model folder listing is over the size cap, or the gallery cannot load, it
+  carries that error code and no pick is marked. The flag is off by default
+  because it fetches uncached template workflows and calls the local server.
+
 ### Fixed
 
+- `comfy templates check` returns an error envelope instead of a traceback when
+  the gallery or workflow fetch gets a non-200 status or an over-cap body, or
+  when a model folder listing is over the size cap. It also percent-encodes the
+  model folder name it asks the local server for, accepts a folder name with
+  `..` inside it, and refreshes a stale gallery index before looking up the name.
+- A failed blob upload during `comfy build push` no longer writes the presigned
+  PUT URL's query string to stdout, into the JSON envelope, or into a CI log.
+  Both a rejected upload and a dropped connection quote the URL they were talking
+  to, and for a presigned GCS PUT that query string is a live credential
+  (`X-Goog-Credential`, `X-Goog-Signature`). The host and path are kept, so the
+  failure still says what it failed to reach.
+- `comfy install --fast-deps --nvidia` no longer installs a torch that its
+  torchvision was not built against, which made ComfyUI fail to import with
+  `RuntimeError: operator torchvision::nms does not exist`. The GPU override
+  named `torch` outright, and a uv `--override` replaces every requirement for
+  the package it names, so torchvision's `torch==<x.y.z>` pin was discarded and
+  a same-day torch release resolved ahead of its matching torchvision.
+- `comfy … | head` exits 0 again, and `--json` keeps stderr clean, on typer
+  >= 0.24. typer now runs on a vendored copy of click, so the broken-pipe guard
+  no longer recognized the stdout wrapper click installs on EPIPE and reported a
+  genuine failure instead. The wrapper is now matched by class name and owning
+  package, which also stops the deprecated `click.utils.PacifyFlushWrapper`
+  import from printing a warning onto stderr.
+- `comfy --help-json` lists `choices` for enum options again, for the same
+  reason: the vendored param types are not instances of the installed click's
+  `Choice`, so the choice list was silently dropped.
 - Promoted subgraph widgets are edited where the frontend reads them. The
   frontend (ADR 0009) keeps a promoted widget's value on the HOST instance
   (`widgets_values` positional over the widget-backed subgraph inputs) and

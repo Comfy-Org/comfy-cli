@@ -38,7 +38,7 @@ def stable_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def invoke_build(*args: str):
-    return CliRunner(mix_stderr=False).invoke(
+    return CliRunner().invoke(
         cli_app,
         ["build", *args],
         env={"AI_AGENT": "1", "COMFY_OUTPUT": "json", "NO_COLOR": "1"},

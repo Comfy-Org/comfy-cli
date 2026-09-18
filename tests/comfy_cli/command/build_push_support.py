@@ -200,7 +200,7 @@ def write_spec(
 
 
 def invoke_push(root: Path, *args: str, agentic: bool = True):
-    return CliRunner(mix_stderr=False).invoke(
+    return CliRunner().invoke(
         cli_app,
         ["build", "push", *args, str(root)],
         env={

@@ -24,9 +24,6 @@ from websocket import (  # noqa: F401 — patch target for tests (run.WebSocket)
 
 from comfy_cli import cancellation, execution_errors, jobs_state, tracking
 from comfy_cli.caller import stream_is_tty
-
-# Re-exports — names patched by tests live at this namespace.
-from comfy_cli.command.run.credentials import _resolve_partner_credential as _resolve_partner_credential
 from comfy_cli.command.run.execution import ExecutionProgress as ExecutionProgress
 from comfy_cli.command.run.execution import WorkflowExecution as WorkflowExecution
 from comfy_cli.command.run.execution import _safe_close as _safe_close
@@ -46,6 +43,9 @@ from comfy_cli.command.run.preflight import _resolve_default_checkpoint_or_exit 
 from comfy_cli.command.run.preflight import fetch_object_info as fetch_object_info
 from comfy_cli.command.run.watcher import _spawn_watcher as _spawn_watcher
 from comfy_cli.command.run.watcher import _tail_state_file as _tail_state_file
+
+# Re-exports — names patched by tests live at this namespace.
+from comfy_cli.credentials import resolve_partner_credential as _resolve_partner_credential
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint

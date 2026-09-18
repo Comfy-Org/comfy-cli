@@ -251,6 +251,7 @@ class Renderer:
         where: str | None = None,
         changed: bool | None = None,
         ok: bool = True,
+        error: Mapping[str, Any] | None = None,
         extra: Mapping[str, Any] | None = None,
     ) -> None:
         """Emit the final envelope. In pretty mode this is a no-op (data was
@@ -260,7 +261,9 @@ class Renderer:
         carry a structured result *and* a negative verdict (e.g. ``validate``
         on an invalid workflow, which still emits its error/warning payload as
         data) pass ``ok=False`` so the envelope's ``ok`` agrees with the
-        process exit code.
+        process exit code — and, with it, an ``error`` block naming the verdict.
+        ``ok=False`` without one is refused: every consumer branches on
+        ``error.code``, so ``{"ok": false, "error": null}`` is unreadable.
 
         ``extra`` merges additional top-level fields into the envelope
         (additive-optional under envelope/1, e.g. ``--select``'s
@@ -268,6 +271,8 @@ class Renderer:
         overridden; when ``extra`` is absent the envelope is byte-identical to
         an emit without it.
         """
+        if not ok and not error:
+            raise AssertionError("a not-ok envelope must carry an error block naming the failure")
         if self.is_pretty():
             return
         if self._envelope_emitted:
@@ -279,7 +284,7 @@ class Renderer:
             data=data,
             where=where or self.where,
             changed=changed,
-            error=None,
+            error=error,
         )
         if extra:
             for key, value in extra.items():
@@ -393,7 +398,17 @@ class Renderer:
         line = json.dumps(payload, default=_json_default, ensure_ascii=False)
         stream = self.machine_stream
         try:
-            stream.write(line + "\n")
+            try:
+                stream.write(line + "\n")
+            except UnicodeEncodeError:
+                # A redirected stdout on Windows is cp1252 (or another legacy
+                # code page), and a payload with a character outside it — the
+                # "→" in a skill description, a model name — raised here. As a
+                # ValueError it fell into the clause below and the envelope
+                # silently vanished: the comfy-agent's skill import saw zero
+                # packs on Windows. JSON can spell every character in ASCII,
+                # so the same envelope is written escaped instead.
+                stream.write(json.dumps(payload, default=_json_default, ensure_ascii=True) + "\n")
             stream.flush()
         except (AttributeError, ValueError):
             # Resolving to JSON mode against an unusable stdout must not merely

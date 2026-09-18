@@ -148,7 +148,7 @@ def test_push_pull_update_push_cycle_has_no_diff_and_an_identical_wire_definitio
     serve(client, "build-created", first_wire)
     pulled = invoke_pull(workspace, "-y")
     before_update = (workspace / "comfy-build.yaml").read_bytes()
-    updated = CliRunner(mix_stderr=False).invoke(
+    updated = CliRunner().invoke(
         cli_app,
         ["build", "update", "-y", "--python", sys.executable, "--comfy-version", "0.3.0", str(workspace)],
         env={"AI_AGENT": "1", "COMFY_OUTPUT": "json", "NO_COLOR": "1"},

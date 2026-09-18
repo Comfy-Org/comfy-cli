@@ -1,9 +1,15 @@
-"""Shared HTTP helpers: default timeouts and an auth-leak-safe redirect policy."""
+"""Shared HTTP helpers: default timeouts, a CA trust store, and an
+auth-leak-safe redirect policy."""
 
+import functools
 import json
+import os
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
+from typing import Final
 
 # Default timeout (seconds) for plain, non-streaming API calls. Without an
 # explicit timeout ``requests`` blocks forever on a stalled peer; this makes such
@@ -89,6 +95,155 @@ def target_auth_headers(target) -> dict[str, str]:
     return headers
 
 
+# Read here rather than left to OpenSSL: an explicitly supplied context bypasses
+# them, and `load_default_certs` ignores them entirely on Windows.
+CA_FILE_ENV_VAR: Final = "SSL_CERT_FILE"
+CA_DIR_ENV_VAR: Final = "SSL_CERT_DIR"
+
+# Consulted only when `certifi` is not importable, for a distribution whose
+# Python has no compiled-in OpenSSL trust path either.
+_SYSTEM_CA_FILES: Final = (
+    "/etc/ssl/certs/ca-certificates.crt",  # Debian, Ubuntu, Alpine, NixOS
+    "/etc/pki/tls/certs/ca-bundle.crt",  # RHEL, Fedora, CentOS
+    "/etc/ssl/ca-bundle.pem",  # openSUSE
+    "/etc/ssl/cert.pem",  # macOS (LibreSSL), FreeBSD
+)
+
+
+@dataclass(frozen=True)
+class TrustStore:
+    """Which CAs this process verifies against, and where they came from.
+
+    ``source`` is for the human reading a failure. ``pinned`` marks a store named
+    through the ``SSL_CERT_*`` env vars, and decides only how a load failure is
+    treated: a pinned store that cannot be read is fatal (``error`` is set), a
+    missing ``certifi`` is not.
+    """
+
+    source: str
+    cafile: str | None = None
+    capath: str | None = None
+    error: str | None = None
+    pinned: bool = False
+
+
+@functools.lru_cache(maxsize=1)
+def trust_store() -> TrustStore:
+    """Resolve the CA source to load on top of the interpreter's own roots.
+
+    The ``SSL_CERT_*`` env vars if set, else ``certifi``, else the first system
+    bundle that exists. Either way it is a supplement; see :func:`ssl_context`.
+    """
+    cafile = os.environ.get(CA_FILE_ENV_VAR) or None
+    capath = os.environ.get(CA_DIR_ENV_VAR) or None
+    if cafile or capath:
+        named = ", ".join(
+            f"{var}={value}" for var, value in ((CA_FILE_ENV_VAR, cafile), (CA_DIR_ENV_VAR, capath)) if value
+        )
+        try:
+            ssl.create_default_context(cafile=cafile, capath=capath)
+        except (OSError, ssl.SSLError) as error:
+            return TrustStore(
+                source=named,
+                cafile=cafile,
+                capath=capath,
+                error=f"{named} could not be loaded: {error}",
+                pinned=True,
+            )
+        return TrustStore(source=named, cafile=cafile, capath=capath, pinned=True)
+
+    try:
+        import certifi
+    except ImportError:
+        pass
+    else:
+        where = certifi.where()
+        if os.path.isfile(where):
+            return TrustStore(source=f"the default CA store plus certifi ({where})", cafile=where)
+
+    for candidate in _SYSTEM_CA_FILES:
+        if os.path.isfile(candidate):
+            return TrustStore(source=f"the default CA store plus the system bundle ({candidate})", cafile=candidate)
+
+    return TrustStore(source="the interpreter's default CA store")
+
+
+@functools.lru_cache(maxsize=1)
+def ssl_context() -> ssl.SSLContext:
+    """The one verifying TLS context every opener in the CLI shares.
+
+    **Every source is loaded on top of the interpreter's own roots, never instead
+    of them.** ``create_default_context(cafile=…)`` and ``load_default_certs()``
+    are exclusive branches in CPython, so naming a file there would narrow the
+    store to that file alone — dropping a CA that lives only in the OS store, and
+    making ``SSL_CERT_FILE`` replace the default CA *directory* too, which is
+    stricter than OpenSSL defines it.
+
+    An unusable pinned store fails closed rather than being swapped for a working
+    one: the caller named that trust root on purpose.
+    """
+    store = trust_store()
+    if store.error is not None:
+        return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context = ssl.create_default_context()
+    if store.cafile or store.capath:
+        try:
+            context.load_verify_locations(cafile=store.cafile, capath=store.capath)
+        except (OSError, ssl.SSLError):
+            # Existence is not loadability, and this runs at import, so an empty
+            # or truncated bundle would raise before any renderer exists to make
+            # an envelope of it. A supplement that will not load is skipped — the
+            # interpreter's roots are already here. A pinned one still fails.
+            if store.pinned:
+                return ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    return context
+
+
+def tls_verification_failed(error: BaseException) -> bool:
+    """True when ``error`` is a TLS certificate-verification failure.
+
+    The failure arrives wrapped — ``URLError(SSLCertVerificationError(...))`` —
+    and its class is not always preserved across the wrapping, so the chain is
+    walked and the OpenSSL reason string is accepted as evidence too.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        reason = getattr(current, "reason", None)
+        if isinstance(reason, BaseException):
+            # Descend without stringifying this link: `URLError.__str__`
+            # interpolates `self.reason`, so a cyclic chain never returns —
+            # before the `seen` guard gets a say.
+            current = reason
+            continue
+        if "CERTIFICATE_VERIFY_FAILED" in str(current):
+            return True
+        current = current.__cause__
+    return False
+
+
+def tls_trust_hint() -> str:
+    """What to do about a verification failure, naming the store actually in use."""
+    store = trust_store()
+    if store.error is not None:
+        return (
+            f"{store.error} — point {CA_FILE_ENV_VAR} at a readable PEM bundle "
+            f"(or {CA_DIR_ENV_VAR} at an OpenSSL hash directory), or unset both to use the default store"
+        )
+    return (
+        f"verifying against {store.source}; if that store is missing the server's CA, install `certifi`, "
+        f"or point both {CA_FILE_ENV_VAR} and REQUESTS_CA_BUNDLE at a PEM bundle containing it "
+        f"(e.g. {_SYSTEM_CA_FILES[0]}) — the two cover different call sites, urllib and requests"
+    )
+
+
+def _https_handler() -> urllib.request.HTTPSHandler:
+    return urllib.request.HTTPSHandler(context=ssl_context())
+
+
 def _http_only_proxy_handler() -> urllib.request.ProxyHandler:
     """A ProxyHandler that can only proxy http(s).
 
@@ -121,6 +276,10 @@ def build_http_only_opener(*handlers: urllib.request.BaseHandler) -> urllib.requ
     subclasses rather than being appended behind it. Note that no redirect
     handler is installed unless the caller passes one, so a bare opener
     surfaces a 30x as an ``HTTPError`` rather than following it.
+
+    The https handler carries the shared :func:`ssl_context`, so every opener in
+    the CLI verifies against one resolved trust store rather than against
+    whatever CAs the interpreter happens to find.
     """
     defaults = [
         (urllib.request.ProxyHandler, _http_only_proxy_handler),
@@ -132,7 +291,7 @@ def build_http_only_opener(*handlers: urllib.request.BaseHandler) -> urllib.requ
     # urllib.request only defines HTTPSHandler on an SSL-capable build; naming it
     # unconditionally would blow up at import time on one without.
     if hasattr(urllib.request, "HTTPSHandler"):
-        defaults.append((urllib.request.HTTPSHandler, urllib.request.HTTPSHandler))
+        defaults.append((urllib.request.HTTPSHandler, _https_handler))
 
     opener = urllib.request.OpenerDirector()
     for klass, factory in defaults:

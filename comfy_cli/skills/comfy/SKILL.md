@@ -19,9 +19,15 @@ halves are independent — you can scan only what's relevant to the task.
 know what exists, and reach for the right one rather than improvising its job:**
 `comfy-director` (multi-shot narrative video — story, continuity, conform),
 `comfy-build` (build a custom ComfyUI environment on the developer platform),
-`comfy-debug` (any failed job: error code → fix), `comfy-relay` (surface a
-workflow/result in chat, never leave it in /tmp). When a task spans several,
-load them up front instead of discovering the gap mid-render.
+`comfy-deploy` (run a build release as a serverless deployment, and stop it
+costing money), `comfy-custom-nodes` (write or fix a custom node pack — the V3 node API,
+layout, testing, publishing), `comfy-debug` (any failed job: error code → fix), `comfy-relay`
+(surface a workflow/result in chat, never leave it in /tmp). When a task spans
+several, load them up front instead of discovering the gap mid-render.
+
+Inside the local comfy agent (the `comfy-agent` binary on a user's machine), a permission that
+blocks you — a folder, a host, a shell — is a question for the user: the `comfy-agent-permissions`
+skill says what the agent may reach, how the user grants more, and what can never be granted.
 
 ---
 
@@ -79,6 +85,13 @@ rather than an answer to anything. Five rules:
    it resolves to. A row flagged this way also pulls in `picks[]` for the
    capabilities that rank it, so the highest-ranked entry *without* the flag is
    the runnable alternative. Say what is missing, then name that alternative.
+   When routing is local, add `--check-local` to `knowledge pick`: it also
+   flags an `oss` pick whose model files are missing, with `missing_models`
+   counting them, and `comfy --json templates check <template>` names them with
+   download URLs. Unless the payload's `local_check` is `ok`, the check did not
+   finish and no pick is flagged. A pick carrying its own `local_check` was not
+   checked, so it is not yet the runnable alternative. Ask before downloading
+   anything.
 3. **Verify before denying.** A missing `knowledge` key or a `nudge` means
    nothing is curated for that query, not that it is unsupported. A `nudge` on
    a block that still carries rows means your search term matched nothing

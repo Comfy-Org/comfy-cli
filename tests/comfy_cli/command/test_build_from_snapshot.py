@@ -111,7 +111,7 @@ def snapshot(tmp_path: Path) -> Path:
 
 
 def _run(verb: str, root: Path, *args: str, token: str | None = "tok_test"):
-    return CliRunner(mix_stderr=False).invoke(
+    return CliRunner().invoke(
         cli_app,
         ["build", verb, *args, str(root)],
         env={
@@ -127,7 +127,7 @@ def _run(verb: str, root: Path, *args: str, token: str | None = "tok_test"):
 
 def _scan_init(install: Path) -> Path:
     """A spec written by the ordinary local `init`, for the `update` tests."""
-    result = CliRunner(mix_stderr=False).invoke(
+    result = CliRunner().invoke(
         cli_app,
         ["build", "init", "--name", "Foo", "--python", sys.executable, "--comfy-version", "0.3.0", str(install)],
         env={"AI_AGENT": "1", "COMFY_OUTPUT": "json", "NO_COLOR": "1"},

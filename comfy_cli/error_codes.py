@@ -43,6 +43,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "User pressed Ctrl-C; in-flight work was torn down.",
     ),
     ErrorCode(
+        "usage_error",
+        "The invocation itself was wrong -- an unknown option, a missing option value, a bad argument count "
+        "or an unknown subcommand. Raised during argv parsing, so NOTHING ran and nothing changed; the exit "
+        "code is 2, not 1. `details.command` is the command path whose surface was violated and "
+        "`details.did_you_mean` carries click's suggestions for a near-miss option. Never retry this: it is "
+        "deterministic.",
+        "fix the invocation; `details.command` plus `--help`, or `comfy --json discover`, gives the exact surface",
+    ),
+    ErrorCode(
         "not_in_workspace",
         "Resolved no workspace where one was required (e.g. `comfy which`).",
         "run `comfy install`, or pass `--workspace`",
@@ -264,9 +273,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "workflow_unknown_nodes",
-        "Workflow references class_type(s) not present in the server's object_info. "
-        "`details.unknown_nodes` lists each with close_matches.",
-        "fix the class_type names; install missing custom nodes",
+        "The workflow failed validation against the target's object_info. Named for its commonest cause -- a "
+        "class_type the target does not have -- but raised for every verdict the validator returns, input "
+        "shape and enum mismatches included, so read `details.errors` rather than assuming a naming problem. "
+        "`details.errors` is one record per failure, each with `node_id`, `message` and any `suggestions`; "
+        "`details.warnings` carries the non-fatal remainder. The `hint` is built from those same records, so "
+        "it describes the actual failures rather than the code's name.",
+        "read `details.errors`: fix the class_type names and install missing custom nodes for an unknown "
+        "class, or correct the input for a shape mismatch",
     ),
     # --- routing / cloud / auth ---------------------------------------------
     ErrorCode(
@@ -340,6 +354,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "a path-segment argument must be a single segment: non-empty, not `.` or `..`, and free "
         "of `/` and `\\`; for `model download`, choose the destination directory with "
         "`--relative-path` instead",
+    ),
+    ErrorCode(
+        "model_listing_too_large",
+        "A local model folder listing was over the response size cap, so `templates check` or "
+        "`knowledge pick --check-local` could not check which model files are installed.",
+        "check that the server on this host:port is ComfyUI",
     ),
     ErrorCode(
         "folder_not_found",
@@ -533,6 +553,42 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "read `data.inventory` for the payload's real keys, then re-run with a corrected --select; "
         "grammar: dot path `a.b.c`, array index `a.0.b`, wildcard `items.#.name`, comma multi-select "
         "`name,inputs`",
+    ),
+    # --- agent ---------------------------------------------------------------
+    ErrorCode(
+        "agent_state_unreadable",
+        "A file in the local agent's data dir (agent.json, permissions.json, "
+        "egress-allow.json) could not be read, or is not the shape the agent writes.",
+        "fix or remove the file named in the message and try again",
+    ),
+    ErrorCode(
+        "agent_state_unwritable",
+        "The local agent's data dir could not be written (permissions, a read-only location, a full disk).",
+        "check the data dir's permissions, or pass --data-dir for the dir the agent uses",
+    ),
+    ErrorCode(
+        "agent_bad_args",
+        "The command was given nothing to act on, or --approve together with --path/--host (comfy agent allow "
+        "needs --approve <id> on its own, or --path and/or --host).",
+        "pass --approve <id> for a pending request, or --path <folder> and/or --host <host>",
+    ),
+    ErrorCode(
+        "agent_refused",
+        "The folder or host cannot be allowed: relative or missing folder, the whole disk, a credential "
+        "store or a folder containing one (the home folder), a .env name, the agent's own data dir; "
+        "a wildcard, bare or multi-host value, a loopback/link-local address, or a host the agent never opens. "
+        "For --approve, the pending request named such a target: nothing was approved and it stays pending.",
+        "allow a narrower folder that holds only what is needed, or give the full host name; "
+        "credential stores, the home folder, the whole disk and telemetry endpoints never are; "
+        "`comfy agent deny <id>` clears a refused request",
+    ),
+    ErrorCode(
+        "agent_unknown_request",
+        "No pending request in the agent's permissions.json carries the id given to `comfy agent allow --approve` "
+        "or `comfy agent deny`: it was already approved or denied, the agent never recorded it, or the data dir "
+        "is not the one the agent uses.",
+        "run `comfy agent permissions` to see the requests waiting and their ids; pass --data-dir if the agent "
+        "uses another data dir",
     ),
     # --- skills --------------------------------------------------------------
     ErrorCode(
@@ -729,7 +785,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "node_deprecated",
         "`workflow add-node` (or an `add_node` op in a batch) named a class the catalog marks deprecated. "
         "Nothing was added. `details.replacement` names the live class with the same display name when "
-        "one exists.",
+        "one exists. `generate --emit-workflow --emit-ops` raises it too, when the node a model maps to "
+        "has gone stale; there `details.model` names the model alias and nothing is written.",
         "add `details.replacement` instead, or pass --allow-deprecated "
         '(`"allow_deprecated": true` on the op) when the user asked for that exact node',
     ),
@@ -1161,11 +1218,62 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "the developer platform is in limited beta; request access, then sign in with an enabled account",
     ),
     ErrorCode(
+        "tls_verify_failed",
+        "The server's TLS certificate could not be verified against this machine's CA trust store. A local "
+        "trust problem, not an auth, URL or availability one: `curl` to the same host typically succeeds. "
+        "Raised on two surfaces only -- the `comfy build` builder calls and the `comfy deploy` control/data "
+        "planes. Other paths still map a verify failure to their own transport code, so its ABSENCE does not "
+        "rule a trust problem out. `hint` names the store actually in use.",
+        "install `certifi`, or point SSL_CERT_FILE **and** REQUESTS_CA_BUNDLE at a PEM bundle containing "
+        "the server's CA (e.g. /etc/ssl/certs/ca-certificates.crt) -- SSL_CERT_FILE covers the urllib call "
+        "sites and REQUESTS_CA_BUNDLE the `requests` ones (blob upload, model download)",
+    ),
+    ErrorCode(
         "build_registry_pin_missing",
         "`comfy build push` sent its identity-keyed public-node subset to the builder's snapshot importer, "
         "which could not vouch for one or more pins. Pushing anyway would save a definition that cannot "
         "reconstruct every requested public node.",
         "edit the spec to name a published registry version or normalized repository, or remove the node",
+    ),
+    ErrorCode(
+        "build_release_limit",
+        "The builder refused the release cut because the workspace already holds as many releases as its "
+        "limit allows, counting every status. `message` is the builder's own wording. `comfy build release "
+        "create` and `comfy build push --release` both post to this route and both answer this code, and "
+        "each attaches `details.buildId` naming the Build the cut was for. No release was cut and retrying "
+        "unchanged is refused again -- but only the cut was refused: under `comfy build push --release` the "
+        "push already landed, so the build was created or updated, its blobs were stored, and its id was "
+        "written into the spec on disk before the refusal.",
+        "delete a release with `comfy build release delete`, or delete a whole build to give up every "
+        "release it holds, then cut again",
+    ),
+    ErrorCode(
+        "build_release_in_use",
+        "The builder refused `comfy build release delete` because a deployment still references the "
+        "release. `message` is the builder's own wording and names the blocking deployments, though on a "
+        "long list it may name only the first several and say so. `comfy build release delete` is the "
+        "route that answers this code, and it attaches `details.releaseId` naming the release. A "
+        "deployment blocks whatever its state -- serving, stopped or failed -- and stops blocking only "
+        "once it has been deleted and its teardown has released its compute.",
+        "delete each deployment the message names (stopping one is not enough), wait for its teardown, then retry",
+    ),
+    ErrorCode(
+        "build_in_use",
+        "The builder refused `comfy build delete` because a deployment still references one of the "
+        "build's releases. `message` is the builder's own wording and names the blocking deployments, "
+        "though on a long list it may name only the first several and say so. `comfy build delete` is "
+        "the route that answers this code, and it attaches `details.buildId` naming the build. A "
+        "deployment blocks whatever its state -- serving, stopped or failed -- and stops blocking only "
+        "once it has been deleted and its teardown has released its compute.",
+        "delete each deployment the message names (stopping one is not enough), wait for its teardown, then retry",
+    ),
+    ErrorCode(
+        "build_release_delete_needs_confirm",
+        "`comfy build release delete` was run without `--yes` in a non-interactive context (JSON output, "
+        "an agent, or a pipe) where nothing can answer a confirmation. Delete is refused rather than "
+        "blocking on a prompt. `details.releaseId` names the release, and `details.question` carries the "
+        "confirmation.",
+        "pass `--yes` to confirm the delete when running non-interactively",
     ),
     ErrorCode(
         "build_delete_needs_confirm",
@@ -1313,6 +1421,17 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "create a new deployment with `comfy deploy up`",
     ),
     ErrorCode(
+        "deploy_status_terminal",
+        "The deployment was read successfully and is in a state the reading command treats as terminal. The "
+        "read itself did not fail, so `data` carries the full payload alongside this block and "
+        "`details.status` names the state. The two commands differ, deliberately: `comfy deploy status` "
+        "reports only `failed` and `stop_failed`, since a `stopped` deployment is a normal thing to be "
+        "asked about; `comfy deploy up` adds `stopped` (with or without `--watch`), because a deployment it was "
+        "asked to bring up and that is stopped did not come up.",
+        "for `failed`, inspect `comfy deploy logs` and redeploy with `comfy deploy up`; for `stop_failed`, "
+        "re-run `comfy deploy stop` -- it may still be billing; for `stopped`, `comfy deploy start`",
+    ),
+    ErrorCode(
         "deploy_delete_needs_confirm",
         "`comfy deploy delete` was run without `--yes` in a non-interactive context. The irreversible "
         "teardown and soft-delete are refused without explicit consent; `details.deploymentId` names the "
@@ -1340,8 +1459,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_workflow_invalid",
-        "The data plane rejected the API-format workflow. `details.node_errors` preserves structured per-node failures.",
-        "fix the nodes named in `details.node_errors`, then submit again with a new idempotency key",
+        "The data plane rejected the API-format workflow, and `message` is the server's own explanation of "
+        "why -- read it first. It usually names the offending node, though some rejections are about the "
+        "document rather than a node (a UI-format export, or a count over a per-workflow limit). "
+        "`details.node_errors` carries structured per-node failures only when the server sent them, which "
+        "this route usually does not.",
+        "fix the workflow as `message` describes, then submit again with a new idempotency key",
     ),
     ErrorCode(
         "deploy_workflow_empty",

@@ -109,3 +109,307 @@ def test_assign_positions_reverse_order_connects_full_depth():
     out = layout.assign_positions(wf, _FakeGraph(), specs)
     xa, xb, xc, xd = (out[i]["at"][0] for i in range(4))
     assert xa < xb < xc < xd
+
+
+# --- title-band regression ------------------------------------------------
+# A node's `pos` is its BODY top-left; LiteGraph draws the title bar ABOVE it at
+# `pos[1] - NODE_TITLE_HEIGHT`. layout.py used to treat `pos` as the top of the whole
+# box, so its collision check was blind to the top 30px of every node and, against a
+# 10px margin, let nodes it called clear sit 20px inside each other on screen.
+
+
+def test_occupied_includes_the_title_band_above_pos():
+    x, y, w, h = layout.occupied((100.0, 200.0), (240.0, 120.0))
+    assert (x, w) == (100.0, 240.0)
+    assert y == 200.0 - layout.TITLE_H, "occupied rect must start at the title bar, not the body"
+    assert h == 120.0 + layout.TITLE_H
+
+
+def test_widget_height_matches_litegraph():
+    # LiteGraph NODE_WIDGET_HEIGHT is 20 (LiteGraphGlobal.ts:64); this was 24.
+    assert layout.WIDGET_H == 20.0
+    one, two = layout.estimate_size(1, 1, 1), layout.estimate_size(1, 1, 2)
+    assert two[1] - one[1] == 20.0
+
+
+def test_cascade_leaves_room_for_the_next_node_title():
+    """Regression: stacking must clear the title bar, not just the bodies.
+
+    Pre-fix, a node forced to slide down could land with its title bar overlapping the
+    body of the node above it, because neither rectangle modelled the band.
+    """
+    wf = {"nodes": [{"id": 1, "pos": [0.0, 0.0], "size": [240.0, 100.0]}]}
+    # Same column: force a vertical slide by asking for a spot the cascade must move.
+    size = [240.0, 100.0]
+    pos = layout.cascade_pos(wf, size)
+    placed = layout.occupied(pos, size)
+    existing = layout._rect(wf["nodes"][0])
+    assert not layout._overlaps(placed, existing)
+    # And the occupied rects genuinely do not intersect, margin aside.
+    px, py, pw, ph = placed
+    ex, ey, ew, eh = existing
+    assert px >= ex + ew or ex >= px + pw or py >= ey + eh or ey >= py + ph
+
+
+def test_stacked_column_bodies_clear_by_at_least_the_title_band():
+    """Two new nodes in one column must not have the lower one's title in the upper's body."""
+
+    class _Port:
+        is_link = True
+        name = "samples"
+
+    class _Meta:
+        inputs = [_Port()]
+        outputs = [_Port()]
+
+    class _Graph:
+        def node(self, _ct):
+            return _Meta()
+
+        def widget_order(self, _ct):
+            return []
+
+    specs = [
+        {"op": "add_node", "class_type": "A", "as": "a"},
+        {"op": "add_node", "class_type": "B", "as": "b"},
+    ]
+    out = layout.assign_positions({"nodes": []}, _Graph(), specs)
+    ats = [s["at"] for s in out]
+    assert len(ats) == 2
+    if ats[0][0] == ats[1][0]:  # same column -> stacked
+        upper, lower = sorted(ats, key=lambda p: p[1])
+        size = layout.estimate_size(1, 1, 0)
+        upper_bottom = upper[1] + size[1]
+        lower_title_top = lower[1] - layout.TITLE_H
+        # Require the FULL row gap, not merely non-overlap: the pre-fix stride (which
+        # omitted TITLE_H) still left the lower title 10px below the upper body, so a
+        # bare non-overlap assertion passes on the broken code and protects nothing.
+        assert lower_title_top - upper_bottom >= layout.ROW_GAP, (
+            f"stacked column must clear ROW_GAP between bodies and the next title; got {lower_title_top - upper_bottom}"
+        )
+
+
+# --- content-derived width ------------------------------------------------
+# Width used to be a flat NODE_W=240 for every node while LiteGraph derives it from label
+# text. COL_GAP absorbs 80px of error and then fails, which is the n8n#38093 failure mode.
+
+
+def test_width_tracks_content_instead_of_being_constant():
+    narrow = layout.estimate_width("Reroute", ("in",), ("out",), ())
+    wide = layout.estimate_width(
+        "CheckpointLoaderSimple",
+        (),
+        ("MODEL", "CLIP", "VAE"),
+        ("ckpt_name",),
+    )
+    assert wide > narrow, "a long-titled, widget-bearing node must estimate wider than a Reroute"
+
+
+def test_width_respects_litegraph_minimums():
+    # No widgets -> NODE_WIDTH floor; widgets -> NODE_WIDTH * 1.5.
+    assert layout.estimate_width("x", (), (), ()) >= layout.LG_NODE_WIDTH
+    assert layout.estimate_width("x", (), (), ("w",)) >= layout.LG_NODE_WIDTH * 1.5
+
+
+def test_long_title_widens_the_node():
+    short = layout.estimate_width("A", (), (), ())
+    long = layout.estimate_width("A" * 60, (), (), ())
+    assert long > short + 200, "title text must drive width like LiteGraph's title_width does"
+
+
+def test_estimate_size_without_labels_keeps_the_old_constant_width():
+    # Additive: existing callers that pass only counts are unchanged.
+    assert layout.estimate_size(1, 1, 0)[0] == layout.NODE_W
+
+
+def test_wide_node_does_not_get_a_neighbour_placed_inside_it():
+    """Regression: the pre-fix flat 240 put the next node inside a wide one.
+
+    A node whose real width is 360 covers x=[0,360]; the old model thought 240, so the
+    cascade placed the next at 240+80=320 — 40px inside it.
+    """
+    wide = layout.estimate_width("CheckpointLoaderSimpleWithNoiseSelect", (), ("MODEL", "CLIP", "VAE"), ("ckpt_name",))
+    wf = {"nodes": [{"id": 1, "pos": [0.0, 0.0], "size": [wide, 100.0]}]}
+    nxt = layout.cascade_pos(wf, [240.0, 100.0])
+    assert nxt[0] >= wide + layout.COL_GAP, "next node must clear the wide node's real extent"
+
+
+# --- review findings on PR #882 -------------------------------------------------------
+
+
+def test_mapping_shaped_geometry_is_read_not_discarded():
+    """litegraph serialises pos/size as both [x, y] and {"0": x, "1": y}.
+
+    schemas/workflow.json documents both shapes. Integer-indexing the object form raises
+    KeyError; falling back to a default would silently mis-place a node whose real
+    geometry was right there.
+    """
+    node = {"pos": {"0": 100.0, "1": 200.0}, "size": {"0": 240.0, "1": 120.0}}
+    x, y, w, h = layout._rect(node)
+    assert (x, w) == (100.0, 240.0)
+    assert y == 200.0 - layout.TITLE_H
+    assert h == 120.0 + layout.TITLE_H
+
+
+def test_unreadable_geometry_fallback_still_includes_the_title_band():
+    x, y, w, h = layout.occupied(None, None)
+    assert y == -layout.TITLE_H
+    assert h == layout.DEFAULT_SIZE[1] + layout.TITLE_H, "fallback must not under-report the body"
+
+
+def test_batch_columns_use_the_widest_node_not_a_fixed_stride():
+    """A wide depth-0 node must not reach into depth 1.
+
+    collides() only compares new nodes against EXISTING workflow nodes, never against
+    each other, so a fixed NODE_W + COL_GAP stride hides this overlap entirely.
+    """
+
+    class _P:
+        is_link = True
+        name = "a_very_long_input_slot_name_to_force_width"
+
+    class _Wide:
+        display_name = "A Node With A Deliberately Very Long Display Name"
+        inputs = [_P()]
+        outputs = [_P()]
+
+    class _Graph:
+        def node(self, _ct):
+            return _Wide()
+
+        def widget_order(self, _ct):
+            return ["a_long_widget_name"]
+
+    specs = [
+        {"op": "add_node", "class_type": "Wide", "as": "a"},
+        {"op": "add_node", "class_type": "Wide", "as": "b"},
+        {"op": "connect", "from": "a.out", "to": "b.in"},
+    ]
+    out = layout.assign_positions({"nodes": []}, _Graph(), specs)
+    at = {s["as"]: s["at"] for s in out if s.get("op") == "add_node"}
+    width = layout.estimate_size(
+        1,
+        1,
+        1,
+        title="A Node With A Deliberately Very Long Display Name",
+        input_labels=("a_very_long_input_slot_name_to_force_width",),
+        output_labels=("a_very_long_input_slot_name_to_force_width",),
+        widget_labels=("a_long_widget_name",),
+    )[0]
+    assert width > layout.NODE_W + layout.COL_GAP, "fixture must be wide enough to expose a fixed stride"
+    assert at["b"][0] - at["a"][0] >= width + layout.COL_GAP, "depth-1 column must clear the widest depth-0 node"
+
+
+# --- batch layout quality (crossing reduction + coordinate assignment) ----------------
+# `assign_positions` implemented only Sugiyama's step 1 (layer assignment). Nodes stacked
+# within a column in ops-array order, and y ignored what a node connected to. These
+# helpers score a placement so the improvement is measured rather than asserted by eye.
+
+
+def _score(nodes, edges):
+    """(crossings, mean |node centre - mean centre of its inputs|)."""
+    import itertools
+
+    crossings = 0
+    for (a1, b1), (a2, b2) in itertools.combinations(edges, 2):
+        if not all(n in nodes for n in (a1, b1, a2, b2)):
+            continue
+        if nodes[a1]["pos"][0] != nodes[a2]["pos"][0]:
+            continue
+        if nodes[b1]["pos"][0] != nodes[b2]["pos"][0]:
+            continue
+        if (nodes[a1]["pos"][1] - nodes[a2]["pos"][1]) * (nodes[b1]["pos"][1] - nodes[b2]["pos"][1]) < 0:
+            crossings += 1
+
+    preds = {}
+    for a, b in edges:
+        preds.setdefault(b, []).append(a)
+    devs = []
+    for k, ps in preds.items():
+        ps = [p for p in ps if p in nodes]
+        if k not in nodes or not ps:
+            continue
+        me = nodes[k]["pos"][1] + nodes[k]["size"][1] / 2
+        theirs = sum(nodes[p]["pos"][1] + nodes[p]["size"][1] / 2 for p in ps) / len(ps)
+        devs.append(abs(me - theirs))
+    return crossings, (sum(devs) / len(devs) if devs else 0.0)
+
+
+class _QPort:
+    def __init__(self, n):
+        self.name, self.is_link = n, True
+
+
+class _QMeta:
+    display_name = "N"
+    inputs = [_QPort("in")]
+    outputs = [_QPort("out")]
+
+
+class _QGraph:
+    def node(self, _ct):
+        return _QMeta()
+
+    def widget_order(self, _ct):
+        return []
+
+
+def _place(specs):
+    out = layout.assign_positions({"nodes": []}, _QGraph(), [dict(s) for s in specs])
+    size = layout.estimate_size(1, 1, 0, title="N", input_labels=("in",), output_labels=("out",))
+    return {s["as"]: {"pos": s["at"], "size": size} for s in out if s.get("op") == "add_node"}
+
+
+def test_crossing_reduction_orders_columns_by_barycentre():
+    """Three parallel chains authored in an order that crosses every wire.
+
+    Pre-fix this produced 3 crossings, because a column stacked in ops-array order.
+    """
+    specs = [{"op": "add_node", "class_type": "N", "as": n} for n in ("a1", "b1", "c1", "a2", "b2", "c2")]
+    specs += [
+        {"op": "connect", "from": "a1.out", "to": "c2.in"},
+        {"op": "connect", "from": "b1.out", "to": "b2.in"},
+        {"op": "connect", "from": "c1.out", "to": "a2.in"},
+    ]
+    edges = [(s["from"].split(".")[0], s["to"].split(".")[0]) for s in specs if s["op"] == "connect"]
+    crossings, _ = _score(_place(specs), edges)
+    assert crossings == 0, f"barycentre ordering should remove all crossings, got {crossings}"
+
+
+def test_coordinate_assignment_centres_a_node_on_its_inputs():
+    """A node should sit level with what feeds it, not flush with the column top."""
+    specs = [{"op": "add_node", "class_type": "N", "as": n} for n in ("a1", "b1", "c1", "a2", "b2", "c2")]
+    specs += [
+        {"op": "connect", "from": "a1.out", "to": "c2.in"},
+        {"op": "connect", "from": "b1.out", "to": "b2.in"},
+        {"op": "connect", "from": "c1.out", "to": "a2.in"},
+    ]
+    edges = [(s["from"].split(".")[0], s["to"].split(".")[0]) for s in specs if s["op"] == "connect"]
+    _, align_dev = _score(_place(specs), edges)
+    assert align_dev == 0.0, f"each target should be centred on its source; mean deviation {align_dev}px"
+
+
+def test_pinned_siblings_are_obstacles_for_movable_nodes():
+    """A new node pinned to an explicit `at` is as real as an existing one.
+
+    collides() only ever compared movable nodes against EXISTING workflow nodes, so a
+    movable node could be placed straight on top of a pinned sibling.
+    """
+    size = layout.estimate_size(1, 1, 0, title="N", input_labels=("in",), output_labels=("out",))
+    specs = [
+        {"op": "add_node", "class_type": "N", "as": "pinned", "at": [40.0, 60.0]},
+        {"op": "add_node", "class_type": "N", "as": "free"},
+    ]
+    out = layout.assign_positions({"nodes": []}, _QGraph(), specs)
+    at = {s["as"]: s["at"] for s in out}
+    assert not layout._overlaps(layout.occupied(at["free"], size), layout.occupied(at["pinned"], size)), (
+        "movable node was placed on top of a pinned sibling"
+    )
+
+
+# NOTE: the direct-jump collision change (replacing a ROW_GAP-at-a-time march that could
+# run _GUARD * ROW_GAP = 40,000px) ships WITHOUT a red-green regression test. Every fixture
+# tried either did not reach the collision branch or was cleared by the old march too, so
+# the intended proof -- old code exhausts its budget and leaves an overlap -- was not
+# demonstrated. It is a robustness and efficiency change, not a verified bug fix; treat it
+# as unproven until someone builds a case that actually exhausts the guard.

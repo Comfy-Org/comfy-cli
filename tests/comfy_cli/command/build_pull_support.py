@@ -40,7 +40,7 @@ def serve(client: PullBuilder, build_id: str, definition: dict) -> None:
 
 
 def invoke_pull(root: Path, *args: str, agentic: bool = True):
-    return CliRunner(mix_stderr=False).invoke(
+    return CliRunner().invoke(
         cli_app,
         ["build", "pull", *args, str(root)],
         env={

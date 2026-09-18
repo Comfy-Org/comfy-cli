@@ -44,6 +44,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy build release show": "build_release_show",
     "comfy build release logs": "build_release_logs",
     "comfy build release manifest": "build_release_manifest",
+    "comfy build release delete": "build_release_delete",
     "comfy build validate": "build_validate",
     "comfy build delete": "build_delete",
     "comfy build update": "build_update",
@@ -117,6 +118,10 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow fragment ls": "workflow",
     "comfy workflow fragment show": "workflow",
     "comfy workflow fragment validate": "workflow",
+    # the local comfy agent's approvals
+    "comfy agent permissions": "agent",
+    "comfy agent allow": "agent",
+    "comfy agent deny": "agent",
     # skill management
     "comfy skills install": "skill",
     "comfy skills uninstall": "skill",

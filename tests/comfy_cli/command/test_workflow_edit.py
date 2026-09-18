@@ -621,6 +621,24 @@ class TestAddNode:
         assert env["ok"] is False, env
         assert env["error"]["code"] == "workflow_edit_invalid"
 
+    @pytest.mark.parametrize("coordinate", ["nan", "inf", "-inf", "1e400"])
+    def test_add_node_cmd_rejects_non_finite_coordinate(self, patched_graph, tmp_path, capsys, coordinate):
+        path = _write(tmp_path, _base_workflow())
+        env = _run(["add-node", str(path), "KSampler", "--at", f"0,{coordinate}"], capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "workflow_edit_invalid"
+        assert json.loads(path.read_text())["nodes"] == _base_workflow()["nodes"]
+
+    def test_add_node_batch_rejects_non_finite_coordinate(self):
+        workflow = _base_workflow()
+        with pytest.raises(ValueError, match="node position must be two finite numbers"):
+            workflow_ops.apply_specs(
+                workflow,
+                _graph(),
+                [{"op": "add_node", "class_type": "KSampler", "at": [0, float("nan")]}],
+            )
+        assert workflow == _base_workflow()
+
 
 # ---------------------------------------------------------------------------
 # set-widget addressed by name

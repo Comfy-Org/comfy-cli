@@ -651,6 +651,32 @@ class TestIndex:
         assert [p["model"] for p in knowledge.pick(b, "c")["picks"]] == ["z", "y", "x"]
         assert b.as_of == "1970-01-01T00:00:00Z"
 
+    def test_compiled_at_comes_from_the_manifest_not_the_file(self, tmp_path, monkeypatch):
+        manifest = json.loads(FIXTURE_MANIFEST.read_text())
+        manifest["compiled_at"] = "2026-08-28T02:44:27Z"
+        _env_bundle(tmp_path, monkeypatch, manifest=manifest)
+
+        b = knowledge.load_bundle()
+
+        assert b.compiled_at == "2026-08-28T02:44:27Z"
+        # as_of is when this machine got the file, so the two must not agree
+        # just because one was copied from the other.
+        assert b.as_of != b.compiled_at
+
+    def test_compiled_at_is_none_for_a_bundle_predating_the_key(self, tmp_path, monkeypatch):
+        _env_bundle(tmp_path, monkeypatch)
+
+        assert knowledge.load_bundle().compiled_at is None
+
+    def test_an_over_long_compiled_at_is_dropped_not_truncated(self, tmp_path, monkeypatch):
+        manifest = json.loads(FIXTURE_MANIFEST.read_text())
+        manifest["compiled_at"] = "2026-08-31T12:00:00" + "0" * knowledge.MAX_VERSION_CHARS + "+00:00"
+        _env_bundle(tmp_path, monkeypatch, manifest=manifest)
+
+        # Cutting a timestamp to length yields a date that parses to the wrong
+        # instant, which is worse than reporting none.
+        assert knowledge.load_bundle().compiled_at is None
+
     def test_pick_attaches_the_model_fits(self):
         fits = {"vram_gb": {"fp8": 12, "bf16": 24}, "credits_per_image": 0.5, "max_refs": 3, "source": "measured"}
         data = {
@@ -723,6 +749,39 @@ def _run(args: list[str], capsys) -> tuple[int, dict[str, Any]]:
 
 def _validate(data: dict) -> None:
     jsonschema.Draft202012Validator(SCHEMA).validate(data)
+
+
+class TestCompiledAtReachesEveryPayload:
+    """One test per emit site, so removing any single one fails."""
+
+    STAMPED = "2026-08-28T02:44:27Z"
+
+    @pytest.fixture(autouse=True)
+    def _stamped_bundle(self, tmp_path, monkeypatch):
+        manifest = json.loads(FIXTURE_MANIFEST.read_text())
+        manifest["compiled_at"] = self.STAMPED
+        _env_bundle(tmp_path, monkeypatch, manifest=manifest)
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["status"],
+            ["resolve", "acme-h3"],
+            ["pick", "lipsync"],
+            ["pick", "no-such-capability"],
+        ],
+        ids=["status", "resolve", "pick", "pick-miss"],
+    )
+    def test_command_payload_dates_its_bundle(self, args, capsys):
+        _, envelope = _run(args, capsys)
+
+        assert envelope["data"]["compiled_at"] == self.STAMPED
+
+    def test_the_attach_block_dates_its_bundle(self):
+        payload: dict = {}
+        knowledge.attach(payload, command="generate list", queries=["acme-h3"])
+
+        assert payload["knowledge"]["compiled_at"] == self.STAMPED
 
 
 class TestCli:
@@ -1006,6 +1065,170 @@ class TestCli:
         raw = FIXTURE_KNOWLEDGE.read_bytes()
         assert manifest["files"]["knowledge.json"]["sha256"] == hashlib.sha256(raw).hexdigest()
         assert manifest["files"]["knowledge.json"]["bytes"] == len(raw)
+
+
+class TestPickCheckLocal:
+    """`pick --check-local` against the fixture's lipsync table: oss picks testlx,
+    testwan1-talk, testwan2 and testvoice carry templates; lipco-3, testface and
+    testvid are partner picks and must never be checked."""
+
+    OSS_TEMPLATES = ("video_testlx_ia2v", "video_testwan1_talk", "video_testwan2_s2v", "audio-testvoice_tts")
+
+    @pytest.fixture(autouse=True)
+    def _stubs(self, tmp_path, monkeypatch):
+        from comfy_cli.command import templates as templates_cmd
+
+        monkeypatch.delenv("COMFY_CACHE_DIR", raising=False)
+        _env_bundle(tmp_path, monkeypatch)
+        self.monkeypatch = monkeypatch
+        self.templates_cmd = templates_cmd
+        self.fetched: list[str] = []
+        self.listed: list[str] = []
+        self.undeclared_models = False
+        self.set_gallery(self.OSS_TEMPLATES)
+        self.set_installed({"checkpoints": []})
+        monkeypatch.setattr(templates_cmd, "_cache_is_stale", lambda _path: False)
+
+        def _fetch(name, **_kw):
+            self.fetched.append(name)
+            if name == "video_testwan1_talk" and self.undeclared_models:
+                return json.dumps({"nodes": [{"id": 1, "type": "CheckpointLoaderSimple"}]}).encode()
+            models = [{"name": f"{name}.safetensors", "directory": "checkpoints", "url": "https://example.test/m"}]
+            if name == "video_testwan2_s2v":
+                models.append({"name": "testwan2_vae.safetensors", "directory": "vae", "url": "https://example.test/v"})
+            return json.dumps(
+                {"nodes": [{"id": 1, "type": "CheckpointLoaderSimple", "properties": {"models": models}}]}
+            ).encode()
+
+        monkeypatch.setattr(templates_cmd, "_fetch_template_workflow", _fetch)
+
+    def set_gallery(self, names, exc=None):
+        def _load(_path, **kw):
+            self.gallery_kwargs = kw
+            if exc is not None:
+                raise exc
+            return [{"type": "video", "templates": [{"name": n} for n in names]}]
+
+        self.monkeypatch.setattr(self.templates_cmd, "_load_gallery", _load)
+
+    def set_installed(self, mapping_or_exc):
+        def _list(_target, folder):
+            self.listed.append(folder)
+            if isinstance(mapping_or_exc, Exception):
+                raise mapping_or_exc
+            return mapping_or_exc.get(folder)
+
+        self.monkeypatch.setattr(self.templates_cmd, "_list_local_folder", _list)
+
+    def _picks(self, capsys, *extra):
+        rc, env = _run(["pick", "lipsync", *extra], capsys)
+        assert rc == 0
+        _validate(env["data"])
+        return env["data"], {p["model"]: p for p in env["data"]["picks"]}
+
+    def test_flags_oss_picks_missing_model_files(self, capsys):
+        self.set_installed({"checkpoints": ["video_testwan1_talk.safetensors"]})
+        data, by_model = self._picks(capsys, "--check-local")
+        assert data["local_check"] == "ok"
+        for model, count in (("testlx", 1), ("testwan2", 2), ("testvoice", 1)):
+            assert by_model[model]["available_locally"] is False
+            assert by_model[model]["unavailable_reason"] == knowledge.UNAVAILABLE_MISSING_MODELS
+            assert by_model[model]["missing_models"] == count
+        assert "available_locally" not in by_model["testwan1-talk"]
+        for partner in ("lipco-3", "testface", "testvid"):
+            assert "available_locally" not in by_model[partner]
+        assert sorted(self.fetched) == sorted(self.OSS_TEMPLATES)
+        assert self.listed == ["checkpoints", "vae"]
+        assert self.gallery_kwargs == {"refresh": False, "background_ok": False}
+
+    def test_template_missing_from_the_gallery_is_flagged_without_a_count(self, capsys):
+        self.set_gallery([t for t in self.OSS_TEMPLATES if t != "video_testwan2_s2v"])
+        self.set_installed({"checkpoints": [f"{t}.safetensors" for t in self.OSS_TEMPLATES]})
+        data, by_model = self._picks(capsys, "--check-local")
+        assert data["local_check"] == "ok"
+        assert by_model["testwan2"]["unavailable_reason"] == knowledge.UNAVAILABLE_TEMPLATE_NOT_FOUND
+        assert "missing_models" not in by_model["testwan2"]
+        assert [m for m, p in by_model.items() if "available_locally" in p] == ["testwan2"]
+
+    def test_a_stale_gallery_index_leaves_a_template_it_lacks_unchecked(self, capsys, monkeypatch):
+        monkeypatch.setattr(self.templates_cmd, "_cache_is_stale", lambda _path: True)
+        self.set_gallery([t for t in self.OSS_TEMPLATES if t != "video_testwan2_s2v"])
+        self.set_installed({"checkpoints": [f"{t}.safetensors" for t in self.OSS_TEMPLATES]})
+        data, by_model = self._picks(capsys, "--check-local")
+        assert data["local_check"] == "ok"
+        assert by_model["testwan2"]["local_check"] == "template_not_found"
+        assert not any("available_locally" in p for p in by_model.values())
+
+    def test_a_folder_the_server_does_not_have_gets_its_own_reason(self, capsys):
+        self.set_installed({"checkpoints": [f"{t}.safetensors" for t in self.OSS_TEMPLATES]})
+        data, by_model = self._picks(capsys, "--check-local")
+        assert data["local_check"] == "ok"
+        assert by_model["testwan2"]["unavailable_reason"] == knowledge.UNAVAILABLE_MODEL_FOLDER_NOT_FOUND
+        assert by_model["testwan2"]["missing_models"] == 1
+        assert [m for m, p in by_model.items() if "available_locally" in p] == ["testwan2"]
+
+    def test_a_loader_with_no_declared_models_is_unknown(self, capsys):
+        self.undeclared_models = True
+        self.set_installed({"checkpoints": [f"{t}.safetensors" for t in self.OSS_TEMPLATES], "vae": []})
+        data, by_model = self._picks(capsys, "--check-local")
+        assert data["local_check"] == "ok"
+        assert by_model["testwan1-talk"]["local_check"] == "unknown"
+        assert "available_locally" not in by_model["testwan1-talk"]
+
+    @pytest.mark.parametrize(
+        "exc", [urllib.error.URLError("offline"), RuntimeError("HTTP 204"), ResponseTooLarge("too big")]
+    )
+    def test_a_failed_workflow_fetch_marks_only_that_pick_unchecked(self, capsys, monkeypatch, exc):
+        real_fetch = self.templates_cmd._fetch_template_workflow
+
+        def _fetch(name, **kw):
+            if name == "video_testlx_ia2v":
+                raise exc
+            return real_fetch(name, **kw)
+
+        monkeypatch.setattr(self.templates_cmd, "_fetch_template_workflow", _fetch)
+        data, by_model = self._picks(capsys, "--check-local")
+        assert data["local_check"] == "ok"
+        assert by_model["testlx"]["local_check"] == "template_fetch_failed"
+        assert "available_locally" not in by_model["testlx"]
+        assert "local_check" not in by_model["testwan2"]
+        assert by_model["testwan2"]["missing_models"] == 2
+
+    @pytest.mark.parametrize(
+        "server_exc, code",
+        [
+            (urllib.error.URLError("connection refused"), "server_not_running"),
+            (ResponseTooLarge("too big"), "model_listing_too_large"),
+        ],
+    )
+    def test_a_server_failure_drops_flags_already_made(self, capsys, server_exc, code):
+        # testlx is rank 1 and absent from the gallery, so it is flagged before the
+        # first folder listing fails.
+        self.set_gallery([t for t in self.OSS_TEMPLATES if t != "video_testlx_ia2v"])
+        self.set_installed(server_exc)
+        data, by_model = self._picks(capsys, "--check-local")
+        assert data["local_check"] == code
+        assert not any("available_locally" in p for p in by_model.values())
+
+    @pytest.mark.parametrize(
+        "gallery_exc", [urllib.error.URLError("offline"), RuntimeError("wrong-shape index"), ResponseTooLarge("big")]
+    )
+    def test_a_gallery_that_cannot_load_flags_nothing(self, capsys, gallery_exc):
+        self.set_gallery((), exc=gallery_exc)
+        data, by_model = self._picks(capsys, "--check-local")
+        assert data["local_check"] == "gallery_load_failed"
+        assert not any("available_locally" in p for p in by_model.values())
+
+    def test_without_the_flag_nothing_is_checked(self, capsys):
+        self.set_gallery((), exc=AssertionError("gallery touched without --check-local"))
+        data, by_model = self._picks(capsys)
+        assert "local_check" not in data
+        assert self.fetched == []
+        assert not any("available_locally" in p for p in by_model.values())
+
+    def test_pretty_mode_with_the_flag(self, pretty_no_stdout):
+        result = CliRunner().invoke(knowledge_cmd.app, ["pick", "lipsync", "--check-local"], standalone_mode=False)
+        assert result.exception is None, result.exception
 
 
 class TestVerbQueryLog:

@@ -31,6 +31,7 @@ from comfy_cli.command.deploy_workflow import (
     resolve_asset_roots,
 )
 from comfy_cli.command.run.loader import WorkflowLoadError
+from comfy_cli.credentials import resolve_partner_credential
 from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.deploy_assets import DeployAssetClient
 from comfy_cli.deploy_download import (
@@ -181,6 +182,7 @@ def run_deploy(ctx: typer.Context, request: DeployRunRequest) -> None:
             Path(workflow_file),
             asset_roots=resolve_asset_roots(request.path, extra_roots=request.asset_roots),
         )
+        partner_credential = resolve_partner_credential()
         builder, candidate = _command_clients()
         if not isinstance(candidate, RunControlClient):
             raise server_shape_error("the deploy client cannot resolve deployment jobs")
@@ -205,7 +207,7 @@ def run_deploy(ctx: typer.Context, request: DeployRunRequest) -> None:
             AssetResolveContext(DeployAssetClient(endpoint_origin, cloud_token), renderer, not request.no_upload),
         )
         submitted = DeployJobClient(endpoint_origin, cloud_token).submit_job(
-            JobSubmitRequest(assets.workflow, str(uuid.uuid4()), deployment_id),
+            JobSubmitRequest(assets.workflow, str(uuid.uuid4()), deployment_id, partner_credential),
             candidate,
         )
         state.job = submitted
@@ -265,7 +267,7 @@ def run_deploy(ctx: typer.Context, request: DeployRunRequest) -> None:
         renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     except DeployAPIError as error:
-        renderer.error(code=error.code, message=str(error), details=error.details)
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     except BuilderAuthError as error:
         renderer.error(code="deploy_not_signed_in", message=str(error))

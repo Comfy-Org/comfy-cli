@@ -161,9 +161,9 @@ class WorkspaceManager:
         self.specified_workspace = None
         self.use_here = None
         self.use_recent = None
-        self.workspace_path = None
-        self.workspace_type = None
         self.skip_prompting = None
+        self._flags_set = False
+        self._resolved: tuple[str | None, WorkspaceType | None] | None = None
 
     def setup_workspace_manager(
         self,
@@ -175,8 +175,48 @@ class WorkspaceManager:
         self.specified_workspace = specified_workspace
         self.use_here = use_here
         self.use_recent = use_recent
-        self.workspace_path, self.workspace_type = self.get_workspace_path()
         self.skip_prompting = skip_prompting
+        self._flags_set = True
+        self._resolved = None
+
+    def _resolve(self) -> tuple[str | None, WorkspaceType | None]:
+        """Resolve the workspace on first read and cache it.
+
+        Deferred because ``get_workspace_path`` runs ``check_comfy_repo``, which
+        imports GitPython and opens the repo — 40 ms warm, more on a cold cache,
+        that every workspace-free command (``knowledge``, ``cloud``, ``skills``,
+        ...) would otherwise pay in the Typer callback before dispatch.
+        """
+        if self._resolved is None:
+            self._resolved = self.get_workspace_path() if self._flags_set else (None, None)
+        return self._resolved
+
+    # The setters and deleters are what keep ``patch.object(manager,
+    # "workspace_path", ...)`` working across the test suite: patching a property
+    # needs both, and unpatching goes through the deleter.
+    @property
+    def workspace_path(self) -> str | None:
+        return self._resolve()[0]
+
+    @workspace_path.setter
+    def workspace_path(self, value: str | None):
+        self._resolved = (value, (self._resolved or (None, None))[1])
+
+    @workspace_path.deleter
+    def workspace_path(self):
+        self._resolved = None
+
+    @property
+    def workspace_type(self) -> WorkspaceType | None:
+        return self._resolve()[1]
+
+    @workspace_type.setter
+    def workspace_type(self, value: WorkspaceType | None):
+        self._resolved = ((self._resolved or (None, None))[0], value)
+
+    @workspace_type.deleter
+    def workspace_type(self):
+        self._resolved = None
 
     def set_recent_workspace(self, path: str):
         """

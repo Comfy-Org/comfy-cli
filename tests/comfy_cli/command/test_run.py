@@ -1292,8 +1292,12 @@ class TestPartialExecutionDiff:
 
 
 class TestResolvePartnerCredential:
-    """The credential the local submit can inject into ``extra_data`` so a
-    partner-API node finds it. Precedence session > env > stored key.
+    """The credential a submit injects into ``extra_data`` so a partner-API node
+    finds it. Precedence session > env > stored key.
+
+    One resolver for both submit paths (``comfy_cli.credentials``): the local
+    exec path ran this chain while ``deploy run`` ran one that ignored the
+    session entirely.
 
     The OAuth session is refreshed when possible (``refresh=True``) but never
     cleared from this best-effort path (``allow_clear=False``): access tokens
@@ -1304,10 +1308,133 @@ class TestResolvePartnerCredential:
     exercised end-to-end in ``tests/comfy_cli/test_credentials.py``.
     """
 
+    @pytest.fixture(autouse=True)
+    def _no_ambient_keys(self, monkeypatch: pytest.MonkeyPatch):
+        """No ambient credential may leak in from the developer's shell.
+
+        All three, not just the two API keys: leaving COMFY_CLOUD_AUTH_TOKEN set
+        would let the forwarded-bearer case pass by accident, and leaving it
+        unset in the fixture would let a resolver that DROPPED it pass too.
+        """
+        for name in ("COMFY_API_KEY", "COMFY_CLOUD_API_KEY", "COMFY_CLOUD_AUTH_TOKEN"):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_uses_the_forwarded_bearer_when_there_is_no_session(self, monkeypatch: pytest.MonkeyPatch):
+        """COMFY_CLOUD_AUTH_TOKEN is how a trusted caller — the cloud agent
+        forwarding a validated token — authenticates without an interactive
+        login. `purpose="partner"` skips it, so a resolver that only consulted
+        that purpose would silently stop honouring a credential the local path
+        already worked with."""
+        monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN", "forwarded-bearer")
+        from comfy_cli.auth import store as auth_store
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() == ("auth_token_comfy_org", "forwarded-bearer")
+
+    def test_the_forwarded_bearer_outranks_every_ambient_key(self, monkeypatch: pytest.MonkeyPatch):
+        """A token forwarded for THIS request must not lose to a key that
+        happens to be configured on the machine: the run would authenticate as a
+        different account and spend that account's credits. Same rule the module
+        applies to a live session — only a deliberate per-call value outranks a
+        request-scoped credential."""
+        monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN", "forwarded-bearer")
+        monkeypatch.setenv("COMFY_API_KEY", "partner-key")
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "cloud-key")
+        from comfy_cli.auth import store as auth_store
+        from comfy_cli.target import CLOUD_API_KEY_PROVIDER
+
+        record = MagicMock()
+        record.key = "stored-key"
+        monkeypatch.setattr(auth_store, "get", lambda name: record if name == CLOUD_API_KEY_PROVIDER else None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() == ("auth_token_comfy_org", "forwarded-bearer")
+
+    def test_a_live_session_outranks_the_forwarded_bearer(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN", "forwarded-bearer")
+        from comfy_cli.auth import store as auth_store
+        from comfy_cli.cloud import oauth
+
+        session = MagicMock()
+        session.is_expired.return_value = False
+        session.access_token = "live-session"
+        session.base_url = "https://cloud.comfy.org"
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: session)
+        assert _resolve_partner_credential() == ("auth_token_comfy_org", "live-session")
+
+    def test_the_forwarded_bearer_outranks_the_cloud_api_key(self, monkeypatch: pytest.MonkeyPatch):
+        """Same order the `purpose="cloud"` chain uses: bearer, then env key."""
+        monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN", "forwarded-bearer")
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "cloud-key")
+        from comfy_cli.auth import store as auth_store
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() == ("auth_token_comfy_org", "forwarded-bearer")
+
     def _no_session(self, monkeypatch: pytest.MonkeyPatch):
         from comfy_cli.cloud import oauth
 
         monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: None)
+
+    def test_prefers_the_partner_env_var_over_the_cloud_one(self, monkeypatch: pytest.MonkeyPatch):
+        """One resolver now serves both submit paths, and each had read only one
+        of the two vars: local read ``COMFY_CLOUD_API_KEY``, ``deploy run`` read
+        ``COMFY_API_KEY``. Both are honoured so neither path loses a credential
+        it already worked with, and the partner-purpose var — the one ComfyUI
+        itself reads — wins when both are set."""
+        monkeypatch.setenv("COMFY_API_KEY", "partner-key")
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "cloud-key")
+        from comfy_cli.auth import store as auth_store
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() == ("api_key_comfy_org", "partner-key")
+
+    def test_uses_the_partner_env_var_alone(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("COMFY_API_KEY", "  partner-key  ")
+        from comfy_cli.auth import store as auth_store
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() == ("api_key_comfy_org", "partner-key")
+
+    def test_the_cloud_env_key_outranks_the_stored_key(self, monkeypatch: pytest.MonkeyPatch):
+        """An env var is a value the caller set for THIS invocation; the stored
+        key is machine state. Resolving the partner env var and the stored key
+        together — as one `find_api_key` call does — lets the stored key win over
+        the OTHER env var, and the run then authenticates as, and bills, an
+        account the caller did not choose."""
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "invocation-key")
+        from comfy_cli.auth import store as auth_store
+        from comfy_cli.target import CLOUD_API_KEY_PROVIDER
+
+        record = MagicMock()
+        record.key = "stored-key"
+        monkeypatch.setattr(auth_store, "get", lambda name: record if name == CLOUD_API_KEY_PROVIDER else None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() == ("api_key_comfy_org", "invocation-key")
+
+    def test_the_stored_key_is_used_when_no_env_var_is_set(self, monkeypatch: pytest.MonkeyPatch):
+        from comfy_cli.auth import store as auth_store
+        from comfy_cli.target import CLOUD_API_KEY_PROVIDER
+
+        record = MagicMock()
+        record.key = "stored-key"
+        monkeypatch.setattr(auth_store, "get", lambda name: record if name == CLOUD_API_KEY_PROVIDER else None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() == ("api_key_comfy_org", "stored-key")
+
+    def test_a_whitespace_only_cloud_key_is_absent_not_a_credential(self, monkeypatch: pytest.MonkeyPatch):
+        """``find_api_key(purpose="cloud")`` passes ambient values verbatim, so
+        padding would otherwise reach a partner header."""
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "   ")
+        from comfy_cli.auth import store as auth_store
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() is None
 
     def test_uses_env_var_when_no_session(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("COMFY_CLOUD_API_KEY", "env-key-123")

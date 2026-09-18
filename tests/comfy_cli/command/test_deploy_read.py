@@ -62,7 +62,7 @@ def _install_clients(monkeypatch, builder: FakeBuilder, client: ReadDeploy) -> N
 
 
 def _invoke_json(command: str, *args: str):
-    return CliRunner(mix_stderr=False).invoke(app, ["--json", "deploy", command, *args])
+    return CliRunner().invoke(app, ["--json", "deploy", command, *args])
 
 
 def _envelope(result) -> JsonObject:
@@ -145,7 +145,7 @@ def test_missing_spec_deployment_maps_to_deploy_not_found_with_remedy(
 
 def test_logs_rejects_follow_as_an_unknown_typer_option() -> None:
     # Given / When
-    result = CliRunner(mix_stderr=False).invoke(app, ["deploy", "logs", "--follow"])
+    result = CliRunner().invoke(app, ["deploy", "logs", "--follow"])
 
     # Then
     assert result.exit_code != 0
@@ -159,7 +159,7 @@ def test_logs_always_renders_capture_vintage(monkeypatch) -> None:
     _install_clients(monkeypatch, FakeBuilder(), client)
 
     # When
-    result = CliRunner(mix_stderr=False).invoke(
+    result = CliRunner().invoke(
         app,
         ["--no-json", "deploy", "logs", "--deployment", "dep-read"],
         env={"COLUMNS": "400"},
@@ -178,7 +178,7 @@ def test_unprobed_logs_explicitly_say_not_captured_yet(monkeypatch) -> None:
     _install_clients(monkeypatch, FakeBuilder(), client)
 
     # When
-    result = CliRunner(mix_stderr=False).invoke(
+    result = CliRunner().invoke(
         app,
         ["--no-json", "deploy", "logs", "--deployment", "dep-read"],
         env={"COLUMNS": "400"},
@@ -195,7 +195,7 @@ def test_events_render_in_server_order_without_false_complete_framing(monkeypatc
     _install_clients(monkeypatch, FakeBuilder(), client)
 
     # When
-    result = CliRunner(mix_stderr=False).invoke(
+    result = CliRunner().invoke(
         app,
         ["--no-json", "deploy", "events", "--deployment", "dep-read"],
         env={"COLUMNS": "400"},
@@ -228,7 +228,7 @@ def test_both_output_modes_reject_the_same_malformed_logs(payload, output_flag, 
     _install_clients(monkeypatch, FakeBuilder(), client)
 
     # When
-    result = CliRunner(mix_stderr=False).invoke(
+    result = CliRunner().invoke(
         app,
         [output_flag, "deploy", "logs", "--deployment", "dep-read"],
         env={"COLUMNS": "400"},
@@ -264,7 +264,7 @@ def test_both_output_modes_reject_the_same_malformed_events(payload, output_flag
     _install_clients(monkeypatch, FakeBuilder(), client)
 
     # When
-    result = CliRunner(mix_stderr=False).invoke(
+    result = CliRunner().invoke(
         app,
         [output_flag, "deploy", "events", "--deployment", "dep-read"],
         env={"COLUMNS": "400"},

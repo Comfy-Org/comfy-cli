@@ -96,19 +96,32 @@ def test_envelope_shape_on_success():
     assert env["where"] is None
 
 
-def test_emit_ok_false_carries_data():
+def test_emit_ok_false_carries_data_and_names_the_verdict():
     """`validate` on an invalid workflow emits its structured payload as data
-    but with ok=False, so the envelope agrees with the exit code."""
+    AND an error block, so the envelope agrees with the exit code and a consumer
+    branching on `error.code` can read the failure it is being told about."""
     stream = io.StringIO()
     r = _resolve()
     r.mode = OutputMode.JSON
     r.machine_stream = stream
     r.command = "validate"
-    r.emit({"valid": False, "error_count": 2}, ok=False)
+    verdict = {"code": "workflow_unknown_nodes", "message": "workflow has 2 validation error(s)"}
+    r.emit({"valid": False, "error_count": 2}, ok=False, error=verdict)
     env = json.loads(stream.getvalue().strip())
     assert env["ok"] is False
     assert env["data"] == {"valid": False, "error_count": 2}
-    assert env["error"] is None  # the verdict rides in data, not error
+    assert env["error"] == verdict
+
+
+def test_emit_refuses_a_not_ok_envelope_with_no_error():
+    """`{"ok": false, "error": null}` says a command failed and refuses to say
+    how — unreadable by construction for every consumer, which all branch on
+    `error.code`. Three commands emitted it before this guard."""
+    r = _resolve()
+    r.mode = OutputMode.JSON
+    r.machine_stream = io.StringIO()
+    with pytest.raises(AssertionError, match="must carry an error block"):
+        r.emit({"valid": False}, ok=False)
 
 
 def test_envelope_shape_on_error():

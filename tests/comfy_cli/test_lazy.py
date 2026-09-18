@@ -15,7 +15,6 @@ import sys
 import types
 from unittest.mock import patch
 
-import click
 import typer
 from typer.testing import CliRunner
 
@@ -133,7 +132,7 @@ def test_group_module_is_imported_only_when_looked_up(monkeypatch):
     assert "late" in group.list_commands(None)  # listing must not import
     _fake_module(monkeypatch, "_lz_missing", app=_sub_app("late"))
     cmd = group.get_command(None, "late")
-    assert isinstance(cmd, click.Group)
+    assert hasattr(cmd, "commands"), cmd
     assert cmd.name == "late"
     assert group.get_command(None, "late") is cmd, "built once, then cached"
     assert group.get_command(None, "nope") is None

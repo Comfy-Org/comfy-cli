@@ -705,6 +705,7 @@ class TestMissMarker:
             "bundle_version": "0.1.0-fixture",
             "stale": False,
             "as_of": k["as_of"],
+            "compiled_at": None,
             "hit_ids": [],
             "zero_hit": False,
             "uncurated_queries": ["faceswap"],
