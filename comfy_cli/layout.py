@@ -13,7 +13,7 @@ ROW_GAP = 40.0
 NODE_W = 240.0
 HEADER_H = 30.0
 SLOT_H = 20.0
-# Matches LiteGraph's NODE_WIDGET_HEIGHT (LiteGraphGlobal.ts:64). Was 24, which
+# Matches LiteGraph's NODE_WIDGET_HEIGHT (LiteGraphGlobal.ts). Was 24, which
 # over-measured every widget row and compounded on widget-heavy nodes.
 WIDGET_H = 20.0
 PAD_H = 12.0
@@ -24,7 +24,7 @@ _MARGIN = 10.0
 _GUARD = 1000  # bounded collision-shift loop
 _ORDER_SWEEPS = 4  # barycentre passes for crossing reduction; converges well before this
 
-# LiteGraph's NODE_TITLE_HEIGHT (LiteGraphGlobal.ts:61). A node's `pos` is the top-left
+# LiteGraph's NODE_TITLE_HEIGHT (LiteGraphGlobal.ts). A node's `pos` is the top-left
 # of its BODY; the title bar is drawn ABOVE it, at `pos[1] - NODE_TITLE_HEIGHT`
 # (LGraphCanvas.ts:6624). Every rectangle this module reasons about must therefore
 # include that band, or the collision check is blind to the top 30px of every node --
@@ -32,6 +32,11 @@ _ORDER_SWEEPS = 4  # barycentre passes for crossing reduction; converges well be
 # other. The frontend's own arrange is title-aware (useArrangeNodes.ts:81); this is the
 # same correction on the CLI side.
 TITLE_H = 30.0
+
+# The citations above and below name upstream FILES, not line numbers: the line numbers
+# these comments originally carried were already stale by the time they landed (they said
+# LiteGraphGlobal.ts:61/64/65/71; the declarations are nowhere near). Every constant in
+# this module is checked against upstream BY NAME by scripts/check_litegraph_parity.py.
 
 
 # --- width model, ported from LiteGraph's own computeSize (LGraphNode.ts:2020-2072) ---
@@ -45,13 +50,17 @@ TITLE_H = 30.0
 # falls back to `font_size * text.length * 0.6` (its compute_text_size), which is exactly
 # what a CLI can compute. It is NOT pixel-identical to a browser with real font metrics —
 # proportional fonts vary per glyph — but it tracks content instead of ignoring it.
-NODE_TEXT_SIZE = 14.0  # LiteGraph NODE_TEXT_SIZE (LiteGraphGlobal.ts:71)
-LG_NODE_WIDTH = 140.0  # LiteGraph NODE_WIDTH (LiteGraphGlobal.ts:65)
+NODE_TEXT_SIZE = 14.0  # LiteGraph NODE_TEXT_SIZE (LiteGraphGlobal.ts)
+LG_NODE_WIDTH = 140.0  # LiteGraph NODE_WIDTH (LiteGraphGlobal.ts)
 _CHAR_W = 0.6  # LiteGraph's no-canvas glyph-width fallback
 # Horizontal room a widget row needs beyond its label, from BaseWidget: a minimum value
 # width of 42, plus a margin of 15, an arrow margin of 6 and an arrow width of 10 on each
-# side (BaseWidget.ts:100-106).
-_WIDGET_PADDING = 42.0 + 2.0 * (15.0 + 6.0 + 10.0)
+# side (BaseWidget.ts).
+_WIDGET_MIN_VALUE_WIDTH = 42.0
+_WIDGET_MARGIN = 15.0
+_WIDGET_ARROW_MARGIN = 6.0
+_WIDGET_ARROW_WIDTH = 10.0
+_WIDGET_PADDING = _WIDGET_MIN_VALUE_WIDTH + 2.0 * (_WIDGET_MARGIN + _WIDGET_ARROW_MARGIN + _WIDGET_ARROW_WIDTH)
 
 
 # LiteGraph does not stack widget rows flush. `LGraphNode.computeSize` accumulates
