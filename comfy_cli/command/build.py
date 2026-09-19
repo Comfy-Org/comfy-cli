@@ -2527,6 +2527,21 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None,
             body = (e.read(_BUILDER_ERROR_READ) or b"").decode("utf-8", "replace")
         except Exception:
             pass
+        # A 401 means the sign-in itself was refused, and the client has already
+        # tried a refresh, so the only way forward is signing in again.
+        if e.code == 401:
+            renderer.error(
+                code="build_not_signed_in",
+                message="the builder refused the sign-in token (401)",
+                # A token passed in through the environment is never refreshed, and
+                # signing in again would not replace it, so it has to be swapped.
+                hint=(
+                    "replace COMFY_BUILDER_TOKEN with a fresh Cloud JWT"
+                    if os.environ.get("COMFY_BUILDER_TOKEN")
+                    else "run `comfy cloud login` first"
+                ),
+            )
+            return
         if e.code == 403 and "FEATURE_NOT_ENABLED" in body:
             renderer.error(
                 code="build_not_enabled",

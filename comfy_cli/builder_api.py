@@ -17,7 +17,9 @@ Field names match services/comfy-builder/openapi.yaml exactly:
 
 from __future__ import annotations
 
+import urllib.error
 import urllib.parse
+from dataclasses import replace
 from pathlib import Path
 
 import requests
@@ -62,6 +64,9 @@ class BuilderClient:
             path_prefix="/v1",
             auth_token=token,
         )
+        # Only a client built from the stored sign-in may swap its token; one
+        # handed a token directly (COMFY_BUILDER_TOKEN) keeps it and lets a 401 surface.
+        self._refreshes_on_401 = False
 
     @classmethod
     def from_session(cls, base_url: str) -> BuilderClient:
@@ -70,12 +75,30 @@ class BuilderClient:
         session = credentials.get_session(refresh=True)
         if not session or not session.access_token:
             raise BuilderAuthError("not signed in — run `comfy cloud login`")
-        return cls(base_url, session.access_token)
+        client = cls(base_url, session.access_token)
+        client._refreshes_on_401 = True
+        return client
+
+    def _send(self, url: str, **kwargs) -> tuple[int, dict | list | None]:
+        """Every builder request goes through here, so a long wait survives its token expiring.
+
+        The access token lasts fifteen minutes. After a 401 a client built from
+        the stored sign-in forces the shared refresh and sends the request once
+        more; the server refuses before acting, so that is safe for every method.
+        """
+        try:
+            return request_json(url, self.target, **kwargs)
+        except urllib.error.HTTPError as error:
+            if error.code != 401 or not self._refreshes_on_401:
+                raise
+            token = credentials.refreshed_access_token(self.target.auth_token)
+            if token is None:
+                raise
+            self.target = replace(self.target, auth_token=token)
+            return request_json(url, self.target, **kwargs)
 
     def _post(self, parts: tuple[str, ...], body: dict, *, timeout: float = _POST_TIMEOUT) -> dict:
-        _, parsed = request_json(
-            self.target.url(*parts), self.target, method="POST", body=body, max_bytes=_MAX_JSON, timeout=timeout
-        )
+        _, parsed = self._send(self.target.url(*parts), method="POST", body=body, max_bytes=_MAX_JSON, timeout=timeout)
         return parsed or {}
 
     def create_blob(self, kind: str, filename: str, sha256: str, size_bytes: int) -> tuple[str, str | None]:
@@ -149,9 +172,7 @@ class BuilderClient:
 
     def get_release(self, release_id: str) -> dict:
         """GET /v1/releases/{id}: poll a release's build status."""
-        _, parsed = request_json(
-            self.target.url("releases", release_id), self.target, method="GET", max_bytes=_MAX_JSON
-        )
+        _, parsed = self._send(self.target.url("releases", release_id), method="GET", max_bytes=_MAX_JSON)
         return parsed or {}
 
     def resolve_models(self, filenames: list[str]) -> list[dict]:
@@ -192,7 +213,7 @@ class BuilderClient:
             query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
             if query:
                 url = f"{url}?{query}"
-        _, parsed = request_json(url, self.target, method="GET", max_bytes=max_bytes)
+        _, parsed = self._send(url, method="GET", max_bytes=max_bytes)
         return parsed or {}
 
     def list_builds(self) -> list[dict]:
@@ -235,7 +256,7 @@ class BuilderClient:
         """DELETE /v1/builds/{id} -> soft-delete. Idempotent (204 even when
         already gone); the builder returns 409 while a deployment still runs one of
         its releases."""
-        request_json(self.target.url("builds", build_id), self.target, method="DELETE", max_bytes=_MAX_JSON)
+        self._send(self.target.url("builds", build_id), method="DELETE", max_bytes=_MAX_JSON)
 
     def delete_release(self, release_id: str) -> None:
         """DELETE /v1/releases/{id} -> stamp the release deleted, freeing the slot
@@ -259,15 +280,14 @@ class BuilderClient:
         if not release_id or set(release_id) == {"."}:
             raise ValueError("release_id must name one release, not an empty or dot-only path segment")
         encoded_id = urllib.parse.quote(release_id, safe="")
-        request_json(self.target.url("releases", encoded_id), self.target, method="DELETE", max_bytes=_MAX_JSON)
+        self._send(self.target.url("releases", encoded_id), method="DELETE", max_bytes=_MAX_JSON)
 
     def validate_build(self, build_id: str) -> dict:
         """POST /v1/builds/{id}/validate -> dry-run resolve the stored
         definition (no build). 200 with a ValidateResult when resolvable; the
         builder returns 400 with the issues when the definition has problems."""
-        _, parsed = request_json(
+        _, parsed = self._send(
             self.target.url("builds", build_id, "validate"),
-            self.target,
             method="POST",
             max_bytes=_MAX_JSON,
         )
@@ -295,9 +315,8 @@ class BuilderClient:
             body["name"] = name
         if description is not None:
             body["description"] = description
-        _, parsed = request_json(
+        _, parsed = self._send(
             self.target.url("builds", build_id),
-            self.target,
             method="PATCH",
             body=body,
             max_bytes=_MAX_JSON,
