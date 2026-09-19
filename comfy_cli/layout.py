@@ -145,11 +145,40 @@ def _text_w(text: str | None) -> float:
     return NODE_TEXT_SIZE * len(text or "") * _CHAR_W
 
 
+# Minimum rendered width, measured rather than derived. LiteGraph's own formula is
+# `NODE_WIDTH * (1.5 if widgets else 1.0)` = 210, which no widget-bearing node actually
+# renders at: across 27 classes measured in a real browser, every node carrying a widget
+# renders at 270 or wider, and every node carrying a MULTILINE widget renders at 400 or
+# wider. Fourteen of fourteen non-multiline widget nodes land at exactly 270 when their
+# content is narrower, and seven of seven multiline nodes at exactly 400 -- the shape of a
+# floor, not a fixed width (KSamplerAdvanced 312, CheckpointLoader 396.9, ControlNetApply
+# 317.9 all exceed it on content).
+#
+# Direction matters more than precision here. Under-estimating width is what produces the
+# overlap users report: the placer puts the next column a node-width away and the real node
+# reaches past it. Over-estimating only wastes canvas, which nobody has ever filed.
+#
+# Known over-estimate: `Note` and `MarkdownNote` carry a multiline widget but render at 140
+# because they are annotation nodes with no slots. They get floored to 400 here and will be
+# over-spaced. Accepted deliberately -- see the direction argument above.
+WIDGET_MIN_WIDTH = 270.0
+MULTILINE_MIN_WIDTH = 400.0
+
+
+def _min_width(has_widgets: bool, n_multiline: int = 0) -> float:
+    if n_multiline > 0:
+        return MULTILINE_MIN_WIDTH
+    if has_widgets:
+        return WIDGET_MIN_WIDTH
+    return LG_NODE_WIDTH
+
+
 def estimate_width(
     title: str | None = None,
     input_labels: tuple[str, ...] = (),
     output_labels: tuple[str, ...] = (),
     widget_labels: tuple[str, ...] = (),
+    n_multiline: int = 0,
 ) -> float:
     """LiteGraph's computeSize width, using its own no-canvas text metric."""
     title_width = TITLE_H + _text_w(title) + TITLE_H * 0.33
@@ -158,7 +187,7 @@ def estimate_width(
     widget_width = max((_text_w(t) for t in widget_labels), default=0.0)
     if widget_width:
         widget_width += _WIDGET_PADDING
-    min_width = LG_NODE_WIDTH * (1.5 if widget_labels else 1.0)
+    min_width = _min_width(bool(widget_labels), n_multiline)
     centre_padding = 5.0 if (input_width and output_width) else 0.0
     slots_width = input_width + output_width + 2.0 * SLOT_H + centre_padding
     return max(slots_width, widget_width, title_width, min_width)
@@ -190,7 +219,7 @@ def estimate_size(
     if title is None and not (input_labels or output_labels or widget_labels):
         w = NODE_W
     else:
-        w = estimate_width(title, input_labels, output_labels, widget_labels)
+        w = estimate_width(title, input_labels, output_labels, widget_labels, n_multiline)
     return [w, max(h, MIN_H)]
 
 
