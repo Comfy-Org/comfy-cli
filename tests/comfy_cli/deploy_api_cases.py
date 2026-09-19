@@ -61,7 +61,7 @@ WIRES = [
         args=("dep-1",),
         max_bytes=MAX_LOG_JSON,
     ),
-    Wire("compute", "get_compute_catalog", "GET", f"{BASE}/v1/compute-catalog"),
+    Wire("compute", "get_compute_catalog", "GET", f"{BASE}/v1/compute-catalog?levels=all"),
 ]
 
 

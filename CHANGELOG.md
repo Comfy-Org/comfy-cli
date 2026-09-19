@@ -45,6 +45,14 @@ history.
 
 ### Fixed
 
+- `comfy deploy refs compute` and the `comfy deploy up` pickers now list every
+  location the deploy service sells in, not only its datacenters, so B200, H100
+  and H200, which are sold only under `us`, can be picked. The table gains
+  `level` and `parent` columns, the region picker names each location's level,
+  and `refs compute --json` now carries the wider rows too, so a script reading
+  its first row gets `anywhere` rather than a datacenter. The region picker lists
+  the broadest location first, so accepting its first choice now creates at
+  `anywhere`.
 - `comfy templates check` returns an error envelope instead of a traceback when
   the gallery or workflow fetch gets a non-200 status or an over-cap body, or
   when a model folder listing is over the size cap. It also percent-encodes the
