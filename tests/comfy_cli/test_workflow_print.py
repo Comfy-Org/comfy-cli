@@ -50,6 +50,27 @@ def test_sd15_golden_source(sd15_workflow, sd15_graph):
     assert len(res.skipped) == 4
 
 
+@pytest.mark.xfail(
+    reason="render_py never reads workflow['groups'], so canvas group titles don't reach the rendered "
+    "source; the in-app agent's canvas read can't see groups that are visibly drawn. Un-xfail once "
+    "render_py renders groups.",
+    strict=True,
+)
+def test_sd15_groups_are_visible_in_the_source(sd15_workflow, sd15_graph):
+    # The in-app agent's canvas read (this renderer) enumerates nodes and
+    # links but drops canvas groups entirely, so an agent asked "are there
+    # any groups on the canvas?" has no way to answer correctly even when
+    # one is drawn on screen with a title bar. `render_py` never reads
+    # `workflow["groups"]` at all (see render_py's top). The bundled sd15
+    # fixture already carries three real, titled groups; none of them
+    # reach the rendered source.
+    groups = sd15_workflow["groups"]
+    assert groups, "fixture must define at least one group to prove this"
+    src = render_py(sd15_workflow, sd15_graph).source
+    for group in groups:
+        assert group["title"] in src
+
+
 def test_sd15_notes_print_as_comments(sd15_workflow, sd15_graph):
     src = render_py(sd15_workflow, sd15_graph).source
     assert '# note 11 "Note: Model link": [Tutorial](https://docs.comfy.org/tutorials/basic/text-to-image) (+' in src
