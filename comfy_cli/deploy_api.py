@@ -202,4 +202,6 @@ class DeployClient:
         )
 
     def get_compute_catalog(self) -> dict:
-        return self._get("compute", ("compute-catalog",))
+        # Without levels=all the service answers with datacenters alone, and a GPU
+        # sold only on a wider location, such as every Modal card, never appears.
+        return self._get("compute", ("compute-catalog",), {"levels": "all"})
