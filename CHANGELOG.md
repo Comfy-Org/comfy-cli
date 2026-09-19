@@ -58,7 +58,9 @@ history.
   `comfy deploy status --watch`) no longer fails once the sign-in token it
   started with expires. The builder and deploy clients now refresh the stored
   sign-in after a 401 and retry the request once; a token passed through
-  `COMFY_BUILDER_TOKEN` is never swapped.
+  `COMFY_BUILDER_TOKEN` is never swapped. A build command the builder still
+  refuses now reports `build_not_signed_in` with the `comfy cloud login` hint
+  rather than a bare `build_builder_error`.
 - `comfy templates check` returns an error envelope instead of a traceback when
   the gallery or workflow fetch gets a non-200 status or an over-cap body, or
   when a model folder listing is over the size cap. It also percent-encodes the

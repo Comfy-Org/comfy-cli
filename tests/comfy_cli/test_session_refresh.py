@@ -174,3 +174,63 @@ def test_a_client_handed_a_token_directly_never_swaps_it(monkeypatch, build) -> 
     # Then
     assert server.tokens == ["injected"]
     assert sessions.forced == 0
+
+
+class _HeaderServer(_Server):
+    def __init__(self, valid: set[str]) -> None:
+        super().__init__(valid)
+        self.headers: list[dict | None] = []
+
+    def __call__(self, url, target, **kwargs):
+        self.headers.append(kwargs.get("headers"))
+        return super().__call__(url, target, **kwargs)
+
+
+def test_the_retried_create_carries_the_same_idempotency_key(monkeypatch) -> None:
+    # Given
+    server = _HeaderServer(valid={"fresh"})
+    _install(monkeypatch, server, _Sessions(first="expired", after="fresh"))
+    client = DeployClient.from_session(_DEPLOY_URL)
+
+    # When
+    client.create_deployment("r1", {"gpuClass": "b200", "region": "us"}, idempotency_key="key-1")
+
+    # Then
+    assert server.headers == [{"Idempotency-Key": "key-1"}, {"Idempotency-Key": "key-1"}]
+
+
+def test_a_refresh_that_signs_the_user_out_surfaces_the_401_as_not_signed_in(monkeypatch) -> None:
+    # Given
+    server = _Server(valid=set())
+    _install(monkeypatch, server, _Sessions(first="expired", after=None))
+    client = DeployClient.from_session(_DEPLOY_URL)
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        client.get_deployment("dep-1")
+
+    # Then
+    assert exc_info.value.code == "deploy_not_signed_in"
+    assert server.tokens == ["expired"]
+
+
+def test_a_build_command_refused_after_the_refresh_says_to_sign_in_again(monkeypatch) -> None:
+    # Given
+    import json
+
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    server = _Server(valid=set())
+    _install(monkeypatch, server, _Sessions(first="expired", after=None))
+    monkeypatch.delenv("COMFY_BUILDER_TOKEN", raising=False)
+
+    # When
+    result = CliRunner().invoke(app, ["--json", "build", "ls"], env={"COMFY_BUILDER_URL": _BUILDER_URL})
+
+    # Then
+    envelope = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
+    assert result.exit_code == 1
+    assert envelope["error"]["code"] == "build_not_signed_in"
+    assert "comfy cloud login" in (envelope["error"]["hint"] or "")
