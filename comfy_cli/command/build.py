@@ -1855,6 +1855,13 @@ def push_cmd(
         bool,
         typer.Option("--force", help="Overwrite remote changes, retrying a bounded GET-then-PATCH."),
     ] = False,
+    release_despite_warnings: Annotated[
+        bool,
+        typer.Option(
+            "--release-despite-warnings",
+            help="With --release, cut the release even though the save warned about a model link.",
+        ),
+    ] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Compute uploads locally; send no HTTP requests.")] = False,
     models_dir: Annotated[
         str | None,
@@ -1873,6 +1880,14 @@ def push_cmd(
             message="--release cuts a release from a real push, and --dry-run sends nothing.",
             hint="drop --dry-run to cut the release, or drop --release to preview the push",
             details={"conflict": ["--release", "--dry-run"]},
+        )
+        raise typer.Exit(code=1)
+    if release_despite_warnings and not release:
+        renderer.error(
+            code="build_missing_input",
+            message="--release-despite-warnings applies only to the release --release cuts.",
+            hint="pass --release to cut a release despite the save's model link warnings",
+            details={"missing": ["--release"]},
         )
         raise typer.Exit(code=1)
     targets = _parse_release_targets(renderer, target or ())
@@ -1991,8 +2006,14 @@ def push_cmd(
     name = str(spec["name"])
     description = str(spec["description"])
     if target_id is None:
-        target_id = _builder_call(renderer, lambda: client.create_build(name, wire_definition, description))
-        saved = _builder_call(renderer, lambda: client.get_build(target_id))
+        created_build = _builder_call(
+            renderer, lambda: client.create_build_response(name, wire_definition, description)
+        )
+        target_id = created_build["id"]
+        saved = {
+            **_builder_call(renderer, lambda: client.get_build(target_id)),
+            "warnings": created_build.get("warnings"),
+        }
         created = True
     elif force:
         saved = _force_update(renderer, client, target_id, wire_definition, name, description)
@@ -2028,7 +2049,22 @@ def push_cmd(
             "deduped": len(uploads) - uploaded,
         }
     )
+    warnings = _save_warnings(saved)
+    for warning in warnings:
+        renderer.warn(f"{warning['field']}: {warning['reason']}")
+    if warnings:
+        payload["warnings"] = warnings
     release_summary: dict[str, str] | None = None
+    held = [warning for warning in warnings if _MODEL_LINK_FIELD.fullmatch(warning["field"])]
+    if release and held and not release_despite_warnings:
+        renderer.error(
+            code="build_release_held",
+            message=f"the save warned about {len(held)} model link(s) a deployment could not download, "
+            "so no release was cut: " + ", ".join(warning["field"] for warning in held),
+            hint="fix the model links and push again, or push with --release --release-despite-warnings to cut anyway",
+            details={"id": target_id, "syncedRevision": saved["updatedAt"], "warnings": warnings},
+        )
+        raise typer.Exit(code=1)
     if release:
         requested = [item.as_wire() for item in targets]
         release_id, status_url = _builder_call(
@@ -2048,6 +2084,25 @@ def push_cmd(
             renderer.print(f"  release: {release_summary['releaseId']}")
             renderer.print(f"  status:  {release_summary['statusUrl']}")
     renderer.emit(payload, command="build push", changed=True)
+
+
+# A warning at this field is comfy-builder's for a model link a deployment could
+# not download; it is the whole contract a held release rests on. Any other
+# field, such as pipDependencies, is printed and never holds a release.
+_MODEL_LINK_FIELD = re.compile(r"models\[\d+\]\.sourceUri")
+
+
+def _save_warnings(saved: dict) -> list[dict[str, str]]:
+    """The warnings a save returned, as field and reason, dropping anything the
+    builder sent in another shape rather than failing a push that landed."""
+    raw = saved.get("warnings")
+    if not isinstance(raw, list):
+        return []
+    return [
+        {"field": item["field"], "reason": item["reason"]}
+        for item in raw
+        if isinstance(item, dict) and isinstance(item.get("field"), str) and isinstance(item.get("reason"), str)
+    ]
 
 
 def _prompt_build_id(renderer, client) -> str | None:
