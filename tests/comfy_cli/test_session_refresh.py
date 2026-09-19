@@ -234,3 +234,29 @@ def test_a_build_command_refused_after_the_refresh_says_to_sign_in_again(monkeyp
     assert result.exit_code == 1
     assert envelope["error"]["code"] == "build_not_signed_in"
     assert "comfy cloud login" in (envelope["error"]["hint"] or "")
+
+
+def test_a_refused_injected_token_says_to_replace_it_not_to_sign_in(monkeypatch) -> None:
+    # Given
+    import json
+
+    from typer.testing import CliRunner
+
+    from comfy_cli.cmdline import app
+
+    server = _Server(valid=set())
+    _install(monkeypatch, server, _Sessions(first="stored", after="stored-refreshed"))
+
+    # When
+    result = CliRunner().invoke(
+        app,
+        ["--json", "build", "ls"],
+        env={"COMFY_BUILDER_URL": _BUILDER_URL, "COMFY_BUILDER_TOKEN": "injected"},
+    )
+
+    # Then
+    envelope = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
+    assert envelope["error"]["code"] == "build_not_signed_in"
+    assert "COMFY_BUILDER_TOKEN" in envelope["error"]["hint"]
+    assert "comfy cloud login" not in envelope["error"]["hint"]
+    assert server.tokens == ["injected"]
