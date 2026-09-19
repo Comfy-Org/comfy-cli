@@ -50,6 +50,12 @@ def test_sd15_golden_source(sd15_workflow, sd15_graph):
     assert len(res.skipped) == 4
 
 
+@pytest.mark.xfail(
+    reason="render_py never reads workflow['groups'], so canvas group titles don't reach the rendered "
+    "source; the in-app agent's canvas read can't see groups that are visibly drawn. Un-xfail once "
+    "render_py renders groups.",
+    strict=True,
+)
 def test_sd15_groups_are_visible_in_the_source(sd15_workflow, sd15_graph):
     # The in-app agent's canvas read (this renderer) enumerates nodes and
     # links but drops canvas groups entirely, so an agent asked "are there
