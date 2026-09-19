@@ -133,8 +133,9 @@ comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
   Take the values from `comfy deploy refs compute`, which lists every location
   with its level (a whole country such as `us` down to one datacenter), its
   parent, its GPU classes, VRAM and availability. A wider location is a valid
-  `--region`, and B200, H100 and H200 are sold only there. Do not invent a class
-  name.
+  `--region`, and some GPU classes are sold only on one. A blank availability
+  means the service gave no hint for that row, not that it has no stock. Do not
+  invent a class name.
 - **Availability is volatile, so re-read `refs compute` immediately before `up`,
   never from an earlier plan.** A region offering RTX PRO 6000 at planning time
   had none an hour later, and `up` refused with `deploy_compute_unavailable`. The

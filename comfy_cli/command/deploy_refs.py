@@ -86,7 +86,9 @@ def _render_pretty(renderer: Renderer, regions: list[JsonObject]) -> None:
     rows.sort(key=lambda row: (-row[0], row[1], row[5]))
     table = Table(show_header=True, header_style="bold")
     for column in ("region", "region label", "level", "parent", "gpu class", "gpu label", "VRAM (GB)", "availability"):
-        table.add_column(column)
+        # The region and gpu class cells are what a user copies into --region and
+        # --gpu, so a narrow terminal wraps them rather than cutting them short.
+        table.add_column(column, overflow="fold")
     for _, *cells in rows:
         table.add_row(*cells)
     if rows:
