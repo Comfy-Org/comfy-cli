@@ -87,7 +87,7 @@ jobs:
       # Omitting it rejects the run outright ("requesting 'actions: read', but is
       # only allowed 'actions: none'").
       actions: read
-    uses: Comfy-Org/github-workflows/.github/workflows/groom.yml@23c7b69392d08e57f545d393faa391e43cf4dd55 # main @ 23c7b69
+    uses: Comfy-Org/github-workflows/.github/workflows/groom.yml@a404fd4a59dcd3add76200e68a26d1f6c548dc62 # main @ 23c7b69
     with:
       # File as cloud-code-bot (App token) rather than github-actions[bot]. Absent
       # APP_ID degrades to github-actions[bot] instead of failing.
