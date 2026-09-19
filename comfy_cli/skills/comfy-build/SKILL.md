@@ -291,8 +291,9 @@ pass `--yes` first and disclose after.
 
 **`build_release_held` asks the same way, with its own option.** `comfy build push
 --release` saved the build but cut no release, because the save warned that a
-deployment could not download a model link. Read `details.warnings`, tell the user
-which links fail and how, and pass `--release-despite-warnings` only after they say
+deployment could not download a model link. Under `--json` the error carries them
+in `details.warnings`; in text mode the tool printed each just above it. Tell the
+user which links fail and how, and pass `--release-despite-warnings` only after they say
 yes; a fixed link needs no option. `comfy build release create` cuts without this
 check.
 
