@@ -78,9 +78,6 @@ class RecordingBuilder:
         self.calls.append({"method": "upload_blob", "url": upload_url})
         self.uploaded.append(path.read_bytes())
 
-    def create_build(self, name: str, definition: JsonObject, description: str | None = None) -> str:
-        return str(self.create_build_response(name, definition, description)["id"])
-
     def create_build_response(self, name: str, definition: JsonObject, description: str | None = None) -> JsonObject:
         revision = self._revision()
         self.remote_revisions[self.created_id] = revision

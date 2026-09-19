@@ -2050,21 +2050,12 @@ def push_cmd(
         }
     )
     warnings = _save_warnings(saved)
-    for warning in warnings:
-        renderer.warn(f"{warning['field']}: {warning['reason']}")
     if warnings:
         payload["warnings"] = warnings
+    _hold_release_on_link_warnings(
+        renderer, warnings, target_id, saved["updatedAt"], release and not release_despite_warnings
+    )
     release_summary: dict[str, str] | None = None
-    held = [warning for warning in warnings if _MODEL_LINK_FIELD.fullmatch(warning["field"])]
-    if release and held and not release_despite_warnings:
-        renderer.error(
-            code="build_release_held",
-            message=f"the save warned about {len(held)} model link(s) a deployment could not download, "
-            "so no release was cut: " + ", ".join(warning["field"] for warning in held),
-            hint="fix the model links and push again, or push with --release --release-despite-warnings to cut anyway",
-            details={"id": target_id, "syncedRevision": saved["updatedAt"], "warnings": warnings},
-        )
-        raise typer.Exit(code=1)
     if release:
         requested = [item.as_wire() for item in targets]
         release_id, status_url = _builder_call(
@@ -2103,6 +2094,31 @@ def _save_warnings(saved: dict) -> list[dict[str, str]]:
         for item in raw
         if isinstance(item, dict) and isinstance(item.get("field"), str) and isinstance(item.get("reason"), str)
     ]
+
+
+def _hold_release_on_link_warnings(
+    renderer, warnings: list[dict[str, str]], build_id: str, revision: str, cutting: bool
+) -> None:
+    """Print every warning the save returned, and refuse the cut a push asked for
+    while one is about a model link a deployment could not download. The build is
+    already saved and the spec already carries its revision, so a second push with
+    the go-ahead option cuts without saving anything twice."""
+    for warning in warnings:
+        renderer.warn(f"{warning['field']}: {warning['reason']}")
+    held = [warning for warning in warnings if _MODEL_LINK_FIELD.fullmatch(warning["field"])]
+    if not cutting or not held:
+        return
+    details: dict = {"id": build_id, "syncedRevision": revision}
+    # Text mode has already printed each warning above; only JSON carries them again.
+    if not renderer.is_pretty():
+        details["warnings"] = warnings
+    renderer.error(
+        code="build_release_held",
+        message=f"saved build {build_id}, but cut no release: the save warned that a deployment could not "
+        "download " + ", ".join(warning["field"] for warning in held),
+        details=details,
+    )
+    raise typer.Exit(code=1)
 
 
 def _prompt_build_id(renderer, client) -> str | None:

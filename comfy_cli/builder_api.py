@@ -118,10 +118,6 @@ class BuilderClient:
             )
         resp.raise_for_status()
 
-    def create_build(self, name: str, definition: dict, description: str | None = None) -> str:
-        """Create a build from a definition. Returns its id."""
-        return self.create_build_response(name, definition, description)["id"]
-
     def create_build_response(self, name: str, definition: dict, description: str | None = None) -> dict:
         """Create a build from a definition. Returns the created build, carrying
         the ``warnings`` the save earned, which a read never returns."""

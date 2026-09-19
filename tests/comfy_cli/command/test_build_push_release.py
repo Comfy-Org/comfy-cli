@@ -433,3 +433,49 @@ def test_the_go_ahead_option_alone_is_refused_before_any_request(workspace: Path
     error = envelope(result)["error"]
     assert error["code"] == "build_missing_input"
     assert error["details"] == {"missing": ["--release"]}
+
+
+def test_a_first_push_holds_its_release_and_names_the_new_build(workspace: Path, client: RecordingBuilder) -> None:
+    # Given
+    write_spec(workspace, models=[], nodes=[])
+    client.save_warnings = [LINK_WARNING]
+
+    # When
+    result = invoke_push(workspace, "--release", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_release_held"
+    assert error["details"]["id"] == client.created_id
+    assert _calls(client, "create_release") == []
+
+
+def test_a_forced_push_holds_its_release_too(workspace: Path, client: RecordingBuilder) -> None:
+    # Given
+    write_spec(workspace, build_id="build-1", revision="revision-0", models=[], nodes=[])
+    client.remote_revisions["build-1"] = "revision-9"
+    client.save_warnings = [LINK_WARNING]
+
+    # When
+    result = invoke_push(workspace, "--force", "--release", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 1
+    assert envelope(result)["error"]["code"] == "build_release_held"
+    assert _calls(client, "create_release") == []
+
+
+@pytest.mark.parametrize("field", ["models[0].sourceUriX", "customNodes[0].sourceUri", "models[x].sourceUri"])
+def test_only_a_model_link_field_holds_a_release(workspace: Path, client: RecordingBuilder, field: str) -> None:
+    # Given
+    write_spec(workspace, build_id="build-1", revision="revision-0", models=[], nodes=[])
+    client.remote_revisions["build-1"] = "revision-0"
+    client.save_warnings = [{"field": field, "reason": "something else"}]
+
+    # When
+    result = invoke_push(workspace, "--release", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert len(_calls(client, "create_release")) == 1

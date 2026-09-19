@@ -17,6 +17,9 @@ history.
 
 ### Added
 
+- `comfy build push` prints every warning a save returns, and `--release` cuts no
+  release while one says a deployment could not download a model link
+  (`build_release_held`); `--release-despite-warnings` cuts anyway.
 - `comfy build release delete RELEASE` deletes the named release, freeing the slot
   it held against the workspace's release limit. It confirms first (`--yes` skips
   the prompt, `build_release_delete_needs_confirm` refuses a caller that cannot
