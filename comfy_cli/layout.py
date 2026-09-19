@@ -71,15 +71,74 @@ _WIDGET_ROW_GAP = 4.0
 _WIDGET_BLOCK_PAD = 8.0
 
 
-def _widgets_height(n_widgets: int) -> float:
+# A multiline text box is not a widget ROW, it is a text AREA, and the difference is
+# most of a node. Measured against the real renderer (see the table in _widgets_height):
+# an ordinary widget occupies 24px, a multiline one 166px -- roughly seven rows. Charging
+# every widget the ordinary rate under-measures a CLIPTextEncode by 142px, which is the
+# dominant term in the overlap the browser harness reproduces.
+MULTILINE_WIDGET_H = 166.0
+
+
+def count_multiline(node_meta, widget_names) -> int:
+    """How many of `widget_names` are multiline, per the catalog.
+
+    Both callers that size a node must derive this the SAME way, and they did not. The
+    planner passed a multiline count; `workflow_ops.add_node` computed its own size without
+    one, and that is the size PERSISTED onto the node -- the size every later collision
+    check reads. So the planner was right and the saved state was wrong, and a second call
+    would place a node on top of one it had itself under-measured.
+
+    Matching is by name because widget order is the render order, not the declaration
+    order, and `options` is guarded because a port may carry none at all.
+    """
+    names = set(widget_names)
+    return sum(
+        1
+        for p in getattr(node_meta, "inputs", [])
+        if p.name in names and getattr(getattr(p, "options", None), "multiline", False)
+    )
+
+
+def _widgets_height(n_widgets: int, n_multiline: int = 0) -> float:
     """Vertical space n widget rows occupy, using LiteGraph's own accumulation.
 
     Zero widgets take zero space -- the block padding is inside the `if (widgets?.length)`
     guard upstream, so a node with no widgets must not pay for it.
+
+    The constants are not read off the source, they are SOLVED from rendered geometry.
+    Measuring twelve core classes in a real browser and fitting
+    `H = 6 + 20*max(link_inputs, outputs) + (widgets + 8)` gives an exact match on all
+    twelve, with an ordinary widget at 24 and a multiline one at 166:
+
+        class                   measured   predicted
+        CLIPTextEncode               200         200   <- 1 multiline
+        KSampler                     262         262   <- 7 ordinary, 4 links
+        EmptyLatentImage             106         106
+        CheckpointLoaderSimple        98          98
+        SaveImage                     58          58
+        LoadImage                    102         102
+        VAEDecode                     46          46   <- 0 widgets
+        PreviewImage                  26          26   <- 0 widgets
+        ConditioningCombine           46          46   <- 0 widgets
+        LatentUpscale                130         130
+        CLIPSetLastLayer              58          58
+        ImageScale                   130         130
+
+    The 24 and the 8 were already here from the per-row-gap fix and this measurement
+    confirms both independently. Note the fit needs TRUE link inputs: KSampler has seven
+    widgets but only six widget-backed inputs, because `control_after_generate` is a
+    widget with no input at all, so deriving links as `len(inputs) - len(widgets)` gets
+    it wrong by a row.
     """
     if n_widgets <= 0:
         return 0.0
-    return n_widgets * (WIDGET_H + _WIDGET_ROW_GAP) + _WIDGET_BLOCK_PAD
+    # Clamp rather than trust. A node cannot have more multiline widgets than widgets, and
+    # charging five multiline areas to a one-widget node is not a case worth codifying --
+    # it only arises from a bad catalog or a caller bug, and silently over-measuring by
+    # 700px hides both.
+    n_multiline = min(max(n_multiline, 0), n_widgets)
+    ordinary = n_widgets - n_multiline
+    return ordinary * (WIDGET_H + _WIDGET_ROW_GAP) + n_multiline * MULTILINE_WIDGET_H + _WIDGET_BLOCK_PAD
 
 
 def _text_w(text: str | None) -> float:
@@ -110,6 +169,7 @@ def estimate_size(
     n_outputs: int,
     n_widgets: int,
     *,
+    n_multiline: int = 0,
     title: str | None = None,
     input_labels: tuple[str, ...] = (),
     output_labels: tuple[str, ...] = (),
@@ -126,7 +186,7 @@ def estimate_size(
     now modelled separately, so the estimate runs ~30px tall. Over-spacing is invisible;
     under-spacing is the overlap users report.
     """
-    h = HEADER_H + SLOT_H * max(n_link_inputs, n_outputs) + _widgets_height(n_widgets) + PAD_H
+    h = HEADER_H + SLOT_H * max(n_link_inputs, n_outputs) + _widgets_height(n_widgets, n_multiline) + PAD_H
     if title is None and not (input_labels or output_labels or widget_labels):
         w = NODE_W
     else:
@@ -229,10 +289,20 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
         m = graph.node(spec.get("class_type") or "")
         if m is not None:
             widget_names = tuple(graph.widget_order(spec["class_type"]))
+            # object_info already marks multiline inputs; the catalog parses it into
+            # PortOptions.multiline. Match by name because widget_order is the render
+            # order, which is not the order inputs are declared in.
+            # Guard `options` itself, not just the attribute on it. A port that carries
+            # no options at all is not hypothetical -- every test double here is one, and
+            # so is any catalog entry parsed from an object_info that omitted the block.
+            # `getattr(p.options, ...)` raises AttributeError on those before the default
+            # can apply.
+            _multiline = {p.name for p in m.inputs if getattr(getattr(p, "options", None), "multiline", False)}
             size = estimate_size(
                 len([p for p in m.inputs if p.is_link]),
                 len(m.outputs),
                 len(widget_names),
+                n_multiline=count_multiline(m, widget_names),
                 # LiteGraph renders `display_name || name`, and width is derived from the
                 # title, so sizing from class_type under-estimates whenever they differ.
                 title=(getattr(m, "display_name", "") or spec["class_type"]),

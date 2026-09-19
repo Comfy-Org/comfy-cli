@@ -1,3 +1,5 @@
+import pytest
+
 from comfy_cli import layout
 
 
@@ -439,3 +441,97 @@ def test_pinned_siblings_are_obstacles_for_movable_nodes():
 # the intended proof -- old code exhausts its budget and leaves an overlap -- was not
 # demonstrated. It is a robustness and efficiency change, not a verified bug fix; treat it
 # as unproven until someone builds a case that actually exhausts the guard.
+
+
+# --- multiline widget height, solved from rendered geometry ---------------------------
+#
+# These numbers are not read off the frontend source, they are fitted to what a real
+# browser drew for twelve core node classes. The fixture below is that measurement,
+# recorded so the fit can be re-checked without a browser.
+
+# (class, rendered height, link inputs, outputs, ordinary widgets, multiline widgets)
+_RENDERED = [
+    ("CLIPTextEncode", 200, 1, 1, 0, 1),
+    ("KSampler", 262, 4, 1, 7, 0),
+    ("EmptyLatentImage", 106, 0, 1, 3, 0),
+    ("CheckpointLoaderSimple", 98, 0, 3, 1, 0),
+    ("SaveImage", 58, 1, 1, 1, 0),
+    ("LoadImage", 102, 0, 2, 2, 0),
+    ("VAEDecode", 46, 2, 1, 0, 0),
+    ("PreviewImage", 26, 1, 1, 0, 0),
+    ("ConditioningCombine", 46, 2, 1, 0, 0),
+    ("LatentUpscale", 130, 1, 1, 4, 0),
+    ("CLIPSetLastLayer", 58, 1, 1, 1, 0),
+    ("ImageScale", 130, 1, 1, 4, 0),
+]
+
+# The renderer's own base: 6px plus one 20px slot row per max(link_inputs, outputs).
+# estimate_size deliberately runs taller (HEADER_H + PAD_H = 42 instead of 6) because
+# over-spacing is invisible and under-spacing is the overlap users report. So the
+# assertions below check the WIDGET term, which is the part that was wrong.
+_RENDER_BASE = 6.0
+
+
+@pytest.mark.parametrize("name,height,links,outputs,ordinary,multiline", _RENDERED)
+def test_widget_block_matches_rendered_geometry(name, height, links, outputs, ordinary, multiline):
+    """The widget term reproduces what the browser drew, for every measured class."""
+    rendered_widget_block = height - _RENDER_BASE - layout.SLOT_H * max(links, outputs)
+    assert layout._widgets_height(ordinary + multiline, multiline) == rendered_widget_block, name
+
+
+def test_multiline_widget_is_not_charged_as_an_ordinary_row():
+    """The bug this fixes.
+
+    A multiline text box is a text AREA, not a widget ROW. Charging it the ordinary
+    24px under-measures a CLIPTextEncode by 142px, which is the dominant term in the
+    overlap the browser harness reproduces on the batched recording.
+    """
+    ordinary = layout.estimate_size(1, 1, 1)[1]
+    multiline = layout.estimate_size(1, 1, 1, n_multiline=1)[1]
+    assert multiline - ordinary == layout.MULTILINE_WIDGET_H - (layout.WIDGET_H + layout._WIDGET_ROW_GAP)
+    assert multiline - ordinary == 142.0
+
+
+def test_multiline_count_is_clamped_to_the_widget_count():
+    """A node cannot have more multiline widgets than widgets.
+
+    This previously asserted that `_widgets_height(1, 5)` charged FIVE multiline areas to a
+    one-widget node, codifying a 700px over-measure as intended behaviour. It only arises
+    from a bad catalog or a caller bug, and silently over-measuring hides both. Clamped.
+    """
+    assert layout._widgets_height(1, 5) == layout._widgets_height(1, 1)
+    assert layout._widgets_height(3, -2) == layout._widgets_height(3, 0)
+
+
+def test_count_multiline_matches_by_name_not_position():
+    """Widget order is the render order, not the declaration order."""
+
+    class _P:
+        def __init__(self, name, multiline=False):
+            self.name = name
+            self.options = type("O", (), {"multiline": multiline})()
+
+    class _M:
+        inputs = [_P("clip"), _P("text", True), _P("seed")]
+
+    assert layout.count_multiline(_M(), ("text", "seed")) == 1
+    assert layout.count_multiline(_M(), ("seed",)) == 0
+
+
+def test_count_multiline_tolerates_a_port_without_options():
+    """Every test double here is such a port, and so is a catalog entry whose object_info
+    omitted the options block."""
+
+    class _Bare:
+        def __init__(self, name):
+            self.name = name
+
+    class _M:
+        inputs = [_Bare("text")]
+
+    assert layout.count_multiline(_M(), ("text",)) == 0
+
+
+def test_estimate_size_default_is_unchanged_without_multiline():
+    """Additive: every existing caller keeps its old result."""
+    assert layout.estimate_size(2, 1, 3) == layout.estimate_size(2, 1, 3, n_multiline=0)
