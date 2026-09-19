@@ -66,7 +66,7 @@ _DEPLOY_CALLS = {
 
 _BUILDER_CALLS = {
     "get_release": lambda c: c.get_release("r1"),
-    "create_build": lambda c: c.create_build("n", {"models": []}),
+    "create_build": lambda c: c.create_build_response("n", {"models": []}),
     "list_builds": lambda c: c.list_builds(),
     "delete_build": lambda c: c.delete_build("b1"),
     "delete_release": lambda c: c.delete_release("r1"),
