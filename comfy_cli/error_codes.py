@@ -1236,6 +1236,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "edit the spec to name a published registry version or normalized repository, or remove the node",
     ),
     ErrorCode(
+        "build_release_held",
+        "`comfy build push --release` saved the build, but the save warned about a model link a deployment "
+        "could not download, so no release was cut. `details` carries the saved `id`, `syncedRevision` and "
+        "every `warnings` entry; a warning at `models[<n>].sourceUri` is the one that holds a release.",
+        "fix the model links and push again, or push with --release --release-despite-warnings to cut anyway",
+    ),
+    ErrorCode(
         "build_release_limit",
         "The builder refused the release cut because the workspace already holds as many releases as its "
         "limit allows, counting every status. `message` is the builder's own wording. `comfy build release "

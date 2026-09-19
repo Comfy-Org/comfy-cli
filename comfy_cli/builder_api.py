@@ -118,12 +118,13 @@ class BuilderClient:
             )
         resp.raise_for_status()
 
-    def create_build(self, name: str, definition: dict, description: str | None = None) -> str:
-        """Create a build from a definition. Returns its id."""
+    def create_build_response(self, name: str, definition: dict, description: str | None = None) -> dict:
+        """Create a build from a definition. Returns the created build, carrying
+        the ``warnings`` the save earned, which a read never returns."""
         body: dict = {"name": name, "definition": definition}
         if description:
             body["description"] = description
-        return self._post(("builds",), body)["id"]
+        return self._post(("builds",), body)
 
     def create_release(self, build_id: str, targets: list[dict] | None = None) -> tuple[str, str]:
         """POST /v1/builds/{id}/releases: freeze the definition and enqueue a
