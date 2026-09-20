@@ -14,6 +14,7 @@ import difflib
 import hashlib as _hashlib
 import json
 import logging
+import math
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -376,6 +377,12 @@ class Port:
         if self.type == "INT":
             if isinstance(value, bool) or not isinstance(value, int | float):
                 return f"{self.name}: expected INT, got {type(value).__name__} {value!r}"
+            # json.loads accepts the bare NaN/Infinity tokens, so a workflow file
+            # can carry one. int() raises on both (ValueError / OverflowError),
+            # which escaped validate_workflow and left `--json` with no envelope
+            # to print; the server answers `invalid_input_type` instead.
+            if isinstance(value, float) and not math.isfinite(value):
+                return f"{self.name}: expected INT, got {value!r}"
             if isinstance(value, float) and value != int(value):
                 return f"{self.name}: expected integer, got {value}"
         elif self.type in ("FLOAT", "NUMBER"):
@@ -1617,8 +1624,43 @@ class Graph:
                         }
                     )
                     continue
+                # A list value is a link or it is nothing: the server accepts
+                # only `[node_id, slot_index]` and answers `bad_linked_input`,
+                # "must be a length-2 list", for every other list. Treating a
+                # wrong-length list as an opaque literal let `["1"]` validate.
+                if isinstance(value, list) and len(value) != 2:
+                    errors.append(
+                        {
+                            "node_id": node_id,
+                            "field": input_name,
+                            "code": "bad_link_shape",
+                            "message": (
+                                f"input {input_name!r} is a {len(value)}-element list; a link must be "
+                                f"[node_id, output_index]"
+                            ),
+                            "hint": 'wire it as ["<source node id>", <output index>], or give a literal value',
+                        }
+                    )
+                    continue
                 # Link references: [source_node_id, output_index]
                 if isinstance(value, list) and len(value) == 2:
+                    # Prompt keys are strings, so a numeric source id is a node
+                    # the server cannot look up: `prompt[1]` raises KeyError and
+                    # the submit 400s. str() here resolved it and validated clean.
+                    if not isinstance(value[0], str):
+                        errors.append(
+                            {
+                                "node_id": node_id,
+                                "field": input_name,
+                                "code": "bad_link_shape",
+                                "message": (
+                                    f"input {input_name!r} references node id {value[0]!r} "
+                                    f"({type(value[0]).__name__}); node ids are strings"
+                                ),
+                                "hint": f'use ["{value[0]}", {value[1]!r}]',
+                            }
+                        )
+                        continue
                     src_id = str(value[0])
                     out_idx = value[1] if isinstance(value[1], int) else None
 
@@ -1804,6 +1846,21 @@ class Graph:
                     "code": "prompt_no_outputs",
                     "message": "workflow has no output nodes — the server will reject it (prompt_no_outputs)",
                     "hint": "add an output node such as SaveImage/PreviewImage",
+                }
+            )
+
+        # A cycle is rejected by the server (`dependency_cycle`) before it runs
+        # anything, so it is an error here too — reported once for the whole
+        # graph rather than once per node on it.
+        cycle = _dependency_cycle(workflow, reachable)
+        if cycle is not None:
+            errors.append(
+                {
+                    "node_id": cycle[0],
+                    "field": None,
+                    "code": "dependency_cycle",
+                    "message": ("dependency cycle: " + " -> ".join(cycle) + " — the server will reject this workflow"),
+                    "hint": "break the loop: an input cannot depend on its own node's output, directly or indirectly",
                 }
             )
 
@@ -2039,6 +2096,48 @@ def _input_payload(p: Port, depth: int) -> dict[str, Any]:
 # Context-independent checks factored out of Graph.validate_workflow so the
 # driver loop reads as the connection/class_type walk it is. Each returns the
 # error/warning dicts for the caller to append — no shared state is threaded.
+
+
+def _dependency_cycle(workflow: dict[str, Any], reachable: set[str]) -> list[str] | None:
+    """A cycle among the nodes the server would validate, as the node ids on it.
+
+    ComfyUI walks each output's inputs depth-first and rejects the prompt with
+    `dependency_cycle` the moment it re-enters a node already on the current
+    path (execution.py). It only ever walks what an output reaches, so a cycle
+    off to the side is pruned and must not be reported: an unreachable one
+    submits fine. Returns the path of the first cycle found, else None.
+    """
+    state: dict[str, int] = {}  # 0 = on the current path, 1 = finished
+    for root in sorted(reachable):
+        if state.get(root) == 1:
+            continue
+        # Iterative DFS: a deep chain would blow the recursion limit, and the
+        # validator must not die on the graph it is judging.
+        path: list[str] = []
+        stack: list[tuple[str, bool]] = [(root, False)]
+        while stack:
+            node_id, leaving = stack.pop()
+            if leaving:
+                state[node_id] = 1
+                path.pop()
+                continue
+            if state.get(node_id) == 1:
+                continue
+            if state.get(node_id) == 0:
+                return path[path.index(node_id) :] + [node_id]
+            state[node_id] = 0
+            path.append(node_id)
+            stack.append((node_id, True))
+            node_data = workflow.get(node_id)
+            inputs = node_data.get("inputs") if isinstance(node_data, dict) else None
+            if not isinstance(inputs, dict):
+                continue
+            for value in inputs.values():
+                if isinstance(value, list) and len(value) == 2 and isinstance(value[0], str):
+                    src_id = value[0]
+                    if src_id in reachable and state.get(src_id) != 1:
+                        stack.append((src_id, False))
+    return None
 
 
 def _output_reachable_node_ids(workflow: dict[str, Any], graph: Graph) -> set[str]:
@@ -2640,6 +2739,18 @@ def _check_dynamic_combo_sub(
     return errs, warns, set(), set()
 
 
+def _autogrow_slot_prefix(port: Port) -> str:
+    """The slot stem this group numbers from (``image`` for ``images``), taken
+    from the schema template when the catalog carries one and otherwise from
+    the same singular-of-the-name guess autogrow_slot_example renders."""
+    template = port.autogrow_element_template or {}
+    prefix = template.get("prefix")
+    if isinstance(prefix, str) and prefix:
+        return prefix
+    last = port.name.rsplit(".", 1)[-1]
+    return last[:-1] if last.endswith("s") else last
+
+
 def _check_autogrow_required(
     node_id: str, autogrow_ports: dict[str, Port], autogrow_seen: set[str], node_data: dict
 ) -> list[dict]:
@@ -2651,6 +2762,27 @@ def _check_autogrow_required(
     inputs = node_data.get("inputs") or {}
     errors: list[dict] = []
     for base, port in autogrow_ports.items():
+        if port.required and base in autogrow_seen:
+            # The group grows from index 0: the server asks for `image0` by name
+            # and answers `required_input_missing` when a group is wired from
+            # image1 up, even though later slots are present. A gap ABOVE the
+            # anchor is fine (image0 + image2 submits), so only index 0 is
+            # checked here.
+            slots = {k.split(".", 1)[1] for k in inputs if isinstance(k, str) and k.startswith(f"{base}.")}
+            prefix = _autogrow_slot_prefix(port)
+            if slots and f"{prefix}0" not in slots:
+                errors.append(
+                    {
+                        "node_id": node_id,
+                        "field": base,
+                        "code": "autogrow_missing_first_slot",
+                        "message": (
+                            f"autogrow input {base!r} is wired from {sorted(slots)[0]!r} but has no "
+                            f"{prefix}0 slot — the server requires the first slot"
+                        ),
+                        "hint": f"wire the first slot: {port.autogrow_slot_example()}",
+                    }
+                )
         if port.required and base not in autogrow_seen and base not in inputs:
             errors.append(
                 {
