@@ -1696,15 +1696,20 @@ class Graph:
                     continue
 
                 # Declared = the node's schema knows this key. A dotted key
-                # (autogrow slot `images.image0`, a dynamic combo's sub-input
-                # `model.images.image0`) belongs to the port its FIRST segment
-                # names.
-                _base = input_name.split(".", 1)[0] if isinstance(input_name, str) else input_name
+                # only counts when it RESOLVES to a slot the current schema and
+                # selections actually declare (an autogrow slot
+                # `images.image0`, a combo sub-input `model.images.image0`).
+                # Only an autogrow group or a dynamic combo takes dotted keys.
+                # Accepting any dotted suffix whose first segment names a port
+                # made `images.extra` on a plain IMAGE input look declared, and
+                # a malformed link under that decoy hard-failed a prompt the
+                # server runs — it ignores every key a node does not declare.
+                _base = input_name.split(".", 1)[0] if isinstance(input_name, str) else None
+                _base_port = port_by_name.get(_base) if isinstance(_base, str) else None
                 declared_input = (
                     input_name in port_by_name
                     or input_name in autogrow_ports
-                    or _base in port_by_name
-                    or _base in autogrow_ports
+                    or (_base_port is not None and (_base_port.is_autogrow or _base_port.is_dynamic_combo))
                 )
 
                 # The server validates only output-reachable nodes and prunes
@@ -1854,9 +1859,7 @@ class Graph:
                     # known-type/empty-intersection mismatch is ever promoted —
                     # a wildcard, a union overlap, or a blank/unknown type on
                     # either end still yields no finding at all.
-                    port = port_by_name.get(input_name) or _dotted_slot_port(
-                        port_by_name, input_name, node_inputs, dyn_valid_keys
-                    )
+                    port = port_by_name.get(input_name) or _dotted_slot_port(port_by_name, input_name, node_inputs)
                     if port is not None:
                         src_type = src_m.outputs[out_idx].type
                         dst_type = port.type
@@ -2875,7 +2878,7 @@ def _autogrow_first_slot(port: Port) -> str:
     """
     template = port.autogrow_element_template or {}
     names = template.get("names")
-    if isinstance(names, list) and names and isinstance(names[0], str):
+    if isinstance(names, list) and names and isinstance(names[0], str) and names[0]:
         return names[0]
     prefix = template.get("prefix")
     if not (isinstance(prefix, str) and prefix):
@@ -3183,17 +3186,19 @@ def frontend_injected_widget_error(node_type: str, widget: str, available: list[
     )
 
 
-def _dotted_slot_port(
-    port_by_name: dict[str, Port], dotted: str, node_inputs: dict, valid_sub_keys: set[str] | None = None
-) -> Port | None:
+def _dotted_slot_port(port_by_name: dict[str, Port], dotted: str, node_inputs: dict) -> Port | None:
     """The port a dotted wire key targets: an autogrow slot or a combo sub-input.
 
     The server type-checks every entry in a node's ``inputs`` by name, dotted
     or not, so ``images.image0`` and ``resize_type.multiplier`` need a type to
-    compare against just as much as a top-level name does. Returns ``None``
-    when the key resolves to nothing the current schema declares — an unknown
-    group, a sub-key left over from another selection (the server ignores
-    those, so they must not hard-fail), or a template with no element type.
+    compare against just as much as a top-level name does — including when the
+    group is nested under a dynamic combo's selected option
+    (``model.images.image0``, ``model.mode.budget``).
+
+    Returns ``None`` when the key resolves to nothing the CURRENT schema and
+    selections declare: an unknown group, a sub-key left over from another
+    selection, a dotted suffix on an ordinary port, or a template with no
+    element type. The server ignores all of those, so none may hard-fail.
     """
     base, _, leaf = dotted.partition(".")
     if not leaf:
@@ -3201,6 +3206,18 @@ def _dotted_slot_port(
     port = port_by_name.get(base)
     if port is None:
         return None
+    return _resolve_dotted_under(port, dotted, node_inputs, 0)
+
+
+def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int) -> Port | None:
+    """Walk ``dotted`` down from ``port``, whose name is a prefix of it.
+
+    The FULL dotted path is carried the whole way: a nested selector is read
+    from ``inputs`` under its own full name (``model.mode``), and a nested
+    autogrow group's slots keep every segment (``model.images.image0``).
+    Dropping a segment to recurse looked up a name no map is keyed by, which
+    silently skipped the check the caller only runs when a port comes back.
+    """
     if port.is_autogrow:
         element = port.autogrow_element_type
         if not element:
@@ -3210,14 +3227,14 @@ def _dotted_slot_port(
         # type comparison the server will make.
         return replace(port, name=dotted, type=element)
     if port.is_dynamic_combo:
-        if valid_sub_keys is not None and dotted not in valid_sub_keys:
+        if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
             return None
-        selector = node_inputs.get(base)
-        for sub in _dynamic_combo_sub_ports(port.dynamic_options, selector, base):
+        selector = node_inputs.get(port.name)
+        for sub in _dynamic_combo_sub_ports(port.dynamic_options, selector, port.name):
             if sub.name == dotted:
                 return sub
-            if dotted.startswith(f"{sub.name}.") and sub.is_dynamic_combo:
-                return _dotted_slot_port({sub.name: sub}, dotted[len(base) + 1 :], node_inputs, valid_sub_keys)
+            if dotted.startswith(f"{sub.name}."):
+                return _resolve_dotted_under(sub, dotted, node_inputs, depth + 1)
     return None
 
 

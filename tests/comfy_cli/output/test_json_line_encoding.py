@@ -62,3 +62,34 @@ def test_envelope_is_escaped_whenever_the_stream_is_not_utf8():
         assert json.loads(written.decode("utf-8"))["data"]["message"] == "no output nodes — rejected"
     finally:
         reset_renderer_for_testing()
+
+
+def test_a_non_utf8_stream_receives_utf8_bytes():
+    """Escaping to ASCII is not enough on a stream that re-encodes it.
+
+    A UTF-16 wrapper turns even pure ASCII into two-byte sequences, so a
+    consumer decoding stdout as UTF-8 cannot parse the envelope at all. The
+    machine stream's contract is "a reader decodes this as UTF-8", so the line
+    is written to the underlying binary buffer as UTF-8 when the text wrapper
+    would encode it as anything else.
+    """
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="utf-16", write_through=True)
+    try:
+        _json_renderer_on(stream).emit({"message": "plain ascii"}, command="workflow validate")
+        assert json.loads(raw.getvalue().decode("utf-8"))["data"]["message"] == "plain ascii"
+    finally:
+        reset_renderer_for_testing()
+
+
+def test_text_written_before_the_envelope_keeps_its_order():
+    """The envelope goes out through the binary buffer, so anything already
+    buffered in the text wrapper has to be flushed ahead of it."""
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252", write_through=False)
+    try:
+        stream.write("first\n")
+        _json_renderer_on(stream).emit({"message": "second"}, command="workflow validate")
+        assert raw.getvalue().decode("utf-8").splitlines()[0] == "first"
+    finally:
+        reset_renderer_for_testing()

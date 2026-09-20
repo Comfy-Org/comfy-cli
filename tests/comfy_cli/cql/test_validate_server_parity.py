@@ -171,6 +171,59 @@ def _object_info() -> dict[str, Any]:
             "output_node": False,
             "python_module": "nodes",
         },
+        # A dynamic combo whose SELECTED option contributes both an autogrow
+        # group (`model.images`) and a nested dynamic combo (`model.mode`) —
+        # the Seedream shape, and the one place a dotted key is three
+        # segments deep.
+        "NestedNode": {
+            "input": {
+                "required": {
+                    "model": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {
+                                    "key": "big",
+                                    "inputs": {
+                                        "required": {
+                                            "images": [
+                                                "COMFY_AUTOGROW_V3",
+                                                {
+                                                    "template": {
+                                                        "input": {"required": {"image": ["IMAGE", {}]}},
+                                                        "prefix": "image",
+                                                        "min": 1,
+                                                        "max": 8,
+                                                    }
+                                                },
+                                            ],
+                                            "mode": [
+                                                "COMFY_DYNAMICCOMBO_V3",
+                                                {
+                                                    "options": [
+                                                        {
+                                                            "key": "fast",
+                                                            "inputs": {
+                                                                "required": {"budget": ["FLOAT", {"default": 1.0}]}
+                                                            },
+                                                        }
+                                                    ]
+                                                },
+                                            ],
+                                        }
+                                    },
+                                }
+                            ]
+                        },
+                    ]
+                }
+            },
+            "input_order": {"required": ["model"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "output_node": False,
+            "python_module": "nodes",
+        },
         "BatchImagesNode": {
             "input": {
                 "required": {
@@ -705,3 +758,65 @@ class TestDottedSlotsAreTypeChecked:
             "2": {"class_type": "ShowImage", "inputs": {"images": ["1", 0]}},
         }
         assert "type_mismatch" not in " ".join(_codes(graph.validate_workflow(wf)))
+
+
+class TestNestedDottedSlotsAreTypeChecked:
+    """A dotted key three segments deep is still an input the server checks.
+
+    `model.images.image0` is an autogrow slot nested under a dynamic combo's
+    selected option, and `model.mode.budget` a sub-input of a nested combo.
+    Resolving only the first segment's port left both unchecked, so a MASK
+    into an IMAGE slot validated clean.
+    """
+
+    def _wf(self, sub_key, source_class):
+        source_inputs = {"value": 1} if source_class == "MakeInt" else {"width": 64}
+        return {
+            "901": {"class_type": source_class, "inputs": source_inputs},
+            "1": {"class_type": "NestedNode", "inputs": {"model": "big", "model.mode": "fast", sub_key: ["901", 0]}},
+            "2": {"class_type": "ShowImage", "inputs": {"images": ["1", 0]}},
+        }
+
+    def test_a_wrong_type_into_a_nested_autogrow_slot_is_reported(self, graph: Graph) -> None:
+        result = graph.validate_workflow(self._wf("model.images.image0", "MakeMask"))
+        assert not result["valid"], result
+        assert "type_mismatch" in " ".join(_codes(result))
+
+    def test_the_right_type_into_a_nested_autogrow_slot_passes(self, graph: Graph) -> None:
+        result = graph.validate_workflow(self._wf("model.images.image0", "MakeImage"))
+        assert "type_mismatch" not in " ".join(_codes(result)), result
+
+    def test_a_wrong_type_into_a_nested_combo_sub_input_is_reported(self, graph: Graph) -> None:
+        # budget is a FLOAT; MakeInt produces INT.
+        result = graph.validate_workflow(self._wf("model.mode.budget", "MakeInt"))
+        assert not result["valid"], result
+        assert "type_mismatch" in " ".join(_codes(result))
+
+
+class TestDottedDecoyOnAnOrdinaryPort:
+    """A dotted suffix on an ordinary port is not a declared input.
+
+    `ShowImage.images` is a plain IMAGE port: the server reads the inputs a
+    node declares and ignores `images.extra` entirely, so junk under that key
+    cannot fail the prompt. Counting the key as declared because its FIRST
+    segment names a port promoted its malformed link to a hard error and
+    rejected a graph the server runs.
+    """
+
+    def test_a_malformed_link_under_a_decoy_key_is_advisory(self, graph: Graph) -> None:
+        wf = {
+            "901": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "2": {"class_type": "ShowImage", "inputs": {"images": ["901", 0], "images.extra": ["901"]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert result["valid"], result["errors"]
+
+    def test_a_real_autogrow_slot_still_fails_hard(self, graph: Graph) -> None:
+        # The same malformed link on a key the schema DOES declare stays an error.
+        wf = {
+            "901": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "1": {"class_type": "BatchImagesNode", "inputs": {"images.image0": ["901"]}},
+            "2": {"class_type": "ShowImage", "inputs": {"images": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert not result["valid"], result

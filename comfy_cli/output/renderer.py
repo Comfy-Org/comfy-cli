@@ -405,8 +405,20 @@ class Renderer:
         # for every validate failure on Windows. Escaping whenever the stream
         # is not UTF-8 keeps those envelopes readable on a UTF-8 terminal and
         # decodable everywhere else.
-        line = json.dumps(payload, default=_json_default, ensure_ascii=not _is_utf8_stream(stream))
+        is_utf8 = _is_utf8_stream(stream)
+        line = json.dumps(payload, default=_json_default, ensure_ascii=not is_utf8)
         try:
+            # Escaping to ASCII is not enough on a stream that re-encodes it: a
+            # UTF-16 wrapper turns even pure ASCII into two-byte sequences, and
+            # a reader decoding this stream as UTF-8 cannot parse it at all.
+            # Write through the binary buffer instead, after flushing whatever
+            # the text wrapper still holds so the two stay in order.
+            buffer = getattr(stream, "buffer", None)
+            if not is_utf8 and buffer is not None:
+                stream.flush()
+                buffer.write((line + "\n").encode("utf-8"))
+                buffer.flush()
+                return
             try:
                 stream.write(line + "\n")
             except UnicodeEncodeError:
