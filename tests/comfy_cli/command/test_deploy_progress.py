@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import inspect
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ from comfy_cli.command.deploy_progress import (
     STALE_SECONDS,
     DeployWatchReporter,
     describe,
+    is_stale,
     progress_of,
 )
 from comfy_cli.command.deploy_runtime import poll_deployment
@@ -88,14 +90,36 @@ def _step(step: str, **over) -> JsonObject:
             "Staging models: model 1 of 2 sd_xl_base_1.0.safetensors, 0 B of 7.0 GB",
             id="the first seconds have no rate",
         ),
-        pytest.param(_step("creating_endpoint"), NOW, "Creating the endpoint", id="a step with nothing to count"),
         pytest.param(
-            _step("waiting_for_worker", attempt=2),
+            _step("creating_endpoint", updatedAt="2026-09-20T02:01:20Z"),
+            NOW,
+            "Creating the endpoint",
+            id="a step with nothing to count, the moment it begins",
+        ),
+        pytest.param(
+            _step("waiting_for_worker", updatedAt="2026-09-20T01:59:05Z"),
+            NOW,
+            "Waiting for the first worker: 2m 15s so far",
+            id="a step with nothing to count says how long it has been waiting",
+        ),
+        pytest.param(
+            _step("waiting_for_worker", updatedAt="2026-09-20T01:58:00Z"),
+            NOW,
+            "Waiting for the first worker: 3m 20s so far",
+            id="a long wait is never called stale: the service writes this step once",
+        ),
+        pytest.param(
+            _step("waiting_for_worker", attempt=2, updatedAt="2026-09-20T02:01:20Z"),
             NOW,
             "Waiting for the first worker (attempt 2, this step was restarted)",
             id="a retried step says so",
         ),
-        pytest.param(_step("warming_cache"), NOW, "warming cache", id="a step this version never heard of"),
+        pytest.param(
+            _step("warming_cache", updatedAt="2026-09-20T02:01:20Z"),
+            NOW,
+            "warming cache",
+            id="a step this version never heard of",
+        ),
         pytest.param(
             _staging(),
             NOW + timedelta(seconds=STALE_SECONDS + 35),
@@ -456,3 +480,35 @@ def test_up_watch_streams_progress_and_interrupting_it_stops_nothing(tmp_path, m
     assert data["deployment"]["status"] == "provisioning"
     assert data["progress"]["bytesDone"] == 3 * GB
     jsonschema.Draft202012Validator(_schema("deploy_up.json")).validate(data)
+
+
+def test_only_the_staging_step_can_go_stale() -> None:
+    """A step the service writes once is not a doubtful read, it is a wait.
+
+    Staging rewrites its numbers every few seconds, so silence there means the
+    numbers on screen may have moved on. The other two steps carry nothing that
+    moves and are written once when they begin, so their age is the length of
+    the wait and calling it stale tells the reader to distrust a true statement.
+    """
+    # Given a sample from each step, all two minutes old
+    old = NOW + timedelta(seconds=120)
+
+    # Then
+    assert is_stale(_staging(), old) is True
+    assert is_stale(_step("creating_endpoint"), old) is False
+    assert is_stale(_step("waiting_for_worker"), old) is False
+    assert "may be stale" not in describe(_step("waiting_for_worker"), now=old)
+
+
+def test_deploy_up_watches_without_being_asked(tmp_path) -> None:
+    """`up` starts a wait of several minutes, so it follows it by default."""
+    # Given
+    from comfy_cli.command import deploy as deploy_module
+
+    signature = inspect.signature(deploy_module.up_cmd)
+
+    # Then
+    assert signature.parameters["watch"].default is True
+    assert signature.parameters["watch"].annotation.__metadata__[0].param_decls == ("--watch/--no-watch",)
+    # `status` answers a question and exits, so there watching stays opt-in.
+    assert inspect.signature(deploy_module.status_cmd).parameters["watch"].default is False

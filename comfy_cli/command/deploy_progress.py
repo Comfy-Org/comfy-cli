@@ -31,13 +31,20 @@ from comfy_cli.output.sanitize import sanitize_markup
 
 EVENT_PROGRESS: Final = "deploy_progress"
 
-# The service rewrites the object every ten seconds while models stage, and its
-# writes are best-effort. Six missed in a row is a sample worth doubting; one or
-# two is an ordinary dropped write.
+# The service rewrites the object every few seconds while models stage, and its
+# writes are best-effort. A minute of silence is a sample worth doubting; one or
+# two dropped writes are ordinary.
+#
+# Only the staging step can be stale. The other two steps carry no number that
+# moves, so the service writes them once when they begin and never again: their
+# age is how long the step has been running, which is the one thing worth saying
+# about them, not a reason to doubt what they say.
 STALE_SECONDS: Final = 60.0
 
+STAGING_STEP: Final = "staging_models"
+
 _STEP_LABELS: Final = {
-    "staging_models": "Staging models",
+    STAGING_STEP: "Staging models",
     "creating_endpoint": "Creating the endpoint",
     "waiting_for_worker": "Waiting for the first worker",
 }
@@ -109,6 +116,10 @@ def seconds_since_update(progress: JsonObject, now: datetime) -> float | None:
 
 
 def is_stale(progress: JsonObject, now: datetime) -> bool:
+    # Only while models stage. A step with nothing to count is written once and
+    # then waits, so its age says how long the wait is, not that the read is old.
+    if progress.get("step") != STAGING_STEP:
+        return False
     age = seconds_since_update(progress, now)
     return age is not None and age > STALE_SECONDS
 
@@ -134,31 +145,52 @@ def _bytes_part(progress: JsonObject) -> str | None:
     return f"{human_bytes(done)} {of} {human_bytes(total)}"
 
 
-def describe(progress: JsonObject, *, now: datetime) -> str:
-    """One line saying where the deployment is, from one progress object."""
+def _parts(progress: JsonObject, now: datetime) -> tuple[str, str | None, list[str]]:
+    """The step's name, the model it is on, and the numbers, kept apart.
+
+    The sentence and the live bar want the same facts in different shapes: one
+    joins them with commas, the other spreads them across columns and has to
+    know which piece may be truncated when the terminal is narrow.
+    """
     label = step_label(progress)
+    model: str | None = None
     parts: list[str] = []
-    if progress.get("step") == "staging_models":
+    if progress.get("step") != STAGING_STEP:
+        # Nothing here is measured, so the only honest number is how long the
+        # step has been running. Without it the line never changes and a wait
+        # that is working reads exactly like one that has died.
+        waited = seconds_since_update(progress, now)
+        if waited is not None and waited >= 1:
+            parts.append(f"{human_seconds(waited)} so far")
+    elif progress.get("step") == STAGING_STEP:
         if _number(progress, "bytesTotal") == 0:
             parts.append("every model is already in place")
         else:
+            model = _model_part(progress)
             rate, left = _number(progress, "bytesPerSecond"), _number(progress, "etaSeconds")
             parts.extend(
                 part
                 for part in (
-                    _model_part(progress),
                     _bytes_part(progress),
                     None if not rate else f"{human_bytes(rate)}/s",
                     None if left is None else f"{human_seconds(left)} left",
                 )
                 if part is not None
             )
+    return label, model, parts
+
+
+def describe(progress: JsonObject, *, now: datetime) -> str:
+    """One line saying where the deployment is, from one progress object."""
+    label, model, parts = _parts(progress, now)
+    if model is not None:
+        parts.insert(0, model)
     line = label if not parts else f"{label}: {', '.join(parts)}"
     attempt = _number(progress, "attempt")
     if attempt is not None and attempt > 1:
         line += f" (attempt {attempt}, this step was restarted)"
-    age = seconds_since_update(progress, now)
-    if age is not None and age > STALE_SECONDS:
+    if is_stale(progress, now):
+        age = seconds_since_update(progress, now)
         line += f" (last update {human_seconds(age)} ago, so these numbers may be stale)"
     return line
 
@@ -259,14 +291,26 @@ class DeployWatchReporter:
             self._muted = True
 
     def _open_live(self) -> None:
-        from rich.progress import BarColumn, Progress, TextColumn
+        from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 
+        # The spinner turns on Rich's own clock, not on the service's writes. Two
+        # of the three steps count nothing, and a deploy can sit in the last one
+        # for minutes; without something moving on its own the screen is
+        # indistinguishable from a command that has hung.
+        # The column order comfy-cli already uses for a transfer (see
+        # `file_utils.download_file` and `build push`): what it is, a bar, then
+        # the numbers. `bar_width=None` lets the bar give its space back, so on
+        # an 80-column terminal the numbers stay on screen and the bar shrinks
+        # instead. A fixed 40-wide bar pushed them off the right edge.
         live = Progress(
+            SpinnerColumn(),
             TextColumn("{task.description}"),
-            BarColumn(),
+            BarColumn(bar_width=None),
             TextColumn("{task.fields[detail]}"),
+            TextColumn("{task.fields[model]}"),
             console=self._renderer.console(),
             transient=True,
+            expand=True,
         )
         try:
             live.start()
@@ -274,7 +318,7 @@ class DeployWatchReporter:
             self._muted = True
             return
         self._live = live
-        self._live_task = live.add_task("", total=None, detail="")
+        self._live_task = live.add_task("", total=None, detail="", model="")
 
     def _update_live(self, progress: JsonObject, now: datetime) -> None:
         if self._muted:
@@ -283,9 +327,13 @@ class DeployWatchReporter:
             self._open_live()
             if self._live is None:
                 return
-        line = describe(progress, now=now)
-        label, _, detail = line.partition(": ")
-        total = _number(progress, "bytesTotal") if progress.get("step") == "staging_models" else None
+        # The model's name goes last, because it is the one piece long enough to
+        # need truncating and the only one a reader can lose without losing a
+        # number. Rich crops from the right, so the numbers keep their place on
+        # a narrow terminal and the file name is what gives way.
+        label, model, parts = _parts(progress, now)
+        detail = ", ".join(parts)
+        total = _number(progress, "bytesTotal") if progress.get("step") == STAGING_STEP else None
         done = _number(progress, "bytesDone") or 0
         try:
             # No total means no fraction to draw, and Rich pulses the bar instead:
@@ -296,6 +344,7 @@ class DeployWatchReporter:
                 total=total if total else None,
                 completed=min(done, total) if total else 0,
                 detail=sanitize_markup(detail),
+                model=sanitize_markup(model or ""),
             )
         except OSError:
             self._muted = True

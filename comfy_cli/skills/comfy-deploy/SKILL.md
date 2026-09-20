@@ -54,7 +54,7 @@ refs    compute — deployable regions and GPU classes with availability.
 ```shell
 comfy build release show                          # confirm deployable: true
 comfy deploy refs compute                         # read the real GPU/region pairs
-comfy deploy up <dir> --gpu <class> --region <region> --min 0 --max 1 --watch
+comfy deploy up <dir> --gpu <class> --region <region> --min 0 --max 1
 comfy deploy status <dir>
 comfy deploy run <dir> --workflow <api-workflow>.json
 comfy deploy stop <dir>                           # when the user is done
@@ -77,7 +77,7 @@ release version. **Read it and act on it.** An empty array means nothing else is
 running; a non-empty one is a bill the user has not agreed to.
 
 ```shell
-comfy deploy up <dir> --watch          # note `supersedes` in the output
+comfy deploy up <dir>                  # note `supersedes` in the output
 comfy deploy stop --deployment <old-id>
 ```
 
@@ -109,8 +109,10 @@ as a pair, `--min` accepts 0–20 and `--max` 1–20.
 | `stop_failed` | **maybe** | Stop did not take; retry it |
 | `failed` | no | Permanent failure |
 
-`--watch` on `up` and `status` polls until `ready`, `failed`, `stopped` or
-`stop_failed`. The other five are transitional and it keeps waiting.
+`up` follows the deployment by default; pass `--no-watch` to return as soon as it
+is accepted. `status` waits only when asked, with `--watch`. Either way the wait
+ends at `ready`, `failed`, `stopped` or `stop_failed`. The other five statuses
+are transitional and it keeps waiting.
 
 While the status is `provisioning` or `starting` the deployment carries a
 `progress` object, and `status --json` returns it as `data.progress`: `step`
@@ -118,7 +120,7 @@ While the status is `provisioning` or `starting` the deployment carries a
 are copied onto the deployment's storage, `modelsDone` / `modelsTotal`,
 `bytesDone` / `bytesTotal`, `currentModel`, `bytesPerSecond` and `etaSeconds`.
 Under `--watch` the same object arrives as `deploy_progress` events, one per new
-sample (the service writes about every ten seconds): on **stderr** under `--json`,
+sample (the service writes about every three seconds): on **stderr** under `--json`,
 on stdout under `--json-stream`. Relay those numbers instead of "still
 provisioning". Things to read correctly:
 
@@ -129,11 +131,12 @@ provisioning". Things to read correctly:
   cold start come after it.
 - `attempt` above 1 means the step was restarted, and `bytesDone` started again.
 - `stale: true` on an event means the service has not rewritten the sample for a
-  minute. Its writes are best-effort, so that is not evidence the deploy stopped;
-  the status is still the verdict.
+  minute while models were staging. Its writes are best-effort, so that is not
+  evidence the deploy stopped; the status is still the verdict. The other two
+  steps are written once and then wait, so they are never stale.
 - No `progress` at all is an older service, or a status other than the two above.
 
-Interrupting `--watch` leaves the deployment coming up on the service's side;
+Interrupting the wait leaves the deployment coming up on the service's side;
 `comfy deploy status --deployment <id> --watch` attaches again.
 
 `status` also reports **why** a deployment stopped, as `stopReason`: `user`,

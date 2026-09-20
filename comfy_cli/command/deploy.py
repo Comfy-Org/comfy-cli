@@ -203,6 +203,8 @@ def status_cmd(
         typer.Argument(help="ComfyUI install directory or build spec path. Default: the current directory."),
     ] = None,
     deployment_id: DeploymentOption = None,
+    # `status` answers a question and exits; watching is the caller asking to
+    # stay, so here it stays opt-in. `up` starts the wait, so there it is on.
     watch: Annotated[bool, typer.Option("--watch", help="Poll until the deployment reaches a terminal state.")] = False,
 ) -> None:
     _run_status(path, deployment_id=deployment_id, watch=watch)
@@ -235,7 +237,16 @@ def up_cmd(
     ] = None,
     release: Annotated[str | None, typer.Option("--release", help="Deploy this release id.")] = None,
     deployment_id: DeploymentOption = None,
-    watch: Annotated[bool, typer.Option("--watch", help="Poll until the deployment reaches a terminal state.")] = False,
+    # Watching is what someone who just asked for a deployment wants: the command
+    # that starts a several-minute wait should say how the wait is going. Ctrl-C
+    # and --no-watch both leave the deploy running and print how to re-attach.
+    watch: Annotated[
+        bool,
+        typer.Option(
+            "--watch/--no-watch",
+            help="Follow the deployment until it settles. Use --no-watch to return as soon as it is accepted.",
+        ),
+    ] = True,
 ) -> None:
     renderer = get_renderer()
     _require_paired_bounds(renderer, minimum, maximum)
