@@ -443,7 +443,12 @@ def test_the_dropped_bound_warning_reaches_a_json_caller_on_stderr(tmp_path, mon
     monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
 
     # When
-    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3", "--max", "8"])
+    # --no-watch because this is about the warning, not the wait. Restarting a
+    # stopped deployment leaves it `queued`, and watch (now the default) polls a
+    # fake that never leaves that status, so the run would never end.
+    result = CliRunner().invoke(
+        app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3", "--max", "8", "--no-watch"]
+    )
 
     # Then
     assert "--min had no effect" in result.stderr
