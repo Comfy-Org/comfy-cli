@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import urllib.error
+from collections.abc import Callable
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -74,9 +75,12 @@ class RecordingBuilder:
         self.calls.append({"method": "create_blob", "blobId": blob_id})
         return blob_id, f"https://uploads.example/{blob_id}"
 
-    def upload_blob(self, upload_url: str, path: Path) -> None:
+    def upload_blob(self, upload_url: str, path: Path, progress: Callable[[int], None] | None = None) -> None:
         self.calls.append({"method": "upload_blob", "url": upload_url})
-        self.uploaded.append(path.read_bytes())
+        data = path.read_bytes()
+        if progress is not None:
+            progress(len(data))
+        self.uploaded.append(data)
 
     def create_build_response(self, name: str, definition: JsonObject, description: str | None = None) -> JsonObject:
         revision = self._revision()

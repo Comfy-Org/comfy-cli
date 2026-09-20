@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_push_event.json",
+  "title": "comfy build push upload progress event",
+  "description": "One JSON object per line while `comfy build push` uploads model files and packaged custom nodes. Under `--json-stream` the lines are on stdout, ahead of the final envelope (build_push.json schema in .data). Under `--json` they are on stderr, so stdout stays the single envelope. A push opens with one `upload_plan`; each file that transfers gets an `upload_progress` when it starts and about every two seconds after, then one `upload_complete`. A file the builder already held gets only an `upload_complete` with `deduplicated: true`. A file whose upload fails gets no `upload_complete`: the error envelope follows.",
+  "type": "object",
+  "required": ["schema", "type"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {
+      "const": "event/1",
+      "description": "Event contract version. Additive optional fields do not bump it; renamed/removed/retyped fields do."
+    },
+    "type": {
+      "type": "string",
+      "enum": ["upload_plan", "upload_progress", "upload_complete"],
+      "description": "ADVISORY and open-ended, as in run_event.json: ignore types you do not recognise."
+    },
+    "files": {"type": "integer", "minimum": 0, "description": "upload_plan: files this push still has to send."},
+    "already_held": {"type": "integer", "minimum": 0, "description": "upload_plan: local models and nodes that need no upload, because an earlier push stored them or a public source link stands in for the bytes."},
+    "file": {"type": "string", "description": "The model's filename, or `<node name>.zip` for a packaged custom node."},
+    "kind": {"type": "string", "enum": ["model", "node_zip"]},
+    "index": {"type": "integer", "minimum": 1, "description": "This file's position among the files being sent, from 1."},
+    "of": {"type": "integer", "minimum": 1, "description": "How many files are being sent."},
+    "bytes_done": {"type": "integer", "minimum": 0, "description": "upload_progress: bytes of this file handed to the connection so far."},
+    "bytes_total": {"type": "integer", "minimum": 0, "description": "upload_plan: bytes across every file to send. upload_progress / upload_complete: this file's size."},
+    "bytes_per_second": {"type": ["integer", "null"], "minimum": 0, "description": "upload_progress: rate over the last ten seconds, so a stall reads as a falling number; null until two samples exist. upload_complete: the file's size over its whole transfer time; null when nothing was sent."},
+    "eta_seconds": {"type": ["integer", "null"], "minimum": 0, "description": "upload_progress: seconds until this file finishes at the current rate; null while the rate is unknown or zero."},
+    "overall_bytes_done": {"type": "integer", "minimum": 0, "description": "Bytes accounted for across the whole push, counting files the builder already held."},
+    "overall_bytes_total": {"type": "integer", "minimum": 0},
+    "overall_eta_seconds": {"type": ["integer", "null"], "minimum": 0, "description": "upload_progress: seconds until every file finishes at the current rate."},
+    "seconds": {"type": "number", "minimum": 0, "description": "upload_complete: how long this file's transfer took; 0 when deduplicated."},
+    "deduplicated": {"type": "boolean", "description": "upload_complete: true when the builder already held these bytes and nothing was sent."}
+  },
+  "allOf": [
+    {
+      "if": {"required": ["type"], "properties": {"type": {"const": "upload_plan"}}},
+      "then": {"required": ["files", "bytes_total", "already_held"]}
+    },
+    {
+      "if": {"required": ["type"], "properties": {"type": {"const": "upload_progress"}}},
+      "then": {
+        "required": [
+          "file", "kind", "index", "of", "bytes_done", "bytes_total", "bytes_per_second", "eta_seconds",
+          "overall_bytes_done", "overall_bytes_total", "overall_eta_seconds"
+        ]
+      }
+    },
+    {
+      "if": {"required": ["type"], "properties": {"type": {"const": "upload_complete"}}},
+      "then": {
+        "required": [
+          "file", "kind", "index", "of", "bytes_total", "seconds", "bytes_per_second", "deduplicated",
+          "overall_bytes_done", "overall_bytes_total"
+        ]
+      }
+    }
+  ]
+}

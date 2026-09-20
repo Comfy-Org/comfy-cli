@@ -65,6 +65,7 @@ from comfy_cli.command.build_paths import (
 from comfy_cli.command.build_pull import UnsyncedDefinitionError, merge_pulled_spec
 from comfy_cli.command.build_push import (
     SkippedSymlink,
+    already_held_count,
     pending_uploads,
     prepare_push,
     public_node_identities,
@@ -87,6 +88,7 @@ from comfy_cli.command.build_targets import (
     catalog_choices,
     parse_build_targets,
 )
+from comfy_cli.command.build_upload_progress import UploadProgressReporter
 from comfy_cli.command.build_validation import (
     lookup_public_model_sources,
     project_wire_definition,
@@ -1990,6 +1992,12 @@ def push_cmd(
                 )
                 raise typer.Exit(code=1)
 
+        # Said before the first byte moves, and said even when nothing will: a
+        # multi-GB upload is otherwise silent until it ends, and "0 files" is
+        # the answer to "is it going to upload that again?".
+        reporter = UploadProgressReporter(renderer)
+        reporter.plan(uploads, already_held=already_held_count(preparation))
+
         # Checkpoint the reconciled spec after every blob so an interrupted push
         # resumes instead of restarting: `prepare_push` skips entries that
         # already carry a `blobId`, and until this lands on disk the ids exist
@@ -1998,7 +2006,7 @@ def push_cmd(
         uploaded = _builder_call(
             renderer,
             lambda: upload_assets(
-                preparation, client, lambda: _write_spec(renderer, paths.spec_file, preparation.spec)
+                preparation, client, lambda: _write_spec(renderer, paths.spec_file, preparation.spec), reporter
             ),
         )
     wire_definition = project_wire_definition(preparation.definition)

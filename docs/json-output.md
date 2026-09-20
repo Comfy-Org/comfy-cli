@@ -398,6 +398,41 @@ time. If the callback never arrives, the terminal envelope is an
 {"schema": "event/1", "type": "login_url", "url": "https://api.comfy.org/oauth/authorize?...", "timeout_s": 300}
 ```
 
+### `upload_plan`, `upload_progress`, `upload_complete`
+
+Emitted by `comfy build push` while it uploads model files and packaged custom
+nodes. They are part of the push, not the `run` stream, and validate against
+`build_push_event.json`.
+
+Where they go depends on the mode. Under `--json-stream` they are on stdout,
+ahead of the envelope, like every other event. Under plain `--json` (which is
+what a caller with a piped stdout resolves to, so every agent) they are on
+**stderr**, because stdout in that mode is exactly one envelope. Read stderr line
+by line and keep the lines that parse as JSON with `schema: "event/1"`.
+
+A push opens with one `upload_plan`, sent before the first byte and sent even
+when there is nothing to upload. Each file that transfers gets an
+`upload_progress` as it starts and about every two seconds after, then one
+`upload_complete`. A file the builder already held gets only an
+`upload_complete` with `deduplicated: true`. A file whose upload fails gets no
+`upload_complete`; the error envelope is the next line.
+
+```json
+{"schema": "event/1", "type": "upload_plan", "files": 3, "bytes_total": 56908316672, "already_held": 2}
+{"schema": "event/1", "type": "upload_progress", "file": "model.safetensors", "kind": "model", "index": 1, "of": 3, "bytes_done": 1288490188, "bytes_total": 23761671782, "bytes_per_second": 47500000, "eta_seconds": 473, "overall_bytes_done": 1288490188, "overall_bytes_total": 56908316672, "overall_eta_seconds": 1171}
+{"schema": "event/1", "type": "upload_complete", "file": "model.safetensors", "kind": "model", "index": 1, "of": 3, "bytes_total": 23761671782, "seconds": 498.2, "bytes_per_second": 47695045, "deduplicated": false, "overall_bytes_done": 23761671782, "overall_bytes_total": 56908316672}
+```
+
+`bytes_per_second` on a progress event is measured over the last ten seconds
+and is sampled on a timer, not on bytes moving, so a stalled connection keeps
+reporting and its rate falls to `0` with `eta_seconds: null`. That is how to
+tell a slow upload from a dead one. `bytes_done` counts bytes handed to the
+connection, which runs slightly ahead of bytes the server has acknowledged.
+
+At a terminal the same numbers render as one redrawn progress line; with output
+piped under `--no-json` they are plain lines every five seconds, with no
+carriage returns.
+
 ## Success envelope
 
 On `--wait` success, `data` carries:
