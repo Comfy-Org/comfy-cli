@@ -1882,9 +1882,17 @@ def _invalid_workflow_error(result: dict[str, Any]) -> dict[str, Any] | None:
         if suggestions:
             line += f" (did you mean: {', '.join(str(s) for s in suggestions)}?)"
         hint_parts.append(line)
+    # The code is a registered catch-all raised for every verdict, so it alone
+    # cannot tell a cycle from a missing input and a caller reading only
+    # `error.code` diagnoses all of them as "unknown nodes". The distinct codes
+    # go in the message, which carries no contract, in first-seen order.
+    seen_codes = list(dict.fromkeys(str(e.get("code")) for e in errors if e.get("code")))
+    summary = f"workflow has {len(errors)} validation error(s)"
+    if seen_codes:
+        summary += ": " + ", ".join(seen_codes[:5])
     return {
         "code": "workflow_unknown_nodes",
-        "message": f"workflow has {len(errors)} validation error(s)",
+        "message": summary,
         "hint": "\n".join(hint_parts),
         "details": {"errors": errors, "warnings": result["warnings"]},
     }

@@ -19,7 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from comfy_cli.cql._net import is_loopback_host
@@ -616,7 +616,7 @@ def finding_severity(code: str) -> str:
     return SEVERITY_ERROR if code in FATAL_FINDING_CODES else SEVERITY_WARNING
 
 
-def _is_wildcard_type(type_id: str) -> bool:
+def is_wildcard_type(type_id: str) -> bool:
     """True when a socket type accepts/produces any type.
 
     Matches COMFY_MATCHTYPE_V3 by prefix rather than exact string so a future
@@ -640,7 +640,7 @@ def _edge_types_compatible(src_type: str, dst_type: str) -> bool:
     12 of the 23 such warnings in a 3-day prod window were this shape, on
     edges the frontend draws and the server runs.
     """
-    if _is_wildcard_type(src_type) or _is_wildcard_type(dst_type):
+    if is_wildcard_type(src_type) or is_wildcard_type(dst_type):
         return True
     # Lazy: workflow_to_api imports this module at load time.
     from comfy_cli.workflow_to_api import _is_valid_connection
@@ -726,9 +726,17 @@ def frontend_extra_widget_names(m: Morphism) -> list[str]:
     return [e for e in extras if e not in declared]
 
 
-def _is_link(type_id: str, is_enum: bool, force_input: bool, widget_type: str | None = None) -> bool:
+def _is_link(
+    type_id: str, is_enum: bool, force_input: bool, widget_type: str | None = None, socketless: bool = False
+) -> bool:
     """Determine if an input participates in typed wiring (link) or is inline (widget)."""
     if is_enum:
+        return False
+    # ``socketless`` hides the input SOCKET and nothing else: litegraph renders
+    # the widget as usual and it serializes positionally like any other
+    # (``ColorToRGBInt ["#ffffff"]``, ``Painter ["p.png", 1024, 1024,
+    # "#000000"]``). An explicit ``forceInput`` still demotes it to a link.
+    if socketless and not force_input:
         return False
     # ``widgetType`` overrides the socket type for widget selection (a
     # ``FLOAT,INT`` math input with ``widgetType: "STRING"``, Preview3D's
@@ -927,7 +935,7 @@ def _port_from_spec(name: str, spec: Any, required: bool) -> Port:
         name=name,
         type=type_id,
         required=required,
-        is_link=_is_link(type_id, is_enum, opts.force_input, opts.widget_type),
+        is_link=_is_link(type_id, is_enum, opts.force_input, opts.widget_type, opts.socketless),
         enum_values=enum_values,
         enum_declared=enum_declared,
         options=opts,
@@ -1846,7 +1854,9 @@ class Graph:
                     # known-type/empty-intersection mismatch is ever promoted —
                     # a wildcard, a union overlap, or a blank/unknown type on
                     # either end still yields no finding at all.
-                    port = port_by_name.get(input_name)
+                    port = port_by_name.get(input_name) or _dotted_slot_port(
+                        port_by_name, input_name, node_inputs, dyn_valid_keys
+                    )
                     if port is not None:
                         src_type = src_m.outputs[out_idx].type
                         dst_type = port.type
@@ -2412,13 +2422,6 @@ def _check_required_present(node_id: str, m: Morphism, node_data: dict) -> list[
         if not port.required or port.is_autogrow:
             continue
         if port.is_dynamic_combo or port.type.startswith("COMFY_DYNAMICSLOT"):
-            continue
-        # `socketless: true` is the frontend's marker for a display-only input
-        # (ImageCompare's compare_view slider, Painter's canvas): it has no
-        # socket and no widget value, so nothing is ever submitted for it and
-        # the server does not ask for one. Demanding it rejected every template
-        # ending in a comparison node.
-        if port.is_socketless:
             continue
         if port.name in present:
             continue
@@ -3178,6 +3181,44 @@ def frontend_injected_widget_error(node_type: str, widget: str, available: list[
         f"`comfy workflow slots` never lists it) and is not editable; "
         f"available widgets: {', '.join(available) if available else '(none — all inputs are links)'}"
     )
+
+
+def _dotted_slot_port(
+    port_by_name: dict[str, Port], dotted: str, node_inputs: dict, valid_sub_keys: set[str] | None = None
+) -> Port | None:
+    """The port a dotted wire key targets: an autogrow slot or a combo sub-input.
+
+    The server type-checks every entry in a node's ``inputs`` by name, dotted
+    or not, so ``images.image0`` and ``resize_type.multiplier`` need a type to
+    compare against just as much as a top-level name does. Returns ``None``
+    when the key resolves to nothing the current schema declares — an unknown
+    group, a sub-key left over from another selection (the server ignores
+    those, so they must not hard-fail), or a template with no element type.
+    """
+    base, _, leaf = dotted.partition(".")
+    if not leaf:
+        return None
+    port = port_by_name.get(base)
+    if port is None:
+        return None
+    if port.is_autogrow:
+        element = port.autogrow_element_type
+        if not element:
+            return None
+        # A slot carries the group's element type; the slot NAME is checked
+        # elsewhere (autogrow_unknown_slot), so an odd name still gets the
+        # type comparison the server will make.
+        return replace(port, name=dotted, type=element)
+    if port.is_dynamic_combo:
+        if valid_sub_keys is not None and dotted not in valid_sub_keys:
+            return None
+        selector = node_inputs.get(base)
+        for sub in _dynamic_combo_sub_ports(port.dynamic_options, selector, base):
+            if sub.name == dotted:
+                return sub
+            if dotted.startswith(f"{sub.name}.") and sub.is_dynamic_combo:
+                return _dotted_slot_port({sub.name: sub}, dotted[len(base) + 1 :], node_inputs, valid_sub_keys)
+    return None
 
 
 def _dynamic_combo_sub_ports(dynamic_options: list[dict], selector: Any, prefix: str) -> list[Port]:

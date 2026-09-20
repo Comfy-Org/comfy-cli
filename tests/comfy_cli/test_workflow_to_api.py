@@ -2751,3 +2751,72 @@ class TestLoad3DInjectedButtonSlots:
         ui = self._workflow("Load3D", ["toy.glb", "", 1024, 1024])
         inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
         assert inputs == {"model_file": "toy.glb", "image": "", "width": 1024, "height": 1024}
+
+
+class TestSocketlessInputsOwnTheirSlot:
+    """``socketless: true`` hides the input SOCKET, not the widget.
+
+    ``litegraphService`` skips adding an input socket for such an input and
+    renders the widget as usual, so the value is serialized positionally like
+    any other — real templates prove it (``ColorToRGBInt ["#ffffff"]``,
+    ``Painter ["p.png", 1024, 1024, "#000000"]``). Reading the type as a link
+    left the slot unconsumed and the input was then refilled from the schema
+    default, so a colour the user picked came back as the default: a value the
+    server accepts and renders wrong.
+    """
+
+    @pytest.fixture
+    def object_info_socketless(self):
+        return {
+            "ImageCropToMask": {
+                "input": {
+                    "required": {
+                        "images": ["IMAGE"],
+                        "width": ["INT", {"default": 1024}],
+                        "background": ["COLOR", {"default": "#000000", "socketless": True}],
+                    }
+                },
+                "input_order": {"required": ["images", "width", "background"]},
+                "output": ["IMAGE"],
+            },
+            # socketless AND forceInput: the explicit demotion wins, so this
+            # one really is a link and owns no slot.
+            "CropByBBoxes": {
+                "input": {
+                    "required": {
+                        "images": ["IMAGE"],
+                        "width": ["INT", {"default": 64}],
+                        "bboxes": ["BOUNDING_BOX", {"socketless": True, "forceInput": True}],
+                    }
+                },
+                "input_order": {"required": ["images", "width", "bboxes"]},
+                "output": ["IMAGE"],
+            },
+        }
+
+    def _node(self, node_type, widgets_values):
+        return {
+            "nodes": [
+                {
+                    "id": 2,
+                    "type": node_type,
+                    "inputs": [{"name": "images", "link": None}],
+                    "outputs": [],
+                    "mode": 0,
+                    "widgets_values": widgets_values,
+                }
+            ],
+            "links": [],
+        }
+
+    def test_a_chosen_socketless_value_is_not_replaced_by_the_default(self, object_info_socketless):
+        ui = self._node("ImageCropToMask", [1024, "#ff0000"])
+        assert convert_ui_to_api(ui, object_info_socketless)["2"]["inputs"]["background"] == "#ff0000"
+
+    def test_force_input_still_demotes_a_socketless_input_to_a_link(self, object_info_socketless):
+        # Only one widget value, for `width`: if bboxes ate a slot the walk
+        # would be short one and width would go missing.
+        ui = self._node("CropByBBoxes", [64])
+        inputs = convert_ui_to_api(ui, object_info_socketless)["2"]["inputs"]
+        assert inputs["width"] == 64
+        assert "bboxes" not in inputs

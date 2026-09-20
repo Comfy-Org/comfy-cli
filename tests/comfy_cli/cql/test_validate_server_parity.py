@@ -126,6 +126,51 @@ def _object_info() -> dict[str, Any]:
             "output_node": False,
             "python_module": "nodes",
         },
+        "MakeMask": {
+            "input": {"required": {"width": ["INT", {"default": 64}]}},
+            "input_order": {"required": ["width"]},
+            "output": ["MASK"],
+            "output_name": ["MASK"],
+            "output_node": False,
+            "python_module": "nodes",
+        },
+        "MakeInt": {
+            "input": {"required": {"value": ["INT", {"default": 1}]}},
+            "input_order": {"required": ["value"]},
+            "output": ["INT"],
+            "output_name": ["INT"],
+            "output_node": False,
+            "python_module": "nodes",
+        },
+        # A V3 dynamic combo whose selected option contributes a FLOAT
+        # sub-input, wired by the dotted key `resize_type.multiplier`.
+        "ResizeNode": {
+            "input": {
+                "required": {
+                    "image": ["IMAGE", {}],
+                    "resize_type": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {
+                                    "key": "scale by multiplier",
+                                    "inputs": {"required": {"multiplier": ["FLOAT", {"default": 1.0}]}},
+                                },
+                                {
+                                    "key": "scale dimensions",
+                                    "inputs": {"required": {"width": ["INT", {"default": 512}]}},
+                                },
+                            ]
+                        },
+                    ],
+                }
+            },
+            "input_order": {"required": ["image", "resize_type"]},
+            "output": ["IMAGE"],
+            "output_name": ["IMAGE"],
+            "output_node": False,
+            "python_module": "nodes",
+        },
         "BatchImagesNode": {
             "input": {
                 "required": {
@@ -458,14 +503,30 @@ class TestAutogrowRealSchemas:
 
 
 class TestSocketlessInputs:
-    """`socketless: true` marks a display-only input: no socket, no widget
-    value, nothing serialized. Demanding it rejected every template ending in
-    an ImageCompare (40 of 517), and 20 more classes declare one."""
+    """`socketless: true` hides the input SOCKET, not the widget.
 
-    def test_a_socketless_required_input_may_be_absent(self, graph: Graph) -> None:
+    The value is still serialized positionally and still required. Verified
+    live on the CPU test server: an ImageCompare carrying only image_a/image_b
+    is rejected with `required_input_missing: compare_view`, and the key is
+    accepted with ANY value (including null) once present. An earlier reading
+    of the flag as "display-only, never submitted" made the validator pass a
+    graph the server refuses, which is the one failure mode that costs an
+    agent a whole round trip.
+    """
+
+    def test_a_missing_socketless_required_input_is_reported(self, graph: Graph) -> None:
         wf = {
             "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
             "2": {"class_type": "SocketlessNode", "inputs": {"image": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert not result["valid"]
+        assert "required_input_missing" in _codes(result)
+
+    def test_a_socketless_input_with_a_value_is_accepted(self, graph: Graph) -> None:
+        wf = {
+            "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "2": {"class_type": "SocketlessNode", "inputs": {"image": ["1", 0], "compare_view": None}},
         }
         assert graph.validate_workflow(wf)["valid"], graph.validate_workflow(wf)["errors"]
 
@@ -578,3 +639,69 @@ class TestUndeclaredInputs:
             "2": {"class_type": "ShowImage", "inputs": {"images": [1, 0]}},
         }
         assert not graph.validate_workflow(wf)["valid"]
+
+
+class TestDottedSlotsAreTypeChecked:
+    """A link into a dotted AUTOGROW / DYNAMICCOMBO slot is still a link.
+
+    The server type-checks every entry in `inputs`, dotted or not: verified
+    live, a MASK wired into `images.image0` comes back
+    `return_type_mismatch` ("images.image0, received_type(MASK) mismatch
+    input_type(IMAGE)"), and an INT into a FLOAT sub-input the same way. The
+    edge check resolved only top-level names, so every one of these passed as
+    valid — the failure mode that costs an agent a submit.
+    """
+
+    def test_a_wrong_type_into_an_autogrow_slot_is_reported(self, graph: Graph) -> None:
+        wf = {
+            "901": {"class_type": "MakeMask", "inputs": {"width": 64}},
+            "1": {"class_type": "BatchImagesNode", "inputs": {"images.image0": ["901", 0]}},
+            "2": {"class_type": "ShowImage", "inputs": {"images": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert not result["valid"], result
+        assert "type_mismatch" in " ".join(_codes(result))
+
+    def test_the_right_type_into_an_autogrow_slot_still_passes(self, graph: Graph) -> None:
+        wf = {
+            "901": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "1": {"class_type": "BatchImagesNode", "inputs": {"images.image0": ["901", 0]}},
+            "2": {"class_type": "ShowImage", "inputs": {"images": ["1", 0]}},
+        }
+        assert graph.validate_workflow(wf)["valid"], graph.validate_workflow(wf)["errors"]
+
+    def test_a_wrong_type_into_a_dynamic_combo_sub_input_is_reported(self, graph: Graph) -> None:
+        wf = {
+            "901": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "902": {"class_type": "MakeInt", "inputs": {"value": 2}},
+            "1": {
+                "class_type": "ResizeNode",
+                "inputs": {
+                    "image": ["901", 0],
+                    "resize_type": "scale by multiplier",
+                    "resize_type.multiplier": ["902", 0],
+                },
+            },
+            "2": {"class_type": "ShowImage", "inputs": {"images": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert not result["valid"], result
+        assert "type_mismatch" in " ".join(_codes(result))
+
+    def test_a_stale_sub_key_under_another_selection_is_not_type_checked(self, graph: Graph) -> None:
+        # The server ignores a sub-key that the CURRENT selection does not
+        # declare, so a leftover from a previous choice must not hard-fail.
+        wf = {
+            "901": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "902": {"class_type": "MakeInt", "inputs": {"value": 2}},
+            "1": {
+                "class_type": "ResizeNode",
+                "inputs": {
+                    "image": ["901", 0],
+                    "resize_type": "scale dimensions",
+                    "resize_type.multiplier": ["902", 0],
+                },
+            },
+            "2": {"class_type": "ShowImage", "inputs": {"images": ["1", 0]}},
+        }
+        assert "type_mismatch" not in " ".join(_codes(graph.validate_workflow(wf)))

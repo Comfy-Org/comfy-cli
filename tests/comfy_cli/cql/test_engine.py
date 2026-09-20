@@ -3911,13 +3911,13 @@ class TestMatchTypeWildcard:
     def test_future_matchtype_revisions_are_wildcards_too(self):
         """Prefix match, so a V4 match-type cannot silently reintroduce the
         false warnings this exists to prevent."""
-        from comfy_cli.cql.engine import _is_wildcard_type
+        from comfy_cli.cql.engine import is_wildcard_type
 
-        assert _is_wildcard_type("*")
-        assert _is_wildcard_type("COMFY_MATCHTYPE_V3")
-        assert _is_wildcard_type("COMFY_MATCHTYPE_V4")
-        assert not _is_wildcard_type("IMAGE")
-        assert not _is_wildcard_type("")
+        assert is_wildcard_type("*")
+        assert is_wildcard_type("COMFY_MATCHTYPE_V3")
+        assert is_wildcard_type("COMFY_MATCHTYPE_V4")
+        assert not is_wildcard_type("IMAGE")
+        assert not is_wildcard_type("")
 
 
 class TestMultiTypeEdge:

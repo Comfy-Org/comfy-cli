@@ -1093,6 +1093,13 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
     # ``FLOAT,INT`` input with ``widgetType: "FLOAT"`` owns a slot.
     if isinstance(options.get("widgetType"), str) and options.get("widgetType"):
         return True, False
+    # ``socketless`` hides the input SOCKET, not the widget: the value is
+    # serialized positionally like any other. Reading it as a link left its
+    # slot unconsumed, and `_collect_default_inputs` then refilled the input
+    # from the schema default — a colour the user picked came back as
+    # "#000000", which the server happily runs.
+    if options.get("socketless"):
+        return True, False
     if isinstance(input_type, (list, tuple)):
         return True, False  # combo of choices
     if isinstance(input_type, str):
