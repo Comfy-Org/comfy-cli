@@ -112,6 +112,30 @@ as a pair, `--min` accepts 0–20 and `--max` 1–20.
 `--watch` on `up` and `status` polls until `ready`, `failed`, `stopped` or
 `stop_failed`. The other five are transitional and it keeps waiting.
 
+While the status is `provisioning` or `starting` the deployment carries a
+`progress` object, and `status --json` returns it as `data.progress`: `step`
+(`staging_models`, `creating_endpoint`, `waiting_for_worker`) and, while models
+are copied onto the deployment's storage, `modelsDone` / `modelsTotal`,
+`bytesDone` / `bytesTotal`, `currentModel`, `bytesPerSecond` and `etaSeconds`.
+Under `--watch` the same object arrives as `deploy_progress` events, one per new
+sample (the service writes about every ten seconds): on **stderr** under `--json`,
+on stdout under `--json-stream`. Relay those numbers instead of "still
+provisioning". Things to read correctly:
+
+- `bytesTotal` absent means nobody measured the release, so there is no time
+  left to quote; `0` means every model was already in place.
+- `bytesTotalIsFloor: true` means "at least this much", with no `etaSeconds`.
+- `etaSeconds` covers staging only. Creating the endpoint and the first worker's
+  cold start come after it.
+- `attempt` above 1 means the step was restarted, and `bytesDone` started again.
+- `stale: true` on an event means the service has not rewritten the sample for a
+  minute. Its writes are best-effort, so that is not evidence the deploy stopped;
+  the status is still the verdict.
+- No `progress` at all is an older service, or a status other than the two above.
+
+Interrupting `--watch` leaves the deployment coming up on the service's side;
+`comfy deploy status --deployment <id> --watch` attaches again.
+
 `status` also reports **why** a deployment stopped, as `stopReason`: `user`,
 `credits`, or `policy`. `credits` is a billing problem and not something a retry
 fixes — say so rather than restarting into the same wall.

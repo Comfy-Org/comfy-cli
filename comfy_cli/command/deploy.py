@@ -18,6 +18,7 @@ from comfy_cli.command.build_paths import BuildSpecNotFoundError
 from comfy_cli.command.build_spec import BuildSpecInvalidError
 from comfy_cli.command.deploy_compute import prompt_gpu as _prompt_gpu
 from comfy_cli.command.deploy_compute import prompt_region as _prompt_region
+from comfy_cli.command.deploy_progress import DeployWatchReporter
 from comfy_cli.command.deploy_resolve import DeployResolveError
 from comfy_cli.command.deploy_runtime import command_clients as _command_clients
 from comfy_cli.command.deploy_runtime import poll_deployment as _poll_deployment
@@ -270,7 +271,19 @@ def up_cmd(
             )
             result = reconcile_up(builder, client, replace(request, gpu=selected_gpu, region=selected_region))
         if watch:
-            watched = _poll_deployment(client, _required_string(result.deployment, "id"), _sleep)
+            watched_id = _required_string(result.deployment, "id")
+            reporter = DeployWatchReporter(renderer, watched_id)
+            try:
+                watched = _poll_deployment(client, watched_id, _sleep, reporter.snapshot)
+            except KeyboardInterrupt:
+                # The deploy runs on the service's side and never needed this
+                # process: say so, report where it had got to, and leave it be.
+                reporter.interrupted()
+                if reporter.last is not None:
+                    _render_result(renderer, replace(result, deployment=reporter.last), watch=False)
+                raise typer.Exit(code=130) from None
+            finally:
+                reporter.close()
             result = replace(result, deployment=watched)
         _render_result(renderer, result, watch=watch)
     except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:

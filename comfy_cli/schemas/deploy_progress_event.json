@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_progress_event.json",
+  "title": "comfy deploy up / status --watch progress event",
+  "description": "One JSON object per line while a watched deployment comes up. On stdout under --json-stream, ahead of the envelope; on stderr under --json, where stdout stays the single envelope. One event per new sample from the deploy service (it writes about every ten seconds while models stage), and one more with stale: true if a sample then goes unrefreshed for a minute. A service that sends no progress object produces no events.",
+  "type": "object",
+  "required": [
+    "schema",
+    "type",
+    "deployment_id",
+    "status",
+    "stale",
+    "progress"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {
+      "const": "event/1"
+    },
+    "type": {
+      "const": "deploy_progress"
+    },
+    "deployment_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "description": "The deployment status the sample was read beside: provisioning or starting."
+    },
+    "stale": {
+      "type": "boolean",
+      "description": "True when progress.updatedAt is more than 60 seconds old. The numbers are the last the service wrote, not evidence that the deploy stopped."
+    },
+    "progress": {
+      "type": "object",
+      "description": "Where a deployment that is coming up has got to, exactly as the deploy service sent it. Present only while the status is provisioning or starting; absent otherwise and from a service that does not send it. The byte fields, bytesPerSecond and etaSeconds are present only while step is staging_models. bytesTotal is absent for a release whose models were never measured and 0 when every model is already in place. New fields may appear.",
+      "required": [
+        "step"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "step": {
+          "type": "string",
+          "description": "staging_models, creating_endpoint or waiting_for_worker today; treat an unknown value as a step name."
+        },
+        "modelsDone": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "modelsTotal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytesDone": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytesTotal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bytesTotalIsFloor": {
+          "type": "boolean"
+        },
+        "currentModel": {
+          "type": "string"
+        },
+        "bytesPerSecond": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "etaSeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

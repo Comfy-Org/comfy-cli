@@ -432,6 +432,45 @@ connection, which runs slightly ahead of bytes the server has acknowledged.
 At a terminal the same numbers render as one redrawn progress line; with output
 piped under `--no-json` they are plain lines every five seconds, with no
 carriage returns.
+### `deploy_progress`
+
+Emitted by `comfy deploy up --watch` and `comfy deploy status --watch` while the
+deployment's status is `provisioning` or `starting`. It is part of those
+commands, not the `run` stream, and validates against
+`deploy_progress_event.json`.
+
+Where it goes depends on the mode, the same way upload progress does. Under
+`--json-stream` it is on stdout, ahead of the envelope. Under plain `--json`
+(what a caller with a piped stdout resolves to, so every agent) it is on
+**stderr**, because stdout in that mode is exactly one envelope.
+
+```json
+{"schema": "event/1", "type": "deploy_progress", "deployment_id": "dep-7edc1262", "status": "provisioning", "stale": false, "progress": {"step": "staging_models", "modelsDone": 0, "modelsTotal": 2, "bytesDone": 3536540667, "bytesTotal": 7272719498, "currentModel": "models/checkpoints/sd_xl_base_1.0.safetensors", "bytesPerSecond": 44205525, "etaSeconds": 85, "attempt": 1, "startedAt": "2026-09-20T01:59:55Z", "updatedAt": "2026-09-20T02:01:15Z"}}
+{"schema": "event/1", "type": "deploy_progress", "deployment_id": "dep-7edc1262", "status": "starting", "stale": false, "progress": {"step": "waiting_for_worker", "attempt": 1, "startedAt": "2026-09-20T02:02:46Z", "updatedAt": "2026-09-20T02:02:46Z"}}
+```
+
+The event's own fields are snake_case like every other event. `progress` is the
+deploy service's object, passed through unchanged, so its fields are the API's
+camelCase, the same as `computeConfig` and `endpointUrl` in the envelopes. The
+service computes `bytesPerSecond` and `etaSeconds`; the CLI computes nothing, so
+the portal and the CLI show the same numbers.
+
+One event per new sample: the CLI polls every two seconds and the service writes
+about every ten, and a sample is keyed on its `updatedAt`. If a sample then goes
+a minute without being rewritten, one more event carries it with `stale: true`.
+The service's writes are best-effort, so a stale sample is not evidence that the
+deploy stopped; `status` remains the verdict. A service that sends no `progress`
+object produces no events, and the command behaves as it did before.
+
+`comfy deploy status --json` (with or without `--watch`) and `comfy deploy up
+--json` carry the same object as `data.progress` while the deployment is coming
+up, and omit the key otherwise.
+
+At a terminal the numbers render as one redrawn progress line; with output piped
+under `--no-json` they are plain lines, one per new sample, with no carriage
+returns. Ctrl-C during `--watch` exits 130 after printing that the deployment
+keeps coming up and the command that re-attaches, and in the JSON modes still
+writes the envelope for the last state it read.
 
 ## Success envelope
 

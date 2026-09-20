@@ -24,6 +24,17 @@ history.
   `--json` they go to stderr so stdout stays the single envelope. The rate is
   measured over the last ten seconds on a timer, so a stalled upload reports a
   falling rate instead of going quiet. Schema: `build_push_event.json`.
+- `comfy deploy up --watch` and `comfy deploy status` show where a deployment that
+  is coming up has got to: the step, and while models are copied onto its storage
+  the model, bytes done of the total, rate and time left ("Staging models: model 1
+  of 2 sd_xl_base_1.0.safetensors, 3.5 GB of 7.3 GB, 44.2 MB/s, 1m 25s left"). The
+  numbers are the deploy service's own `progress` object, which `status --json`
+  and `up --json` now carry while the status is `provisioning` or `starting` and
+  omit otherwise. Under `--watch`, `--json-stream` emits a `deploy_progress` event
+  per new sample on stdout and `--json` puts the same lines on stderr. Ctrl-C
+  during `--watch` stops the watching and nothing else, and prints the command
+  that re-attaches. A service that sends no `progress` prints what it printed
+  before. Schema: `deploy_progress_event.json`.
 - `comfy build push` prints every warning a save returns, and `--release` cuts no
   release while one says a deployment could not download a model link
   (`build_release_held`); `--release-despite-warnings` cuts anyway.

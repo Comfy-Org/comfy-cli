@@ -80,6 +80,26 @@
         "jobsInQueue": {"type": "integer", "minimum": 0},
         "sampledAt": {"type": "string", "format": "date-time"}
       }
+    },
+    "progress": {
+      "type": "object",
+      "description": "Where a deployment that is coming up has got to, exactly as the deploy service sent it. Present only while the status is provisioning or starting; absent otherwise, and from a service that does not send it. The byte fields, bytesPerSecond and etaSeconds are present only while step is staging_models. bytesTotal is absent for a release whose models were never measured and 0 when every model is already in place. New fields may appear.",
+      "required": ["step"],
+      "additionalProperties": true,
+      "properties": {
+        "step": {"type": "string", "description": "staging_models, creating_endpoint or waiting_for_worker today; read an unknown value as a step name."},
+        "modelsDone": {"type": "integer", "minimum": 0},
+        "modelsTotal": {"type": "integer", "minimum": 0},
+        "bytesDone": {"type": "integer", "minimum": 0},
+        "bytesTotal": {"type": "integer", "minimum": 0},
+        "bytesTotalIsFloor": {"type": "boolean"},
+        "currentModel": {"type": "string"},
+        "bytesPerSecond": {"type": "integer", "minimum": 0},
+        "etaSeconds": {"type": "integer", "minimum": 0},
+        "attempt": {"type": "integer", "minimum": 1},
+        "startedAt": {"type": "string", "format": "date-time"},
+        "updatedAt": {"type": "string", "format": "date-time"}
+      }
     }
   }
 }
