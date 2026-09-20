@@ -24,9 +24,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any, Final, Literal
+from typing import Any, Final
 
 from comfy_cli.command.build_spec import JsonObject
+from comfy_cli.output.progress import Surface, human_bytes, human_seconds, surface_for
 from comfy_cli.output.sanitize import sanitize_markup
 
 EVENT_PROGRESS: Final = "deploy_progress"
@@ -49,7 +50,6 @@ _STEP_LABELS: Final = {
     "waiting_for_worker": "Waiting for the first worker",
 }
 
-Surface = Literal["events", "live", "lines"]
 Now = Callable[[], datetime]
 
 
@@ -75,25 +75,6 @@ def _number(progress: JsonObject, key: str) -> int | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return int(value)
-
-
-def human_bytes(n: float) -> str:
-    size = float(n)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024:
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} TB"
-
-
-def human_seconds(seconds: float) -> str:
-    whole = int(seconds + 0.5)
-    if whole < 60:
-        return f"{whole}s"
-    if whole < 3600:
-        return f"{whole // 60}m {whole % 60:02d}s"
-    hours, rest = divmod(whole, 3600)
-    return f"{hours}h {rest // 60:02d}m"
 
 
 def step_label(progress: JsonObject) -> str:
@@ -220,12 +201,7 @@ class DeployWatchReporter:
         # Progress is never worth failing a deploy command over: the first write
         # the stream refuses turns reporting off for the rest of the watch.
         self._muted = False
-        if not renderer.is_pretty():
-            self._surface: Surface = "events"
-        elif renderer.console().is_terminal:
-            self._surface = "live"
-        else:
-            self._surface = "lines"
+        self._surface: Surface = surface_for(renderer)
 
     def snapshot(self, deployment: JsonObject) -> None:
         self.last = deployment

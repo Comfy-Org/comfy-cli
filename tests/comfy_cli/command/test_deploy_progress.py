@@ -501,14 +501,21 @@ def test_only_the_staging_step_can_go_stale() -> None:
 
 
 def test_deploy_up_watches_without_being_asked(tmp_path) -> None:
-    """`up` starts a wait of several minutes, so it follows it by default."""
+    """`up` starts a wait of several minutes, so it follows it by default.
+
+    Asserted through the help a person actually reads, not through Typer's
+    parameter objects: what matters is that the pair is offered and that the
+    default shown is to watch.
+    """
     # Given
     from comfy_cli.command import deploy as deploy_module
 
-    signature = inspect.signature(deploy_module.up_cmd)
+    # When
+    help_text = CliRunner().invoke(app, ["deploy", "up", "--help"], env={"COLUMNS": "400"}).stdout
 
     # Then
-    assert signature.parameters["watch"].default is True
-    assert signature.parameters["watch"].annotation.__metadata__[0].param_decls == ("--watch/--no-watch",)
+    assert "--watch" in help_text and "--no-watch" in help_text
+    assert "[default: watch]" in help_text
+    assert inspect.signature(deploy_module.up_cmd).parameters["watch"].default is True
     # `status` answers a question and exits, so there watching stays opt-in.
     assert inspect.signature(deploy_module.status_cmd).parameters["watch"].default is False
