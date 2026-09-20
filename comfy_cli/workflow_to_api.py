@@ -1615,7 +1615,25 @@ def _collect_default_inputs(
             default = _extract_default(input_spec)
             if default is not _MISSING:
                 defaults[input_name] = _wrap_widget_value(default)
+            elif section == "required" and _is_socketless_widget(input_spec):
+                # A socketless widget the saved workflow never persisted
+                # (ImageCompare's `compare_view`, saved as `widgets_values:
+                # []`). The frontend builds its prompt from LIVE widget state
+                # and submits one anyway; converting without it yields a prompt
+                # the server refuses outright (`required_input_missing`), which
+                # is 40 of the shipped templates. The server accepts any value
+                # here, `null` included — verified live — and this input has no
+                # declared default to offer instead.
+                defaults[input_name] = None
     return defaults
+
+
+def _is_socketless_widget(input_spec: Any) -> bool:
+    """A socketless input that is a widget rather than a forceInput link."""
+    if not isinstance(input_spec, (list, tuple)) or len(input_spec) < 2 or not isinstance(input_spec[1], dict):
+        return False
+    options = input_spec[1]
+    return bool(options.get("socketless")) and not (options.get("forceInput") or options.get("defaultInput"))
 
 
 _MISSING = object()

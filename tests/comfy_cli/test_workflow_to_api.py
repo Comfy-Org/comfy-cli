@@ -2820,3 +2820,56 @@ class TestSocketlessInputsOwnTheirSlot:
         inputs = convert_ui_to_api(ui, object_info_socketless)["2"]["inputs"]
         assert inputs["width"] == 64
         assert "bboxes" not in inputs
+
+
+class TestSocketlessInputAbsentFromASavedWorkflow:
+    """A socketless widget the saved workflow never persisted still has to
+    reach the prompt.
+
+    The frontend builds the prompt from LIVE widget state, not from
+    `widgets_values`, so an ImageCompare saved as `widgets_values: []`
+    still submits a `compare_view`. Converting it without one produces a
+    prompt the server refuses outright — verified live:
+    `required_input_missing: compare_view`, and the key is accepted with any
+    value once present (null included). 40 of the 517 shipped templates end
+    in one of these.
+    """
+
+    @pytest.fixture
+    def object_info_compare(self):
+        return {
+            "ImageCompare": {
+                "input": {
+                    "required": {"compare_view": ["IMAGECOMPARE", {"socketless": True}]},
+                    "optional": {"image_a": ["IMAGE", {}]},
+                },
+                "input_order": {"required": ["compare_view"], "optional": ["image_a"]},
+                "output": [],
+                "output_node": True,
+            },
+            "ColorNode": {
+                "input": {"required": {"color": ["COLOR", {"socketless": True, "default": "#ffffff"}]}},
+                "input_order": {"required": ["color"]},
+                "output": ["INT"],
+            },
+        }
+
+    def _one(self, node_type, widgets_values, object_info):
+        ui = {
+            "nodes": [
+                {"id": 5, "type": node_type, "inputs": [], "outputs": [], "mode": 0, "widgets_values": widgets_values}
+            ],
+            "links": [],
+        }
+        return convert_ui_to_api(ui, object_info)["5"]["inputs"]
+
+    def test_a_socketless_input_with_no_declared_default_is_still_emitted(self, object_info_compare):
+        inputs = self._one("ImageCompare", [], object_info_compare)
+        assert "compare_view" in inputs
+        assert inputs["compare_view"] is None
+
+    def test_a_socketless_input_with_a_default_uses_it(self, object_info_compare):
+        assert self._one("ColorNode", [], object_info_compare)["color"] == "#ffffff"
+
+    def test_a_saved_value_still_wins_over_the_placeholder(self, object_info_compare):
+        assert self._one("ColorNode", ["#123456"], object_info_compare)["color"] == "#123456"
