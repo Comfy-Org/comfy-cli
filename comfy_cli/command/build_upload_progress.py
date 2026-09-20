@@ -28,8 +28,9 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Any, Final, Literal, Protocol
+from typing import Any, Final, Protocol
 
+from comfy_cli.output.progress import Surface, human_bytes, human_seconds, surface_for
 from comfy_cli.output.sanitize import sanitize_markup
 
 _WINDOW_SECONDS: Final = 10.0
@@ -60,25 +61,6 @@ class UploadItem(Protocol):
 
     @property
     def size_bytes(self) -> int: ...
-
-
-def human_bytes(n: float) -> str:
-    size = float(n)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024:
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{size:.1f} TB"
-
-
-def human_seconds(seconds: float) -> str:
-    whole = int(seconds + 0.5)
-    if whole < 60:
-        return f"{whole}s"
-    if whole < 3600:
-        return f"{whole // 60}m {whole % 60:02d}s"
-    hours, rest = divmod(whole, 3600)
-    return f"{hours}h {rest // 60:02d}m"
 
 
 def plan_line(files: int, total_bytes: int, already_held: int) -> str:
@@ -138,9 +120,6 @@ class _Transfer:
         self.done += n
 
 
-Surface = Literal["events", "live", "lines"]
-
-
 class UploadProgressReporter:
     """Reports the plan, each file's progress and each file's completion.
 
@@ -161,12 +140,7 @@ class UploadProgressReporter:
         # Progress is never worth failing an upload over: the first write the
         # stream refuses turns reporting off for the rest of the push.
         self._muted = False
-        if not renderer.is_pretty():
-            self._surface: Surface = "events"
-        elif renderer.console().is_terminal:
-            self._surface = "live"
-        else:
-            self._surface = "lines"
+        self._surface: Surface = surface_for(renderer)
 
     # ----- the plan -----
 
