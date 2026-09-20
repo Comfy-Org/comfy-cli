@@ -128,6 +128,14 @@ def _finish(renderer, p, workflow: dict, op: dict, base_version: int, stdout: bo
     renderer.emit(payload, command=command, changed=not stdout)
 
 
+def _emit_op(renderer, p: Path, op: dict, base_version: int, command: str) -> None:
+    """Emit an op without applying it or writing the source workflow."""
+    payload = {"workflow": str(p), "op": op, "base_version": base_version, "wrote": None}
+    if renderer.is_pretty():
+        rprint(f"[bold green]✓[/bold green] {op['op']} emitted for [dim]{p}[/dim]")
+    renderer.emit(payload, command=command, changed=False)
+
+
 def _graph_or_exit(input_path, host, port, renderer, where=None):
     return _get_graph(input_path, host, port, where=where)
 
@@ -135,6 +143,34 @@ def _graph_or_exit(input_path, host, port, renderer, where=None):
 # ---------------------------------------------------------------------------
 # add-node
 # ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def insert_workflow_cmd(
+    file: Annotated[str, typer.Argument(help="Source frontend-format workflow JSON; emit-only, file is not modified.")],
+    template: Annotated[str, typer.Argument(help="Frontend-format workflow JSON to insert, or '-' for stdin.")],
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+):
+    """Insert a workflow template and emit one atomic ``insert_workflow`` op."""
+    renderer = get_renderer()
+    renderer.command = "workflow insert-workflow"
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    try:
+        if template == "-":
+            import sys
+
+            raw = sys.stdin.read()
+        else:
+            raw = Path(template).expanduser().read_text(encoding="utf-8")
+        inserted = json.loads(raw)
+        if not isinstance(inserted, dict):
+            raise ValueError("template must be a JSON object")
+        _, op = workflow_ops.insert_workflow(workflow, inserted, actor=actor, base_version=base_version)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+        _emit_edit_error(renderer, e, hint="provide a frontend-format workflow template JSON file")
+        raise typer.Exit(code=1) from e
+    _emit_op(renderer, p, op, base_version, "workflow insert-workflow")
 
 
 @tracking.track_command("workflow")
@@ -760,7 +796,13 @@ def apply_cmd(
     except workflow_ops.NotBatchableError as e:
         # A standalone-only op (clear) inside the batch: its own registered code,
         # with the hint naming the standalone command to run instead.
-        renderer.error(code=e.code, message=f"batch failed: {e}", hint=e.hint)
+        details = None
+        if ack == "summary":
+            details = {
+                "failed": {"index": e.spec_index, "op": e.spec_op, "code": e.code},
+                "applied_count": e.applied_count,
+            }
+        renderer.error(code=e.code, message=f"batch failed: {e}", hint=e.hint, details=details)
         raise typer.Exit(code=1) from e
     except workflow_ops.DeprecatedNodeType as e:
         renderer.error(
