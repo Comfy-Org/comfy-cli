@@ -24,7 +24,7 @@ import random
 import re
 from typing import Any
 
-from comfy_cli.cql.engine import _FRONTEND_DOM_WIDGET_TYPES
+from comfy_cli.cql.engine import _FRONTEND_DOM_WIDGET_TYPES, LOAD_3D_BUTTON_VALUES
 
 logger = logging.getLogger(__name__)
 
@@ -1117,6 +1117,24 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
     return False, False
 
 
+def _declared_input_spec(input_def: dict, name: str) -> Any:
+    """The spec a schema declares for ``name`` in either section, else ``None``."""
+    for section in ("required", "optional"):
+        section_def = input_def.get(section) or {}
+        if isinstance(section_def, dict) and name in section_def:
+            return section_def[name]
+    return None
+
+
+def _is_load_3d_spec(input_spec: Any) -> bool:
+    """Whether this input is the one the frontend's LOAD_3D factory renders.
+
+    Exactly the type that factory is registered for — ``LOAD_3D_ADVANCED`` and
+    ``PREVIEW_3D`` have their own widgets and inject no buttons.
+    """
+    return isinstance(input_spec, (list, tuple)) and bool(input_spec) and input_spec[0] == "LOAD_3D"
+
+
 def _dynamic_combo_selected_subs(input_name: str, input_spec: Any, selected: Any) -> list[tuple[str, Any]]:
     """``(dotted_name, spec)`` pairs for the selected option's sub-inputs.
 
@@ -1182,6 +1200,10 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
     input_def = _schema_input_def(schema)
     pairs: list[tuple[str, Any]] = []
     vidx = 0
+    # ``hasModelFileWidget`` in the frontend's LOAD_3D factory: the buttons are
+    # attached to the loaders (Load3D, Load3DAdvanced) and NOT to the viewers
+    # fed by a ``model_3d`` link (Preview3DAdvanced, SaveGaussianSplat, …).
+    injects_load_3d_buttons = _is_widget_input(_declared_input_spec(input_def, "model_file"))[0]
 
     def next_widget_spec(entries: list[tuple[str, Any]], start: int) -> Any:
         # The spec of the next WIDGET-owning input, not the next declared one.
@@ -1203,7 +1225,20 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
         # COMBO legitimately lists as one of its own options.
         nonlocal vidx
         is_widget, is_dynamic = _is_widget_input(spec)
-        if not is_widget or vidx >= len(widget_values):
+        if not is_widget:
+            return
+        if injects_load_3d_buttons and depth == 0 and _is_load_3d_spec(spec):
+            # The LOAD_3D custom widget adds its three buttons before its own
+            # component widget, so their values sit between ``model_file`` and
+            # this slot. Consuming them here read "upload3dmodel" into the
+            # viewport input and shifted width/height by three.
+            while (
+                vidx < len(widget_values)
+                and isinstance(widget_values[vidx], str)
+                and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
+            ):
+                vidx += 1
+        if vidx >= len(widget_values):
             return
         value = widget_values[vidx]
         pairs.append((name, value))

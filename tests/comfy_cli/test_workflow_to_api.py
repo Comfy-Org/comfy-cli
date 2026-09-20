@@ -2655,3 +2655,99 @@ class TestSeedreamDynamicCombo:
 
         assert "model.images" not in inputs
         assert "fixed" not in inputs.values()
+
+
+class TestLoad3DInjectedButtonSlots:
+    """The LOAD_3D custom widget injects three button slots before its own.
+
+    ``getCustomWidgets().LOAD_3D`` (frontend ``src/extensions/core/load3d.ts``)
+    adds ``upload 3d model`` / ``upload extra resources`` / ``clear`` button
+    widgets — serialized as the literal values ``"upload3dmodel"``,
+    ``"uploadExtraResources"``, ``"clear"`` — and only when the node already
+    carries a ``model_file`` widget, which is why ``Preview3DAdvanced`` and the
+    other ``model_3d``-fed viewers get none. They are constructed BEFORE the
+    LOAD_3D component widget, so they sit between ``model_file`` and the
+    declared DOM-widget input rather than trailing it. Walking the schema
+    positionally without them read the three button values into ``image``,
+    ``width`` and ``height``; the real captured shape is the one asserted here
+    (``api_hunyuan3d_model2uv.json`` and three sibling templates).
+    """
+
+    @pytest.fixture
+    def object_info_3d(self):
+        def load3d(dom_name):
+            return {
+                "input": {
+                    "required": {
+                        "model_file": ["COMBO", {"options": ["none"], "file_upload": True}],
+                        dom_name: ["LOAD_3D", {}],
+                        "width": ["INT", {"default": 1024}],
+                        "height": ["INT", {"default": 1024}],
+                    }
+                },
+                "input_order": {"required": ["model_file", dom_name, "width", "height"]},
+                "output": ["IMAGE"],
+                "output_name": ["image"],
+            }
+
+        return {
+            "Load3D": load3d("image"),
+            "Load3DAdvanced": load3d("viewport_state"),
+            # model_3d is a LINK input, so the frontend finds no model_file
+            # widget and injects no buttons: this node's LOAD_3D slot is the
+            # one right after nothing at all.
+            "Preview3DAdvanced": {
+                "input": {
+                    "required": {
+                        "model_3d": ["MESH"],
+                        "viewport_state": ["LOAD_3D", {}],
+                        "width": ["INT", {"default": 1024}],
+                    }
+                },
+                "input_order": {"required": ["model_3d", "viewport_state", "width"]},
+                "output": [],
+            },
+        }
+
+    def _workflow(self, node_type, widgets_values):
+        return {
+            "nodes": [
+                {
+                    "id": 13,
+                    "type": node_type,
+                    "inputs": [],
+                    "outputs": [],
+                    "mode": 0,
+                    "widgets_values": widgets_values,
+                }
+            ],
+            "links": [],
+        }
+
+    def test_load3d_button_values_do_not_become_input_values(self, object_info_3d):
+        # Verbatim from api_hunyuan3d_model2uv.json node 13.
+        ui = self._workflow("Load3D", ["toy.glb", "upload3dmodel", "uploadExtraResources", "clear", "", 1024, 1024])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "toy.glb", "image": "", "width": 1024, "height": 1024}
+
+    def test_advanced_variant_skips_the_same_three_slots(self, object_info_3d):
+        ui = self._workflow(
+            "Load3DAdvanced", ["motor.fbx", "upload3dmodel", "uploadExtraResources", "clear", "", 800, 600]
+        )
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 800, "height": 600}
+
+    def test_link_fed_viewer_has_no_buttons_to_skip(self, object_info_3d):
+        # No model_file widget -> no injected buttons. Skipping three slots
+        # here would eat this node's only two values.
+        ui = self._workflow("Preview3DAdvanced", ["", 512])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"viewport_state": "", "width": 512}
+
+    def test_a_workflow_saved_without_the_buttons_still_maps_in_order(self, object_info_3d):
+        # The skip is gated on the literal button values, so a shape written
+        # before the extension existed (or by a non-frontend producer) keeps
+        # its straight positional mapping instead of losing three values.
+        ui = self._workflow("Load3D", ["toy.glb", "", 1024, 1024])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "toy.glb", "image": "", "width": 1024, "height": 1024}

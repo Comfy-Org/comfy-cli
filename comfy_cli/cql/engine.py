@@ -48,6 +48,22 @@ _FRONTEND_DOM_WIDGET_TYPES = frozenset(
 # frontend reads ``width`` into the viewport slot.
 _FRONTEND_DOM_WIDGET_DEFAULTS: dict[str, Any] = {"LOAD_3D": "", "LOAD_3D_ADVANCED": "", "PREVIEW_3D": ""}
 
+# ``getCustomWidgets().LOAD_3D`` adds three button widgets BEFORE its own
+# component widget, and only when the node already carries a ``model_file``
+# widget — which is why the ``model_3d``-fed viewers (``Preview3DAdvanced``,
+# ``SaveGaussianSplat``, …) get none. A button serializes its VALUE, so each
+# owns a positional slot holding a fixed string. ``(widget name, value)``; the
+# sibling ``PREVIEW_3D`` factory injects no buttons.
+_LOAD_3D_BUTTON_SLOTS: tuple[tuple[str, str], ...] = (
+    ("upload 3d model", "upload3dmodel"),
+    ("upload extra resources", "uploadExtraResources"),
+    ("clear", "clear"),
+)
+# The values, for the converter's gate: it skips a slot only when the saved
+# value IS one of these, so a shape written without the buttons keeps its
+# straight positional mapping.
+LOAD_3D_BUTTON_VALUES = frozenset(value for _name, value in _LOAD_3D_BUTTON_SLOTS)
+
 # Widget names the FRONTEND injects into a node's inputs after object_info
 # (``beforeRegisterNodeDef`` in ``uploadImage.ts``/``uploadAudio.ts``/
 # ``load3d.ts``/``saveMesh.ts``). They have no schema port. Listed with
@@ -659,6 +675,22 @@ def _has_control_after_generate_slot(port: Port) -> bool:
     # consumer wrote into the marker slot.
     leaf_name = port.name.rsplit(".", 1)[-1]
     return port.type == "INT" and "seed" in leaf_name.lower()
+
+
+def load_3d_button_slots(m: Morphism) -> tuple[tuple[str, str], ...]:
+    """The button slots the LOAD_3D custom widget injects into ``m``, if any.
+
+    ``getCustomWidgets().LOAD_3D`` attaches them only when the node already
+    carries a ``model_file`` WIDGET (``hasModelFileWidget``), so the loaders
+    (``Load3D``, ``Load3DAdvanced``) get them and the viewers fed by a
+    ``model_3d`` link (``Preview3DAdvanced``, ``SaveGaussianSplat``, …) do not.
+    They are constructed before the component widget, so the caller places them
+    immediately BEFORE the ``LOAD_3D`` slot — unlike every entry in
+    ``frontend_extra_widget_names``, which trails the declared inputs.
+    """
+    if not any(p.name == "model_file" and not p.is_link for p in m.inputs):
+        return ()
+    return _LOAD_3D_BUTTON_SLOTS
 
 
 def frontend_extra_widget_names(m: Morphism) -> list[str]:
@@ -1404,9 +1436,12 @@ class Graph:
         if m is None:
             return []
         order: list[str] = []
+        buttons = load_3d_button_slots(m)
         for p in m.inputs:
             if p.is_link:
                 continue
+            if buttons and p.type == "LOAD_3D":
+                order.extend(name for name, _value in buttons)
             order.append(p.name)
             if _has_control_after_generate_slot(p):
                 order.append("control_after_generate")
@@ -1468,10 +1503,16 @@ class Graph:
         # Same walk as ``widget_order_default`` (first key at every dynamic
         # combo, link-only sub-inputs skipped), so the two can never disagree
         # about which names own a slot.
+        button_values = dict(load_3d_button_slots(m))
         for entry in _expand_widget_entries(m, [], first_key=True):
             if entry.port is None:
                 if entry.name == "control_after_generate":
                     out[entry.name] = "fixed"
+                elif entry.name in button_values:
+                    # A LOAD_3D button DOES serialize (its own value) and sits
+                    # before the viewport slot, so a fresh node must write it
+                    # or every later value lands one slot early.
+                    out[entry.name] = button_values[entry.name]
                 # Frontend-injected marker slots (``upload``, ``audioUI``) are
                 # trailing and ``serialize: false`` on current frontends: no
                 # default, no value.
@@ -3209,9 +3250,13 @@ def _expand_widget_entries(
         elif _has_control_after_generate_slot(port):
             entries.append(_WidgetEntry(name="control_after_generate", port=None, owner=owner))
 
+    buttons = load_3d_button_slots(m)
     for p in m.inputs:
         if p.is_link:
             continue
+        if buttons and p.type == "LOAD_3D":
+            for name, _value in buttons:
+                entries.append(_WidgetEntry(name=name, port=None, owner=None, frontend_injected=True))
         emit(p.name, p, None, 0)
     for name in frontend_extra_widget_names(m):
         entries.append(_WidgetEntry(name=name, port=None, owner=None, frontend_injected=True))
