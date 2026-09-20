@@ -603,20 +603,6 @@ class TestAddNode:
         assert wf["nodes"][-1]["pos"] == [400, 200]
         assert op["pos"] == [400, 200]
 
-    @pytest.mark.xfail(
-        reason=(
-            "A node's title can't be set at creation time. "
-            "workflow_ops.add_node() takes no `title` kwarg, _build_node() "
-            "never writes a `title` key (so a fresh node falls back to the "
-            "frontend's class-derived default), and add-node's CLI/agent-tool "
-            "surface (workflow_edit.add_node_cmd, cloud services/agent's "
-            "add_node tool) exposes no --title/title option either — nor "
-            "does any other op/command rename a node after creation. "
-            "Un-xfail once add_node grows a title parameter that lands in "
-            "the node's `title` (and the op's, for replay)."
-        ),
-        strict=True,
-    )
     def test_add_node_can_set_title_at_creation(self):
         """Applying a title when creating a node should show the requested
         title immediately, not the node's default class-derived title."""

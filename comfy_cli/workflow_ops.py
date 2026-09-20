@@ -532,6 +532,7 @@ def add_node(
     *,
     pos: list | None = None,
     mode: int = 0,
+    title: str | None = None,
     actor: str = "cli",
     base_version: int = 0,
     allow_deprecated: bool = False,
@@ -571,7 +572,9 @@ def add_node(
         )
     ):
         raise ValueError(f"node position must be two finite numbers, got {pos!r}")
-    node = _build_node(mint_id(), class_type, m, graph, pos, size)
+    if title is not None and not isinstance(title, str):
+        raise ValueError(f"node title must be a string, got {title!r}")
+    node = _build_node(mint_id(), class_type, m, graph, pos, size, title=title)
     if mode:
         # Node mode (mute/bypass) is graph-semantic state — a bypassed node
         # executes differently — so it must survive capture→apply. op.node is
@@ -591,6 +594,7 @@ def add_node(
         pos=node["pos"],
         node=node,
         **({"mode": mode} if mode else {}),
+        **({"title": title} if title is not None else {}),
     )
     return apply_op(workflow, op, graph), op
 
@@ -1734,6 +1738,7 @@ def apply_specs(
                         spec["class_type"],
                         pos=spec.get("at"),
                         mode=spec.get("mode") or 0,
+                        title=spec.get("title"),
                         actor=actor,
                         base_version=base_version,
                         allow_deprecated=bool(spec.get("allow_deprecated")),
@@ -2431,7 +2436,7 @@ def strip_internal(workflow: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list) -> dict:
+def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list, title: str | None = None) -> dict:
     inputs = [{"name": p.name, "type": p.type, "link": None} for p in m.inputs if p.is_link]
     outputs = [{"name": p.name, "type": p.type, "links": []} for p in m.outputs]
     # Widget values in positional order, including dynamic-combo selectors and
@@ -2444,7 +2449,7 @@ def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list) 
     while order and order[-1] not in defaults:
         order = order[:-1]
     widgets = [defaults.get(name) for name in order]
-    return {
+    node = {
         "id": node_id,
         "type": class_type,
         "pos": list(pos),
@@ -2454,9 +2459,16 @@ def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list) 
         "mode": 0,
         "inputs": inputs,
         "outputs": outputs,
-        "properties": {},
-        "widgets_values": widgets,
     }
+    if title is not None:
+        # Omitted (never an empty/None key) unless requested: the frontend
+        # falls back to the class's own display name whenever a node carries
+        # no `title`, and writing one unconditionally would defeat that
+        # fallback for every node minted without an explicit title.
+        node["title"] = title
+    node["properties"] = {}
+    node["widgets_values"] = widgets
+    return node
 
 
 def _widget_index(graph, class_type: str, widget: str, widgets_values=None) -> int:
