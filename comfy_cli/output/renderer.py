@@ -11,6 +11,7 @@ UX contract:
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import sys
@@ -395,8 +396,16 @@ class Renderer:
         return env
 
     def _write_json_line(self, payload: Mapping[str, Any]) -> None:
-        line = json.dumps(payload, default=_json_default, ensure_ascii=False)
         stream = self.machine_stream
+        # Readers of this stream decode it as UTF-8. A legacy code page that
+        # CAN encode a character is the dangerous case — no UnicodeEncodeError
+        # fires (the clause below never runs) and the line goes out as bytes
+        # that are not valid UTF-8: cp1252 spells an em-dash 0x97, and the
+        # comfy-agent stored "no output nodes � the server will reject it"
+        # for every validate failure on Windows. Escaping whenever the stream
+        # is not UTF-8 keeps those envelopes readable on a UTF-8 terminal and
+        # decodable everywhere else.
+        line = json.dumps(payload, default=_json_default, ensure_ascii=not _is_utf8_stream(stream))
         try:
             try:
                 stream.write(line + "\n")
@@ -435,6 +444,22 @@ class Renderer:
     @property
     def exit_code(self) -> int:
         return self._exit_code
+
+
+def _is_utf8_stream(stream: Any) -> bool:
+    """Whether bytes written to ``stream`` come out as UTF-8.
+
+    A stream with no ``encoding`` (a StringIO under test, a mock) is treated as
+    UTF-8: nothing re-encodes it, so escaping would only make its text harder
+    to read. Unknown/odd codec names fall to escaped, which is always safe.
+    """
+    encoding = getattr(stream, "encoding", None)
+    if not encoding:
+        return True
+    try:
+        return codecs.lookup(encoding).name == "utf-8"
+    except (LookupError, TypeError):
+        return False
 
 
 def _json_default(obj: Any) -> Any:

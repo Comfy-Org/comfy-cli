@@ -44,3 +44,21 @@ def test_envelope_stays_unescaped_on_a_utf8_stream():
         assert "→" in raw.getvalue().decode("utf-8")
     finally:
         reset_renderer_for_testing()
+
+
+def test_envelope_is_escaped_whenever_the_stream_is_not_utf8():
+    """The em-dash IS in cp1252 (0x97), so no UnicodeEncodeError fires and the
+    escape path above never runs — the line goes out as legacy bytes. Every
+    reader of this stream decodes it as UTF-8, where 0x97 is invalid: the
+    comfy-agent stored `no output nodes � the server will reject it` for
+    every validate failure on the Windows box. A non-UTF-8 stream gets the
+    ASCII-escaped envelope, which any JSON reader decodes back."""
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252", errors="strict", write_through=True)
+    try:
+        _json_renderer_on(stream).emit({"message": "no output nodes — rejected"}, command="workflow validate")
+        written = raw.getvalue()
+        assert written.decode("utf-8") == written.decode("ascii"), written
+        assert json.loads(written.decode("utf-8"))["data"]["message"] == "no output nodes — rejected"
+    finally:
+        reset_renderer_for_testing()
