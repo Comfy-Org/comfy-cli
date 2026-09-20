@@ -1013,15 +1013,21 @@ class TestValidateWorkflow:
         assert result["valid"] is True
         assert result["errors"] == []
 
-    def test_non_node_key_warns(self, graph: Graph):
-        """An unrecognized non-node key should produce a warning, not an error."""
+    def test_dict_key_without_class_type_errors(self, graph: Graph):
+        """A dict key with no class_type is a REJECT, not a stray annotation.
+
+        This asserted a warning and a valid verdict until the server was asked:
+        it answers 400 `missing_node_type` ("Node 'ID #notanode' has no
+        class_type") for exactly this workflow, whether or not an output
+        reaches the key. A non-dict value is still only a warning — see
+        test_non_dict_node_value_warns, which the server 500s on (its own bug).
+        """
         wf = {**self._valid_workflow(), "notanode": {"title": "My Workflow"}}
         result = graph.validate_workflow(wf)
-        assert result["valid"] is True, result["errors"]
-        non_node = [w for w in result["warnings"] if w["code"] == "non_node_key"]
-        assert len(non_node) == 1
-        assert non_node[0]["node_id"] == "notanode"
-        assert non_node[0]["field"] == "notanode"
+        assert result["valid"] is False
+        missing = [e for e in result["errors"] if e["code"] == "missing_class_type"]
+        assert len(missing) == 1
+        assert missing[0]["node_id"] == "notanode"
 
     def test_meta_provenance_key_is_not_warned(self, graph: Graph):
         """`_meta` is the compose/run provenance block (stripped before submit),
@@ -1101,10 +1107,14 @@ class TestValidateWorkflow:
                 "class_type": "KSampler",
                 "inputs": {"model": ["99", 0]},
             },
+            # Reachable from an output, so the server would validate it: an
+            # unreachable node is pruned and its edges are advisory.
+            "2": {"class_type": "VAEDecode", "inputs": {"samples": ["1", 0], "vae": ["99", 2]}},
+            "3": {"class_type": "SaveImage", "inputs": {"images": ["2", 0]}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
-        errs = [e for e in result["errors"] if e["code"] == "dangling_edge"]
+        errs = [e for e in result["errors"] if e["code"] == "dangling_edge" and e["node_id"] == "1"]
         assert len(errs) == 1
         assert "99" in errs[0]["message"]
 
@@ -1121,6 +1131,8 @@ class TestValidateWorkflow:
                 # Index 5 is out of range
                 "inputs": {"model": ["1", 5]},
             },
+            "3": {"class_type": "VAEDecode", "inputs": {"samples": ["2", 0], "vae": ["1", 2]}},
+            "4": {"class_type": "SaveImage", "inputs": {"images": ["3", 0]}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
@@ -1311,10 +1323,12 @@ class TestValidateWorkflow:
                     "latent_image": ["97", 0],  # dangling
                 },
             },
+            "2": {"class_type": "VAEDecode", "inputs": {"samples": ["1", 0], "vae": ["96", 0]}},
+            "3": {"class_type": "SaveImage", "inputs": {"images": ["2", 0]}},
         }
         result = graph.validate_workflow(wf)
         assert result["valid"] is False
-        dangling = [e for e in result["errors"] if e["code"] == "dangling_edge"]
+        dangling = [e for e in result["errors"] if e["code"] == "dangling_edge" and e["node_id"] == "1"]
         assert len(dangling) == 3
 
     def test_below_min_error(self, graph: Graph):
@@ -1423,6 +1437,9 @@ class TestAutogrowInputs:
                 "class_type": "BatchImagesNode",
                 "inputs": {"images.image0": ["99", 0]},
             },
+            # Output-reachable, so the server validates it: on a pruned node
+            # the server never resolves the link and accepts the prompt.
+            "21": {"class_type": "SaveImage", "inputs": {"images": ["20", 0]}},
         }
         result = graph.validate_workflow(wf)
         codes = [e["code"] for e in result["errors"]]

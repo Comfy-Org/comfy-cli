@@ -110,6 +110,10 @@ class PortOptions:
     multiline: bool = False
     control_after_generate: bool = False
     force_input: bool = False
+    # ``socketless``: a display-only input (ImageCompare's compare_view slider,
+    # Painter's canvas). The frontend renders it and serializes nothing for it,
+    # and the server never asks for one, so it is not a required input.
+    socketless: bool = False
     # For COMFY_DYNAMICCOMBO_V3: the raw options list ({key, inputs} dicts) so the
     # engine can expand key-dependent sub-widgets (e.g. model → model.resolution),
     # matching the converter. None for ordinary inputs.
@@ -161,6 +165,11 @@ class Port:
     # in the spec's ``options`` blocks and is NOT recoverable from the parsed
     # fields above. Output ports carry ``None``.
     raw_spec: Any = None
+
+    @property
+    def is_socketless(self) -> bool:
+        """Display-only input: no socket, no widget value, nothing submitted."""
+        return self.options.socketless
 
     @property
     def is_autogrow(self) -> bool:
@@ -767,6 +776,7 @@ def _parse_port_options(opts_raw: dict) -> PortOptions:
         multiline=bool(opts_raw.get("multiline", False)),
         control_after_generate=_control_after_generate_set(opts_raw.get("control_after_generate")),
         force_input=bool(opts_raw.get("forceInput", False)),
+        socketless=bool(opts_raw.get("socketless", False)),
         template=template_raw if isinstance(template_raw, dict) else None,
         upload=_upload_marked(opts_raw),
         upload_declared=_upload_declared(opts_raw),
@@ -1547,19 +1557,20 @@ class Graph:
                 # hard-failing whoever links to it (dangling_edge) sent the
                 # reader to the wrong node. Advisory on a node no output
                 # reaches, which the server prunes without looking.
-                finding = {
-                    "node_id": node_id,
-                    "field": node_id,
-                    "code": "missing_class_type",
-                    "message": f"node {node_id!r} has no class_type — the server will reject this workflow",
-                    "hint": 'give it a class_type, e.g. {"class_type": "PreviewImage", "inputs": {…}}',
-                }
-                if node_id in reachable:
-                    errors.append(finding)
-                else:
-                    finding["code"] = "non_node_key"
-                    finding["message"] = f"key {node_id!r} has no class_type and will be ignored by the server"
-                    warnings.append(finding)
+                # Not gated on reachability, unlike required-presence and the
+                # range checks: the server reads class_type while it BUILDS the
+                # graph, so it answers `missing_node_type` ("Node 'ID #9' has no
+                # class_type") even for a node no output reaches. Verified
+                # against a live server on both an orphan and a wired node.
+                errors.append(
+                    {
+                        "node_id": node_id,
+                        "field": node_id,
+                        "code": "missing_class_type",
+                        "message": f"node {node_id!r} has no class_type — the server will reject this workflow",
+                        "hint": 'give it a class_type, e.g. {"class_type": "PreviewImage", "inputs": {…}}',
+                    }
+                )
                 continue
 
             m = self._nodes.get(class_type)
@@ -1634,12 +1645,20 @@ class Graph:
                         }
                     )
                     continue
+
+                # The server validates only output-reachable nodes and prunes
+                # the rest, so a structural break on a pruned node does not stop
+                # the prompt: it is accepted and runs. Same gate the required,
+                # range and edge-type checks above already use.
+                def _structural(finding: dict, _node_id: str = node_id) -> None:
+                    (errors if _node_id in reachable else warnings).append(finding)
+
                 # A list value is a link or it is nothing: the server accepts
                 # only `[node_id, slot_index]` and answers `bad_linked_input`,
                 # "must be a length-2 list", for every other list. Treating a
                 # wrong-length list as an opaque literal let `["1"]` validate.
                 if isinstance(value, list) and len(value) != 2:
-                    errors.append(
+                    _structural(
                         {
                             "node_id": node_id,
                             "field": input_name,
@@ -1658,7 +1677,7 @@ class Graph:
                     # the server cannot look up: `prompt[1]` raises KeyError and
                     # the submit 400s. str() here resolved it and validated clean.
                     if not isinstance(value[0], str):
-                        errors.append(
+                        _structural(
                             {
                                 "node_id": node_id,
                                 "field": input_name,
@@ -1678,7 +1697,7 @@ class Graph:
                     # IS 0. The server calls it a type error too (TypeError:
                     # tuple indices must be integers).
                     if not isinstance(value[1], int) or isinstance(value[1], bool):
-                        errors.append(
+                        _structural(
                             {
                                 "node_id": node_id,
                                 "field": input_name,
@@ -1701,7 +1720,7 @@ class Graph:
                         # not exist" here sent the reader to this node instead.
                         continue
                     if not isinstance(src_data, dict):
-                        errors.append(
+                        _structural(
                             {
                                 "node_id": node_id,
                                 "field": input_name,
@@ -1724,7 +1743,7 @@ class Graph:
                     # (ii) output index in range
                     if out_idx is None or out_idx < 0 or out_idx >= len(src_m.outputs):
                         valid_indices = ", ".join(f"[{i}]={p.type}" for i, p in enumerate(src_m.outputs))
-                        errors.append(
+                        _structural(
                             {
                                 "node_id": node_id,
                                 "field": input_name,
@@ -2326,11 +2345,23 @@ def _check_required_present(node_id: str, m: Morphism, node_data: dict) -> list[
     is a genuine authoring error; we do not skip ports with defaults.
     """
     present = node_data.get("inputs") or {}
+    # Same guard as _check_autogrow_required: a truthy non-dict `inputs` gets
+    # past `or {}` and raises on the membership test below. Nothing is present
+    # on such a node, which is what the required-input errors should say.
+    if not isinstance(present, dict):
+        present = {}
     errors: list[dict] = []
     for port in m.inputs:
         if not port.required or port.is_autogrow:
             continue
         if port.is_dynamic_combo or port.type.startswith("COMFY_DYNAMICSLOT"):
+            continue
+        # `socketless: true` is the frontend's marker for a display-only input
+        # (ImageCompare's compare_view slider, Painter's canvas): it has no
+        # socket and no widget value, so nothing is ever submitted for it and
+        # the server does not ask for one. Demanding it rejected every template
+        # ending in a comparison node.
+        if port.is_socketless:
             continue
         if port.name in present:
             continue
@@ -2773,16 +2804,24 @@ def _check_dynamic_combo_sub(
     return errs, warns, set(), set()
 
 
-def _autogrow_slot_prefix(port: Port) -> str:
-    """The slot stem this group numbers from (``image`` for ``images``), taken
-    from the schema template when the catalog carries one and otherwise from
-    the same singular-of-the-name guess autogrow_slot_example renders."""
+def _autogrow_first_slot(port: Port) -> str:
+    """The slot name this group's FIRST connection must use.
+
+    A modern group names its slots outright (``names: [image_1, …]``, the
+    convention ClaudeNode and most partner nodes ship) and there is no
+    ``image0`` in that scheme at all; guessing one rejected 51 of the 517
+    shipped templates, every one of them correctly wired. Only a group with no
+    names list is numbered from ``{prefix}0``.
+    """
     template = port.autogrow_element_template or {}
+    names = template.get("names")
+    if isinstance(names, list) and names and isinstance(names[0], str):
+        return names[0]
     prefix = template.get("prefix")
-    if isinstance(prefix, str) and prefix:
-        return prefix
-    last = port.name.rsplit(".", 1)[-1]
-    return last[:-1] if last.endswith("s") else last
+    if not (isinstance(prefix, str) and prefix):
+        last = port.name.rsplit(".", 1)[-1]
+        prefix = last[:-1] if last.endswith("s") else last
+    return f"{prefix}0"
 
 
 def _check_autogrow_required(
@@ -2794,6 +2833,13 @@ def _check_autogrow_required(
     cryptic downstream reject.
     """
     inputs = node_data.get("inputs") or {}
+    # A truthy non-dict `inputs` (a scalar from a hand-edited or generated file)
+    # survives `or {}` and then raises on the membership tests below —
+    # TypeError: argument of type 'int' is not iterable — which escaped as a
+    # crash with no envelope. The node is junk either way; treat it as having
+    # no inputs so the required-presence checks report it as a verdict.
+    if not isinstance(inputs, dict):
+        inputs = {}
     errors: list[dict] = []
     for base, port in autogrow_ports.items():
         if port.required and base in autogrow_seen:
@@ -2803,8 +2849,8 @@ def _check_autogrow_required(
             # anchor is fine (image0 + image2 submits), so only index 0 is
             # checked here.
             slots = {k.split(".", 1)[1] for k in inputs if isinstance(k, str) and k.startswith(f"{base}.")}
-            prefix = _autogrow_slot_prefix(port)
-            if slots and f"{prefix}0" not in slots:
+            first = _autogrow_first_slot(port)
+            if slots and first not in slots:
                 errors.append(
                     {
                         "node_id": node_id,
@@ -2812,12 +2858,16 @@ def _check_autogrow_required(
                         "code": "autogrow_missing_first_slot",
                         "message": (
                             f"autogrow input {base!r} is wired from {sorted(slots)[0]!r} but has no "
-                            f"{prefix}0 slot — the server requires the first slot"
+                            f"{first} slot — the server requires the first slot"
                         ),
                         "hint": f"wire the first slot: {port.autogrow_slot_example()}",
                     }
                 )
-        if port.required and base not in autogrow_seen and base not in inputs:
+        # `required` names where the group LIVES in the schema, not how many
+        # connections it needs: GLSLShader.floats and friends sit under
+        # required with min 0, and a shader using no float uniforms runs.
+        minimum, _ = port.autogrow_limits
+        if port.required and minimum >= 1 and base not in autogrow_seen and base not in inputs:
             errors.append(
                 {
                     "node_id": node_id,
