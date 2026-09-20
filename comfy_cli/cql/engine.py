@@ -1542,14 +1542,24 @@ class Graph:
             if not isinstance(class_type, str):
                 class_type = ""
             if not class_type:
-                warnings.append(
-                    {
-                        "node_id": node_id,
-                        "field": node_id,
-                        "code": "non_node_key",
-                        "message": f"key {node_id!r} has no class_type and will be ignored by the server",
-                    }
-                )
+                # The server answers `missing_node_type` for this node itself
+                # ("Node has no class_type"). Reporting it as a warning and then
+                # hard-failing whoever links to it (dangling_edge) sent the
+                # reader to the wrong node. Advisory on a node no output
+                # reaches, which the server prunes without looking.
+                finding = {
+                    "node_id": node_id,
+                    "field": node_id,
+                    "code": "missing_class_type",
+                    "message": f"node {node_id!r} has no class_type — the server will reject this workflow",
+                    "hint": 'give it a class_type, e.g. {"class_type": "PreviewImage", "inputs": {…}}',
+                }
+                if node_id in reachable:
+                    errors.append(finding)
+                else:
+                    finding["code"] = "non_node_key"
+                    finding["message"] = f"key {node_id!r} has no class_type and will be ignored by the server"
+                    warnings.append(finding)
                 continue
 
             m = self._nodes.get(class_type)
@@ -1662,11 +1672,35 @@ class Graph:
                         )
                         continue
                     src_id = str(value[0])
-                    out_idx = value[1] if isinstance(value[1], int) else None
+                    # The index must be an int. Folding a wrong-typed one into
+                    # the range check reported "index 0 out of range" for
+                    # `["1", "0"]` — nonsense on a node whose only valid index
+                    # IS 0. The server calls it a type error too (TypeError:
+                    # tuple indices must be integers).
+                    if not isinstance(value[1], int) or isinstance(value[1], bool):
+                        errors.append(
+                            {
+                                "node_id": node_id,
+                                "field": input_name,
+                                "code": "output_index_not_an_integer",
+                                "message": (
+                                    f"input {input_name!r} has output index {value[1]!r} "
+                                    f"({type(value[1]).__name__}); it must be an integer"
+                                ),
+                                "hint": f'use ["{src_id}", 0] for the first output',
+                            }
+                        )
+                        continue
+                    out_idx = value[1]
 
                     # (i) source node exists in workflow
                     src_data = workflow.get(src_id)
-                    if not isinstance(src_data, dict) or not src_data.get("class_type"):
+                    if isinstance(src_data, dict) and not src_data.get("class_type"):
+                        # It exists; it is malformed, and its own
+                        # missing_class_type error says so. Calling it "does
+                        # not exist" here sent the reader to this node instead.
+                        continue
+                    if not isinstance(src_data, dict):
                         errors.append(
                             {
                                 "node_id": node_id,

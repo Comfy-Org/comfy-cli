@@ -243,3 +243,55 @@ class TestNonFiniteNumbers:
         result = graph.validate_workflow(wf)
         assert not result["valid"]
         assert "shape_mismatch" in _codes(result)
+
+
+class TestErrorPointsAtTheRealProblem:
+    """Two messages sent the reader to the wrong place. Both were found by
+    comparing against the server, which names the malformed node itself and
+    calls a wrong-typed index a type error."""
+
+    @pytest.mark.parametrize(
+        "index",
+        [
+            pytest.param("0", id="string"),
+            pytest.param(0.0, id="float"),
+            pytest.param(None, id="null"),
+        ],
+    )
+    def test_wrong_typed_index_is_not_reported_as_out_of_range(self, graph: Graph, index: Any) -> None:
+        """`["1", "0"]` names a valid index in the wrong JSON type. Reporting
+        `output_index_out_of_range` claims index 0 is out of range on a node
+        whose only valid index IS 0, which reads as nonsense."""
+        wf = {
+            "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "2": {"class_type": "ShowImage", "inputs": {"images": ["1", index]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert not result["valid"]
+        assert "output_index_not_an_integer" in _codes(result)
+        assert "out of range" not in " ".join(e["message"] for e in result["errors"])
+
+    def test_missing_class_type_is_reported_on_that_node(self, graph: Graph) -> None:
+        """The server answers `missing_node_type` for the malformed node. The
+        validator called it a warning and hard-failed the CONSUMING node with a
+        dangling_edge, so the reader fixed the wrong node."""
+        wf = {
+            "1": {"inputs": {"width": 64}},
+            "2": {"class_type": "ShowImage", "inputs": {"images": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert not result["valid"]
+        missing = [e for e in result["errors"] if e["code"] == "missing_class_type"]
+        assert missing, _codes(result)
+        assert missing[0]["node_id"] == "1"
+
+    def test_a_malformed_source_is_not_called_missing(self, graph: Graph) -> None:
+        """The consumer also reported `dangling_edge`: "references node '1'
+        which does not exist". It does exist — it has no class_type, which the
+        node's own error already says."""
+        wf = {
+            "1": {"inputs": {"width": 64}},
+            "2": {"class_type": "ShowImage", "inputs": {"images": ["1", 0]}},
+        }
+        errors = graph.validate_workflow(wf)["errors"]
+        assert not [e for e in errors if e["code"] == "dangling_edge"], errors
