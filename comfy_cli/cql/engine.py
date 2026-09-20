@@ -1646,12 +1646,28 @@ class Graph:
                     )
                     continue
 
+                # Declared = the node's schema knows this key. A dotted key
+                # (autogrow slot `images.image0`, a dynamic combo's sub-input
+                # `model.images.image0`) belongs to the port its FIRST segment
+                # names.
+                _base = input_name.split(".", 1)[0] if isinstance(input_name, str) else input_name
+                declared_input = (
+                    input_name in port_by_name
+                    or input_name in autogrow_ports
+                    or _base in port_by_name
+                    or _base in autogrow_ports
+                )
+
                 # The server validates only output-reachable nodes and prunes
                 # the rest, so a structural break on a pruned node does not stop
                 # the prompt: it is accepted and runs. Same gate the required,
                 # range and edge-type checks above already use.
-                def _structural(finding: dict, _node_id: str = node_id) -> None:
-                    (errors if _node_id in reachable else warnings).append(finding)
+                def _structural(finding: dict, _node_id: str = node_id, _declared: bool = declared_input) -> None:
+                    # The server reads the inputs a node DECLARES and ignores
+                    # any other key, so junk under an unknown name cannot fail
+                    # a prompt (verified live). The unknown_input warning
+                    # already reports the key itself.
+                    (errors if _node_id in reachable and _declared else warnings).append(finding)
 
                 # A list value is a link or it is nothing: the server accepts
                 # only `[node_id, slot_index]` and answers `bad_linked_input`,

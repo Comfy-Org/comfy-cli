@@ -554,3 +554,27 @@ class TestPrunedNodesStayAdvisory:
             "2": {"class_type": "ShowImage", "inputs": broken},
         }
         assert not graph.validate_workflow(wf)["valid"]
+
+
+class TestUndeclaredInputs:
+    """The server validates the inputs a node DECLARES and ignores the rest, so
+    junk under an unknown key cannot fail a prompt (verified live: a
+    PreviewImage carrying `totally_unknown_field_zzz: [1, 2]` is accepted)."""
+
+    def test_a_malformed_link_under_an_unknown_key_does_not_fail(self, graph: Graph) -> None:
+        wf = {
+            "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "2": {
+                "class_type": "ShowImage",
+                "inputs": {"images": ["1", 0], "totally_unknown_field_zzz": [1, 2]},
+            },
+        }
+        result = graph.validate_workflow(wf)
+        assert result["valid"], result["errors"]
+
+    def test_a_malformed_link_under_a_declared_key_still_fails(self, graph: Graph) -> None:
+        wf = {
+            "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "2": {"class_type": "ShowImage", "inputs": {"images": [1, 0]}},
+        }
+        assert not graph.validate_workflow(wf)["valid"]
