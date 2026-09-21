@@ -128,7 +128,8 @@ def _object_info() -> dict[str, Any]:
                                                 },
                                             ],
                                             "resolution": ["COMBO", {"options": ["1K", "2K"]}],
-                                        }
+                                        },
+                                        "optional": {"mask": ["MASK", {}]},
                                     },
                                 }
                             ]
@@ -138,6 +139,26 @@ def _object_info() -> dict[str, Any]:
             },
             "input_order": {"required": ["prompt", "model"]},
             "output": ["IMAGE"],
+            "output_node": False,
+        },
+        # Frontend-extension widget types whose value is a filename.
+        "WebcamCapture": {
+            "input": {
+                "required": {
+                    "image": ["WEBCAM", {}],
+                    "width": ["INT", {"default": 0}],
+                    "height": ["INT", {"default": 0}],
+                    "capture_on_queue": ["BOOLEAN", {"default": True}],
+                }
+            },
+            "input_order": {"required": ["image", "width", "height", "capture_on_queue"]},
+            "output": ["IMAGE"],
+            "output_node": False,
+        },
+        "RecordAudio": {
+            "input": {"required": {"audio": ["AUDIO_RECORD", {}]}},
+            "input_order": {"required": ["audio"]},
+            "output": ["AUDIO"],
             "output_node": False,
         },
         "LoadImage": {
@@ -241,6 +262,48 @@ class TestLiteralOnLinkNoFalsePositives:
 
         assert result["valid"], result["errors"]
 
+    def test_webcam_and_record_audio_filenames_are_not_flagged(self):
+        # Both nodes read the value as a filename the frontend uploaded.
+        info = _object_info()
+        info["SaveAudio"] = {
+            "input": {"required": {"audio": ["AUDIO"], "filename_prefix": ["STRING", {"default": "audio/ComfyUI"}]}},
+            "input_order": {"required": ["audio", "filename_prefix"]},
+            "output": [],
+            "output_node": True,
+        }
+        wf = {
+            "1": {
+                "class_type": "WebcamCapture",
+                "inputs": {"image": "webcam/123.png", "width": 0, "height": 0, "capture_on_queue": True},
+            },
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "x"}},
+            "3": {"class_type": "RecordAudio", "inputs": {"audio": "recording.wav"}},
+            "4": {"class_type": "SaveAudio", "inputs": {"audio": ["3", 0], "filename_prefix": "a"}},
+        }
+
+        result = Graph.from_object_info(info).validate_workflow(wf)
+
+        assert result["valid"], result["errors"]
+
+
+class TestLiteralOnAutogrowSlot:
+    """A slot key is a connection too: a filename there reaches the node raw."""
+
+    def test_literal_in_autogrow_slot_is_an_error(self):
+        wf = {
+            "1": {"class_type": "LoadVideo", "inputs": {"file": "a.mp4"}},
+            "3": {
+                "class_type": "ConcatenateVideo",
+                "inputs": {"videos.video0": ["1", 0], "videos.video1": "b.mp4", "codec": "auto"},
+            },
+            "4": {"class_type": "SaveVideo", "inputs": {"video": ["3", 0], "filename_prefix": "v"}},
+        }
+
+        result = _graph().validate_workflow(wf)
+
+        assert not result["valid"]
+        assert ("literal_on_link_input", "videos.video1") in _codes(result)
+
 
 class TestAutogrowSlots:
     """ConcatenateVideo 400: `videos.video1` got AUDIO and `video0` was missing."""
@@ -306,6 +369,49 @@ class TestAutogrowSlots:
         result = _graph().validate_workflow(wf)
 
         assert result["valid"], result["errors"]
+
+    def test_nested_autogrow_slot_link_is_type_checked(self):
+        # `model.images.image_1` takes the nested template's IMAGE, not nothing.
+        wf = {
+            "0": {"class_type": "LoadAudio", "inputs": {"audio": "a.wav"}},
+            "1": {
+                "class_type": "GrokImageEditNodeV2",
+                "inputs": {
+                    "prompt": "make it blue",
+                    "model": "grok-imagine-image-2.0",
+                    "model.resolution": "1K",
+                    "model.images.image_1": ["0", 0],
+                },
+            },
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "x"}},
+        }
+
+        result = _graph().validate_workflow(wf)
+
+        assert not result["valid"]
+        assert ("edge_type_mismatch", "model.images.image_1") in _codes(result)
+
+    def test_dynamic_combo_sub_input_link_is_type_checked(self):
+        wf = {
+            "0": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
+            "9": {"class_type": "LoadAudio", "inputs": {"audio": "a.wav"}},
+            "1": {
+                "class_type": "GrokImageEditNodeV2",
+                "inputs": {
+                    "prompt": "make it blue",
+                    "model": "grok-imagine-image-2.0",
+                    "model.resolution": "1K",
+                    "model.images.image_1": ["0", 0],
+                    "model.mask": ["9", 0],
+                },
+            },
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "x"}},
+        }
+
+        result = _graph().validate_workflow(wf)
+
+        assert not result["valid"]
+        assert ("edge_type_mismatch", "model.mask") in _codes(result)
 
 
 class TestLoad3dViewportCapture:

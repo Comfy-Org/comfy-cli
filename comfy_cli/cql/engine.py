@@ -685,6 +685,10 @@ _FRONTEND_REGISTERED_WIDGET_TYPES = frozenset(
         "MARKDOWN", "IMAGEUPLOAD", "COLOR", "IMAGECOMPARE", "BOUNDING_BOX", "CHART", "GALLERIA",
         "PAINTER", "COMPOSITOR", "TEXTAREA", "CURVE", "RANGE", "VIDEO_EDIT", "RESOLUTION_PREVIEW",
         "BOUNDING_BOXES", "COLORS",
+        # Registered by frontend extensions (webcamCapture, uploadAudio); the
+        # node reads the value as a filename (WebcamCapture.image,
+        # RecordAudio.audio), so a literal is exactly right.
+        "WEBCAM", "AUDIO_RECORD",
     }
 )  # fmt: skip
 
@@ -1961,28 +1965,32 @@ class Graph:
                     continue
 
                 port = port_by_name.get(input_name)
-                if port is None:
-                    continue
+                # A dotted key (`videos.video1`, `model.mask`) has no port of its
+                # own; it is checked for a literal against the slot or sub-input
+                # it resolves to, and every other check below is its group's.
+                link_port = port if port is not None else _dotted_slot_port(port_by_name, input_name, node_inputs)
                 # A literal on a socket that only carries a node's output. The
                 # server does not type-check custom types (only INT/FLOAT/
                 # STRING/BOOLEAN/COMBO), so it hands the string to the node,
                 # which crashes: VHS_LoadVideo got `meta_batch: "None"` and
                 # died on `meta_batch.inputs` 117 times in 30 days.
-                if port.is_link and not _literal_expected(port, value):
+                if link_port is not None and link_port.is_link and not _literal_expected(link_port, value):
                     finding = {
                         "node_id": node_id,
                         "field": input_name,
                         "code": "literal_on_link_input",
                         "message": (
-                            f"input {input_name!r} is a {port.type} connection but holds the literal {value!r} "
-                            f"— the node receives a raw value where it expects a {port.type} object"
+                            f"input {input_name!r} is a {link_port.type} connection but holds the literal {value!r} "
+                            f"— the node receives a raw value where it expects a {link_port.type} object"
                         ),
                         "hint": (
-                            f"wire a node that outputs {port.type} into {input_name!r}, or remove the value "
-                            f"(`comfy nodes ls --produces {port.type}` to find a source)"
+                            f"wire a node that outputs {link_port.type} into {input_name!r}, or remove the value "
+                            f"(`comfy nodes ls --produces {link_port.type}` to find a source)"
                         ),
                     }
                     (errors if node_id in reachable else warnings).append(finding)
+                    continue
+                if port is None:
                     continue
                 if (class_type, input_name) in _FRONTEND_CAPTURE_INPUTS and not isinstance(value, dict):
                     finding = {
