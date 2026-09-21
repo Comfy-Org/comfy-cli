@@ -62,6 +62,7 @@ argument you pass.
 | `deploy_rate_limited` | Queue full or rate limited | Wait for capacity |
 | `deploy_idempotency_reuse` | That idempotency key was already used | The earlier submit landed; say so rather than resubmitting |
 | `deploy_job_submit_unknown` | Submit timed out and the job **may exist** | **Do not auto-resubmit.** No job lookup exists — ask the user |
+| `deploy_endpoint_unreachable` | Submit never reached the endpoint (connection refused, DNS, or a proxy refused `details.host`) — no job exists | Fix the network path (a local agent: the host must be allowed), then submit again |
 | `deploy_job_failed` | The job ran and failed | Fix the workflow or its inputs |
 | `deploy_job_canceled` | The job was canceled | Resubmit if that was not intended |
 

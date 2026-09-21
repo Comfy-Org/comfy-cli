@@ -1540,6 +1540,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "do not retry the duplicate invocation automatically",
     ),
     ErrorCode(
+        "deploy_endpoint_unreachable",
+        "A job submission failed before reaching the deployment's data plane (connection refused, DNS failure, or a proxy refused the tunnel), so no job was created.",
+        "check the network path to the endpoint host in details.host (a proxy or firewall must allow it), then submit again",
+    ),
+    ErrorCode(
         "deploy_job_submit_unknown",
         "A job submission timed out, lost its connection, or returned HTTP 5xx, so the job may exist. The v2 API has no job-list endpoint, idempotency-key lookup, or client-supplied job id with which to find it.",
         "do not resubmit automatically because the possibly-created job cannot be found through the v2 API",

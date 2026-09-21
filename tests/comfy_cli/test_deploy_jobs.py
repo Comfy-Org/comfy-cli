@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import socket
 import urllib.error
 from typing import Any
 
@@ -144,6 +145,31 @@ def test_unknown_transport_outcome_is_never_retried(monkeypatch, failure):
     message = str(exc_info.value).lower()
     assert "job may exist" in message and "no way to find" in message
     assert "poll your" not in message and "list your" not in message
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        OSError("Tunnel connection failed: 403 Forbidden"),
+        ConnectionRefusedError(10061, "refused"),
+        socket.gaierror(11001, "getaddrinfo failed"),
+    ],
+    ids=["proxy-refused-tunnel", "connection-refused", "dns"],
+)
+def test_a_submit_that_never_left_the_machine_is_definite_not_unknown(monkeypatch, reason):
+    """A local agent's egress proxy refusing the endpoint must not read as 'the job may exist'."""
+    # Given
+    transport = _Transport(urllib.error.URLError(reason))
+    monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", transport)
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        DeployJobClient(_BASE_URL, "jwt-token").submit_job(_request(), _ControlPlane())
+
+    # Then
+    assert exc_info.value.code == "deploy_endpoint_unreachable"
+    assert "not submitted" in str(exc_info.value)
+    assert len(transport.calls) == 1
 
 
 def test_5xx_is_the_same_single_attempt_unknown_outcome(monkeypatch):
