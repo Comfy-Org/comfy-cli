@@ -289,6 +289,14 @@ for comes back as a refusal envelope and exits 1: `build_update_needs_confirm`,
 Pass `--yes`, or the option it named, once the user has actually agreed. Do not
 pass `--yes` first and disclose after.
 
+**`build_release_held` asks the same way, with its own option.** `comfy build push
+--release` saved the build but cut no release, because the save warned that a
+deployment could not download a model link. Under `--json` the error carries them
+in `details.warnings`; in text mode the tool printed each just above it. Tell the
+user which links fail and how, and pass `--release-despite-warnings` only after they say
+yes; a fixed link needs no option. `comfy build release create` cuts without this
+check.
+
 **Three other refusals block rather than ask — `--yes` does nothing for them.**
 Each is cleared by deleting something, and each exits 1:
 

@@ -16,6 +16,8 @@
         "properties": {
           "region": {"type": "string", "minLength": 1},
           "label": {"type": "string"},
+          "level": {"type": "string", "description": "What this location is, such as country or datacenter. An open set, shown as sent."},
+          "parent": {"type": "string", "description": "The region value of the location containing this one."},
           "gpus": {
             "type": "array",
             "items": {

@@ -41,11 +41,16 @@ def _regions(catalog: JsonObject) -> list[JsonObject]:
 def _render_pretty(renderer: Renderer, regions: list[JsonObject]) -> None:
     from rich.table import Table
 
-    rows: list[tuple[int, str, str, str, str, str, str]] = []
+    rows: list[tuple[int, str, str, str, str, str, str, str, str]] = []
     for region in regions:
         region_id = required_string(region, "region")
         region_label_value = region.get("label")
         region_label = region_label_value if isinstance(region_label_value, str) else region_id
+        # The server's level names are an open set, so they are shown as sent.
+        level_value = region.get("level")
+        level = level_value if isinstance(level_value, str) else ""
+        parent_value = region.get("parent")
+        parent = parent_value if isinstance(parent_value, str) else ""
         gpus = region.get("gpus")
         if not isinstance(gpus, list):
             raise server_shape_error("a compute catalog region has no gpus array", region=region_id)
@@ -70,16 +75,20 @@ def _render_pretty(renderer: Renderer, regions: list[JsonObject]) -> None:
                     _AVAILABILITY_RANK.get(availability.casefold(), 0),
                     region_id,
                     region_label,
+                    level,
+                    parent,
                     gpu_class,
                     gpu_label,
                     vram,
                     availability,
                 )
             )
-    rows.sort(key=lambda row: (-row[0], row[1], row[3]))
+    rows.sort(key=lambda row: (-row[0], row[1], row[5]))
     table = Table(show_header=True, header_style="bold")
-    for column in ("region", "region label", "gpu class", "gpu label", "VRAM (GB)", "availability"):
-        table.add_column(column)
+    for column in ("region", "region label", "level", "parent", "gpu class", "gpu label", "VRAM (GB)", "availability"):
+        # The region and gpu class cells are what a user copies into --region and
+        # --gpu, so a narrow terminal wraps them rather than cutting them short.
+        table.add_column(column, overflow="fold")
     for _, *cells in rows:
         table.add_row(*cells)
     if rows:

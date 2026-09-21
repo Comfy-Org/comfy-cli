@@ -11,6 +11,7 @@ UX contract:
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import sys
@@ -395,9 +396,29 @@ class Renderer:
         return env
 
     def _write_json_line(self, payload: Mapping[str, Any]) -> None:
-        line = json.dumps(payload, default=_json_default, ensure_ascii=False)
         stream = self.machine_stream
+        # Readers of this stream decode it as UTF-8. A legacy code page that
+        # CAN encode a character is the dangerous case — no UnicodeEncodeError
+        # fires (the clause below never runs) and the line goes out as bytes
+        # that are not valid UTF-8: cp1252 spells an em-dash 0x97, and the
+        # comfy-agent stored "no output nodes � the server will reject it"
+        # for every validate failure on Windows. Escaping whenever the stream
+        # is not UTF-8 keeps those envelopes readable on a UTF-8 terminal and
+        # decodable everywhere else.
+        is_utf8 = _is_utf8_stream(stream)
+        line = json.dumps(payload, default=_json_default, ensure_ascii=not is_utf8)
         try:
+            # Escaping to ASCII is not enough on a stream that re-encodes it: a
+            # UTF-16 wrapper turns even pure ASCII into two-byte sequences, and
+            # a reader decoding this stream as UTF-8 cannot parse it at all.
+            # Write through the binary buffer instead, after flushing whatever
+            # the text wrapper still holds so the two stay in order.
+            buffer = getattr(stream, "buffer", None)
+            if not is_utf8 and buffer is not None:
+                stream.flush()
+                buffer.write((line + "\n").encode("utf-8"))
+                buffer.flush()
+                return
             try:
                 stream.write(line + "\n")
             except UnicodeEncodeError:
@@ -435,6 +456,29 @@ class Renderer:
     @property
     def exit_code(self) -> int:
         return self._exit_code
+
+
+def _is_utf8_stream(stream: TextIO | None) -> bool:
+    """Whether text written to ``stream`` comes out as UTF-8 bytes.
+
+    ``TextIO.encoding`` is the declared type, but this is still read with
+    ``getattr``: ``machine_stream`` is assignable, and the things callers
+    assign (a ``StringIO``, a test double) have no encoding at all. Such a
+    stream re-encodes nothing, so it counts as UTF-8 — escaping would only make
+    its text harder to read, and no bytes reach a decoder anyway.
+
+    The name is resolved through ``codecs.lookup`` rather than compared, so
+    every alias the platform may report lands correctly — ``utf8``, ``UTF-8``,
+    ``utf_8`` and Windows' ``cp65001`` all normalise to ``utf-8``. A name no
+    codec claims falls to "not UTF-8", which only ever escapes more.
+    """
+    encoding = getattr(stream, "encoding", None)
+    if not encoding:
+        return True
+    try:
+        return codecs.lookup(encoding).name == "utf-8"
+    except (LookupError, TypeError):
+        return False
 
 
 def _json_default(obj: Any) -> Any:

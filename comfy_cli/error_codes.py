@@ -643,6 +643,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "run the standalone `comfy workflow reset-doc <file> --confirm` first, then apply the remaining ops as a batch",
     ),
     ErrorCode(
+        "workflow_insert_workflow_not_batchable",
+        "A batch contained an `insert_workflow` op. A complete workflow insertion is one standalone atomic op, "
+        "so nesting it in the spec batch protocol is rejected and nothing is applied.",
+        "run `comfy workflow insert-workflow <file> <template>` instead",
+    ),
+    ErrorCode(
         "workflow_reset_doc_unconfirmed",
         "`comfy workflow reset-doc` was called without `--confirm`. The command fails closed: it erases every "
         "node AND the document's replay history, which no later op can undo.",
@@ -1234,6 +1240,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "which could not vouch for one or more pins. Pushing anyway would save a definition that cannot "
         "reconstruct every requested public node.",
         "edit the spec to name a published registry version or normalized repository, or remove the node",
+    ),
+    ErrorCode(
+        "build_release_held",
+        "`comfy build push --release` saved the build, but the save warned about a model link a deployment "
+        "could not download, so no release was cut. `details` carries the saved `id`, `syncedRevision` and "
+        "every `warnings` entry; a warning at `models[<n>].sourceUri` is the one that holds a release.",
+        "fix the model links and push again, or push with --release --release-despite-warnings to cut anyway",
     ),
     ErrorCode(
         "build_release_limit",

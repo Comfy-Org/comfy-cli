@@ -1,4 +1,7 @@
+import pytest
+
 from comfy_cli import layout
+from comfy_cli import layout_quality as quality
 
 
 def _node(nid, pos, size=(210, 100)):
@@ -126,10 +129,36 @@ def test_occupied_includes_the_title_band_above_pos():
 
 
 def test_widget_height_matches_litegraph():
-    # LiteGraph NODE_WIDGET_HEIGHT is 20 (LiteGraphGlobal.ts:64); this was 24.
-    assert layout.WIDGET_H == 20.0
+    """Each extra widget row costs its height PLUS LiteGraph's 4px inter-row gap.
+
+    This test previously asserted a delta of exactly 20 and so encoded the bug it was
+    named after: `LGraphNode.computeSize` accumulates `widget_height + 4` per row, and
+    modelling only the 20 under-measures every node with more than one widget. The
+    browser harness caught the consequence -- two agent-added CLIPTextEncode nodes
+    rendered 20 graph px taller than this module predicted and overlapped by 6px.
+    """
+    assert layout.WIDGET_H == 20.0  # LiteGraph NODE_WIDGET_HEIGHT; this was 24
     one, two = layout.estimate_size(1, 1, 1), layout.estimate_size(1, 1, 2)
-    assert two[1] - one[1] == 20.0
+    assert two[1] - one[1] == layout.WIDGET_H + layout._WIDGET_ROW_GAP == 24.0
+
+
+def test_widgetless_node_pays_no_widget_block_padding():
+    """Upstream's block padding lives inside `if (widgets?.length)`.
+
+    A node with no widgets must not be charged the 8px, or every Reroute and every
+    pure-routing node is modelled 8px taller than it draws -- harmless for overlap,
+    but it would make the estimate wrong in the direction that wastes canvas.
+    """
+    none_, one = layout.estimate_size(1, 1, 0), layout.estimate_size(1, 1, 1)
+    assert one[1] - none_[1] == 32.0
+
+
+def test_widget_block_grows_the_way_litegraph_accumulates():
+    """Three widgets cost 3*(20+4)+8, not 3*20 -- a 20px difference at three rows."""
+    base = layout.estimate_size(1, 1, 0)[1]
+    three = layout.estimate_size(1, 1, 3)[1]
+    assert three - base == 3 * (20.0 + 4.0) + 8.0
+    assert three - base > 3 * 20.0, "the old flat model under-measured a three-widget node"
 
 
 def test_cascade_leaves_room_for_the_next_node_title():
@@ -307,32 +336,14 @@ def test_batch_columns_use_the_widest_node_not_a_fixed_stride():
 
 
 def _score(nodes, edges):
-    """(crossings, mean |node centre - mean centre of its inputs|)."""
-    import itertools
+    """(crossings, mean input-alignment deviation).
 
-    crossings = 0
-    for (a1, b1), (a2, b2) in itertools.combinations(edges, 2):
-        if not all(n in nodes for n in (a1, b1, a2, b2)):
-            continue
-        if nodes[a1]["pos"][0] != nodes[a2]["pos"][0]:
-            continue
-        if nodes[b1]["pos"][0] != nodes[b2]["pos"][0]:
-            continue
-        if (nodes[a1]["pos"][1] - nodes[a2]["pos"][1]) * (nodes[b1]["pos"][1] - nodes[b2]["pos"][1]) < 0:
-            crossings += 1
-
-    preds = {}
-    for a, b in edges:
-        preds.setdefault(b, []).append(a)
-    devs = []
-    for k, ps in preds.items():
-        ps = [p for p in ps if p in nodes]
-        if k not in nodes or not ps:
-            continue
-        me = nodes[k]["pos"][1] + nodes[k]["size"][1] / 2
-        theirs = sum(nodes[p]["pos"][1] + nodes[p]["size"][1] / 2 for p in ps) / len(ps)
-        devs.append(abs(me - theirs))
-    return crossings, (sum(devs) / len(devs) if devs else 0.0)
+    Delegates to comfy_cli.layout_quality rather than keeping a second copy. The two
+    used to be separate implementations of the same metric, which is the shape of bug
+    where the tests and the telemetry quietly disagree about whether a layout improved.
+    """
+    s = quality.score(nodes, edges)
+    return s.crossings, s.align_deviation
 
 
 class _QPort:
@@ -413,3 +424,163 @@ def test_pinned_siblings_are_obstacles_for_movable_nodes():
 # the intended proof -- old code exhausts its budget and leaves an overlap -- was not
 # demonstrated. It is a robustness and efficiency change, not a verified bug fix; treat it
 # as unproven until someone builds a case that actually exhausts the guard.
+
+
+# --- multiline widget height, solved from rendered geometry ---------------------------
+#
+# These numbers are not read off the frontend source, they are fitted to what a real
+# browser drew for twelve core node classes. The fixture below is that measurement,
+# recorded so the fit can be re-checked without a browser.
+
+# (class, rendered height, link inputs, outputs, ordinary widgets, multiline widgets)
+_RENDERED = [
+    ("CLIPTextEncode", 200, 1, 1, 0, 1),
+    ("KSampler", 262, 4, 1, 7, 0),
+    ("EmptyLatentImage", 106, 0, 1, 3, 0),
+    ("CheckpointLoaderSimple", 98, 0, 3, 1, 0),
+    ("SaveImage", 58, 1, 1, 1, 0),
+    ("LoadImage", 102, 0, 2, 2, 0),
+    ("VAEDecode", 46, 2, 1, 0, 0),
+    ("PreviewImage", 26, 1, 1, 0, 0),
+    ("ConditioningCombine", 46, 2, 1, 0, 0),
+    ("LatentUpscale", 130, 1, 1, 4, 0),
+    ("CLIPSetLastLayer", 58, 1, 1, 1, 0),
+    ("ImageScale", 130, 1, 1, 4, 0),
+]
+
+# The renderer's own base: 6px plus one 20px slot row per max(link_inputs, outputs).
+# estimate_size deliberately runs taller (HEADER_H + PAD_H = 42 instead of 6) because
+# over-spacing is invisible and under-spacing is the overlap users report. So the
+# assertions below check the WIDGET term, which is the part that was wrong.
+_RENDER_BASE = 6.0
+
+
+@pytest.mark.parametrize("name,height,links,outputs,ordinary,multiline", _RENDERED)
+def test_widget_block_matches_rendered_geometry(name, height, links, outputs, ordinary, multiline):
+    """The widget term reproduces what the browser drew, for every measured class."""
+    rendered_widget_block = height - _RENDER_BASE - layout.SLOT_H * max(links, outputs)
+    assert layout._widgets_height(ordinary + multiline, multiline) == rendered_widget_block, name
+
+
+def test_multiline_widget_is_not_charged_as_an_ordinary_row():
+    """The bug this fixes.
+
+    A multiline text box is a text AREA, not a widget ROW. Charging it the ordinary
+    24px under-measures a CLIPTextEncode by 142px, which is the dominant term in the
+    overlap the browser harness reproduces on the batched recording.
+    """
+    ordinary = layout.estimate_size(1, 1, 1)[1]
+    multiline = layout.estimate_size(1, 1, 1, n_multiline=1)[1]
+    assert multiline - ordinary == layout.MULTILINE_WIDGET_H - (layout.WIDGET_H + layout._WIDGET_ROW_GAP)
+    assert multiline - ordinary == 142.0
+
+
+def test_multiline_count_is_clamped_to_the_widget_count():
+    """A node cannot have more multiline widgets than widgets.
+
+    This previously asserted that `_widgets_height(1, 5)` charged FIVE multiline areas to a
+    one-widget node, codifying a 700px over-measure as intended behaviour. It only arises
+    from a bad catalog or a caller bug, and silently over-measuring hides both. Clamped.
+    """
+    assert layout._widgets_height(1, 5) == layout._widgets_height(1, 1)
+    assert layout._widgets_height(3, -2) == layout._widgets_height(3, 0)
+
+
+def test_count_multiline_matches_by_name_not_position():
+    """Widget order is the render order, not the declaration order."""
+
+    class _P:
+        def __init__(self, name, multiline=False):
+            self.name = name
+            self.options = type("O", (), {"multiline": multiline})()
+
+    class _M:
+        inputs = [_P("clip"), _P("text", True), _P("seed")]
+
+    assert layout.count_multiline(_M(), ("text", "seed")) == 1
+    assert layout.count_multiline(_M(), ("seed",)) == 0
+
+
+def test_count_multiline_tolerates_a_port_without_options():
+    """Every test double here is such a port, and so is a catalog entry whose object_info
+    omitted the options block."""
+
+    class _Bare:
+        def __init__(self, name):
+            self.name = name
+
+    class _M:
+        inputs = [_Bare("text")]
+
+    assert layout.count_multiline(_M(), ("text",)) == 0
+
+
+def test_estimate_size_default_is_unchanged_without_multiline():
+    """Additive: every existing caller keeps its old result."""
+    assert layout.estimate_size(2, 1, 3) == layout.estimate_size(2, 1, 3, n_multiline=0)
+
+
+# --- minimum rendered width, measured across 27 classes --------------------------------
+#
+# LiteGraph's own formula is NODE_WIDTH * (1.5 if widgets else 1.0) = 210, which no
+# widget-bearing node actually renders at. Measured in a real browser: every node with a
+# widget renders at 270 or wider, every node with a MULTILINE widget at 400 or wider.
+# Fourteen of fourteen non-multiline widget classes sit at exactly 270 when their content
+# is narrower, and seven of seven multiline classes at exactly 400 -- a floor, not a fixed
+# width. Classes that exceed it on content (KSamplerAdvanced 312, ControlNetApply 317.9,
+# CheckpointLoader 396.9) confirm the shape.
+
+# (class, rendered width, has widgets, multiline count)
+_RENDERED_WIDTHS = [
+    ("CLIPTextEncode", 400, True, 1),
+    ("CLIPTextEncodeSDXL", 400, True, 2),
+    ("CLIPTextEncodeFlux", 400, True, 2),
+    ("PrimitiveStringMultiline", 400, True, 1),
+    ("KSampler", 270, True, 0),
+    ("EmptyLatentImage", 270, True, 0),
+    ("CheckpointLoaderSimple", 270, True, 0),
+    ("SaveImage", 270, True, 0),
+    ("LatentUpscale", 270, True, 0),
+    ("PrimitiveString", 270, True, 0),
+    ("UNETLoader", 270, True, 0),
+    ("KSamplerAdvanced", 312, True, 0),
+    ("ControlNetApply", 317.9, True, 0),
+    ("CheckpointLoader", 396.9, True, 0),
+    ("VAEDecode", 140, False, 0),
+    ("VAEEncode", 140, False, 0),
+    ("ConditioningCombine", 215, False, 0),
+]
+
+
+@pytest.mark.parametrize("name,width,has_widgets,multiline", _RENDERED_WIDTHS)
+def test_min_width_never_exceeds_what_the_class_renders(name, width, has_widgets, multiline):
+    """The floor must be a floor: never above the narrowest real node of its kind.
+
+    A floor above the rendered width would over-space every node of that shape, which is
+    the harmless direction but still wrong.
+    """
+    assert layout._min_width(has_widgets, multiline) <= width, name
+
+
+def test_widget_nodes_floor_at_the_measured_270():
+    assert layout._min_width(True, 0) == layout.WIDGET_MIN_WIDTH == 270.0
+
+
+def test_multiline_nodes_floor_at_the_measured_400():
+    assert layout._min_width(True, 1) == layout.MULTILINE_MIN_WIDTH == 400.0
+
+
+def test_widgetless_nodes_keep_litegraphs_own_floor():
+    """Only widget-bearing nodes get the raised floor; a Reroute must stay narrow."""
+    assert layout._min_width(False, 0) == layout.LG_NODE_WIDTH == 140.0
+
+
+def test_under_estimating_width_is_what_causes_overlap():
+    """Direction check, and the reason this fix exists.
+
+    Before the floors, a CLIPTextEncode was estimated at 250 against a rendered 400, so the
+    placer put the next column 330px away and the real node reached 400 -- a 70px overlap
+    that the model believed was a 80px gap. Over-estimating only wastes canvas.
+    """
+    w = layout.estimate_width("CLIP Text Encode (Prompt)", ("clip",), ("CONDITIONING",), ("text",), 1)
+    assert w >= 400.0
