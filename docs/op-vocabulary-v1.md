@@ -945,7 +945,7 @@ machinery.
 
 ### Independent prior art: comfy-multi-player PR #232 / ADR-032
 
-[comfy-multi-player PR #232](https://github.com/Comfy-Org/comfy-multi-player/pull/232)
+comfy-multi-player PR #232 (see that repo's own pull request history)
 diagnosed and fixed the identical bug in its CRDT multiplayer applier first,
 ahead of this amendment, because the fix was scoped and needed there and a
 client-side sync fix should not wait on this document's own release cycle
