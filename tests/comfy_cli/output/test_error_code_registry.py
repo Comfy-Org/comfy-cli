@@ -284,7 +284,7 @@ def test_deploy_error_codes_are_the_exact_final_set() -> None:
     actual = {code for code in error_codes.all_codes() if code.startswith("deploy_")}
 
     # Then
-    assert len(actual) == 34
+    assert len(actual) == 35
     assert actual == expected
 
 
