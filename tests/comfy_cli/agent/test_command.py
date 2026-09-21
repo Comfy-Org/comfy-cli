@@ -683,7 +683,11 @@ def test_cli_permissions_lists_pending_and_names_approve_first(tmp_path: Path):
         assert out.find(needle) >= 0, f"{needle!r} missing from:\n{out}"
     assert out.index(req["id"]) < out.index("hosts the user approved")
     assert "ago" in out
-    assert "comfy agent allow --approve 0123456789abcdef" in out
+    # The per-request line is the generated hint with the id filled in, so it
+    # carries --data-dir like the JSON grant does.
+    flat = "".join(out.split())
+    assert "".join(f'comfy agent allow --data-dir "{root}" --approve 0123456789abcdef'.split()) in flat
+    assert "".join(f'comfy agent deny --data-dir "{root}" 0123456789abcdef'.split()) in flat
 
 
 def test_cli_allow_approve_round_trip(tmp_path: Path):
@@ -813,6 +817,23 @@ def test_permissions_grant_omits_the_data_dir_when_it_is_the_default(home: Path)
     grant = _envelope(res)["data"]["grant"]
     assert grant["deny"] == "comfy agent deny <id>"
     assert all("--data-dir" not in hint for hint in grant.values())
+
+
+@pytest.mark.parametrize("via_env", [False, True])
+def test_permissions_grant_makes_a_relative_data_dir_absolute(tmp_path: Path, home: Path, monkeypatch, via_env: bool):
+    # The hint is pasted into another shell, whose cwd need not be this one's —
+    # so a relative dir is emitted absolute, even when it is also the default.
+    monkeypatch.chdir(tmp_path)
+    _write_pending(tmp_path / "rel", _req("0123456789abcdef", "host", "models.example.com"))
+    if via_env:
+        monkeypatch.setenv("AGENT_DATA_DIR", "rel")
+        argv = ["permissions"]
+    else:
+        argv = ["permissions", "--data-dir", "rel"]
+    res = CliRunner().invoke(app, argv)
+    assert res.exit_code == 0, res.stdout
+    grant = _envelope(res)["data"]["grant"]
+    assert grant["deny"] == f'comfy agent deny --data-dir "{tmp_path / "rel"}" <id>'
 
 
 @pytest.mark.parametrize(

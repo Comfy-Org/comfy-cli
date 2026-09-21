@@ -95,9 +95,10 @@ def grant_hints(root: Path) -> dict[str, str]:
     ``--data-dir`` rides along whenever the agent's dir is not the one a bare
     terminal resolves (``AGENT_DATA_DIR``, else ``~/.comfy-agent``): the user's
     shell is a different process, and without it ``--approve`` answers
-    ``agent_unknown_request`` while the request is still waiting.
+    ``agent_unknown_request`` while the request is still waiting. A relative
+    dir is emitted absolute: the user's shell need not share this process's cwd.
     """
-    flag = "" if root == data_dir(None) else f' --data-dir "{root}"'
+    flag = "" if root.is_absolute() and root == data_dir(None) else f' --data-dir "{root.absolute()}"'
     cli = _cli_invocation()
     return {k: v.format(cli=cli, dir=flag) for k, v in GRANT_HINTS.items()}
 
@@ -207,7 +208,8 @@ def permissions_cmd(data_dir_opt: _DATA_DIR_OPT = None):
             )
         if state.pending:
             first = state.pending[0]["id"]
-            rprint(f"  [dim]comfy agent allow --approve {first}    comfy agent deny {first}[/dim]")
+            approve_cmd, deny_cmd = (payload["grant"][k].replace("<id>", first) for k in ("approve", "deny"))
+            rprint(f"  [dim]{esc(approve_cmd)}    {esc(deny_cmd)}[/dim]")
         rprint("[bold]folders the user approved[/bold]" + ("" if state.paths else "  (none)"))
         for e in state.paths:
             rprint(f"  {esc(e.get('path'))}  — {esc(e.get('reason', ''))}")

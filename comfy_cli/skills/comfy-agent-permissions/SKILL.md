@@ -59,7 +59,8 @@ only when you know this panel has one; otherwise the command is the way.
 
 Approving vets the target the way a direct grant does (below) and then records
 it; a target that can never be granted stays pending until denied. The user
-can also grant outright, without a request:
+can also grant outright, without a request (hand over `grant.path` /
+`grant.host`, for the same reason):
 
 ```
 comfy agent allow --path "C:\Users\me\Pictures" --reason "reference photos"
