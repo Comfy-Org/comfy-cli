@@ -210,12 +210,15 @@ field as `malformed_op`. The kind is not batchable and a spec batch rejects it a
 
 * Every op carries `op_id`: uuid4 hex, minted by the **creator, before
   dispatch** (`_new_op`). Receivers never regenerate or rewrite an `op_id`.
-* `apply_op` records applied `op_id`s in the document's `_applied_ops` list and
-  drops any op whose `op_id` is already there. **Uniqueness scope is
+* `apply_op` records applied `op_id`s in `_applied_ops` and records `sha256(canonical_op)` in `_applied_op_digests`. An identical retry is a no-op; reuse with a different canonical payload rejects with `op_id_reuse`. Legacy documents with only the list retain their historical duplicate behavior. **Uniqueness scope is
   PER-WORKFLOW**: the same `op_id` can exist in two different workflow documents
   without interaction; within one document each op applies exactly once.
 * `_applied_ops` (and `_widget_stamps`) are apply-time bookkeeping, stripped
   before serialization to disk (`strip_internal`).
+
+## Amendment v1.6 — canonical op identity
+
+`op_id` identifies one immutable semantic-op envelope. The canonical form is compact UTF-8 JSON over the whole envelope, with object keys sorted by Unicode code point at every depth and array order preserved. The replay ledger records its lowercase SHA-256 digest. Reusing an `op_id` with a different canonical payload rejects before mutation with `op_id_reuse`; an identical retry remains a no-op. Canonicalization is bounded to 64 levels, 4,096 entries per collection, and 262,144 approximate cost units. This mirrors comfy-multi-player schema Amendment A8. The asymmetric case is load-bearing: `{value: 25}` followed by the same `op_id` carrying `{value: 30}` rejects, while key insertion order is immaterial.
 
 ## 3. Conflict rules
 

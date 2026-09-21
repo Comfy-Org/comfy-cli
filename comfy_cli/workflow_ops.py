@@ -52,6 +52,7 @@ while the display order does not.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import random
@@ -65,6 +66,43 @@ from comfy_cli.cql.engine import frontend_injected_widget_error, is_wildcard_typ
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
 _ID_FLOOR = 1 << 40
+
+_MAX_OP_PAYLOAD_DEPTH = 64
+_MAX_OP_COLLECTION_ENTRIES = 4096
+_MAX_OP_COST = 262_144
+
+
+def _canonical_op(op: dict) -> str:
+    cost = 0
+    stack: list[tuple[Any, int]] = [(op, 0)]
+    while stack:
+        value, depth = stack.pop()
+        if depth > _MAX_OP_PAYLOAD_DEPTH:
+            raise ValueError(f"payload_too_deep: op payload nests deeper than {_MAX_OP_PAYLOAD_DEPTH} levels")
+        cost += 1
+        if isinstance(value, str):
+            cost += len(value)
+        elif isinstance(value, dict):
+            if len(value) > _MAX_OP_COLLECTION_ENTRIES:
+                raise ValueError(f"malformed_op: object exceeds {_MAX_OP_COLLECTION_ENTRIES} entries")
+            cost += 4 + sum(len(str(key)) for key in value)
+            stack.extend((child, depth + 1) for child in value.values())
+        elif isinstance(value, list | tuple):
+            if len(value) > _MAX_OP_COLLECTION_ENTRIES:
+                raise ValueError(f"malformed_op: array exceeds {_MAX_OP_COLLECTION_ENTRIES} entries")
+            cost += 4
+            stack.extend((child, depth + 1) for child in value)
+        else:
+            cost += 8
+        if cost > _MAX_OP_COST:
+            raise ValueError(f"malformed_op: payload exceeds the {_MAX_OP_COST}-unit cost budget")
+    try:
+        return json.dumps(op, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"malformed_op: op payload is not canonical JSON: {exc}") from exc
+
+def _op_digest(op: dict) -> str:
+    return hashlib.sha256(_canonical_op(op).encode("utf-8")).hexdigest()
 
 
 def mint_id() -> int:
@@ -1854,9 +1892,13 @@ def apply_specs(
 
 def apply_op(workflow: dict, op: dict, graph) -> dict:
     """Replay one op onto ``workflow`` in place and return it. Idempotent: an
-    op whose ``op_id`` was already applied is a no-op."""
+    op whose ``op_id`` was already applied is a no-op only for one payload."""
+    digest = _op_digest(op)
     applied = workflow.setdefault("_applied_ops", [])
     if op["op_id"] in applied:
+        recorded = (workflow.get("_applied_op_digests") or {}).get(op["op_id"])
+        if recorded is not None and recorded != digest:
+            raise ValueError(f"op_id_reuse: op_id {op['op_id']!r} was already applied with a different payload")
         return workflow
     kind = op["op"]
     if kind != "insert_workflow" and "definitions" in op:
@@ -1891,6 +1933,7 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
     # written into a discarded list. Re-read, so a re-delivered reset_doc is a
     # no-op rather than a second wipe.
     workflow.setdefault("_applied_ops", []).append(op["op_id"])
+    workflow.setdefault("_applied_op_digests", {})[op["op_id"]] = digest
     return workflow
 
 
@@ -2279,6 +2322,7 @@ def _apply_reset_doc(workflow: dict, op: dict) -> None:
     workflow["last_node_id"] = 0
     workflow["last_link_id"] = 0
     workflow["_applied_ops"] = []
+    workflow["_applied_op_digests"] = {}
     workflow["_widget_stamps"] = {}
 
 
@@ -2474,6 +2518,7 @@ def strip_internal(workflow: dict) -> dict:
     file writes, ``--stdout`` and batch output alike.
     """
     workflow.pop("_applied_ops", None)
+    workflow.pop("_applied_op_digests", None)
     workflow.pop("_widget_stamps", None)
     return complete_save_format(workflow)
 
