@@ -1080,3 +1080,19 @@ def test_uninstall_by_path_still_removes_an_edited_shipped_skill(monkeypatch, tm
     assert not (installed / "SKILL.md").exists()
     assert not (root / ".cursor" / "rules" / "comfy.mdc").exists()
     assert "comfy" not in (root / "AGENTS.md").read_text(encoding="utf-8").split("# mine", 1)[1]
+
+
+def test_agent_permissions_skill_names_every_permanently_refused_host():
+    """The skill tells the model not to request these, because `approve` vets
+    with `vet_host` and refuses them: a request for one waits until denied. A
+    host added to `_REFUSED_HOSTS` without a line here would be requested."""
+    from comfy_cli.agent import _REFUSED_HOSTS
+
+    rows = [
+        line
+        for line in skill_content("comfy-agent-permissions").splitlines()
+        if line.startswith("|") and "do **not** call `request_host`" in line
+    ]
+    assert len(rows) == 1, "expected exactly one 'never request this host' row in the blocked-by table"
+    for host in _REFUSED_HOSTS:
+        assert host in rows[0], f"the row should name the refused host {host}"
