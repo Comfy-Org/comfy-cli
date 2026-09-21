@@ -1894,13 +1894,15 @@ def apply_specs(
 def apply_op(workflow: dict, op: dict, graph) -> dict:
     """Replay one op onto ``workflow`` in place and return it. Idempotent: an
     op whose ``op_id`` was already applied is a no-op only for one payload."""
-    digest = _op_digest(op)
     applied = workflow.setdefault("_applied_ops", [])
     if op["op_id"] in applied:
         recorded = (workflow.get("_applied_op_digests") or {}).get(op["op_id"])
-        if recorded is not None and recorded != digest:
+        if recorded is None:
+            return workflow
+        if recorded != _op_digest(op):
             raise ValueError(f"op_id_reuse: op_id {op['op_id']!r} was already applied with a different payload")
         return workflow
+    digest = _op_digest(op)
     kind = op["op"]
     if kind != "insert_workflow" and "definitions" in op:
         raise ValueError(f"malformed_op: {kind} does not accept definitions")
@@ -2415,6 +2417,7 @@ def canonical(workflow: dict) -> dict:
     """
     w = copy.deepcopy(workflow)
     w.pop("_applied_ops", None)
+    w.pop("_applied_op_digests", None)
     w.pop("_widget_stamps", None)
     nodes = w.get("nodes")
     # Capture each node's original index -> slot identity BEFORE reordering
