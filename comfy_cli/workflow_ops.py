@@ -792,6 +792,7 @@ def _set_widget_impl(
         # resolution is the pre-fork sibling, not the written one.
         written = _engine._resolve_node_path(workflow, list(target.segments), _engine._subgraph_defs_by_id(workflow))
         op["promoted"]["host_widgets_values"] = _promoted.host_widgets_values(written)
+        workflow["_applied_op_digests"][op["op_id"]] = _op_digest(op)
         return workflow, op
     if target.kind == "legacy_primitive":
         # A frontend-only PrimitiveNode has no catalog entry, so every
@@ -814,6 +815,7 @@ def _set_widget_impl(
         )
         workflow = apply_op(workflow, op, graph)
         op["promoted"]["host_widgets_values"] = list(src.get("widgets_values") or [])
+        workflow["_applied_op_digests"][op["op_id"]] = _op_digest(op)
         return workflow, op
     if target.kind == "top" and target.redirected_from is not None:
         node_id = target.node.get("id")
