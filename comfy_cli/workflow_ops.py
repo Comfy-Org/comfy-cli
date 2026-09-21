@@ -101,6 +101,7 @@ def _canonical_op(op: dict) -> str:
     except (TypeError, ValueError) as exc:
         raise ValueError(f"malformed_op: op payload is not canonical JSON: {exc}") from exc
 
+
 def _op_digest(op: dict) -> str:
     return hashlib.sha256(_canonical_op(op).encode("utf-8")).hexdigest()
 
