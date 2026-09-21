@@ -1704,13 +1704,7 @@ class Graph:
                 # made `images.extra` on a plain IMAGE input look declared, and
                 # a malformed link under that decoy hard-failed a prompt the
                 # server runs — it ignores every key a node does not declare.
-                _base = input_name.split(".", 1)[0] if isinstance(input_name, str) else None
-                _base_port = port_by_name.get(_base) if isinstance(_base, str) else None
-                declared_input = (
-                    input_name in port_by_name
-                    or input_name in autogrow_ports
-                    or (_base_port is not None and (_base_port.is_autogrow or _base_port.is_dynamic_combo))
-                )
+                declared_input = _node_declares_input(port_by_name, input_name)
 
                 # The server validates only output-reachable nodes and prunes
                 # the rest, so a structural break on a pruned node does not stop
@@ -1975,7 +1969,7 @@ class Graph:
         # A cycle is rejected by the server (`dependency_cycle`) before it runs
         # anything, so it is an error here too — reported once for the whole
         # graph rather than once per node on it.
-        cycle = _dependency_cycle(workflow, reachable)
+        cycle = _dependency_cycle(workflow, reachable, self)
         if cycle is not None:
             errors.append(
                 {
@@ -2221,7 +2215,7 @@ def _input_payload(p: Port, depth: int) -> dict[str, Any]:
 # error/warning dicts for the caller to append — no shared state is threaded.
 
 
-def _dependency_cycle(workflow: dict[str, Any], reachable: set[str]) -> list[str] | None:
+def _dependency_cycle(workflow: dict[str, Any], reachable: set[str], graph: Graph) -> list[str] | None:
     """A cycle among the nodes the server would validate, as the node ids on it.
 
     ComfyUI walks each output's inputs depth-first and rejects the prompt with
@@ -2252,14 +2246,11 @@ def _dependency_cycle(workflow: dict[str, Any], reachable: set[str]) -> list[str
             path.append(node_id)
             stack.append((node_id, True))
             node_data = workflow.get(node_id)
-            inputs = node_data.get("inputs") if isinstance(node_data, dict) else None
-            if not isinstance(inputs, dict):
+            if not isinstance(node_data, dict):
                 continue
-            for value in inputs.values():
-                if isinstance(value, list) and len(value) == 2 and isinstance(value[0], str):
-                    src_id = value[0]
-                    if src_id in reachable and state.get(src_id) != 1:
-                        stack.append((src_id, False))
+            for src_id in _declared_link_targets(node_data, graph):
+                if src_id in reachable and state.get(src_id) != 1:
+                    stack.append((src_id, False))
     return None
 
 
@@ -2293,17 +2284,10 @@ def _output_reachable_node_ids(workflow: dict[str, Any], graph: Graph) -> set[st
         node_data = workflow.get(stack.pop())
         if not isinstance(node_data, dict):
             continue
-        node_inputs = node_data.get("inputs")
-        # Guard against a truthy non-dict `inputs` from malformed JSON, which
-        # would slip past `or {}` and raise AttributeError on `.values()`.
-        if not isinstance(node_inputs, dict):
-            continue
-        for value in node_inputs.values():
-            if isinstance(value, list) and len(value) == 2:
-                src_id = str(value[0])
-                if src_id in workflow and src_id not in reachable:
-                    reachable.add(src_id)
-                    stack.append(src_id)
+        for src_id in _declared_link_targets(node_data, graph):
+            if src_id in workflow and src_id not in reachable:
+                reachable.add(src_id)
+                stack.append(src_id)
     return reachable
 
 
@@ -3184,6 +3168,51 @@ def frontend_injected_widget_error(node_type: str, widget: str, available: list[
         f"`comfy workflow slots` never lists it) and is not editable; "
         f"available widgets: {', '.join(available) if available else '(none — all inputs are links)'}"
     )
+
+
+def _node_declares_input(port_by_name: dict[str, Port], key: Any) -> bool:
+    """Whether a node whose ports are ``port_by_name`` declares ``key``.
+
+    The server reads the inputs a class DECLARES (``validate_inputs`` walks
+    ``INPUT_TYPES``) and ignores every other key, so this is the one rule that
+    decides whether a key can fail a prompt or be followed as an edge. Only an
+    autogrow group or a dynamic combo takes dotted keys; a dotted suffix on an
+    ordinary port (``images.extra`` on a plain IMAGE input) is not declared.
+    """
+    if not isinstance(key, str):
+        return False
+    if key in port_by_name:
+        return True
+    base = port_by_name.get(key.split(".", 1)[0])
+    return base is not None and (base.is_autogrow or base.is_dynamic_combo)
+
+
+def _declared_link_targets(node_data: dict, graph: Graph) -> list[str]:
+    """The node ids this node links to through keys it actually declares.
+
+    Both graph walks — output-reachability and cycle detection — used to follow
+    every two-item list in ``inputs``, so a decoy key could pull a pruned node
+    into the validated set or close a cycle that does not exist. Live proof of
+    the latter: a graph whose only cycle ran through ``images.extra`` on a
+    plain IMAGE input was accepted by the server (200, no node_errors) while
+    the validator reported ``dependency_cycle``.
+
+    An unknown class_type keeps the old permissive walk: with no schema there
+    is nothing to check a key against, and the unknown class is reported on its
+    own.
+    """
+    node_inputs = node_data.get("inputs")
+    if not isinstance(node_inputs, dict):
+        return []
+    m = graph.node(node_data.get("class_type", "")) if isinstance(node_data.get("class_type"), str) else None
+    port_by_name = {p.name: p for p in m.inputs} if m is not None else None
+    targets: list[str] = []
+    for key, value in node_inputs.items():
+        if port_by_name is not None and not _node_declares_input(port_by_name, key):
+            continue
+        if isinstance(value, list) and len(value) == 2:
+            targets.append(str(value[0]))
+    return targets
 
 
 def _dotted_slot_port(port_by_name: dict[str, Port], dotted: str, node_inputs: dict) -> Port | None:

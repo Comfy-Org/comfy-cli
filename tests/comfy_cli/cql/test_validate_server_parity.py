@@ -820,3 +820,42 @@ class TestDottedDecoyOnAnOrdinaryPort:
         }
         result = graph.validate_workflow(wf)
         assert not result["valid"], result
+
+
+class TestDecoyKeysAreNotFollowed:
+    """A link walk follows only the keys a node DECLARES.
+
+    ComfyUI's `validate_inputs` recurses over a class's declared inputs, so a
+    value under a key the schema does not know is never traversed: it cannot
+    pull a pruned node into the validated set and it cannot close a cycle.
+    Verified live — this exact graph is accepted (200, no node_errors) while
+    the validator reported `dependency_cycle: 2 -> 3 -> 2`.
+    """
+
+    def test_a_cycle_that_exists_only_through_a_decoy_key_is_not_reported(self, graph: Graph) -> None:
+        wf = {
+            "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "2": {"class_type": "ShowImage", "inputs": {"images": ["1", 0], "images.extra": ["3", 0]}},
+            "3": {"class_type": "InvertImage", "inputs": {"image": ["2", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert "dependency_cycle" not in _codes(result), result["errors"]
+        assert result["valid"], result["errors"]
+
+    def test_a_real_cycle_is_still_reported(self, graph: Graph) -> None:
+        wf = {
+            "2": {"class_type": "ShowImage", "inputs": {"images": ["3", 0]}},
+            "3": {"class_type": "InvertImage", "inputs": {"image": ["2", 0]}},
+        }
+        assert "dependency_cycle" in _codes(graph.validate_workflow(wf))
+
+    def test_a_node_reached_only_through_a_decoy_key_stays_pruned(self, graph: Graph) -> None:
+        # Node 3 is missing a required input. The server never validates it,
+        # because nothing an output DECLARES points at it.
+        wf = {
+            "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
+            "2": {"class_type": "ShowImage", "inputs": {"images": ["1", 0], "images.extra": ["3", 0]}},
+            "3": {"class_type": "InvertImage", "inputs": {}},
+        }
+        result = graph.validate_workflow(wf)
+        assert result["valid"], result["errors"]

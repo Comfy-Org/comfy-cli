@@ -458,12 +458,19 @@ class Renderer:
         return self._exit_code
 
 
-def _is_utf8_stream(stream: Any) -> bool:
-    """Whether bytes written to ``stream`` come out as UTF-8.
+def _is_utf8_stream(stream: TextIO | None) -> bool:
+    """Whether text written to ``stream`` comes out as UTF-8 bytes.
 
-    A stream with no ``encoding`` (a StringIO under test, a mock) is treated as
-    UTF-8: nothing re-encodes it, so escaping would only make its text harder
-    to read. Unknown/odd codec names fall to escaped, which is always safe.
+    ``TextIO.encoding`` is the declared type, but this is still read with
+    ``getattr``: ``machine_stream`` is assignable, and the things callers
+    assign (a ``StringIO``, a test double) have no encoding at all. Such a
+    stream re-encodes nothing, so it counts as UTF-8 — escaping would only make
+    its text harder to read, and no bytes reach a decoder anyway.
+
+    The name is resolved through ``codecs.lookup`` rather than compared, so
+    every alias the platform may report lands correctly — ``utf8``, ``UTF-8``,
+    ``utf_8`` and Windows' ``cp65001`` all normalise to ``utf-8``. A name no
+    codec claims falls to "not UTF-8", which only ever escapes more.
     """
     encoding = getattr(stream, "encoding", None)
     if not encoding:

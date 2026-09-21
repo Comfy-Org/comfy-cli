@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import io
 import json
+from types import SimpleNamespace
+
+import pytest
 
 from comfy_cli.caller import Caller
-from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
+from comfy_cli.output.renderer import (
+    OutputMode,
+    Renderer,
+    _is_utf8_stream,
+    reset_renderer_for_testing,
+    set_renderer,
+)
 
 
 def _json_renderer_on(stream) -> Renderer:
@@ -93,3 +102,28 @@ def test_text_written_before_the_envelope_keeps_its_order():
         assert raw.getvalue().decode("utf-8").splitlines()[0] == "first"
     finally:
         reset_renderer_for_testing()
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf8", "UTF-8", "utf_8", "cp65001"])
+def test_every_utf8_alias_counts_as_utf8(encoding):
+    """A platform reports its encoding under whichever alias it likes —
+    Windows says `cp65001` for UTF-8. Resolving through `codecs.lookup`
+    instead of comparing the string keeps all of them on the unescaped path."""
+    assert _is_utf8_stream(io.TextIOWrapper(io.BytesIO(), encoding=encoding))
+
+
+@pytest.mark.parametrize(
+    "stream",
+    [io.StringIO(), SimpleNamespace(encoding=None), SimpleNamespace(encoding=""), SimpleNamespace()],
+    ids=["stringio", "none", "empty", "absent"],
+)
+def test_a_stream_that_declares_no_encoding_counts_as_utf8(stream):
+    # Nothing re-encodes it, so escaping would only hurt readability.
+    assert _is_utf8_stream(stream)
+
+
+@pytest.mark.parametrize("encoding", ["cp1252", "utf-16", "latin-1", "not-a-codec", 42])
+def test_anything_else_is_treated_as_not_utf8(encoding):
+    # Including a name no codec claims and a non-string: the fallback only
+    # ever escapes more, which is always safe.
+    assert not _is_utf8_stream(SimpleNamespace(encoding=encoding))
