@@ -1211,6 +1211,53 @@ class TestWildcardInputType:
         assert "anything" not in result["1"]["inputs"]
 
 
+class TestMixedCaseLinkType:
+    """A socket type without a registered frontend widget is a connection,
+    whatever its letter case. ``VHS_LoadVideo.meta_batch`` (type
+    ``VHS_BatchManager``) sits before the ``format`` widget; giving it a
+    ``widgets_values`` slot shifted ``format="None"`` into ``meta_batch`` and
+    the node crashed on the worker (`'str' object has no attribute 'inputs'`,
+    117 failed cloud jobs in 30 days)."""
+
+    OI = {
+        "VHS_LoadVideo": {
+            "input": {
+                "required": {
+                    "video": [["clip.mp4"]],
+                    "select_every_nth": ["INT", {"default": 1}],
+                },
+                "optional": {
+                    "meta_batch": ["VHS_BatchManager"],
+                    "format": [["None", "AnimateDiff"], {"default": "AnimateDiff"}],
+                },
+            },
+            "input_order": {"required": ["video", "select_every_nth"], "optional": ["meta_batch", "format"]},
+            "output_node": True,
+            "output": ["IMAGE"],
+        },
+    }
+
+    def test_mixed_case_link_socket_owns_no_widget_slot(self):
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "VHS_LoadVideo",
+                    "mode": 0,
+                    "inputs": [{"name": "meta_batch", "type": "VHS_BatchManager", "link": None}],
+                    "outputs": [],
+                    "widgets_values": ["clip.mp4", 1, "None"],
+                }
+            ],
+            "links": [],
+        }
+
+        inputs = convert_ui_to_api(workflow, self.OI)["1"]["inputs"]
+
+        assert "meta_batch" not in inputs
+        assert inputs["format"] == "None"
+
+
 class TestImplicitSeedCompanion:
     """The frontend's ``useIntWidget`` composable adds a
     ``control_after_generate`` companion widget for inputs named ``seed`` or
