@@ -572,7 +572,7 @@ class TestInstallSkipManager:
         """When --skip-manager is used, config should be set to disable."""
         # Setup mocks
         mock_exists.side_effect = lambda p: p == "/fake/comfy"  # repo exists
-        mock_check_repo.return_value = (True, None)
+        mock_check_repo.return_value = (True, "/fake/comfy")
         mock_ws.skip_prompting = True
         mock_config_manager = MagicMock()
         mock_config_manager_cls.return_value = mock_config_manager
@@ -629,7 +629,7 @@ class TestInstallManagerFailure:
         """When pip_install_manager fails, config should be set to disable."""
         # Setup mocks
         mock_exists.side_effect = lambda p: p == "/fake/comfy"  # repo exists
-        mock_check_repo.return_value = (True, None)
+        mock_check_repo.return_value = (True, "/fake/comfy")
         mock_ws.skip_prompting = True
         mock_pip_manager.return_value = False  # Manager installation fails
         mock_config_manager = MagicMock()
@@ -682,7 +682,7 @@ class TestInstallManagerFailure:
         """When pip_install_manager succeeds, config should NOT be set to disable."""
         # Setup mocks
         mock_exists.side_effect = lambda p: p == "/fake/comfy"  # repo exists
-        mock_check_repo.return_value = (True, None)
+        mock_check_repo.return_value = (True, "/fake/comfy")
         mock_ws.skip_prompting = True
         mock_pip_manager.return_value = True  # Manager installation succeeds
         mock_config_manager = MagicMock()
@@ -737,7 +737,7 @@ class TestInstallManagerFailure:
         """When fast_deps=True and pip_install_manager fails, config should be set to disable."""
         # Setup mocks
         mock_exists.side_effect = lambda p: p == "/fake/comfy"
-        mock_check_repo.return_value = (True, None)
+        mock_check_repo.return_value = (True, "/fake/comfy")
         mock_ws.skip_prompting = True
         mock_pip_manager.return_value = False  # Manager installation fails
         mock_config_manager = MagicMock()

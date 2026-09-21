@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 from typing import NoReturn, TypedDict
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import requests
 import semver
@@ -173,6 +173,41 @@ def _is_git_repo(path: str) -> bool:
     return True
 
 
+def _redact_remote_url(url: str) -> str:
+    """Mask the userinfo of a git remote URL (``https://user:tok@host/x`` -> ``https://***@host/x``).
+
+    Remote URLs can embed a username/token; they are echoed into the error
+    message and envelope, so the credential must not ride along. scp-style
+    remotes (``git@host:owner/repo``) have no scheme and carry no secret — they
+    are returned unchanged.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.scheme or "@" not in parts.netloc:
+        return url
+    host = parts.netloc.rpartition("@")[2]
+    return urlunsplit(parts._replace(netloc=f"***@{host}"))
+
+
+def _is_comfy_repo_root(repo_dir: str) -> bool:
+    """True only when ``repo_dir`` itself is a recognized ComfyUI root.
+
+    ``check_comfy_repo`` walks up to a parent checkout (right for workspace
+    detection), so ``<ComfyUI>/leftover`` would otherwise pass as an install
+    target and the install would run inside the parent's subfolder.
+    """
+    ok, resolved = check_comfy_repo(repo_dir)
+    if not ok or resolved is None:
+        return False
+
+    def norm(p: str) -> str:
+        return os.path.normcase(os.path.realpath(p))
+
+    return norm(resolved) == norm(repo_dir)
+
+
 _INVALID_TARGET_HINT = "choose another --workspace, or remove/rename the existing folder and re-run `comfy install`"
 
 
@@ -200,7 +235,7 @@ def _reject_invalid_install_target(repo_dir: str) -> NoReturn:
         remote_urls: list[str] = []
     else:
         try:
-            remote_urls = [r.url for r in repo.remotes]
+            remote_urls = [_redact_remote_url(r.url) for r in repo.remotes]
         except Exception:  # noqa: BLE001
             remote_urls = []
 
@@ -262,11 +297,12 @@ def execute(
     # Refuse a target nothing below can install into. Nightly has always
     # required a recognized ComfyUI checkout; a versioned install only needs a
     # git repo to check a tag out in, so there we reject just a pre-existing
-    # folder that isn't one (a leftover/unrelated directory).
+    # folder that isn't one (a leftover/unrelated directory). The ComfyUI check
+    # is rooted at ``repo_dir``: a subfolder of some other checkout is not one.
     if version == "nightly":
-        if not check_comfy_repo(repo_dir)[0]:
+        if not _is_comfy_repo_root(repo_dir):
             _reject_invalid_install_target(repo_dir)
-    elif preexisting and not check_comfy_repo(repo_dir)[0] and not _is_git_repo(repo_dir):
+    elif preexisting and not _is_comfy_repo_root(repo_dir) and not _is_git_repo(repo_dir):
         _reject_invalid_install_target(repo_dir)
 
     if version != "nightly":

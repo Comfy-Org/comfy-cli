@@ -83,7 +83,7 @@ class TestGlobalPythonInstallExecute:
         with (
             patch("comfy_cli.command.install.ensure_workspace_python", return_value=python) as mock_ensure,
             patch("comfy_cli.command.install.clone_comfyui"),
-            patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, None)),
+            patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, repo_dir)),
             # The non-fast-deps path bootstraps pip into `python` for real; left
             # live it shells out to `uv pip install --python <python>`, which
             # fails wherever that stand-in path isn't a real interpreter.
