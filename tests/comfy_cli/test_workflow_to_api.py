@@ -1211,6 +1211,53 @@ class TestWildcardInputType:
         assert "anything" not in result["1"]["inputs"]
 
 
+class TestMixedCaseLinkType:
+    """A socket type without a registered frontend widget is a connection,
+    whatever its letter case. ``VHS_LoadVideo.meta_batch`` (type
+    ``VHS_BatchManager``) sits before the ``format`` widget; giving it a
+    ``widgets_values`` slot shifted ``format="None"`` into ``meta_batch`` and
+    the node crashed on the worker (`'str' object has no attribute 'inputs'`,
+    117 failed cloud jobs in 30 days)."""
+
+    OI = {
+        "VHS_LoadVideo": {
+            "input": {
+                "required": {
+                    "video": [["clip.mp4"]],
+                    "select_every_nth": ["INT", {"default": 1}],
+                },
+                "optional": {
+                    "meta_batch": ["VHS_BatchManager"],
+                    "format": [["None", "AnimateDiff"], {"default": "AnimateDiff"}],
+                },
+            },
+            "input_order": {"required": ["video", "select_every_nth"], "optional": ["meta_batch", "format"]},
+            "output_node": True,
+            "output": ["IMAGE"],
+        },
+    }
+
+    def test_mixed_case_link_socket_owns_no_widget_slot(self):
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "VHS_LoadVideo",
+                    "mode": 0,
+                    "inputs": [{"name": "meta_batch", "type": "VHS_BatchManager", "link": None}],
+                    "outputs": [],
+                    "widgets_values": ["clip.mp4", 1, "None"],
+                }
+            ],
+            "links": [],
+        }
+
+        inputs = convert_ui_to_api(workflow, self.OI)["1"]["inputs"]
+
+        assert "meta_batch" not in inputs
+        assert inputs["format"] == "None"
+
+
 class TestImplicitSeedCompanion:
     """The frontend's ``useIntWidget`` composable adds a
     ``control_after_generate`` companion widget for inputs named ``seed`` or
@@ -2655,3 +2702,221 @@ class TestSeedreamDynamicCombo:
 
         assert "model.images" not in inputs
         assert "fixed" not in inputs.values()
+
+
+class TestLoad3DInjectedButtonSlots:
+    """The LOAD_3D custom widget injects three button slots before its own.
+
+    ``getCustomWidgets().LOAD_3D`` (frontend ``src/extensions/core/load3d.ts``)
+    adds ``upload 3d model`` / ``upload extra resources`` / ``clear`` button
+    widgets — serialized as the literal values ``"upload3dmodel"``,
+    ``"uploadExtraResources"``, ``"clear"`` — and only when the node already
+    carries a ``model_file`` widget, which is why ``Preview3DAdvanced`` and the
+    other ``model_3d``-fed viewers get none. They are constructed BEFORE the
+    LOAD_3D component widget, so they sit between ``model_file`` and the
+    declared DOM-widget input rather than trailing it. Walking the schema
+    positionally without them read the three button values into ``image``,
+    ``width`` and ``height``; the real captured shape is the one asserted here
+    (``api_hunyuan3d_model2uv.json`` and three sibling templates).
+    """
+
+    @pytest.fixture
+    def object_info_3d(self):
+        def load3d(dom_name):
+            return {
+                "input": {
+                    "required": {
+                        "model_file": ["COMBO", {"options": ["none"], "file_upload": True}],
+                        dom_name: ["LOAD_3D", {}],
+                        "width": ["INT", {"default": 1024}],
+                        "height": ["INT", {"default": 1024}],
+                    }
+                },
+                "input_order": {"required": ["model_file", dom_name, "width", "height"]},
+                "output": ["IMAGE"],
+                "output_name": ["image"],
+            }
+
+        return {
+            "Load3D": load3d("image"),
+            "Load3DAdvanced": load3d("viewport_state"),
+            # model_3d is a LINK input, so the frontend finds no model_file
+            # widget and injects no buttons: this node's LOAD_3D slot is the
+            # one right after nothing at all.
+            "Preview3DAdvanced": {
+                "input": {
+                    "required": {
+                        "model_3d": ["MESH"],
+                        "viewport_state": ["LOAD_3D", {}],
+                        "width": ["INT", {"default": 1024}],
+                    }
+                },
+                "input_order": {"required": ["model_3d", "viewport_state", "width"]},
+                "output": [],
+            },
+        }
+
+    def _workflow(self, node_type, widgets_values):
+        return {
+            "nodes": [
+                {
+                    "id": 13,
+                    "type": node_type,
+                    "inputs": [],
+                    "outputs": [],
+                    "mode": 0,
+                    "widgets_values": widgets_values,
+                }
+            ],
+            "links": [],
+        }
+
+    def test_load3d_button_values_do_not_become_input_values(self, object_info_3d):
+        # Verbatim from api_hunyuan3d_model2uv.json node 13.
+        ui = self._workflow("Load3D", ["toy.glb", "upload3dmodel", "uploadExtraResources", "clear", "", 1024, 1024])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "toy.glb", "image": "", "width": 1024, "height": 1024}
+
+    def test_advanced_variant_skips_the_same_three_slots(self, object_info_3d):
+        ui = self._workflow(
+            "Load3DAdvanced", ["motor.fbx", "upload3dmodel", "uploadExtraResources", "clear", "", 800, 600]
+        )
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 800, "height": 600}
+
+    def test_link_fed_viewer_has_no_buttons_to_skip(self, object_info_3d):
+        # No model_file widget -> no injected buttons. Skipping three slots
+        # here would eat this node's only two values.
+        ui = self._workflow("Preview3DAdvanced", ["", 512])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"viewport_state": "", "width": 512}
+
+    def test_a_workflow_saved_without_the_buttons_still_maps_in_order(self, object_info_3d):
+        # The skip is gated on the literal button values, so a shape written
+        # before the extension existed (or by a non-frontend producer) keeps
+        # its straight positional mapping instead of losing three values.
+        ui = self._workflow("Load3D", ["toy.glb", "", 1024, 1024])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "toy.glb", "image": "", "width": 1024, "height": 1024}
+
+
+class TestSocketlessInputsOwnTheirSlot:
+    """``socketless: true`` hides the input SOCKET, not the widget.
+
+    ``litegraphService`` skips adding an input socket for such an input and
+    renders the widget as usual, so the value is serialized positionally like
+    any other — real templates prove it (``ColorToRGBInt ["#ffffff"]``,
+    ``Painter ["p.png", 1024, 1024, "#000000"]``). Reading the type as a link
+    left the slot unconsumed and the input was then refilled from the schema
+    default, so a colour the user picked came back as the default: a value the
+    server accepts and renders wrong.
+    """
+
+    @pytest.fixture
+    def object_info_socketless(self):
+        return {
+            "ImageCropToMask": {
+                "input": {
+                    "required": {
+                        "images": ["IMAGE"],
+                        "width": ["INT", {"default": 1024}],
+                        "background": ["COLOR", {"default": "#000000", "socketless": True}],
+                    }
+                },
+                "input_order": {"required": ["images", "width", "background"]},
+                "output": ["IMAGE"],
+            },
+            # socketless AND forceInput: the explicit demotion wins, so this
+            # one really is a link and owns no slot.
+            "CropByBBoxes": {
+                "input": {
+                    "required": {
+                        "images": ["IMAGE"],
+                        "width": ["INT", {"default": 64}],
+                        "bboxes": ["BOUNDING_BOX", {"socketless": True, "forceInput": True}],
+                    }
+                },
+                "input_order": {"required": ["images", "width", "bboxes"]},
+                "output": ["IMAGE"],
+            },
+        }
+
+    def _node(self, node_type, widgets_values):
+        return {
+            "nodes": [
+                {
+                    "id": 2,
+                    "type": node_type,
+                    "inputs": [{"name": "images", "link": None}],
+                    "outputs": [],
+                    "mode": 0,
+                    "widgets_values": widgets_values,
+                }
+            ],
+            "links": [],
+        }
+
+    def test_a_chosen_socketless_value_is_not_replaced_by_the_default(self, object_info_socketless):
+        ui = self._node("ImageCropToMask", [1024, "#ff0000"])
+        assert convert_ui_to_api(ui, object_info_socketless)["2"]["inputs"]["background"] == "#ff0000"
+
+    def test_force_input_still_demotes_a_socketless_input_to_a_link(self, object_info_socketless):
+        # Only one widget value, for `width`: if bboxes ate a slot the walk
+        # would be short one and width would go missing.
+        ui = self._node("CropByBBoxes", [64])
+        inputs = convert_ui_to_api(ui, object_info_socketless)["2"]["inputs"]
+        assert inputs["width"] == 64
+        assert "bboxes" not in inputs
+
+
+class TestSocketlessInputAbsentFromASavedWorkflow:
+    """A socketless widget the saved workflow never persisted still has to
+    reach the prompt.
+
+    The frontend builds the prompt from LIVE widget state, not from
+    `widgets_values`, so an ImageCompare saved as `widgets_values: []`
+    still submits a `compare_view`. Converting it without one produces a
+    prompt the server refuses outright — verified live:
+    `required_input_missing: compare_view`, and the key is accepted with any
+    value once present (null included). 40 of the 517 shipped templates end
+    in one of these.
+    """
+
+    @pytest.fixture
+    def object_info_compare(self):
+        return {
+            "ImageCompare": {
+                "input": {
+                    "required": {"compare_view": ["IMAGECOMPARE", {"socketless": True}]},
+                    "optional": {"image_a": ["IMAGE", {}]},
+                },
+                "input_order": {"required": ["compare_view"], "optional": ["image_a"]},
+                "output": [],
+                "output_node": True,
+            },
+            "ColorNode": {
+                "input": {"required": {"color": ["COLOR", {"socketless": True, "default": "#ffffff"}]}},
+                "input_order": {"required": ["color"]},
+                "output": ["INT"],
+            },
+        }
+
+    def _one(self, node_type, widgets_values, object_info):
+        ui = {
+            "nodes": [
+                {"id": 5, "type": node_type, "inputs": [], "outputs": [], "mode": 0, "widgets_values": widgets_values}
+            ],
+            "links": [],
+        }
+        return convert_ui_to_api(ui, object_info)["5"]["inputs"]
+
+    def test_a_socketless_input_with_no_declared_default_is_still_emitted(self, object_info_compare):
+        inputs = self._one("ImageCompare", [], object_info_compare)
+        assert "compare_view" in inputs
+        assert inputs["compare_view"] is None
+
+    def test_a_socketless_input_with_a_default_uses_it(self, object_info_compare):
+        assert self._one("ColorNode", [], object_info_compare)["color"] == "#ffffff"
+
+    def test_a_saved_value_still_wins_over_the_placeholder(self, object_info_compare):
+        assert self._one("ColorNode", ["#123456"], object_info_compare)["color"] == "#123456"

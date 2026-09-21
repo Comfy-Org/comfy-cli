@@ -24,7 +24,7 @@ import random
 import re
 from typing import Any
 
-from comfy_cli.cql.engine import _FRONTEND_DOM_WIDGET_TYPES
+from comfy_cli.cql.engine import _FRONTEND_DOM_WIDGET_TYPES, LOAD_3D_BUTTON_VALUES
 
 logger = logging.getLogger(__name__)
 
@@ -1093,17 +1093,22 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
     # ``FLOAT,INT`` input with ``widgetType: "FLOAT"`` owns a slot.
     if isinstance(options.get("widgetType"), str) and options.get("widgetType"):
         return True, False
+    # ``socketless`` hides the input SOCKET, not the widget: the value is
+    # serialized positionally like any other. Reading it as a link left its
+    # slot unconsumed, and `_collect_default_inputs` then refilled the input
+    # from the schema default — a colour the user picked came back as
+    # "#000000", which the server happily runs.
+    if options.get("socketless"):
+        return True, False
     if isinstance(input_type, (list, tuple)):
         return True, False  # combo of choices
     if isinstance(input_type, str):
-        # ``*`` and ``""`` are wildcard *connection* types — the frontend
-        # never renders a widget for them. They slipped through the
-        # lowercase fallback below because they have no cased characters
-        # (``"*".isupper()`` returns ``False``), so we have to filter them
-        # out explicitly. PreviewAny.source: ["*", {}] is the canonical
-        # case this used to mis-handle.
-        if input_type in ("", "*"):
-            return False, False
+        # The frontend renders a widget only for a type with a registered
+        # widget constructor (``widgetStore.inputIsWidget``); every other type,
+        # whatever its casing, is a connection socket that owns no
+        # ``widgets_values`` slot. A letter-case guess here once gave the
+        # mixed-case link ``VHS_LoadVideo.meta_batch`` (``VHS_BatchManager``) a
+        # slot, shifting the ``format`` value into it and crashing the node.
         if input_type in {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"}:
             return True, False
         if input_type in _FRONTEND_DOM_WIDGET_TYPES:
@@ -1112,9 +1117,25 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
             return True, False
         if input_type.startswith("COMFY_") and "COMBO" in input_type:
             return True, True
-        if not input_type.isupper():
-            return True, False  # custom (lowercase) widget types
     return False, False
+
+
+def _declared_input_spec(input_def: dict, name: str) -> Any:
+    """The spec a schema declares for ``name`` in either section, else ``None``."""
+    for section in ("required", "optional"):
+        section_def = input_def.get(section) or {}
+        if isinstance(section_def, dict) and name in section_def:
+            return section_def[name]
+    return None
+
+
+def _is_load_3d_spec(input_spec: Any) -> bool:
+    """Whether this input is the one the frontend's LOAD_3D factory renders.
+
+    Exactly the type that factory is registered for — ``LOAD_3D_ADVANCED`` and
+    ``PREVIEW_3D`` have their own widgets and inject no buttons.
+    """
+    return isinstance(input_spec, (list, tuple)) and bool(input_spec) and input_spec[0] == "LOAD_3D"
 
 
 def _dynamic_combo_selected_subs(input_name: str, input_spec: Any, selected: Any) -> list[tuple[str, Any]]:
@@ -1182,6 +1203,10 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
     input_def = _schema_input_def(schema)
     pairs: list[tuple[str, Any]] = []
     vidx = 0
+    # ``hasModelFileWidget`` in the frontend's LOAD_3D factory: the buttons are
+    # attached to the loaders (Load3D, Load3DAdvanced) and NOT to the viewers
+    # fed by a ``model_3d`` link (Preview3DAdvanced, SaveGaussianSplat, …).
+    injects_load_3d_buttons = _is_widget_input(_declared_input_spec(input_def, "model_file"))[0]
 
     def next_widget_spec(entries: list[tuple[str, Any]], start: int) -> Any:
         # The spec of the next WIDGET-owning input, not the next declared one.
@@ -1203,7 +1228,20 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
         # COMBO legitimately lists as one of its own options.
         nonlocal vidx
         is_widget, is_dynamic = _is_widget_input(spec)
-        if not is_widget or vidx >= len(widget_values):
+        if not is_widget:
+            return
+        if injects_load_3d_buttons and depth == 0 and _is_load_3d_spec(spec):
+            # The LOAD_3D custom widget adds its three buttons before its own
+            # component widget, so their values sit between ``model_file`` and
+            # this slot. Consuming them here read "upload3dmodel" into the
+            # viewport input and shifted width/height by three.
+            while (
+                vidx < len(widget_values)
+                and isinstance(widget_values[vidx], str)
+                and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
+            ):
+                vidx += 1
+        if vidx >= len(widget_values):
             return
         value = widget_values[vidx]
         pairs.append((name, value))
@@ -1573,7 +1611,25 @@ def _collect_default_inputs(
             default = _extract_default(input_spec)
             if default is not _MISSING:
                 defaults[input_name] = _wrap_widget_value(default)
+            elif section == "required" and _is_socketless_widget(input_spec):
+                # A socketless widget the saved workflow never persisted
+                # (ImageCompare's `compare_view`, saved as `widgets_values:
+                # []`). The frontend builds its prompt from LIVE widget state
+                # and submits one anyway; converting without it yields a prompt
+                # the server refuses outright (`required_input_missing`), which
+                # is 40 of the shipped templates. The server accepts any value
+                # here, `null` included — verified live — and this input has no
+                # declared default to offer instead.
+                defaults[input_name] = None
     return defaults
+
+
+def _is_socketless_widget(input_spec: Any) -> bool:
+    """A socketless input that is a widget rather than a forceInput link."""
+    if not isinstance(input_spec, (list, tuple)) or len(input_spec) < 2 or not isinstance(input_spec[1], dict):
+        return False
+    options = input_spec[1]
+    return bool(options.get("socketless")) and not (options.get("forceInput") or options.get("defaultInput"))
 
 
 _MISSING = object()

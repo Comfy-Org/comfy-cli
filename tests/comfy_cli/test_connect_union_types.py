@@ -91,3 +91,26 @@ def test_connect_union_matching_is_not_substring_based(graph):
     wf = _wf("FILE_3D_GL", "FILE_3D_GLTF,FILE_3D_GLB")
     with pytest.raises(ValueError, match="type mismatch"):
         workflow_ops.connect(wf, graph, 1, "OUT", 2, "slot")
+
+
+@pytest.mark.parametrize(
+    "out_type,in_type",
+    [
+        ("IMAGE", "COMFY_MATCHTYPE_V3"),  # prod: LoadImage -> ResizeImageMaskNode.input
+        ("MASK", "COMFY_MATCHTYPE_V3"),
+        ("COMFY_MATCHTYPE_V3", "IMAGE"),  # and back out: .resized -> PreviewImage.images
+        ("COMFY_MATCHTYPE_V3", MESH_UNION),
+    ],
+)
+def test_connect_accepts_a_matchtype_slot_on_either_end(graph, out_type, in_type):
+    """`COMFY_MATCHTYPE_V3` is a wildcard that takes the type of whatever is
+    wired to it — the validator has always read it that way
+    (`_WILDCARD_TYPE_PREFIX`), but the connect gate had its own type test that
+    knew only `*`. Both directions were refused, so no node using a match-type
+    socket could be wired at all: an end-to-end run against the live agent
+    could not build a ResizeImageMaskNode graph by any route.
+    """
+    wf = _wf(out_type, in_type)
+    wf, op = workflow_ops.connect(wf, graph, 1, "OUT", 2, "slot")
+    assert op["op"] == "connect"
+    assert wf["nodes"][1]["inputs"][0]["link"] is not None, "the link must be wired"

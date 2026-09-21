@@ -24,6 +24,8 @@ class RecordingBuilder:
         self.revision_number = 0
         self.stale_updates = 0
         self.always_stale = False
+        # What every save answers with under ``warnings``; empty means none.
+        self.save_warnings: list[JsonObject] = []
         self.build_targets: list[JsonObject] = [
             {"target": {"os": "linux", "gpu": "nvidia"}, "label": "Linux NVIDIA", "artifactKind": "image"},
             {"target": {"os": "linux", "gpu": "cpu"}, "label": "Linux CPU", "artifactKind": "image"},
@@ -76,7 +78,7 @@ class RecordingBuilder:
         self.calls.append({"method": "upload_blob", "url": upload_url})
         self.uploaded.append(path.read_bytes())
 
-    def create_build(self, name: str, definition: JsonObject, description: str | None = None) -> str:
+    def create_build_response(self, name: str, definition: JsonObject, description: str | None = None) -> JsonObject:
         revision = self._revision()
         self.remote_revisions[self.created_id] = revision
         self.calls.append(
@@ -88,7 +90,10 @@ class RecordingBuilder:
                 "definition": definition,
             }
         )
-        return self.created_id
+        created: JsonObject = {"id": self.created_id, "updatedAt": revision}
+        if self.save_warnings:
+            created["warnings"] = self.save_warnings
+        return created
 
     def get_build(self, build_id: str) -> JsonObject:
         revision = self.remote_revisions.setdefault(build_id, self._revision())
@@ -121,7 +126,10 @@ class RecordingBuilder:
             raise stale_error()
         revision = self._revision()
         self.remote_revisions[build_id] = revision
-        return {"id": build_id, "updatedAt": revision, "name": name, "description": description}
+        updated: JsonObject = {"id": build_id, "updatedAt": revision, "name": name, "description": description}
+        if self.save_warnings:
+            updated["warnings"] = self.save_warnings
+        return updated
 
     def list_build_targets(self) -> list[JsonObject]:
         self.calls.append({"method": "list_build_targets"})

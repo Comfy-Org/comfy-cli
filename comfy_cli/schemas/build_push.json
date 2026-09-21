@@ -25,6 +25,20 @@
     "upload_bytes": {"type": "integer", "minimum": 0},
     "uploaded": {"description": "Blobs whose bytes were transferred. Never exceeds `upload_count`: the builder answers with an id it already holds, and no upload URL, when the workspace already stored those exact bytes.", "type": "integer", "minimum": 0},
     "deduped": {"description": "Blobs the builder already held, so `upload_count` was planned but not transferred. Always `upload_count - uploaded`.", "type": "integer", "minimum": 0},
+    "warnings": {
+      "description": "Non-blocking advisories the save returned; present only when it returned at least one. A warning at `models[<n>].sourceUri` names a model link a deployment could not download.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["field", "reason"],
+        "additionalProperties": false,
+        "properties": {
+          "field": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    },
     "skipped_symlinks": {
       "description": "Symlinks excluded from a packaged custom node; present only when packaging skipped at least one. `location` points into the definition of the spec at `spec_file` (this payload carries no definition of its own), `localPath` names the node under custom_nodes/, and `member` is the symlink's path inside that node.",
       "type": "array",
