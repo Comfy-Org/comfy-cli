@@ -222,6 +222,16 @@ class TestLiteralOnLinkInput:
         assert not result["valid"]
         assert ("literal_on_link_input", "meta_batch") in _codes(result)
 
+    def test_none_on_a_required_link_socket_is_an_error(self):
+        # Null means "not connected" only on an optional socket; a required
+        # one hands the None to the node.
+        wf = {"1": {"class_type": "SaveImage", "inputs": {"images": None, "filename_prefix": "x"}}}
+
+        result = _graph().validate_workflow(wf)
+
+        assert not result["valid"]
+        assert ("literal_on_link_input", "images") in _codes(result)
+
 
 class TestLiteralOnLinkNoFalsePositives:
     """Shapes official templates submit that the server runs fine."""
@@ -422,6 +432,21 @@ class TestLoad3dViewportCapture:
             "1": {
                 "class_type": "Load3D",
                 "inputs": {"model_file": "m.glb", "image": "", "width": 1024, "height": 1024},
+            },
+            "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "x"}},
+        }
+
+        result = _graph().validate_workflow(wf)
+
+        assert not result["valid"]
+        assert ("frontend_capture_required", "image") in _codes(result)
+
+    def test_load3d_capture_without_its_image_key_is_an_error(self):
+        # The node reads image['image'], so an empty dict crashes just the same.
+        wf = {
+            "1": {
+                "class_type": "Load3D",
+                "inputs": {"model_file": "m.glb", "image": {}, "width": 1024, "height": 1024},
             },
             "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "x"}},
         }

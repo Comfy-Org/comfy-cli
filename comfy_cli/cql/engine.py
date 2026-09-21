@@ -696,8 +696,9 @@ _FRONTEND_REGISTERED_WIDGET_TYPES = frozenset(
 def _literal_expected(port: Port, value: Any) -> bool:
     """Whether a JSON literal can legitimately fill ``port``.
 
-    True for ``None`` (the converter fills an unwired optional socket from its
-    ``default: null``, which the node reads as "not connected"); for a
+    True for ``None`` on an optional port (the converter fills an unwired
+    optional socket from its ``default: null``, which the node reads as "not
+    connected"); for a
     primitive anywhere in a comma-separated union (a ``forceInput`` INT or an
     ``INT,FLOAT`` operand still takes ``5`` — the server converts it); for
     wildcards and ``COMFY_*`` meta types; for frontend-registered widget
@@ -707,7 +708,11 @@ def _literal_expected(port: Port, value: Any) -> bool:
     ``VHS_BatchManager``, …) has no literal form.
     """
     type_id = port.type
-    if value is None or not type_id or is_wildcard_type(type_id) or type_id.startswith("COMFY_"):
+    if value is None:
+        # Only an OPTIONAL socket reads null as "not connected"; the server
+        # passes a required one's None straight to the node.
+        return not port.required
+    if not type_id or is_wildcard_type(type_id) or type_id.startswith("COMFY_"):
         return True
     if type_id in _FRONTEND_REGISTERED_WIDGET_TYPES or port.options.default is not None:
         return True
@@ -1992,7 +1997,9 @@ class Graph:
                     continue
                 if port is None:
                     continue
-                if (class_type, input_name) in _FRONTEND_CAPTURE_INPUTS and not isinstance(value, dict):
+                if (class_type, input_name) in _FRONTEND_CAPTURE_INPUTS and (
+                    not isinstance(value, dict) or "image" not in value
+                ):
                     finding = {
                         "node_id": node_id,
                         "field": input_name,
