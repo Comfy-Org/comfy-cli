@@ -1964,6 +1964,10 @@ app.command("insert-workflow", help="Insert a complete workflow; emits one inser
 app.command("add-node", help="Add a node to the graph; emits an add_node op.")(_wedit.add_node_cmd)
 app.command("connect", help="Wire an output slot to an input slot; emits a connect op.")(_wedit.connect_cmd)
 app.command("set-widget", help="Set a widget by name (`<id>.<widget>`); emits a set_widget op.")(_wedit.set_widget_cmd)
+app.command(
+    "set-node-field",
+    help="Set a durable node field (title/mode/flags.collapsed/flags.pinned); emits a set_node_field op.",
+)(_wedit.set_node_field_cmd)
 app.command("delete-node", help="Delete a node and its links; emits a delete_node op.")(_wedit.delete_cmd)
 app.command(
     "delete-nodes",

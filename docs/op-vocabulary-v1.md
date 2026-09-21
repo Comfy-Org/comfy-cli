@@ -25,6 +25,7 @@ Seven kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind wi
 | `add_node` | yes | `comfy workflow add-node` | Mint and insert one node |
 | `connect` | yes | `comfy workflow connect` | Wire one output slot to one input slot |
 | `set_widget` | yes | `comfy workflow set-widget` | Set one widget value by name |
+| `set_node_field` | yes | `comfy workflow set-node-field` | Set one durable node field (`title`, `mode`, `flags.collapsed`, `flags.pinned`) |
 | `delete_node` | yes | `comfy workflow delete` | Remove one node and its incident links |
 | `clear` | no | `comfy workflow clear` | Remove every node, link, and group |
 | `reset_doc` | no | `comfy workflow reset-doc --confirm` | Reset the whole document to an empty baseline |

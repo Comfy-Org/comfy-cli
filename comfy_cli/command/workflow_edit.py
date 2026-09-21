@@ -307,6 +307,44 @@ def set_widget_cmd(
 
 
 # ---------------------------------------------------------------------------
+# set-node-field
+# ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def set_node_field_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    node: Annotated[str, typer.Argument(help="Node id.")],
+    field: Annotated[
+        str,
+        typer.Argument(help="Field: `title`, `mode`, `flags.collapsed` or `flags.pinned`."),
+    ],
+    value: Annotated[str, typer.Argument(help="New value (parsed as JSON, else literal string).")],
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+):
+    renderer = get_renderer()
+    renderer.command = "workflow set-node-field"
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    # No catalog needed: the writable fields are graph-independent node state,
+    # unlike a widget name, which must be checked against the node's class.
+    try:
+        workflow, op = workflow_ops.set_node_field(
+            workflow, node, field, _parse_value(value), actor=actor, base_version=base_version
+        )
+    except ValueError as e:
+        _emit_edit_error(
+            renderer,
+            e,
+            hint=f"writable fields are {', '.join(workflow_ops.WRITABLE_NODE_FIELDS)}; run "
+            "`comfy workflow ls-nodes <file>` to see the node ids that exist",
+        )
+        raise typer.Exit(code=1) from e
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow set-node-field")
+
+
+# ---------------------------------------------------------------------------
 # connect
 # ---------------------------------------------------------------------------
 
