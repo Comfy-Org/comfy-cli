@@ -40,6 +40,9 @@ def test_canonical_digest_matches_cmp_a8_vector_and_key_order_is_immaterial():
     workflow = _workflow()
     first = _op()
     ops.apply_op(workflow, first, _Graph())
-    assert workflow["_applied_op_digests"][first["op_id"]] == "d395ba92dd991c07c0f790b974b3d4f34e3b29c71a26621634d75de31040a431"
+    assert (
+        workflow["_applied_op_digests"][first["op_id"]]
+        == "d395ba92dd991c07c0f790b974b3d4f34e3b29c71a26621634d75de31040a431"
+    )
     reordered = dict(reversed(list(first.items())))
     assert ops.apply_op(workflow, reordered, _Graph()) is workflow
