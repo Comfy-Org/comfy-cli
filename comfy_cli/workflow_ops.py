@@ -92,10 +92,13 @@ def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str
 # ---------------------------------------------------------------------------
 
 #: Every op kind in the v1 vocabulary, including defined-but-deferred kinds.
+#: ``set_title`` (amendment v1.6) is PROPOSED, not yet ratified — see
+#: docs/op-vocabulary-v1.md §1.8 for its status.
 FROZEN_OPS: tuple[str, ...] = (
     "add_node",
     "connect",
     "set_widget",
+    "set_title",
     "delete_node",
     "clear",
     "reset_doc",
@@ -110,7 +113,7 @@ DEFERRED_OPS: tuple[str, ...] = ("insert_workflow",)
 #: Kinds a batch (``apply_specs``) dispatches. ``clear`` and ``reset_doc`` are
 #: standalone-only: they rewrite the whole document, so they never ride inside
 #: an atomic batch.
-BATCHABLE_OPS: tuple[str, ...] = ("add_node", "connect", "set_widget", "delete_node")
+BATCHABLE_OPS: tuple[str, ...] = ("add_node", "connect", "set_widget", "set_title", "delete_node")
 
 #: Per-kind rendering for :class:`NotBatchableError` — the registered error code
 #: and the standalone command that DOES do the job. One entry per frozen kind
@@ -1170,6 +1173,34 @@ def _promoted_widget_error(workflow: dict, node: dict, slot: Any) -> ValueError 
     )
 
 
+def set_title(
+    workflow: dict,
+    node_id: Any,
+    title: str | None,
+    *,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, dict]:
+    """Set, or clear, a node's display title (§1.8, PROPOSED amendment v1.6).
+
+    ``title`` is a string, or ``None`` to clear a custom title back to the
+    class default. Unlike ``set_widget``, no catalog is involved: ``title``
+    is not a catalogued widget name and carries no ``widget_order`` position,
+    so this never touches ``widgets_values`` — it is LWW-gated on its own
+    register (``_write_target``), exactly like a top-level ``set_widget``
+    write, but under the ``"title"`` namespace rather than ``"widget"`` so
+    the two can never collide by accident.
+
+    There is no interior/subgraph-promoted variant in this amendment (mirrors
+    comfy-multi-player's ADR-032, which carries the same limitation).
+    """
+    if title is not None and not isinstance(title, str):
+        raise ValueError(f"title must be a string or null, got {title!r}")
+    _require(workflow, node_id)
+    op = _new_op("set_title", actor, base_version, node_id=node_id, title=title)
+    return apply_op(workflow, op, None), op
+
+
 def connect(
     workflow: dict,
     graph,
@@ -1954,6 +1985,14 @@ def apply_specs(
                         actor=actor,
                         base_version=base_version,
                     )
+                elif kind == "set_title":
+                    workflow, op = set_title(
+                        workflow,
+                        resolve_ref(spec["node"], aliases),
+                        spec["title"],
+                        actor=actor,
+                        base_version=base_version,
+                    )
                 elif kind == "delete_node":
                     workflow, op = delete_node(
                         workflow, graph, resolve_ref(spec["node"], aliases), actor=actor, base_version=base_version
@@ -2014,6 +2053,8 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
             _apply_add_node(workflow, op)
         elif kind == "set_widget":
             _apply_set_widget(workflow, op, graph)
+        elif kind == "set_title":
+            _apply_set_title(workflow, op)
         elif kind == "connect":
             _apply_connect(workflow, op, graph)
         elif kind == "delete_node":
@@ -2123,6 +2164,22 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
     # dynamic-combo selector change must replace the old option's variable-width
     # sub-widget span before preserving trailing values such as seed/watermark.
     _engine._write_widget(node, op["widget"], op["value"], graph, extend=True)
+    _lww_commit(workflow, op)
+
+
+def _apply_set_title(workflow: dict, op: dict) -> None:
+    """§1.8 (PROPOSED, amendment v1.6). Same LWW/delete-wins shape as
+    ``_apply_set_widget``'s top-level branch, but no catalog is involved and
+    the target is the ``("title", …)`` namespace, never the widget one."""
+    if not _lww_gate(workflow, op):
+        return
+    node = _find_by_str(workflow, op["node_id"])
+    if node is None:
+        return  # target concurrently deleted => no-op (delete wins).
+    if op["title"] is None:
+        node.pop("title", None)
+    else:
+        node["title"] = op["title"]
     _lww_commit(workflow, op)
 
 
@@ -2450,6 +2507,11 @@ def _write_target(op: dict) -> tuple:
         if op.get("path"):
             return ("widget", tuple(str(s) for s in op["path"]), op["inner_widget"])
         return ("widget", str(op["node_id"]), op["widget"])
+    if kind == "set_title":
+        # Its own namespace, never the widget one (§1.8): `title` is not a
+        # catalogued widget name and must not collide with a same-named
+        # widget's register on some future node class.
+        return ("title", str(op["node_id"]))
     if kind in ("add_node", "delete_node"):
         return ("node", str(op["node_id"]))
     if kind == "connect":

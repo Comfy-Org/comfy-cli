@@ -44,6 +44,16 @@ history.
   download, from the deploy service's estimate. Under `--json` it is `estimate`
   in the output. A service that gives no estimate, or has it switched off,
   changes nothing and prints nothing.
+- `comfy workflow set-title FILE NODE_ID TITLE` (or `--clear`) renames a node
+  or clears a custom title back to the class default, emitting a `set_title`
+  op. **Proposed, pending ratification**: `set_title` is a candidate addition
+  to `docs/op-vocabulary-v1.md` (§1.8 / amendment v1.6), mirroring the
+  package-local op comfy-multi-player#232 added for the same title-rename
+  sync bug.
+
+- `comfy build push` prints every warning a save returns, and `--release` cuts no
+  release while one says a deployment could not download a model link
+  (`build_release_held`); `--release-despite-warnings` cuts anyway.
 - `comfy build release delete RELEASE` deletes the named release, freeing the slot
   it held against the workspace's release limit. It confirms first (`--yes` skips
   the prompt, `build_release_delete_needs_confirm` refuses a caller that cannot

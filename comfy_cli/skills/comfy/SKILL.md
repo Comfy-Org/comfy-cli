@@ -364,7 +364,7 @@ of a live graph, use the structured-edit primitives below — never raw `jq`/`se
 (This rule exists because that exact jq-on-`id==128` hand-edit is the anti-pattern
 `decompose` — and these primitives — were built to kill.)
 
-## Structured graph edits — `insert-workflow` / `add-node` / `connect` / `set-widget` / `delete-node`
+## Structured graph edits — `insert-workflow` / `add-node` / `connect` / `set-widget` / `set-title` / `delete-node`
 
 The **sanctioned** way to mutate a graph's *structure* from code — the
 alternative to `jq`/`sed` on `nodes`/`links`/`widgets_values`. `insert-workflow`
@@ -384,7 +384,7 @@ hard-checked; unknown COMBO values / out-of-range numbers come back as soft
   human editor) → the primitives here.
 
 > **Live co-editing / CRDT:** only the structured-edit primitives (`insert-workflow`/
-> `add-node`/`connect`/`set-widget`/`delete-node`/`apply`) emit a mergeable **op** in
+> `add-node`/`connect`/`set-widget`/`set-title`/`delete-node`/`apply`) emit a mergeable **op** in
 > `data.op`/`data.ops` (`op_id` + `actor` + `base_version` + `stamp`). Fragments +
 > `compose` produce a **whole-document** graph — fine for authoring a *fresh*
 > draft (the base), but it does **not** emit ops and will clobber a concurrent
@@ -405,6 +405,8 @@ cat template.json | comfy --json workflow insert-workflow wf.json -        # '-'
 comfy --json workflow add-node    wf.json KSampler --at 400,200 $CAT  # → data.op.node_id (minted)
 comfy --json workflow connect     wf.json 7.LATENT 3.samples $CAT     # source out-slot → target in-slot
 comfy --json workflow set-widget  wf.json 3.steps 35 $CAT             # widget by NAME; op carries {old,value}
+comfy --json workflow set-title   wf.json 3 "My Sampler"              # rename a node; PROPOSED op, no catalog needed
+comfy --json workflow set-title   wf.json 3 --clear                   # clear a custom title back to the class default
 comfy --json workflow delete-node wf.json 7 $CAT                      # removes node + its links
 comfy --json workflow ls-nodes    wf.json                            # id / type / title (no catalog needed)
 ```
@@ -483,6 +485,13 @@ comfy --json download --out-dir ./out < run.json                      # pull the
   `set-widget` additionally resolves values **inside a subgraph** directly — use
   the flat promoted address `slots` advertises (e.g. `57.text`) or the nested
   form (`57/27.text`); no decompose needed.
+- **`set-title` renames a node** (or `--clear`s a custom title back to the
+  class default). It needs no catalog — `title` is not a widget — and is the
+  only way to rename a node that produces a mergeable op; hand-editing
+  `node.title` in the JSON does not replicate to a concurrent editor.
+  **PROPOSED:** `set_title` is not yet part of the ratified
+  `docs/op-vocabulary-v1.md` contract (§1.8) — it is implemented and tested,
+  pending maintainer ratification.
 
 ---
 

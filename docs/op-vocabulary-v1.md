@@ -17,14 +17,16 @@ citation must point at a commit on that branch.
 
 ## 1. Frozen op kinds
 
-Seven kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
-`ValueError("unknown op ...")` — it never ignores one.
+Eight kinds as of amendment v1.6 (§13, below) — `set_title` is the eighth and
+is **PROPOSED**, not yet ratified; see §1.8. `apply_op` rejects an unknown
+kind with `ValueError("unknown op ...")` — it never ignores one.
 
 | Kind | Batchable | Standalone command | Summary |
 |------|-----------|--------------------|---------|
 | `add_node` | yes | `comfy workflow add-node` | Mint and insert one node |
 | `connect` | yes | `comfy workflow connect` | Wire one output slot to one input slot |
 | `set_widget` | yes | `comfy workflow set-widget` | Set one widget value by name |
+| `set_title` | yes | `comfy workflow set-title` | Set or clear one node's display title (§1.8, PROPOSED) |
 | `delete_node` | yes | `comfy workflow delete` | Remove one node and its incident links |
 | `clear` | no | `comfy workflow clear` | Remove every node, link, and group |
 | `reset_doc` | no | `comfy workflow reset-doc --confirm` | Reset the whole document to an empty baseline |
@@ -215,6 +217,52 @@ or write a mutated workflow document. Per the contract decision recorded in the 
 `insert_workflow` ops may carry definitions; edit ops reject a `definitions`
 field as `malformed_op`. The kind is not batchable and a spec batch rejects it as
 `workflow_insert_workflow_not_batchable`.
+
+### 1.8 `set_title` — PROPOSED (amendment v1.6, not yet ratified)
+
+Command: `comfy workflow set-title <file> <node_id> <title>` or `... --clear`.
+Spec form (batch input):
+
+```json
+{"op": "set_title", "node": "$sampler", "title": "My Sampler"}
+```
+
+`node` resolves exactly like `set_widget`'s (int id, alias, or `$alias`).
+`title` is a string, or `null` to clear a custom title back to the class
+default. Minted op fields beyond the envelope: `node_id`, `title`.
+
+* Idempotency: `op_id` no-op, exactly like `set_widget`.
+* Conflict: last-writer-wins per `node_id`, on its own register —
+  `("title", node_id)` — never the `("widget", node_id, widget)` one, since
+  `title` is not a catalogued widget name and carries no `widget_order`
+  position. See §3 and §1.8.1 below.
+* Invalid: a non-string, non-null `title` is rejected at mint time; a missing
+  node is rejected at mint time (mirrors `set_widget`'s not-found handling),
+  and at replay a since-deleted target is a no-op (delete wins), same as
+  every other write.
+* No catalog is required to mint or apply this op.
+* No interior or subgraph-promoted variant exists in this amendment. A
+  subgraph-interior node's title is out of scope; if that need is confirmed,
+  it should follow `set_widget`'s interior shape (`path` + a title-equivalent
+  of `inner_widget`) rather than growing a distinct mechanism.
+
+#### 1.8.1 Relationship to comfy-multi-player's `set_title` (ADR-032)
+
+comfy-multi-player PR #232 independently added an identical, package-local
+`set_title` op (same payload shape, same LWW model) to its CRDT applier ahead
+of this amendment, because the title-stomp bug it closes was diagnosed and
+scoped there and a client-side sync fix should not wait on this document's
+release cycle (see that PR's ADR-032 and `docs/multiplayer-schema.md`
+Amendment A21). That implementation additionally carries an optional
+`node_incarnation` field — comfy-multi-player's Y.Doc can, in principle, see
+a node id reused after a tombstoned delete, so its LWW register is scoped by
+`(node_id, node_incarnation)`. **comfy-cli has no equivalent field and does
+not need one**: node ids here are minted by `mint_id()` as leaderless random
+53-bit integers and are never reused (§6, §1.5's resurrection-hazard note),
+so a bare `("title", node_id)` register is already collision-free. A future
+reconciliation pass (once this amendment is ratified) should confirm
+comfy-multi-player's applier accepts an op that omits `node_incarnation`
+rather than requiring one only because its own local model can need it.
 
 ## 2. Idempotency and identity
 
@@ -866,3 +914,67 @@ the op additionally carries `promoted.repair = {entry, ids}` with the
 subgraph-input and boundary-link ids the repair mints, derived by SHA-256 from
 `(instance path, source node, widget)` so replay anywhere is byte-identical.
 The pinned contract text in §8.7 states the full rule.
+
+## 15. Amendment v1.6 — 2026-09-21 (`set_title`: a node-rename op — PROPOSED, pending ratification)
+
+> **Status of this amendment: PROPOSED.** Every prior amendment in this
+> document (§§10–14) recorded a change already decided and shipped. This one
+> is different in kind: it adds a new frozen op kind, which §9 says requires
+> updating `FROZEN_OPS`/`BATCHABLE_OPS`, the dispatch tables, and this
+> document together — and this commit does exactly that so the contract test
+> (`tests/comfy_cli/test_op_vocabulary_contract.py`) stays green — but adding
+> a kind to a document three other repos pin BY SHA (see the top of this
+> document) is a decision for
+> this repo's maintainers, not something a single PR can ratify by merging.
+> Treat `set_title` as implemented-and-tested-but-not-yet-blessed until a
+> maintainer says otherwise; a downstream repo should not move its pin to
+> this SHA on the strength of this amendment alone.
+
+### What changed and why
+
+A node's `title` enters a workflow document only as a passthrough field on
+`add_node`'s initial `node` snapshot (§1.1). No op wrote it afterward: a
+rename made after the node already existed — by hand, by a script, or by the
+in-app agent — produced no replayable op, so a merge consumer had nothing to
+receive and a concurrent rename from two sources resolved by accident (arrival
+order in whatever process last touched the file) rather than by any of this
+document's convergence guarantees. §1.8 adds `set_title` to close that gap,
+following `set_widget`'s existing top-level shape (§8.1's stamp comparison,
+§2's idempotency, the delete-wins rule in §3) rather than introducing new
+machinery.
+
+### Independent prior art: comfy-multi-player PR #232 / ADR-032
+
+[comfy-multi-player PR #232](https://github.com/Comfy-Org/comfy-multi-player/pull/232)
+diagnosed and fixed the identical bug in its CRDT multiplayer applier first,
+ahead of this amendment, because the fix was scoped and needed there and a
+client-side sync fix should not wait on this document's own release cycle
+(see that PR's `docs/decisions/ADR-032-set-title-op.md`). Its op is
+package-local and explicitly marked PROVISIONAL pending exactly this kind of
+upstream amendment. This document's §1.8 defines the shape comfy-cli now
+implements; §1.8.1 records the one payload difference (`node_incarnation`)
+and why comfy-cli's model does not need it. Ratifying this amendment is what
+lets comfy-multi-player reconcile its provisional op with a real upstream
+definition instead of the two living in permanent disagreement (ADR-032's own
+stated follow-up).
+
+### Scope of this change
+
+* `FROZEN_OPS` and `BATCHABLE_OPS` gain `set_title` (`comfy_cli/workflow_ops.py`).
+* `apply_op` dispatches it via `_apply_set_title`; `apply_specs` dispatches
+  the `{"op": "set_title", "node": ..., "title": ...}` spec form via the new
+  `set_title()` primitive.
+* `_write_target` gains the `("title", node_id)` register (§1.8).
+* `comfy workflow set-title <file> <node_id> <title>` (or `--clear`) is the
+  new standalone/batch-authoring command, mirroring `set-widget`'s CLI shape.
+* No change to any existing kind's semantics, to `DEFERRED_OPS`, or to
+  §§2–8.8 beyond the new §1.8 addition and this section.
+
+### What is explicitly NOT done here
+
+* **Not ratified.** See the status callout above.
+* **No interior/subgraph-promoted `set_title` variant** — §1.8 states this
+  is out of scope, mirroring ADR-032's own stated limitation.
+* **No reconciliation commit against comfy-multi-player** — that is follow-up
+  work for once (and if) this amendment is accepted, per ADR-032's own
+  disposition.
