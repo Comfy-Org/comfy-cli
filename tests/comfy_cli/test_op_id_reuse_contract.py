@@ -46,3 +46,19 @@ def test_canonical_digest_matches_cmp_a8_vector_and_key_order_is_immaterial():
     )
     reordered = dict(reversed(list(first.items())))
     assert ops.apply_op(workflow, reordered, _Graph()) is workflow
+
+
+def test_legacy_list_only_replay_returns_before_digesting_payload():
+    workflow = _workflow()
+    workflow["_applied_ops"] = [_op()["op_id"]]
+    replay = _op()
+    replay["value"] = object()
+    assert ops.apply_op(workflow, replay, _Graph()) is workflow
+
+
+def test_canonical_ignores_replay_digest_metadata():
+    workflow = _workflow()
+    applied = copy.deepcopy(workflow)
+    ops.apply_op(applied, _op(), _Graph())
+    applied["nodes"] = copy.deepcopy(workflow["nodes"])
+    assert ops.canonical(applied) == ops.canonical(workflow)
