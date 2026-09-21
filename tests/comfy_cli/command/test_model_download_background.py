@@ -2484,7 +2484,7 @@ class TestSpawnFlags:
         models._spawn_download_worker(tmp_path / "s.json", tmp_path / "s.log")
 
         kwargs = popen.call_args.kwargs
-        assert kwargs["creationflags"] == 0x8 | 0x200
+        assert kwargs["creationflags"] == 0x8 | 0x200 | 0x01000000
         assert "start_new_session" not in kwargs
 
     def test_worker_argv_targets_the_hidden_command(self, tmp_path, monkeypatch):

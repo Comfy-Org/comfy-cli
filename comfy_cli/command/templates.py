@@ -31,6 +31,7 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import knowledge, tracking, workflow_ops
+from comfy_cli.detach import popen_detached
 from comfy_cli.file_utils import atomic_write_bytes, cache_dir
 from comfy_cli.http import ResponseTooLarge, plain_urlopen, read_capped
 from comfy_cli.output import get_renderer, rprint
@@ -377,16 +378,10 @@ def _spawn_background_refresh() -> bool:
         cwd=_refresh_cwd(),
         env=child_env,
     )
-    if sys.platform == "win32":
-        # start_new_session maps to setsid and is silently ignored on Windows;
-        # use the native flags so the child is truly detached from the parent's
-        # console/process group and survives console-close / Ctrl-C.
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
-    else:
-        kwargs["start_new_session"] = True
-
     try:
-        subprocess.Popen(argv, **kwargs)
+        # New session on POSIX; native detach (+ job breakaway) flags on Windows
+        # so the child survives console-close / Ctrl-C / a parent Job Object.
+        popen_detached(argv, **kwargs)
     except OSError:
         # Couldn't spawn the refresher (no fork available, exec denied, …). We
         # already served the stale cache, so degrade silently rather than
