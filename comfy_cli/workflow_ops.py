@@ -60,7 +60,7 @@ import uuid
 from typing import Any
 
 from comfy_cli import layout
-from comfy_cli.cql.engine import frontend_injected_widget_error
+from comfy_cli.cql.engine import frontend_injected_widget_error, is_wildcard_type
 
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
@@ -305,7 +305,11 @@ def _types_compatible(link_type: Any, dst_type: Any) -> bool:
     src, dst = _slot_types(link_type), _slot_types(dst_type)
     if not src or not dst:
         return True
-    if "*" in src or "*" in dst:
+    # A V3 match-type port takes the type of whatever is wired to it, so it is
+    # a wildcard on either end — the validator has always read it that way.
+    # This gate knew only "*", so no node with a match-type socket could be
+    # wired in either direction (ResizeImageMaskNode, ComfySwitchNode).
+    if any(is_wildcard_type(t) for t in src | dst):
         return True
     return bool(src & dst)
 
