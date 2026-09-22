@@ -598,6 +598,8 @@ def _build_link_map(links: list) -> dict[int, dict]:
         if not isinstance(link, (list, tuple)) or len(link) < 6:
             continue
         link_id, src_id, src_slot, tgt_id, tgt_slot, link_type = link[:6]
+        if not _is_link_id(link_id):
+            continue  # unhashable (malformed save) — skip it, don't abort the conversion
         link_map[link_id] = {
             "source_id": src_id,
             "source_slot": src_slot,
