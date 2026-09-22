@@ -4682,7 +4682,7 @@ def _expand_widget_entries(
             for row in range(count):
                 for sub in _dynamic_group_widgets(port, f"{name}.{row}"):
                     entries.append(_WidgetEntry(name=sub.name, port=sub, owner=name))
-        elif port.dynamic_options and _is_dynamic_combo_type(port.type):
+        elif port.is_dynamic_combo or port.dynamic_options:
             if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
                 return
             idx = len(entries) - 1
