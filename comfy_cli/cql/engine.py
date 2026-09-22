@@ -5150,7 +5150,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
             else:
                 widgets.append(button_defaults.get(entry.name))
 
-    if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options:
+    if port is not None and port.dynamic_options:
         return _write_dynamic_combo_selector(
             node,
             port,
@@ -5173,7 +5173,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
             if fatal:
                 raise ValueError(fatal["message"])
 
-    if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options:
+    if port is not None and port.dynamic_options:
         return _write_dynamic_combo_selector(node, port, input_name, widget_idx, value, entries, widgets, extend=extend)
 
     widgets[widget_idx] = value
@@ -5410,7 +5410,7 @@ def _dynamic_combo_default_values(
         default = _widget_default(sub)
         values.append(default)
         names.append(sub.name)
-        if _is_dynamic_combo_type(sub.type) and sub.dynamic_options:
+        if sub.dynamic_options:
             if depth < _MAX_DYNAMIC_COMBO_DEPTH:
                 nested_values, nested_names = _dynamic_combo_default_values(
                     sub.dynamic_options, default, sub.name, depth + 1
