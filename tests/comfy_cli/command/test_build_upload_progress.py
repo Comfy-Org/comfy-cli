@@ -81,6 +81,12 @@ def _validate(events: list[dict]) -> None:
         validator.validate(event)
 
 
+def test_a_type_this_version_does_not_emit_still_validates() -> None:
+    """The schema says to ignore an unrecognised type; a schema that then rejects
+    one would make a newer CLI's additive event a validation failure."""
+    _validate([{"schema": "event/1", "type": "upload_paused", "file": "m.safetensors"}])
+
+
 # ----- the byte-counting reader -----
 
 

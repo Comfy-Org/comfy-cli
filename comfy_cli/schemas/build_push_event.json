@@ -13,8 +13,7 @@
     },
     "type": {
       "type": "string",
-      "enum": ["upload_plan", "upload_progress", "upload_complete"],
-      "description": "ADVISORY and open-ended, as in run_event.json: ignore types you do not recognise."
+      "description": "Open-ended: this comfy-cli version emits upload_plan, upload_progress and upload_complete (the shapes below), and adding a type is an additive change that does NOT bump `event/1`. Ignore types you do not recognise rather than treat them as a validation failure."
     },
     "files": {"type": "integer", "minimum": 0, "description": "upload_plan: files this push still has to send."},
     "already_held": {"type": "integer", "minimum": 0, "description": "upload_plan: local models and nodes that need no upload, because an earlier push stored them or a public source link stands in for the bytes."},
