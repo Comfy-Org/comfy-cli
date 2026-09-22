@@ -1198,7 +1198,10 @@ class TestTrackCommandRecordsHowTheCommandEnded:
             up_cmd()
         _, (_, props) = self._events()
         assert props["outcome"] == outcome
-        assert props["exit_code"] == code
+        if code == 0:
+            assert "exit_code" not in props, "a zero exit is a normal end and carries no code"
+        else:
+            assert props["exit_code"] == code
 
     def test_ctrl_c_is_recorded_and_re_raised(self):
         @self.tracking.track_command("deploy")

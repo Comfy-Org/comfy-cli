@@ -761,8 +761,12 @@ def track_command(sub_command: str | None = None):
             try:
                 result = func(*args, **kwargs)
             except typer.Exit as exit_:
-                code = exit_.exit_code
-                finished.update(outcome="ok" if code == 0 else "exit", exit_code=code)
+                # A zero exit is a normal end and carries no code, as the
+                # docstring promises; only a non-zero one names its code.
+                if exit_.exit_code == 0:
+                    finished["outcome"] = "ok"
+                else:
+                    finished.update(outcome="exit", exit_code=exit_.exit_code)
                 raise
             except KeyboardInterrupt:
                 finished.update(outcome="error", error_type="KeyboardInterrupt")
