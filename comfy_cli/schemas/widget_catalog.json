@@ -1,8 +1,47 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "comfy nodes widget-catalog",
-  "description": "The widget catalog: a derived projection of object_info giving, per node class, the positional order of its widgets (plus the grow families that mint slots). It is what a name<->index widget converter needs — notably the CRDT applier, which stores widget values by NAME while the workflow JSON stores them POSITIONALLY in widgets_values. It is NOT object_info: no types, defaults, enum choices, or descriptions.",
+  "description": "Derived object_info metadata for positional widget serialization and grow families. widget_layout retains all dynamic selector branches and structural field identities; widget_order is the first-choice display order only. No types, defaults or ordinary enum choices are included.",
   "type": "object",
+  "$defs": {
+    "layout": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/widget" },
+      "description": "Serialized slots in semantic order. A selector consumes its own value, then the matching option's widgets, then the following sibling. Injected upload/audioUI controls consume no value and are excluded; seed companions and PREVIEW_3D image are included. Require exact consumption, not padding from defaults."
+    },
+    "widget": {
+      "type": "object",
+      "required": ["name", "identity"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "identity": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Structural path: field name, ancestor choice, child field name, and optional owning-field companion. Mutually exclusive branches may reuse names but have distinct identities. Repeated seed companions are owned by their preceding field, not by their bare name.",
+          "items": {
+            "type": "array",
+            "prefixItems": [{ "enum": ["field", "choice", "companion"] }, { "type": "string" }],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        },
+        "options": {
+          "type": "array",
+          "description": "Present for dynamic selectors only. Keys must be unique strings within this selector; field and choice array order is semantic and covered by catalog_version. Unsupported key types are rejected during generation, never coerced. Consumers must reject unknown selections.",
+          "items": {
+            "type": "object",
+            "required": ["key", "widgets"],
+            "additionalProperties": false,
+            "properties": {
+              "key": { "type": "string" },
+              "widgets": { "$ref": "#/$defs/layout" }
+            }
+          }
+        }
+      }
+    }
+  },
   "properties": {
     "catalog_version": {
       "type": "string",
@@ -22,8 +61,9 @@
           "widget_order": {
             "type": "array",
             "items": { "type": "string" },
-            "description": "Widget names in the exact positional order of the node's widgets_values array — index i in this list IS index i in widgets_values. Includes the synthetic 'control_after_generate' slot the frontend injects after a seed, dynamic-combo sub-widgets flattened as '<selector>.<sub>', and the trailing inputs frontend extensions inject ('upload' on media loaders, 'audioUI' on the audio family, 'image' on SaveGLB/Preview3D) so a widgets_values written by any frontend version decomposes. Computed by cql.engine.Graph.widget_order, the same call every set-widget in this CLI resolves against."
+            "description": "First-choice display order from Graph.widget_order_default. Includes nonserialized injected controls. This is NOT a decoder for arbitrary widgets_values: dynamic selectors may choose another branch. Use widget_layout for serialized participation and branch-aware identities."
           },
+          "widget_layout": { "$ref": "#/$defs/layout" },
           "autogrow_templates": {
             "type": "object",
             "description": "Present only for classes with a COMFY_AUTOGROW_V3 input: base input name -> element-naming template. The schema's own template when object_info ships one, else the pluralization fallback the edit path applies ('images' -> prefix 'image'), so a consumer holding only the catalog can name grown slots without object_info.",
@@ -56,7 +96,7 @@
             "required": ["widget", "elements"]
           }
         },
-        "required": ["widget_order"]
+        "required": ["widget_order", "widget_layout"]
       }
     },
     "stale": {
