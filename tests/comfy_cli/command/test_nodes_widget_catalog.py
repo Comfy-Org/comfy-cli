@@ -582,6 +582,71 @@ class TestSerializedLayout:
         layout = build_catalog(_graph(data))["types"][class_name]["widget_layout"]
         assert [w["name"] for w in layout] == expected
 
+    @pytest.mark.parametrize("declared_image", [False, True])
+    def test_regression_injected_image_is_read_only_but_declared_image_is_not(self, declared_image):
+        # https://github.com/Comfy-Org/comfy-cli/pull/914#discussion_r4068275348
+        # The same serialized identity can name an injected viewport or a
+        # schema-backed field. Consumers cannot infer permission from its name.
+        import jsonschema
+
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        inputs = {"filename_prefix": ["STRING"]}
+        if declared_image:
+            inputs["image"] = ["STRING"]
+        catalog = build_catalog(_graph({"SaveGLB": {"input": {"required": inputs}, "output": []}}))
+        expected_image = {"name": "image", "identity": [["field", "image"]]}
+        if not declared_image:
+            expected_image["read_only"] = True
+        assert catalog["types"]["SaveGLB"]["widget_layout"] == [
+            {"name": "filename_prefix", "identity": [["field", "filename_prefix"]]},
+            expected_image,
+        ]
+        schema = json.loads(
+            (Path(nodes_cmd.__file__).resolve().parents[1] / "schemas" / "widget_catalog.json").read_text()
+        )
+        jsonschema.Draft202012Validator(schema).validate(catalog)
+
+    def test_regression_injected_buttons_are_read_only_but_seed_companion_is_not(self):
+        # https://github.com/Comfy-Org/comfy-cli/pull/914#discussion_r4068275348
+        # Both use companion identities, but only the seed control is writable.
+        import jsonschema
+
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        inputs = {"model_file": [["scene.glb"]], "image": ["LOAD_3D"], "seed": ["INT"]}
+        catalog = build_catalog(
+            _graph(
+                {
+                    "Load3D": {
+                        "input": {"required": inputs},
+                        "input_order": {"required": ["model_file", "image", "seed"]},
+                        "output": [],
+                    }
+                }
+            )
+        )
+        layout = catalog["types"]["Load3D"]["widget_layout"]
+        assert [(w["name"], w.get("read_only", False)) for w in layout] == [
+            ("model_file", False),
+            ("upload 3d model", True),
+            ("upload extra resources", True),
+            ("clear", True),
+            ("image", False),
+            ("seed", False),
+            ("control_after_generate", False),
+        ]
+        assert [w["identity"] for w in layout[1:4]] == [
+            [["field", "image"], ["companion", "upload 3d model"]],
+            [["field", "image"], ["companion", "upload extra resources"]],
+            [["field", "image"], ["companion", "clear"]],
+        ]
+        assert layout[-1]["identity"] == [["field", "seed"], ["companion", "control_after_generate"]]
+        schema = json.loads(
+            (Path(nodes_cmd.__file__).resolve().parents[1] / "schemas" / "widget_catalog.json").read_text()
+        )
+        jsonschema.Draft202012Validator(schema).validate(catalog)
+
     @pytest.mark.parametrize("keys", [[1, True], ["a", "a"]])
     def test_unsupported_selector_keys_fail_with_class_and_field(self, keys):
         from comfy_cli.cql.widget_catalog import build_catalog
