@@ -26,7 +26,9 @@ from typing import Any
 # ``comfy-cloud-mcp-server/src/pricing.ts``. Keep all three in lockstep.
 CREDITS_PER_USD = 211
 
-MICROS_PER_USD = 1_000_000
+# The balance endpoint names its fields ``*_micros`` but sends cents: ingest's
+# balance handler says a client dividing them by 1e6 understates the balance
+# 10,000x. The names stay (they are the wire contract); the unit is cents.
 CENTS_PER_USD = 100
 
 # Default concurrency per tier, shown as context beside the live
@@ -166,7 +168,7 @@ def coerce_bool(value: Any) -> bool | None:
 
 
 def select_effective_balance_micros(balance: Mapping[str, Any] | None) -> int | None:
-    """Resolve the balance in micro-dollars, or None when nothing is reported.
+    """Resolve the balance in cents, or None when nothing is reported.
 
     Walks :data:`BALANCE_FIELDS` in priority order and returns the first
     NON-ZERO value. Returns 0 only when at least one field was present and
@@ -191,10 +193,10 @@ def select_effective_balance_micros(balance: Mapping[str, Any] | None) -> int | 
     return 0 if saw_numeric_field else None
 
 
-def micros_to_usd(micros: int | None) -> float | None:
-    if micros is None:
+def cents_to_usd(cents: int | None) -> float | None:
+    if cents is None:
         return None
-    return micros / MICROS_PER_USD
+    return cents / CENTS_PER_USD
 
 
 def usd_to_credits(usd: float | None) -> int | None:

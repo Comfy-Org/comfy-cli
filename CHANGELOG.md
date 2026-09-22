@@ -81,6 +81,9 @@ history.
   new deployment and leaves the old one running; the JSON `supersedes` array
   already listed it, but the terminal said nothing. Under `--json` the warning
   goes to stderr.
+- `comfy cloud status` shows the workspace balance at its real size. The balance
+  endpoint sends cents in fields named `*_micros`, and the CLI divided them by
+  1,000,000, so every balance and credit figure was 10,000 times too small.
 - `insert_workflow` (`comfy workflow insert-workflow`) now rebases the inserted
   template beside the target graph's existing nodes instead of leaving its
   original absolute `pos` values untouched, which could land it thousands of
