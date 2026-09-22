@@ -149,3 +149,13 @@ def test_validate_names_an_inserted_node_by_its_real_id(tmp_path):
     assert hits, _errors(env)
     assert hits[0]["node_id"] == sampler["id"]
     assert sampler["id"].startswith(f"insert:{OP_ID}:root:node:")
+
+
+def test_lowering_skips_a_link_whose_id_is_unhashable():
+    """Widening link ids to strings must keep the malformed-save guard: a link
+    whose id is a list is skipped, not allowed to abort the whole conversion
+    (review: comfy-cli#918, `_build_link_map`)."""
+    wf = _load(SD15["cmp_inserted"])
+    wf["links"].append([[], wf["nodes"][0]["id"], 0, wf["nodes"][1]["id"], 0, "MODEL"])
+    lowered = _linked_inputs(convert_ui_to_api(wf, {}))
+    assert lowered == _linked_inputs(convert_ui_to_api(_load(SD15["original"]), {}))
