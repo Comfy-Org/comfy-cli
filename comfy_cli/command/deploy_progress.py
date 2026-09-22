@@ -58,13 +58,19 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+COMING_UP = frozenset({"provisioning", "starting"})
+
+
 def progress_of(deployment: JsonObject) -> JsonObject | None:
     """The deployment's progress object, or None where it sent none.
 
     Lenient where the rest of the deploy parsing is strict: progress narrates a
     deploy and must never be what fails a command, so anything that is not an
-    object naming a step reads as no progress at all.
+    object naming a step reads as no progress at all. Only a deployment coming
+    up has any: a settled one still carrying an object is off the contract.
     """
+    if deployment.get("status") not in COMING_UP:
+        return None
     progress = deployment.get("progress")
     if not isinstance(progress, dict) or not isinstance(progress.get("step"), str):
         return None

@@ -148,6 +148,17 @@ def test_a_deployment_that_sends_no_progress_has_none() -> None:
     assert progress_of(deployment("dep-1")) is None
 
 
+@pytest.mark.parametrize("status", ["ready", "failed", "stopped", "unhealthy", None])
+def test_a_settled_deployment_has_no_progress_whatever_it_carries(status) -> None:
+    """The service sends progress only while a deployment is provisioning or
+    starting. One that settled and still carries an object must not narrate."""
+    row = deployment("dep-1", status="provisioning")
+    row["progress"] = _staging()
+    assert progress_of(row) is not None
+    row["status"] = status
+    assert progress_of(row) is None
+
+
 # ----- the reporter -----
 
 
