@@ -49,7 +49,7 @@ class _Sessions:
         if force:
             self.forced += 1
             return SimpleNamespace(access_token=self.after) if self.after else None
-        return SimpleNamespace(access_token=self.first)
+        return SimpleNamespace(access_token=self.first, is_expired=lambda: False)
 
 
 def _install(monkeypatch, server: _Server, sessions: _Sessions) -> None:
@@ -260,3 +260,47 @@ def test_a_refused_injected_token_says_to_replace_it_not_to_sign_in(monkeypatch)
     assert "COMFY_BUILDER_TOKEN" in envelope["error"]["hint"]
     assert "comfy cloud login" not in envelope["error"]["hint"]
     assert server.tokens == ["injected"]
+
+
+@pytest.mark.parametrize("client_type,base_url", [(BuilderClient, _BUILDER_URL), (DeployClient, _DEPLOY_URL)])
+@pytest.mark.parametrize("source", ["env", "stored", "forwarded"])
+def test_ambient_credentials_are_bearers_and_never_refresh(monkeypatch, client_type, base_url, source):
+    from comfy_cli import http as http_mod
+    from comfy_cli.auth import store
+
+    token = "forwarded-jwt" if source == "forwarded" else "comfyui-test-key"
+    monkeypatch.setattr("comfy_cli.credentials.get_session", lambda **kwargs: None)
+    monkeypatch.delenv("COMFY_CLOUD_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
+    if source == "stored":
+        store.set("comfy-cloud-api-key", token)
+    else:
+        monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN" if source == "forwarded" else "COMFY_CLOUD_API_KEY", token)
+    client = client_type.from_session(base_url)
+
+    def unexpected_refresh(*args, **kwargs):
+        pytest.fail("a rejected ambient credential must not refresh or switch identities")
+
+    monkeypatch.setattr("comfy_cli.credentials.refreshed_access_token", unexpected_refresh)
+    seen = []
+
+    def reject(req, timeout=None):
+        seen.append(req)
+        raise urllib.error.HTTPError(req.full_url, 401, "invalid", http.client.HTTPMessage(), io.BytesIO(b"{}"))
+
+    monkeypatch.setattr(http_mod._AUTHED_OPENER, "open", reject)
+    with pytest.raises((DeployAPIError, urllib.error.HTTPError)):
+        client.get_release("r1") if isinstance(client, BuilderClient) else client.get_deployment("dep-1")
+    assert len(seen) == 1
+    assert seen[0].get_header("Authorization") == f"Bearer {token}"
+    assert seen[0].get_header("X-api-key") is None
+
+
+@pytest.mark.parametrize("client_type,base_url", [(BuilderClient, _BUILDER_URL), (DeployClient, _DEPLOY_URL)])
+def test_live_session_still_outranks_api_key(monkeypatch, client_type, base_url):
+    monkeypatch.setenv("COMFY_CLOUD_API_KEY", "comfyui-ambient")
+    server = _Server(valid={"session-token"})
+    _install(monkeypatch, server, _Sessions(first="session-token", after="refreshed"))
+    client = client_type.from_session(base_url)
+    client.get_release("r1") if isinstance(client, BuilderClient) else client.get_deployment("dep-1")
+    assert server.tokens == ["session-token"]

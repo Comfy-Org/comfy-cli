@@ -1,10 +1,8 @@
 """HTTP client for the comfy-builder build API (``/v1``).
 
-Authenticates with the OAuth Cloud JWT the CLI already holds after
-``comfy cloud login`` — the builder validates it by signature (issuer
-``cloud.comfy.org``, audience ``comfy-cloud``, ``workspace_id`` claim), so no
-server-side changes are needed. Blob bytes are PUT straight to a presigned GCS
-URL and never transit the builder.
+Authenticates with a Cloud JWT or workspace API key selected by the shared
+credential resolver. Blob bytes are PUT straight to a presigned GCS URL and
+never transit the builder.
 
 Field names match services/comfy-builder/openapi.yaml exactly:
   POST /v1/blobs {kind, filename, sizeBytes, sha256}     -> {blobId, uploadUrl, expiresAt}
@@ -47,11 +45,11 @@ _WORKFLOW_IMPORT_TIMEOUT = 90.0
 
 
 class BuilderAuthError(Exception):
-    """No usable Cloud JWT — the user needs to run `comfy cloud login`."""
+    """No usable Cloud credential."""
 
 
 class BuilderClient:
-    """Thin authed client over the builder's /v1 API. One OAuth JWT, attached
+    """Thin authed client over the builder's /v1 API. A JWT or API key, attached
     as Bearer via the shared authed HTTP path (HTTPS-enforced, no credential
     replay on redirect, response-size capped)."""
 
@@ -70,13 +68,12 @@ class BuilderClient:
 
     @classmethod
     def from_session(cls, base_url: str) -> BuilderClient:
-        """Build a client from the CLI's OAuth session, refreshing the JWT if it
-        is near expiry (the CLI's existing rotation machinery)."""
-        session = credentials.get_session(refresh=True)
-        if not session or not session.access_token:
-            raise BuilderAuthError("not signed in — run `comfy cloud login`")
-        client = cls(base_url, session.access_token)
-        client._refreshes_on_401 = True
+        """Resolve Cloud credentials; only stored OAuth sessions can refresh."""
+        credential = credentials.resolve_cloud_credential(purpose="cloud")
+        if credential is None:
+            raise BuilderAuthError("no credentials — run `comfy cloud login` or set COMFY_CLOUD_API_KEY")
+        client = cls(base_url, credential.value)
+        client._refreshes_on_401 = credential.source == "session"
         return client
 
     def _send(self, url: str, **kwargs) -> tuple[int, dict | list | None]:

@@ -32,7 +32,7 @@ class DeployAuthError(DeployAPIError):
     code = "deploy_not_signed_in"
 
     def __init__(self) -> None:
-        super().__init__(self.code, "not signed in — run `comfy cloud login`")
+        super().__init__(self.code, "no credentials — run `comfy cloud login` or set COMFY_CLOUD_API_KEY")
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,11 +87,11 @@ class DeployClient:
     def from_session(cls, base_url: str | None = None) -> DeployClient:
         resolved_url = _resolved_base_url(base_url).rstrip("/")
         assert_safe_deploy_url(resolved_url, source=_base_url_source(base_url))
-        session = credentials.get_session(refresh=True)
-        if not session or not session.access_token:
+        credential = credentials.resolve_cloud_credential(purpose="cloud")
+        if credential is None:
             raise DeployAuthError
-        client = cls(resolved_url, session.access_token)
-        client._refreshes_on_401 = True
+        client = cls(resolved_url, credential.value)
+        client._refreshes_on_401 = credential.source == "session"
         return client
 
     def _request(self, request: _Request) -> dict:

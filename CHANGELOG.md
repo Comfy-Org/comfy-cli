@@ -17,6 +17,9 @@ history.
 
 ### Added
 
+- `comfy build` and `comfy deploy` accept `COMFY_CLOUD_API_KEY` or a stored
+  `comfy cloud set-key` key when no OAuth session is available. API keys are sent
+  as bearer credentials and are never refreshed or replaced after a 401.
 - `comfy build push` prints every warning a save returns, and `--release` cuts no
   release while one says a deployment could not download a model link
   (`build_release_held`); `--release-despite-warnings` cuts anyway.

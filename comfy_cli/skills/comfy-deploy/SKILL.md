@@ -6,9 +6,12 @@ description: "Run a Comfy Build release as a serverless deployment with comfy-cl
 # comfy-deploy
 
 The commands here are the `comfy deploy` group from
-[comfy-cli](https://github.com/Comfy-Org/comfy-cli). Everything in it needs
-`comfy cloud login`; a command answers `deploy_not_signed_in` when there is no
-usable session.
+[comfy-cli](https://github.com/Comfy-Org/comfy-cli). Authenticate with
+`comfy cloud login`, or use `COMFY_CLOUD_API_KEY` / a stored `comfy cloud set-key`
+key for headless automation on servers supporting workspace keys. A live OAuth
+session takes precedence over ambient keys. `deploy_not_signed_in` means no
+usable credential was found or the server rejected it; a rejected key is never
+replaced by an OAuth refresh.
 
 **Deploying spends money continuously, not once.** Building does not: it is capped
 by counts — how many builds and releases a workspace holds — and metered by nothing,
