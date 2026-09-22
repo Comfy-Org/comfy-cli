@@ -184,8 +184,10 @@ def _notes(progress: JsonObject, now: datetime, *, short: bool = False) -> list[
     attempt = _number(progress, "attempt")
     if attempt is not None and attempt > 1:
         notes.append(f"attempt {attempt}" if short else f"attempt {attempt}, this step was restarted")
+    # The same test the events' `stale` flag uses, so a line and an event
+    # read at the same moment never disagree about the sample.
     age = seconds_since_update(progress, now)
-    if age is not None and age > STALE_SECONDS:
+    if age is not None and is_stale(progress, now):
         waited = human_seconds(age)
         notes.append(f"no update for {waited}" if short else f"last update {waited} ago, so these numbers may be stale")
     return notes
