@@ -384,6 +384,41 @@ class TestSchemaContract:
 
 
 class TestSerializedLayout:
+    @pytest.mark.parametrize("nested", [False, True])
+    @pytest.mark.parametrize("selected", [False, True])
+    def test_regression_structural_combo_orders_include_branch_slots(self, nested, selected):
+        # https://github.com/Comfy-Org/comfy-cli/pull/914#discussion_r4068275324
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        data = _object_info()
+        required = data["DynNode"]["input"]["required"]
+        selector = required["model"]
+        selector[0] = "COMBO"
+        selector[1]["options"][1]["inputs"]["required"] = {
+            "width": ["INT", {"default": 73}],
+            "height": ["INT", {"default": 91}],
+        }
+        if nested:
+            required["model"] = [
+                "COMFY_DYNAMICCOMBO_V3",
+                {"options": [{"key": "outer", "inputs": {"required": {"child": selector}}}]},
+            ]
+        graph = _graph(data)
+        prefix = "model.child" if nested else "model"
+        names = ["model", "model.child"] if nested else ["model"]
+        names += [f"{prefix}.width", f"{prefix}.height"] if selected else [f"{prefix}.resolution"]
+        names += ["seed", "control_after_generate"]
+
+        # The value-independent API intentionally lists no branch fields.
+        assert graph.widget_order("DynNode") == ["model", "seed", "control_after_generate"]
+        if selected:
+            values = (["outer"] if nested else []) + ["b", 73, 91, 37, "fixed"]
+            assert graph.widget_order_for_node("DynNode", values) == names
+        else:
+            catalog = build_catalog(graph)["types"]["DynNode"]
+            assert catalog["widget_order"] == names
+            assert graph.widget_order_default("DynNode") == names
+
     def test_magnific_carries_every_branch_and_suffix(self):
         from comfy_cli.cql.widget_catalog import build_catalog
 
