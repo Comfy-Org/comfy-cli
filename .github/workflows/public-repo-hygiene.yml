@@ -33,12 +33,13 @@ jobs:
       # `HALO-03` is a fictional product id used as test fixture data in
       # tests/comfy_cli/test_knowledge.py and test_knowledge_attach.py — not a
       # real ticket.
-      # `ADR-032` names an Architecture Decision Record filename
-      # (`docs/decisions/ADR-032-set-title-op.md`) in the public
-      # comfy-multi-player repo, referenced from docs/op-vocabulary-v1.md and
-      # workflow_ops.py while documenting the set_title op proposal. It fits
-      # the ticket-ID shape but is a public doc filename, not an internal
-      # ticket.
+      # `ADR-032` names an Architecture Decision Record filename in the
+      # public comfy-multi-player repo, referenced from
+      # docs/op-vocabulary-v1.md and workflow_ops.py while documenting the
+      # set_node_field op proposal's prior art (the withdrawn, title-only
+      # set_title prototype that ADR-032 originally recorded, since
+      # generalized and merged there as PR #235). It fits the ticket-ID shape
+      # but is a public doc filename, not an internal ticket.
       ticket_allowlist: HAILUO-03,HALO-03,ADR-032
       # No `exclude_paths:` here, deliberately. Every entry this caller used to
       # carry was a false positive in the checker itself — Hugging Face model

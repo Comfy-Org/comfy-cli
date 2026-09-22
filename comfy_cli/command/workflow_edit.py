@@ -307,54 +307,57 @@ def set_widget_cmd(
 
 
 # ---------------------------------------------------------------------------
-# set-title (PROPOSED, op-vocabulary-v1 amendment v1.6 — not yet ratified)
+# set-node-field (PROPOSED, op-vocabulary-v1 amendment v1.6 — not yet ratified)
 # ---------------------------------------------------------------------------
 
 
 @tracking.track_command("workflow")
-def set_title_cmd(
+def set_node_field_cmd(
     file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
-    node: Annotated[str, typer.Argument(help="Node id to rename.")],
-    title: Annotated[
+    node: Annotated[str, typer.Argument(help="Node id.")],
+    field: Annotated[
+        str,
+        typer.Argument(help="Field: `title`, `mode`, `flags.collapsed` or `flags.pinned`."),
+    ],
+    value: Annotated[
         str | None,
-        typer.Argument(show_default=False, help="New title. Omit and pass --clear to reset to the class default."),
+        typer.Argument(
+            show_default=False,
+            help="New value (parsed as JSON, else literal string). Omit and pass --clear to clear the field.",
+        ),
     ] = None,
     clear: Annotated[
         bool,
-        typer.Option("--clear", show_default=False, help="Clear a custom title back to the class default."),
+        typer.Option("--clear", show_default=False, help="Clear the field back to absent."),
     ] = False,
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
-    input_path: InputOpt = None,
-    host: HostOpt = None,
-    port: PortOpt = None,
-    where: WhereOpt = None,
 ):
-    """Set, or clear, a node's display title; emits a ``set_title`` op.
+    """Set, or clear, one durable node field; emits a ``set_node_field`` op.
 
-    PROPOSED: ``set_title`` is not yet part of the ratified
-    docs/op-vocabulary-v1.md contract — see that document's §1.8 and the PR
-    that introduced it.
+    PROPOSED: ``set_node_field`` is not yet part of the ratified
+    docs/op-vocabulary-v1.md contract — see that document's §1.8. It
+    supersedes the withdrawn, title-only ``set_title`` proposal and mirrors
+    comfy-multi-player#235's merged ``set_node_field`` CRDT op.
     """
     renderer = get_renderer()
-    renderer.command = "workflow set-title"
-    if clear == (title is not None):
+    renderer.command = "workflow set-node-field"
+    if clear == (value is not None):
         renderer.error(
             code="workflow_edit_invalid",
-            message="pass exactly one of TITLE or --clear",
-            hint='`comfy workflow set-title <file> <node_id> "New Name"` or '
-            "`comfy workflow set-title <file> <node_id> --clear`",
+            message="pass exactly one of VALUE or --clear",
+            hint='`comfy workflow set-node-field <file> <node_id> <field> "value"` or '
+            "`comfy workflow set-node-field <file> <node_id> <field> --clear`",
         )
         raise typer.Exit(code=1)
     p, workflow = _load_workflow_or_fail(renderer, file)
-    # No catalog is needed to write a title (unlike set-widget), but the
-    # option surface stays uniform with the other edit commands.
-    _graph_or_exit(input_path, host, port, renderer, where)
+    # No catalog is needed to write these fields (unlike set-widget): none of
+    # `title`/`mode`/`flags.collapsed`/`flags.pinned` is a catalogued widget.
     node_id: Any = int(node) if node.lstrip("-").isdigit() else node
     try:
-        workflow, op = workflow_ops.set_title(
-            workflow, node_id, None if clear else title, actor=actor, base_version=base_version
+        workflow, op = workflow_ops.set_node_field(
+            workflow, node_id, field, None if clear else _parse_value(value), actor=actor, base_version=base_version
         )
     except ValueError as e:
         _emit_edit_error(
@@ -363,7 +366,7 @@ def set_title_cmd(
             hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read",
         )
         raise typer.Exit(code=1) from e
-    _finish(renderer, p, workflow, op, base_version, stdout, "workflow set-title")
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow set-node-field")
 
 
 # ---------------------------------------------------------------------------
