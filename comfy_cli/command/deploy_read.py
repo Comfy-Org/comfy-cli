@@ -97,6 +97,13 @@ def _logs(renderer: Renderer, client: DeploymentReadClient, deployment_id: str) 
         renderer.info(f"capturedAt: {captured_at if captured_at is not None else 'not captured yet'}")
         if log:
             renderer.print(log)
+        elif captured_at is None:
+            # The log is captured only once a container is up, so a deployment
+            # that failed while staging its models never has one.
+            renderer.info(
+                "No container has started, so there is no log. "
+                f"`comfy deploy events --deployment {deployment_id}` shows what happened before that."
+            )
     renderer.emit(logs, command="deploy logs", changed=False)
 
 

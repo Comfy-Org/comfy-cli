@@ -187,6 +187,8 @@ def test_unprobed_logs_explicitly_say_not_captured_yet(monkeypatch) -> None:
     # Then
     assert result.exit_code == 0
     assert "capturedAt: not captured yet" in result.stdout
+    assert "No container has started" in result.stdout
+    assert "comfy deploy events --deployment dep-read" in result.stdout
 
 
 def test_events_render_in_server_order_without_false_complete_framing(monkeypatch) -> None:

@@ -342,6 +342,8 @@ history.
 - `comfy deploy status` shows why a deployment failed and how many workers it
   has. It read the deployment list, whose rows leave out `error` and `serving`,
   so both were always empty; it now reads the chosen deployment in full.
+  `comfy deploy logs` on a deployment with no log yet says no container has
+  started and points at `comfy deploy events`.
 
 ## [1.16.0] - 2026-08-10
 
