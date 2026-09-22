@@ -30,17 +30,15 @@ from typing import Any, Final
 from comfy_cli.command.build_spec import JsonObject
 from comfy_cli.output.progress import Surface, human_bytes, human_seconds, surface_for
 from comfy_cli.output.sanitize import sanitize_markup
+from comfy_cli.utils import parse_rfc3339
 
 EVENT_PROGRESS: Final = "deploy_progress"
 
-# The service rewrites the object every few seconds while models stage, and its
-# writes are best-effort. A minute of silence is a sample worth doubting; one or
-# two dropped writes are ordinary.
-#
-# Only the staging step can be stale. The other two steps carry no number that
-# moves, so the service writes them once when they begin and never again: their
-# age is how long the step has been running, which is the one thing worth saying
-# about them, not a reason to doubt what they say.
+# The service rewrites the object every few seconds in every step while the
+# deploy is alive, the two that count nothing included, and its writes are
+# best-effort. A minute of silence is a sample worth doubting; one or two
+# dropped writes are ordinary. How long a step has run is `startedAt`'s to say:
+# `updatedAt` only says how fresh the sample is.
 STALE_SECONDS: Final = 60.0
 
 STAGING_STEP: Final = "staging_models"
@@ -77,12 +75,18 @@ def progress_of(deployment: JsonObject) -> JsonObject | None:
     return progress
 
 
-def _sample_key(progress: JsonObject) -> str:
-    """What makes one sample the same as the last: its stamp, or all of it."""
+def _sample_key(progress: JsonObject, *, by_stamp: bool) -> str:
+    """What makes one sample the same as the last.
+
+    By its stamp for an agent, which is told about every write. By what it says
+    for a person reading piped lines: a step with nothing to count is re-stamped
+    every few seconds, and a line per re-stamp would bury the ones that matter.
+    """
     updated_at = progress.get("updatedAt")
-    if isinstance(updated_at, str):
+    if by_stamp and isinstance(updated_at, str):
         return updated_at
-    return json.dumps(progress, sort_keys=True, separators=(",", ":"), default=str)
+    content = {key: value for key, value in progress.items() if key != "updatedAt"}
+    return json.dumps(content, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def _number(progress: JsonObject, key: str) -> int | None:
@@ -98,24 +102,22 @@ def step_label(progress: JsonObject) -> str:
     return _STEP_LABELS.get(step, step.replace("_", " "))
 
 
-def seconds_since_update(progress: JsonObject, now: datetime) -> float | None:
-    stamp = progress.get("updatedAt")
+def _seconds_since(progress: JsonObject, key: str, now: datetime) -> float | None:
+    stamp = progress.get(key)
     if not isinstance(stamp, str):
         return None
     try:
-        updated = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        then = parse_rfc3339(stamp)
     except ValueError:
         return None
-    if updated.tzinfo is None:
-        updated = updated.replace(tzinfo=timezone.utc)
-    return max((now - updated).total_seconds(), 0.0)
+    return max((now - then).total_seconds(), 0.0)
+
+
+def seconds_since_update(progress: JsonObject, now: datetime) -> float | None:
+    return _seconds_since(progress, "updatedAt", now)
 
 
 def is_stale(progress: JsonObject, now: datetime) -> bool:
-    # Only while models stage. A step with nothing to count is written once and
-    # then waits, so its age says how long the wait is, not that the read is old.
-    if progress.get("step") != STAGING_STEP:
-        return False
     age = seconds_since_update(progress, now)
     return age is not None and age > STALE_SECONDS
 
@@ -155,10 +157,10 @@ def _parts(progress: JsonObject, now: datetime) -> tuple[str, str | None, list[s
         # Nothing here is measured, so the only honest number is how long the
         # step has been running. Without it the line never changes and a wait
         # that is working reads exactly like one that has died.
-        waited = seconds_since_update(progress, now)
+        waited = _seconds_since(progress, "startedAt", now)
         if waited is not None and waited >= 1:
             parts.append(f"{human_seconds(waited)} so far")
-    elif progress.get("step") == STAGING_STEP:
+    else:
         if _number(progress, "bytesTotal") == 0:
             parts.append("every model is already in place")
         else:
@@ -176,19 +178,43 @@ def _parts(progress: JsonObject, now: datetime) -> tuple[str, str | None, list[s
     return label, model, parts
 
 
+def _notes(progress: JsonObject, now: datetime, *, short: bool = False) -> list[str]:
+    """What a reader must know about the sample itself: a restart, an old read."""
+    notes = []
+    attempt = _number(progress, "attempt")
+    if attempt is not None and attempt > 1:
+        notes.append(f"attempt {attempt}" if short else f"attempt {attempt}, this step was restarted")
+    age = seconds_since_update(progress, now)
+    if age is not None and age > STALE_SECONDS:
+        waited = human_seconds(age)
+        notes.append(f"no update for {waited}" if short else f"last update {waited} ago, so these numbers may be stale")
+    return notes
+
+
 def describe(progress: JsonObject, *, now: datetime) -> str:
     """One line saying where the deployment is, from one progress object."""
     label, model, parts = _parts(progress, now)
     if model is not None:
         parts.insert(0, model)
     line = label if not parts else f"{label}: {', '.join(parts)}"
-    attempt = _number(progress, "attempt")
-    if attempt is not None and attempt > 1:
-        line += f" (attempt {attempt}, this step was restarted)"
-    if is_stale(progress, now):
-        age = seconds_since_update(progress, now)
-        line += f" (last update {human_seconds(age)} ago, so these numbers may be stale)"
-    return line
+    return line + "".join(f" ({note})" for note in _notes(progress, now))
+
+
+def live_line(progress: JsonObject, *, now: datetime) -> str:
+    """The same facts for the redrawn line, ordered by what may be cut.
+
+    The terminal crops from the right. The notes ride on the label in their short
+    form, because a restart or a silent service changes how every number after
+    them reads. The model's name goes last: it is the one piece long enough to
+    need cutting and the only one a reader can lose without losing a number.
+    """
+    label, model, parts = _parts(progress, now)
+    notes = _notes(progress, now, short=True)
+    if notes:
+        label = f"{label} ({', '.join(notes)})"
+    if model is not None:
+        parts.append(model)
+    return label if not parts else f"{label}: {', '.join(parts)}"
 
 
 def reattach_hint(deployment_id: str) -> str:
@@ -229,11 +255,12 @@ class DeployWatchReporter:
         if self._surface == "live":
             self._update_live(progress, now)
             return
-        # Keyed on the service's own stamp, not on the wording: the stale suffix
-        # counts seconds, and a line per poll is what this exists to avoid. A
-        # sample with no stamp is keyed on its content instead, so a number that
+        # Keyed on the sample, not on the wording: the stale suffix and the
+        # time so far count seconds, and a line per poll is what this exists to
+        # avoid. A sample with no stamp is keyed on its content, so a number that
         # moved is still reported and a repeat still is not.
-        key = (str(deployment.get("status")), _sample_key(progress), stale)
+        by_stamp = self._surface == "events"
+        key = (str(deployment.get("status")), _sample_key(progress, by_stamp=by_stamp), stale)
         if key == self._reported:
             return
         self._reported = key
@@ -285,22 +312,20 @@ class DeployWatchReporter:
 
     def _open_live(self) -> None:
         from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
+        from rich.table import Column
 
-        # The spinner turns on Rich's own clock, not on the service's writes. Two
-        # of the three steps count nothing, and a deploy can sit in the last one
-        # for minutes; without something moving on its own the screen is
-        # indistinguishable from a command that has hung.
-        # The column order comfy-cli already uses for a transfer (see
-        # `file_utils.download_file` and `build push`): what it is, a bar, then
-        # the numbers. `bar_width=None` lets the bar give its space back, so on
-        # an 80-column terminal the numbers stay on screen and the bar shrinks
-        # instead. A fixed 40-wide bar pushed them off the right edge.
+        # The spinner turns on Rich's own clock, not on the service's writes, so
+        # a step that counts nothing still shows the command is alive.
+        # One text column holding the whole sentence, after a short fixed bar.
+        # Spread over several columns, Rich's table gave the narrow terminal's
+        # shortfall to whichever column it chose: at 80 columns it cut the label
+        # and the time left and wrapped the bar onto a line of its own. A single
+        # column that never wraps is cropped from its right end, and
+        # `live_line` puts the model's name there.
         live = Progress(
             SpinnerColumn(),
-            TextColumn("{task.description}"),
-            BarColumn(bar_width=None),
-            TextColumn("{task.fields[detail]}"),
-            TextColumn("{task.fields[model]}"),
+            BarColumn(bar_width=10),
+            TextColumn("{task.fields[line]}", table_column=Column(no_wrap=True, overflow="ellipsis", ratio=1)),
             console=self._renderer.console(),
             transient=True,
             expand=True,
@@ -310,7 +335,7 @@ class DeployWatchReporter:
         # published until both have landed.
         try:
             live.start()
-            task = live.add_task("", total=None, detail="", model="")
+            task = live.add_task("", total=None, line="")
         except OSError:
             self._muted = True
             try:
@@ -328,12 +353,6 @@ class DeployWatchReporter:
             self._open_live()
             if self._live is None:
                 return
-        # The model's name goes last, because it is the one piece long enough to
-        # need truncating and the only one a reader can lose without losing a
-        # number. Rich crops from the right, so the numbers keep their place on
-        # a narrow terminal and the file name is what gives way.
-        label, model, parts = _parts(progress, now)
-        detail = ", ".join(parts)
         total = _number(progress, "bytesTotal") if progress.get("step") == STAGING_STEP else None
         done = _number(progress, "bytesDone") or 0
         try:
@@ -341,11 +360,9 @@ class DeployWatchReporter:
             # the step is moving, and how far along it is was never measured.
             self._live.update(
                 self._live_task,
-                description=sanitize_markup(label),
                 total=total if total else None,
                 completed=min(done, total) if total else 0,
-                detail=sanitize_markup(detail),
-                model=sanitize_markup(model or ""),
+                line=sanitize_markup(live_line(progress, now=now)),
             )
         except OSError:
             self._muted = True

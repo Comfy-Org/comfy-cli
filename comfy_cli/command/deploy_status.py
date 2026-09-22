@@ -175,6 +175,30 @@ def status_result(builder: BuilderReleaseClient, target: StatusTarget) -> Status
     )
 
 
+def _interrupted_result(builder: BuilderReleaseClient, target: StatusTarget) -> StatusResult:
+    """The last read, for a watch the person stopped.
+
+    Its release summary needs one more read of the Build's releases, and a
+    person often presses Ctrl-C because the network went away. That read is not
+    worth turning an interrupt (130) into a server error (1): without it the
+    envelope still carries the deployment and its progress, with no release.
+    """
+    try:
+        return status_result(builder, target)
+    except (DeployAPIError, BuilderAuthError, ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError):
+        deployment = target.deployment
+        if deployment is None:
+            return StatusResult(target.build_id, target.build_name, None, None, None)
+        return StatusResult(
+            target.build_id,
+            target.build_name,
+            _normalized_deployment(deployment),
+            None,
+            _normalized_serving(deployment),
+            progress_of(deployment),
+        )
+
+
 def _render_serving(renderer: Renderer, serving: JsonObject | None) -> None:
     if serving is None:
         renderer.info("Serving: not sampled yet.")
@@ -285,7 +309,7 @@ def run_status(path: str | None, *, deployment_id: str | None = None, watch: boo
                 # and nothing else: the deployment is the service's to bring up.
                 reporter.interrupted()
                 if reporter.last is not None:
-                    render_status(renderer, status_result(builder, replace(target, deployment=reporter.last)))
+                    render_status(renderer, _interrupted_result(builder, replace(target, deployment=reporter.last)))
                 raise typer.Exit(code=130) from None
             finally:
                 reporter.close()

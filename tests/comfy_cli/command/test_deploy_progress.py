@@ -6,8 +6,10 @@ import copy
 import errno
 import importlib
 import inspect
+import io
 import json
 import re
+import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -52,8 +54,16 @@ def _staging(**over) -> JsonObject:
 
 
 def _step(step: str, **over) -> JsonObject:
-    stamp = "2026-09-20T02:02:45Z"
-    return {"step": step, "attempt": 1, "startedAt": stamp, "updatedAt": stamp, **over}
+    # The service re-stamps a running step every few seconds, the two that count
+    # nothing included, so a live sample's updatedAt sits just behind NOW
+    # whatever its startedAt says. How long the step has run is startedAt's.
+    return {
+        "step": step,
+        "attempt": 1,
+        "startedAt": "2026-09-20T02:01:20Z",
+        "updatedAt": "2026-09-20T02:01:18Z",
+        **over,
+    }
 
 
 # ----- the wording -----
@@ -93,31 +103,43 @@ def _step(step: str, **over) -> JsonObject:
             id="the first seconds have no rate",
         ),
         pytest.param(
-            _step("creating_endpoint", updatedAt="2026-09-20T02:01:20Z"),
+            _step("creating_endpoint"),
             NOW,
             "Creating the endpoint",
             id="a step with nothing to count, the moment it begins",
         ),
         pytest.param(
-            _step("waiting_for_worker", updatedAt="2026-09-20T01:59:05Z"),
+            _step("waiting_for_worker", startedAt="2026-09-20T01:59:05Z"),
             NOW,
             "Waiting for the first worker: 2m 15s so far",
-            id="a step with nothing to count says how long it has been waiting",
+            id="a step with nothing to count says how long it has run, from its start, not its last write",
         ),
         pytest.param(
-            _step("waiting_for_worker", updatedAt="2026-09-20T01:58:00Z"),
+            _step("waiting_for_worker", startedAt="2026-09-20T01:58:00Z"),
             NOW,
             "Waiting for the first worker: 3m 20s so far",
-            id="a long wait is never called stale: the service writes this step once",
+            id="a long wait the service keeps re-stamping is long, not stale",
         ),
         pytest.param(
-            _step("waiting_for_worker", attempt=2, updatedAt="2026-09-20T02:01:20Z"),
+            _step("waiting_for_worker", startedAt="2026-09-20T01:58:00Z", updatedAt="2026-09-20T01:59:00Z"),
+            NOW,
+            "Waiting for the first worker: 3m 20s so far (last update 2m 20s ago, so these numbers may be stale)",
+            id="a step the service stopped re-stamping goes stale like any other",
+        ),
+        pytest.param(
+            _step("waiting_for_worker", startedAt="2026-09-20T01:59:05.43745Z", updatedAt="2026-09-20T02:01:18.5Z"),
+            NOW,
+            "Waiting for the first worker: 2m 15s so far",
+            id="a stamp with five fractional digits, which Python 3.10 cannot read alone",
+        ),
+        pytest.param(
+            _step("waiting_for_worker", attempt=2),
             NOW,
             "Waiting for the first worker (attempt 2, this step was restarted)",
             id="a retried step says so",
         ),
         pytest.param(
-            _step("warming_cache", updatedAt="2026-09-20T02:01:20Z"),
+            _step("warming_cache"),
             NOW,
             "warming cache",
             id="a step this version never heard of",
@@ -334,10 +356,12 @@ def test_piped_pretty_output_is_plain_lines_with_no_carriage_returns(tmp_path) -
     renderer, out, _ = _renderer(OutputMode.PRETTY, tmp_path)
     reporter = DeployWatchReporter(renderer, "dep-1", now=_Clock())
 
-    # When
+    # When the service re-stamps the last step twice with nothing else moving
     reporter.snapshot(_snapshot("provisioning", _staging()))
     reporter.snapshot(_snapshot("provisioning", _staging()))
     reporter.snapshot(_snapshot("starting", _step("waiting_for_worker")))
+    reporter.snapshot(_snapshot("starting", _step("waiting_for_worker", updatedAt="2026-09-20T02:01:19Z")))
+    reporter.snapshot(_snapshot("starting", _step("waiting_for_worker", updatedAt="2026-09-20T02:01:20Z")))
     reporter.snapshot(_snapshot("ready", None))
     reporter.close()
 
@@ -533,6 +557,41 @@ def test_interrupting_a_status_watch_leaves_the_deployment_alone_and_says_how_to
     assert client.update_calls == [] and client.start_calls == []
 
 
+def test_interrupting_a_status_watch_with_the_network_gone_still_exits_130(tmp_path, monkeypatch) -> None:
+    """A person often presses Ctrl-C because the network went away. The release
+    summary the envelope would carry needs one more read, and losing it must not
+    turn the interrupt into a server error."""
+
+    # Given a builder that stops answering once the watch has begun
+    class BuilderGoneOffline(FakeBuilder):
+        def list_releases(self, build_id: str) -> list[JsonObject]:
+            if any(call[0] == "list_releases" for call in self.calls):
+                raise urllib.error.URLError("network is unreachable")
+            return super().list_releases(build_id)
+
+    client = ProgressDeploy([_status_row("queued")], [("provisioning", _staging())])
+
+    def interrupt(_: float) -> None:
+        raise KeyboardInterrupt
+
+    module = importlib.import_module("comfy_cli.command.deploy_status")
+    monkeypatch.setattr(module, "_command_clients", lambda: (BuilderGoneOffline([_release(5)]), client))
+    monkeypatch.setattr(module, "_sleep", interrupt)
+
+    # When
+    result = CliRunner().invoke(
+        app, ["--json", "deploy", "status", str(write_spec(tmp_path)), "--watch"], env={"COLUMNS": "400"}
+    )
+
+    # Then
+    assert result.exit_code == 130, result.stderr
+    data = _envelope(result)["data"]
+    assert data["deployment"]["status"] == "provisioning"
+    assert data["release"] is None
+    assert data["progress"]["step"] == "staging_models"
+    jsonschema.Draft202012Validator(_schema("deploy_status.json")).validate(data)
+
+
 def test_up_watch_streams_progress_and_interrupting_it_stops_nothing(tmp_path, monkeypatch) -> None:
     # Given
     module = importlib.import_module("comfy_cli.command.deploy")
@@ -572,22 +631,74 @@ def test_up_watch_streams_progress_and_interrupting_it_stops_nothing(tmp_path, m
     jsonschema.Draft202012Validator(_schema("deploy_up.json")).validate(data)
 
 
-def test_only_the_staging_step_can_go_stale() -> None:
-    """A step the service writes once is not a doubtful read, it is a wait.
-
-    Staging rewrites its numbers every few seconds, so silence there means the
-    numbers on screen may have moved on. The other two steps carry nothing that
-    moves and are written once when they begin, so their age is the length of
-    the wait and calling it stale tells the reader to distrust a true statement.
-    """
-    # Given a sample from each step, all two minutes old
+def test_every_step_goes_stale_when_the_service_stops_rewriting_it() -> None:
+    """The service rewrites the object every few seconds in every step, so a
+    minute of silence in any of them is a read worth doubting. A step that
+    never went stale would show a dead wait as a live one for ever."""
+    # Given a sample from each step, none rewritten for two minutes
     old = NOW + timedelta(seconds=120)
 
     # Then
     assert is_stale(_staging(), old) is True
-    assert is_stale(_step("creating_endpoint"), old) is False
-    assert is_stale(_step("waiting_for_worker"), old) is False
-    assert "may be stale" not in describe(_step("waiting_for_worker"), now=old)
+    assert is_stale(_step("creating_endpoint"), old) is True
+    assert is_stale(_step("waiting_for_worker"), old) is True
+    assert "may be stale" in describe(_step("waiting_for_worker"), now=old)
+    assert is_stale(_step("waiting_for_worker"), NOW) is False
+
+
+class _TerminalRenderer:
+    """A pretty renderer drawing on a real Rich console of a given width."""
+
+    def __init__(self, width: int) -> None:
+        from rich.console import Console
+
+        self._console = Console(file=io.StringIO(), width=width, force_terminal=True, color_system=None)
+
+    def is_pretty(self) -> bool:
+        return True
+
+    def console(self):
+        return self._console
+
+    def info(self, message: str, *, hint: str | None = None) -> None:
+        raise AssertionError("the live surface draws, it does not print lines")
+
+    def screen(self) -> list[str]:
+        text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", self._console.file.getvalue()).replace("\r", "\n")
+        return [line for line in text.splitlines() if line.strip()]
+
+
+def _draw(progress: JsonObject, *, width: int, now: datetime) -> str:
+    renderer = _TerminalRenderer(width)
+    reporter = DeployWatchReporter(renderer, "dep-1", now=lambda: now)
+    reporter.snapshot(_snapshot("provisioning", progress))
+    reporter._live.refresh()
+    reporter.close()
+    return renderer.screen()[-1]
+
+
+def test_at_80_columns_the_live_line_keeps_the_time_left_and_cuts_the_model_name() -> None:
+    # Given a model name longer than the space left over
+    progress = _staging(currentModel="models/checkpoints/sd_xl_base_1.0_with_a_long_finetune_name.safetensors")
+
+    # When
+    line = _draw(progress, width=80, now=NOW)
+
+    # Then: one line, the step and every number on it, the name cut instead
+    assert len(line) <= 80
+    assert "Staging models: 3.0 GB of 7.0 GB, 44.0 MB/s, 1m 25s left" in line
+    assert "safetensors" not in line
+
+
+def test_the_live_line_says_a_step_restarted_and_a_sample_went_quiet() -> None:
+    # Given a restarted step the service has not rewritten for four minutes
+    progress = _staging(attempt=2)
+
+    # When
+    line = _draw(progress, width=80, now=NOW + timedelta(minutes=4))
+
+    # Then: the notes ride on the label, where a narrow terminal keeps them
+    assert "Staging models (attempt 2, no update for 4m 05s): 3.0 GB of 7.0 GB" in line
 
 
 def test_deploy_up_watches_without_being_asked(tmp_path) -> None:

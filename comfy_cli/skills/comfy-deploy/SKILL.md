@@ -111,8 +111,11 @@ as a pair, `--min` accepts 0–20 and `--max` 1–20.
 
 `up` follows the deployment by default; pass `--no-watch` to return as soon as it
 is accepted. `status` waits only when asked, with `--watch`. Either way the wait
-ends at `ready`, `failed`, `stopped` or `stop_failed`. The other five statuses
-are transitional and it keeps waiting.
+ends at `ready`, `unhealthy`, `failed`, `stopped` or `stop_failed`. `unhealthy`
+only ever follows `ready`, so the deployment already came up: `up` reports it as
+not ok (`deploy_status_terminal`, exit 1) because it is billing without serving,
+and `status` reports it as recoverable. The other four statuses are transitional
+and it keeps waiting.
 
 While the status is `provisioning` or `starting` the deployment carries a
 `progress` object, and `status --json` returns it as `data.progress`: `step`
@@ -120,7 +123,7 @@ While the status is `provisioning` or `starting` the deployment carries a
 are copied onto the deployment's storage, `modelsDone` / `modelsTotal`,
 `bytesDone` / `bytesTotal`, `currentModel`, `bytesPerSecond` and `etaSeconds`.
 Under `--watch` the same object arrives as `deploy_progress` events, one per new
-sample (the service writes about every three seconds): on **stderr** under `--json`,
+sample (the service rewrites it about every three seconds in every step): on **stderr** under `--json`,
 on stdout under `--json-stream`. Relay those numbers instead of "still
 provisioning". Things to read correctly:
 
@@ -131,9 +134,10 @@ provisioning". Things to read correctly:
   cold start come after it.
 - `attempt` above 1 means the step was restarted, and `bytesDone` started again.
 - `stale: true` on an event means the service has not rewritten the sample for a
-  minute while models were staging. Its writes are best-effort, so that is not
-  evidence the deploy stopped; the status is still the verdict. The other two
-  steps are written once and then wait, so they are never stale.
+  minute. Its writes are best-effort, so that is not evidence the deploy stopped;
+  the status is still the verdict.
+- How long a step has run is now minus `startedAt`. `updatedAt` only says how
+  fresh the sample is, and it moves every few seconds in every step.
 - No `progress` at all is an older service, or a status other than the two above.
 
 Interrupting the wait leaves the deployment coming up on the service's side;
@@ -147,7 +151,7 @@ fixes — say so rather than restarting into the same wall.
 
 ```shell
 comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
-                       [--release <id>] [--deployment <id>] [--watch]
+                       [--release <id>] [--deployment <id>] [--no-watch]
 ```
 
 - **It selects the newest deployable release of the Build** unless `--release`

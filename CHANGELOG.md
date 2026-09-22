@@ -61,6 +61,18 @@ history.
   carries that error code and no pick is marked. The flag is off by default
   because it fetches uncached template workflows and calls the local server.
 
+### Changed
+
+- `comfy deploy up` now follows the deployment until it settles, instead of
+  returning as soon as the deploy service accepts it. A script that relied on
+  `up` returning at once passes `--no-watch`.
+- A watch (`up`, or `status --watch`) now stops at `unhealthy` instead of
+  waiting for `ready`: the status only ever follows `ready`, so the wait could
+  last as long as the endpoint stayed degraded, with nothing printed. `up` reports
+  an unhealthy deployment as not ok (`deploy_status_terminal`, exit 1), with
+  or without the watch, since it is billing without serving; `status` still
+  reports it as recoverable.
+
 ### Fixed
 
 - `insert_workflow` (`comfy workflow insert-workflow`) now rebases the inserted

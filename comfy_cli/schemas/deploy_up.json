@@ -72,8 +72,8 @@
         "bytesPerSecond": {"type": "integer", "minimum": 0},
         "etaSeconds": {"type": "integer", "minimum": 0},
         "attempt": {"type": "integer", "minimum": 1},
-        "startedAt": {"type": "string", "format": "date-time"},
-        "updatedAt": {"type": "string", "format": "date-time"}
+        "startedAt": {"type": "string", "format": "date-time", "description": "When this attempt of the step began. How long the step has run is measured from here."},
+        "updatedAt": {"type": "string", "format": "date-time", "description": "When the service last wrote this object. It advances every few seconds in every step, so it says how fresh the sample is, not how long the step has run."}
       }
     }
   }

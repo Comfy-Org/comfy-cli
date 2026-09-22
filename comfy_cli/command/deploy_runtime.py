@@ -27,7 +27,11 @@ from comfy_cli.deploy_api import DeployClient
 from comfy_cli.output.renderer import Renderer
 
 DEPLOY_POLL_SECONDS: Final = 2.0
-_WATCH_TERMINAL: Final = frozenset({"ready", "failed", "stopped", "stop_failed"})
+# Where a watch stops. `unhealthy` is here although the service can still move
+# it back to `ready`: it only ever follows `ready`, so a deployment in it has
+# already come up, and a watch that waited on it would wait silently for as
+# long as the endpoint stays degraded.
+_WATCH_TERMINAL: Final = frozenset({"ready", "unhealthy", "failed", "stopped", "stop_failed"})
 
 
 @dataclass(frozen=True, slots=True)
