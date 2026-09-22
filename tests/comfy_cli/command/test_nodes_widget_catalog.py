@@ -508,3 +508,21 @@ class TestSerializedLayout:
             option["key"] = key
         with pytest.raises(ValueError, match=r"DynNode.*model.*unique string"):
             build_catalog(_graph(data))
+
+    @pytest.mark.parametrize("type_name", ["COMFY_DYNAMICCOMBO_V3", "COMBO"])
+    @pytest.mark.parametrize("nested", [False, True])
+    @pytest.mark.parametrize("malformed", [{"inputs": {"required": {"lost": ["INT"]}}}, None])
+    def test_regression_malformed_selector_branches_cannot_disappear(self, type_name, nested, malformed):
+        # https://github.com/Comfy-Org/comfy-cli/pull/914#discussion_r4068215356
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        data = _object_info()
+        selector = [type_name, {"options": [{"key": "valid", "inputs": {}}, malformed]}]
+        required = data["DynNode"]["input"]["required"]
+        if nested:
+            required["model"][1]["options"][1]["inputs"]["required"] = {"child": selector}
+        else:
+            required["model"] = selector
+        field = r"model\.child" if nested else "model"
+        with pytest.raises(ValueError, match=rf"DynNode.*{field}.*unique string"):
+            build_catalog(_graph(data))
