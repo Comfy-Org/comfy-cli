@@ -95,11 +95,15 @@ def _deploy_estimate(client: DeployUpClient, release_id: str, compute: JsonObjec
 
     Advice only: a service too old to serve it, any refusal, a connection that
     drops, and any answer missing the numbers it is read for all leave the
-    create exactly as it was.
+    create exactly as it was. So does ``enabled: false``, the service saying the
+    estimate is switched off: nothing is printed and nothing is added to the
+    output, whatever else the answer carries.
     """
     try:
         estimate = client.get_deploy_estimate(release_id, str(compute["gpuClass"]), str(compute["region"]))
     except (DeployAPIError, ResponseTooLarge, OSError):
+        return None
+    if estimate.get("enabled") is False:
         return None
     for field in _ESTIMATE_FIELDS:
         value = estimate.get(field)

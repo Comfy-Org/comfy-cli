@@ -189,7 +189,9 @@ comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
   so to relay it before a long wait run `up` without `--watch`, tell the user,
   then follow with `comfy deploy status --watch`. It is a range, not a promise,
   and it stops at ready: the first run can still wait for a worker to start.
-  Absent on a restart, an edit, or when the service gave none; never retry for it.
+  Absent on a restart, an edit, when the service gave none, or when the service
+  has the estimate switched off; that is not an error, so never retry for it or
+  mention its absence.
 
 ## `comfy deploy run`
 

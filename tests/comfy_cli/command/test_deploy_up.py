@@ -640,6 +640,7 @@ def test_up_on_a_deployment_already_unhealthy_does_not_wait_for_ever(tmp_path, m
 
 _GIB = 1024**3
 _ESTIMATE = {
+    "enabled": True,
     "bytesTotal": 42 * _GIB,
     "bytesHeld": 0,
     "bytesToFetch": 42 * _GIB,
@@ -773,3 +774,30 @@ def test_estimate_line_rounds_outward_and_says_what_downloads(changes, line) -> 
     from comfy_cli.command.deploy_up import estimate_line
 
     assert estimate_line({**_ESTIMATE, **changes}) == line
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [{"enabled": False}, {**_ESTIMATE, "enabled": False}],
+    ids=["bare", "with_numbers"],
+)
+def test_a_switched_off_estimate_prints_nothing_and_adds_nothing(tmp_path, monkeypatch, answer) -> None:
+    """``enabled: false`` is the service saying the estimate is off, not a failure:
+    no line for a person, no ``estimate`` under --json, no warning either way."""
+    # Given
+    module = _deploy()
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), FakeDeploy(estimate=answer)))
+    args = ["deploy", "up", str(write_spec(tmp_path)), "--gpu", "l4", "--region", "US-MO-2"]
+
+    # When
+    pretty = CliRunner().invoke(app, ["--no-json", *args])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), FakeDeploy(estimate=answer)))
+    as_json = CliRunner().invoke(app, ["--json", *args])
+
+    # Then
+    assert pretty.exit_code == 0, pretty.output
+    assert "Expected ready" not in pretty.output
+    assert "estimate" not in pretty.output.lower()
+    assert as_json.exit_code == 0, as_json.stderr
+    assert "estimate" not in _json_envelope(as_json)["data"]
+    assert as_json.stderr.strip() == ""

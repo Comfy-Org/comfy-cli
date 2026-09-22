@@ -43,6 +43,7 @@
       "type": "object",
       "required": ["etaSecondsLow", "etaSecondsHigh", "bytesToFetch"],
       "properties": {
+        "enabled": {"const": true},
         "etaSecondsLow": {"type": "integer", "minimum": 0},
         "etaSecondsHigh": {"type": "integer", "minimum": 0},
         "bytesToFetch": {"type": "integer", "minimum": 0},
