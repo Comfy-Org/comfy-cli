@@ -401,7 +401,7 @@ def test_the_ticker_thread_reports_without_being_driven(monkeypatch: pytest.Monk
     with reporter.uploading(item, 1, 1) as progress:
         progress(100)
         deadline = time.monotonic() + 5.0
-        while len(_lines(stdout.getvalue())) < 3 and time.monotonic() < deadline:
+        while stdout.getvalue().count("\n") < 3 and time.monotonic() < deadline:
             time.sleep(0.01)
 
     # Then: the ticker reported while nothing drove it, the completion came last,
@@ -419,6 +419,9 @@ class _FakeConsole:
 
 
 class _LiveRenderer:
+    def __init__(self) -> None:
+        self.said: list[str] = []
+
     def is_pretty(self) -> bool:
         return True
 
@@ -426,7 +429,7 @@ class _LiveRenderer:
         return _FakeConsole()
 
     def info(self, message: str, *, hint: str | None = None) -> None:
-        raise AssertionError("the live surface does not print lines")
+        self.said.append(message)
 
 
 class _DisplayThatRefusesTheTask:
@@ -459,7 +462,8 @@ def test_a_display_refused_at_the_first_redraw_mutes_the_reporter_instead_of_rai
     monkeypatch.setattr(rich.progress, "Progress", _DisplayThatRefusesTheTask)
     _DisplayThatRefusesTheTask.stopped = 0
     clock = FakeClock()
-    reporter = UploadProgressReporter(_LiveRenderer(), clock=clock, ticker=False)
+    renderer = _LiveRenderer()
+    reporter = UploadProgressReporter(renderer, clock=clock, ticker=False)
     item = Item("model", "m.safetensors", 100)
 
     # When: nothing raises, before the upload or during it
@@ -467,10 +471,12 @@ def test_a_display_refused_at_the_first_redraw_mutes_the_reporter_instead_of_rai
         progress(100)
         reporter.tick()
 
-    # Then: the half-opened display was closed and nothing of it was kept
+    # Then: the half-opened display was closed, nothing of it was kept, and the
+    # reporter stayed quiet on the stream it could not write to
     assert reporter._muted is True
     assert reporter._live is None and reporter._live_task is None
     assert _DisplayThatRefusesTheTask.stopped == 1
+    assert renderer.said == []
 
 
 # ----- lines for a person whose output is piped -----
