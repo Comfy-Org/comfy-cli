@@ -1485,6 +1485,21 @@ class Graph:
             return []
 
         def expand(port: Port, identity: list[list[str]], depth: int) -> list[dict[str, Any]]:
+            # Parsing is intentionally permissive, but a catalog must not lose
+            # malformed branches. Check the retained declaration before even
+            # skipping links: malformed structural combos can parse as links.
+            spec = port.raw_spec
+            if isinstance(spec, list) and len(spec) > 1 and isinstance(spec[1], dict):
+                declared = spec[1].get("options")
+                if isinstance(declared, list) and (
+                    port.is_dynamic_combo or any(isinstance(option, dict) for option in declared)
+                ):
+                    if any(
+                        not isinstance(option, dict) or not isinstance(option.get("key"), str) for option in declared
+                    ):
+                        raise ValueError(f"{class_name}.{port.name}: dynamic selector keys must be unique strings")
+            if port.is_link:
+                return []
             entry: dict[str, Any] = {"name": port.name, "identity": identity}
             entries = [entry]
             if port.is_dynamic_combo or port.dynamic_options:
@@ -1499,8 +1514,6 @@ class Graph:
                 for key in keys:
                     children = []
                     for sub in _dynamic_combo_sub_ports(port.dynamic_options, key, port.name):
-                        if sub.is_link:
-                            continue
                         # Strip only this ancestor prefix, not dots belonging
                         # to the declared child name itself.
                         local_name = sub.name[len(port.name) + 1 :]
@@ -1520,13 +1533,14 @@ class Graph:
         layout: list[dict[str, Any]] = []
         buttons = load_3d_button_slots(m)
         for port in m.inputs:
-            if port.is_link:
-                continue
             identity = [["field", port.name]]
+            entries = expand(port, identity, 0)
+            if not entries:
+                continue
             if port.type == "LOAD_3D":
                 for name, _value in buttons:
                     layout.append({"name": name, "identity": [*identity, ["companion", name]]})
-            layout.extend(expand(port, identity, 0))
+            layout.extend(entries)
         for name in frontend_extra_widget_names(m):
             if name not in {"upload", "audioUI"}:
                 layout.append({"name": name, "identity": [["field", name]]})
