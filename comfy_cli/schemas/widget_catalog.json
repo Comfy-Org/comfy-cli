@@ -28,7 +28,7 @@
         },
         "options": {
           "type": "array",
-          "description": "Present for dynamic selectors only. Keys must be unique strings within this selector; field and choice array order is semantic and covered by catalog_version. Unsupported key types are rejected during generation, never coerced. Consumers must reject unknown selections.",
+          "description": "Present for dynamic selectors only. An empty list means explicitly declared zero choices, not unavailable metadata. A typed dynamic selector without an explicit options list rejects catalog generation with its class and field identified. Keys must be unique strings within this selector; field and choice array order is semantic and covered by catalog_version. Unsupported key types are rejected during generation, never coerced. Consumers must reject unknown selections.",
           "items": {
             "type": "object",
             "required": ["key", "widgets"],
