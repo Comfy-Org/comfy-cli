@@ -16,6 +16,7 @@ from comfy_cli.caller import Caller
 from comfy_cli.cmdline import app
 from comfy_cli.deploy_api import _validate_compute_config
 from comfy_cli.deploy_api_errors import DeployAPIError
+from comfy_cli.http import ResponseTooLarge
 
 
 def _deploy() -> ModuleType:
@@ -691,8 +692,10 @@ def test_a_reconcile_that_creates_nothing_asks_for_no_estimate(status: str) -> N
         {**_ESTIMATE, "etaSecondsHigh": None},
         {**_ESTIMATE, "bytesToFetch": -1},
         {**_ESTIMATE, "etaSecondsLow": True},
+        ConnectionResetError("peer reset"),
+        ResponseTooLarge("https://deploy.test/v1/deploy-estimate is over the cap"),
     ],
-    ids=["no_route", "server_error", "missing_number", "negative", "bool"],
+    ids=["no_route", "server_error", "missing_number", "negative", "bool", "connection_reset", "too_large"],
 )
 def test_a_create_the_service_cannot_estimate_still_deploys(answer) -> None:
     # Given

@@ -18,6 +18,7 @@ from comfy_cli.command.deploy_types import release_summary as _release_summary
 from comfy_cli.command.deploy_types import required_int as _required_int
 from comfy_cli.command.deploy_types import required_string as _required_string
 from comfy_cli.deploy_api_errors import DeployAPIError
+from comfy_cli.http import ResponseTooLarge
 
 # This literal is a permanent protocol constant. Regenerating it would silently
 # change every idempotency key and allow duplicate deployments.
@@ -92,12 +93,13 @@ _ESTIMATE_FIELDS: Final = ("etaSecondsLow", "etaSecondsHigh", "bytesToFetch")
 def _deploy_estimate(client: DeployUpClient, release_id: str, compute: JsonObject) -> JsonObject | None:
     """The service's estimate for this create, or ``None`` when it has none.
 
-    Advice only: a service too old to serve it, any refusal, and any answer
-    missing the numbers it is read for all leave the create exactly as it was.
+    Advice only: a service too old to serve it, any refusal, a connection that
+    drops, and any answer missing the numbers it is read for all leave the
+    create exactly as it was.
     """
     try:
         estimate = client.get_deploy_estimate(release_id, str(compute["gpuClass"]), str(compute["region"]))
-    except DeployAPIError:
+    except (DeployAPIError, ResponseTooLarge, OSError):
         return None
     for field in _ESTIMATE_FIELDS:
         value = estimate.get(field)
