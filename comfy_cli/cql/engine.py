@@ -1513,9 +1513,10 @@ class Graph:
                 if any(not isinstance(key, str) for key in keys) or len(set(keys)) != len(keys):
                     raise ValueError(f"{class_name}.{port.name}: dynamic selector keys must be unique strings")
                 options = []
-                for key in keys:
+                for option in port.dynamic_options:
+                    key = option["key"]
                     children = []
-                    for sub in _dynamic_combo_sub_ports(port.dynamic_options, key, port.name):
+                    for sub in _dynamic_combo_sub_ports([option], key, port.name):
                         # Strip only this ancestor prefix, not dots belonging
                         # to the declared child name itself.
                         local_name = sub.name[len(port.name) + 1 :]
