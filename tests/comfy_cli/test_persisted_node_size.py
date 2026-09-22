@@ -227,7 +227,7 @@ def test_a_second_call_does_not_overlap_the_first_batch():
 def test_populated_image_loaders_reserve_the_frontend_preview_height():
     """Five loader→save rows stay disjoint after image previews materialize.
 
-    Regression for PM-1607: object_info exposes the image combo and upload
+    Regression for the reported five-loader overlap: object_info exposes the image combo and upload
     button, but not the 190px DOM preview host the frontend adds after loading
     the selected image. The old row pitch therefore looked aligned while every
     loader overlapped the one below it once its preview appeared.
