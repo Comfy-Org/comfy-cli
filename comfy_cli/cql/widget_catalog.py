@@ -53,12 +53,15 @@ A class whose DynamicGroup schema the CLI refuses is left out of ``types`` and
 named in a ``dynamic_group_unsupported`` warning instead.
 
 CONTRACT BOUNDARIES. ``widget_layout`` describes current frontend serialization,
-not historical upload/audio tails or edit permissions. Exact consumption rejects
-extra or missing values; do not discard legacy tails or fill absent slots from
-defaults. Serialized identity alone must not authorize a write to an injected
-PREVIEW_3D slot. Companion ownership comes from the identity path without its
-final companion component: LOAD_3D buttons precede their owner, whereas seed
-companions follow it.
+not historical upload/audio tails. Exact consumption rejects extra or missing
+values; do not discard legacy tails or fill absent slots from defaults. Injected
+PREVIEW_3D image and LOAD_3D buttons carry ``read_only: true``: preserve their
+values during import/projection, but refuse writes before mutation. The marker
+is omitted for schema-backed fields and writable seed companions. Its absence
+does not bypass active-branch, ambiguity, selector-switch or other write checks;
+serialized identity alone is not authorization. Companion ownership comes from
+the identity path without its final companion component: LOAD_3D buttons precede
+their owner, whereas seed companions follow it.
 
 Selector metadata is all-or-error. Invalid or unavailable selector options and
 unsupported nesting reject the entire catalog with class/field context; silently
