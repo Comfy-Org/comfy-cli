@@ -384,6 +384,55 @@ class TestSchemaContract:
 
 
 class TestSerializedLayout:
+    @pytest.mark.parametrize("width", [16, 64])
+    def test_regression_layout_does_not_rescan_sibling_options(self, width):
+        # https://github.com/Comfy-Org/comfy-cli/pull/914#discussion_r4068275342
+        # Count option-key reads, not elapsed time, so shared CI load cannot
+        # turn the quadratic traversal regression into a flaky timing test.
+        key_reads = 0
+
+        class CountedOption(dict):
+            def get(self, key, default=None):
+                nonlocal key_reads
+                if key == "key":
+                    key_reads += 1
+                return super().get(key, default)
+
+        options = [CountedOption(key=f"branch-{i}", inputs={"required": {f"value-{i}": ["INT"]}}) for i in range(width)]
+        graph = _graph(
+            {
+                "WideSelector": {
+                    "input": {"required": {"mode": ["COMFY_DYNAMICCOMBO_V3", {"options": options}]}},
+                    "output": [],
+                }
+            }
+        )
+        key_reads = 0
+        layout = graph.widget_layout("WideSelector")
+
+        # A skipped or reordered branch must not count as a faster traversal.
+        assert layout == [
+            {
+                "name": "mode",
+                "identity": [["field", "mode"]],
+                "options": [
+                    {
+                        "key": f"branch-{i}",
+                        "widgets": [
+                            {
+                                "name": f"mode.value-{i}",
+                                "identity": [["field", "mode"], ["choice", f"branch-{i}"], ["field", f"value-{i}"]],
+                            }
+                        ],
+                    }
+                    for i in range(width)
+                ],
+            }
+        ]
+        # Allow multiple linear validation passes, but not one sibling scan
+        # for every emitted branch (136 and 2080 probes at these widths).
+        assert key_reads <= 4 * width
+
     @pytest.mark.parametrize("nested", [False, True])
     @pytest.mark.parametrize("selected", [False, True])
     def test_regression_structural_combo_orders_include_branch_slots(self, nested, selected):
