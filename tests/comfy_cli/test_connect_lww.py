@@ -443,6 +443,42 @@ def test_concurrent_autogrows_are_not_a_shared_register():
     assert _comparable(forward) == _comparable(reverse)
 
 
+@pytest.mark.parametrize(
+    "grow",
+    [
+        {"name": "images.image0", "type": "IMAGE"},
+        {"name": "cfg", "type": "FLOAT", "widget": "cfg"},
+    ],
+    ids=["ordinary-autogrow", "widget-converted"],
+)
+def test_dynamic_disconnect_tombstone_survives_reversed_replay(grow: dict[str, Any]):
+    """A disconnect can arrive before the connect that materializes its slot."""
+    connect = _grow_connect("id1", AGENT, 5, 9751, 500)
+    connect["grow"] = grow
+    connect["link_type"] = grow["type"]
+    disconnect = {
+        "op": "disconnect",
+        "op_id": _op_id("id2"),
+        "actor": HUMAN,
+        "base_version": 9,
+        "stamp": [9, HUMAN],
+        "link_id": 9751,
+        "to_node": 700,
+        "to_slot": 1,
+        "grow_id": 9751,
+    }
+
+    forward = _run(_autogrow_base(), [connect, disconnect])
+    reverse = _run(_autogrow_base(), [disconnect, connect])
+
+    assert _comparable(forward) == _comparable(reverse)
+    assert _link_ids(forward) == []
+    grown = next(i for i in forward["nodes"][-1]["inputs"] if i.get("grow_id") == 9751)
+    assert grown["link"] is None
+    if "widget" in grow:
+        assert grown["widget"] == {"name": grow["widget"]}
+
+
 # ---------------------------------------------------------------------------
 # 5. generated interleavings — breadth over the hand-picked cases
 # ---------------------------------------------------------------------------

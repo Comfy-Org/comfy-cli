@@ -1089,7 +1089,8 @@ def disconnect(
             raise boundary
         dst = _require(workflow, to_node)
         in_idx = _resolve_input_slot(dst, graph, to_slot)
-        link_id = (dst.get("inputs") or [])[in_idx].get("link")
+        inp = (dst.get("inputs") or [])[in_idx]
+        link_id = inp.get("link")
         if link_id is None:
             raise ValueError(f"input {to_slot!r} on node {to_node} is not connected")
         op = _new_op(
@@ -1100,6 +1101,14 @@ def disconnect(
             to_node=to_node,
             to_slot=in_idx,
         )
+        promoted = _resolve_promoted_target(workflow, dst, to_slot, None)
+        if promoted is not None:
+            op["grow"] = promoted
+        elif inp.get("grow_id") is not None:
+            # Dynamic inputs do not have a stable numeric index until their
+            # creating connect materializes them. Preserve their convergence
+            # identity so a disconnect replayed first can tombstone that link.
+            op["grow_id"] = inp["grow_id"]
         return apply_op(workflow, op, graph), op
     except ValueError as e:
         raise _enrich_resolution_error(e, workflow, graph) from e
@@ -2097,6 +2106,7 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
     if dst is None:
         return
     grow = op.get("grow")
+    dynamic_wins = True
     if grow is not None:
         # Autogrow is NOT a shared register: every grow mints its own slot keyed
         # by ``grow_id``, so two concurrent grows onto one base both survive and
@@ -2135,6 +2145,24 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                 if prev is not None and prev != op["link_id"]:
                     _remove_link(workflow, prev)
                 ins[to_idx]["grow_id"] = op["link_id"]  # the register follows the winner
+        else:
+            # Each ordinary grow has its own identity, so this does not gate
+            # concurrent siblings. It only pairs the creating connect with a
+            # later disconnect of THAT grown input. If the disconnect arrived
+            # first, still materialize the same empty slot for convergence,
+            # but do not restore its link.
+            identity_op = {
+                "op": "disconnect",
+                "op_id": op["op_id"],
+                "actor": op.get("actor"),
+                "base_version": op.get("base_version"),
+                "stamp": op.get("stamp"),
+                "to_node": op["to_node"],
+                "grow_id": op["link_id"],
+            }
+            dynamic_wins = _lww_gate(workflow, identity_op)
+            if dynamic_wins:
+                _lww_commit(workflow, identity_op)
         if to_idx is None:
             inputcount = grow.get("inputcount")
             if grow.get("promoted"):
@@ -2186,6 +2214,8 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                 # counter) — the widget may undercount until the next
                 # explicit set_widget or connect on this node corrects it.
                 _apply_inputcount_bump(workflow, dst, op, graph, inputcount["widget"], inputcount["value"])
+        if not dynamic_wins:
+            return
     else:
         to_idx = op["to_slot"]
         ins = dst.get("inputs")
@@ -2280,6 +2310,23 @@ def _apply_disconnect(workflow: dict, op: dict) -> None:
     if dst is None:
         return
     ins = dst.get("inputs")
+    grow = op.get("grow")
+    grow_id = op.get("grow_id")
+    if grow_id is not None or (grow is not None and grow.get("promoted")):
+        if not _lww_gate(workflow, op):
+            return
+        _lww_commit(workflow, op)
+        if not isinstance(ins, list):
+            return
+        if grow_id is not None:
+            to_idx = next((i for i, inp in enumerate(ins) if inp.get("grow_id") == grow_id), None)
+        else:
+            to_idx = next((i for i, inp in enumerate(ins) if inp.get("name") == grow["name"]), None)
+        if to_idx is not None:
+            current = ins[to_idx].get("link")
+            if current is not None:
+                _remove_link(workflow, current)
+        return
     to_idx = op["to_slot"]
     if (
         not isinstance(ins, list)
@@ -2392,6 +2439,8 @@ def _write_target(op: dict) -> tuple:
             # under a dynamic combo (``model.reference_images.image_1``) must
             # not share a target with its sibling (``model.reference_videos``).
             return ("input", str(op["to_node"]), "grow", _autogrow_base(str(grow["name"])))
+        if kind == "disconnect" and op.get("grow_id") is not None:
+            return ("input", str(op["to_node"]), "grow_id", op["grow_id"])
         return ("input", str(op["to_node"]), op["to_slot"])
     return (kind,)
 

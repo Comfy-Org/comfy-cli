@@ -1106,6 +1106,34 @@ class TestConnect:
         assert {i["name"] for i in grown} == {"images.image0", "images.image1"}
         assert all(i["link"] is not None and i["type"] == "IMAGE" for i in grown)
 
+    def test_disconnect_preserves_dynamic_input_identity(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _autogrow_workflow())
+        connected = _run(["connect", str(path), "20.IMAGE", "10.images"], capsys)
+        grow_id = connected["data"]["op"]["link_id"]
+
+        disconnected = _run(["disconnect", str(path), "10.images.image0"], capsys)
+
+        assert disconnected["ok"] is True, disconnected
+        assert disconnected["data"]["op"]["grow_id"] == grow_id
+
+    def test_disconnect_preserves_widget_converted_input_identity(self, patched_graph):
+        wf = _base_workflow()
+        sampler = next(n for n in wf["nodes"] if n["id"] == 3)
+        sampler["inputs"].append(
+            {
+                "name": "cfg",
+                "type": "FLOAT",
+                "link": 41,
+                "widget": {"name": "cfg"},
+                "grow_id": 41,
+            }
+        )
+        wf["links"].append([41, 7, 0, 3, len(sampler["inputs"]) - 1, "FLOAT"])
+
+        _updated, op = workflow_ops.disconnect(wf, patched_graph, 3, "cfg")
+
+        assert op["grow_id"] == 41
+
     def test_autogrow_rejects_malformed_slot_targets(self, patched_graph, tmp_path, capsys):
         """A dotted autogrow target that is not the next sequential slot — an index gap
         (images.image2), a doubled prefix (images.images.image0), a stray element
