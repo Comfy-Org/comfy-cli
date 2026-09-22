@@ -1356,7 +1356,14 @@ def insert_workflow(
             raise ValueError(f"insert_workflow field {field} must be an array")
     if "definitions" in template and not isinstance(template["definitions"], dict):
         raise ValueError("insert_workflow field definitions must be an object")
-    return workflow, _new_op("insert_workflow", actor, base_version, workflow=copy.deepcopy(template))
+    inserted = copy.deepcopy(template)
+    # The template arrives with whatever absolute `pos` values it was
+    # authored/exported with, which can sit thousands of pixels from this
+    # graph's own nodes. Rebase the whole block beside the existing graph
+    # (see layout.rebase_template) so it doesn't land as a disconnected
+    # cluster on canvas; IDs and internal relative layout are untouched.
+    layout.rebase_template(workflow.get("nodes") or [], inserted)
+    return workflow, _new_op("insert_workflow", actor, base_version, workflow=inserted)
 
 
 def delete_node(

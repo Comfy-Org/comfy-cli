@@ -45,6 +45,11 @@ history.
 
 ### Fixed
 
+- `insert_workflow` (`comfy workflow insert-workflow`) now rebases the inserted
+  template beside the target graph's existing nodes instead of leaving its
+  original absolute `pos` values untouched, which could land it thousands of
+  pixels away as a disconnected cluster on canvas. The whole block moves by a
+  single delta, so the template's own internal relative layout is preserved.
 - `comfy deploy refs compute` and the `comfy deploy up` pickers now list every
   location the deploy service sells in, not only its datacenters, so B200, H100
   and H200, which are sold only under `us`, can be picked. The table gains
