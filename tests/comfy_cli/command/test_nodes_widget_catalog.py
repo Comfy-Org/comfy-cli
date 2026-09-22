@@ -265,6 +265,29 @@ class TestGrowFamilies:
 
 
 class TestCatalogVersion:
+    @pytest.mark.parametrize("mode", ["creative", "faithful", "flexible"])
+    def test_regression_magnific_branch_widget_changes_catalog_pin(self, mode, tmp_path, capsys):
+        """Non-default modes must not disappear from the pinned catalog.
+
+        Fixture captured from /object_info/MagnificImageSkinEnhancerNode at
+        ComfyUI b1693ecba9f5b65f8c80ab36b195ab963ec92413 on 2026-09-22.
+        Related failure: https://github.com/Comfy-Org/comfy-multi-player/pull/226
+        Creative is the positive control: the existing first-choice projection
+        sees its added widget, but misses the same change in the other modes.
+        """
+        fixture = Path(__file__).parents[1] / "fixtures" / "magnific_skin_enhancer_object_info.json"
+        before = _run(["widget-catalog", "--input", str(fixture)], capsys)["data"]
+        changed = json.loads(fixture.read_text(encoding="utf-8"))
+        options = changed["MagnificImageSkinEnhancerNode"]["input"]["required"]["mode"][1]["options"]
+        branch = next(option for option in options if option["key"] == mode)
+        branch["inputs"]["required"]["extra_detail"] = ["INT", {"default": 17}]
+        dump = tmp_path / "changed_object_info.json"
+        dump.write_text(json.dumps(changed), encoding="utf-8")
+        after = _run(["widget-catalog", "--input", str(dump)], capsys)["data"]
+
+        assert after["catalog_version"] != before["catalog_version"], mode
+        assert after["types"] != before["types"], mode
+
     def test_stable_across_runs_for_identical_input(self, patched_loader, capsys):
         first = _run(["widget-catalog"], capsys)["data"]
         second = _run(["widget-catalog"], capsys)["data"]
