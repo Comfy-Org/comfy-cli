@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import errno
 import importlib
 import inspect
 import json
@@ -177,6 +178,77 @@ def _snapshot(status: str, progress: JsonObject | None) -> JsonObject:
     if progress is not None:
         row["progress"] = progress
     return row
+
+
+def test_a_sample_with_no_stamp_is_reported_when_its_numbers_move_and_not_when_they_repeat(tmp_path) -> None:
+    """`updatedAt` is optional to the lenient parser; a sample without one must
+    not be mistaken for the last one just because both have no stamp."""
+    # Given samples the service never stamped
+    renderer, out, _ = _renderer(OutputMode.NDJSON, tmp_path)
+    reporter = DeployWatchReporter(renderer, "dep-1", now=_Clock())
+    first = _staging(updatedAt=None)
+    second = _staging(bytesDone=4 * GB, updatedAt=None)
+
+    # When
+    for progress in (first, first, second, second, first):
+        reporter.snapshot(_snapshot("provisioning", progress))
+
+    # Then: one event per change, none per repeat
+    events = [json.loads(line) for line in _read(out).splitlines()]
+    assert [event["progress"]["bytesDone"] for event in events] == [3 * GB, 4 * GB, 3 * GB]
+
+
+class _LiveRenderer:
+    """A pretty renderer on a terminal, so the reporter picks the live surface."""
+
+    class _Console:
+        is_terminal = True
+
+    def is_pretty(self) -> bool:
+        return True
+
+    def console(self) -> _LiveRenderer._Console:
+        return self._Console()
+
+    def info(self, message: str, *, hint: str | None = None) -> None:
+        raise AssertionError("the live surface does not print lines")
+
+
+class _DisplayThatRefusesTheTask:
+    """Rich's Progress with a stream that fails on the first redraw after start."""
+
+    stopped = 0
+
+    def __init__(self, *columns: object, **options: object) -> None:
+        pass
+
+    def start(self) -> None:
+        pass
+
+    def add_task(self, description: str, **fields: object) -> int:
+        raise OSError(errno.EIO, "broken terminal")
+
+    def stop(self) -> None:
+        type(self).stopped += 1
+
+
+def test_a_display_refused_at_the_first_redraw_mutes_the_watch_instead_of_raising(monkeypatch) -> None:
+    # Given a terminal whose stream refuses the redraw that adding the task makes
+    import rich.progress
+
+    monkeypatch.setattr(rich.progress, "Progress", _DisplayThatRefusesTheTask)
+    _DisplayThatRefusesTheTask.stopped = 0
+    reporter = DeployWatchReporter(_LiveRenderer(), "dep-1", now=_Clock())
+
+    # When: two samples arrive and nothing raises
+    reporter.snapshot(_snapshot("provisioning", _staging()))
+    reporter.snapshot(_snapshot("provisioning", _staging(bytesDone=4 * GB)))
+    reporter.close()
+
+    # Then: the half-opened display was closed once and never reopened
+    assert reporter._muted is True
+    assert reporter._live is None and reporter._live_task is None
+    assert _DisplayThatRefusesTheTask.stopped == 1
 
 
 def test_an_ndjson_watch_emits_one_event_per_new_sample_and_carries_the_object_unchanged(tmp_path) -> None:

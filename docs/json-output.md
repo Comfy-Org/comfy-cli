@@ -456,7 +456,8 @@ service computes `bytesPerSecond` and `etaSeconds`; the CLI computes nothing, so
 the portal and the CLI show the same numbers.
 
 One event per new sample: the CLI polls every two seconds and the service writes
-about every ten, and a sample is keyed on its `updatedAt`. If a sample then goes
+about every three, and a sample is keyed on its `updatedAt` (on its whole content
+where a sample carries no `updatedAt`). If a sample then goes
 a minute without being rewritten, one more event carries it with `stale: true`.
 The service's writes are best-effort, so a stale sample is not evidence that the
 deploy stopped; `status` remains the verdict. A service that sends no `progress`

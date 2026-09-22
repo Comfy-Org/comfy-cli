@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://comfy.org/schemas/deploy_progress_event.json",
   "title": "comfy deploy up / status --watch progress event",
-  "description": "One JSON object per line while a watched deployment comes up. On stdout under --json-stream, ahead of the envelope; on stderr under --json, where stdout stays the single envelope. One event per new sample from the deploy service (it writes about every ten seconds while models stage), and one more with stale: true if a sample then goes unrefreshed for a minute. A service that sends no progress object produces no events.",
+  "description": "One JSON object per line while a watched deployment comes up. On stdout under --json-stream, ahead of the envelope; on stderr under --json, where stdout stays the single envelope. One event per new sample from the deploy service (it writes about every three seconds while models stage), and one more with stale: true if a sample then goes unrefreshed for a minute. A service that sends no progress object produces no events.",
   "type": "object",
   "required": [
     "schema",

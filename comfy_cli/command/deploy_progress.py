@@ -22,6 +22,7 @@ above) produces nothing here, so those commands print what they always printed.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any, Final
@@ -68,6 +69,14 @@ def progress_of(deployment: JsonObject) -> JsonObject | None:
     if not isinstance(progress, dict) or not isinstance(progress.get("step"), str):
         return None
     return progress
+
+
+def _sample_key(progress: JsonObject) -> str:
+    """What makes one sample the same as the last: its stamp, or all of it."""
+    updated_at = progress.get("updatedAt")
+    if isinstance(updated_at, str):
+        return updated_at
+    return json.dumps(progress, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def _number(progress: JsonObject, key: str) -> int | None:
@@ -184,9 +193,9 @@ class DeployWatchReporter:
     """Reports each new sample of a watched deployment's progress.
 
     Fed every snapshot the poll reads. The poll runs every two seconds and the
-    service writes every ten, so a sample is reported once, when it changes, and
-    once more if it then goes stale: a reader is never shown movement that did
-    not happen.
+    service writes about every three, so a sample is reported once, when it
+    changes, and once more if it then goes stale: a reader is never shown
+    movement that did not happen.
     """
 
     def __init__(self, renderer: Any, deployment_id: str, *, now: Now = _utcnow) -> None:
@@ -215,8 +224,10 @@ class DeployWatchReporter:
             self._update_live(progress, now)
             return
         # Keyed on the service's own stamp, not on the wording: the stale suffix
-        # counts seconds, and a line per poll is what this exists to avoid.
-        key = (str(deployment.get("status")), str(progress.get("updatedAt")), stale)
+        # counts seconds, and a line per poll is what this exists to avoid. A
+        # sample with no stamp is keyed on its content instead, so a number that
+        # moved is still reported and a repeat still is not.
+        key = (str(deployment.get("status")), _sample_key(progress), stale)
         if key == self._reported:
             return
         self._reported = key
@@ -288,13 +299,21 @@ class DeployWatchReporter:
             transient=True,
             expand=True,
         )
+        # Adding the task redraws the display, so it can refuse the stream just
+        # as starting it can; both stay inside one boundary and nothing is
+        # published until both have landed.
         try:
             live.start()
+            task = live.add_task("", total=None, detail="", model="")
         except OSError:
             self._muted = True
+            try:
+                live.stop()
+            except OSError:
+                pass
             return
         self._live = live
-        self._live_task = live.add_task("", total=None, detail="", model="")
+        self._live_task = task
 
     def _update_live(self, progress: JsonObject, now: datetime) -> None:
         if self._muted:
