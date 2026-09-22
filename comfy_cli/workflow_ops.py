@@ -636,7 +636,33 @@ def set_widget(
     try:
         return _set_widget_impl(workflow, graph, node_id, widget, value, actor=actor, base_version=base_version)
     except ValueError as e:
+        bound = _binding_address(workflow, graph, node_id)
+        if bound is not None:
+            try:
+                return _set_widget_impl(workflow, graph, bound, widget, value, actor=actor, base_version=base_version)
+            except ValueError:
+                pass
         raise _enrich_resolution_error(e, workflow, graph, widget=widget) from e
+
+
+def _binding_address(workflow: dict, graph, node_id: Any) -> Any:
+    """The node address a ``print_workflow`` binding key stands for, or ``None``.
+
+    ``print_workflow`` names every node (``57/clip_text_encode`` → ``57/27``) and
+    callers copy those names back as the node part of an address. Consulted
+    only after the literal address failed to resolve, so a real node id always
+    wins over a binding that happens to spell it.
+    """
+    from comfy_cli.workflow_print import render_py
+
+    try:
+        bindings = render_py(workflow, graph).bindings
+    except Exception:  # noqa: BLE001 — a render failure just means "no alias"
+        return None
+    bound = bindings.get(str(node_id))
+    if bound is None or bound == str(node_id):
+        return None
+    return int(bound) if bound.lstrip("-").isdigit() else bound
 
 
 def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[Any, dict | None]:
