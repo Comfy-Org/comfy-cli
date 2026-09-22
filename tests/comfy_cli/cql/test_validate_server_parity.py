@@ -832,6 +832,39 @@ class TestDecoyKeysAreNotFollowed:
     the validator reported `dependency_cycle: 2 -> 3 -> 2`.
     """
 
+    @staticmethod
+    def _dynamic_graph() -> Graph:
+        return Graph.from_object_info(
+            {
+                "DynamicPass": {
+                    "input": {
+                        "required": {
+                            "model": [
+                                "COMFY_DYNAMICCOMBO_V3",
+                                {
+                                    "options": [
+                                        {"key": "A", "inputs": {"required": {"value": ["STRING", {}]}}},
+                                        {"key": "B", "inputs": {"required": {"other": ["STRING", {}]}}},
+                                    ]
+                                },
+                            ]
+                        }
+                    },
+                    "input_order": {"required": ["model"]},
+                    "output": ["STRING"],
+                    "output_name": ["text"],
+                    "output_node": False,
+                },
+                "StringSink": {
+                    "input": {"required": {"text": ["STRING", {}]}},
+                    "input_order": {"required": ["text"]},
+                    "output": ["STRING"],
+                    "output_name": ["text"],
+                    "output_node": True,
+                },
+            }
+        )
+
     def test_a_cycle_that_exists_only_through_a_decoy_key_is_not_reported(self, graph: Graph) -> None:
         wf = {
             "1": {"class_type": "MakeImage", "inputs": {"width": 64}},
@@ -859,3 +892,24 @@ class TestDecoyKeysAreNotFollowed:
         }
         result = graph.validate_workflow(wf)
         assert result["valid"], result["errors"]
+
+    def test_a_stale_dynamic_combo_key_cannot_close_a_cycle(self) -> None:
+        graph = self._dynamic_graph()
+        wf = {
+            "1": {
+                "class_type": "DynamicPass",
+                "inputs": {"model": "A", "model.value": "ready", "model.other": ["2", 0]},
+            },
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert "dependency_cycle" not in _codes(result), result["errors"]
+        assert result["valid"], result["errors"]
+
+    def test_the_same_dynamic_combo_key_closes_a_cycle_when_selected(self) -> None:
+        graph = self._dynamic_graph()
+        wf = {
+            "1": {"class_type": "DynamicPass", "inputs": {"model": "B", "model.other": ["2", 0]}},
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        assert "dependency_cycle" in _codes(graph.validate_workflow(wf))

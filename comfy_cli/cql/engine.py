@@ -1704,7 +1704,7 @@ class Graph:
                 # made `images.extra` on a plain IMAGE input look declared, and
                 # a malformed link under that decoy hard-failed a prompt the
                 # server runs — it ignores every key a node does not declare.
-                declared_input = _node_declares_input(port_by_name, input_name)
+                declared_input = _node_declares_input(port_by_name, input_name, node_inputs)
 
                 # The server validates only output-reachable nodes and prunes
                 # the rest, so a structural break on a pruned node does not stop
@@ -3170,21 +3170,26 @@ def frontend_injected_widget_error(node_type: str, widget: str, available: list[
     )
 
 
-def _node_declares_input(port_by_name: dict[str, Port], key: Any) -> bool:
+def _node_declares_input(port_by_name: dict[str, Port], key: Any, node_inputs: dict) -> bool:
     """Whether a node whose ports are ``port_by_name`` declares ``key``.
 
     The server reads the inputs a class DECLARES (``validate_inputs`` walks
     ``INPUT_TYPES``) and ignores every other key, so this is the one rule that
-    decides whether a key can fail a prompt or be followed as an edge. Only an
-    autogrow group or a dynamic combo takes dotted keys; a dotted suffix on an
-    ordinary port (``images.extra`` on a plain IMAGE input) is not declared.
+    decides whether a key can fail a prompt or be followed as an edge. Autogrow
+    groups take generated dotted slots; a dynamic combo takes only the dotted
+    inputs exposed by its current selection. A stale key from another selection
+    and a dotted suffix on an ordinary port are not declared.
     """
     if not isinstance(key, str):
         return False
     if key in port_by_name:
         return True
     base = port_by_name.get(key.split(".", 1)[0])
-    return base is not None and (base.is_autogrow or base.is_dynamic_combo)
+    if base is None:
+        return False
+    if base.is_autogrow:
+        return True
+    return base.is_dynamic_combo and _dotted_slot_port(port_by_name, key, node_inputs) is not None
 
 
 def _declared_link_targets(node_data: dict, graph: Graph) -> list[str]:
@@ -3208,7 +3213,7 @@ def _declared_link_targets(node_data: dict, graph: Graph) -> list[str]:
     port_by_name = {p.name: p for p in m.inputs} if m is not None else None
     targets: list[str] = []
     for key, value in node_inputs.items():
-        if port_by_name is not None and not _node_declares_input(port_by_name, key):
+        if port_by_name is not None and not _node_declares_input(port_by_name, key, node_inputs):
             continue
         if isinstance(value, list) and len(value) == 2:
             targets.append(str(value[0]))
