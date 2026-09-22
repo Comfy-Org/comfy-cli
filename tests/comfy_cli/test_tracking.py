@@ -48,12 +48,30 @@ def tracking_module(tmp_path):
 
 
 def _last_track_call(provider):
-    args, kwargs = provider.track.call_args
+    """The command's own event: the first call, since ``track_command`` now sends
+    ``command_finished`` after it (see TestTrackCommandRecordsHowTheCommandEnded)."""
+    args, kwargs = provider.track.call_args_list[0]
     # Provider.track signature - event_name, distinct_id=..., properties=...
     event_name = args[0] if args else kwargs.get("event_name")
     distinct_id = kwargs.get("distinct_id", args[1] if len(args) > 1 else None)
     properties = kwargs.get("properties", args[2] if len(args) > 2 else {})
     return event_name, distinct_id, properties
+
+
+def _newest_track_call(provider):
+    """The most recent call, for a test that sends more than one event itself."""
+    args, kwargs = provider.track.call_args
+    event_name = args[0] if args else kwargs.get("event_name")
+    distinct_id = kwargs.get("distinct_id", args[1] if len(args) > 1 else None)
+    properties = kwargs.get("properties", args[2] if len(args) > 2 else {})
+    return event_name, distinct_id, properties
+
+
+def _command_tracked_once(provider):
+    """One run of a decorated command sends exactly its own event and then
+    ``command_finished``; nothing else, and neither twice."""
+    names = [c.args[0] if c.args else c.kwargs.get("event_name") for c in provider.track.call_args_list]
+    assert len(names) == 2 and names[1] == "command_finished" and names[0] != "command_finished", names
 
 
 class TestTrackEvent:
@@ -207,7 +225,7 @@ class TestFeedbackCallerKindIsNarrowed:
             kind_patch, custom_patch = self._as_caller(tracking_module, env)
             with kind_patch, custom_patch:
                 tracking_module.submit_feedback("nice tool")
-            _, _, properties = _last_track_call(tracking_module.provider)
+            _, _, properties = _newest_track_call(tracking_module.provider)
             assert properties["caller_kind"] == expected
 
     def test_a_label_spelling_an_intrinsic_kind_is_still_narrowed(self, tracking_module):
@@ -443,7 +461,7 @@ class TestTrackCommandRedaction:
 
         some_cmd(name="demo", api_key="sk-supersecret")
 
-        tracking_module.provider.track.assert_called_once()
+        _command_tracked_once(tracking_module.provider)
         _, _, properties = _last_track_call(tracking_module.provider)
         assert properties["api_key"] == "<redacted>"
         assert properties["name"] == "demo"
@@ -506,7 +524,7 @@ class TestTrackCommandRedaction:
 
         download(url="https://example.com", set_civitai_api_token="civ-real-token")
 
-        tracking_module.provider.track.assert_called_once()
+        _command_tracked_once(tracking_module.provider)
         _, _, properties = _last_track_call(tracking_module.provider)
         assert properties["set_civitai_api_token"] == "<redacted>"
         assert "civ-real-token" not in str(properties)
@@ -520,7 +538,7 @@ class TestTrackCommandRedaction:
 
         download(url="https://example.com", set_hf_api_token="hf_real-token")
 
-        tracking_module.provider.track.assert_called_once()
+        _command_tracked_once(tracking_module.provider)
         _, _, properties = _last_track_call(tracking_module.provider)
         assert properties["set_hf_api_token"] == "<redacted>"
         assert "hf_real-token" not in str(properties)
@@ -534,7 +552,7 @@ class TestTrackCommandRedaction:
 
         some_cmd(workflow="wf.json", token="my-secret-token")
 
-        tracking_module.provider.track.assert_called_once()
+        _command_tracked_once(tracking_module.provider)
         _, _, properties = _last_track_call(tracking_module.provider)
         assert properties["token"] == "<redacted>"
         assert "my-secret-token" not in str(properties)
@@ -553,7 +571,7 @@ class TestTrackCommandRedaction:
 
         init(name="demo", from_snapshot="/Users/someone/ComfyUI-Installs/private/snapshot.json")
 
-        tracking_module.provider.track.assert_called_once()
+        _command_tracked_once(tracking_module.provider)
         _, _, properties = _last_track_call(tracking_module.provider)
         assert properties["from_snapshot"] == "<redacted>"
         assert properties["name"] == "demo"
@@ -572,7 +590,7 @@ class TestTrackCommandRedaction:
 
         init(name="demo", from_workflow="/Users/someone/ComfyUI/private/portrait.json")
 
-        tracking_module.provider.track.assert_called_once()
+        _command_tracked_once(tracking_module.provider)
         _, _, properties = _last_track_call(tracking_module.provider)
         assert properties["from_workflow"] == "<redacted>"
         assert properties["name"] == "demo"
@@ -590,7 +608,7 @@ class TestTrackCommandRedaction:
 
         run(workflow="/Users/someone/Private Clients/acme-brief/workflow.json", wait=True)
 
-        tracking_module.provider.track.assert_called_once()
+        _command_tracked_once(tracking_module.provider)
         _, _, properties = _last_track_call(tracking_module.provider)
         assert properties["workflow"] == "<redacted>"
         assert properties["wait"] is True
@@ -627,7 +645,7 @@ class TestTrackCommandRedaction:
         ctx = click.Context(click.Command("download"))
         download(_ctx=ctx, url="https://example.com")
 
-        tracking_module.provider.track.assert_called_once()
+        _command_tracked_once(tracking_module.provider)
         _, _, properties = _last_track_call(tracking_module.provider)
         assert "_ctx" not in properties
         assert properties["url"] == "https://example.com"
@@ -641,7 +659,7 @@ class TestTrackCommandRedaction:
 
         some_cmd(name="demo", callback=lambda x: x)
 
-        tracking_module.provider.track.assert_called_once()
+        _command_tracked_once(tracking_module.provider)
         _, _, properties = _last_track_call(tracking_module.provider)
         assert "callback" not in properties
         assert properties["name"] == "demo"
@@ -818,7 +836,7 @@ class TestTrackCommandRealTyperWiring:
         # The command body aborted at the patched helper, after tracking fired.
         assert isinstance(result.exception, RuntimeError)
 
-        tracking_module.provider.track.assert_called_once()
+        _command_tracked_once(tracking_module.provider)
         event_name, _, properties = _last_track_call(tracking_module.provider)
         assert event_name == "model:download"
         assert "_ctx" not in properties
@@ -1121,3 +1139,74 @@ class TestConsentPromptSurvivesUnusableStdio:
         ):
             tracking_module.prompt_tracking_consent()
         mock_prompt.assert_not_called()
+
+
+class TestTrackCommandRecordsHowTheCommandEnded:
+    """Two events per command: the command's own when it starts, unchanged, and
+    ``command_finished`` when it ends, saying how and how long. Before this the
+    only event went out before the body ran, so a push that died on a 400 and one
+    that moved 20 GB were the same row."""
+
+    @pytest.fixture(autouse=True)
+    def _consented(self, tracking_module):
+        tracking_module.config_manager.set(constants.CONFIG_KEY_ENABLE_TRACKING, "True")
+        tracking_module.user_id = "u-1"
+        self.tracking = tracking_module
+
+    def _events(self):
+        return [
+            (c.args[0], c.kwargs.get("properties", c.args[2] if len(c.args) > 2 else {}))
+            for c in self.tracking.provider.track.call_args_list
+        ]
+
+    def test_the_start_event_is_unchanged_and_the_finish_says_ok_and_how_long(self):
+        @self.tracking.track_command("build")
+        def push_cmd(force: bool = False):
+            return "pushed"
+
+        assert push_cmd(force=True) == "pushed"
+        (start_name, start_props), (end_name, end_props) = self._events()
+        assert start_name == "build:push_cmd"
+        assert start_props["force"] is True
+        assert "outcome" not in start_props, "the start row is what every existing count reads; it does not change"
+        assert end_name == "command_finished"
+        assert end_props["command"] == "build:push_cmd"
+        assert end_props["outcome"] == "ok"
+        assert end_props["seconds"] >= 0
+
+    def test_a_command_that_raises_names_the_error_class_and_still_raises(self):
+        @self.tracking.track_command("build")
+        def push_cmd():
+            raise ValueError("secret path /Users/x")
+
+        with pytest.raises(ValueError):
+            push_cmd()
+        _, (_, props) = self._events()
+        assert props["outcome"] == "error"
+        assert props["error_type"] == "ValueError"
+        assert "/Users/x" not in str(props), "an error message can carry a path or a token; only the class goes"
+
+    @pytest.mark.parametrize(("code", "outcome"), [(0, "ok"), (1, "exit"), (130, "exit")])
+    def test_a_typer_exit_is_recorded_by_its_code(self, code, outcome):
+        import typer
+
+        @self.tracking.track_command("deploy")
+        def up_cmd():
+            raise typer.Exit(code=code)
+
+        with pytest.raises(typer.Exit):
+            up_cmd()
+        _, (_, props) = self._events()
+        assert props["outcome"] == outcome
+        assert props["exit_code"] == code
+
+    def test_ctrl_c_is_recorded_and_re_raised(self):
+        @self.tracking.track_command("deploy")
+        def up_cmd():
+            raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            up_cmd()
+        _, (_, props) = self._events()
+        assert props["outcome"] == "error"
+        assert props["error_type"] == "KeyboardInterrupt"

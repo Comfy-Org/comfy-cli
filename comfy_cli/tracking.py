@@ -734,7 +734,18 @@ def filter_command_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 def track_command(sub_command: str | None = None):
     """
-    A decorator factory that logs the command function name and selected arguments when it's called.
+    A decorator factory that records a command run as two events: the command's
+    own event when it starts, as before, and ``command_finished`` when it ends.
+
+    The start event is unchanged, so every count that reads it stays a count of
+    commands, and a long-running command (``launch``, ``run``) is still counted the
+    moment it starts rather than when, or whether, it exits. ``command_finished``
+    carries ``command``, ``seconds`` and ``outcome``: ``ok`` for a normal return or
+    a zero exit, ``exit`` for a non-zero ``typer.Exit`` (with ``exit_code``), and
+    ``error`` for an exception (with ``error_type``, the class name only: a message
+    can carry a path or a credential). The exception, exit or Ctrl-C then
+    propagates as before. A command that never ends has a start row and no finish
+    row, which is itself the answer.
     """
 
     def decorator(func):
@@ -745,7 +756,26 @@ def track_command(sub_command: str | None = None):
             logging.debug(f"Tracking command: {command_name} with arguments: {filtered_kwargs}")
             track_event(command_name, properties=filtered_kwargs)
 
-            return func(*args, **kwargs)
+            finished: dict[str, Any] = {"command": command_name}
+            started = time.monotonic()
+            try:
+                result = func(*args, **kwargs)
+            except typer.Exit as exit_:
+                code = exit_.exit_code
+                finished.update(outcome="ok" if code == 0 else "exit", exit_code=code)
+                raise
+            except KeyboardInterrupt:
+                finished.update(outcome="error", error_type="KeyboardInterrupt")
+                raise
+            except BaseException as error:
+                finished.update(outcome="error", error_type=type(error).__name__)
+                raise
+            else:
+                finished["outcome"] = "ok"
+                return result
+            finally:
+                finished["seconds"] = round(time.monotonic() - started, 3)
+                track_event("command_finished", properties=finished)
 
         return wrapper
 
