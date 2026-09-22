@@ -19,10 +19,9 @@ against, including the two shapes a naive projection gets wrong:
 * Frontend-injected inputs — ``upload`` (the upload button on every media
   loader), ``audioUI`` (the audio player), ``image`` (the ``PREVIEW_3D``
   viewport on ``SaveGLB``/``Preview3D``). Extensions add them to the node
-  definition after ``object_info``; they serialize AFTER every declared
-  widget, optional ones included, and are ``serialize: false`` on current
-  frontends (older ones wrote ``"image"``/``null``). The order names them so
-  a workflow saved by either frontend decomposes, and a fresh node omits them.
+  definition after ``object_info``. Upload/audio controls do not serialize;
+  PREVIEW_3D's image does. ``widget_layout`` includes only serialized slots.
+  The existing ``widget_order`` still names all injected controls.
 * DOM-widget inputs the schema declares under an uppercase custom type
   (``Load3D.image`` is ``LOAD_3D``, ``LoadAudioUI.audioUI`` is ``AUDIO_UI``)
   and inputs whose ``widgetType`` option overrides a link-shaped socket type
@@ -33,13 +32,18 @@ a second implementation of widget order is a second answer, and the two would
 diverge silently — as a wrong index, i.e. a widget value written into the wrong
 field of the user's canvas.
 
-WHAT IT IS NOT. It is not ``object_info``. It carries no types, no enum
-choices, no descriptions — only what a name↔index converter needs. That keeps
-it small enough to hand to a sidecar on every call. The one exception is a
+WHAT IT IS NOT. It is not ``object_info``. It carries no types, no ordinary
+enum choices, no descriptions — only what a name↔index converter needs. That
+keeps it small enough to hand to a sidecar on every call. The one exception is a
 dynamic combo's per-option ``defaults``: ``widget_order`` is value-blind (first
 key only), so ``dynamic_combos`` names every option's slots and the values a
 fresh selection seeds them with — what the frontend does on a selection change
 (``dynamicWidgets.ts``), and what a converter needs to handle any other key.
+
+``widget_layout`` retains dynamic selector keys and each branch's serialized
+fields, with structural identities that distinguish branch-reused names and
+owner-specific seed companions. ``widget_order`` is only the first-choice
+layout, not a decoder for other modes.
 
 Dynamic groups publish a row-count controller in ``widget_order`` and a
 ``dynamic_groups`` map containing each template's relative widget names,
@@ -54,13 +58,18 @@ SHAPE (``envelope/1`` ``data`` of ``comfy nodes widget-catalog``)::
       "catalog_version": "sha256:<64 hex>",
       "class_count": 1234,
       "types": {
-        "KSampler": {"widget_order": ["seed", "control_after_generate", ...]},
+        "CLIPTextEncode": {
+          "widget_order": ["text"],
+          "widget_layout": [{"name": "text", "identity": [["field", "text"]]}]
+        },
         "BatchImagesNode": {
           "widget_order": [],
+          "widget_layout": [],
           "autogrow_templates": {"images": {"prefix": "image"}}
         },
         "ImageBatchMulti": {
           "widget_order": ["inputcount"],
+          "widget_layout": [{"name": "inputcount", "identity": [["field", "inputcount"]]}],
           "inputcount": {"widget": "inputcount", "elements": ["image"]}
         },
         "MagnificImageSkinEnhancerNode": {
@@ -75,9 +84,9 @@ SHAPE (``envelope/1`` ``data`` of ``comfy nodes widget-catalog``)::
 ``catalog_version`` is the SHA-256 of the canonical JSON encoding of ``types``
 alone (sorted keys, no whitespace, UTF-8), prefixed ``sha256:``. It excludes
 itself and ``class_count`` so a consumer that stored only the catalog can
-recompute and verify the pin it was given. Identical ``object_info`` in ⇒
-identical version out, regardless of key iteration order; any change to any
-class's widget order or grow family moves it.
+recompute and verify the pin it was given. Equivalent object-key ordering
+produces the same pin when input order is unchanged. All field/choice arrays
+retain their semantic order; even an inactive branch's layout changes the pin.
 """
 
 from __future__ import annotations
@@ -93,7 +102,7 @@ def build_types(graph, skipped: dict[str, str] | None = None) -> dict[str, dict[
     """The ``types`` map: one entry per class the graph knows, in class order.
 
     Every class gets an entry, including widget-less ones (``VAEDecode`` →
-    ``{"widget_order": []}``). A missing entry and an empty order are different
+    ``{"widget_order": [], "widget_layout": []}``). A missing entry and an empty order are different
     statements — "I have never heard of this class" vs. "this class has no
     widgets" — and a converter must be able to tell them apart.
 
@@ -112,7 +121,10 @@ def build_types(graph, skipped: dict[str, str] | None = None) -> dict[str, dict[
     types: dict[str, dict[str, Any]] = {}
     for m in graph.all_nodes():
         try:
-            entry: dict[str, Any] = {"widget_order": list(graph.widget_order_default(m.id))}
+            entry: dict[str, Any] = {
+                "widget_order": list(graph.widget_order_default(m.id)),
+                "widget_layout": graph.widget_layout(m.id),
+            }
         except DynamicGroupBindingError as e:
             if skipped is not None:
                 skipped[m.id] = str(e)
