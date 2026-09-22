@@ -7,7 +7,7 @@
     "layout": {
       "type": "array",
       "items": { "$ref": "#/$defs/widget" },
-      "description": "Serialized slots in semantic order. A selector consumes its own value, then the matching option's widgets, then the following sibling. Injected upload/audioUI controls consume no value and are excluded; seed companions and PREVIEW_3D image are included. Require exact consumption, not padding from defaults."
+      "description": "Current-frontend serialized slots in semantic order, not a list of writable fields. A selector consumes its own value, then the matching option's widgets, then the following sibling. Injected upload/audioUI controls consume no value and are excluded; seed companions and PREVIEW_3D image are included. Historical payloads with extra upload/audio values are unsupported. Require exact consumption, not padding from defaults or discarding excess values."
     },
     "widget": {
       "type": "object",
@@ -18,7 +18,7 @@
         "identity": {
           "type": "array",
           "minItems": 1,
-          "description": "Structural path: field name, ancestor choice, child field name, and optional owning-field companion. Mutually exclusive branches may reuse names but have distinct identities. Repeated seed companions are owned by their preceding field, not by their bare name.",
+          "description": "Structural serialization path: field name, ancestor choice, child field name, and optional owning-field companion. Mutually exclusive branches may reuse names but have distinct identities. A companion's owner is its identity path without the final companion component, never an adjacent position or its bare name. LOAD_3D buttons precede their owner; seed companions follow it. Identity does not imply edit permission, including for the injected PREVIEW_3D image slot.",
           "items": {
             "type": "array",
             "prefixItems": [{ "enum": ["field", "choice", "companion"] }, { "type": "string" }],
@@ -28,7 +28,7 @@
         },
         "options": {
           "type": "array",
-          "description": "Present for dynamic selectors only. An empty list means explicitly declared zero choices, not unavailable metadata. A typed dynamic selector without an explicit options list rejects catalog generation with its class and field identified. Keys must be unique strings within this selector; field and choice array order is semantic and covered by catalog_version. Unsupported key types are rejected during generation, never coerced. Consumers must reject unknown selections.",
+          "description": "Present for dynamic selectors only. An empty list means explicitly declared zero choices, not unavailable metadata. A typed dynamic selector without an explicit options list rejects catalog generation with its class and field identified. Keys must be unique strings within this selector; consumers must check key uniqueness explicitly because JSON Schema validation alone does not enforce it. Field and choice array order is semantic and covered by catalog_version. Unsupported key types are rejected during generation, never coerced. Consumers must reject unknown selections.",
           "items": {
             "type": "object",
             "required": ["key", "widgets"],
@@ -54,7 +54,7 @@
     },
     "types": {
       "type": "object",
-      "description": "One entry per node class the loaded environment knows. EVERY class is present, including widget-less ones: a missing entry ('unknown class') and an empty widget_order ('no widgets') are different statements and a converter must distinguish them.",
+      "description": "One entry per node class the loaded environment knows. EVERY class is present, including widget-less ones: a missing entry ('unknown class') and an empty widget_order ('no widgets') are different statements and a converter must distinguish them. Invalid or unavailable dynamic selector options and unsupported nesting reject the entire catalog with class/field context; generation does not silently skip classes or return a partial catalog.",
       "additionalProperties": {
         "type": "object",
         "properties": {

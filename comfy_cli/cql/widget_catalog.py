@@ -38,6 +38,21 @@ selector keys and each branch's serialized fields, with structural identities
 that distinguish branch-reused names and owner-specific seed companions.
 ``widget_order`` is only the first-choice layout, not a decoder for other modes.
 
+CONTRACT BOUNDARIES. ``widget_layout`` describes current frontend serialization,
+not historical upload/audio tails or edit permissions. Exact consumption rejects
+extra or missing values; do not discard legacy tails or fill absent slots from
+defaults. Serialized identity alone must not authorize a write to an injected
+PREVIEW_3D slot. Companion ownership comes from the identity path without its
+final companion component: LOAD_3D buttons precede their owner, whereas seed
+companions follow it.
+
+Catalog generation is all-or-error. Invalid or unavailable selector options and
+unsupported nesting reject the entire catalog with class/field context; silently
+omitting a known class would misrepresent it as unknown. General graph parsing
+remains permissive. Consumers must independently check selector-key uniqueness
+and reject unknown selections; JSON Schema validation does not enforce uniqueness
+by key. There is no partial-catalog or historical compatibility mode here.
+
 SHAPE (``envelope/1`` ``data`` of ``comfy nodes widget-catalog``)::
 
     {
