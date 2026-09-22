@@ -1207,9 +1207,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "build_not_signed_in",
-        "A Builder-backed `comfy build` command found no usable Cloud JWT — the builder authenticates with "
-        "the OAuth session token, and there isn't a valid one.",
-        "run `comfy cloud login` first",
+        "A Builder-backed `comfy build` command found no usable Cloud credentials, or the server rejected them with HTTP 401.",
+        "run `comfy cloud login` or check your COMFY_CLOUD_API_KEY / stored key",
     ),
     ErrorCode(
         "build_builder_error",
@@ -1390,8 +1389,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_not_signed_in",
-        "A deploy control-plane request found no usable Cloud JWT, or the server rejected it with HTTP 401.",
-        "run `comfy cloud login`, then retry",
+        "A deploy control-plane request found no usable Cloud credentials, or the server rejected them with HTTP 401.",
+        "run `comfy cloud login` or check your COMFY_CLOUD_API_KEY / stored key",
     ),
     ErrorCode(
         "deploy_not_found",

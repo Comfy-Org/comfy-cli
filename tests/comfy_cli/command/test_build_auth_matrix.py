@@ -115,6 +115,8 @@ BUILD_AUTH_CASES = (
 
 @pytest.fixture(autouse=True)
 def stable_command_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
+    monkeypatch.delenv("COMFY_CLOUD_AUTH_TOKEN", raising=False)
     monkeypatch.setattr("comfy_cli.tracking.prompt_tracking_consent", lambda *args, **kwargs: None)
     monkeypatch.setattr("comfy_cli.tracking.track_event", lambda *args, **kwargs: None)
     monkeypatch.setattr("comfy_cli.credentials.get_session", lambda *args, **kwargs: None)
@@ -232,7 +234,10 @@ def _assert_call_expectation(expectation: BuilderCallExpectation, count: int) ->
 
 
 @pytest.mark.parametrize("case", BUILD_AUTH_CASES, ids=lambda case: case.fixture.value)
-def test_build_auth_contract(case: BuildAuthCase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("api_key", [False, True], ids=["token", "api-key"])
+def test_build_auth_contract(
+    case: BuildAuthCase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, api_key: bool
+) -> None:
     # Given
     recorder = RecordingTransport()
     monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
@@ -247,7 +252,12 @@ def test_build_auth_contract(case: BuildAuthCase, tmp_path: Path, monkeypatch: p
         assert recorder.calls == []
 
     # When
-    result = _invoke(_prepare(case.fixture, tmp_path / "signed-in"), "tok_test" if case.requires_session else None)
+    if api_key:
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "comfyui-test-key")
+    result = _invoke(
+        _prepare(case.fixture, tmp_path / "signed-in"),
+        "tok_test" if case.requires_session and not api_key else None,
+    )
 
     # Then
     assert result.exit_code == 0, result.stderr
@@ -270,7 +280,10 @@ def test_auth_matrix_covers_every_build_command() -> None:
 
 
 @pytest.mark.parametrize("case", DEPLOY_AUTH_CASES, ids=lambda case: case.fixture.value)
-def test_deploy_auth_contract(case: DeployAuthCase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("api_key", [False, True], ids=["session", "api-key"])
+def test_deploy_auth_contract(
+    case: DeployAuthCase, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, api_key: bool
+) -> None:
     # Given
     control = DeployRecordingTransport()
     jobs = JobRecordingTransport()
@@ -278,7 +291,6 @@ def test_deploy_auth_contract(case: DeployAuthCase, tmp_path: Path, monkeypatch:
     monkeypatch.setattr("comfy_cli.deploy_api.request_json", control)
     monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", jobs)
     monkeypatch.setattr("comfy_cli.builder_api.request_json", builder)
-    monkeypatch.setattr("comfy_cli.credentials.find_api_key", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "comfy_cli.credentials.get_session",
         lambda *args, **kwargs: session(os.environ.get("COMFY_DEPLOY_TOKEN")),
@@ -293,7 +305,9 @@ def test_deploy_auth_contract(case: DeployAuthCase, tmp_path: Path, monkeypatch:
     assert control.calls == []
 
     # When
-    signed_in = invoke_deploy(prepare_deploy(case.fixture, tmp_path / "signed-in"), "tok_test")
+    if api_key:
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "comfyui-test-key")
+    signed_in = invoke_deploy(prepare_deploy(case.fixture, tmp_path / "signed-in"), None if api_key else "tok_test")
 
     # Then
     assert signed_in.exit_code == 0, signed_in.stderr

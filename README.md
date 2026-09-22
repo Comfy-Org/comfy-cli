@@ -471,6 +471,23 @@ Notes:
 - Models and custom nodes must exist on the cloud side. `comfy models search --where cloud` lists the cloud asset catalog, and `comfy nodes ls --where cloud` lists the node classes cloud can run.
 - Sign out with `comfy cloud logout`. If a run fails with `cloud_unauthorized`, your session expired — re-run `comfy cloud login`.
 
+### Headless builds and deployments
+
+With Builder and Deploy servers that support workspace API keys, automation can
+use `COMFY_CLOUD_API_KEY` without an interactive login:
+
+```bash
+export COMFY_CLOUD_API_KEY="comfyui-..."  # supply from your CI secret store
+comfy build ls
+comfy deploy up --release <release-id> --gpu <gpu-class> --region <region>
+```
+
+The shared credential order applies: a live OAuth session wins, followed by
+`COMFY_CLOUD_AUTH_TOKEN`, `COMFY_CLOUD_API_KEY`, then a key saved with
+`comfy cloud set-key`. In CI, use a config directory without a saved login to
+select the API key. Keys are sent as `Authorization: Bearer` to Builder and
+Deploy; a rejected key fails without an OAuth refresh or credential fallback.
+
 ### Calling partner nodes (`comfy generate`)
 
 `comfy generate` calls Comfy's partner nodes directly from the terminal — no

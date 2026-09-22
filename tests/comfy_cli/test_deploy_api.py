@@ -149,9 +149,10 @@ def test_base_url_resolution_prefers_explicit_then_environment_then_default(monk
 def test_from_session_refreshes_and_uses_the_resolved_url(monkeypatch):
     # Given
     seen: list[bool] = []
-    session = type("Session", (), {"access_token": "fresh-jwt"})()
+    session = type("Session", (), {"access_token": "fresh-jwt", "is_expired": lambda self: False})()
     monkeypatch.setattr(
-        "comfy_cli.deploy_api.credentials.get_session", lambda *, refresh: seen.append(refresh) or session
+        "comfy_cli.deploy_api.credentials.get_session",
+        lambda *, refresh, allow_clear=True: seen.append(refresh) or session,
     )
 
     # When
@@ -162,9 +163,9 @@ def test_from_session_refreshes_and_uses_the_resolved_url(monkeypatch):
     assert client.target.auth_token == "fresh-jwt"
 
 
-def test_from_session_without_a_jwt_raises_the_registered_auth_error(monkeypatch):
+def test_from_session_without_credentials_raises_the_registered_auth_error(monkeypatch):
     # Given
-    monkeypatch.setattr("comfy_cli.deploy_api.credentials.get_session", lambda *, refresh: None)
+    monkeypatch.setattr("comfy_cli.deploy_api.credentials.get_session", lambda *, refresh, allow_clear=True: None)
 
     # When / Then
     with pytest.raises(DeployAuthError) as exc_info:
@@ -177,7 +178,8 @@ def test_plaintext_non_loopback_is_rejected_before_session_or_header_constructio
     session_calls: list[bool] = []
     header_calls: list[bool] = []
     monkeypatch.setattr(
-        "comfy_cli.deploy_api.credentials.get_session", lambda *, refresh: session_calls.append(refresh)
+        "comfy_cli.deploy_api.credentials.get_session",
+        lambda *, refresh, allow_clear=True: session_calls.append(refresh),
     )
     monkeypatch.setattr("comfy_cli.http.target_auth_headers", lambda target: header_calls.append(True) or {})
 

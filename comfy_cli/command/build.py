@@ -2387,8 +2387,8 @@ def _builder_client(renderer, builder_url: str | None):
 
     A caller that already holds a Cloud JWT — the Developer Platform agent service
     forwarding the request's token, or CI — injects it via ``COMFY_BUILDER_TOKEN``
-    and skips the interactive OAuth session ``from_session`` uses. The env var wins
-    over a stored session so an explicit token always takes precedence.
+    and skips the shared credential resolver. The env var wins over a stored
+    session or API key so an explicit token always takes precedence.
     """
     from comfy_cli.builder_api import BuilderAuthError, BuilderClient
 
@@ -2527,18 +2527,18 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None,
             body = (e.read(_BUILDER_ERROR_READ) or b"").decode("utf-8", "replace")
         except Exception:
             pass
-        # A 401 means the sign-in itself was refused, and the client has already
-        # tried a refresh, so the only way forward is signing in again.
+        # Session clients already tried a refresh; keys and injected tokens
+        # must be replaced by the caller.
         if e.code == 401:
             renderer.error(
                 code="build_not_signed_in",
-                message="the builder refused the sign-in token (401)",
+                message="the builder refused the credentials (401)",
                 # A token passed in through the environment is never refreshed, and
                 # signing in again would not replace it, so it has to be swapped.
                 hint=(
                     "replace COMFY_BUILDER_TOKEN with a fresh Cloud JWT"
                     if os.environ.get("COMFY_BUILDER_TOKEN")
-                    else "run `comfy cloud login` first"
+                    else "run `comfy cloud login` or check your COMFY_CLOUD_API_KEY / stored key"
                 ),
             )
             return
