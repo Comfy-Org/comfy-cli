@@ -6,6 +6,7 @@ import copy
 import importlib
 import inspect
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -511,11 +512,16 @@ def test_deploy_up_watches_without_being_asked(tmp_path) -> None:
     from comfy_cli.command import deploy as deploy_module
 
     # When
-    help_text = CliRunner().invoke(app, ["deploy", "up", "--help"], env={"COLUMNS": "400"}).stdout
+    help_text = CliRunner().invoke(app, ["deploy", "up", "--help"]).stdout
 
     # Then
-    assert "--watch" in help_text and "--no-watch" in help_text
-    assert "[default: watch]" in help_text
+    # Rich draws the help in a box, puts the two spellings of the flag in
+    # separate cells, and wraps at whatever width it detects (80 on CI), so a
+    # flag can straddle a line break. Compare with every escape code, box
+    # character and space removed.
+    flat = re.sub(r"\s+|[\u2500-\u257f]", "", re.sub(r"\x1b\[[0-9;]*m", "", help_text))
+    assert "--watch" in flat and "--no-watch" in flat
+    assert "[default:watch]" in flat
     assert inspect.signature(deploy_module.up_cmd).parameters["watch"].default is True
     # `status` answers a question and exits, so there watching stays opt-in.
     assert inspect.signature(deploy_module.status_cmd).parameters["watch"].default is False
