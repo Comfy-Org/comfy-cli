@@ -196,15 +196,16 @@ class Port:
 
     @property
     def is_dynamic_combo(self) -> bool:
-        """V3 dynamic combo (e.g. ``COMFY_DYNAMICCOMBO_V3``): the schema declares
+        """Dynamic combo (e.g. ``COMFY_DYNAMICCOMBO_V3``): the schema declares
         ONE selector input, but the option the selector names carries its own
         ``INPUT_TYPES`` block, which the frontend — and ``convert_ui_to_api`` —
         lower into dotted slot keys (``model.size_preset``, ``model.width``, …).
 
-        Deliberately the same test the converter applies
-        (``workflow_to_api._is_widget_input``), so validation expands exactly the
-        tree the converter lowered."""
-        return self.type.startswith("COMFY_") and "COMBO" in self.type
+        Most servers use a ``COMFY_*COMBO*`` type, while some partner schemas
+        expose the same option tree under a plain ``COMBO``. Parsing retains
+        that tree in ``dynamic_options``, so its presence is authoritative.
+        """
+        return bool(self.dynamic_options) or (self.type.startswith("COMFY_") and "COMBO" in self.type)
 
     def autogrow_slot_example(self) -> str:
         """Slot-key example for hints: the first two slot names this group
@@ -3255,7 +3256,11 @@ def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int
     if port.is_autogrow:
         element = port.autogrow_element_type
         if not element:
-            return None
+            # Older/partial catalogs can omit the element schema while still
+            # declaring the generated slot. Preserve structural link checks
+            # and accept any source type, matching the validator's historical
+            # behavior for these otherwise-untyped slots.
+            element = "*"
         # A slot carries the group's element type; the slot NAME is checked
         # elsewhere (autogrow_unknown_slot), so an odd name still gets the
         # type comparison the server will make.

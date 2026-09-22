@@ -833,14 +833,14 @@ class TestDecoyKeysAreNotFollowed:
     """
 
     @staticmethod
-    def _dynamic_graph() -> Graph:
+    def _dynamic_graph(type_id: str = "COMFY_DYNAMICCOMBO_V3") -> Graph:
         return Graph.from_object_info(
             {
                 "DynamicPass": {
                     "input": {
                         "required": {
                             "model": [
-                                "COMFY_DYNAMICCOMBO_V3",
+                                type_id,
                                 {
                                     "options": [
                                         {"key": "A", "inputs": {"required": {"value": ["STRING", {}]}}},
@@ -908,6 +908,27 @@ class TestDecoyKeysAreNotFollowed:
 
     def test_the_same_dynamic_combo_key_closes_a_cycle_when_selected(self) -> None:
         graph = self._dynamic_graph()
+        wf = {
+            "1": {"class_type": "DynamicPass", "inputs": {"model": "B", "model.other": ["2", 0]}},
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        assert "dependency_cycle" in _codes(graph.validate_workflow(wf))
+
+    def test_a_plain_combo_stale_key_cannot_close_a_cycle(self) -> None:
+        graph = self._dynamic_graph("COMBO")
+        wf = {
+            "1": {
+                "class_type": "DynamicPass",
+                "inputs": {"model": "A", "model.value": "ready", "model.other": ["2", 0]},
+            },
+            "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
+        }
+        result = graph.validate_workflow(wf)
+        assert "dependency_cycle" not in _codes(result), result["errors"]
+        assert result["valid"], result["errors"]
+
+    def test_the_same_plain_combo_key_closes_a_cycle_when_selected(self) -> None:
+        graph = self._dynamic_graph("COMBO")
         wf = {
             "1": {"class_type": "DynamicPass", "inputs": {"model": "B", "model.other": ["2", 0]}},
             "2": {"class_type": "StringSink", "inputs": {"text": ["1", 0]}},
