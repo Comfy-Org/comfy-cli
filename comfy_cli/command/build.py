@@ -38,7 +38,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Final, NoReturn
+from typing import TYPE_CHECKING, Annotated, Any, Final, NoReturn
 from urllib.parse import urlsplit
 
 import requests
@@ -2003,12 +2003,18 @@ def push_cmd(
         # already carry a `blobId`, and until this lands on disk the ids exist
         # only in memory — a crash would re-upload the same bytes under new ids
         # and orphan the ones the builder already stored.
-        uploaded = _builder_call(
-            renderer,
-            lambda: upload_assets(
-                preparation, client, lambda: _write_spec(renderer, paths.spec_file, preparation.spec), reporter
-            ),
-        )
+        started = time.monotonic()
+        try:
+            uploaded = _builder_call(
+                renderer,
+                lambda: upload_assets(
+                    preparation, client, lambda: _write_spec(renderer, paths.spec_file, preparation.spec), reporter
+                ),
+            )
+        except BaseException:
+            _track_push_upload(uploads, uploaded=None, seconds=time.monotonic() - started)
+            raise
+        _track_push_upload(uploads, uploaded=uploaded, seconds=time.monotonic() - started)
     wire_definition = project_wire_definition(preparation.definition)
     target_id = build_id or stored_id
     name = str(spec["name"])
@@ -2127,6 +2133,29 @@ def _hold_release_on_link_warnings(
         details=details,
     )
     raise typer.Exit(code=1)
+
+
+def _track_push_upload(uploads, *, uploaded: int | None, seconds: float) -> None:
+    """One event per push that had something to upload: how much, how long, how it
+    ended. Nothing measured an upload before this, in the CLI or the portal, so the
+    size and the seconds are what say whether a change to uploads changed anything
+    for anyone. No filename: a private model's name is the customer's.
+
+    ``uploaded`` is None when the upload did not finish; then ``deduped`` is not
+    known either and is left out rather than guessed.
+    """
+    if not uploads:
+        return
+    properties: dict[str, Any] = {
+        "upload_count": len(uploads),
+        "upload_bytes": sum(upload.size_bytes for upload in uploads),
+        "seconds": round(seconds, 3),
+        "outcome": "ok" if uploaded is not None else "error",
+    }
+    if uploaded is not None:
+        properties["uploaded"] = uploaded
+        properties["deduped"] = len(uploads) - uploaded
+    tracking.track_event("build:push_upload", properties=properties)
 
 
 def _prompt_build_id(renderer, client) -> str | None:
