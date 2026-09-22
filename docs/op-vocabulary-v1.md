@@ -884,7 +884,8 @@ of `UI_ONLY_NODE_TYPES`). The spec gains one optional, spec-and-node key:
   authoritative for replay (§8.5), so a replica with no notion of `Note`
   inserts it verbatim.
 * A non-string `text` is `ValueError` at mint time (batch: aborts atomically,
-  `applied_count == 0`, §4). `text` on a **catalog** class is likewise
+  `applied_count == 0`, §4). An explicit `"text": null` in a spec counts as
+  non-string — omit the key for an empty note. `text` on a **catalog** class is likewise
   `ValueError` — catalog widgets are addressed by name through `set_widget`;
   a stray `text` is an error, not a dropped field.
 * CLI: `comfy workflow add-node <file> Note --text "..."`. Envelope unchanged.

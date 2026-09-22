@@ -163,6 +163,18 @@ class TestApplySpecsNotes:
         assert [n["type"] for n in wf["nodes"] if n["type"] == "Note"] == []
         assert snapshot["last_node_id"] == 7
 
+    def test_explicit_null_text_is_rejected_not_coerced_to_empty(self):
+        # `"text": null` in a recipe is a malformed spec, not shorthand for an empty
+        # note. Omitting the key is the documented way to get "". Silently coercing
+        # null would contradict "non-string text raises ValueError".
+        wf = _base_workflow()
+        specs = [{"op": "add_node", "class_type": "Note", "text": None}]
+        with pytest.raises(ValueError, match="text.*null") as ei:
+            workflow_ops.apply_specs(wf, _graph(), specs)
+        assert getattr(ei.value, "spec_index", None) == 0
+        assert getattr(ei.value, "applied_count", None) == 0
+        assert [n["type"] for n in wf["nodes"] if n["type"] == "Note"] == []
+
 
 # ---------------------------------------------------------------------------
 # T6 — the data-flow UI-only types stay refused, with the same specific reason

@@ -1812,6 +1812,14 @@ def apply_specs(
             # wrap it so the batch/recipe caller learns WHICH spec and op are malformed.
             try:
                 if kind == "add_node":
+                    # `add_node(text=None)` means "omitted" (empty note). A recipe that
+                    # spells out `"text": null` is malformed, not shorthand for "" — the
+                    # documented rule is that non-string text raises. Catch it here
+                    # because only the spec layer can tell absent from explicit null.
+                    if "text" in spec and spec["text"] is None:
+                        raise ValueError(
+                            f"spec #{i} (add_node): `text` must be a string, got null; omit the key for an empty note"
+                        )
                     workflow, op = add_node(
                         workflow,
                         graph,
