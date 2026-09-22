@@ -134,7 +134,9 @@ class TestFetchObjectInfo:
         ) as mock_open:
             result = fetch_object_info("127.0.0.1", 8188, timeout=30)
         assert result == payload
-        assert mock_open.call_args[0][0] == "http://127.0.0.1:8188/object_info"
+        req = mock_open.call_args[0][0]
+        assert req.full_url == "http://127.0.0.1:8188/object_info"
+        assert req.get_header("Comfy-usage-source") == "comfy-cli"
 
     def test_http_error_exits_cleanly(self):
         with patch(

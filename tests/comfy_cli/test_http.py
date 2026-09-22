@@ -138,6 +138,13 @@ def test_method_and_data_passthrough():
     assert req.data == b"payload"
 
 
+@pytest.mark.parametrize("is_cloud", [True, False])
+def test_build_authed_request_carries_usage_source(is_cloud):
+    """Every Comfy API request is attributed to the CLI, credentialed or not."""
+    req = build_authed_request("https://x/thing", _target(auth_token="t", is_cloud=is_cloud))
+    assert req.get_header("Comfy-usage-source") == "comfy-cli"
+
+
 # ---------------------------------------------------------------------------
 # authed_urlopen
 # ---------------------------------------------------------------------------
@@ -344,6 +351,18 @@ def test_request_json_body_exactly_at_cap_still_parses(monkeypatch, cloud_target
     assert request_json("https://cloud.example/api/thing", cloud_target, max_bytes=len(body)) == (200, {"a": 1})
 
 
+@pytest.mark.parametrize("target_name", ["cloud_target", "local_target"])
+def test_request_json_carries_usage_source(monkeypatch, request, target_name):
+    """``request_json`` is the builder and deploy clients' only way out, so the
+    attribution header rides it on every call — alongside, not instead of, the
+    caller's own headers."""
+    target = request.getfixturevalue(target_name)
+    seen = _patch_urlopen(monkeypatch, b"{}")
+    request_json(target.url("thing"), target, headers={"Accept": "text/plain"}, max_bytes=1024)
+    assert seen[0].get_header("Comfy-usage-source") == "comfy-cli"
+    assert seen[0].get_header("Accept") == "text/plain"
+
+
 def test_request_json_empty_body_returns_none(monkeypatch, cloud_target):
     _patch_urlopen(monkeypatch, b"", status=204)
     assert request_json("https://cloud.example/api/thing", cloud_target, max_bytes=1024) == (204, None)
@@ -406,7 +425,8 @@ def test_request_json_attaches_no_auth_headers_for_local(monkeypatch, local_targ
     req = seen[0]
     # Assert on the whole header bag, not two named keys: a named-key check
     # would pass vacuously if urllib ever changed how it cases header names.
-    assert req.headers == {}
+    # The usage-source attribution is the only header a local call carries.
+    assert req.headers == {"Comfy-usage-source": "comfy-cli"}
 
 
 def test_request_json_raises_urllib_errors_verbatim(monkeypatch, cloud_target):

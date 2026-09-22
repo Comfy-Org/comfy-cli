@@ -51,6 +51,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from comfy_cli import constants, knowledge, tracking, ui
 from comfy_cli.command.generate import adapters, client, emit, output, poll, schema, spec, upload
 from comfy_cli.config_manager import ConfigManager
+from comfy_cli.http import USAGE_SOURCE_HEADERS
 from comfy_cli.output.renderer import Renderer, get_renderer
 from comfy_cli.output.sanitize import sanitize_markup
 
@@ -1068,7 +1069,7 @@ def _schema(extra_args: list[str]) -> None:
 
 def _fetch_spec(url: str) -> httpx.Response:
     with httpx.Client(timeout=30.0, follow_redirects=True) as cli:
-        r = cli.get(url, headers={"Comfy-Env": "comfy-cli", "User-Agent": "comfy-cli/api"})
+        r = cli.get(url, headers={"Comfy-Env": "comfy-cli", "User-Agent": "comfy-cli/api", **USAGE_SOURCE_HEADERS})
         r.raise_for_status()
         return r
 

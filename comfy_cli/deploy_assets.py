@@ -18,6 +18,7 @@ from comfy_cli.command.build_spec import JsonObject
 from comfy_cli.deploy_api_errors import DeployAPIError, assert_safe_deploy_url
 from comfy_cli.hashing import blake3_file
 from comfy_cli.http import (
+    USAGE_SOURCE_HEADERS,
     ResponseTooLarge,
     no_redirect_urlopen,
     read_capped,
@@ -131,7 +132,7 @@ def _multipart_request(
     upload = urllib.request.Request(target.url("assets"), data=body, method="POST")
     upload.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
     upload.add_header("Content-Length", str(body.content_length))
-    for name, value in target_auth_headers(target).items():
+    for name, value in {**USAGE_SOURCE_HEADERS, **target_auth_headers(target)}.items():
         upload.add_header(name, value)
     return upload, file_size
 

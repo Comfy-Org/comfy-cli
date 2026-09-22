@@ -2,7 +2,7 @@ import json
 import logging
 import os
 
-from comfy_cli.http import DEFAULT_HTTP_TIMEOUT
+from comfy_cli.http import DEFAULT_HTTP_TIMEOUT, USAGE_SOURCE_HEADERS
 
 # Reduced global imports from comfy_cli.registry
 from comfy_cli.registry.types import (
@@ -130,7 +130,7 @@ class RegistryAPI:
         if changelog:
             request_body["node_version"]["changelog"] = changelog
         url = f"{self.base_url}/publishers/{node_config.tool_comfy.publisher_id}/nodes/{node_config.project.name}/versions"
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", **USAGE_SOURCE_HEADERS}
         body = request_body
 
         # Imported lazily: requests costs ~30ms to import and this module is
@@ -165,7 +165,7 @@ class RegistryAPI:
         import requests  # deferred; see publish_node_version
 
         url = f"{self.base_url}/nodes"
-        response = requests.get(url, timeout=DEFAULT_HTTP_TIMEOUT)
+        response = requests.get(url, headers=USAGE_SOURCE_HEADERS, timeout=DEFAULT_HTTP_TIMEOUT)
         if response.status_code == 200:
             raw_nodes = response.json()["nodes"]
             return [map_node_to_node_class(node) for node in raw_nodes]
@@ -197,7 +197,7 @@ class RegistryAPI:
 
         # A stalled/blackholed registry must not hang callers indefinitely.
         # A Timeout surfaces as a RequestException for callers to catch.
-        response = requests.get(url, timeout=DEFAULT_HTTP_TIMEOUT)
+        response = requests.get(url, headers=USAGE_SOURCE_HEADERS, timeout=DEFAULT_HTTP_TIMEOUT)
         if response.status_code == 200:
             # Convert the API response to a NodeVersion object
             logging.debug(f"RegistryAPI install_node response: {response.json()}")
@@ -228,7 +228,7 @@ class RegistryAPI:
 
         url = f"{self.base_url}/nodes/{node_id}"
         # Same rationale as install_node: a stalled registry must not hang callers.
-        response = requests.get(url, timeout=DEFAULT_HTTP_TIMEOUT)
+        response = requests.get(url, headers=USAGE_SOURCE_HEADERS, timeout=DEFAULT_HTTP_TIMEOUT)
         if response.status_code == 200:
             logging.debug(f"RegistryAPI get_node response: {response.json()}")
             return map_node_to_node_class(response.json())
