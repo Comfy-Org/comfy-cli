@@ -1488,6 +1488,8 @@ class Graph:
             # Parsing is intentionally permissive, but a catalog must not lose
             # malformed branches. Check the retained declaration before even
             # skipping links: malformed structural combos can parse as links.
+            if port.is_dynamic_combo and not port.enum_declared:
+                raise ValueError(f"{class_name}.{port.name}: dynamic selector requires an explicit options list")
             spec = port.raw_spec
             if isinstance(spec, list) and len(spec) > 1 and isinstance(spec[1], dict):
                 declared = spec[1].get("options")
