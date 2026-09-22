@@ -1064,6 +1064,31 @@ class TestConnect:
         samples = next(i for i in vae["inputs"] if i["name"] == "samples")
         assert samples["link"] == link_id
 
+    def test_disconnect_removes_link_and_both_endpoint_references(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _base_workflow())
+        env = _run(["disconnect", str(path), "3.latent_image"], capsys)
+        assert env["ok"] is True, env
+        expected = {
+            "op": "disconnect",
+            "link_id": 1,
+            "to_node": 3,
+            "to_slot": 3,
+        }
+        assert expected.items() <= env["data"]["op"].items()
+        on_disk = json.loads(path.read_text())
+        assert on_disk["links"] == []
+        sampler = next(n for n in on_disk["nodes"] if n["id"] == 3)
+        source = next(n for n in on_disk["nodes"] if n["id"] == 7)
+        assert sampler["inputs"][3]["link"] is None
+        assert source["outputs"][0]["links"] == []
+
+    def test_disconnect_rejects_an_empty_input(self, patched_graph, tmp_path, capsys):
+        path = _write(tmp_path, _base_workflow())
+        env = _run(["disconnect", str(path), "3.model"], capsys)
+        assert env["ok"] is False
+        assert "not connected" in env["error"]["message"]
+        assert json.loads(path.read_text()) == _base_workflow()
+
     def test_autogrow_input_grows_a_slot_per_connection(self, patched_graph, tmp_path, capsys):
         """COMFY_AUTOGROW inputs (BatchImagesNode.images) grow images.image0/1… — the
         assembly wiring the CRDT/apply path needs for video."""

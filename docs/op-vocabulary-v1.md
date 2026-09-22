@@ -17,13 +17,14 @@ citation must point at a commit on that branch.
 
 ## 1. Frozen op kinds
 
-Seven kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
+Eight kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
 `ValueError("unknown op ...")` — it never ignores one.
 
 | Kind | Batchable | Standalone command | Summary |
 |------|-----------|--------------------|---------|
 | `add_node` | yes | `comfy workflow add-node` | Mint and insert one node |
 | `connect` | yes | `comfy workflow connect` | Wire one output slot to one input slot |
+| `disconnect` | yes | `comfy workflow disconnect` | Remove the link from one input slot |
 | `set_widget` | yes | `comfy workflow set-widget` | Set one widget value by name |
 | `delete_node` | yes | `comfy workflow delete` | Remove one node and its incident links |
 | `clear` | no | `comfy workflow clear` | Remove every node, link, and group |
@@ -102,6 +103,20 @@ and optionally `grow` (autogrow slot descriptor: `{name, type, widget?, inputcou
   both survive.
 * Invalid: type-mismatched slots are rejected at mint time; a link cannot cross
   a subgraph boundary (rejected with the boundary explanation).
+
+### 1.2.1 `disconnect` (amendment v1.8)
+
+Spec form: `{"op": "disconnect", "to": "$sampler.model"}`. The standalone
+command accepts the same `<node>.<input>` target. Minted fields are `link_id`
+(the occupant observed at mint time), `to_node`, and the resolved numeric
+`to_slot`.
+
+`disconnect` and concrete `connect` claim the same scalar LWW register,
+`("input", to_node, to_slot)`. A winning disconnect removes whichever link
+occupies the slot when it is replayed, including both endpoint references; a
+losing disconnect changes nothing. A missing node or drifted slot is a replay
+no-op. Minting against an existing empty input is rejected so callers cannot
+mistake an already-disconnected or incorrectly addressed slot for a mutation.
 
 ### 1.3 `set_widget`
 

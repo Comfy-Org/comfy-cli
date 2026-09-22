@@ -129,6 +129,33 @@ def _connect(
     }
 
 
+def _disconnect(tag: str, actor: str, base_version: int, link_id: int = 9000) -> dict[str, Any]:
+    return {
+        "op": "disconnect",
+        "op_id": _op_id(tag),
+        "actor": actor,
+        "base_version": base_version,
+        "stamp": [base_version, actor],
+        "link_id": link_id,
+        "to_node": SAMPLER,
+        "to_slot": POSITIVE,
+    }
+
+
+def test_disconnect_and_connect_share_one_lww_register():
+    connect = _connect("dc1", AGENT, 5, 9101, ENCODER)
+    disconnect = _disconnect("dc2", HUMAN, 9)
+    results = []
+    for order in ((connect, disconnect), (disconnect, connect)):
+        wf = copy.deepcopy(_wired_base())
+        for op in order:
+            ops.apply_op(wf, copy.deepcopy(op), None)
+        results.append(wf)
+    assert ops.canonical(results[0]) == ops.canonical(results[1])
+    assert results[0]["links"] == []
+    assert results[0]["nodes"][-1]["inputs"][POSITIVE]["link"] is None
+
+
 def _add_encoder(tag: str, actor: str, base_version: int, node_id: int, text: str) -> dict[str, Any]:
     return {
         "op": "add_node",

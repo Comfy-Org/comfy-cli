@@ -95,6 +95,7 @@ def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str
 FROZEN_OPS: tuple[str, ...] = (
     "add_node",
     "connect",
+    "disconnect",
     "set_widget",
     "delete_node",
     "clear",
@@ -110,7 +111,7 @@ DEFERRED_OPS: tuple[str, ...] = ("insert_workflow",)
 #: Kinds a batch (``apply_specs``) dispatches. ``clear`` and ``reset_doc`` are
 #: standalone-only: they rewrite the whole document, so they never ride inside
 #: an atomic batch.
-BATCHABLE_OPS: tuple[str, ...] = ("add_node", "connect", "set_widget", "delete_node")
+BATCHABLE_OPS: tuple[str, ...] = ("add_node", "connect", "disconnect", "set_widget", "delete_node")
 
 #: Per-kind rendering for :class:`NotBatchableError` — the registered error code
 #: and the standalone command that DOES do the job. One entry per frozen kind
@@ -1072,6 +1073,38 @@ def connect(
         raise _enrich_resolution_error(e, workflow, graph) from e
 
 
+def disconnect(
+    workflow: dict,
+    graph,
+    to_node: Any,
+    to_slot: Any,
+    *,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, dict]:
+    """Remove the link occupying one concrete input slot."""
+    try:
+        boundary = _subgraph_boundary_error(workflow, to_node)
+        if boundary is not None:
+            raise boundary
+        dst = _require(workflow, to_node)
+        in_idx = _resolve_input_slot(dst, graph, to_slot)
+        link_id = (dst.get("inputs") or [])[in_idx].get("link")
+        if link_id is None:
+            raise ValueError(f"input {to_slot!r} on node {to_node} is not connected")
+        op = _new_op(
+            "disconnect",
+            actor,
+            base_version,
+            link_id=link_id,
+            to_node=to_node,
+            to_slot=in_idx,
+        )
+        return apply_op(workflow, op, graph), op
+    except ValueError as e:
+        raise _enrich_resolution_error(e, workflow, graph) from e
+
+
 def _connect_impl(
     workflow: dict,
     graph,
@@ -1808,6 +1841,9 @@ def apply_specs(
                     fn, fs = _split_ref_slot(spec["from"], aliases)
                     tn, ts = _split_ref_slot(spec["to"], aliases)
                     workflow, op = connect(workflow, graph, fn, fs, tn, ts, actor=actor, base_version=base_version)
+                elif kind == "disconnect":
+                    tn, ts = _split_ref_slot(spec["to"], aliases)
+                    workflow, op = disconnect(workflow, graph, tn, ts, actor=actor, base_version=base_version)
                 elif kind == "set_widget":
                     workflow, op = set_widget(
                         workflow,
@@ -1880,6 +1916,8 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
             _apply_set_widget(workflow, op, graph)
         elif kind == "connect":
             _apply_connect(workflow, op, graph)
+        elif kind == "disconnect":
+            _apply_disconnect(workflow, op)
         elif kind == "delete_node":
             _apply_delete_node(workflow, op)
         elif kind == "clear":
@@ -2236,6 +2274,30 @@ def _remove_link(workflow: dict, link_id: Any) -> None:
                 out["links"] = [lid for lid in out["links"] if lid != link_id]
 
 
+def _apply_disconnect(workflow: dict, op: dict) -> None:
+    """Apply a scalar write that leaves a concrete input unoccupied."""
+    dst = _find_by_str(workflow, op["to_node"])
+    if dst is None:
+        return
+    ins = dst.get("inputs")
+    to_idx = op["to_slot"]
+    if (
+        not isinstance(ins, list)
+        or not isinstance(to_idx, int)
+        or isinstance(to_idx, bool)
+        or to_idx < 0
+        or to_idx >= len(ins)
+        or not isinstance(ins[to_idx], dict)
+    ):
+        return
+    if not _lww_gate(workflow, op):
+        return
+    _lww_commit(workflow, op)
+    current = ins[to_idx].get("link")
+    if current is not None:
+        _remove_link(workflow, current)
+
+
 def _apply_delete_node(workflow: dict, op: dict) -> None:
     node_id = str(op["node_id"])  # node identity is compared as a string (amendment v1.2)
     workflow["nodes"] = [n for n in workflow.get("nodes") or [] if str(n.get("id")) != node_id]
@@ -2316,7 +2378,7 @@ def _write_target(op: dict) -> tuple:
         return ("widget", str(op["node_id"]), op["widget"])
     if kind in ("add_node", "delete_node"):
         return ("node", str(op["node_id"]))
-    if kind == "connect":
+    if kind in ("connect", "disconnect"):
         grow = op.get("grow")
         if grow is not None:
             # Two autogrow connects onto the same base share a target (their
