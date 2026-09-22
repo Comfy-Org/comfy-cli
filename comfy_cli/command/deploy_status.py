@@ -314,6 +314,11 @@ def run_status(path: str | None, *, deployment_id: str | None = None, watch: boo
             finally:
                 reporter.close()
             target = replace(target, deployment=watched)
+        elif target.deployment is not None:
+            # The list reply is a summary without `error` or `serving`, so the
+            # one deployment this reports on is read again in full.
+            full = client.get_deployment(required_string(target.deployment, "id"))
+            target = replace(target, deployment=full)
         render_status(renderer, status_result(builder, target))
     except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:
         render_spec_error(renderer, error)

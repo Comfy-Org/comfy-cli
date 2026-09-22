@@ -339,6 +339,9 @@ history.
   opened and read later, when urllib got round to consuming it; both now come
   from a single open handle, and the body is bounded to exactly the declared
   size.
+- `comfy deploy status` shows why a deployment failed and how many workers it
+  has. It read the deployment list, whose rows leave out `error` and `serving`,
+  so both were always empty; it now reads the chosen deployment in full.
 
 ## [1.16.0] - 2026-08-10
 

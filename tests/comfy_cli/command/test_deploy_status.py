@@ -183,6 +183,35 @@ def test_older_release_reports_behind_with_latest_deployable_and_new_url_hint(tm
     assert "new url" in result.stderr.lower()
 
 
+class SummaryListDeploy(RecordingDeploy):
+    """The list endpoint's summary shape: no `error` and no `serving`."""
+
+    def list_all_deployments(self) -> list[JsonObject]:
+        rows = super().list_all_deployments()
+        for row in rows:
+            row.pop("error", None)
+            row.pop("serving", None)
+        return rows
+
+
+def test_status_reads_the_chosen_deployment_in_full(tmp_path, monkeypatch) -> None:
+    # Given a failed deployment whose error and worker counts only the full read carries
+    row = _status_deployment(status="failed")
+    row["error"] = "the model download was refused"
+    row["serving"] = _serving(unhealthy=1)
+    client = SummaryListDeploy([row])
+    _install_clients(monkeypatch, FakeBuilder([_release(5)]), client, [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then
+    data = _json_envelope(result)["data"]
+    assert client.get_calls == ["dep-status"]
+    assert data["deployment"]["error"] == "the model download was refused"
+    assert data["serving"]["workers"]["unhealthy"] == 1
+
+
 def test_null_serving_renders_not_sampled_yet(tmp_path, monkeypatch) -> None:
     # Given
     _install_clients(monkeypatch, FakeBuilder(), RecordingDeploy([_status_deployment()]), [])
