@@ -314,6 +314,53 @@ def cascade_pos(workflow: dict, size: list[float]) -> list[float]:
     return [x, y]
 
 
+def rebase_template(existing_nodes: list, template: dict) -> None:
+    """Translate a whole inserted template so it lands beside the target
+    graph's existing nodes, instead of at whatever absolute coordinates the
+    template happened to be authored/exported with.
+
+    Mutates `template` in place. Every node (and group) that carries a `pos`
+    (or `bounding`) is shifted by the SAME delta, so the template's own
+    internal relative layout is preserved exactly -- this is a uniform
+    translation of the whole block, not a per-node reshuffle, the same
+    convention `cascade_pos` uses for a single new node.
+
+    A no-op when there is nothing to be beside (`existing_nodes` is empty) or
+    nothing positioned to move (no template node carries a `pos`); an
+    unpositioned node is left exactly as it was, matching the empty-graph
+    case in `cascade_pos`.
+    """
+    existing_box = _bbox([n for n in existing_nodes if isinstance(n, dict)])
+    if existing_box is None:
+        return
+
+    positioned = [n for n in template.get("nodes") or [] if isinstance(n, dict) and _pair(n.get("pos")) is not None]
+    if not positioned:
+        return
+
+    template_box = _bbox(positioned)
+    # Mirrors cascade_pos: place the block to the right of the existing
+    # bounding box, top-aligned with it. Both boxes are in the same
+    # occupied-space (title bar included), and that band cancels out of a
+    # delta, so it applies directly to `pos` values below.
+    dx = (existing_box[2] + COL_GAP) - template_box[0]
+    dy = existing_box[1] - template_box[1]
+
+    for node in positioned:
+        x, y = _pair(node["pos"])
+        node["pos"] = [x + dx, y + dy]
+
+    for group in template.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        bounding = group.get("bounding")
+        pair = _pair(bounding[:2]) if isinstance(bounding, (list, tuple)) and len(bounding) >= 2 else None
+        if pair is None:
+            continue
+        gx, gy = pair
+        group["bounding"] = [gx + dx, gy + dy, *bounding[2:]]
+
+
 def assign_positions(workflow: dict, graph, specs: list) -> list:
     """Fill `at` on every add_node spec that lacks one, using the batch's own
     connects for dataflow layering. Returns spec copies; non-add specs and
