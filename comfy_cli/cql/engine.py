@@ -1542,11 +1542,11 @@ class Graph:
                 continue
             if port.type == "LOAD_3D":
                 for name, _value in buttons:
-                    layout.append({"name": name, "identity": [*identity, ["companion", name]]})
+                    layout.append({"name": name, "identity": [*identity, ["companion", name]], "read_only": True})
             layout.extend(entries)
         for name in frontend_extra_widget_names(m):
             if name not in {"upload", "audioUI"}:
-                layout.append({"name": name, "identity": [["field", name]]})
+                layout.append({"name": name, "identity": [["field", name]], "read_only": True})
         return layout
 
     def widget_order_for_node(self, class_name: str, widgets_values: list[Any] | None) -> list[str]:

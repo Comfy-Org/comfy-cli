@@ -15,6 +15,10 @@
       "additionalProperties": false,
       "properties": {
         "name": { "type": "string" },
+        "read_only": {
+          "type": "boolean",
+          "description": "True for serialized frontend-injected slots without editable schema inputs: PREVIEW_3D image and LOAD_3D buttons. Preserve these values during import/projection, but reject writes before mutation. Omitted for schema-backed fields and writable seed companions. Absence or false does not override active-branch, ambiguity, selector-switch or other write checks."
+        },
         "identity": {
           "type": "array",
           "minItems": 1,
