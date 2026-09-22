@@ -561,3 +561,34 @@ class TestSerializedLayout:
         field = r"model\.child" if nested else "model"
         with pytest.raises(ValueError, match=rf"DynNode.*{field}.*unique string"):
             build_catalog(_graph(data))
+
+    @pytest.mark.parametrize("nested", [False, True])
+    @pytest.mark.parametrize("declaration", [None, {}, {"options": None}, {"options": "remote"}, {"options": []}])
+    def test_regression_unavailable_selector_choices_are_not_declared_empty(self, nested, declaration):
+        # https://github.com/Comfy-Org/comfy-cli/pull/914#discussion_r4068275339
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        data = _object_info()
+        selector = ["COMFY_DYNAMICCOMBO_V3"]
+        if declaration is not None:
+            selector.append(declaration)
+        required = data["DynNode"]["input"]["required"]
+        if nested:
+            required["model"][1]["options"][1]["inputs"]["required"] = {"child": selector}
+        else:
+            required["model"] = selector
+
+        if declaration != {"options": []}:
+            field = r"model\.child" if nested else "model"
+            with pytest.raises(ValueError, match=rf"DynNode.*{field}.*explicit options list"):
+                build_catalog(_graph(data))
+        else:
+            layout = build_catalog(_graph(data))["types"]["DynNode"]["widget_layout"]
+            entry = layout[0]["options"][1]["widgets"][0] if nested else layout[0]
+            assert entry == {
+                "name": "model.child" if nested else "model",
+                "identity": [["field", "model"], ["choice", "b"], ["field", "child"]]
+                if nested
+                else [["field", "model"]],
+                "options": [],
+            }
