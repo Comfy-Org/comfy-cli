@@ -473,6 +473,42 @@ def test_a_stop_failed_deployment_is_not_pointed_at_a_scale_that_would_bounce(tm
     assert "comfy deploy stop --deployment" in result.stderr
 
 
+def test_up_warns_that_an_older_release_deployment_is_still_billing(tmp_path, monkeypatch) -> None:
+    """A new release gets a new deployment and the old one keeps billing. Only
+    the JSON `supersedes` array said so; the terminal has to say it too."""
+    # Given a ready deployment on release 3 and the live one on release 5
+    module = _deploy()
+    releases = [
+        {"id": "release-5", "buildId": "build-1", "version": 5, "deployable": True},
+        {"id": "release-3", "buildId": "build-1", "version": 3, "deployable": True},
+    ]
+    client = FakeDeploy([deployment("dep-live"), deployment("dep-old", release_id="release-3", status="ready")])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(releases), client))
+
+    # When
+    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path))])
+
+    # Then the old deployment is named with the command that stops it
+    assert result.exit_code == 0, result.stderr
+    assert "Deployment dep-old (release v3, ready) is still running and billing." in result.stderr
+    assert "comfy deploy stop --deployment dep-old" in result.stderr
+    assert [row["id"] for row in _json_envelope(result)["data"]["supersedes"]] == ["dep-old"]
+
+
+def test_up_with_nothing_else_running_prints_no_billing_warning(tmp_path, monkeypatch) -> None:
+    # Given only the live deployment of this release
+    module = _deploy()
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), FakeDeploy([deployment("dep-live")])))
+
+    # When
+    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path))])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert "still running and billing" not in result.stderr
+    assert _json_envelope(result)["data"]["supersedes"] == []
+
+
 def test_reconcile_rejects_an_immutable_gpu_change() -> None:
     # Given
     module = _deploy()

@@ -73,8 +73,9 @@ running and keeps billing.
 
 The CLI tells you this: `up` returns a `supersedes` array naming every other
 live deployment of this Build still holding compute, with its id, status and
-release version. **Read it and act on it.** An empty array means nothing else is
-running; a non-empty one is a bill the user has not agreed to.
+release version, and prints a "still running and billing" warning for each
+(on stderr under `--json`). **Read it and act on it.** An empty array means
+nothing else is running; a non-empty one is a bill the user has not agreed to.
 
 ```shell
 comfy deploy up <dir>                  # note `supersedes` in the output
