@@ -52,6 +52,23 @@ mapping positional values; the controller itself is never a prompt input.
 A class whose DynamicGroup schema the CLI refuses is left out of ``types`` and
 named in a ``dynamic_group_unsupported`` warning instead.
 
+CONTRACT BOUNDARIES. ``widget_layout`` describes current frontend serialization,
+not historical upload/audio tails or edit permissions. Exact consumption rejects
+extra or missing values; do not discard legacy tails or fill absent slots from
+defaults. Serialized identity alone must not authorize a write to an injected
+PREVIEW_3D slot. Companion ownership comes from the identity path without its
+final companion component: LOAD_3D buttons precede their owner, whereas seed
+companions follow it.
+
+Selector metadata is all-or-error. Invalid or unavailable selector options and
+unsupported nesting reject the entire catalog with class/field context; silently
+omitting a known class would misrepresent it as unknown. The one class the
+catalog does drop is a refused DynamicGroup schema, and that one is named in the
+``dynamic_group_unsupported`` warning above. General graph parsing remains
+permissive. Consumers must independently check selector-key uniqueness
+and reject unknown selections; JSON Schema validation does not enforce uniqueness
+by key. There is no partial-catalog or historical compatibility mode here.
+
 SHAPE (``envelope/1`` ``data`` of ``comfy nodes widget-catalog``)::
 
     {
