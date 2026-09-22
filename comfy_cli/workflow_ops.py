@@ -859,7 +859,7 @@ def _resolve_widget_write(workflow: dict, graph, node_id: Any, widget: str):
 
     node_str = str(node_id)
     if _engine._SUBGRAPH_PATH_SEP in node_str:
-        segments = node_str.split(_engine._SUBGRAPH_PATH_SEP)
+        segments = _engine.split_node_path(workflow, node_str)
     elif ":" in node_str and _find_by_str(workflow, node_str) is None:
         segments = node_str.split(":")
     else:
@@ -890,7 +890,7 @@ def _subgraph_write_target(workflow: dict, node_id: Any, widget: str) -> tuple[l
     node_str = str(node_id)
     # Nested interior form: the interior path is explicit.
     if _engine._SUBGRAPH_PATH_SEP in node_str:
-        return node_str.split(_engine._SUBGRAPH_PATH_SEP), widget
+        return _engine.split_node_path(workflow, node_str), widget
     # Flattened composite form ("57:27"): the id namespace UI→API lowering mints
     # (workflow_to_api composes inner ids as `<outer>:<inner>`), which is what
     # `validate` output and server node_errors carry. Callers copy those ids
@@ -977,7 +977,7 @@ def _subgraph_boundary_error(workflow: dict, node_id: Any) -> ValueError | None:
     if _find_by_str(workflow, node_str) is not None:
         return None  # a literal node really has this id
     if _engine._SUBGRAPH_PATH_SEP in node_str:
-        segments = node_str.split(_engine._SUBGRAPH_PATH_SEP)
+        segments = _engine.split_node_path(workflow, node_str)
     elif ":" in node_str:
         # The flattened namespace UI→API lowering mints (`<outer>:<inner>`),
         # accepted everywhere set-widget accepts the `/` form.
@@ -1548,14 +1548,15 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
     links = [ln for ln in (workflow.get("links") or []) if isinstance(ln, list) and len(ln) >= 5]
     # link_id -> (source_id, source_slot). Node identity is compared as a STRING
     # (amendment v1.2) — ids are legitimately either JSON type.
-    link_map = {ln[0]: (ln[1], ln[2]) for ln in links if isinstance(ln[0], int)}
+    # Link ids are ints, or strings once the doc host's insert_workflow remapped them.
+    link_map = {ln[0]: (ln[1], ln[2]) for ln in links if isinstance(ln[0], (int, str))}
     node_by_sid = {str(n["id"]): n for n in all_nodes}
 
     def _first_input_source(n: dict) -> tuple[Any, Any] | None:
         for inp in n.get("inputs") or []:
             if isinstance(inp, dict):
                 lid = inp.get("link")
-                if isinstance(lid, int) and lid in link_map:
+                if isinstance(lid, (int, str)) and lid in link_map:
                     return link_map[lid]
         return None
 

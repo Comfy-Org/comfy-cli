@@ -363,6 +363,14 @@ def _outer_slot_to_input_idx(outer_node: dict, sg_def: dict) -> dict[int, int]:
     return mapping
 
 
+def _is_link_id(value: Any) -> bool:
+    """Whether ``value`` can be a link id: an int as LiteGraph mints, or a string
+    as the doc host's ``insert_workflow`` remap mints (``insert:<op>:root:link:12``).
+    Anything else (``None``, a list or dict in a malformed save) is not a link and
+    must not reach a dict lookup, where an unhashable value would raise."""
+    return isinstance(value, (int, str)) and not isinstance(value, bool)
+
+
 def _expand_one_subgraph(
     outer_node: dict, sg_def: dict, existing_links: list
 ) -> tuple[list[dict], list, dict[int, list[tuple[Any, int]]], dict[tuple[Any, int], int]]:
@@ -386,13 +394,11 @@ def _expand_one_subgraph(
         if not isinstance(link, dict):
             continue
         old_id = link.get("id")
-        # Only int IDs are usable here: link_id_remap[old_id] / internal_link_map[old_id]
-        # need a hashable key, and the wider pipeline later does ``link_id in
-        # link_id_remap`` lookups keyed by int link IDs from the outer workflow.
-        # Skip the entry entirely on a missing/unhashable/wrong-typed id so a
-        # bad apple can't crash the whole subgraph expansion (which runs
+        # link_id_remap[old_id] / internal_link_map[old_id] need a hashable key
+        # (see _is_link_id). Skip the entry entirely on a missing/unhashable/
+        # wrong-typed id so a bad apple can't crash the whole subgraph expansion (which runs
         # before the per-node try/except wrapper).
-        if not isinstance(old_id, int):
+        if not _is_link_id(old_id):
             continue
         link_id_remap[old_id] = next_id
         next_id += 1
@@ -404,7 +410,7 @@ def _expand_one_subgraph(
             continue
         targets = []
         for lid in in_def.get("linkIds") or []:
-            if not isinstance(lid, int):
+            if not _is_link_id(lid):
                 continue
             link = internal_link_map.get(lid)
             if isinstance(link, dict):
@@ -417,7 +423,7 @@ def _expand_one_subgraph(
         if not isinstance(out_def, dict):
             continue
         for lid in out_def.get("linkIds") or []:
-            if not isinstance(lid, int):
+            if not _is_link_id(lid):
                 continue
             link = internal_link_map.get(lid)
             if isinstance(link, dict):
@@ -443,7 +449,7 @@ def _expand_one_subgraph(
         if target_id in (_SUBGRAPH_INPUT_NODE_ID, _SUBGRAPH_OUTPUT_NODE_ID):
             continue
         old_id = link.get("id")
-        if not isinstance(old_id, int):
+        if not _is_link_id(old_id):
             continue
         new_id = link_id_remap.get(old_id, old_id)
         expanded_links.append(
@@ -465,7 +471,7 @@ def _rewrite_internal_input(
 ) -> dict:
     input_copy = input_info.copy()
     link_id = input_info.get("link")
-    if not isinstance(link_id, int):
+    if not _is_link_id(link_id):
         # Both internal_link_map and link_id_remap are keyed by int IDs; an
         # unhashable (list/dict) link_id would otherwise crash the lookup
         # and abort the whole subgraph expansion.
@@ -630,7 +636,7 @@ def _collect_reroute_sources(nodes: list[dict], link_map: dict[int, dict]) -> di
         # (e.g. ``link: []`` in a malformed saved file). _collect_reroute_sources
         # runs before the per-node try/except wrapper, so a single bad Reroute
         # would otherwise abort the entire conversion.
-        if not isinstance(link_id, int) or link_id not in link_map:
+        if not _is_link_id(link_id) or link_id not in link_map:
             continue
         ld = link_map[link_id]
         out[str(node.get("id"))] = (ld["source_id"], ld["source_slot"])
@@ -661,7 +667,7 @@ def _collect_get_set_mappings(
                 lid = inp.get("link")
                 # See _collect_reroute_sources: unhashable lid would crash
                 # the global pre-pass before any per-node guard kicks in.
-                if not isinstance(lid, int) or lid not in link_map:
+                if not _is_link_id(lid) or lid not in link_map:
                     continue
                 ld = link_map[lid]
                 set_sources[var_name] = (ld["source_id"], ld["source_slot"])
@@ -967,7 +973,7 @@ def _build_api_node(
             continue
         input_name = inp.get("name")
         link_id = inp.get("link")
-        if not input_name or not isinstance(link_id, int) or link_id not in tracers.link_map:
+        if not input_name or not _is_link_id(link_id) or link_id not in tracers.link_map:
             continue
         ld = tracers.link_map[link_id]
         actual_id, actual_slot = ld["source_id"], ld["source_slot"]
