@@ -8,8 +8,11 @@ per file, in the shape each output mode promises.
 
 from __future__ import annotations
 
+import errno
 import io
 import json
+import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +23,7 @@ import requests
 
 from comfy_cli.builder_api import BuilderClient, _CountingReader
 from comfy_cli.caller import Caller
+from comfy_cli.command import build_upload_progress
 from comfy_cli.command.build_push import PushPreparation, PushUpload, already_held_count, upload_assets
 from comfy_cli.command.build_upload_progress import (
     SlidingRate,
@@ -375,22 +379,92 @@ def test_a_reader_that_hangs_up_does_not_fail_the_upload() -> None:
     _upload_one_file(reporter, clock, item, [(3.0, 100)])
 
 
-def test_the_ticker_thread_reports_without_being_driven() -> None:
+def test_the_ticker_thread_reports_without_being_driven(monkeypatch: pytest.MonkeyPatch) -> None:
     """The byte callback goes quiet when a socket stalls, so the numbers have to
     come from somewhere that does not: a started ticker samples on its own."""
-    # Given
+    # Given a ticker that fires often and reports every time it does
+    monkeypatch.setattr(build_upload_progress, "_TICK_SECONDS", 0.01)
+    monkeypatch.setattr(build_upload_progress, "_EVENT_SECONDS", 0.0)
     stdout = io.StringIO()
     renderer = _renderer(OutputMode.NDJSON)
     renderer.machine_stream = stdout
     reporter = UploadProgressReporter(renderer)
     item = Item("model", "m.safetensors", 100)
 
-    # When
+    # When: the bytes stop moving and only the ticker is left to report
     with reporter.uploading(item, 1, 1) as progress:
         progress(100)
+        deadline = time.monotonic() + 5.0
+        while len(_lines(stdout.getvalue())) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
 
-    # Then: the start and the completion, and the thread is gone
-    assert [event["type"] for event in _lines(stdout.getvalue())] == ["upload_progress", "upload_complete"]
+    # Then: the ticker reported while nothing drove it, the completion came last,
+    # and the thread is gone
+    types = [event["type"] for event in _lines(stdout.getvalue())]
+    assert types.count("upload_progress") >= 2
+    assert types[-1] == "upload_complete"
+    assert not [thread for thread in threading.enumerate() if thread.name == "comfy-upload-progress"]
+
+
+class _FakeConsole:
+    """A pretty renderer's console for a terminal, without a terminal."""
+
+    is_terminal = True
+
+
+class _LiveRenderer:
+    def is_pretty(self) -> bool:
+        return True
+
+    def console(self) -> _FakeConsole:
+        return _FakeConsole()
+
+    def info(self, message: str, *, hint: str | None = None) -> None:
+        raise AssertionError("the live surface does not print lines")
+
+
+class _DisplayThatRefusesTheTask:
+    """Rich's Progress with a stream that fails on the first redraw after start.
+
+    `add_task` redraws the display, so it is the second place the stream can
+    refuse a write; a boundary that only wraps `start` lets that one escape."""
+
+    stopped = 0
+
+    def __init__(self, *columns: object, **options: object) -> None:
+        pass
+
+    def start(self) -> None:
+        pass
+
+    def add_task(self, description: str, **fields: object) -> int:
+        raise OSError(errno.EIO, "broken terminal")
+
+    def stop(self) -> None:
+        type(self).stopped += 1
+
+
+def test_a_display_refused_at_the_first_redraw_mutes_the_reporter_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given a terminal whose stream refuses the redraw that adding the task makes
+    import rich.progress
+
+    monkeypatch.setattr(rich.progress, "Progress", _DisplayThatRefusesTheTask)
+    _DisplayThatRefusesTheTask.stopped = 0
+    clock = FakeClock()
+    reporter = UploadProgressReporter(_LiveRenderer(), clock=clock, ticker=False)
+    item = Item("model", "m.safetensors", 100)
+
+    # When: nothing raises, before the upload or during it
+    with reporter.uploading(item, 1, 1) as progress:
+        progress(100)
+        reporter.tick()
+
+    # Then: the half-opened display was closed and nothing of it was kept
+    assert reporter._muted is True
+    assert reporter._live is None and reporter._live_task is None
+    assert _DisplayThatRefusesTheTask.stopped == 1
 
 
 # ----- lines for a person whose output is piped -----

@@ -305,18 +305,26 @@ class UploadProgressReporter:
             console=self._renderer.console(),
             transient=True,
         )
+        # Adding the task redraws the display, so it can refuse the stream just
+        # as starting it can; both stay inside one boundary and nothing is
+        # published until both have landed.
         try:
             live.start()
+            task = live.add_task(
+                sanitize_markup(f"{transfer.index}/{transfer.of} {item.filename}"),
+                total=item.size_bytes,
+                rate="",
+                left="",
+            )
         except OSError:
             self._muted = True
+            try:
+                live.stop()
+            except OSError:
+                pass
             return
         self._live = live
-        self._live_task = live.add_task(
-            sanitize_markup(f"{transfer.index}/{transfer.of} {item.filename}"),
-            total=item.size_bytes,
-            rate="",
-            left="",
-        )
+        self._live_task = task
 
     def _update_live(self, numbers: dict[str, Any]) -> None:
         if self._live is None:
