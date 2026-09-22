@@ -495,6 +495,27 @@ def test_up_warns_that_an_older_release_deployment_is_still_billing(tmp_path, mo
     assert [row["id"] for row in _json_envelope(result)["data"]["supersedes"]] == ["dep-old"]
 
 
+def test_a_person_at_the_terminal_sees_the_billing_warning(tmp_path, monkeypatch) -> None:
+    # Given a ready deployment on release 3 and the live one on release 5
+    module = _deploy()
+    releases = [
+        {"id": "release-5", "buildId": "build-1", "version": 5, "deployable": True},
+        {"id": "release-3", "buildId": "build-1", "version": 3, "deployable": True},
+    ]
+    client = FakeDeploy([deployment("dep-live"), deployment("dep-old", release_id="release-3", status="ready")])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(releases), client))
+
+    # When run with human output
+    result = CliRunner().invoke(app, ["deploy", "up", str(write_spec(tmp_path))], env={"COMFY_OUTPUT": "pretty"})
+
+    # Then the warning is on stdout, after the deployment's own line
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout.index("Deployment dep-live: ready") < result.stdout.index(
+        "Deployment dep-old (release v3, ready) is still running and billing."
+    )
+    assert "comfy deploy stop --deployment dep-old" in result.stdout
+
+
 def test_up_with_nothing_else_running_prints_no_billing_warning(tmp_path, monkeypatch) -> None:
     # Given only the live deployment of this release
     module = _deploy()
