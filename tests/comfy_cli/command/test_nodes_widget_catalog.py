@@ -381,3 +381,130 @@ class TestSchemaContract:
         )
         jsonschema.Draft202012Validator.check_schema(schema)
         jsonschema.Draft202012Validator(schema).validate(_run(["widget-catalog"], capsys)["data"])
+
+
+class TestSerializedLayout:
+    def test_magnific_carries_every_branch_and_suffix(self):
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        fixture = Path(__file__).parents[1] / "fixtures" / "magnific_skin_enhancer_object_info.json"
+        data = json.loads(fixture.read_text(encoding="utf-8"))
+        node = data["MagnificImageSkinEnhancerNode"]
+        node["input"]["required"]["suffix"] = ["INT", {"default": 7}]
+        node["input_order"]["required"].append("suffix")
+        entry = build_catalog(_graph(data))["types"]["MagnificImageSkinEnhancerNode"]
+
+        assert entry["widget_layout"] == [
+            {"name": "sharpen", "identity": [["field", "sharpen"]]},
+            {"name": "smart_grain", "identity": [["field", "smart_grain"]]},
+            {
+                "name": "mode",
+                "identity": [["field", "mode"]],
+                "options": [
+                    {"key": "creative", "widgets": []},
+                    {
+                        "key": "faithful",
+                        "widgets": [
+                            {
+                                "name": "mode.skin_detail",
+                                "identity": [["field", "mode"], ["choice", "faithful"], ["field", "skin_detail"]],
+                            }
+                        ],
+                    },
+                    {
+                        "key": "flexible",
+                        "widgets": [
+                            {
+                                "name": "mode.optimized_for",
+                                "identity": [["field", "mode"], ["choice", "flexible"], ["field", "optimized_for"]],
+                            }
+                        ],
+                    },
+                ],
+            },
+            {"name": "suffix", "identity": [["field", "suffix"]]},
+        ]
+
+    def test_nested_branch_names_and_seed_companions_have_distinct_identity(self):
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        data = _object_info()
+        options = data["DynNode"]["input"]["required"]["model"][1]["options"]
+        options[0]["inputs"]["required"] = {
+            "detail": [
+                "COMFY_DYNAMICCOMBO_V3",
+                {
+                    "options": [
+                        {
+                            "key": "fine",
+                            "inputs": {
+                                "required": {
+                                    "seed": ["INT", {"default": 11}],
+                                    "noise_seed": ["INT", {"default": 29}],
+                                    "resolution": ["INT", {"default": 7}],
+                                }
+                            },
+                        }
+                    ]
+                },
+            ],
+        }
+        options[1]["inputs"]["required"] = {"detail": ["STRING", {"default": "other"}]}
+        layout = build_catalog(_graph(data))["types"]["DynNode"]["widget_layout"]
+        branch_a, branch_b = layout[0]["options"]
+        detail = branch_a["widgets"][0]
+        assert detail["name"] == branch_b["widgets"][0]["name"] == "model.detail"
+        assert detail["identity"] == [["field", "model"], ["choice", "a"], ["field", "detail"]]
+        assert branch_b["widgets"][0]["identity"] == [["field", "model"], ["choice", "b"], ["field", "detail"]]
+        widgets = detail["options"][0]["widgets"]
+        assert [w["name"] for w in widgets] == [
+            "model.detail.seed",
+            "control_after_generate",
+            "model.detail.noise_seed",
+            "control_after_generate",
+            "model.detail.resolution",
+        ]
+        assert [w["identity"] for w in widgets[1:4:2]] == [
+            [
+                ["field", "model"],
+                ["choice", "a"],
+                ["field", "detail"],
+                ["choice", "fine"],
+                ["field", "seed"],
+                ["companion", "control_after_generate"],
+            ],
+            [
+                ["field", "model"],
+                ["choice", "a"],
+                ["field", "detail"],
+                ["choice", "fine"],
+                ["field", "noise_seed"],
+                ["companion", "control_after_generate"],
+            ],
+        ]
+
+    @pytest.mark.parametrize(
+        "class_name,inputs,expected",
+        [
+            ("LoadImage", {"image": [["x.png"], {"image_upload": True}]}, ["image"]),
+            ("LoadAudio", {"audio": [["x.wav"], {"audio_upload": True}]}, ["audio"]),
+            ("SaveGLB", {"filename_prefix": ["STRING"]}, ["filename_prefix", "image"]),
+        ],
+    )
+    def test_only_serialized_frontend_slots_participate(self, class_name, inputs, expected):
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        data = {class_name: {"input": {"required": inputs}, "output": []}}
+        layout = build_catalog(_graph(data))["types"][class_name]["widget_layout"]
+        assert [w["name"] for w in layout] == expected
+
+    @pytest.mark.parametrize("keys", [[1, True], ["a", "a"]])
+    def test_unsupported_selector_keys_fail_with_class_and_field(self, keys):
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        data = _object_info()
+        options = data["DynNode"]["input"]["required"]["model"][1]["options"]
+        for option, key in zip(options, keys):
+            option["key"] = key
+        with pytest.raises(ValueError, match=r"DynNode.*model.*unique string"):
+            build_catalog(_graph(data))
