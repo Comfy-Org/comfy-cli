@@ -137,3 +137,57 @@ def test_selector_conflicts_with_owned_sub_widget_but_not_trailing_seed(graph):
     seed_selector = workflow_ops.apply_op(workflow_ops.apply_op(copy.deepcopy(base), seed, graph), selector, graph)
     assert workflow_ops.canonical(selector_seed) == workflow_ops.canonical(seed_selector)
     assert _seedance_values(selector_seed)[-3:] == [42, "fixed", False]
+
+
+@pytest.mark.parametrize("outer_type", ["COMFY_DYNAMICCOMBO_V3", "COMBO"])
+@pytest.mark.parametrize("inner_type", ["COMFY_DYNAMICCOMBO_V3", "COMBO"])
+def test_structural_selector_switch_preserves_nested_roster_and_suffix(outer_type, inner_type):
+    # Regression: reading structural selectors must agree with rebuilding their
+    # values on write. https://github.com/Comfy-Org/comfy-cli/pull/914
+    quality = [
+        inner_type,
+        {
+            "options": [
+                {"key": "fine", "inputs": {"required": {"detail": ["INT", {"default": 17}]}}},
+                {"key": "plain", "inputs": {"required": {}}},
+            ]
+        },
+    ]
+    required = {
+        "before": ["INT", {"default": 0}],
+        "mode": [
+            outer_type,
+            {
+                "options": [
+                    {"key": "simple", "inputs": {"required": {"score": ["INT", {"default": 11}]}}},
+                    {"key": "expanded", "inputs": {"required": {"quality": quality}}},
+                ]
+            },
+        ],
+        "after": ["INT", {"default": 0}],
+    }
+    graph = Graph.from_object_info(
+        {"SelectorNode": {"input": {"required": required}, "input_order": {"required": list(required)}, "output": []}}
+    )
+    base = {
+        "nodes": [{"id": 1, "type": "SelectorNode", "widgets_values": [91, "simple", 23, 42]}],
+        "links": [],
+    }
+
+    expanded, op = workflow_ops.set_widget(copy.deepcopy(base), graph, 1, "mode", "expanded")
+    assert expanded["nodes"][0]["widgets_values"] == [91, "expanded", "fine", 17, 42]
+    assert [warning["code"] for warning in op["warnings"]] == ["dynamic_combo_roster_rebuilt"]
+    replayed = workflow_ops.apply_op(copy.deepcopy(base), op, graph)
+    assert workflow_ops.canonical(replayed) == workflow_ops.canonical(expanded)
+
+    edited, _ = workflow_ops.set_widget(expanded, graph, 1, "mode.quality.detail", 63, base_version=1)
+    unchanged, _ = workflow_ops.set_widget(edited, graph, 1, "mode", "expanded", base_version=2)
+    assert unchanged["nodes"][0]["widgets_values"] == [91, "expanded", "fine", 63, 42]
+
+    plain, _ = workflow_ops.set_widget(unchanged, graph, 1, "mode.quality", "plain", base_version=3)
+    assert plain["nodes"][0]["widgets_values"] == [91, "expanded", "plain", 42]
+    fine, _ = workflow_ops.set_widget(plain, graph, 1, "mode.quality", "fine", base_version=4)
+    assert fine["nodes"][0]["widgets_values"] == [91, "expanded", "fine", 17, 42]
+
+    simple, _ = workflow_ops.set_widget(fine, graph, 1, "mode", "simple", base_version=5)
+    assert simple["nodes"][0]["widgets_values"] == [91, "simple", 11, 42]
