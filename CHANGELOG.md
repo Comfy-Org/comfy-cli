@@ -17,6 +17,12 @@ history.
 
 ### Added
 
+- `comfy nodes widget-catalog` includes a recursive `widget_layout` with every
+  dynamic selector branch and branch-qualified field identities. The catalog pin
+  now covers non-default branches too. Injected upload/audio controls are excluded
+  from serialized slots; seed companions and 3D image state remain included.
+  Dynamic selector keys must be unique strings. Consumers must adopt the new
+  layout before decoding non-default modes; the existing flat order is unchanged.
 - `comfy build push` prints every warning a save returns, and `--release` cuts no
   release while one says a deployment could not download a model link
   (`build_release_held`); `--release-despite-warnings` cuts anyway.

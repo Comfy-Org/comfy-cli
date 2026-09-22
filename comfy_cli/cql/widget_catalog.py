@@ -19,10 +19,9 @@ against, including the two shapes a naive projection gets wrong:
 * Frontend-injected inputs — ``upload`` (the upload button on every media
   loader), ``audioUI`` (the audio player), ``image`` (the ``PREVIEW_3D``
   viewport on ``SaveGLB``/``Preview3D``). Extensions add them to the node
-  definition after ``object_info``; they serialize AFTER every declared
-  widget, optional ones included, and are ``serialize: false`` on current
-  frontends (older ones wrote ``"image"``/``null``). The order names them so
-  a workflow saved by either frontend decomposes, and a fresh node omits them.
+  definition after ``object_info``. Upload/audio controls do not serialize;
+  PREVIEW_3D's image does. ``widget_layout`` includes only serialized slots.
+  The existing ``widget_order`` still names all injected controls.
 * DOM-widget inputs the schema declares under an uppercase custom type
   (``Load3D.image`` is ``LOAD_3D``, ``LoadAudioUI.audioUI`` is ``AUDIO_UI``)
   and inputs whose ``widgetType`` option overrides a link-shaped socket type
@@ -33,9 +32,29 @@ a second implementation of widget order is a second answer, and the two would
 diverge silently — as a wrong index, i.e. a widget value written into the wrong
 field of the user's canvas.
 
-WHAT IT IS NOT. It is not ``object_info``. It carries no types, no defaults, no
-enum choices, no descriptions — only what a name↔index converter needs. That
-keeps it small enough to hand to a sidecar on every call.
+WHAT IT IS NOT. It is not ``object_info``. It carries no types, defaults,
+ordinary enum choices or descriptions. ``widget_layout`` retains dynamic
+selector keys and each branch's serialized fields, with structural identities
+that distinguish branch-reused names and owner-specific seed companions.
+``widget_order`` is only the first-choice layout, not a decoder for other modes.
+
+CONTRACT BOUNDARIES. ``widget_layout`` describes current frontend serialization,
+not historical upload/audio tails. Exact consumption rejects extra or missing
+values; do not discard legacy tails or fill absent slots from defaults. Injected
+PREVIEW_3D image and LOAD_3D buttons carry ``read_only: true``: preserve their
+values during import/projection, but refuse writes before mutation. The marker
+is omitted for schema-backed fields and writable seed companions. Its absence
+does not bypass active-branch, ambiguity, selector-switch or other write checks;
+serialized identity alone is not authorization. Companion ownership comes from
+the identity path without its final companion component: LOAD_3D buttons precede
+their owner, whereas seed companions follow it.
+
+Catalog generation is all-or-error. Invalid or unavailable selector options and
+unsupported nesting reject the entire catalog with class/field context; silently
+omitting a known class would misrepresent it as unknown. General graph parsing
+remains permissive. Consumers must independently check selector-key uniqueness
+and reject unknown selections; JSON Schema validation does not enforce uniqueness
+by key. There is no partial-catalog or historical compatibility mode here.
 
 SHAPE (``envelope/1`` ``data`` of ``comfy nodes widget-catalog``)::
 
@@ -43,13 +62,18 @@ SHAPE (``envelope/1`` ``data`` of ``comfy nodes widget-catalog``)::
       "catalog_version": "sha256:<64 hex>",
       "class_count": 1234,
       "types": {
-        "KSampler": {"widget_order": ["seed", "control_after_generate", ...]},
+        "CLIPTextEncode": {
+          "widget_order": ["text"],
+          "widget_layout": [{"name": "text", "identity": [["field", "text"]]}]
+        },
         "BatchImagesNode": {
           "widget_order": [],
+          "widget_layout": [],
           "autogrow_templates": {"images": {"prefix": "image"}}
         },
         "ImageBatchMulti": {
           "widget_order": ["inputcount"],
+          "widget_layout": [{"name": "inputcount", "identity": [["field", "inputcount"]]}],
           "inputcount": {"widget": "inputcount", "elements": ["image"]}
         }
       }
@@ -58,9 +82,9 @@ SHAPE (``envelope/1`` ``data`` of ``comfy nodes widget-catalog``)::
 ``catalog_version`` is the SHA-256 of the canonical JSON encoding of ``types``
 alone (sorted keys, no whitespace, UTF-8), prefixed ``sha256:``. It excludes
 itself and ``class_count`` so a consumer that stored only the catalog can
-recompute and verify the pin it was given. Identical ``object_info`` in ⇒
-identical version out, regardless of key iteration order; any change to any
-class's widget order or grow family moves it.
+recompute and verify the pin it was given. Equivalent object-key ordering
+produces the same pin when input order is unchanged. All field/choice arrays
+retain their semantic order; even an inactive branch's layout changes the pin.
 """
 
 from __future__ import annotations
@@ -76,7 +100,7 @@ def build_types(graph) -> dict[str, dict[str, Any]]:
     """The ``types`` map: one entry per class the graph knows, in class order.
 
     Every class gets an entry, including widget-less ones (``VAEDecode`` →
-    ``{"widget_order": []}``). A missing entry and an empty order are different
+    ``{"widget_order": [], "widget_layout": []}``). A missing entry and an empty order are different
     statements — "I have never heard of this class" vs. "this class has no
     widgets" — and a converter must be able to tell them apart.
     """
@@ -87,7 +111,10 @@ def build_types(graph) -> dict[str, dict[str, Any]]:
 
     types: dict[str, dict[str, Any]] = {}
     for m in graph.all_nodes():
-        entry: dict[str, Any] = {"widget_order": list(graph.widget_order_default(m.id))}
+        entry: dict[str, Any] = {
+            "widget_order": list(graph.widget_order_default(m.id)),
+            "widget_layout": graph.widget_layout(m.id),
+        }
 
         # V3 autogrow (COMFY_AUTOGROW_V3): one declared input, one wire slot per
         # connection (`images` → `images.image0`, `images.image1`, …). The

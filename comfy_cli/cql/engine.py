@@ -1472,6 +1472,83 @@ class Graph:
             return []
         return [e.name for e in _expand_widget_entries(m, [], first_key=True)]
 
+    def widget_layout(self, class_name: str) -> list[dict[str, Any]]:
+        """Serialized slots, retaining every dynamic choice instead of flattening.
+
+        A field's identity includes its ancestor choices; dotted names alone
+        cannot distinguish fields reused by mutually exclusive branches. Seed
+        companions extend their owner's identity. Only serialized injected
+        controls participate: upload buttons and audio players consume no value.
+        """
+        m = self._nodes.get(class_name)
+        if m is None:
+            return []
+
+        def expand(port: Port, identity: list[list[str]], depth: int) -> list[dict[str, Any]]:
+            # Parsing is intentionally permissive, but a catalog must not lose
+            # malformed branches. Check the retained declaration before even
+            # skipping links: malformed structural combos can parse as links.
+            if port.is_dynamic_combo and not port.enum_declared:
+                raise ValueError(f"{class_name}.{port.name}: dynamic selector requires an explicit options list")
+            spec = port.raw_spec
+            if isinstance(spec, list) and len(spec) > 1 and isinstance(spec[1], dict):
+                declared = spec[1].get("options")
+                if isinstance(declared, list) and (
+                    port.is_dynamic_combo or any(isinstance(option, dict) for option in declared)
+                ):
+                    if any(
+                        not isinstance(option, dict) or not isinstance(option.get("key"), str) for option in declared
+                    ):
+                        raise ValueError(f"{class_name}.{port.name}: dynamic selector keys must be unique strings")
+            if port.is_link:
+                return []
+            entry: dict[str, Any] = {"name": port.name, "identity": identity}
+            entries = [entry]
+            if port.is_dynamic_combo or port.dynamic_options:
+                if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
+                    raise ValueError(
+                        f"{class_name}.{port.name}: dynamic selector nesting exceeds {_MAX_DYNAMIC_COMBO_DEPTH}"
+                    )
+                keys = [option["key"] for option in port.dynamic_options]
+                if any(not isinstance(key, str) for key in keys) or len(set(keys)) != len(keys):
+                    raise ValueError(f"{class_name}.{port.name}: dynamic selector keys must be unique strings")
+                options = []
+                for option in port.dynamic_options:
+                    key = option["key"]
+                    children = []
+                    for sub in _dynamic_combo_sub_ports([option], key, port.name):
+                        # Strip only this ancestor prefix, not dots belonging
+                        # to the declared child name itself.
+                        local_name = sub.name[len(port.name) + 1 :]
+                        child_identity = [*identity, ["choice", key], ["field", local_name]]
+                        children.extend(expand(sub, child_identity, depth + 1))
+                    options.append({"key": key, "widgets": children})
+                entry["options"] = options
+            elif _has_control_after_generate_slot(port):
+                entries.append(
+                    {
+                        "name": "control_after_generate",
+                        "identity": [*identity, ["companion", "control_after_generate"]],
+                    }
+                )
+            return entries
+
+        layout: list[dict[str, Any]] = []
+        buttons = load_3d_button_slots(m)
+        for port in m.inputs:
+            identity = [["field", port.name]]
+            entries = expand(port, identity, 0)
+            if not entries:
+                continue
+            if port.type == "LOAD_3D":
+                for name, _value in buttons:
+                    layout.append({"name": name, "identity": [*identity, ["companion", name]], "read_only": True})
+            layout.extend(entries)
+        for name in frontend_extra_widget_names(m):
+            if name not in {"upload", "audioUI"}:
+                layout.append({"name": name, "identity": [["field", name]], "read_only": True})
+        return layout
+
     def widget_order_for_node(self, class_name: str, widgets_values: list[Any] | None) -> list[str]:
         """Value-aware widget order: like ``widget_order`` but at each dynamic
         combo the current selector (read from its positional slot) picks an
@@ -3320,7 +3397,7 @@ def _expand_widget_entries(
 
     def emit(name: str, port: Port, owner: str | None, depth: int) -> None:
         entries.append(_WidgetEntry(name=name, port=port, owner=owner))
-        if port.dynamic_options and _is_dynamic_combo_type(port.type):
+        if port.is_dynamic_combo or port.dynamic_options:
             if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
                 return
             idx = len(entries) - 1
@@ -3684,7 +3761,7 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         # declared port.
         port = next((p for p in m.inputs if p.name == input_name), None)
 
-    if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options:
+    if port is not None and port.dynamic_options:
         return _write_dynamic_combo_selector(node, port, input_name, widget_idx, value, entries, extend=extend)
 
     if widget_idx >= len(widgets):
@@ -3807,7 +3884,7 @@ def _dynamic_combo_default_values(
             default = sub.enum_values[0]
         values.append(default)
         names.append(sub.name)
-        if _is_dynamic_combo_type(sub.type) and sub.dynamic_options:
+        if sub.dynamic_options:
             if depth < _MAX_DYNAMIC_COMBO_DEPTH:
                 nested_values, nested_names = _dynamic_combo_default_values(
                     sub.dynamic_options, default, sub.name, depth + 1

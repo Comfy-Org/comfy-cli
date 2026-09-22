@@ -265,6 +265,29 @@ class TestGrowFamilies:
 
 
 class TestCatalogVersion:
+    @pytest.mark.parametrize("mode", ["creative", "faithful", "flexible"])
+    def test_regression_magnific_branch_widget_changes_catalog_pin(self, mode, tmp_path, capsys):
+        """Non-default modes must not disappear from the pinned catalog.
+
+        Fixture captured from /object_info/MagnificImageSkinEnhancerNode at
+        ComfyUI b1693ecba9f5b65f8c80ab36b195ab963ec92413 on 2026-09-22.
+        Regression: https://github.com/Comfy-Org/comfy-cli/pull/914
+        Creative is the positive control: the existing first-choice projection
+        sees its added widget, but misses the same change in the other modes.
+        """
+        fixture = Path(__file__).parents[1] / "fixtures" / "magnific_skin_enhancer_object_info.json"
+        before = _run(["widget-catalog", "--input", str(fixture)], capsys)["data"]
+        changed = json.loads(fixture.read_text(encoding="utf-8"))
+        options = changed["MagnificImageSkinEnhancerNode"]["input"]["required"]["mode"][1]["options"]
+        branch = next(option for option in options if option["key"] == mode)
+        branch["inputs"]["required"]["extra_detail"] = ["INT", {"default": 17}]
+        dump = tmp_path / "changed_object_info.json"
+        dump.write_text(json.dumps(changed), encoding="utf-8")
+        after = _run(["widget-catalog", "--input", str(dump)], capsys)["data"]
+
+        assert after["catalog_version"] != before["catalog_version"], mode
+        assert after["types"] != before["types"], mode
+
     def test_stable_across_runs_for_identical_input(self, patched_loader, capsys):
         first = _run(["widget-catalog"], capsys)["data"]
         second = _run(["widget-catalog"], capsys)["data"]
@@ -358,3 +381,328 @@ class TestSchemaContract:
         )
         jsonschema.Draft202012Validator.check_schema(schema)
         jsonschema.Draft202012Validator(schema).validate(_run(["widget-catalog"], capsys)["data"])
+
+
+class TestSerializedLayout:
+    @pytest.mark.parametrize("width", [16, 64])
+    def test_regression_layout_does_not_rescan_sibling_options(self, width):
+        # https://github.com/Comfy-Org/comfy-cli/pull/914#discussion_r4068275342
+        # Count option-key reads, not elapsed time, so shared CI load cannot
+        # turn the quadratic traversal regression into a flaky timing test.
+        key_reads = 0
+
+        class CountedOption(dict):
+            def get(self, key, default=None):
+                nonlocal key_reads
+                if key == "key":
+                    key_reads += 1
+                return super().get(key, default)
+
+        options = [CountedOption(key=f"branch-{i}", inputs={"required": {f"value-{i}": ["INT"]}}) for i in range(width)]
+        graph = _graph(
+            {
+                "WideSelector": {
+                    "input": {"required": {"mode": ["COMFY_DYNAMICCOMBO_V3", {"options": options}]}},
+                    "output": [],
+                }
+            }
+        )
+        key_reads = 0
+        layout = graph.widget_layout("WideSelector")
+
+        # A skipped or reordered branch must not count as a faster traversal.
+        assert layout == [
+            {
+                "name": "mode",
+                "identity": [["field", "mode"]],
+                "options": [
+                    {
+                        "key": f"branch-{i}",
+                        "widgets": [
+                            {
+                                "name": f"mode.value-{i}",
+                                "identity": [["field", "mode"], ["choice", f"branch-{i}"], ["field", f"value-{i}"]],
+                            }
+                        ],
+                    }
+                    for i in range(width)
+                ],
+            }
+        ]
+        # Allow multiple linear validation passes, but not one sibling scan
+        # for every emitted branch (136 and 2080 probes at these widths).
+        assert key_reads <= 4 * width
+
+    @pytest.mark.parametrize("nested", [False, True])
+    @pytest.mark.parametrize("selected", [False, True])
+    def test_regression_structural_combo_orders_include_branch_slots(self, nested, selected):
+        # https://github.com/Comfy-Org/comfy-cli/pull/914#discussion_r4068275324
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        data = _object_info()
+        required = data["DynNode"]["input"]["required"]
+        selector = required["model"]
+        selector[0] = "COMBO"
+        selector[1]["options"][1]["inputs"]["required"] = {
+            "width": ["INT", {"default": 73}],
+            "height": ["INT", {"default": 91}],
+        }
+        if nested:
+            required["model"] = [
+                "COMFY_DYNAMICCOMBO_V3",
+                {"options": [{"key": "outer", "inputs": {"required": {"child": selector}}}]},
+            ]
+        graph = _graph(data)
+        prefix = "model.child" if nested else "model"
+        names = ["model", "model.child"] if nested else ["model"]
+        names += [f"{prefix}.width", f"{prefix}.height"] if selected else [f"{prefix}.resolution"]
+        names += ["seed", "control_after_generate"]
+
+        # The value-independent API intentionally lists no branch fields.
+        assert graph.widget_order("DynNode") == ["model", "seed", "control_after_generate"]
+        if selected:
+            values = (["outer"] if nested else []) + ["b", 73, 91, 37, "fixed"]
+            assert graph.widget_order_for_node("DynNode", values) == names
+        else:
+            catalog = build_catalog(graph)["types"]["DynNode"]
+            assert catalog["widget_order"] == names
+            assert graph.widget_order_default("DynNode") == names
+
+    def test_magnific_carries_every_branch_and_suffix(self):
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        fixture = Path(__file__).parents[1] / "fixtures" / "magnific_skin_enhancer_object_info.json"
+        data = json.loads(fixture.read_text(encoding="utf-8"))
+        node = data["MagnificImageSkinEnhancerNode"]
+        node["input"]["required"]["suffix"] = ["INT", {"default": 7}]
+        node["input_order"]["required"].append("suffix")
+        entry = build_catalog(_graph(data))["types"]["MagnificImageSkinEnhancerNode"]
+
+        assert entry["widget_layout"] == [
+            {"name": "sharpen", "identity": [["field", "sharpen"]]},
+            {"name": "smart_grain", "identity": [["field", "smart_grain"]]},
+            {
+                "name": "mode",
+                "identity": [["field", "mode"]],
+                "options": [
+                    {"key": "creative", "widgets": []},
+                    {
+                        "key": "faithful",
+                        "widgets": [
+                            {
+                                "name": "mode.skin_detail",
+                                "identity": [["field", "mode"], ["choice", "faithful"], ["field", "skin_detail"]],
+                            }
+                        ],
+                    },
+                    {
+                        "key": "flexible",
+                        "widgets": [
+                            {
+                                "name": "mode.optimized_for",
+                                "identity": [["field", "mode"], ["choice", "flexible"], ["field", "optimized_for"]],
+                            }
+                        ],
+                    },
+                ],
+            },
+            {"name": "suffix", "identity": [["field", "suffix"]]},
+        ]
+
+    def test_nested_branch_names_and_seed_companions_have_distinct_identity(self):
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        data = _object_info()
+        options = data["DynNode"]["input"]["required"]["model"][1]["options"]
+        options[0]["inputs"]["required"] = {
+            "detail": [
+                "COMFY_DYNAMICCOMBO_V3",
+                {
+                    "options": [
+                        {
+                            "key": "fine",
+                            "inputs": {
+                                "required": {
+                                    "seed": ["INT", {"default": 11}],
+                                    "noise_seed": ["INT", {"default": 29}],
+                                    "resolution": ["INT", {"default": 7}],
+                                }
+                            },
+                        }
+                    ]
+                },
+            ],
+        }
+        options[1]["inputs"]["required"] = {"detail": ["STRING", {"default": "other"}]}
+        layout = build_catalog(_graph(data))["types"]["DynNode"]["widget_layout"]
+        branch_a, branch_b = layout[0]["options"]
+        detail = branch_a["widgets"][0]
+        assert detail["name"] == branch_b["widgets"][0]["name"] == "model.detail"
+        assert detail["identity"] == [["field", "model"], ["choice", "a"], ["field", "detail"]]
+        assert branch_b["widgets"][0]["identity"] == [["field", "model"], ["choice", "b"], ["field", "detail"]]
+        widgets = detail["options"][0]["widgets"]
+        assert [w["name"] for w in widgets] == [
+            "model.detail.seed",
+            "control_after_generate",
+            "model.detail.noise_seed",
+            "control_after_generate",
+            "model.detail.resolution",
+        ]
+        assert [w["identity"] for w in widgets[1:4:2]] == [
+            [
+                ["field", "model"],
+                ["choice", "a"],
+                ["field", "detail"],
+                ["choice", "fine"],
+                ["field", "seed"],
+                ["companion", "control_after_generate"],
+            ],
+            [
+                ["field", "model"],
+                ["choice", "a"],
+                ["field", "detail"],
+                ["choice", "fine"],
+                ["field", "noise_seed"],
+                ["companion", "control_after_generate"],
+            ],
+        ]
+
+    @pytest.mark.parametrize(
+        "class_name,inputs,expected",
+        [
+            ("LoadImage", {"image": [["x.png"], {"image_upload": True}]}, ["image"]),
+            ("LoadAudio", {"audio": [["x.wav"], {"audio_upload": True}]}, ["audio"]),
+            ("SaveGLB", {"filename_prefix": ["STRING"]}, ["filename_prefix", "image"]),
+        ],
+    )
+    def test_only_serialized_frontend_slots_participate(self, class_name, inputs, expected):
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        data = {class_name: {"input": {"required": inputs}, "output": []}}
+        layout = build_catalog(_graph(data))["types"][class_name]["widget_layout"]
+        assert [w["name"] for w in layout] == expected
+
+    @pytest.mark.parametrize("declared_image", [False, True])
+    def test_regression_injected_image_is_read_only_but_declared_image_is_not(self, declared_image):
+        # https://github.com/Comfy-Org/comfy-cli/pull/914#discussion_r4068275348
+        # The same serialized identity can name an injected viewport or a
+        # schema-backed field. Consumers cannot infer permission from its name.
+        import jsonschema
+
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        inputs = {"filename_prefix": ["STRING"]}
+        if declared_image:
+            inputs["image"] = ["STRING"]
+        catalog = build_catalog(_graph({"SaveGLB": {"input": {"required": inputs}, "output": []}}))
+        expected_image = {"name": "image", "identity": [["field", "image"]]}
+        if not declared_image:
+            expected_image["read_only"] = True
+        assert catalog["types"]["SaveGLB"]["widget_layout"] == [
+            {"name": "filename_prefix", "identity": [["field", "filename_prefix"]]},
+            expected_image,
+        ]
+        schema = json.loads(
+            (Path(nodes_cmd.__file__).resolve().parents[1] / "schemas" / "widget_catalog.json").read_text()
+        )
+        jsonschema.Draft202012Validator(schema).validate(catalog)
+
+    def test_regression_injected_buttons_are_read_only_but_seed_companion_is_not(self):
+        # https://github.com/Comfy-Org/comfy-cli/pull/914#discussion_r4068275348
+        # Both use companion identities, but only the seed control is writable.
+        import jsonschema
+
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        inputs = {"model_file": [["scene.glb"]], "image": ["LOAD_3D"], "seed": ["INT"]}
+        catalog = build_catalog(
+            _graph(
+                {
+                    "Load3D": {
+                        "input": {"required": inputs},
+                        "input_order": {"required": ["model_file", "image", "seed"]},
+                        "output": [],
+                    }
+                }
+            )
+        )
+        layout = catalog["types"]["Load3D"]["widget_layout"]
+        assert [(w["name"], w.get("read_only", False)) for w in layout] == [
+            ("model_file", False),
+            ("upload 3d model", True),
+            ("upload extra resources", True),
+            ("clear", True),
+            ("image", False),
+            ("seed", False),
+            ("control_after_generate", False),
+        ]
+        assert [w["identity"] for w in layout[1:4]] == [
+            [["field", "image"], ["companion", "upload 3d model"]],
+            [["field", "image"], ["companion", "upload extra resources"]],
+            [["field", "image"], ["companion", "clear"]],
+        ]
+        assert layout[-1]["identity"] == [["field", "seed"], ["companion", "control_after_generate"]]
+        schema = json.loads(
+            (Path(nodes_cmd.__file__).resolve().parents[1] / "schemas" / "widget_catalog.json").read_text()
+        )
+        jsonschema.Draft202012Validator(schema).validate(catalog)
+
+    @pytest.mark.parametrize("keys", [[1, True], ["a", "a"]])
+    def test_unsupported_selector_keys_fail_with_class_and_field(self, keys):
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        data = _object_info()
+        options = data["DynNode"]["input"]["required"]["model"][1]["options"]
+        for option, key in zip(options, keys):
+            option["key"] = key
+        with pytest.raises(ValueError, match=r"DynNode.*model.*unique string"):
+            build_catalog(_graph(data))
+
+    @pytest.mark.parametrize("type_name", ["COMFY_DYNAMICCOMBO_V3", "COMBO"])
+    @pytest.mark.parametrize("nested", [False, True])
+    @pytest.mark.parametrize("malformed", [{"inputs": {"required": {"lost": ["INT"]}}}, None])
+    def test_regression_malformed_selector_branches_cannot_disappear(self, type_name, nested, malformed):
+        # https://github.com/Comfy-Org/comfy-cli/pull/914#discussion_r4068215356
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        data = _object_info()
+        selector = [type_name, {"options": [{"key": "valid", "inputs": {}}, malformed]}]
+        required = data["DynNode"]["input"]["required"]
+        if nested:
+            required["model"][1]["options"][1]["inputs"]["required"] = {"child": selector}
+        else:
+            required["model"] = selector
+        field = r"model\.child" if nested else "model"
+        with pytest.raises(ValueError, match=rf"DynNode.*{field}.*unique string"):
+            build_catalog(_graph(data))
+
+    @pytest.mark.parametrize("nested", [False, True])
+    @pytest.mark.parametrize("declaration", [None, {}, {"options": None}, {"options": "remote"}, {"options": []}])
+    def test_regression_unavailable_selector_choices_are_not_declared_empty(self, nested, declaration):
+        # https://github.com/Comfy-Org/comfy-cli/pull/914#discussion_r4068275339
+        from comfy_cli.cql.widget_catalog import build_catalog
+
+        data = _object_info()
+        selector = ["COMFY_DYNAMICCOMBO_V3"]
+        if declaration is not None:
+            selector.append(declaration)
+        required = data["DynNode"]["input"]["required"]
+        if nested:
+            required["model"][1]["options"][1]["inputs"]["required"] = {"child": selector}
+        else:
+            required["model"] = selector
+
+        if declaration != {"options": []}:
+            field = r"model\.child" if nested else "model"
+            with pytest.raises(ValueError, match=rf"DynNode.*{field}.*explicit options list"):
+                build_catalog(_graph(data))
+        else:
+            layout = build_catalog(_graph(data))["types"]["DynNode"]["widget_layout"]
+            entry = layout[0]["options"][1]["widgets"][0] if nested else layout[0]
+            assert entry == {
+                "name": "model.child" if nested else "model",
+                "identity": [["field", "model"], ["choice", "b"], ["field", "child"]]
+                if nested
+                else [["field", "model"]],
+                "options": [],
+            }
