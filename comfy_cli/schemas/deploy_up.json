@@ -38,6 +38,20 @@
         "max": {"type": "integer", "minimum": 1}
       }
     },
+    "estimate": {
+      "description": "Present only when this run created the deployment and the service could estimate it: how long until ready, in whole seconds, and the model bytes to download. atLeast makes both a floor.",
+      "type": "object",
+      "required": ["etaSecondsLow", "etaSecondsHigh", "bytesToFetch"],
+      "properties": {
+        "etaSecondsLow": {"type": "integer", "minimum": 0},
+        "etaSecondsHigh": {"type": "integer", "minimum": 0},
+        "bytesToFetch": {"type": "integer", "minimum": 0},
+        "bytesTotal": {"type": "integer", "minimum": 0},
+        "bytesHeld": {"type": "integer", "minimum": 0},
+        "atLeast": {"type": "boolean"},
+        "measured": {"type": "boolean"}
+      }
+    },
     "supersedes": {
       "type": "array",
       "items": {

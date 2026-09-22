@@ -182,6 +182,13 @@ comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
   reported back as dropped.
 - **It restarts a `stopped` or `failed` deployment** for that release instead of
   creating another.
+- **A create carries the service's estimate** of how long the deployment takes to
+  come up, as `estimate` in the output: `etaSecondsLow`/`etaSecondsHigh` until
+  ready and `bytesToFetch` of models to download, with `atLeast: true` when some
+  models have no recorded size. Relay it to the user before watching, so a long
+  wait reads as expected rather than stuck. It is a range, not a promise, and it
+  stops at ready: the first run can still wait for a worker to start. Absent on a
+  restart, an edit, or when the service gave none; never retry for it.
 
 ## `comfy deploy run`
 

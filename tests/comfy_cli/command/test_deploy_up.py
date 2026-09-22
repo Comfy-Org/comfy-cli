@@ -635,3 +635,138 @@ def test_up_on_a_deployment_already_unhealthy_does_not_wait_for_ever(tmp_path, m
     assert sleeps == []
     assert "Deployment dep-1 is unhealthy" in result.stdout + result.stderr
     assert client.start_calls == [] and client.update_calls == []
+
+
+_GIB = 1024**3
+_ESTIMATE = {
+    "bytesTotal": 42 * _GIB,
+    "bytesHeld": 0,
+    "bytesToFetch": 42 * _GIB,
+    "measured": True,
+    "unsizedModelCount": 0,
+    "atLeast": False,
+    "stagingSecondsLow": 444,
+    "stagingSecondsHigh": 4260,
+    "startupSecondsLow": 60,
+    "startupSecondsHigh": 600,
+    "etaSecondsLow": 504,
+    "etaSecondsHigh": 4860,
+}
+
+
+def test_a_create_asks_for_the_estimate_with_its_release_and_compute() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy(estimate=_ESTIMATE)
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module))
+
+    # Then
+    assert client.estimate_calls == [("release-5", "l4", "US-MO-2")]
+    assert result.estimate == _ESTIMATE
+    assert result.payload()["estimate"] == _ESTIMATE
+
+
+@pytest.mark.parametrize("status", ["ready", "stopped"])
+def test_a_reconcile_that_creates_nothing_asks_for_no_estimate(status: str) -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", status=status)], estimate=_ESTIMATE)
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module))
+
+    # Then
+    assert client.estimate_calls == []
+    assert result.estimate is None
+    assert "estimate" not in result.payload()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        DeployAPIError("deploy_not_found", "no route", status=404),
+        DeployAPIError("deploy_server_error", "boom", status=503),
+        {**_ESTIMATE, "etaSecondsHigh": None},
+        {**_ESTIMATE, "bytesToFetch": -1},
+        {**_ESTIMATE, "etaSecondsLow": True},
+    ],
+    ids=["no_route", "server_error", "missing_number", "negative", "bool"],
+)
+def test_a_create_the_service_cannot_estimate_still_deploys(answer) -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy(estimate=answer)
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module))
+
+    # Then
+    assert result.created is True
+    assert result.estimate is None
+    assert len(client.create_keys) == 1
+
+
+def test_the_estimate_validates_against_the_published_up_schema(tmp_path, monkeypatch) -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy(estimate=_ESTIMATE)
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+
+    # When
+    result = CliRunner().invoke(
+        app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--gpu", "l4", "--region", "US-MO-2"]
+    )
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _json_envelope(result)["data"]
+    assert data["estimate"]["etaSecondsHigh"] == 4860
+    jsonschema.Draft202012Validator(_schema("deploy_up.json")).validate(data)
+
+
+def test_a_person_sees_the_estimate_before_the_watch_starts(tmp_path, monkeypatch) -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy(estimate=_ESTIMATE, get_statuses=["queued", "ready"])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+    monkeypatch.setattr(module, "_sleep", lambda _: None)
+
+    # When
+    result = CliRunner().invoke(
+        app,
+        ["--no-json", "deploy", "up", str(write_spec(tmp_path)), "--gpu", "l4", "--region", "US-MO-2", "--watch"],
+    )
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert "Expected ready in 8-81 min (42.0 GB of models to download)." in result.output
+    assert result.output.index("Expected ready") < result.output.index("Deployment dep-1: ready")
+
+
+@pytest.mark.parametrize(
+    ("changes", "line"),
+    [
+        ({}, "Expected ready in 8-81 min (42.0 GB of models to download)."),
+        ({"atLeast": True}, "Expected ready in 8-81 min (at least 42.0 GB of models to download)."),
+        (
+            {"bytesToFetch": 0, "etaSecondsLow": 120, "etaSecondsHigh": 900},
+            "Expected ready in 2-15 min (nothing to download).",
+        ),
+        (
+            {"etaSecondsLow": 3000, "etaSecondsHigh": 4 * 3600 + 60},
+            "Expected ready in 0.5-4.5 h (42.0 GB of models to download).",
+        ),
+        ({"etaSecondsLow": 60, "etaSecondsHigh": 60}, "Expected ready in 1 min (42.0 GB of models to download)."),
+        (
+            {"measured": False, "atLeast": True, "bytesToFetch": 0},
+            "Expected ready in 8-81 min (the release's models were never measured, so this counts starting the endpoint alone).",
+        ),
+    ],
+    ids=["sized", "at_least", "nothing_to_fetch", "hours", "one_number", "unmeasured"],
+)
+def test_estimate_line_rounds_outward_and_says_what_downloads(changes, line) -> None:
+    from comfy_cli.command.deploy_up import estimate_line
+
+    assert estimate_line({**_ESTIMATE, **changes}) == line

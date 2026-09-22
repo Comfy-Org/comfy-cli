@@ -86,6 +86,53 @@ def _supersedes(
     return sorted(rows, key=lambda row: str(row["id"]))
 
 
+_ESTIMATE_FIELDS: Final = ("etaSecondsLow", "etaSecondsHigh", "bytesToFetch")
+
+
+def _deploy_estimate(client: DeployUpClient, release_id: str, compute: JsonObject) -> JsonObject | None:
+    """The service's estimate for this create, or ``None`` when it has none.
+
+    Advice only: a service too old to serve it, any refusal, and any answer
+    missing the numbers it is read for all leave the create exactly as it was.
+    """
+    try:
+        estimate = client.get_deploy_estimate(release_id, str(compute["gpuClass"]), str(compute["region"]))
+    except DeployAPIError:
+        return None
+    for field in _ESTIMATE_FIELDS:
+        value = estimate.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None
+    return estimate
+
+
+def _minutes_or_hours(low_seconds: int, high_seconds: int) -> str:
+    # The short end rounds down and the long end up, so rounding never narrows
+    # what the service quoted.
+    low = max(1, low_seconds // 60)
+    high = max(low, -(-high_seconds // 60))
+    if high < 120:
+        return f"{low} min" if low == high else f"{low}-{high} min"
+    low_hours = max(0.5, (low // 30) / 2)
+    high_hours = -(-high // 30) / 2
+    return f"{low_hours:g}-{high_hours:g} h"
+
+
+def estimate_line(estimate: JsonObject) -> str:
+    """One line for a person: the time until ready and what has to download."""
+    time = _minutes_or_hours(int(estimate["etaSecondsLow"]), int(estimate["etaSecondsHigh"]))
+    fetch = int(estimate["bytesToFetch"])
+    at_least = estimate.get("atLeast") is True
+    if estimate.get("measured") is False:
+        what = "the release's models were never measured, so this counts starting the endpoint alone"
+    elif fetch == 0:
+        what = "some models have no recorded size" if at_least else "nothing to download"
+    else:
+        size = f"{fetch / 1024**3:.1f} GB of models to download"
+        what = f"at least {size}" if at_least else size
+    return f"Expected ready in {time} ({what})."
+
+
 def _create_live_deployment(client: DeployUpClient, request: UpRequest, compute: JsonObject) -> JsonObject:
     release_id = _required_string(request.release, "id")
     for attempt in range(_CREATE_ATTEMPTS):
@@ -152,8 +199,9 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
             "min": minimum,
             "max": maximum,
         }
+        estimate = _deploy_estimate(client, release_id, compute)
         snapshot = _create_live_deployment(client, request, compute)
-        return UpResult(snapshot, _release_summary(request.release), compute, supersedes, True, True)
+        return UpResult(snapshot, _release_summary(request.release), compute, supersedes, True, True, estimate=estimate)
 
     compute = _compute_config(existing)
     if (request.gpu is not None and request.gpu != compute["gpuClass"]) or (

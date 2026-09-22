@@ -224,6 +224,11 @@ class DeployClient:
             _Request(operation="logs", parts=("deployments", deployment_id, "logs"), max_bytes=_MAX_LOG_JSON)
         )
 
+    def get_deploy_estimate(self, release_id: str, gpu_class: str, region: str) -> dict:
+        return self._get(
+            "estimate", ("deploy-estimate",), {"releaseId": release_id, "gpuClass": gpu_class, "region": region}
+        )
+
     def get_compute_catalog(self) -> dict:
         # Without levels=all the service answers with datacenters alone, and a GPU
         # sold only on a wider location never appears.
