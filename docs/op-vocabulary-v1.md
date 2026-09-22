@@ -856,3 +856,56 @@ the op additionally carries `promoted.repair = {entry, ids}` with the
 subgraph-input and boundary-link ids the repair mints, derived by SHA-256 from
 `(instance path, source node, widget)` so replay anywhere is byte-identical.
 The pinned contract text in §8.7 states the full rule.
+
+## 15. Amendment v1.6 — 2026-09-22 (authorable annotation nodes: `Note` / `MarkdownNote` carry `text`)
+
+### 15.1 `add_node` mints `Note` and `MarkdownNote`
+
+§1.1 / §13.2 stated that `add_node` rejects every UI-only type. Production
+agent traces show the agent repeatedly asking for `Note` / `MarkdownNote` and
+being refused; every downstream replica (comfy-multi-player applier, frontend
+follower) already round-trips those nodes — the applier stores an uncatalogued
+positional `widgets_values` opaquely and the follower materializes a note with
+its text box — so the catalog refusal on this surface was the only thing
+between "add a note" and a note on the canvas.
+
+`add_node` now mints the two **annotation** UI-only types. The authorable set
+is `AUTHORABLE_VIRTUAL_NODE_TYPES = {"Note", "MarkdownNote"}` (a strict subset
+of `UI_ONLY_NODE_TYPES`). The spec gains one optional, spec-and-node key:
+
+```json
+{"op": "add_node", "class_type": "Note", "text": "trigger word: zxc", "as": "n"}
+```
+
+* `text` (string, default `""`) becomes the note's single positional widget:
+  `op.node.widgets_values == [text]`. The minted node has no sockets
+  (`inputs == outputs == []`), `mode`/`flags`/`properties` at their defaults,
+  and a layout-assigned `pos`/`size` unless `at` is given. `op.node` stays
+  authoritative for replay (§8.5), so a replica with no notion of `Note`
+  inserts it verbatim.
+* A non-string `text` is `ValueError` at mint time (batch: aborts atomically,
+  `applied_count == 0`, §4). `text` on a **catalog** class is likewise
+  `ValueError` — catalog widgets are addressed by name through `set_widget`;
+  a stray `text` is an error, not a dropped field.
+* CLI: `comfy workflow add-node <file> Note --text "..."`. Envelope unchanged.
+* Execution: unchanged. `workflow_to_api` owns the exclusion of UI-only types
+  from the API prompt and keeps dropping these nodes; a test pins the exact
+  shape `add_node` mints against the converter.
+
+`Reroute`, `PrimitiveNode`, `GetNode`, `SetNode` remain refused
+(`node_not_found`, `details.ui_only: true`): they carry data flow the converter
+resolves specially, and authoring them here would need link semantics this
+surface does not model.
+
+### 15.2 `capture` deliberately unchanged
+
+§13.2's capture behaviour stands: `capture` still skips UI-only nodes,
+including `Note` / `MarkdownNote`, and reports them as warnings. The recipe
+rebuilds the executable graph, not the canvas decoration. Capturing notes into
+recipes (now that `apply` would accept them) is a possible follow-up; it is not
+part of this amendment so a recipe captured before v1.6 and one captured after
+stay byte-identical.
+
+**No change to §§2-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. Downstream repos
+pinning this document by SHA move the SHA together with their comfy-cli pin.

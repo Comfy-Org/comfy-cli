@@ -20,6 +20,12 @@ PAD_H = 12.0
 MIN_H = 60.0
 ORIGIN = (40.0, 60.0)
 DEFAULT_SIZE = (210.0, 100.0)
+# The two UI-only node types add_node can mint without a catalog entry: pure
+# annotation nodes with no slots and one positional multiline `text` widget.
+# Defined here (the leaf module) so both the planner and workflow_ops read one
+# constant; workflow_ops re-exports it. The full UI-only set lives in
+# workflow_ops.UI_ONLY_NODE_TYPES — this is the authorable subset of it.
+AUTHORABLE_VIRTUAL_NODE_TYPES = frozenset({"Note", "MarkdownNote"})
 _MARGIN = 10.0
 _GUARD = 1000  # bounded collision-shift loop
 _ORDER_SWEEPS = 4  # barycentre passes for crossing reduction; converges well before this
@@ -232,6 +238,18 @@ def estimate_size(
     return [w, max(h, MIN_H)]
 
 
+def note_size(class_type: str) -> list[float]:
+    """Persisted size for an authorable annotation node (`Note` / `MarkdownNote`).
+
+    These have no catalog entry, no slots, and one multiline text widget, so the
+    catalog-driven path in `estimate_size` cannot be fed from `graph.node`. Both
+    `workflow_ops.add_node` and `assign_positions` call this so the planner's
+    footprint and the size stamped onto the node agree — the same invariant the
+    catalog path keeps by calling `estimate_size` with identical arguments.
+    """
+    return estimate_size(0, 0, 1, n_multiline=1, title=class_type, widget_labels=("text",))
+
+
 def _pair(value) -> tuple[float, float] | None:
     """Read a geometry pair, tolerating both shapes litegraph serialises.
 
@@ -348,6 +366,8 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
                 output_labels=tuple(p.name for p in m.outputs),
                 widget_labels=widget_names,
             )
+        elif spec.get("class_type") in AUTHORABLE_VIRTUAL_NODE_TYPES:
+            size = note_size(spec["class_type"])
         else:
             size = list(DEFAULT_SIZE)  # unknown type: apply_specs will error later
         key = spec.get("as") or f"__new{i}"

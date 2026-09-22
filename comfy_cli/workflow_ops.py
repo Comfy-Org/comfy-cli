@@ -172,6 +172,16 @@ class NotBatchableError(ValueError):
 # converter. Keep the two in sync.
 UI_ONLY_NODE_TYPES = frozenset({"Note", "MarkdownNote", "PrimitiveNode", "GetNode", "SetNode", "Reroute"})
 
+# The subset of UI_ONLY_NODE_TYPES that add_node CAN mint (op-vocabulary-v1 §15,
+# Amendment v1.6). Note/MarkdownNote are pure annotation: no sockets, one
+# positional multiline `text` widget, no backend class. Every downstream replica
+# (multi-player applier, frontend follower) already round-trips them; the
+# catalog check here was the only thing refusing an agent's "add a note". The
+# remaining four carry data flow the API converter resolves specially, so they
+# stay refused. Sourced from layout so the batch planner sizes them identically.
+AUTHORABLE_VIRTUAL_NODE_TYPES = layout.AUTHORABLE_VIRTUAL_NODE_TYPES
+assert AUTHORABLE_VIRTUAL_NODE_TYPES <= UI_ONLY_NODE_TYPES
+
 # A subgraph INSTANCE's node `type` is the UUID id of its definition, and
 # `ls-nodes` prints that verbatim — so a caller reading ls-nodes output can
 # mistake it for a class name. There is no instantiate-a-subgraph command, so
@@ -555,9 +565,24 @@ def add_node(
     actor: str = "cli",
     base_version: int = 0,
     allow_deprecated: bool = False,
+    text: str | None = None,
 ) -> tuple[dict, dict]:
+    """Mint one node and apply it.
+
+    ``text`` is only meaningful for the authorable annotation nodes
+    (:data:`AUTHORABLE_VIRTUAL_NODE_TYPES`): it becomes the single positional
+    ``widgets_values`` entry. Passing it for a catalog class is an error rather
+    than a silently dropped field — catalog widgets are addressed by name through
+    ``set_widget``.
+    """
     m = graph.node(class_type)
-    if m is None:
+    if m is None and class_type in AUTHORABLE_VIRTUAL_NODE_TYPES:
+        if text is None:
+            text = ""
+        if not isinstance(text, str):
+            raise ValueError(f"`text` for a {class_type} node must be a string, got {type(text).__name__}")
+        size = layout.note_size(class_type)
+    elif m is None:
         if class_type in UI_ONLY_NODE_TYPES:
             raise UnknownNodeType(class_type, ui_only=True)
         if _UUID_RE.match(class_type.strip()):
@@ -566,23 +591,29 @@ def add_node(
 
         names = [n.id for n in graph.all_nodes()]
         raise UnknownNodeType(class_type, close_matches=difflib.get_close_matches(class_type, names, n=5, cutoff=0.6))
-    if m.deprecated and not allow_deprecated:
-        raise DeprecatedNodeType(class_type, replacement=_deprecated_replacement(graph, m))
-    _widget_names = tuple(graph.widget_order_default(class_type))
-    size = layout.estimate_size(
-        len([p for p in m.inputs if p.is_link]),
-        len(m.outputs),
-        len(_widget_names),
-        # This is the size PERSISTED onto the node, and every later collision check reads
-        # it. Omitting the multiline term here left the planner correct and the saved state
-        # wrong, so a second call would place the next node on top of a node it had itself
-        # under-measured.
-        n_multiline=layout.count_multiline(m, _widget_names),
-        title=(getattr(m, "display_name", "") or class_type),
-        input_labels=tuple(p.name for p in m.inputs if p.is_link),
-        output_labels=tuple(p.name for p in m.outputs),
-        widget_labels=_widget_names,
-    )
+    else:
+        if text is not None:
+            raise ValueError(
+                f"`text` is only valid for annotation nodes ({', '.join(sorted(AUTHORABLE_VIRTUAL_NODE_TYPES))}); "
+                f"{class_type!r} is a catalog class — add it, then set its widgets by name with set-widget"
+            )
+        if m.deprecated and not allow_deprecated:
+            raise DeprecatedNodeType(class_type, replacement=_deprecated_replacement(graph, m))
+        _widget_names = tuple(graph.widget_order_default(class_type))
+        size = layout.estimate_size(
+            len([p for p in m.inputs if p.is_link]),
+            len(m.outputs),
+            len(_widget_names),
+            # This is the size PERSISTED onto the node, and every later collision check reads
+            # it. Omitting the multiline term here left the planner correct and the saved state
+            # wrong, so a second call would place the next node on top of a node it had itself
+            # under-measured.
+            n_multiline=layout.count_multiline(m, _widget_names),
+            title=(getattr(m, "display_name", "") or class_type),
+            input_labels=tuple(p.name for p in m.inputs if p.is_link),
+            output_labels=tuple(p.name for p in m.outputs),
+            widget_labels=_widget_names,
+        )
     if pos is None:
         # Layout-aware default: right of the current graph, collision-free.
         # Decided at mint time so the position freezes into the op and replay
@@ -596,7 +627,10 @@ def add_node(
         )
     ):
         raise ValueError(f"node position must be two finite numbers, got {pos!r}")
-    node = _build_node(mint_id(), class_type, m, graph, pos, size)
+    if m is None:
+        node = _build_note_node(mint_id(), class_type, pos, size, text or "")
+    else:
+        node = _build_node(mint_id(), class_type, m, graph, pos, size)
     if mode:
         # Node mode (mute/bypass) is graph-semantic state — a bypassed node
         # executes differently — so it must survive capture→apply. op.node is
@@ -1787,6 +1821,7 @@ def apply_specs(
                         actor=actor,
                         base_version=base_version,
                         allow_deprecated=bool(spec.get("allow_deprecated")),
+                        text=spec.get("text"),
                     )
                     alias = spec.get("as")
                     if alias:
@@ -2508,6 +2543,26 @@ def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list) 
         "outputs": outputs,
         "properties": {},
         "widgets_values": widgets,
+    }
+
+
+def _build_note_node(node_id: int, class_type: str, pos: list, size: list, text: str) -> dict:
+    """Frontend shape of a `Note` / `MarkdownNote`: no sockets, one positional
+    widget carrying the text. Mirrors what the frontend serialises for a note
+    it created itself (noteNode.ts), so the multi-player applier stores the
+    value opaquely and the follower renders the text box."""
+    return {
+        "id": node_id,
+        "type": class_type,
+        "pos": list(pos),
+        "size": list(size),
+        "flags": {},
+        "order": 0,
+        "mode": 0,
+        "inputs": [],
+        "outputs": [],
+        "properties": {},
+        "widgets_values": [text],
     }
 
 
