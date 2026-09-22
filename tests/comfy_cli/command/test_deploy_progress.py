@@ -204,6 +204,9 @@ class _LiveRenderer:
     class _Console:
         is_terminal = True
 
+    def __init__(self) -> None:
+        self.said: list[str] = []
+
     def is_pretty(self) -> bool:
         return True
 
@@ -211,7 +214,7 @@ class _LiveRenderer:
         return self._Console()
 
     def info(self, message: str, *, hint: str | None = None) -> None:
-        raise AssertionError("the live surface does not print lines")
+        self.said.append(message)
 
 
 class _DisplayThatRefusesTheTask:
@@ -238,17 +241,20 @@ def test_a_display_refused_at_the_first_redraw_mutes_the_watch_instead_of_raisin
 
     monkeypatch.setattr(rich.progress, "Progress", _DisplayThatRefusesTheTask)
     _DisplayThatRefusesTheTask.stopped = 0
-    reporter = DeployWatchReporter(_LiveRenderer(), "dep-1", now=_Clock())
+    renderer = _LiveRenderer()
+    reporter = DeployWatchReporter(renderer, "dep-1", now=_Clock())
 
     # When: two samples arrive and nothing raises
     reporter.snapshot(_snapshot("provisioning", _staging()))
     reporter.snapshot(_snapshot("provisioning", _staging(bytesDone=4 * GB)))
     reporter.close()
 
-    # Then: the half-opened display was closed once and never reopened
+    # Then: the half-opened display was closed once, never reopened, and the
+    # reporter stayed quiet on the stream it could not write to
     assert reporter._muted is True
     assert reporter._live is None and reporter._live_task is None
     assert _DisplayThatRefusesTheTask.stopped == 1
+    assert renderer.said == []
 
 
 def test_an_ndjson_watch_emits_one_event_per_new_sample_and_carries_the_object_unchanged(tmp_path) -> None:
