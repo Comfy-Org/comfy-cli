@@ -271,7 +271,7 @@ class TestCatalogVersion:
 
         Fixture captured from /object_info/MagnificImageSkinEnhancerNode at
         ComfyUI b1693ecba9f5b65f8c80ab36b195ab963ec92413 on 2026-09-22.
-        Related failure: https://github.com/Comfy-Org/comfy-multi-player/pull/226
+        Regression: https://github.com/Comfy-Org/comfy-cli/pull/914
         Creative is the positive control: the existing first-choice projection
         sees its added widget, but misses the same change in the other modes.
         """
