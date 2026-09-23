@@ -748,6 +748,10 @@ def _exit_code_of(exit_: typer.Exit | SystemExit) -> int:
     return exit_.code if isinstance(exit_.code, int) else 1
 
 
+# What `cmdline.main` exits with once a KeyboardInterrupt reaches it.
+_CTRL_C_EXIT_CODE = 130
+
+
 def _record_exit(finished: dict[str, Any], code: int) -> None:
     # A zero exit is a normal end and carries no code; only a non-zero one names it.
     if code == 0:
@@ -781,13 +785,14 @@ def track_command(sub_command: str | None = None):
     carries ``command``, ``seconds`` and ``outcome``: ``ok`` for a normal return or
     a zero exit, ``exit`` for a non-zero ``typer.Exit`` or ``SystemExit`` (with
     ``exit_code``), and ``error`` for an exception (with ``error_type``, the class
-    name only: a message can carry a path or a credential). Most commands turn
-    Ctrl-C into exit 130, so it is usually an ``exit`` with ``exit_code`` 130; one
-    that lets ``KeyboardInterrupt`` through is an ``error`` of that type. The
-    exception or exit then propagates as before. A command that ends in
+    name only: a message can carry a path or a credential). Ctrl-C is an ``exit``
+    with ``exit_code`` 130 whether the command catches it or lets
+    ``KeyboardInterrupt`` through, since the entry point turns the latter into 130
+    too. The exception or exit then propagates as before. A command that ends in
     ``os._exit`` finishes through ``flush_for_hard_exit``, which must be given the
-    code. A command that never ends has a start row and no finish row, which is
-    itself the answer.
+    code; a negative code there is a child the command waited on being killed by
+    that signal, recorded as ``killed`` with ``signal``. A command that never
+    ends has a start row and no finish row, which is itself the answer.
     """
 
     def decorator(func):
@@ -804,6 +809,11 @@ def track_command(sub_command: str | None = None):
                 result = func(*args, **kwargs)
             except (typer.Exit, SystemExit) as exit_:
                 _record_exit(run[0], _exit_code_of(exit_))
+                raise
+            except KeyboardInterrupt:
+                # The entry point (`cmdline.main`) turns it into exit 130, so the
+                # run ends the way a command that caught Ctrl-C itself ends.
+                _record_exit(run[0], _CTRL_C_EXIT_CODE)
                 raise
             except BaseException as error:
                 run[0].update(outcome="error", error_type=type(error).__name__)
@@ -966,7 +976,13 @@ def flush_for_hard_exit(exit_code: int | None = None) -> None:
     try:
         if exit_code is not None:
             for run in reversed(list(_open_commands)):
-                _record_exit(run[0], exit_code)
+                if exit_code < 0:
+                    # A subprocess return code: the child `comfy launch` waited on
+                    # was killed by signal -code (`comfy stop` sends SIGKILL), which
+                    # is how the server ended, not a failure of the launcher.
+                    run[0].update(outcome="killed", signal=-exit_code)
+                else:
+                    _record_exit(run[0], exit_code)
                 _finish(run)
         _flush_all_providers()
     except BaseException:  # noqa: BLE001  # pragma: no cover - defensive

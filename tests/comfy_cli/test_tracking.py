@@ -237,7 +237,7 @@ class TestFeedbackCallerKindIsNarrowed:
             kind_patch, custom_patch = self._as_caller(tracking_module, {"COMFY_USER_AGENT": label})
             with kind_patch, custom_patch:
                 tracking_module.submit_feedback("nice tool")
-            _, _, properties = _first_track_call(tracking_module.provider)
+            _, _, properties = _newest_track_call(tracking_module.provider)
             assert properties["caller_kind"] == "custom", f"COMFY_USER_AGENT={label} bypassed the narrowing"
 
     def test_consent_gated_paths_keep_the_full_label(self, tracking_module):
@@ -252,7 +252,7 @@ class TestFeedbackCallerKindIsNarrowed:
             assert properties["caller_kind"] == "acme-harness/2.1"
 
             tracking_module.submit_agent_review("went fine")
-            _, _, properties = _first_track_call(tracking_module.provider)
+            _, _, properties = _newest_track_call(tracking_module.provider)
             assert properties["caller_kind"] == "acme-harness/2.1"
 
 
@@ -1260,7 +1260,9 @@ class TestTrackCommandRecordsHowTheCommandEnded:
         launch()
         assert [name for name, _ in self._events()] == ["launch", "command_finished"]
 
-    def test_ctrl_c_is_recorded_and_re_raised(self):
+    def test_ctrl_c_is_recorded_as_the_exit_130_it_becomes_and_re_raised(self):
+        # cmdline.main turns a KeyboardInterrupt into sys.exit(130), so the row
+        # matches a command that caught Ctrl-C and exited 130 itself.
         @self.tracking.track_command("deploy")
         def up_cmd():
             raise KeyboardInterrupt
@@ -1268,5 +1270,22 @@ class TestTrackCommandRecordsHowTheCommandEnded:
         with pytest.raises(KeyboardInterrupt):
             up_cmd()
         _, (_, props) = self._events()
-        assert props["outcome"] == "error"
-        assert props["error_type"] == "KeyboardInterrupt"
+        assert props["outcome"] == "exit"
+        assert props["exit_code"] == 130
+        assert "error_type" not in props
+
+    def test_a_hard_exit_passing_on_a_child_killed_by_a_signal_is_recorded_as_killed(self):
+        # `comfy stop` SIGKILLs the background server; the launcher's wait sees
+        # -9 and hands it to _hard_exit. That is the server being stopped, not
+        # the launcher failing with exit code -9.
+        tracking = self.tracking
+
+        @tracking.track_command()
+        def launch():
+            tracking.flush_for_hard_exit(-9)
+
+        launch()
+        _, (_, props) = self._events()
+        assert props["outcome"] == "killed"
+        assert props["signal"] == 9
+        assert "exit_code" not in props
