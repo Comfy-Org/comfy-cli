@@ -1440,9 +1440,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`details.status` names the state. The two commands differ, deliberately: `comfy deploy status` "
         "reports only `failed` and `stop_failed`, since a `stopped` deployment is a normal thing to be "
         "asked about; `comfy deploy up` adds `stopped` (with or without `--watch`), because a deployment it was "
-        "asked to bring up and that is stopped did not come up.",
+        "asked to bring up and that is stopped did not come up, and `unhealthy`, because one that came up and "
+        "then degraded is billing without serving and `up` does not change it.",
         "for `failed`, inspect `comfy deploy logs` and redeploy with `comfy deploy up`; for `stop_failed`, "
-        "re-run `comfy deploy stop` -- it may still be billing; for `stopped`, `comfy deploy start`",
+        "re-run `comfy deploy stop` -- it may still be billing; for `stopped`, `comfy deploy start`; for "
+        "`unhealthy`, inspect `comfy deploy logs`, or `comfy deploy stop` to stop billing",
     ),
     ErrorCode(
         "deploy_delete_needs_confirm",

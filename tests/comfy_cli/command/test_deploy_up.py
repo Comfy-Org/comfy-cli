@@ -14,7 +14,6 @@ from typer.testing import CliRunner
 
 from comfy_cli.caller import Caller
 from comfy_cli.cmdline import app
-from comfy_cli.command.deploy_runtime import DEPLOY_POLL_SECONDS
 from comfy_cli.deploy_api import _validate_compute_config
 from comfy_cli.deploy_api_errors import DeployAPIError
 
@@ -443,7 +442,12 @@ def test_the_dropped_bound_warning_reaches_a_json_caller_on_stderr(tmp_path, mon
     monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
 
     # When
-    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3", "--max", "8"])
+    # --no-watch because this is about the warning, not the wait. Restarting a
+    # stopped deployment leaves it `queued`, and watch (now the default) polls a
+    # fake that never leaves that status, so the run would never end.
+    result = CliRunner().invoke(
+        app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3", "--max", "8", "--no-watch"]
+    )
 
     # Then
     assert "--min had no effect" in result.stderr
@@ -579,8 +583,8 @@ def test_watch_exits_immediately_on_stop_failed_with_stop_remedy(tmp_path, monke
     assert sleeps == []
 
 
-def test_watch_continues_through_unhealthy_until_ready(tmp_path, monkeypatch) -> None:
-    # Given
+def test_watch_stops_at_unhealthy_and_reports_it_as_not_ok(tmp_path, monkeypatch) -> None:
+    # Given a deployment the watch reads as unhealthy
     module = _deploy()
     client = FakeDeploy(get_statuses=["queued", "unhealthy", "ready"])
     monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
@@ -591,9 +595,43 @@ def test_watch_continues_through_unhealthy_until_ready(tmp_path, monkeypatch) ->
     result = CliRunner().invoke(
         app,
         ["--json", "deploy", "up", str(write_spec(tmp_path)), "--gpu", "l4", "--region", "US-MO-2", "--watch"],
+        env={"COLUMNS": "400"},
     )
 
+    # Then: `unhealthy` only follows `ready`, so the watch ends there, loudly
+    assert result.exit_code == 1
+    envelope = _json_envelope(result)
+    assert envelope["data"]["deployment"]["status"] == "unhealthy"
+    assert envelope["error"]["code"] == "deploy_status_terminal"
+    assert envelope["error"]["details"]["status"] == "unhealthy"
+    assert "still billing" in result.stderr
+    assert "comfy deploy stop --deployment dep-1" in result.stderr
+    assert sleeps == []
+
+
+def test_up_on_a_deployment_already_unhealthy_does_not_wait_for_ever(tmp_path, monkeypatch) -> None:
+    """`up` leaves an unhealthy deployment as it is, so a watch that waited for
+    `ready` would poll for as long as the endpoint stays degraded, saying
+    nothing."""
+    # Given the release's deployment is unhealthy and stays so
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-1", status="unhealthy")])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) > 5:
+            raise AssertionError("the watch kept polling an unhealthy deployment")
+
+    monkeypatch.setattr(module, "_sleep", sleep)
+
+    # When
+    result = CliRunner().invoke(app, ["--no-json", "deploy", "up", str(write_spec(tmp_path))], env={"COLUMNS": "400"})
+
     # Then
-    assert result.exit_code == 0
-    assert _json_envelope(result)["data"]["deployment"]["status"] == "ready"
-    assert sleeps == [DEPLOY_POLL_SECONDS]
+    assert result.exception is None or isinstance(result.exception, SystemExit), result.exception
+    assert result.exit_code == 1
+    assert sleeps == []
+    assert "Deployment dep-1 is unhealthy" in result.stdout + result.stderr
+    assert client.start_calls == [] and client.update_calls == []
