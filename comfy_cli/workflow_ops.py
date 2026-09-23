@@ -674,7 +674,43 @@ def set_widget(
                 return _set_widget_impl(workflow, graph, bound, widget, value, actor=actor, base_version=base_version)
             except ValueError:
                 pass
+        inserted = _inserted_node_id(workflow, node_id)
+        if inserted is not None:
+            # Unambiguous, so a failure past resolution (bad value, unknown
+            # widget) is the error to report, not "node 57 not found".
+            try:
+                return _set_widget_impl(
+                    workflow, graph, inserted, widget, value, actor=actor, base_version=base_version
+                )
+            except ValueError as e2:
+                raise _enrich_resolution_error(e2, workflow, graph, widget=widget) from e2
         raise _enrich_resolution_error(e, workflow, graph, widget=widget) from e
+
+
+def _inserted_node_id(workflow: dict, node_id: Any) -> str | None:
+    """The top-level ``insert:<op>:root:node:<id>`` node a bare template id means.
+
+    The doc host's ``insert_workflow`` remaps every template id, so a canvas
+    built by ``get_template`` has node ``insert:<op>:root:node:57`` and no node
+    ``57``. Agents still address ``57`` (the id the template showed). Prod/stg
+    comfy-agent traces (2026-09-23) show 5 turns refused this way, and each
+    re-sent the suggested ``insert:`` address. Returns the remapped id only
+    when EXACTLY ONE top-level node is the remap of ``node_id``. With none,
+    or with two inserts of the same template, it returns ``None`` and the
+    caller's not-found error (which lists every candidate) stands. Consulted
+    only after the literal id failed to resolve, so a real node ``57`` always
+    wins.
+    """
+    s = str(node_id)
+    if not s.lstrip("-").isdigit():
+        return None
+    pattern = re.compile(rf"insert:[^:/]+:root:node:{re.escape(s)}")
+    matches = [
+        n["id"]
+        for n in workflow.get("nodes") or []
+        if isinstance(n, dict) and isinstance(n.get("id"), str) and pattern.fullmatch(n["id"])
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _binding_address(workflow: dict, graph, node_id: Any) -> Any:

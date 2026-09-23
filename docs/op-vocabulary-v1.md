@@ -113,6 +113,11 @@ Spec form:
 ```
 
 `node` is an int id, alias, `$alias`, or a subgraph-scoped id (section 6).
+The doc host's `insert_workflow` remaps template ids to
+`insert:<op>:root:node:<id>`. If a bare `<id>` names no node and exactly one
+top-level node has that remapped id, the bare id addresses that node, and
+the minted `node_id` is the full `insert:` id. If two inserts remapped the
+same id, the not-found error lists both.
 Minted op fields: `node_id`, `widget` (name, never index), `value`, `old`; for a
 subgraph interior write also `path` (resolved node path, list of strings) and
 `inner_widget`; optionally `warnings` (e.g. `normalized_value`). A value that
