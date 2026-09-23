@@ -590,22 +590,24 @@ def _prefixed_dynamic_combo_object_info() -> dict:
 
 
 class TestDynamicComboImplicitControlAfterGenerate:
-    """Sub-input seed/noise_seed widgets companion a control_after_generate
-    marker even without the schema flag — same rule as the UI→API converter."""
+    """An unflagged sub-input seed gets NO control_after_generate marker: the
+    frontend names it ``mode.seed``, so ``useIntWidget``'s exact
+    ``seed``/``noise_seed`` rule never matches (saved TextGenerate templates
+    carry no marker after ``sampling_mode.seed``)."""
 
     @pytest.fixture
     def seed_graph(self) -> Graph:
         return Graph.from_object_info(_dynamic_combo_implicit_seed_object_info())
 
-    def test_value_aware_order_includes_implicit_marker(self, seed_graph: Graph):
-        order = seed_graph.widget_order_for_node("SeedComboNode", ["a", 0, "fixed"])
-        assert order == ["mode", "mode.seed", "control_after_generate"]
+    def test_value_aware_order_has_no_implicit_sub_marker(self, seed_graph: Graph):
+        order = seed_graph.widget_order_for_node("SeedComboNode", ["a", 0])
+        assert order == ["mode", "mode.seed"]
 
-    def test_roster_rebuild_synthesizes_implicit_marker_default(self, seed_graph: Graph):
+    def test_roster_rebuild_writes_no_implicit_sub_marker(self, seed_graph: Graph):
         wf = {"nodes": [{"id": 1, "type": "SeedComboNode", "widgets_values": [None]}]}
         out, warnings = seed_graph.apply_slots(wf, {"1.mode": "a"})
         assert [w["code"] for w in warnings] == ["dynamic_combo_roster_rebuilt"]
-        assert out["nodes"][0]["widgets_values"] == ["a", 0, "fixed"]
+        assert out["nodes"][0]["widgets_values"] == ["a", 0]
 
     def test_roster_rebuild_respects_extend_false(self):
         graph = Graph.from_object_info(_prefixed_dynamic_combo_object_info())

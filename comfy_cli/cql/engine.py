@@ -728,24 +728,20 @@ def _is_dynamic_combo_type(type_id: str) -> bool:
 
 def _has_control_after_generate_slot(port: Port) -> bool:
     """True if the frontend places a ``control_after_generate`` marker widget
-    right after this port — explicit (schema ``control_after_generate: True``)
-    or implicit (the frontend's ``useIntWidget`` composable always companions
-    an INT ``seed``/``noise_seed`` input, regardless of the schema flag).
-    ``port.name`` may be dotted for a dynamic-combo sub-input (``model.seed``);
-    the implicit rule keys off the leaf name, same as the converter.
-    Mirrors ``workflow_to_api._has_control_after_generate_companion``'s
-    schema-level test."""
+    right after this port.
+
+    Mirrors ``useIntWidget``: the schema flag, else the legacy convention of an
+    INT input named exactly ``seed`` or ``noise_seed``. A dynamic-combo
+    sub-input is named ``<selector>.<key>`` (``sampling_mode.seed``), so the
+    name rule never applies to it, and ``image_seed``/``texture_seed`` get a
+    companion only when flagged. Reserving a slot the frontend does not create
+    shifts every later widget by one on a saved node (TextGenerate's
+    ``presence_penalty`` read from ``thinking``) and makes ``add_node`` write
+    stray markers the canvas then loads positionally (Tripo P-series).
+    """
     if port.options.control_after_generate:
         return True
-    # Same seed-like rule as the converter's companion guard: partner nodes
-    # name the widget every which way — ``image_seed``/``model_seed`` (Tripo),
-    # ``Seed`` (Rodin3D), ``rand_seed``, ``noise_seed_sde``, ``variation_seed``
-    # — and several ship it UNFLAGGED, yet the frontend still appends the
-    # companion. An exact ``seed``/``noise_seed`` match here made the exported
-    # widget catalog off by one for every such node, so a name<->index
-    # consumer wrote into the marker slot.
-    leaf_name = port.name.rsplit(".", 1)[-1]
-    return port.type == "INT" and "seed" in leaf_name.lower()
+    return port.type == "INT" and port.name in ("seed", "noise_seed")
 
 
 def load_3d_button_slots(m: Morphism) -> tuple[tuple[str, str], ...]:
