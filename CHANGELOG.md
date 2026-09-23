@@ -17,6 +17,27 @@ history.
 
 ### Added
 
+- `comfy build push` says how far along an upload is. It prints the plan before
+  the first byte ("3 files, 53.0 GB to upload, 2 already held"), then bytes sent,
+  rate and time left while each file moves. Under `--json-stream` the same numbers
+  are `upload_plan` / `upload_progress` / `upload_complete` events on stdout; under
+  `--json` they go to stderr so stdout stays the single envelope. The rate is
+  measured over the last ten seconds on a timer, so a stalled upload reports a
+  falling rate instead of going quiet. Schema: `build_push_event.json`.
+- `comfy deploy up --watch` and `comfy deploy status` show where a deployment that
+  is coming up has got to: the step, and while models are copied onto its storage
+  the model, bytes done of the total, rate and time left ("Staging models: model 1
+  of 2 sd_xl_base_1.0.safetensors, 3.5 GB of 7.3 GB, 44.2 MB/s, 1m 25s left"). The
+  numbers are the deploy service's own `progress` object, which `status --json`
+  and `up --json` now carry while the status is `provisioning` or `starting` and
+  omit otherwise. Under `--watch`, `--json-stream` emits a `deploy_progress` event
+  per new sample on stdout and `--json` puts the same lines on stderr. Ctrl-C
+  during `--watch` stops the watching and nothing else, and prints the command
+  that re-attaches. A service that sends no `progress` prints what it printed
+  before. Schema: `deploy_progress_event.json`.
+- `comfy build push` prints every warning a save returns, and `--release` cuts no
+  release while one says a deployment could not download a model link
+  (`build_release_held`); `--release-despite-warnings` cuts anyway.
 - `comfy build release delete RELEASE` deletes the named release, freeing the slot
   it held against the workspace's release limit. It confirms first (`--yes` skips
   the prompt, `build_release_delete_needs_confirm` refuses a caller that cannot
@@ -29,9 +50,57 @@ history.
   release, or one of the build's releases). The builder's message is carried
   whole up to 8 KiB, so the blocking deployment ids it names are no longer lost
   to the 1000-byte cap on the raw body.
+- `comfy knowledge pick CAPABILITY --check-local` checks each `oss` pick's
+  template against the local ComfyUI's model folders, the same check
+  `comfy templates check` runs. A pick whose model files are missing gets
+  `available_locally: false`, an `unavailable_reason` and a `missing_models`
+  count, and a template absent from a fresh gallery index is flagged too. A pick
+  that could not be checked carries its own `local_check` naming why. The
+  payload's `local_check` is `ok` when the check ran. When the server is down, a
+  model folder listing is over the size cap, or the gallery cannot load, it
+  carries that error code and no pick is marked. The flag is off by default
+  because it fetches uncached template workflows and calls the local server.
+
+### Changed
+
+- `comfy deploy up` now follows the deployment until it settles, instead of
+  returning as soon as the deploy service accepts it. A script that relied on
+  `up` returning at once passes `--no-watch`.
+- A watch (`up`, or `status --watch`) now stops at `unhealthy` instead of
+  waiting for `ready`: the status only ever follows `ready`, so the wait could
+  last as long as the endpoint stayed degraded, with nothing printed. `up` reports
+  an unhealthy deployment as not ok (`deploy_status_terminal`, exit 1), with
+  or without the watch, since it is billing without serving; `status` still
+  reports it as recoverable.
 
 ### Fixed
 
+- `insert_workflow` (`comfy workflow insert-workflow`) now rebases the inserted
+  template beside the target graph's existing nodes instead of leaving its
+  original absolute `pos` values untouched, which could land it thousands of
+  pixels away as a disconnected cluster on canvas. The whole block moves by a
+  single delta, so the template's own internal relative layout is preserved.
+- `comfy deploy refs compute` and the `comfy deploy up` pickers now list every
+  location the deploy service sells in, not only its datacenters, so B200, H100
+  and H200, which are sold only under `us`, can be picked. The table gains
+  `level` and `parent` columns, the region picker names each location's level,
+  and `refs compute --json` now carries the wider rows too, so a script reading
+  its first row gets `anywhere` rather than a datacenter. The region picker lists
+  the broadest location first, so accepting its first choice now creates at
+  `anywhere`.
+- A wait on a build or a deployment (`comfy build release create --watch`,
+  `comfy build release logs --follow`, `comfy deploy up --watch`,
+  `comfy deploy status --watch`) no longer fails once the sign-in token it
+  started with expires. The builder and deploy clients now refresh the stored
+  sign-in after a 401 and retry the request once; a token passed through
+  `COMFY_BUILDER_TOKEN` is never swapped. A build command the builder still
+  refuses now reports `build_not_signed_in` with the `comfy cloud login` hint
+  rather than a bare `build_builder_error`.
+- `comfy templates check` returns an error envelope instead of a traceback when
+  the gallery or workflow fetch gets a non-200 status or an over-cap body, or
+  when a model folder listing is over the size cap. It also percent-encodes the
+  model folder name it asks the local server for, accepts a folder name with
+  `..` inside it, and refreshes a stale gallery index before looking up the name.
 - A failed blob upload during `comfy build push` no longer writes the presigned
   PUT URL's query string to stdout, into the JSON envelope, or into a CI log.
   Both a rejected upload and a dropped connection quote the URL they were talking

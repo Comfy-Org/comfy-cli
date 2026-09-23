@@ -85,6 +85,38 @@ the message names the field:
 - `build_spec_stale` — the remote moved under you, or `--id` names a Build the
   spec's `syncedRevision` does not belong to. See *Revising*.
 
+- **`build_release_held`** — the save warned that a deployment could not download a
+  model link, so the push cut no release. Under `--json`, `details.warnings` names
+  each link and how its host refused; in text mode the tool printed each just above. Fix the link, or ask the user before passing
+  `--release-despite-warnings`.
+
+Two refusals are the workspace being full rather than the definition being wrong,
+and neither is fixed by editing anything:
+
+- **`build_release_limit`** — the workspace holds its maximum number of releases.
+  A retry does not clear it; deleting one does. `comfy build release delete` is the
+  procedure, and `comfy skills show comfy-build` carries the rules for it.
+- **`429 CONCURRENCY_LIMIT`**, which arrives as `build_builder_error` with the
+  builder's own message — too many builds running at once. Transient, unlike the
+  one above. Wait for one to finish, or say which are running.
+
+## A cut that failed after the request went out
+
+`release create` failing with a timeout, a 5xx, a dropped connection or any envelope
+you cannot tell landed is **ambiguous, not lost**. The builder may have committed
+the release and lost the response.
+
+**Re-run the identical command.** The cut dedupes on the definition's content hash
+scoped to the Build, so an unchanged spec cuts nothing new: the retry returns the
+release that already exists, or creates the one that never did, and re-drives the
+enqueue either way. There is no double-cut to protect against and no state to
+reconcile first — `comfy build release ls` is worth reading to *report* which
+happened, but not as a gate before retrying.
+
+The one thing that breaks this: a `push` between the failure and the retry. That
+changes the definition, moves the hash, and makes the retry a genuine second cut
+holding a second release slot.
+
 ## When a build ran and failed
 
 **One cause per cut, and every edit that cause requires. Three cuts, then stop.**

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from comfy_cli.command.build_spec import JsonObject, JsonValue
+from comfy_cli.command.deploy_progress import progress_of
 from comfy_cli.deploy_api_errors import DeployAPIError
 
 
@@ -61,12 +62,19 @@ class UpResult:
             "status": required_string(self.deployment, "status"),
             "created": self.created,
         }
-        return {
+        payload: JsonObject = {
             "deployment": deployment,
             "release": self.release,
             "computeConfig": self.compute_config,
             "supersedes": supersedes,
         }
+        # Present only while the deployment is coming up, and absent rather than
+        # null otherwise: an older service never sends it, and a settled
+        # deployment has nothing left to narrate.
+        progress = progress_of(self.deployment)
+        if progress is not None:
+            payload["progress"] = progress
+        return payload
 
 
 class ComputeRequiredError(Exception):

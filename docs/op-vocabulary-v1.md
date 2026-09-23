@@ -17,7 +17,7 @@ citation must point at a commit on that branch.
 
 ## 1. Frozen op kinds
 
-Seven kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
+Eight kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
 `ValueError("unknown op ...")` — it never ignores one.
 
 | Kind | Batchable | Standalone command | Summary |
@@ -29,6 +29,7 @@ Seven kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind wi
 | `clear` | no | `comfy workflow clear` | Remove every node, link, and group |
 | `reset_doc` | no | `comfy workflow reset-doc --confirm` | Reset the whole document to an empty baseline |
 | `define_subgraph` | yes | `comfy workflow define-subgraph` | Create one subgraph definition |
+| `insert_workflow` | no | `comfy workflow insert-workflow` | Merge a complete workflow template in one transaction |
 
 Batchable = the kind is accepted by `apply_specs` (the `workflow apply` /
 `workflow foreach` batch surface). `clear` and `reset_doc` rewrite the whole
@@ -198,12 +199,40 @@ stamped op without modifying the local workflow:
 }
 ```
 
-Only this op may carry `subgraph_id` or definition payloads. The CLI does not
+Only this op may carry `subgraph_id` or `subgraph_definition`; `definitions`
+is accepted only here and on `insert_workflow`. The CLI does not
 semantically validate, apply, replay, project, or resolve conflicts for the
 definition. cmp owns those operations: reusing an id with different content
 returns `definition_conflict`, and references to unknown ids follow cmp's
 unknown-node failure path. The CLI surfaces server errors verbatim. Subsequent
 interior edits use the existing id-addressed op scopes.
+
+### 1.8 `insert_workflow` — standalone only
+
+Command: `comfy workflow insert-workflow <file> <template>`, where `<template>`
+may be `-` to read the template payload from stdin. The CLI preserves the
+template payload verbatim and emits exactly one stamped op:
+
+```json
+{
+  "op": "insert_workflow",
+  "op_id": "<uuid4 hex>",
+  "actor": "cli",
+  "base_version": 0,
+  "stamp": [0, "cli"],
+  "workflow": {"nodes": [], "links": [], "groups": [], "definitions": {"subgraphs": []}}
+}
+```
+
+The `workflow` payload is authoritative and requires a top-level `nodes` array;
+`links`, `groups`, and `definitions` are optional. When present, `links` and
+`groups` must be arrays and `definitions` must be an object. The CLI checks only
+this outer shape. It does not validate graph semantics, remap IDs, apply the op,
+or write a mutated workflow document. Per the contract decision recorded in the TDD
+(vetoable), cmp owns deterministic ID remapping from the op envelope ID. Only `define_subgraph` and
+`insert_workflow` ops may carry definitions; edit ops reject a `definitions`
+field as `malformed_op`. The kind is not batchable and a spec batch rejects it as
+`workflow_insert_workflow_not_batchable`.
 
 ## 2. Idempotency and identity
 

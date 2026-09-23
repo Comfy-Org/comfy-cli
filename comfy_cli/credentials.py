@@ -97,6 +97,20 @@ def get_session(*, refresh: bool = True, force: bool = False, allow_clear: bool 
     return auth_store.get_cloud_session()
 
 
+def refreshed_access_token(rejected: str | None) -> str | None:
+    """Force the shared refresh after a server 401, and return the new access token.
+
+    Returns ``None`` when the refresh produced no token or the same one the
+    server just refused, so the caller surfaces the 401 rather than retrying a
+    token already known to fail. A fatal refresh clears the stored session, and
+    the 401 then carries the usual sign-in guidance.
+    """
+    session = get_session(refresh=True, force=True)
+    if session is None or not session.access_token or session.access_token == rejected:
+        return None
+    return session.access_token
+
+
 def find_api_key(*, purpose: Purpose) -> Credential | None:
     """Locate an ambient API key for ``purpose``: env var → stored key.
 

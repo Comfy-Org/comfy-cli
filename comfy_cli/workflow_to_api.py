@@ -24,7 +24,7 @@ import random
 import re
 from typing import Any
 
-from comfy_cli.cql.engine import _FRONTEND_DOM_WIDGET_TYPES
+from comfy_cli.cql.engine import _FRONTEND_DOM_WIDGET_TYPES, LOAD_3D_BUTTON_VALUES
 
 logger = logging.getLogger(__name__)
 
@@ -363,6 +363,14 @@ def _outer_slot_to_input_idx(outer_node: dict, sg_def: dict) -> dict[int, int]:
     return mapping
 
 
+def _is_link_id(value: Any) -> bool:
+    """Whether ``value`` can be a link id: an int as LiteGraph mints, or a string
+    as the doc host's ``insert_workflow`` remap mints (``insert:<op>:root:link:12``).
+    Anything else (``None``, a list or dict in a malformed save) is not a link and
+    must not reach a dict lookup, where an unhashable value would raise."""
+    return isinstance(value, (int, str)) and not isinstance(value, bool)
+
+
 def _expand_one_subgraph(
     outer_node: dict, sg_def: dict, existing_links: list
 ) -> tuple[list[dict], list, dict[int, list[tuple[Any, int]]], dict[tuple[Any, int], int]]:
@@ -386,13 +394,11 @@ def _expand_one_subgraph(
         if not isinstance(link, dict):
             continue
         old_id = link.get("id")
-        # Only int IDs are usable here: link_id_remap[old_id] / internal_link_map[old_id]
-        # need a hashable key, and the wider pipeline later does ``link_id in
-        # link_id_remap`` lookups keyed by int link IDs from the outer workflow.
-        # Skip the entry entirely on a missing/unhashable/wrong-typed id so a
-        # bad apple can't crash the whole subgraph expansion (which runs
+        # link_id_remap[old_id] / internal_link_map[old_id] need a hashable key
+        # (see _is_link_id). Skip the entry entirely on a missing/unhashable/
+        # wrong-typed id so a bad apple can't crash the whole subgraph expansion (which runs
         # before the per-node try/except wrapper).
-        if not isinstance(old_id, int):
+        if not _is_link_id(old_id):
             continue
         link_id_remap[old_id] = next_id
         next_id += 1
@@ -404,7 +410,7 @@ def _expand_one_subgraph(
             continue
         targets = []
         for lid in in_def.get("linkIds") or []:
-            if not isinstance(lid, int):
+            if not _is_link_id(lid):
                 continue
             link = internal_link_map.get(lid)
             if isinstance(link, dict):
@@ -417,7 +423,7 @@ def _expand_one_subgraph(
         if not isinstance(out_def, dict):
             continue
         for lid in out_def.get("linkIds") or []:
-            if not isinstance(lid, int):
+            if not _is_link_id(lid):
                 continue
             link = internal_link_map.get(lid)
             if isinstance(link, dict):
@@ -443,7 +449,7 @@ def _expand_one_subgraph(
         if target_id in (_SUBGRAPH_INPUT_NODE_ID, _SUBGRAPH_OUTPUT_NODE_ID):
             continue
         old_id = link.get("id")
-        if not isinstance(old_id, int):
+        if not _is_link_id(old_id):
             continue
         new_id = link_id_remap.get(old_id, old_id)
         expanded_links.append(
@@ -465,7 +471,7 @@ def _rewrite_internal_input(
 ) -> dict:
     input_copy = input_info.copy()
     link_id = input_info.get("link")
-    if not isinstance(link_id, int):
+    if not _is_link_id(link_id):
         # Both internal_link_map and link_id_remap are keyed by int IDs; an
         # unhashable (list/dict) link_id would otherwise crash the lookup
         # and abort the whole subgraph expansion.
@@ -592,6 +598,8 @@ def _build_link_map(links: list) -> dict[int, dict]:
         if not isinstance(link, (list, tuple)) or len(link) < 6:
             continue
         link_id, src_id, src_slot, tgt_id, tgt_slot, link_type = link[:6]
+        if not _is_link_id(link_id):
+            continue  # unhashable (malformed save) — skip it, don't abort the conversion
         link_map[link_id] = {
             "source_id": src_id,
             "source_slot": src_slot,
@@ -630,7 +638,7 @@ def _collect_reroute_sources(nodes: list[dict], link_map: dict[int, dict]) -> di
         # (e.g. ``link: []`` in a malformed saved file). _collect_reroute_sources
         # runs before the per-node try/except wrapper, so a single bad Reroute
         # would otherwise abort the entire conversion.
-        if not isinstance(link_id, int) or link_id not in link_map:
+        if not _is_link_id(link_id) or link_id not in link_map:
             continue
         ld = link_map[link_id]
         out[str(node.get("id"))] = (ld["source_id"], ld["source_slot"])
@@ -661,7 +669,7 @@ def _collect_get_set_mappings(
                 lid = inp.get("link")
                 # See _collect_reroute_sources: unhashable lid would crash
                 # the global pre-pass before any per-node guard kicks in.
-                if not isinstance(lid, int) or lid not in link_map:
+                if not _is_link_id(lid) or lid not in link_map:
                     continue
                 ld = link_map[lid]
                 set_sources[var_name] = (ld["source_id"], ld["source_slot"])
@@ -967,7 +975,7 @@ def _build_api_node(
             continue
         input_name = inp.get("name")
         link_id = inp.get("link")
-        if not input_name or not isinstance(link_id, int) or link_id not in tracers.link_map:
+        if not input_name or not _is_link_id(link_id) or link_id not in tracers.link_map:
             continue
         ld = tracers.link_map[link_id]
         actual_id, actual_slot = ld["source_id"], ld["source_slot"]
@@ -1093,17 +1101,22 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
     # ``FLOAT,INT`` input with ``widgetType: "FLOAT"`` owns a slot.
     if isinstance(options.get("widgetType"), str) and options.get("widgetType"):
         return True, False
+    # ``socketless`` hides the input SOCKET, not the widget: the value is
+    # serialized positionally like any other. Reading it as a link left its
+    # slot unconsumed, and `_collect_default_inputs` then refilled the input
+    # from the schema default — a colour the user picked came back as
+    # "#000000", which the server happily runs.
+    if options.get("socketless"):
+        return True, False
     if isinstance(input_type, (list, tuple)):
         return True, False  # combo of choices
     if isinstance(input_type, str):
-        # ``*`` and ``""`` are wildcard *connection* types — the frontend
-        # never renders a widget for them. They slipped through the
-        # lowercase fallback below because they have no cased characters
-        # (``"*".isupper()`` returns ``False``), so we have to filter them
-        # out explicitly. PreviewAny.source: ["*", {}] is the canonical
-        # case this used to mis-handle.
-        if input_type in ("", "*"):
-            return False, False
+        # The frontend renders a widget only for a type with a registered
+        # widget constructor (``widgetStore.inputIsWidget``); every other type,
+        # whatever its casing, is a connection socket that owns no
+        # ``widgets_values`` slot. A letter-case guess here once gave the
+        # mixed-case link ``VHS_LoadVideo.meta_batch`` (``VHS_BatchManager``) a
+        # slot, shifting the ``format`` value into it and crashing the node.
         if input_type in {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"}:
             return True, False
         if input_type in _FRONTEND_DOM_WIDGET_TYPES:
@@ -1112,9 +1125,25 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
             return True, False
         if input_type.startswith("COMFY_") and "COMBO" in input_type:
             return True, True
-        if not input_type.isupper():
-            return True, False  # custom (lowercase) widget types
     return False, False
+
+
+def _declared_input_spec(input_def: dict, name: str) -> Any:
+    """The spec a schema declares for ``name`` in either section, else ``None``."""
+    for section in ("required", "optional"):
+        section_def = input_def.get(section) or {}
+        if isinstance(section_def, dict) and name in section_def:
+            return section_def[name]
+    return None
+
+
+def _is_load_3d_spec(input_spec: Any) -> bool:
+    """Whether this input is the one the frontend's LOAD_3D factory renders.
+
+    Exactly the type that factory is registered for — ``LOAD_3D_ADVANCED`` and
+    ``PREVIEW_3D`` have their own widgets and inject no buttons.
+    """
+    return isinstance(input_spec, (list, tuple)) and bool(input_spec) and input_spec[0] == "LOAD_3D"
 
 
 def _dynamic_combo_selected_subs(input_name: str, input_spec: Any, selected: Any) -> list[tuple[str, Any]]:
@@ -1182,6 +1211,10 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
     input_def = _schema_input_def(schema)
     pairs: list[tuple[str, Any]] = []
     vidx = 0
+    # ``hasModelFileWidget`` in the frontend's LOAD_3D factory: the buttons are
+    # attached to the loaders (Load3D, Load3DAdvanced) and NOT to the viewers
+    # fed by a ``model_3d`` link (Preview3DAdvanced, SaveGaussianSplat, …).
+    injects_load_3d_buttons = _is_widget_input(_declared_input_spec(input_def, "model_file"))[0]
 
     def next_widget_spec(entries: list[tuple[str, Any]], start: int) -> Any:
         # The spec of the next WIDGET-owning input, not the next declared one.
@@ -1203,7 +1236,20 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
         # COMBO legitimately lists as one of its own options.
         nonlocal vidx
         is_widget, is_dynamic = _is_widget_input(spec)
-        if not is_widget or vidx >= len(widget_values):
+        if not is_widget:
+            return
+        if injects_load_3d_buttons and depth == 0 and _is_load_3d_spec(spec):
+            # The LOAD_3D custom widget adds its three buttons before its own
+            # component widget, so their values sit between ``model_file`` and
+            # this slot. Consuming them here read "upload3dmodel" into the
+            # viewport input and shifted width/height by three.
+            while (
+                vidx < len(widget_values)
+                and isinstance(widget_values[vidx], str)
+                and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
+            ):
+                vidx += 1
+        if vidx >= len(widget_values):
             return
         value = widget_values[vidx]
         pairs.append((name, value))
@@ -1573,7 +1619,25 @@ def _collect_default_inputs(
             default = _extract_default(input_spec)
             if default is not _MISSING:
                 defaults[input_name] = _wrap_widget_value(default)
+            elif section == "required" and _is_socketless_widget(input_spec):
+                # A socketless widget the saved workflow never persisted
+                # (ImageCompare's `compare_view`, saved as `widgets_values:
+                # []`). The frontend builds its prompt from LIVE widget state
+                # and submits one anyway; converting without it yields a prompt
+                # the server refuses outright (`required_input_missing`), which
+                # is 40 of the shipped templates. The server accepts any value
+                # here, `null` included — verified live — and this input has no
+                # declared default to offer instead.
+                defaults[input_name] = None
     return defaults
+
+
+def _is_socketless_widget(input_spec: Any) -> bool:
+    """A socketless input that is a widget rather than a forceInput link."""
+    if not isinstance(input_spec, (list, tuple)) or len(input_spec) < 2 or not isinstance(input_spec[1], dict):
+        return False
+    options = input_spec[1]
+    return bool(options.get("socketless")) and not (options.get("forceInput") or options.get("defaultInput"))
 
 
 _MISSING = object()

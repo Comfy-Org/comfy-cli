@@ -1,6 +1,6 @@
 """``comfy build push --release`` — targets are always explicit, never defaulted.
 
-A target belongs to a release and spends build minutes, so every path here is
+A target belongs to a release and builds an artifact, so every path here is
 about refusing to invent one: a malformed spelling, an absent ``--target``, an
 aborted picker and a failed push must all end with **zero** release cuts.
 """
@@ -328,3 +328,154 @@ def test_release_with_dry_run_is_refused_rather_than_silently_skipped(workspace:
     details = error["details"]
     assert isinstance(details, dict)
     assert details["conflict"] == ["--release", "--dry-run"]
+
+
+# --- the save's warnings -------------------------------------------------------
+
+LINK_WARNING = {
+    "field": "models[0].sourceUri",
+    "reason": "https://huggingface.co/org/gated/resolve/main/m.safetensors answered 403, "
+    "so a deployment could not download it",
+}
+PIP_WARNING = {"field": "pipDependencies", "reason": "numpy==2.5.1 needs Python >=3.12"}
+
+
+def test_a_save_warning_is_printed_and_carried_in_the_envelope(workspace: Path, client: RecordingBuilder) -> None:
+    # Given
+    write_spec(workspace, build_id="build-1", revision="revision-0", models=[], nodes=[])
+    client.remote_revisions["build-1"] = "revision-0"
+    client.save_warnings = [PIP_WARNING]
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert "pipDependencies: numpy==2.5.1 needs Python >=3.12" in result.stderr
+    data = envelope(result)["data"]
+    assert data["warnings"] == [PIP_WARNING]
+    jsonschema.validate(data, json.loads((SCHEMAS_DIR / "build_push.json").read_text(encoding="utf-8")))
+
+
+def test_a_first_push_prints_the_warnings_its_create_returned(workspace: Path, client: RecordingBuilder) -> None:
+    # Given: a create is followed by a read, which never carries warnings
+    write_spec(workspace, models=[], nodes=[])
+    client.save_warnings = [LINK_WARNING]
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert "models[0].sourceUri" in result.stderr
+    assert envelope(result)["data"]["warnings"] == [LINK_WARNING]
+
+
+def test_a_model_link_warning_holds_the_release_the_push_asked_for(workspace: Path, client: RecordingBuilder) -> None:
+    # Given
+    write_spec(workspace, build_id="build-1", revision="revision-0", models=[], nodes=[])
+    client.remote_revisions["build-1"] = "revision-0"
+    client.save_warnings = [LINK_WARNING, PIP_WARNING]
+
+    # When
+    result = invoke_push(workspace, "--release", "--target", "linux/nvidia")
+
+    # Then: the build saved, nothing was cut, and the envelope says where things stand
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_release_held"
+    assert "--release-despite-warnings" in error["hint"]
+    assert error["details"]["id"] == "build-1"
+    assert error["details"]["syncedRevision"] == client.remote_revisions["build-1"]
+    assert error["details"]["warnings"] == [LINK_WARNING, PIP_WARNING]
+    assert _calls(client, "create_release") == []
+    assert _calls(client, "update_build")
+
+
+def test_the_go_ahead_option_cuts_despite_a_model_link_warning(workspace: Path, client: RecordingBuilder) -> None:
+    # Given
+    write_spec(workspace, build_id="build-1", revision="revision-0", models=[], nodes=[])
+    client.remote_revisions["build-1"] = "revision-0"
+    client.save_warnings = [LINK_WARNING]
+
+    # When
+    result = invoke_push(workspace, "--release", "--target", "linux/nvidia", "--release-despite-warnings")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert len(_calls(client, "create_release")) == 1
+    assert envelope(result)["data"]["warnings"] == [LINK_WARNING]
+
+
+def test_a_package_warning_alone_never_holds_a_release(workspace: Path, client: RecordingBuilder) -> None:
+    # Given
+    write_spec(workspace, build_id="build-1", revision="revision-0", models=[], nodes=[])
+    client.remote_revisions["build-1"] = "revision-0"
+    client.save_warnings = [PIP_WARNING]
+
+    # When
+    result = invoke_push(workspace, "--release", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert len(_calls(client, "create_release")) == 1
+
+
+def test_the_go_ahead_option_alone_is_refused_before_any_request(workspace: Path, refusing_client: None) -> None:
+    # Given
+    write_spec(workspace, build_id="build-1", revision="revision-0", models=[], nodes=[])
+
+    # When
+    result = invoke_push(workspace, "--release-despite-warnings")
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_missing_input"
+    assert error["details"] == {"missing": ["--release"]}
+
+
+def test_a_first_push_holds_its_release_and_names_the_new_build(workspace: Path, client: RecordingBuilder) -> None:
+    # Given
+    write_spec(workspace, models=[], nodes=[])
+    client.save_warnings = [LINK_WARNING]
+
+    # When
+    result = invoke_push(workspace, "--release", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_release_held"
+    assert error["details"]["id"] == client.created_id
+    assert _calls(client, "create_release") == []
+
+
+def test_a_forced_push_holds_its_release_too(workspace: Path, client: RecordingBuilder) -> None:
+    # Given
+    write_spec(workspace, build_id="build-1", revision="revision-0", models=[], nodes=[])
+    client.remote_revisions["build-1"] = "revision-9"
+    client.save_warnings = [LINK_WARNING]
+
+    # When
+    result = invoke_push(workspace, "--force", "--release", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 1
+    assert envelope(result)["error"]["code"] == "build_release_held"
+    assert _calls(client, "create_release") == []
+
+
+@pytest.mark.parametrize("field", ["models[0].sourceUriX", "customNodes[0].sourceUri", "models[x].sourceUri"])
+def test_only_a_model_link_field_holds_a_release(workspace: Path, client: RecordingBuilder, field: str) -> None:
+    # Given
+    write_spec(workspace, build_id="build-1", revision="revision-0", models=[], nodes=[])
+    client.remote_revisions["build-1"] = "revision-0"
+    client.save_warnings = [{"field": field, "reason": "something else"}]
+
+    # When
+    result = invoke_push(workspace, "--release", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert len(_calls(client, "create_release")) == 1

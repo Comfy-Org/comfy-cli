@@ -6,7 +6,7 @@ is convenient but leaves no reusable artifact: no workflow JSON you can re-run,
 edit, or drop into a fragment pipeline. The same partner models also exist as
 ComfyUI **API NODES**. ``--emit-workflow <path>`` takes the exact same
 ``--param`` values the proxy path would consume and writes an API-format
-workflow that drives the partner node, plus a ``SaveImage``/``SaveVideo`` so the
+workflow that drives the partner node, plus a ``SaveImageAdvanced``/``SaveVideo`` so the
 result lands on disk when run with ``comfy run``.
 
 The proxy-model → node-class mapping is intentionally small and explicit: it
@@ -61,7 +61,7 @@ class NodeSpec:
     that must be materialized with a ``LoadImage`` node and wired into the
     partner node's matching input. ``fixed`` are node inputs always set to a
     constant (defaults the node requires but that ``generate`` doesn't surface).
-    ``output`` selects the save node (IMAGE → SaveImage, VIDEO → SaveVideo) and
+    ``output`` selects the save node (IMAGE → SaveImageAdvanced, VIDEO → SaveVideo) and
     the partner node's output port that carries the media.
 
     COMPLETENESS CONTRACT for ``fixed``: it must supply a default for EVERY
@@ -90,6 +90,33 @@ class NodeSpec:
     # Node input to set to "{width}:{height}" when the user passes both flags —
     # for nodes that take an aspect ratio where the proxy schema takes w/h.
     aspect_from_wh: str | None = None
+    # Emit this class even though the catalog flags it deprecated. Per-entry and
+    # off by default: an entry that goes stale must be renewed deliberately, not
+    # ride a blanket exemption. `test_emit.py` asserts the flag matches the
+    # recorded catalog in both directions.
+    deprecated_ok: bool = False
+    # `--model` value → the spec that runs it, for aliases whose models live on
+    # different node classes (nano-banana's gemini-3-pro-image-preview is only
+    # on GeminiImage2Node). Consulted before anything is built.
+    model_variants: dict[str, NodeSpec] = field(default_factory=dict)
+    # Flag → values the emitted graph already produces, so the flag is accepted
+    # and needs no input (flux-2's `--output_format png`: SaveImage writes PNG).
+    # Any other value is still refused as unmapped.
+    implied_flag_values: dict[str, frozenset[Any]] = field(default_factory=dict)
+
+
+# Schema default (snapshot 2026-07) of the Gemini image nodes' system_prompt;
+# execute() falls back to "" but the UI serializes this steering prompt, so
+# match it.
+_GEMINI_SYSTEM_PROMPT = (
+    "You are an expert image-generation engine. You must ALWAYS produce an image.\n"
+    "Interpret all user input—regardless of format, intent, or abstraction—as literal "
+    "visual directives for image composition.\n"
+    "If a prompt is conversational or lacks specific visual details, you must creatively "
+    "invent a concrete visual scenario that depicts the concept.\n"
+    "Prioritize generating the visual representation above any text, formatting, or "
+    "conversational requests."
+)
 
 
 # proxy model alias → partner node spec. Param keys are the *generate* flag
@@ -112,19 +139,34 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
             "seed": 42,
             "aspect_ratio": "auto",
             "response_modalities": "IMAGE+TEXT",
-            # Schema default (snapshot 2026-07); the node's execute() falls back
-            # to "" but the UI serializes this steering prompt, so match it.
-            "system_prompt": (
-                "You are an expert image-generation engine. You must ALWAYS produce an image.\n"
-                "Interpret all user input—regardless of format, intent, or abstraction—as literal "
-                "visual directives for image composition.\n"
-                "If a prompt is conversational or lacks specific visual details, you must creatively "
-                "invent a concrete visual scenario that depicts the concept.\n"
-                "Prioritize generating the visual representation above any text, formatting, or "
-                "conversational requests."
-            ),
+            "system_prompt": _GEMINI_SYSTEM_PROMPT,
         },
         output="IMAGE",
+        model_variants={
+            # Nano Banana Pro. Node: GeminiImage2Node — the only class whose
+            # `model` combo offers it.
+            "gemini-3-pro-image-preview": NodeSpec(
+                node_class="GeminiImage2Node",
+                endpoint="vertexai/gemini/{model}",
+                param_map={
+                    "prompt": "prompt",
+                    "model": "model",
+                    "seed": "seed",
+                    "aspect_ratio": "aspect_ratio",
+                    "resolution": "resolution",
+                },
+                image_params={"image": "images", "images": "images"},
+                fixed={
+                    "model": "gemini-3-pro-image-preview",
+                    "seed": 42,
+                    "aspect_ratio": "auto",
+                    "resolution": "1K",
+                    "response_modalities": "IMAGE+TEXT",
+                    "system_prompt": _GEMINI_SYSTEM_PROMPT,
+                },
+                output="IMAGE",
+            ),
+        },
     ),
     # ByteDance Seedance image-to-video. Node: ByteDanceImageToVideoNode.
     "seedance": NodeSpec(
@@ -160,25 +202,37 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
         },
         output="VIDEO",
     ),
-    # BFL Flux 2 [pro] (text-to-image). Node: Flux2ProImageNode.
+    # BFL Flux 2 [pro] (text-to-image). Node: Flux2ImageNode.
     #
     # There is deliberately NO "flux-pro" entry: that alias means BFL Flux Pro
     # 1.1 (`bfl/flux-pro-1.1/generate`), and ComfyUI has no node for it — the
     # only `flux-pro-1.1` node is the Ultra variant below. Mapping it to
-    # Flux2ProImageNode would emit a workflow for a *different* model, so
+    # Flux2ImageNode would emit a workflow for a *different* model, so
     # `flux-pro` falls through to the EmitError instead.
     "flux-2": NodeSpec(
-        node_class="Flux2ProImageNode",
+        node_class="Flux2ImageNode",
         endpoint="bfl/flux-2-pro/generate",
         param_map={
             "prompt": "prompt",
-            "width": "width",
-            "height": "height",
+            "width": "model.width",
+            "height": "model.height",
             "seed": "seed",
-            "prompt_upsampling": "prompt_upsampling",
         },
-        fixed={"width": 1024, "height": 768, "seed": 0, "prompt_upsampling": True},
+        # `model` is the dynamic-combo selector and its sub-widgets are addressed
+        # through it. It must be set before them, which `ops_from_api_workflow`
+        # guarantees by ordering plain keys ahead of dotted ones.
+        #
+        # "Flux.2 [pro]" is the option that posts to this entry's `endpoint`.
+        # The node's other option, "Flux.2 [max]", is a different model at a
+        # different price, so it needs its own alias and endpoint rather than
+        # being reachable by accident from this one.
+        #
+        # No `prompt_upsampling`: the proxy takes it, this node does not expose
+        # it, so the emitted workflow cannot carry it. `comfy generate` without
+        # --emit-workflow still sends it straight to the proxy.
+        fixed={"model": "Flux.2 [pro]", "model.width": 1024, "model.height": 768, "seed": 0},
         output="IMAGE",
+        implied_flag_values={"output_format": frozenset({"png"})},
     ),
     # BFL Flux 1.1 [pro] Ultra (text-to-image). Node: FluxProUltraImageNode.
     # The node takes an `aspect_ratio` string where the proxy schema takes
@@ -230,6 +284,13 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
 }
 
 
+# Core scaffolding `build_workflow` mints itself, exempt on the same grounds a
+# NodeSpec entry can be: the class is chosen here, not guessed. ImageBatch has
+# carried DEPRECATED since ComfyUI v0.35.0 — BatchImagesNode replaces it, but
+# folding the chain over changes emitted output, so that is its own change.
+_CORE_DEPRECATED_OK = frozenset({"ImageBatch"})
+
+
 def supported_models() -> list[str]:
     """Aliases that ``--emit-workflow`` knows how to render as a node."""
     return sorted(MODEL_NODE_MAP)
@@ -253,6 +314,20 @@ def is_supported(model: str) -> bool:
     return _lookup_model(model) is not None
 
 
+def node_class_for(model: str) -> str | None:
+    """The ComfyUI class ``--emit-workflow`` would mint for ``model``, or None
+    when nothing maps to a node. The per-row ``node_class`` of ``generate list``.
+
+    Exposed because :data:`MODEL_NODE_MAP` is hand-written and nothing outside
+    this repo could see what it points at. A consumer can check each class
+    against the catalog its own ComfyUI serves, which catches a class ComfyUI
+    has since deprecated. ``deprecated_ok`` covers the same ground against a
+    snapshot recorded HERE; this lets a caller cover it against a live one.
+    """
+    found = _lookup_model(model)
+    return found[1].node_class if found else None
+
+
 def _resolve_model(model: str) -> tuple[str, NodeSpec]:
     found = _lookup_model(model)
     if found is None:
@@ -266,10 +341,11 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
     ``values`` are the parsed ``--param`` values (same dict the proxy client
     receives). Local-file image params are materialized as ``LoadImage`` nodes
     and wired into the partner node; scalar params override the node's fixed
-    defaults. A ``SaveImage``/``SaveVideo`` is appended so ``comfy run`` writes
+    defaults. A ``SaveImageAdvanced``/``SaveVideo`` is appended so ``comfy run`` writes
     the result to disk.
     """
     _alias, ns = _resolve_model(model)
+    ns = ns.model_variants.get(values.get("model"), ns)
 
     node_inputs: dict[str, Any] = dict(ns.fixed)
 
@@ -328,6 +404,27 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
         if width_given and height_given:
             node_inputs[ns.aspect_from_wh] = f"{values['width']}:{values['height']}"
 
+    # Same rule, generalized: every flag the user actually typed has to land
+    # somewhere. `parse_args` fills no defaults, so `values` holds only what argv
+    # carried — anything in it that no mapping consumes would be discarded in
+    # silence. Some of these the node has no input for (flux-2's
+    # `prompt_upsampling`); others it has and this table does not wire yet
+    # (flux-2's `input_image` into `model.images`). Either way the emitted graph
+    # would ignore the flag, so the error names the mapping, not the node.
+    handled = set(ns.param_map) | set(ns.image_params)
+    handled |= {flag for flag, implied in ns.implied_flag_values.items() if values.get(flag) in implied}
+    if ns.aspect_from_wh:
+        handled |= {"width", "height"}
+    unsupported = sorted(flag for flag, value in values.items() if value is not None and flag not in handled)
+    if unsupported:
+        flags = ", ".join(f"--{flag}" for flag in unsupported)
+        noun = "that flag" if len(unsupported) == 1 else "those flags"
+        raise EmitError(
+            f"--emit-workflow for {model!r} does not map {flags} onto {ns.node_class}. "
+            f"Drop {noun}, or run `comfy generate {model}` without --emit-workflow, "
+            "which sends every flag straight to the proxy."
+        )
+
     partner = {
         "class_type": ns.node_class,
         "_meta": {"title": f"{ns.node_class} ({model})"},
@@ -349,9 +446,13 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
         }
     else:
         workflow[save_id] = {
-            "class_type": "SaveImage",
+            "class_type": "SaveImageAdvanced",
             "_meta": {"title": "save generated image"},
-            "inputs": {"images": ["1", ns.media_port], "filename_prefix": output_prefix},
+            "inputs": {
+                "images": ["1", ns.media_port],
+                "filename_prefix": output_prefix,
+                "format": "png",
+            },
         }
     return workflow
 
@@ -393,8 +494,8 @@ def _is_link_ref(value: Any, node_ids: set[str]) -> bool:
     )
 
 
-def ops_from_api_workflow(api_wf: dict[str, Any], graph: Any) -> list[dict[str, Any]]:
-    """Re-express an API-format graph as batch specs for ``apply_specs``.
+def ops_from_api_workflow(api_wf: dict[str, Any], graph: Any, model: str) -> list[dict[str, Any]]:
+    """Re-express ``model``'s API-format graph as batch specs for ``apply_specs``.
 
     Shape: every ``add_node`` first (each with a batch-local alias), then every
     ``set_widget`` (non-dotted keys before dotted ones, so a dynamic-combo
@@ -406,6 +507,8 @@ def ops_from_api_workflow(api_wf: dict[str, Any], graph: Any) -> list[dict[str, 
     """
     del graph  # structural mapping today; see docstring
     node_ids = {str(k) for k in api_wf}
+    _alias, ns = _resolve_model(model)
+    deprecated_ok = ({ns.node_class} if ns.deprecated_ok else set()) | _CORE_DEPRECATED_OK
 
     def alias(nid: Any) -> str:
         return f"gen{nid}"
@@ -415,11 +518,18 @@ def ops_from_api_workflow(api_wf: dict[str, Any], graph: Any) -> list[dict[str, 
     connects: list[dict[str, Any]] = []
     for nid in sorted(api_wf, key=str):
         node = api_wf[nid]
-        # allow_deprecated: the model→node mapping is curated (and pinned by
-        # test_emit's endpoint invariant), so a class the catalog has since
-        # flagged deprecated is still the intended target — the gate exists to
-        # stop a GUESSED class, not a mapped one.
-        adds.append({"op": "add_node", "class_type": node["class_type"], "as": alias(nid), "allow_deprecated": True})
+        # The deprecation gate exists to stop a GUESSED class, so a mapped one
+        # may opt out — but only the entry being emitted, read from its own
+        # NodeSpec rather than from a union over the whole table. Anything else
+        # the catalog has since flagged deprecated fails here, loudly.
+        adds.append(
+            {
+                "op": "add_node",
+                "class_type": node["class_type"],
+                "as": alias(nid),
+                "allow_deprecated": node["class_type"] in deprecated_ok,
+            }
+        )
         inputs = node.get("inputs") or {}
         keys = sorted(inputs, key=lambda k: (k.count("."), list(inputs).index(k)))
         for key in keys:
@@ -464,16 +574,24 @@ def write_frontend_workflow(
 
     Raises ``EmitError``/``UnsupportedModelError`` like :func:`write_workflow`;
     an applier failure surfaces as ``EmitError`` (the request itself was
-    expressible — a failure here is a schema/catalog mismatch worth reporting).
+    expressible — a failure here is a schema/catalog mismatch worth reporting),
+    except ``DeprecatedNodeType``, which travels out intact.
     """
     from comfy_cli import workflow_ops
 
     api = build_workflow(model, values, output_prefix=output_prefix)
-    specs = ops_from_api_workflow(api, graph)
+    specs = ops_from_api_workflow(api, graph, model)
     try:
         workflow, _ops, _aliases = workflow_ops.apply_specs(  # noqa: F841 — wf is the product; batch below is replace-shaped
             json.loads(json.dumps(_EMPTY_FRONTEND)), graph, specs, actor=actor, base_version=base_version
         )
+    except workflow_ops.DeprecatedNodeType:
+        # Subclasses ValueError, so it has to be caught first. It already carries
+        # `node_deprecated`, the replacement class and a hint that names the fix;
+        # folding it into EmitError would render the umbrella "check the model
+        # name and that all required inputs are provided", which is not the
+        # remedy for a stale entry in MODEL_NODE_MAP.
+        raise
     except (ValueError, KeyError) as e:
         raise EmitError(f"could not materialize the {model!r} workflow as canvas ops: {e}") from e
 

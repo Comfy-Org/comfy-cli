@@ -10,10 +10,13 @@ The commands here are the `comfy deploy` group from
 `comfy cloud login`; a command answers `deploy_not_signed_in` when there is no
 usable session.
 
-**Deploying spends money continuously, not once.** A build costs minutes and
-stops. A deployment holds compute until something stops it: `up` and `run` create
-paid compute, `start` resumes it, and `scale --min` sets the standing charge.
-Every other verb reads, or gives compute back.
+**Deploying spends money continuously, not once.** Building does not: it is capped
+by counts — how many builds and releases a workspace holds — and metered by nothing,
+so a finished build costs nothing to leave lying there. A deployment holds compute
+until something stops it: `up` and `run` create paid compute, `start` resumes it,
+and `scale --min` sets the standing charge which can approach 0 with a `scale --min 0`.
+Every other verb reads, or gives compute back. **This skill's surface is the one that
+bills by time.**
 
 ## What you are working with
 
@@ -51,7 +54,7 @@ refs    compute — deployable regions and GPU classes with availability.
 ```shell
 comfy build release show                          # confirm deployable: true
 comfy deploy refs compute                         # read the real GPU/region pairs
-comfy deploy up <dir> --gpu <class> --region <region> --min 0 --max 1 --watch
+comfy deploy up <dir> --gpu <class> --region <region> --min 0 --max 1
 comfy deploy status <dir>
 comfy deploy run <dir> --workflow <api-workflow>.json
 comfy deploy stop <dir>                           # when the user is done
@@ -74,7 +77,7 @@ release version. **Read it and act on it.** An empty array means nothing else is
 running; a non-empty one is a bill the user has not agreed to.
 
 ```shell
-comfy deploy up <dir> --watch          # note `supersedes` in the output
+comfy deploy up <dir>                  # note `supersedes` in the output
 comfy deploy stop --deployment <old-id>
 ```
 
@@ -106,8 +109,39 @@ as a pair, `--min` accepts 0–20 and `--max` 1–20.
 | `stop_failed` | **maybe** | Stop did not take; retry it |
 | `failed` | no | Permanent failure |
 
-`--watch` on `up` and `status` polls until `ready`, `failed`, `stopped` or
-`stop_failed`. The other five are transitional and it keeps waiting.
+`up` follows the deployment by default; pass `--no-watch` to return as soon as it
+is accepted. `status` waits only when asked, with `--watch`. Either way the wait
+ends at `ready`, `unhealthy`, `failed`, `stopped` or `stop_failed`. `unhealthy`
+only ever follows `ready`, so the deployment already came up: `up` reports it as
+not ok (`deploy_status_terminal`, exit 1) because it is billing without serving,
+and `status` reports it as recoverable. Through `queued`, `provisioning`,
+`starting` and `stopping` it keeps waiting.
+
+While the status is `provisioning` or `starting` the deployment carries a
+`progress` object, and `status --json` returns it as `data.progress`: `step`
+(`staging_models`, `creating_endpoint`, `waiting_for_worker`) and, while models
+are copied onto the deployment's storage, `modelsDone` / `modelsTotal`,
+`bytesDone` / `bytesTotal`, `currentModel`, `bytesPerSecond` and `etaSeconds`.
+Under `--watch` the same object arrives as `deploy_progress` events, one per new
+sample (the service rewrites it about every three seconds in every step): on **stderr** under `--json`,
+on stdout under `--json-stream`. Relay those numbers instead of "still
+provisioning". Things to read correctly:
+
+- `bytesTotal` absent means nobody measured the release, so there is no time
+  left to quote; `0` means every model was already in place.
+- `bytesTotalIsFloor: true` means "at least this much", with no `etaSeconds`.
+- `etaSeconds` covers staging only. Creating the endpoint and the first worker's
+  cold start come after it.
+- `attempt` above 1 means the step was restarted, and `bytesDone` started again.
+- `stale: true` on an event means the service has not rewritten the sample for a
+  minute. Its writes are best-effort, so that is not evidence the deploy stopped;
+  the status is still the verdict.
+- How long a step has run is now minus `startedAt`. `updatedAt` only says how
+  fresh the sample is, and it moves every few seconds in every step.
+- No `progress` at all is an older service, or a status other than the two above.
+
+Interrupting the wait leaves the deployment coming up on the service's side;
+`comfy deploy status --deployment <id> --watch` attaches again.
 
 `status` also reports **why** a deployment stopped, as `stopReason`: `user`,
 `credits`, or `policy`. `credits` is a billing problem and not something a retry
@@ -117,7 +151,7 @@ fixes — say so rather than restarting into the same wall.
 
 ```shell
 comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
-                       [--release <id>] [--deployment <id>] [--watch]
+                       [--release <id>] [--deployment <id>] [--no-watch]
 ```
 
 - **It selects the newest deployable release of the Build** unless `--release`
@@ -127,8 +161,12 @@ comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
   all" from "releases, none deployable".
 - **`--gpu` and `--region` are required for a new deployment**, and it prompts
   for them interactively. Under `--json` an omission is `deploy_missing_input`.
-  Take the values from `comfy deploy refs compute`, which lists regions with
-  their GPU classes, VRAM and availability — do not invent a class name.
+  Take the values from `comfy deploy refs compute`, which lists every location
+  with its level (a whole country such as `us` down to one datacenter), its
+  parent, its GPU classes, VRAM and availability. A wider location is a valid
+  `--region`, and some GPU classes are sold only on one. A blank availability
+  means the service gave no hint for that row, not that it has no stock. Do not
+  invent a class name.
 - **Availability is volatile, so re-read `refs compute` immediately before `up`,
   never from an earlier plan.** A region offering RTX PRO 6000 at planning time
   had none an hour later, and `up` refused with `deploy_compute_unavailable`. The

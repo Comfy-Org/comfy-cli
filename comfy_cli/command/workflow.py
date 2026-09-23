@@ -1612,18 +1612,26 @@ def validate_api_workflow(
     # Load workflow
     wf_path = Path(workflow).expanduser()
     if not wf_path.is_file():
-        renderer.error(code="workflow_not_found", message=f"Workflow file not found: {workflow}", hint="check the path")
+        renderer.error(
+            command=command,
+            code="workflow_not_found",
+            message=f"Workflow file not found: {workflow}",
+            hint="check the path",
+        )
         raise typer.Exit(code=1)
     try:
         wf_data = json.loads(wf_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
-        renderer.error(code="workflow_invalid_json", message=f"Invalid JSON: {e}", hint="re-export from ComfyUI")
+        renderer.error(
+            command=command, code="workflow_invalid_json", message=f"Invalid JSON: {e}", hint="re-export from ComfyUI"
+        )
         raise typer.Exit(code=1) from e
     except (OSError, UnicodeDecodeError) as e:
         # e.g. a non-UTF-8 file, permission denied, or a TOCTOU race if the file
         # vanished after the is_file() check above. Report structurally instead
         # of crashing with a raw traceback.
         renderer.error(
+            command=command,
             code="workflow_read_error",
             message=f"Unable to read workflow file: {e}",
             hint="check file permissions and encoding",
@@ -1631,7 +1639,10 @@ def validate_api_workflow(
         raise typer.Exit(code=1) from e
     if not isinstance(wf_data, dict):
         renderer.error(
-            code="workflow_not_api_format", message="Workflow must be a JSON object", hint="use File > Export (API)"
+            command=command,
+            code="workflow_not_api_format",
+            message="Workflow must be a JSON object",
+            hint="use File > Export (API)",
         )
         raise typer.Exit(code=1)
 
@@ -1648,6 +1659,7 @@ def validate_api_workflow(
     except ValueError as e:
         if where:
             renderer.error(
+                command=command,
                 code="where_invalid",
                 message=str(e),
                 hint="use `--where local` or `--where cloud`",
@@ -1703,6 +1715,7 @@ def validate_api_workflow(
         graph._try_default_annotations()
     except LoadError as e:
         renderer.error(
+            command=command,
             code="cql_no_graph",
             message=str(e),
             hint=e.details.get("hint", "pass --input <object_info.json>, or start the server"),
@@ -1724,6 +1737,7 @@ def validate_api_workflow(
             converted = convert_ui_to_api(wf_data, graph.object_info)
         except WorkflowConversionError as e:
             renderer.error(
+                command=command,
                 code="workflow_not_api_format",
                 message=f"Workflow is a UI export that could not be converted to API format: {e}",
                 hint="use ComfyUI's 'File > Export (API)' to save as API format",
@@ -1731,6 +1745,7 @@ def validate_api_workflow(
             raise typer.Exit(code=1) from e
         except Exception as e:  # noqa: BLE001 — never leak a raw traceback to the agent flow
             renderer.error(
+                command=command,
                 code="conversion_crash",
                 message=f"Workflow conversion crashed unexpectedly: {type(e).__name__}: {e}",
                 hint="report this at https://github.com/Comfy-Org/comfy-cli/issues",
@@ -1739,11 +1754,13 @@ def validate_api_workflow(
             raise typer.Exit(code=1) from e
         if not converted:
             renderer.error(
+                command=command,
                 code="workflow_not_api_format",
                 message="Workflow is a UI export that converted to no executable nodes",
                 hint="use ComfyUI's 'File > Export (API)' to save as API format",
             )
             raise typer.Exit(code=1)
+        editable_ids = _editable_node_ids(wf_data)
         wf_data = converted
         converted_from_ui = True
 
@@ -1758,9 +1775,10 @@ def validate_api_workflow(
     if converted_from_ui:
         for issue in (*result["errors"], *result["warnings"]):
             nid = str(issue.get("node_id", ""))
-            if ":" in nid:
+            editable = editable_ids.get(nid, nid.replace(":", "/") if ":" in nid else nid)
+            if editable != nid:
                 issue["api_node_id"] = nid
-                issue["node_id"] = nid.replace(":", "/")
+                issue["node_id"] = editable
 
     # Preview credit spend: partner-API (paid) nodes spend Comfy credits when the
     # workflow is run. This is the same detection `comfy run` uses (authoritative
@@ -1866,12 +1884,52 @@ def _invalid_workflow_error(result: dict[str, Any]) -> dict[str, Any] | None:
         if suggestions:
             line += f" (did you mean: {', '.join(str(s) for s in suggestions)}?)"
         hint_parts.append(line)
+    # The code is a registered catch-all raised for every verdict, so it alone
+    # cannot tell a cycle from a missing input and a caller reading only
+    # `error.code` diagnoses all of them as "unknown nodes". The distinct codes
+    # go in the message, which carries no contract, in first-seen order.
+    seen_codes = list(dict.fromkeys(str(e.get("code")) for e in errors if e.get("code")))
+    summary = f"workflow has {len(errors)} validation error(s)"
+    if seen_codes:
+        summary += ": " + ", ".join(seen_codes[:5])
     return {
         "code": "workflow_unknown_nodes",
-        "message": f"workflow has {len(errors)} validation error(s)",
+        "message": summary,
         "hint": "\n".join(hint_parts),
         "details": {"errors": errors, "warnings": result["warnings"]},
     }
+
+
+def _editable_node_ids(ui_workflow: dict) -> dict[str, str]:
+    """Map every API id UI→API lowering mints to the editable address of its node.
+
+    Lowering composes an interior node's id as ``<outer>:<inner>`` (nested:
+    ``<outer>:<mid>:<inner>``); the edit surface speaks ``<outer>/<inner>``. The
+    map is built from the canvas's real ids rather than by rewriting ``:`` —
+    a doc-host-inserted node's own id (``insert:<op>:root:node:13``) already
+    contains ``:`` and must come back verbatim.
+    """
+    from comfy_cli.cql.engine import _MAX_SUBGRAPH_DEPTH, _subgraph_defs_by_id
+
+    defs_by_id = _subgraph_defs_by_id(ui_workflow)
+    out: dict[str, str] = {}
+
+    def walk(nodes: list, api_prefix: str, edit_prefix: str, depth: int) -> None:
+        if depth > _MAX_SUBGRAPH_DEPTH:
+            return
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            nid = str(node.get("id", ""))
+            api_id = f"{api_prefix}:{nid}" if api_prefix else nid
+            edit_id = f"{edit_prefix}/{nid}" if edit_prefix else nid
+            out[api_id] = edit_id
+            sg = defs_by_id.get(str(node.get("type", "")))
+            if sg is not None:
+                walk(sg.get("nodes") or [], api_id, edit_id, depth + 1)
+
+    walk(ui_workflow.get("nodes") or [], "", "", 0)
+    return out
 
 
 @app.command(
@@ -1936,6 +1994,9 @@ from comfy_cli.command import workflow_edit as _wedit  # noqa: E402
 
 app.command("define-subgraph", help="Create a subgraph definition; emits one define_subgraph op.")(
     _wedit.define_subgraph_cmd
+)
+app.command("insert-workflow", help="Insert a complete workflow; emits one insert_workflow op.")(
+    _wedit.insert_workflow_cmd
 )
 app.command("add-node", help="Add a node to the graph; emits an add_node op.")(_wedit.add_node_cmd)
 app.command("connect", help="Wire an output slot to an input slot; emits a connect op.")(_wedit.connect_cmd)

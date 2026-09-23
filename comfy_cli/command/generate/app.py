@@ -593,6 +593,8 @@ def _generate(model: str, extra_args: list[str]) -> None:
             prefix = meta.get("output-prefix") if isinstance(meta.get("output-prefix"), str) else "generate"
             renderer = get_renderer()
             ops: list | None = None
+            from comfy_cli import workflow_ops
+
             try:
                 if emit_ops_mode:
                     # FRONTEND-format file + a stamped replace_ops batch, so the
@@ -647,6 +649,19 @@ def _generate(model: str, extra_args: list[str]) -> None:
                         "(see `details.supported`), or call the model through the proxy without --emit-workflow"
                     ),
                     details={"model": e.model, "supported": e.supported},
+                )
+                raise typer.Exit(code=1) from e
+            except workflow_ops.DeprecatedNodeType as e:
+                # Same envelope as `workflow add-node`: the remedy is a live
+                # class, which `details.replacement` names. The umbrella
+                # `emit_workflow_failed` hint would send the caller to check
+                # their params for a failure their params did not cause.
+                _track_error("emit", e)
+                renderer.error(
+                    code=e.code,
+                    message=str(e),
+                    hint=e.hint,
+                    details={"requested": e.class_type, "replacement": e.replacement, "model": name},
                 )
                 raise typer.Exit(code=1) from e
             except (emit.EmitError, OSError) as e:
@@ -908,6 +923,11 @@ def _model_record(e: spec.Endpoint) -> dict[str, object]:
         # Most of the catalog is proxy-only; an agent that could not see this
         # asked for a workflow it could never get (`emit_workflow_failed`).
         "emit_supported": emit.is_supported(e.id),
+        # The class the row above would mint, or None when unmapped. Paired with
+        # `emit_supported` so a consumer outside this repo can check the
+        # hand-written mapping against a live catalog instead of taking the
+        # boolean on trust.
+        "node_class": emit.node_class_for(e.id),
     }
 
 

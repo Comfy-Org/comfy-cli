@@ -53,13 +53,14 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import random
 import re
 import uuid
 from typing import Any
 
 from comfy_cli import layout
-from comfy_cli.cql.engine import frontend_injected_widget_error
+from comfy_cli.cql.engine import frontend_injected_widget_error, is_wildcard_type
 
 # New ids live in [2**40, 2**53): always large (never collides with small
 # frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
@@ -100,12 +101,14 @@ FROZEN_OPS: tuple[str, ...] = (
     "clear",
     "reset_doc",
     "define_subgraph",
+    "insert_workflow",
 )
 
 #: Kinds frozen in the contract whose replay is not implemented in the CLI.
-#: ``define_subgraph`` is emitted for cmp to validate and apply; the CLI must
-#: keep rejecting local replay to preserve that ownership boundary.
-DEFERRED_OPS: tuple[str, ...] = ("define_subgraph",)
+#: ``define_subgraph`` and ``insert_workflow`` are emitted for cmp to validate
+#: and apply; the CLI must keep rejecting local replay to preserve that
+#: ownership boundary.
+DEFERRED_OPS: tuple[str, ...] = ("define_subgraph", "insert_workflow")
 
 #: Kinds a batch (``apply_specs``) dispatches. ``clear`` and ``reset_doc`` are
 #: standalone-only: they rewrite the whole document, so they never ride inside
@@ -125,6 +128,11 @@ _NOT_BATCHABLE: dict[str, dict[str, str]] = {
         "code": "workflow_reset_doc_not_batchable",
         "command": "comfy workflow reset-doc <file> --confirm",
         "does": "resets the whole document to the empty baseline and erases its replay history",
+    },
+    "insert_workflow": {
+        "code": "workflow_insert_workflow_not_batchable",
+        "command": "comfy workflow insert-workflow <file> <template>",
+        "does": "inserts a complete workflow in one transaction",
     },
 }
 
@@ -150,6 +158,9 @@ class NotBatchableError(ValueError):
         command = entry["command"]
         self.code = entry["code"]
         self.kind = kind
+        self.spec_index = index
+        self.spec_op = kind
+        self.applied_count = 0
         self.hint = f"run the standalone `{command}` first, then apply the remaining ops as a batch"
         super().__init__(
             f"spec #{index}: `{kind}` {entry['does']} and is standalone-only (op-vocabulary-v1: "
@@ -297,7 +308,11 @@ def _types_compatible(link_type: Any, dst_type: Any) -> bool:
     src, dst = _slot_types(link_type), _slot_types(dst_type)
     if not src or not dst:
         return True
-    if "*" in src or "*" in dst:
+    # A V3 match-type port takes the type of whatever is wired to it, so it is
+    # a wildcard on either end — the validator has always read it that way.
+    # This gate knew only "*", so no node with a match-type socket could be
+    # wired in either direction (ResizeImageMaskNode, ComfySwitchNode).
+    if any(is_wildcard_type(t) for t in src | dst):
         return True
     return bool(src & dst)
 
@@ -556,16 +571,35 @@ def add_node(
         raise UnknownNodeType(class_type, close_matches=difflib.get_close_matches(class_type, names, n=5, cutoff=0.6))
     if m.deprecated and not allow_deprecated:
         raise DeprecatedNodeType(class_type, replacement=_deprecated_replacement(graph, m))
+    _widget_names = tuple(graph.widget_order_default(class_type))
     size = layout.estimate_size(
         len([p for p in m.inputs if p.is_link]),
         len(m.outputs),
-        len(graph.widget_order_default(class_type)),
+        len(_widget_names),
+        # This is the size PERSISTED onto the node, and every later collision check reads
+        # it. Omitting the multiline term here left the planner correct and the saved state
+        # wrong, so a second call would place the next node on top of a node it had itself
+        # under-measured.
+        n_multiline=layout.count_multiline(m, _widget_names),
+        n_image_previews=layout.count_image_previews(m, _widget_names),
+        title=(getattr(m, "display_name", "") or class_type),
+        input_labels=tuple(p.name for p in m.inputs if p.is_link),
+        output_labels=tuple(p.name for p in m.outputs),
+        widget_labels=_widget_names,
     )
     if pos is None:
         # Layout-aware default: right of the current graph, collision-free.
         # Decided at mint time so the position freezes into the op and replay
         # stays convergent (P1). Existing nodes are never moved.
         pos = layout.cascade_pos(workflow, size)
+    if (
+        not isinstance(pos, (list, tuple))
+        or len(pos) != 2
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) for value in pos
+        )
+    ):
+        raise ValueError(f"node position must be two finite numbers, got {pos!r}")
     node = _build_node(mint_id(), class_type, m, graph, pos, size)
     if mode:
         # Node mode (mute/bypass) is graph-semantic state — a bypassed node
@@ -606,7 +640,33 @@ def set_widget(
     try:
         return _set_widget_impl(workflow, graph, node_id, widget, value, actor=actor, base_version=base_version)
     except ValueError as e:
+        bound = _binding_address(workflow, graph, node_id)
+        if bound is not None:
+            try:
+                return _set_widget_impl(workflow, graph, bound, widget, value, actor=actor, base_version=base_version)
+            except ValueError:
+                pass
         raise _enrich_resolution_error(e, workflow, graph, widget=widget) from e
+
+
+def _binding_address(workflow: dict, graph, node_id: Any) -> Any:
+    """The node address a ``print_workflow`` binding key stands for, or ``None``.
+
+    ``print_workflow`` names every node (``57/clip_text_encode`` → ``57/27``) and
+    callers copy those names back as the node part of an address. Consulted
+    only after the literal address failed to resolve, so a real node id always
+    wins over a binding that happens to spell it.
+    """
+    from comfy_cli.workflow_print import render_py
+
+    try:
+        bindings = render_py(workflow, graph).bindings
+    except Exception:  # noqa: BLE001 — a render failure just means "no alias"
+        return None
+    bound = bindings.get(str(node_id))
+    if bound is None or bound == str(node_id):
+        return None
+    return int(bound) if bound.lstrip("-").isdigit() else bound
 
 
 def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[Any, dict | None]:
@@ -829,7 +889,7 @@ def _resolve_widget_write(workflow: dict, graph, node_id: Any, widget: str):
 
     node_str = str(node_id)
     if _engine._SUBGRAPH_PATH_SEP in node_str:
-        segments = node_str.split(_engine._SUBGRAPH_PATH_SEP)
+        segments = _engine.split_node_path(workflow, node_str)
     elif ":" in node_str and _find_by_str(workflow, node_str) is None:
         segments = node_str.split(":")
     else:
@@ -860,7 +920,7 @@ def _subgraph_write_target(workflow: dict, node_id: Any, widget: str) -> tuple[l
     node_str = str(node_id)
     # Nested interior form: the interior path is explicit.
     if _engine._SUBGRAPH_PATH_SEP in node_str:
-        return node_str.split(_engine._SUBGRAPH_PATH_SEP), widget
+        return _engine.split_node_path(workflow, node_str), widget
     # Flattened composite form ("57:27"): the id namespace UI→API lowering mints
     # (workflow_to_api composes inner ids as `<outer>:<inner>`), which is what
     # `validate` output and server node_errors carry. Callers copy those ids
@@ -947,7 +1007,7 @@ def _subgraph_boundary_error(workflow: dict, node_id: Any) -> ValueError | None:
     if _find_by_str(workflow, node_str) is not None:
         return None  # a literal node really has this id
     if _engine._SUBGRAPH_PATH_SEP in node_str:
-        segments = node_str.split(_engine._SUBGRAPH_PATH_SEP)
+        segments = _engine.split_node_path(workflow, node_str)
     elif ":" in node_str:
         # The flattened namespace UI→API lowering mints (`<outer>:<inner>`),
         # accepted everywhere set-widget accepts the `/` form.
@@ -1302,6 +1362,38 @@ def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int =
     return ops
 
 
+def insert_workflow(
+    workflow: dict,
+    template: dict,
+    *,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, dict]:
+    """Structurally validate and emit an insert op without applying it.
+
+    The CLI deliberately preserves all source IDs. Per the vetoable contract
+    decision recorded in the TDD, cmp owns deterministic ID remapping from the
+    op envelope ID when it applies this payload.
+    """
+    if not isinstance(template, dict):
+        raise ValueError("insert_workflow workflow must be a JSON object")
+    if "nodes" not in template:
+        raise ValueError("insert_workflow missing required field: nodes")
+    for field in ("nodes", "links", "groups"):
+        if field in template and not isinstance(template[field], list):
+            raise ValueError(f"insert_workflow field {field} must be an array")
+    if "definitions" in template and not isinstance(template["definitions"], dict):
+        raise ValueError("insert_workflow field definitions must be an object")
+    inserted = copy.deepcopy(template)
+    # The template arrives with whatever absolute `pos` values it was
+    # authored/exported with, which can sit thousands of pixels from this
+    # graph's own nodes. Rebase the whole block beside the existing graph
+    # (see layout.rebase_template) so it doesn't land as a disconnected
+    # cluster on canvas; IDs and internal relative layout are untouched.
+    layout.rebase_template(workflow.get("nodes") or [], inserted)
+    return workflow, _new_op("insert_workflow", actor, base_version, workflow=inserted)
+
+
 def delete_node(
     workflow: dict,
     graph,
@@ -1484,14 +1576,15 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
     links = [ln for ln in (workflow.get("links") or []) if isinstance(ln, list) and len(ln) >= 5]
     # link_id -> (source_id, source_slot). Node identity is compared as a STRING
     # (amendment v1.2) — ids are legitimately either JSON type.
-    link_map = {ln[0]: (ln[1], ln[2]) for ln in links if isinstance(ln[0], int)}
+    # Link ids are ints, or strings once the doc host's insert_workflow remapped them.
+    link_map = {ln[0]: (ln[1], ln[2]) for ln in links if isinstance(ln[0], (int, str))}
     node_by_sid = {str(n["id"]): n for n in all_nodes}
 
     def _first_input_source(n: dict) -> tuple[Any, Any] | None:
         for inp in n.get("inputs") or []:
             if isinstance(inp, dict):
                 lid = inp.get("link")
-                if isinstance(lid, int) and lid in link_map:
+                if isinstance(lid, (int, str)) and lid in link_map:
                     return link_map[lid]
         return None
 
@@ -1806,12 +1899,14 @@ def apply_specs(
 def apply_op(workflow: dict, op: dict, graph) -> dict:
     """Replay one op onto ``workflow`` in place and return it. Idempotent: an
     op whose ``op_id`` was already applied is a no-op."""
-    applied = workflow.get("_applied_ops", [])
+    applied = workflow.setdefault("_applied_ops", [])
     if op["op_id"] in applied:
         return workflow
     kind = op["op"]
-    if kind != "define_subgraph" and any(key in op for key in ("subgraph_id", "subgraph_definition", "definitions")):
+    if kind != "define_subgraph" and any(key in op for key in ("subgraph_id", "subgraph_definition")):
         raise ValueError(f"malformed_op: {kind} cannot carry a subgraph definition")
+    if kind not in ("define_subgraph", "insert_workflow") and "definitions" in op:
+        raise ValueError(f"malformed_op: {kind} does not accept definitions")
     # Snapshot the LWW bookkeeping so an exception escaping a handler cannot
     # leave a stamp committed WITHOUT its op_id recorded below. That pairing is
     # the poison state: a retry of the identical op loses to the failed
