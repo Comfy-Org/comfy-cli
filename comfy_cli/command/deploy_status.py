@@ -198,6 +198,8 @@ def _interrupted_result(builder: BuilderReleaseClient, target: StatusTarget) -> 
             _normalized_serving(deployment),
             progress_of(deployment),
         )
+
+
 def _sample_age(sampled_at: str) -> str:
     """How long ago the counts were taken, for the line that prints them.
 
