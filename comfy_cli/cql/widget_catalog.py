@@ -33,9 +33,13 @@ a second implementation of widget order is a second answer, and the two would
 diverge silently — as a wrong index, i.e. a widget value written into the wrong
 field of the user's canvas.
 
-WHAT IT IS NOT. It is not ``object_info``. It carries no types, no defaults, no
-enum choices, no descriptions — only what a name↔index converter needs. That
-keeps it small enough to hand to a sidecar on every call.
+WHAT IT IS NOT. It is not ``object_info``. It carries no types, no enum
+choices, no descriptions — only what a name↔index converter needs. That keeps
+it small enough to hand to a sidecar on every call. The one exception is a
+dynamic combo's per-option ``defaults``: ``widget_order`` is value-blind (first
+key only), so ``dynamic_combos`` names every option's slots and the values a
+fresh selection seeds them with — what the frontend does on a selection change
+(``dynamicWidgets.ts``), and what a converter needs to handle any other key.
 
 SHAPE (``envelope/1`` ``data`` of ``comfy nodes widget-catalog``)::
 
@@ -51,6 +55,12 @@ SHAPE (``envelope/1`` ``data`` of ``comfy nodes widget-catalog``)::
         "ImageBatchMulti": {
           "widget_order": ["inputcount"],
           "inputcount": {"widget": "inputcount", "elements": ["image"]}
+        },
+        "MagnificImageSkinEnhancerNode": {
+          "widget_order": ["sharpen", "smart_grain", "mode"],
+          "dynamic_combos": {"mode": {"default": "creative", "options": {
+            "creative": {"widgets": [], "defaults": {}},
+            "faithful": {"widgets": ["mode.skin_detail"], "defaults": {"mode.skin_detail": 80}}}}}
         }
       }
     }
@@ -104,6 +114,12 @@ def build_types(graph) -> dict[str, dict[str, Any]]:
         elements = inputcount_family_elements(graph, m.id)
         if elements:
             entry["inputcount"] = {"widget": INPUTCOUNT_WIDGET, "elements": elements}
+
+        # Dynamic combos: every option's slots, not just the first key the
+        # value-blind ``widget_order`` expands (see Graph.dynamic_combo_options).
+        combos = graph.dynamic_combo_options(m.id)
+        if combos:
+            entry["dynamic_combos"] = combos
 
         types[m.id] = entry
     return types

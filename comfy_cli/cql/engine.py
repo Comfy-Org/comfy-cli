@@ -1500,6 +1500,51 @@ class Graph:
             return []
         return frontend_extra_widget_names(m)
 
+    def dynamic_combo_options(self, class_name: str) -> dict[str, dict[str, Any]]:
+        """Every dynamic-combo selector of ``class_name`` with EVERY option's slots.
+
+        ``{selector: {"default": <first key>, "options": {key: {"widgets": [...],
+        "defaults": {...}}}}}`` — per option, the DIRECT widget slots it inserts
+        after its selector, in positional order (the same walk as
+        :func:`_expand_widget_entries`: link-only sub-inputs own no slot, a
+        control-flagged one is followed by its ``control_after_generate``
+        marker), with the value a fresh selection seeds each with. A nested
+        selector is listed under its own full dotted name, so expanding the map
+        from ``widget_order`` reproduces :meth:`widget_order_for_node` for any
+        selection. This is what lets a consumer holding only the catalog (the
+        doc host's applier) handle a selection other than the first.
+        """
+        m = self._nodes.get(class_name)
+        if m is None:
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+
+        def describe(port: Port, name: str, depth: int) -> None:
+            if depth >= _MAX_DYNAMIC_COMBO_DEPTH or name in out:
+                return
+            keys = [o.get("key") for o in port.dynamic_options if o.get("key") is not None]
+            options: dict[str, Any] = {}
+            for key in keys:
+                widgets: list[str] = []
+                defaults: dict[str, Any] = {}
+                for sub in _dynamic_combo_sub_ports(port.dynamic_options, key, name):
+                    if sub.is_link:
+                        continue
+                    widgets.append(sub.name)
+                    defaults[sub.name] = _widget_default(sub)
+                    if sub.dynamic_options and _is_dynamic_combo_type(sub.type):
+                        describe(sub, sub.name, depth + 1)
+                    elif _has_control_after_generate_slot(sub):
+                        widgets.append("control_after_generate")
+                        defaults["control_after_generate"] = "fixed"
+                options[str(key)] = {"widgets": widgets, "defaults": defaults}
+            out[name] = {"default": str(keys[0]) if keys else None, "options": options}
+
+        for p in m.inputs:
+            if not p.is_link and p.dynamic_options and _is_dynamic_combo_type(p.type):
+                describe(p, p.name, 0)
+        return out
+
     def widget_defaults(self, class_name: str) -> dict[str, Any]:
         """Default value per widget-order name — including dynamic-combo selectors
         (first key), their sub-widgets, and control_after_generate. Used by
