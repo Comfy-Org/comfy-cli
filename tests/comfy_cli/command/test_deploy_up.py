@@ -826,12 +826,22 @@ def test_a_person_sees_the_estimate_before_the_watch_starts(tmp_path, monkeypatc
             "Expected ready in 14-130 min (42.0 GB of models to download).",
         ),
         ({"etaSecondsLow": 60, "etaSecondsHigh": 60}, "Expected ready in 1 min (42.0 GB of models to download)."),
+        ({"etaSecondsLow": 30, "etaSecondsHigh": 45}, "Expected ready in 0-1 min (42.0 GB of models to download)."),
         (
             {"measured": False, "atLeast": True, "bytesToFetch": 0},
             "Expected ready in 8-81 min (the release's models were never measured, so this counts starting the endpoint alone).",
         ),
     ],
-    ids=["sized", "at_least", "nothing_to_fetch", "hours", "short_end_under_half_an_hour", "one_number", "unmeasured"],
+    ids=[
+        "sized",
+        "at_least",
+        "nothing_to_fetch",
+        "hours",
+        "short_end_under_half_an_hour",
+        "one_number",
+        "short_end_under_a_minute",
+        "unmeasured",
+    ],
 )
 def test_estimate_line_rounds_outward_and_says_what_downloads(changes, line) -> None:
     from comfy_cli.command.deploy_up import estimate_line
@@ -841,12 +851,19 @@ def test_estimate_line_rounds_outward_and_says_what_downloads(changes, line) -> 
 
 @pytest.mark.parametrize(
     "answer",
-    [{"enabled": False}, {**_ESTIMATE, "enabled": False}],
-    ids=["bare", "with_numbers"],
+    [
+        {"enabled": False},
+        {**_ESTIMATE, "enabled": False},
+        {k: v for k, v in _ESTIMATE.items() if k != "enabled"},
+        {**_ESTIMATE, "enabled": None},
+        {**_ESTIMATE, "enabled": "true"},
+    ],
+    ids=["bare", "with_numbers", "enabled_missing", "enabled_null", "enabled_a_string"],
 )
 def test_a_switched_off_estimate_prints_nothing_and_adds_nothing(tmp_path, monkeypatch, answer) -> None:
     """``enabled: false`` is the service saying the estimate is off, not a failure:
-    no line for a person, no ``estimate`` under --json, no warning either way."""
+    no line for a person, no ``estimate`` under --json, no warning either way. An
+    ``enabled`` that is not ``true`` reads the same way, as the site reads it."""
     # Given
     module = _deploy()
     monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), FakeDeploy(estimate=answer)))

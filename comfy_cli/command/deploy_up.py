@@ -96,15 +96,15 @@ def _deploy_estimate(client: DeployUpClient, release_id: str, compute: JsonObjec
 
     Advice only: a service too old to serve it, any refusal, a connection that
     drops or a response cut short, and any answer missing the numbers it is
-    read for all leave the create exactly as it was. So does ``enabled: false``, the service saying the
-    estimate is switched off: nothing is printed and nothing is added to the
-    output, whatever else the answer carries.
+    read for all leave the create exactly as it was. So does any ``enabled`` but
+    ``true``: ``false`` is the service saying the estimate is switched off, and
+    nothing is printed or added to the output, whatever else the answer carries.
     """
     try:
         estimate = client.get_deploy_estimate(release_id, str(compute["gpuClass"]), str(compute["region"]))
     except (DeployAPIError, ResponseTooLarge, OSError, http.client.HTTPException):
         return None
-    if estimate.get("enabled") is False:
+    if estimate.get("enabled") is not True:
         return None
     for field in _ESTIMATE_FIELDS:
         value = estimate.get(field)
@@ -115,9 +115,9 @@ def _deploy_estimate(client: DeployUpClient, release_id: str, compute: JsonObjec
 
 def _minutes_or_hours(low_seconds: int, high_seconds: int) -> str:
     # The short end rounds down and the long end up, so rounding never narrows
-    # what the service quoted. A short end under half an hour stays in minutes,
-    # since the smallest half hour would raise it.
-    low = max(1, low_seconds // 60)
+    # what the service quoted: a short end under a minute is 0. A short end under
+    # half an hour stays in minutes, since the smallest half hour would raise it.
+    low = low_seconds // 60
     high = max(low, -(-high_seconds // 60))
     if high < 120 or low < 30:
         return f"{low} min" if low == high else f"{low}-{high} min"
