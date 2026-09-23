@@ -75,6 +75,12 @@ history.
 
 ### Fixed
 
+- `comfy deploy up` now warns about each deployment of an older release of the
+  Build that is still running and billing, with the
+  `comfy deploy stop --deployment <id>` to run. `up` on a new release creates a
+  new deployment and leaves the old one running; the JSON `supersedes` array
+  already listed it, but the terminal said nothing. Under `--json` the warning
+  goes to stderr.
 - `insert_workflow` (`comfy workflow insert-workflow`) now rebases the inserted
   template beside the target graph's existing nodes instead of leaving its
   original absolute `pos` values untouched, which could land it thousands of

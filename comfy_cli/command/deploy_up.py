@@ -217,6 +217,16 @@ def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
             if status == "stop_failed"
             else f"run `comfy deploy scale --deployment {deployment_id} --min <n> --max <n>` to change them",
         )
+    # A new release gets a new deployment, so the old one keeps billing. The
+    # JSON envelope carries `supersedes`; a person reading the terminal needs it
+    # said, on stderr under --json as with every other warning here.
+    for row in result.supersedes:
+        old_id = row["id"]
+        version = row["release"]["version"]
+        renderer.warn(
+            f"Deployment {old_id} (release v{version}, {row['status']}) is still running and billing.",
+            hint=f"run `comfy deploy stop --deployment {old_id}` if you no longer need it",
+        )
     terminal = status in {"failed", "stopped", "stop_failed", "unhealthy"}
     renderer.emit(
         result.payload(),
