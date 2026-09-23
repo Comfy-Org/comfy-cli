@@ -233,3 +233,26 @@ class TestConnectDynamicComboWidget:
                     {"op": "connect", "from": "$tx.STRING", "to": "$sd.model.no_such_widget"},
                 ],
             )
+
+
+# ---------------------------------------------------------------------------
+# 3. `node` given as `$alias.<input>` (model error: the message names the fix)
+# ---------------------------------------------------------------------------
+
+
+class TestAliasWithInputSuffix:
+    # Trace ce95cacf (prod): set_widget with node "$kling.prompt" and widget
+    # "prompt" failed with "node kling.prompt not found in workflow", which
+    # does not say that `node` takes the alias alone.
+    def test_error_names_the_alias_and_the_widget_field(self, graph):
+        with pytest.raises(ValueError) as exc:
+            workflow_ops.apply_specs(
+                _empty(),
+                graph,
+                [
+                    {"op": "add_node", "class_type": "UNETLoader", "as": "kling"},
+                    {"op": "set_widget", "node": "$kling.prompt", "widget": "unet_name", "value": "x"},
+                ],
+            )
+        msg = str(exc.value)
+        assert "'$kling'" in msg and "`widget`" in msg

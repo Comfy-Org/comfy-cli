@@ -1877,6 +1877,14 @@ def resolve_ref(ref: Any, aliases: dict[str, Any]) -> Any:
             return aliases[ref]
         if ref.lstrip("-").isdigit():
             return int(ref)
+        head, dot, rest = ref.partition(".")
+        if dot and head in aliases:
+            # `$kling.prompt` as a `node` (prod trace ce95cacf) — say what
+            # the field takes instead of "node kling.prompt not found".
+            raise ValueError(
+                f"node {'$' + ref!r} is an alias plus an input name; `node` takes the alias alone "
+                f"({'$' + head!r}) — put the input name ({rest!r}) in `widget`"
+            )
     return ref
 
 
