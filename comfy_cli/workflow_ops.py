@@ -545,6 +545,36 @@ def _next_inputcount_name(ins: list, requested: str) -> str:
 _VALID_NODE_MODES = frozenset({0, 1, 2, 3, 4})
 
 
+_POS_STRING_RE = re.compile(r"\s*\[?\s*([^,\[\]]+?)\s*,\s*([^,\[\]]+?)\s*\]?\s*")
+
+
+def _coerce_pos(pos: Any) -> Any:
+    """Parse an ``"x,y"`` / ``"[x, y]"`` string position into two numbers.
+
+    Agents send ``"at": "40,90"`` as often as ``[40, 90]`` (prod comfy-agent
+    traces, 2026-09-23: every such batch was refused, then re-sent verbatim
+    with an array). The string has one reading, so it is parsed here — ints
+    stay ints so the frozen op matches the array spelling. Anything else
+    (other types, wrong arity, non-numbers) passes through untouched for the
+    caller's "two finite numbers" check to reject.
+    """
+    if not isinstance(pos, str):
+        return pos
+    m = _POS_STRING_RE.fullmatch(pos)
+    if m is None:
+        return pos
+    out: list[int | float] = []
+    for part in m.groups():
+        try:
+            out.append(int(part))
+        except ValueError:
+            try:
+                out.append(float(part))
+            except ValueError:
+                return pos
+    return out
+
+
 def add_node(
     workflow: dict,
     graph,
@@ -589,6 +619,7 @@ def add_node(
         # Decided at mint time so the position freezes into the op and replay
         # stays convergent (P1). Existing nodes are never moved.
         pos = layout.cascade_pos(workflow, size)
+    pos = _coerce_pos(pos)
     if (
         not isinstance(pos, (list, tuple))
         or len(pos) != 2
@@ -1798,6 +1829,14 @@ def apply_specs(
     workflow: dict, graph, specs: list, *, actor: str = "cli", base_version: int = 0
 ) -> tuple[dict, list, dict]:
     """Apply edit specs to ``workflow`` in order. Returns (workflow, ops, aliases)."""
+    # Parse a string `at` up front: layout treats a pinned `at` as an obstacle
+    # and reads it as coordinates.
+    specs = [
+        {**spec, "at": _coerce_pos(spec["at"])}
+        if isinstance(spec, dict) and spec.get("op") == "add_node" and isinstance(spec.get("at"), str)
+        else spec
+        for spec in specs
+    ]
     specs = layout.assign_positions(workflow, graph, specs)
     # Snapshot the inventory BEFORE any op mutates the graph — on failure the
     # caller discards everything below, so this is what actually survives.

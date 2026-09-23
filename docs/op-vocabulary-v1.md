@@ -58,7 +58,8 @@ Spec form (batch input):
 ```
 
 `at` is optional (layout assigns a collision-free position at mint time; the
-position freezes into the op). `as` is optional and declares a batch-local alias
+position freezes into the op). A string `"x,y"` or `"[x, y]"` is parsed to the
+same two numbers; the minted `pos` is always numeric. `as` is optional and declares a batch-local alias
 (section 5). `mode` is optional (amendment v1.4): the litegraph execution mode
 the node is minted with — `0` always (default, omitted), `1` on-event, `2` mute,
 `3` on-trigger, `4` bypass. Mute/bypass change what executes, so a recipe that
