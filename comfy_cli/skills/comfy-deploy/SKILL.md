@@ -185,8 +185,9 @@ comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
 - **A create carries the service's estimate** of how long the deployment takes to
   come up, as `estimate` in the output: `etaSecondsLow`/`etaSecondsHigh` until
   ready and `bytesToFetch` of models to download, with `atLeast: true` when some
-  models have no recorded size. Under `--json` it arrives with the one envelope,
-  so to relay it before a long wait run `up` without `--watch`, tell the user,
+  models have no recorded size. A person at a terminal sees it before `up` starts
+  following the deployment. Under `--json` it arrives with the one envelope, after
+  the watch, so to relay it before a long wait run `up --no-watch`, tell the user,
   then follow with `comfy deploy status --watch`. It is a range, not a promise,
   and it stops at ready: the first run can still wait for a worker to start.
   Absent on a restart, an edit, when the service gave none, or when the service
