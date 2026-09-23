@@ -1,5 +1,6 @@
 """Reconcile and render deploy-up operations."""
 
+import http.client
 import uuid
 from collections.abc import Sequence
 from typing import Final
@@ -94,14 +95,14 @@ def _deploy_estimate(client: DeployUpClient, release_id: str, compute: JsonObjec
     """The service's estimate for this create, or ``None`` when it has none.
 
     Advice only: a service too old to serve it, any refusal, a connection that
-    drops, and any answer missing the numbers it is read for all leave the
-    create exactly as it was. So does ``enabled: false``, the service saying the
+    drops or a response cut short, and any answer missing the numbers it is
+    read for all leave the create exactly as it was. So does ``enabled: false``, the service saying the
     estimate is switched off: nothing is printed and nothing is added to the
     output, whatever else the answer carries.
     """
     try:
         estimate = client.get_deploy_estimate(release_id, str(compute["gpuClass"]), str(compute["region"]))
-    except (DeployAPIError, ResponseTooLarge, OSError):
+    except (DeployAPIError, ResponseTooLarge, OSError, http.client.HTTPException):
         return None
     if estimate.get("enabled") is False:
         return None
@@ -114,12 +115,13 @@ def _deploy_estimate(client: DeployUpClient, release_id: str, compute: JsonObjec
 
 def _minutes_or_hours(low_seconds: int, high_seconds: int) -> str:
     # The short end rounds down and the long end up, so rounding never narrows
-    # what the service quoted.
+    # what the service quoted. A short end under half an hour stays in minutes,
+    # since the smallest half hour would raise it.
     low = max(1, low_seconds // 60)
     high = max(low, -(-high_seconds // 60))
-    if high < 120:
+    if high < 120 or low < 30:
         return f"{low} min" if low == high else f"{low}-{high} min"
-    low_hours = max(0.5, (low // 30) / 2)
+    low_hours = (low // 30) / 2
     high_hours = -(-high // 30) / 2
     return f"{low_hours:g}-{high_hours:g} h"
 

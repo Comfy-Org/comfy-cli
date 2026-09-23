@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import http.client
 import importlib
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
 
@@ -14,7 +16,7 @@ from typer.testing import CliRunner
 
 from comfy_cli.caller import Caller
 from comfy_cli.cmdline import app
-from comfy_cli.deploy_api import _validate_compute_config
+from comfy_cli.deploy_api import DeployClient, _validate_compute_config
 from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.http import ResponseTooLarge
 
@@ -695,8 +697,18 @@ def test_a_reconcile_that_creates_nothing_asks_for_no_estimate(status: str) -> N
         {**_ESTIMATE, "etaSecondsLow": True},
         ConnectionResetError("peer reset"),
         ResponseTooLarge("https://deploy.test/v1/deploy-estimate is over the cap"),
+        http.client.IncompleteRead(b'{"etaSecondsLow": 5', 40),
     ],
-    ids=["no_route", "server_error", "missing_number", "negative", "bool", "connection_reset", "too_large"],
+    ids=[
+        "no_route",
+        "server_error",
+        "missing_number",
+        "negative",
+        "bool",
+        "connection_reset",
+        "too_large",
+        "cut_short",
+    ],
 )
 def test_a_create_the_service_cannot_estimate_still_deploys(answer) -> None:
     # Given
@@ -705,6 +717,53 @@ def test_a_create_the_service_cannot_estimate_still_deploys(answer) -> None:
 
     # When
     result = module.reconcile_up(FakeBuilder(), client, _request(module))
+
+    # Then
+    assert result.created is True
+    assert result.estimate is None
+    assert len(client.create_keys) == 1
+
+
+class _CutShortEstimate(BaseHTTPRequestHandler):
+    # Promises a 64-byte chunk, sends part of it, then hangs up.
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        self.wfile.write(b'40\r\n{"etaSecondsLow": 5')
+        self.wfile.flush()
+        self.close_connection = True
+
+    def log_message(self, *args) -> None:
+        pass
+
+
+class _EstimateFromServer(FakeDeploy):
+    def __init__(self, base_url: str) -> None:
+        super().__init__()
+        self._real = DeployClient(base_url, "token")
+
+    def get_deploy_estimate(self, release_id: str, gpu_class: str, region: str):
+        return self._real.get_deploy_estimate(release_id, gpu_class, region)
+
+
+def test_an_estimate_response_cut_short_on_the_wire_still_deploys() -> None:
+    # Given
+    module = _deploy()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _CutShortEstimate)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = _EstimateFromServer(f"http://127.0.0.1:{server.server_address[1]}")
+
+        # When
+        result = module.reconcile_up(FakeBuilder(), client, _request(module))
+    finally:
+        server.shutdown()
+        server.server_close()
 
     # Then
     assert result.created is True
@@ -762,13 +821,17 @@ def test_a_person_sees_the_estimate_before_the_watch_starts(tmp_path, monkeypatc
             {"etaSecondsLow": 3000, "etaSecondsHigh": 4 * 3600 + 60},
             "Expected ready in 0.5-4.5 h (42.0 GB of models to download).",
         ),
+        (
+            {"etaSecondsLow": 840, "etaSecondsHigh": 7800},
+            "Expected ready in 14-130 min (42.0 GB of models to download).",
+        ),
         ({"etaSecondsLow": 60, "etaSecondsHigh": 60}, "Expected ready in 1 min (42.0 GB of models to download)."),
         (
             {"measured": False, "atLeast": True, "bytesToFetch": 0},
             "Expected ready in 8-81 min (the release's models were never measured, so this counts starting the endpoint alone).",
         ),
     ],
-    ids=["sized", "at_least", "nothing_to_fetch", "hours", "one_number", "unmeasured"],
+    ids=["sized", "at_least", "nothing_to_fetch", "hours", "short_end_under_half_an_hour", "one_number", "unmeasured"],
 )
 def test_estimate_line_rounds_outward_and_says_what_downloads(changes, line) -> None:
     from comfy_cli.command.deploy_up import estimate_line
