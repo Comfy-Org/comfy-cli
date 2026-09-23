@@ -271,3 +271,31 @@ def test_exact_seed_name_still_gets_the_implicit_slot():
     )
 
     assert graph.widget_order_default("SeedOnly") == ["seed", "control_after_generate", "steps"]
+
+
+def test_explicit_false_flag_suppresses_the_implicit_seed_slot():
+    # useIntWidget: ``inputSpec.control_after_generate ?? ['seed', 'noise_seed'].includes(name)``
+    # -- an explicit ``false`` wins over the name rule, so no companion is created.
+    info = {
+        "NoControlSeed": {
+            "input": {
+                "required": {
+                    "noise_seed": ["INT", {"default": 0, "control_after_generate": False}],
+                    "steps": ["INT", {"default": 20}],
+                }
+            },
+            "input_order": {"required": ["noise_seed", "steps"]},
+            "output": [],
+            "output_name": [],
+            "category": "test",
+            "display_name": "NoControlSeed",
+            "python_module": "nodes",
+        }
+    }
+    graph = Graph.from_object_info(copy.deepcopy(info))
+    saved = [7, 30]
+
+    assert graph.widget_order_default("NoControlSeed") == ["noise_seed", "steps"]
+    order = graph.widget_order_for_node("NoControlSeed", saved)
+    assert dict(zip(order, saved)) == {"noise_seed": 7, "steps": 30}
+    assert dict(zip(order, saved)) == dict(workflow_to_api._schema_widget_pairs(info["NoControlSeed"], saved))

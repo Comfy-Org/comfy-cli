@@ -124,7 +124,9 @@ class PortOptions:
     step: float | None = None
     default: Any = None
     multiline: bool = False
-    control_after_generate: bool = False
+    # None when the spec omits the flag, so an explicit ``False`` can override
+    # the seed/noise_seed name rule (``useIntWidget`` uses ``??``).
+    control_after_generate: bool | None = None
     force_input: bool = False
     # ``socketless``: a display-only input (ImageCompare's compare_view slider,
     # Painter's canvas). The frontend renders it and serializes nothing for it,
@@ -730,7 +732,8 @@ def _has_control_after_generate_slot(port: Port) -> bool:
     """True if the frontend places a ``control_after_generate`` marker widget
     right after this port.
 
-    Mirrors ``useIntWidget``: the schema flag, else the legacy convention of an
+    Mirrors ``useIntWidget``: the schema flag when present (an explicit ``false``
+    suppresses the slot), else the legacy convention of an
     INT input named exactly ``seed`` or ``noise_seed``. A dynamic-combo
     sub-input is named ``<selector>.<key>`` (``sampling_mode.seed``), so the
     name rule never applies to it, and ``image_seed``/``texture_seed`` get a
@@ -739,8 +742,8 @@ def _has_control_after_generate_slot(port: Port) -> bool:
     ``presence_penalty`` read from ``thinking``) and makes ``add_node`` write
     stray markers the canvas then loads positionally (Tripo P-series).
     """
-    if port.options.control_after_generate:
-        return True
+    if port.options.control_after_generate is not None:
+        return port.options.control_after_generate
     return port.type == "INT" and port.name in ("seed", "noise_seed")
 
 
@@ -896,9 +899,9 @@ def _parse_port_options(opts_raw: dict) -> PortOptions:
     )
 
 
-def _control_after_generate_set(val: Any) -> bool:
+def _control_after_generate_set(val: Any) -> bool | None:
     if val is None:
-        return False
+        return None
     if isinstance(val, bool):
         return val
     if isinstance(val, str):
