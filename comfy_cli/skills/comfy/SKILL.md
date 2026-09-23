@@ -467,9 +467,10 @@ comfy --json download --out-dir ./out < run.json                      # pull the
   are addressed **by name**. Discover them with `comfy --json nodes show <class>`
   (input/output slot names) and `comfy --json workflow slots <file>` (widget
   names — note `slots` lists **widgets only**, not connection slots).
-- **Identity:** `add-node` mints a **large random integer** id (leaderless,
-  collision-free) and returns it in `data.op.node_id`; **capture it** to wire the
-  new node (e.g. `id=$(comfy --json workflow add-node … | jq -r .data.op.node_id)`).
+- **Identity:** `add-node` mints a **large random integer** id (leaderless;
+  collisions are possible but unlikely) and returns it in `data.op.node_id`;
+  **capture it** to wire the new node (e.g.
+  `id=$(comfy --json workflow add-node … | jq -r .data.op.node_id)`).
   Do not assume small/sequential ids. `add-node` fills widget defaults (COMBO →
   first choice), so a new node is runtime-valid without extra `set-widget` calls.
 - **The op** (`data.op`): `{op, op_id, node_id/link_id, actor, base_version, stamp}`

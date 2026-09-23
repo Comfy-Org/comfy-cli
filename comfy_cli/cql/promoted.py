@@ -712,8 +712,8 @@ _PRIMITIVE_WIDGET_ORDER = ("value", "control_after_generate")
 _LEGACY_PREFIX_RE = _re.compile(r"^\s*(\d+)\s*:\s*(.+)$")
 
 #: Minted link ids share the op model's leaderless range (see
-#: ``workflow_ops.mint_id``): always above any frontend counter id, always
-#: inside JS ``Number.MAX_SAFE_INTEGER``.
+#: ``workflow_ops.mint_id``): bit 40 set, below ``2**52``, and inside JS
+#: ``Number.MAX_SAFE_INTEGER``. Frontend stable ids clear bit 40.
 _LINK_ID_FLOOR = 1 << 40
 _LINK_ID_BITS = 52
 
