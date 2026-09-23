@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import urllib.error
 import urllib.parse
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
+from typing import BinaryIO
 
 import requests
 
@@ -44,6 +46,51 @@ _POST_TIMEOUT = 30.0
 # 20 second budget of the builder's own, then matches models, so the shared
 # default leaves a large graph nothing to spare.
 _WORKFLOW_IMPORT_TIMEOUT = 90.0
+
+
+# How much `_CountingReader` hands over per step when something iterates it
+# instead of calling `read`. Only the chunked path does, and only for an empty
+# file, so the size is not a tuning knob.
+_UPLOAD_ITER_BYTES = 1024 * 1024
+
+
+class _CountingReader:
+    """A file as ``requests`` sees it, reporting each block the transport pulls.
+
+    ``requests`` sizes a streamed body with ``os.fstat(body.fileno())`` and sends
+    it by calling ``read`` until it runs dry, so passing ``fileno`` and ``tell``
+    through keeps the request byte-identical to one handed the bare file: same
+    ``Content-Length``, no chunked transfer, which a presigned GCS PUT would
+    refuse. ``__iter__`` is there because its presence is how ``requests``
+    decides a body streams at all.
+
+    ``progress`` receives the size of each block as it is read, not a running
+    total. It runs once per transport block (16 KiB), so it must stay cheap.
+    """
+
+    def __init__(self, raw: BinaryIO, progress: Callable[[int], None]) -> None:
+        self._raw = raw
+        self._progress = progress
+
+    def read(self, size: int = -1) -> bytes:
+        block = self._raw.read(size)
+        if block:
+            self._progress(len(block))
+        return block
+
+    @property
+    def mode(self) -> str:
+        # `requests` reads this straight after `fileno` to warn about text mode.
+        return self._raw.mode
+
+    def fileno(self) -> int:
+        return self._raw.fileno()
+
+    def tell(self) -> int:
+        return self._raw.tell()
+
+    def __iter__(self) -> Iterator[bytes]:
+        return iter(lambda: self.read(_UPLOAD_ITER_BYTES), b"")
 
 
 class BuilderAuthError(Exception):
@@ -118,17 +165,20 @@ class BuilderClient:
             return blob_id, None
         return blob_id, r["uploadUrl"]
 
-    def upload_blob(self, upload_url: str, path: Path) -> None:
+    def upload_blob(self, upload_url: str, path: Path, progress: Callable[[int], None] | None = None) -> None:
         """Stream a file to its presigned PUT URL (bytes go straight to storage).
 
         The builder signs the URL with ``x-goog-if-generation-match: 0`` (create-
         only, so re-using a blob id can't clobber bytes), and that header is part
         of the signature — GCS rejects the PUT with 400 unless the client sends it.
+
+        ``progress`` is called with the size of each block as the transport reads
+        it off disk, which is as close to "bytes sent" as a streamed PUT exposes.
         """
         with path.open("rb") as f:
             resp = requests.put(
                 upload_url,
-                data=f,
+                data=f if progress is None else _CountingReader(f, progress),
                 headers={"x-goog-if-generation-match": "0"},
                 timeout=_UPLOAD_TIMEOUT,
                 # A presigned PUT targets one exact object; a 3xx would divert the file

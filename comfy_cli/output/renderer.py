@@ -2,7 +2,8 @@
 
 UX contract:
 - Pretty mode produces output byte-identical to the pre-Phase-1 CLI.
-- JSON mode produces a single envelope on stdout (intermediate messages → stderr).
+- JSON mode produces a single envelope on stdout (intermediate messages → stderr,
+  and so do ``progress_event`` lines, as JSON).
 - NDJSON mode produces one JSON event per line on stdout; the final envelope is
   the last line.
 - Errors carry a stable ``code`` and a ``hint``. The hint is rendered as a
@@ -367,6 +368,22 @@ class Renderer:
         self.event(type, **fields)
         return True
 
+    def progress_event(self, type: str, **fields: Any) -> None:
+        """Emit one event line about work still in flight, in either JSON mode.
+
+        ``event`` is silent outside NDJSON mode, which is right for a stream a
+        consumer asked for and wrong for progress: a caller that resolved to
+        single-envelope JSON mode only because its stdout is a pipe (every agent)
+        would sit through a multi-GB upload with nothing to read. So in NDJSON
+        mode this is ``event``; in JSON mode the same ``event/1`` line goes to
+        stderr, which keeps stdout the single envelope the contract promises.
+        Pretty mode renders its own progress and emits nothing here.
+        """
+        if self.is_pretty():
+            return
+        payload = {"schema": EVENT_SCHEMA, "type": type, **fields}
+        self._write_json_line(payload, stream=None if self.is_stream() else sys.stderr)
+
     # ----- internals -----
 
     def _envelope(
@@ -395,8 +412,9 @@ class Renderer:
             env["changed"] = changed
         return env
 
-    def _write_json_line(self, payload: Mapping[str, Any]) -> None:
-        stream = self.machine_stream
+    def _write_json_line(self, payload: Mapping[str, Any], *, stream: TextIO | None = None) -> None:
+        if stream is None:
+            stream = self.machine_stream
         # Readers of this stream decode it as UTF-8. A legacy code page that
         # CAN encode a character is the dangerous case — no UnicodeEncodeError
         # fires (the clause below never runs) and the line goes out as bytes

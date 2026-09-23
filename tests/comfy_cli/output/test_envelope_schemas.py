@@ -49,6 +49,8 @@ def _validator_for(name: str) -> jsonschema.Validator:
         "which.json",
         "run.json",
         "run_event.json",
+        # Three event types, each with its own required set behind an `if`/`then`.
+        "build_push_event.json",
         "download.json",
         "download_status.json",
         "downloads.json",

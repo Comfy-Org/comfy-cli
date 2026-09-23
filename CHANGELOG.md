@@ -17,6 +17,13 @@ history.
 
 ### Added
 
+- `comfy build push` says how far along an upload is. It prints the plan before
+  the first byte ("3 files, 53.0 GB to upload, 2 already held"), then bytes sent,
+  rate and time left while each file moves. Under `--json-stream` the same numbers
+  are `upload_plan` / `upload_progress` / `upload_complete` events on stdout; under
+  `--json` they go to stderr so stdout stays the single envelope. The rate is
+  measured over the last ten seconds on a timer, so a stalled upload reports a
+  falling rate instead of going quiet. Schema: `build_push_event.json`.
 - `comfy build push` prints every warning a save returns, and `--release` cuts no
   release while one says a deployment could not download a model link
   (`build_release_held`); `--release-despite-warnings` cuts anyway.
