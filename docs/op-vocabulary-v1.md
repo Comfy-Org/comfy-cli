@@ -71,8 +71,9 @@ refused with `node_deprecated` unless it is `true`.
 
 * Idempotency: re-applying the same `op_id` is a no-op; independently, replaying
   an `add_node` whose `node_id` already exists in the graph is a no-op.
-* Conflict: none — ids are minted leaderlessly (section 6), so two concurrent
-  `add_node` ops never target the same identity.
+* Conflict: none in normal operation — ids are minted leaderlessly (section 6),
+  so two concurrent `add_node` ops are overwhelmingly unlikely to target the
+  same identity. A random same-actor collision remains possible.
 * Invalid: an unknown `class_type` is rejected at mint time (`UnknownNodeType`,
   rendered as `node_not_found` with close matches).
 
@@ -247,7 +248,7 @@ and `"7"` two registers for one node.
 | update vs delete | **delete wins**: `set_widget` to a deleted node is a no-op; a `connect` whose destination is gone is a no-op; a `connect` whose SOURCE is gone still claims its input register and leaves that input empty (v1.2 — otherwise the incumbent's survival depends on when the delete arrives); replay never raises on a since-removed target | `_apply_set_widget` (missing node → return), `_apply_connect` (missing endpoint → return) |
 | concurrent moves | no `move` op exists in v1 — positions are decided once at `add_node` mint time and frozen into the op; live position editing is frontend view state, out of scope until the FE stable-ID reconciliation (section 6) | `add_node` / `layout.cascade_pos` |
 | edges referencing deleted nodes | the connect no-ops (delete wins); a delete removes incident links and scrubs every dangling input/output reference, so no dangling edge survives either order | `_apply_connect`, `_apply_delete_node` |
-| duplicate entity creation | impossible by construction across writers (random 53-bit `mint_id`, no shared counter); a replayed `add_node` whose `node_id` already exists is a no-op; a re-sent op is dropped by `op_id` | `mint_id`, `_apply_add_node` |
+| duplicate entity creation | actor ranges are disjoint and random same-actor `mint_id` collisions are unlikely, not impossible; a replayed `add_node` whose `node_id` already exists is a no-op; a re-sent op is dropped by `op_id` | `mint_id`, `_apply_add_node` |
 | concurrent autogrow connects to one base | both survive: each grows a fresh slot keyed by `grow_id`; their display order is the one sequence decision a leaderless writer cannot make and is surfaced by `detect_conflict` for the merge consumer | `_apply_connect` (grow path), `detect_conflict` |
 | invalid / inapplicable ops | explicit per kind — unknown kind: **reject** (`apply_op` raises); malformed op (missing required field): **reject**; well-formed op whose target node is gone: **no-op** (delete wins); `set_widget` naming a widget the live schema does not have: **reject**; `clear`/`reset_doc` inside a batch: **reject** with `workflow_clear_not_batchable` / `unknown op`. Rejection is never silent | `apply_op`, `apply_specs`, `_widget_index` |
 
@@ -299,18 +300,18 @@ specs in the same batch reference the minted node by alias.
 
 * `op_id`: uuid4 hex, minted by the creator pre-dispatch. Receivers never
   regenerate one (section 2).
-* Node and link ids: `mint_id()` — random ints in `[2^40, 2^53)`. Leaderless
-  and collision-free without coordination; always inside JS
-  `Number.MAX_SAFE_INTEGER`; always larger than small frontend counter ids.
-  `last_node_id` / `last_link_id` are advisory high-water marks, never
-  allocators.
+* Node and link ids: `mint_id()` — random ints with bit 40 set, all below
+  `2^52`. They are leaderless and always inside JS `Number.MAX_SAFE_INTEGER`.
+  Agent-bound frontend ids set bit 41 and clear bit 40, so the two actor ranges
+  are disjoint; random draws within one actor range can still collide.
+  `last_node_id` / `last_link_id` are advisory high-water marks, never allocators.
 * Subgraph-scoped ids: an interior node is addressed as `57:3` (the flattened
   form the UI→API lowering mints and `validate` / server errors print) or
   `57/3` (the edit-path form); both resolve to the same interior target. **Ops
   must carry fully-scoped ids** — a bare interior id is meaningless at the top
   level and is rejected, not guessed.
-* OPEN: ID representation is to be reconciled with the FE stable-ID workstream
-  before this document's v1.1. Until then, the shapes above are the contract.
+* The frontend stable-ID reconciliation reserves bit 41 for Agent-bound
+  frontend ids and clears bit 40, keeping them disjoint from `mint_id()` ids.
 
 ## 7. Attribution origins
 
@@ -616,8 +617,9 @@ discard one writer's connection. That target keeps its §3 role as conflict
   gap above, on a target that is deliberately not a register.
 * Two `add_node` ops with the SAME `node_id` and different payloads resolve
   first-writer-wins by arrival (`("node", node_id)` is reserved but ungated).
-  §1.1 rules this out by construction — `mint_id` draws 53-bit random ids — so
-  it is a property of hand-authored or replayed streams, not of minted ones.
+  The actor partition prevents cross-actor collisions, while random same-actor
+  `mint_id` collisions remain possible, so this is unlikely but not ruled out
+  for minted streams.
 
 **Batch caveat, now stated.** `apply_specs` stamps every op in one batch with
 the same `base_version`, so two writes to the SAME target inside one batch are
