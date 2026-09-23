@@ -145,3 +145,47 @@ class TestPositionString:
     def test_malformed_string_position_still_rejected(self, graph, at):
         with pytest.raises(ValueError, match="node position must be two finite numbers"):
             workflow_ops.apply_specs(_empty(), graph, [{"op": "add_node", "class_type": "LoadVideo", "at": at}])
+
+
+# ---------------------------------------------------------------------------
+# 2. bool written to a combo whose options are exactly 'true' / 'false'
+# ---------------------------------------------------------------------------
+
+
+class TestBoolToTrueFalseCombo:
+    # Trace c9552f9f (stg): {"op":"set_widget","node":"$gen","widget":"should_remesh","value":true}
+    def test_batch_maps_json_true_to_dynamic_combo_option(self, graph):
+        workflow, ops, aliases = workflow_ops.apply_specs(
+            _empty(),
+            graph,
+            [
+                {"op": "add_node", "class_type": "MeshyTextToModelNode", "as": "gen"},
+                {"op": "set_widget", "node": "$gen", "widget": "should_remesh", "value": True},
+                {"op": "set_widget", "node": "$gen", "widget": "should_remesh.topology", "value": "quad"},
+            ],
+        )
+        assert ops[1]["value"] == "true"
+        assert any(w.get("code") == "normalized_value" for w in ops[1].get("warnings", []))
+        assert "quad" in _node(workflow, aliases["gen"])["widgets_values"]
+
+    def test_false_maps_to_false_option(self, graph):
+        workflow, add = workflow_ops.add_node(_empty(), graph, "MeshyTextToModelNode")
+        workflow, op = workflow_ops.set_widget(workflow, graph, add["node_id"], "should_remesh", False)
+        assert op["value"] == "false"
+        assert "false" in _node(workflow, add["node_id"])["widgets_values"]
+
+    def test_plain_true_false_combo_also_maps(self, graph):
+        workflow, add = workflow_ops.add_node(_empty(), graph, "BoolishCombos")
+        _, op = workflow_ops.set_widget(workflow, graph, add["node_id"], "flag", True)
+        assert op["value"] == "true"
+
+    def test_bool_not_mapped_when_options_are_not_exactly_true_false(self, graph):
+        workflow, add = workflow_ops.add_node(_empty(), graph, "BoolishCombos")
+        with pytest.raises(ValueError, match="got bool"):
+            workflow_ops.set_widget(workflow, graph, add["node_id"], "tri", True)
+
+    def test_string_true_still_accepted_unchanged(self, graph):
+        workflow, add = workflow_ops.add_node(_empty(), graph, "MeshyTextToModelNode")
+        _, op = workflow_ops.set_widget(workflow, graph, add["node_id"], "should_remesh", "true")
+        assert op["value"] == "true"
+        assert not any(w.get("code") == "normalized_value" for w in op.get("warnings", []))

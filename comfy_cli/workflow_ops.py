@@ -711,16 +711,41 @@ def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[A
     port = next((p for p in m.inputs if p.name == widget), None)
     if port is None:
         return value, None
-    canon = port.canonical_combo(value)
+    canon = _bool_combo_option(port, value)
+    what = "option"
+    if canon is None:
+        canon = port.canonical_combo(value)
+        what = "model"
     if canon is None or canon == value:
         return value, None
     return canon, {
         "code": "normalized_value",
         "field": widget,
-        "message": f"{value!r} is not an exact option; using the matching model {canon!r}",
+        "message": f"{value!r} is not an exact option; using the matching {what} {canon!r}",
         "from": str(value),
         "to": canon,
     }
+
+
+def _bool_combo_option(port, value: Any) -> str | None:
+    """The ``'true'``/``'false'`` option a JSON boolean means, or ``None``.
+
+    Some combos spell a toggle as the STRINGS ``'true'``/``'false'`` (e.g.
+    MeshyTextToModelNode's ``should_remesh`` dynamic combo), and agents write
+    ``true`` for them. Stg trace c9552f9f (2026-09-23) shows the batch refused
+    and then re-sent as ``"true"``. The value is mapped ONLY when the options
+    are exactly that pair, case-insensitively. Any other option set keeps the
+    bool and its error.
+    """
+    if not isinstance(value, bool):
+        return None
+    opts = list(port.enum_values or [])
+    if len(opts) != 2 or not all(isinstance(o, str) for o in opts):
+        return None
+    if sorted(o.lower() for o in opts) != ["false", "true"]:
+        return None
+    want = "true" if value else "false"
+    return next(o for o in opts if o.lower() == want)
 
 
 def _set_widget_impl(

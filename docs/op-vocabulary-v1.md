@@ -115,7 +115,11 @@ Spec form:
 `node` is an int id, alias, `$alias`, or a subgraph-scoped id (section 6).
 Minted op fields: `node_id`, `widget` (name, never index), `value`, `old`; for a
 subgraph interior write also `path` (resolved node path, list of strings) and
-`inner_widget`; optionally `warnings` (e.g. `normalized_value`).
+`inner_widget`; optionally `warnings` (e.g. `normalized_value`). A value that
+clearly means one option is rewritten at mint time and recorded with a
+`normalized_value` warning. Examples: a directory-prefixed model name, or a
+JSON boolean written to a combo whose only options are `'true'`/`'false'`
+(case-insensitive). The minted `value` is the real option.
 
 * Idempotency: `op_id` no-op.
 * Conflict: last-writer-wins per `(node, widget)` target (section 3).
