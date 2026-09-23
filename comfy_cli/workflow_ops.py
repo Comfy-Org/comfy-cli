@@ -14,8 +14,9 @@ Design (settled by the identity spike):
   set (``mint_id``), all below ``2**52``: no shared counter or coordination, and
   still ``int``-typed so the API converter (which gates link ids on
   ``isinstance(int)``) and an int-keyed frontend keep working. Agent-bound
-  frontend ids clear bit 40, making the actor ranges disjoint; bit 41 alone is
-  not the discriminator. Collisions remain possible between random draws.
+  frontend ids clear bit 40, separating frontend and structured-edit ranges;
+  bit 41 alone is not the discriminator. Structured-edit writers share one
+  random range regardless of their ``actor``, so collisions remain possible.
   This module maintains ``last_node_id``/``last_link_id`` as advisory high-water
   marks but never allocates from them; legacy frontend code may still do so.
 * **Widgets are name-addressed, never index-addressed.** ``set_widget`` carries
