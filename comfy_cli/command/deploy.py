@@ -39,6 +39,7 @@ from comfy_cli.command.deploy_up import (
 )
 from comfy_cli.command.deploy_up import (
     _render_result,
+    estimate_line,
     reconcile_up,
 )
 from comfy_cli.command.deploy_up import (
@@ -281,6 +282,8 @@ def up_cmd(
                 ctx=ctx,
             )
             result = reconcile_up(builder, client, replace(request, gpu=selected_gpu, region=selected_region))
+        if result.estimate is not None and renderer.is_pretty():
+            renderer.info(estimate_line(result.estimate))
         if watch:
             watched_id = _required_string(result.deployment, "id")
             reporter = DeployWatchReporter(renderer, watched_id)

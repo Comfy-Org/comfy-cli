@@ -35,6 +35,11 @@ history.
   during `--watch` stops the watching and nothing else, and prints the command
   that re-attaches. A service that sends no `progress` prints what it printed
   before. Schema: `deploy_progress_event.json`.
+- `comfy deploy up` says roughly how long a new deployment will take to come up
+  before it waits: a range until ready and how many GB of models it has to
+  download, from the deploy service's estimate. Under `--json` it is `estimate`
+  in the output. A service that gives no estimate, or has it switched off,
+  changes nothing and prints nothing.
 - `comfy build push` prints every warning a save returns, and `--release` cuts no
   release while one says a deployment could not download a model link
   (`build_release_held`); `--release-despite-warnings` cuts anyway.

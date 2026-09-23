@@ -25,6 +25,8 @@ class DeployUpClient(Protocol):
 
     def get_compute_catalog(self) -> JsonObject: ...
 
+    def get_deploy_estimate(self, release_id: str, gpu_class: str, region: str) -> JsonObject: ...
+
 
 @dataclass(frozen=True, slots=True)
 class UpRequest:
@@ -54,6 +56,11 @@ class UpResult:
     # it are dropped — silently discarding explicit input is the same defect as
     # silently resetting it, so the renderer says so.
     dropped_bounds: tuple[str, ...] = ()
+    # The service's estimate of how long a new deployment takes to come up,
+    # asked just before the create. ``None`` on every other branch, and on a
+    # create the service could not estimate: the estimate is advice and never
+    # stops a deploy.
+    estimate: JsonObject | None = None
 
     def payload(self) -> JsonObject:
         supersedes: list[JsonValue] = [*self.supersedes]
@@ -74,6 +81,8 @@ class UpResult:
         progress = progress_of(self.deployment)
         if progress is not None:
             payload["progress"] = progress
+        if self.estimate is not None:
+            payload["estimate"] = self.estimate
         return payload
 
 
