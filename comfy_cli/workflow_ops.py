@@ -545,7 +545,10 @@ def _next_inputcount_name(ins: list, requested: str) -> str:
 _VALID_NODE_MODES = frozenset({0, 1, 2, 3, 4})
 
 
-_POS_STRING_RE = re.compile(r"\s*\[?\s*([^,\[\]]+?)\s*,\s*([^,\[\]]+?)\s*\]?\s*")
+# ``x, y`` or ``[x, y]`` — both brackets or neither, so a truncated ``"[40,90"``
+# stays malformed instead of parsing.
+_POS_PAIR = r"\s*([^,\[\]]+?)\s*,\s*([^,\[\]]+?)\s*"
+_POS_STRING_RE = re.compile(rf"\s*(?:\[{_POS_PAIR}\]|{_POS_PAIR})\s*")
 
 
 def _coerce_pos(pos: Any) -> Any:
@@ -564,7 +567,7 @@ def _coerce_pos(pos: Any) -> Any:
     if m is None:
         return pos
     out: list[int | float] = []
-    for part in m.groups():
+    for part in (g for g in m.groups() if g is not None):
         try:
             out.append(int(part))
         except ValueError:

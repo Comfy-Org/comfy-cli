@@ -142,7 +142,9 @@ class TestPositionString:
         assert ops[0]["pos"] == [0, 0]
         assert ops[1]["pos"] != [0, 0]
 
-    @pytest.mark.parametrize("at", ["40", "40,90,10", "x,y", "nan,0", "0,inf", "", "40;90"])
+    @pytest.mark.parametrize(
+        "at", ["40", "40,90,10", "x,y", "nan,0", "0,inf", "", "40;90", "[40,90", "40,90]", " [ 40 , 90"]
+    )
     def test_malformed_string_position_still_rejected(self, graph, at):
         with pytest.raises(ValueError, match="node position must be two finite numbers"):
             workflow_ops.apply_specs(_empty(), graph, [{"op": "add_node", "class_type": "LoadVideo", "at": at}])
