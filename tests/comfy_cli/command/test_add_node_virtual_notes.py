@@ -311,6 +311,17 @@ class TestReplaceOpsCarriesNoteText:
         (note_op,) = [o for o in ops if o["op"] == "add_node" and o["class_type"] == "Note"]
         assert note_op["text"] == ""
 
+    @pytest.mark.parametrize("bad_type", [["Note"], {"type": "Note"}, 7])
+    def test_non_string_node_type_is_refused_not_a_type_error(self, bad_type):
+        # A malformed `type` is truthy, so a bare falsiness check lets it reach
+        # the authorable-set membership test, where an unhashable value raises
+        # TypeError instead of the NotExpressibleError contract callers rely on.
+        src = _base_workflow()
+        src["nodes"].append({"id": 99, "type": bad_type, "pos": [0, 0], "size": [200, 100]})
+        src["last_node_id"] = 99
+        with pytest.raises(workflow_ops.NotExpressibleError, match="no id or no type"):
+            workflow_ops.replace_ops({"nodes": [], "links": []}, src)
+
 
 # ---------------------------------------------------------------------------
 # T6 — the data-flow UI-only types stay refused, with the same specific reason

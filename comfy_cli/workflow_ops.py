@@ -1270,7 +1270,15 @@ def _inexpressible_reason(workflow: dict) -> str | None:
     if isinstance(extra, dict) and (extra.get("reroutes") or extra.get("linkExtensions")):
         return "the workflow contains reroute points, which no frozen op kind can create"
     for node in workflow["nodes"]:
-        if not isinstance(node, dict) or node.get("id") is None or not node.get("type"):
+        # `type` must be a non-empty STRING, not merely truthy: a malformed
+        # `["Note"]` would otherwise reach the authorable-set membership test
+        # below and surface as TypeError instead of this contract's reason.
+        if (
+            not isinstance(node, dict)
+            or node.get("id") is None
+            or not isinstance(node.get("type"), str)
+            or not node["type"]
+        ):
             return "the workflow contains a node with no id or no type"
     for link in workflow.get("links") or []:
         if not isinstance(link, list) or len(link) < 5:
