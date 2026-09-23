@@ -241,7 +241,7 @@ def test_emit_refuses_a_flag_the_node_cannot_carry():
 def test_emit_names_every_unsupported_flag_at_once():
     """Reporting one at a time turns a single fix into a guessing loop."""
     with pytest.raises(emit.EmitError) as ei:
-        emit.build_workflow("flux-2", {"prompt": "p", "safety_tolerance": 2, "output_format": "png"})
+        emit.build_workflow("flux-2", {"prompt": "p", "safety_tolerance": 2, "output_format": "jpeg"})
     msg = str(ei.value)
     assert "--output_format" in msg and "--safety_tolerance" in msg
     assert "Drop those flags" in msg
