@@ -6,7 +6,7 @@ is convenient but leaves no reusable artifact: no workflow JSON you can re-run,
 edit, or drop into a fragment pipeline. The same partner models also exist as
 ComfyUI **API NODES**. ``--emit-workflow <path>`` takes the exact same
 ``--param`` values the proxy path would consume and writes an API-format
-workflow that drives the partner node, plus a ``SaveImage``/``SaveVideo`` so the
+workflow that drives the partner node, plus a ``SaveImageAdvanced``/``SaveVideo`` so the
 result lands on disk when run with ``comfy run``.
 
 The proxy-model → node-class mapping is intentionally small and explicit: it
@@ -61,7 +61,7 @@ class NodeSpec:
     that must be materialized with a ``LoadImage`` node and wired into the
     partner node's matching input. ``fixed`` are node inputs always set to a
     constant (defaults the node requires but that ``generate`` doesn't surface).
-    ``output`` selects the save node (IMAGE → SaveImage, VIDEO → SaveVideo) and
+    ``output`` selects the save node (IMAGE → SaveImageAdvanced, VIDEO → SaveVideo) and
     the partner node's output port that carries the media.
 
     COMPLETENESS CONTRACT for ``fixed``: it must supply a default for EVERY
@@ -341,7 +341,7 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
     ``values`` are the parsed ``--param`` values (same dict the proxy client
     receives). Local-file image params are materialized as ``LoadImage`` nodes
     and wired into the partner node; scalar params override the node's fixed
-    defaults. A ``SaveImage``/``SaveVideo`` is appended so ``comfy run`` writes
+    defaults. A ``SaveImageAdvanced``/``SaveVideo`` is appended so ``comfy run`` writes
     the result to disk.
     """
     _alias, ns = _resolve_model(model)
@@ -446,9 +446,13 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
         }
     else:
         workflow[save_id] = {
-            "class_type": "SaveImage",
+            "class_type": "SaveImageAdvanced",
             "_meta": {"title": "save generated image"},
-            "inputs": {"images": ["1", ns.media_port], "filename_prefix": output_prefix},
+            "inputs": {
+                "images": ["1", ns.media_port],
+                "filename_prefix": output_prefix,
+                "format": "png",
+            },
         }
     return workflow
 

@@ -42,18 +42,19 @@ CORE_OBJECT_INFO = {
         "display_name": "Load Image",
         "category": "image",
     },
-    "SaveImage": {
+    "SaveImageAdvanced": {
         "input": {
             "required": {
                 "images": ["IMAGE"],
                 "filename_prefix": ["STRING", {"default": "ComfyUI"}],
+                "format": [["png", "exr", "avif"], {"default": "png"}],
             }
         },
-        "input_order": {"required": ["images", "filename_prefix"]},
-        "output": [],
-        "output_name": [],
-        "name": "SaveImage",
-        "display_name": "Save Image",
+        "input_order": {"required": ["images", "filename_prefix", "format"]},
+        "output": ["IMAGE"],
+        "output_name": ["images"],
+        "name": "SaveImageAdvanced",
+        "display_name": "Save Image (Advanced)",
         "category": "image",
     },
     "SaveVideo": {
@@ -140,7 +141,11 @@ def test_ops_shape_for_an_image_edit_model():
         "adds, then widgets, then connects — every endpoint exists before it is referenced"
     )
     adds = [s for s in specs if s["op"] == "add_node"]
-    assert {s["class_type"] for s in adds} == {"LoadImage", "GeminiImageNode", "SaveImage"}
+    assert {s["class_type"] for s in adds} == {
+        "LoadImage",
+        "GeminiImageNode",
+        "SaveImageAdvanced",
+    }
     assert all(s.get("as") for s in adds), "every add declares an alias for later specs to reference"
     prompts = [s for s in specs if s["op"] == "set_widget" and s["widget"] == "prompt"]
     assert len(prompts) == 1 and prompts[0]["value"] == "add sunglasses"
@@ -160,7 +165,7 @@ def test_allow_deprecated_is_read_from_the_spec_not_stamped_on_everything():
 
     flux = adds("flux-2", {"prompt": "a fox"})
     assert flux["Flux2ImageNode"] is False, "a live partner class carries no exemption"
-    assert flux["SaveImage"] is False, "a live core class carries no exemption"
+    assert flux["SaveImageAdvanced"] is False, "a live core class carries no exemption"
 
     gemini = adds("nano-banana", {"prompt": "p", "image": ["a.png", "b.png"]})
     assert gemini["GeminiImageNode"] is False, "a partner class that is not deprecated gets no exemption"
@@ -274,7 +279,7 @@ def test_ops_roundtrip_with_no_image_params():
     assert got["Flux2ImageNode"]["model"] == "Flux.2 [pro]"
     assert got["Flux2ImageNode"]["model.width"] == 512
     assert got["Flux2ImageNode"]["model.height"] == 768
-    assert got["SaveImage"]["images"] == ("link", "Flux2ImageNode")
+    assert got["SaveImageAdvanced"]["images"] == ("link", "Flux2ImageNode")
 
 
 def test_ops_set_a_combo_selector_before_its_sub_widgets_whatever_the_dict_order():
