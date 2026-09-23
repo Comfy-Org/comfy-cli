@@ -114,8 +114,8 @@ is accepted. `status` waits only when asked, with `--watch`. Either way the wait
 ends at `ready`, `unhealthy`, `failed`, `stopped` or `stop_failed`. `unhealthy`
 only ever follows `ready`, so the deployment already came up: `up` reports it as
 not ok (`deploy_status_terminal`, exit 1) because it is billing without serving,
-and `status` reports it as recoverable. The other four statuses are transitional
-and it keeps waiting.
+and `status` reports it as recoverable. Through `queued`, `provisioning`,
+`starting` and `stopping` it keeps waiting.
 
 While the status is `provisioning` or `starting` the deployment carries a
 `progress` object, and `status --json` returns it as `data.progress`: `step`
