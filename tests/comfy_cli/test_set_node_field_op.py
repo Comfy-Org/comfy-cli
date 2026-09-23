@@ -210,6 +210,20 @@ class TestSetNodeFieldOp:
         with pytest.raises(ValueError):
             workflow_ops.set_node_field(wf, 3, field, bad_value)
 
+    @pytest.mark.parametrize("bad_mode", [-1, -100, 5, 6, 100])
+    def test_mode_value_out_of_range_is_rejected(self, bad_mode):
+        """``mode`` is a litegraph int, but not *any* int: only 0-4 (always,
+        on-event, mute, on-trigger, bypass) are valid execution modes. A
+        negative or otherwise out-of-range value must be caught here, at the
+        CLI/producer boundary, rather than passing this op's type check and
+        failing only when a downstream applier (e.g. comfy-multi-player's
+        ``validateSetNodeFieldValue``) rejects it."""
+        wf = _base_workflow()
+        with pytest.raises(ValueError, match="invalid node mode"):
+            workflow_ops.set_node_field(wf, 3, "mode", bad_mode)
+        node = next(n for n in wf["nodes"] if n["id"] == 3)
+        assert "mode" not in node
+
     def test_op_id_is_frozen_shape(self):
         wf = _base_workflow()
         _, op = workflow_ops.set_node_field(wf, 3, "title", "Renamed")
@@ -354,3 +368,11 @@ class TestSetNodeFieldCommand:
         path = _write(tmp_path, _base_workflow())
         env = _run(["set-node-field", str(path), "3", "mode", "not-a-number"], capsys)
         assert env["ok"] is False
+
+    def test_negative_mode_errors(self, tmp_path, capsys):
+        path = _write(tmp_path, _base_workflow())
+        env = _run(["set-node-field", str(path), "3", "mode", "--", "-1"], capsys)
+        assert env["ok"] is False
+        on_disk = json.loads(path.read_text())
+        node = next(n for n in on_disk["nodes"] if n["id"] == 3)
+        assert "mode" not in node

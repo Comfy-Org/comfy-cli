@@ -1217,7 +1217,10 @@ def set_node_field(
     ``bool`` for the two ``flags.*`` fields — ``bool`` is checked before
     ``int`` since ``bool`` is an ``int`` subclass in Python), or be ``None``
     to clear the field, so it returns to absent the way workflow JSON
-    round-trips an unset flag.
+    round-trips an unset flag. ``mode`` is additionally range-checked against
+    :data:`_VALID_NODE_MODES` (the same litegraph 0-4 enum ``add_node``
+    enforces), so an out-of-range value like ``-1`` is rejected here instead
+    of failing downstream at the applier.
 
     Unlike ``set_widget``, no catalog is involved: none of these fields is a
     catalogued widget name, so this never touches ``widgets_values``.
@@ -1245,6 +1248,10 @@ def set_node_field(
     )
     if value is not None and not type_ok:
         raise ValueError(f"{field} must be a {expected.__name__} or null, got {value!r}")
+    if field == "mode" and value is not None and value not in _VALID_NODE_MODES:
+        raise ValueError(
+            f"invalid node mode {value!r}; valid: 0 (always), 1 (on-event), 2 (mute), 3 (on-trigger), 4 (bypass)"
+        )
     _require(workflow, node_id)
     op = _new_op("set_node_field", actor, base_version, node_id=node_id, field=field, value=value)
     return apply_op(workflow, op, None), op
