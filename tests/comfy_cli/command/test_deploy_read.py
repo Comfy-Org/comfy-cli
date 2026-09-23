@@ -187,7 +187,12 @@ def test_unprobed_logs_explicitly_say_not_captured_yet(monkeypatch) -> None:
     # Then
     assert result.exit_code == 0
     assert "capturedAt: not captured yet" in result.stdout
-    assert "No container has started" in result.stdout
+    # An empty log means the health check has not finished, which is as true of a
+    # deployment still booting as of one that died before a container ran, so the
+    # line must not tell the first of those that nothing ever started.
+    assert "No log yet" in result.stdout
+    assert "still coming up has none yet" in result.stdout
+    assert "No container has started, so there is no log" not in result.stdout
     assert "comfy deploy events --deployment dep-read" in result.stdout
 
 

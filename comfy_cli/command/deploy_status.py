@@ -44,6 +44,7 @@ from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output import get_renderer
 from comfy_cli.output.renderer import Renderer
+from comfy_cli.utils import parse_rfc3339
 
 _WORKER_STATES: Final = ("idle", "initializing", "ready", "running", "throttled", "unhealthy")
 _STOP_REASONS: Final = frozenset({"user", "credits", "policy"})
@@ -197,6 +198,32 @@ def _interrupted_result(builder: BuilderReleaseClient, target: StatusTarget) -> 
             _normalized_serving(deployment),
             progress_of(deployment),
         )
+def _sample_age(sampled_at: str) -> str:
+    """How long ago the counts were taken, for the line that prints them.
+
+    The counts are a snapshot the control plane refreshes on its own schedule,
+    and a deployment whose endpoint stopped answering keeps the last one it got,
+    so the timestamp alone does not say whether these numbers still describe
+    now. Never raises: a timestamp this cannot read still has to print its
+    counts, so an unreadable one degrades to saying the age is unknown.
+    """
+    try:
+        elapsed = (datetime.now(timezone.utc) - parse_rfc3339(sampled_at)).total_seconds()
+    except ValueError:
+        return "age unknown"
+    seconds = int(elapsed)
+    if seconds < 0:
+        # The sample is stamped by the server, so a clock a little apart from
+        # ours reads as the future rather than as an age.
+        return "just now"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        hours, rest = divmod(seconds, 3600)
+        return f"{hours}h {rest // 60}m ago"
+    return f"{seconds // 86400}d ago"
 
 
 def _render_serving(renderer: Renderer, serving: JsonObject | None) -> None:
@@ -210,7 +237,22 @@ def _render_serving(renderer: Renderer, serving: JsonObject | None) -> None:
     queue = required_int(serving, "jobsInQueue")
     sampled_at = required_string(serving, "sampledAt")
     suffix = " — healthy idle (scale-to-zero)" if queue == 0 and all(value == 0 for value in workers.values()) else ""
-    renderer.info(f"Serving: {counts} queued={queue}; sampledAt={sampled_at}{suffix}")
+    renderer.info(f"Serving: {counts} queued={queue}; sampledAt={sampled_at} ({_sample_age(sampled_at)}){suffix}")
+
+
+def _render_error(renderer: Renderer, deployment: JsonObject) -> None:
+    """The failure detail the deployment carries, which only `--json` showed.
+
+    Set when the status is failed (why it failed) or stop_failed (why the stop
+    could not release the compute); null otherwise, so this prints nothing for
+    a deployment that is fine.
+    """
+    error = deployment.get("error")
+    if error is None:
+        return
+    if not isinstance(error, str):
+        raise server_shape_error("the normalized deployment has an invalid error")
+    renderer.warn(f"Reason: {error}")
 
 
 def _render_stop_reason(renderer: Renderer, deployment: JsonObject) -> None:
@@ -270,6 +312,7 @@ def render_status(renderer: Renderer, result: StatusResult) -> None:
     if renderer.is_pretty():
         if result.progress is not None:
             renderer.info(describe_progress(result.progress, now=datetime.now(timezone.utc)))
+        _render_error(renderer, deployment)
         _render_stop_reason(renderer, deployment)
         _render_serving(renderer, result.serving)
     release = result.release

@@ -341,9 +341,11 @@ history.
   size.
 - `comfy deploy status` shows why a deployment failed and how many workers it
   has. It read the deployment list, whose rows leave out `error` and `serving`,
-  so both were always empty; it now reads the chosen deployment in full.
-  `comfy deploy logs` on a deployment with no log yet says no container has
-  started and points at `comfy deploy events`.
+  so both were always empty; it now reads the chosen deployment in full, prints
+  the failure reason in the terminal rather than only under `--json`, and says
+  how old the worker-count sample is beside the counts. `comfy deploy logs` on a
+  deployment with no log yet says so, says the log arrives when the health check
+  finishes, and points at `comfy deploy events`.
 
 ## [1.16.0] - 2026-08-10
 
