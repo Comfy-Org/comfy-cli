@@ -550,6 +550,15 @@ def resolve_write(
         raise ValueError(f"node {node_str} not found in workflow")
     sg = defs.get(str(node.get("type", "")))
     if sg is None:
+        if str(node.get("type", "")) == LEGACY_PRIMITIVE_TYPE:
+            # Schema-less: its one widget is named by its output's marker (the
+            # input it feeds), or `value`. Either name addresses it — the same
+            # write a redirect through the fed input lands (trace_upstream_write).
+            outputs = node.get("outputs") or []
+            marker = outputs[0].get("widget") if outputs and isinstance(outputs[0], dict) else None
+            name = marker.get("name") if isinstance(marker, dict) and marker.get("name") else "value"
+            if widget in (name, "value"):
+                return WriteTarget("legacy_primitive", node=node, widget=str(name), redirected_from=redirected_from)
         return WriteTarget("top", node=node, widget=widget, redirected_from=redirected_from)
     given = f"{node_str}.{widget}"
     pi = find_promoted(sg, defs, widget)
