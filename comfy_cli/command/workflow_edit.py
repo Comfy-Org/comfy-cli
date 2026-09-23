@@ -166,12 +166,11 @@ def _read_subgraph_definition(path: Path):
 
 @tracking.track_command("workflow")
 def define_subgraph_cmd(
-    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON to update.")],
+    file: Annotated[str, typer.Argument(help="Source frontend-format workflow JSON; emit-only, file is not modified.")],
     definition_file: Annotated[str, typer.Argument(help="Serializable subgraph definition JSON.")],
     subgraph_id: Annotated[str | None, typer.Option("--id", show_default=False)] = None,
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
-    stdout: StdoutOpt = False,
 ):
     """Create one subgraph definition and emit one ``define_subgraph`` op."""
     renderer = get_renderer()
@@ -979,6 +978,15 @@ def _load_param_sets(raw: str, renderer) -> list[dict]:
     return sets
 
 
+def _reject_deferred_specs(specs: list) -> None:
+    """Refuse to persist a batch locally when any spec is a deferred op kind."""
+    deferred = [
+        spec.get("op") for spec in specs if isinstance(spec, dict) and spec.get("op") in workflow_ops.DEFERRED_OPS
+    ]
+    if deferred:
+        raise ValueError(f"local foreach cannot persist deferred operation(s): {', '.join(deferred)}")
+
+
 @tracking.track_command("workflow")
 def foreach_cmd(
     recipe_file: Annotated[str, typer.Argument(help="Recipe file: {params, ops}.")],
@@ -1024,18 +1032,15 @@ def foreach_cmd(
     out.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
     try:
-        deferred = [
-            spec.get("op")
-            for spec in specs_template
-            if isinstance(spec, dict) and spec.get("op") in workflow_ops.DEFERRED_OPS
-        ]
-        if deferred:
-            raise ValueError(f"local foreach cannot persist deferred operation(s): {', '.join(deferred)}")
+        _reject_deferred_specs(specs_template)
         for i, pset in enumerate(param_sets):
             if not isinstance(pset, dict):
                 raise workflow_ops.RecipeError(f"param-set #{i} must be a JSON object")
             params = workflow_ops.resolve_params(params_decl, {k: str(v) for k, v in pset.items()})
             specs = workflow_ops.substitute_params(specs_template, params)
+            # The op kind itself may be a `${param}`, so the template check above
+            # cannot see a kind that only becomes deferred for this param-set.
+            _reject_deferred_specs(specs)
             wf: dict = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
             wf, _ops, _aliases = workflow_ops.apply_specs(wf, graph, specs, actor=actor, base_version=base_version)
             workflow_ops.strip_internal(wf)

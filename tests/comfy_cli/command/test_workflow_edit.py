@@ -1735,6 +1735,37 @@ class TestForeach:
         assert "deferred operation" in env["error"]["message"]
         assert not list(out.glob("*.json"))
 
+    def test_foreach_rejects_deferred_op_kind_that_only_appears_after_substitution(
+        self, patched_graph, tmp_path, capsys
+    ):
+        """The op kind itself may be a `${param}`. The up-front deferred check sees
+        only the template, so a param-set that resolves the kind to a deferred op
+        must still be refused as a deferred operation (not fall through to the
+        generic `unknown op` failure), and the earlier, valid set stays reported."""
+        rp = tmp_path / "kind.json"
+        rp.write_text(
+            json.dumps(
+                {
+                    "params": {"kind": {"type": "string"}},
+                    "ops": [
+                        {"op": "${kind}", "class_type": "KSampler", "as": "ks"},
+                    ],
+                }
+            )
+        )
+        params = tmp_path / "sets.jsonl"
+        params.write_text('{"kind":"add_node"}\n{"kind":"define_subgraph"}\n', encoding="utf-8")
+        out = tmp_path / "out"
+
+        env = _run(["foreach", str(rp), "--params", str(params), "--out-dir", str(out)], capsys)
+
+        assert env["ok"] is False
+        assert "deferred operation" in env["error"]["message"]
+        assert "define_subgraph" in env["error"]["message"]
+        assert "unknown op" not in env["error"]["message"]
+        written = env["error"]["details"]["written"]
+        assert len(written) == 1 and written[0].endswith("_000.json")
+
     def test_foreach_surfaces_partial_writes_on_mid_batch_failure(self, patched_graph, tmp_path, capsys):
         """foreach writes per param-set; a mid-batch failure leaves earlier files
         on disk, so the error must surface them (not leave the caller blind)."""

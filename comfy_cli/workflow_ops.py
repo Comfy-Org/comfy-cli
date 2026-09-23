@@ -1210,7 +1210,10 @@ def _inexpressible_reason(workflow: dict) -> str | None:
         return "not a frontend-format workflow (no `nodes` list) — only the save/UI format can be op-ified"
     if workflow.get("groups"):
         return "the workflow contains canvas groups, which no frozen op kind can create"
-    if (workflow.get("definitions") or {}).get("subgraphs"):
+    definitions = workflow.get("definitions")
+    if definitions is not None and not isinstance(definitions, dict):
+        return "the workflow's `definitions` is not an object, so it is not a frontend-format workflow"
+    if definitions and definitions.get("subgraphs"):
         return "the workflow contains subgraph definitions, which only cmp can project into ops"
     extra = workflow.get("extra")
     if isinstance(extra, dict) and (extra.get("reroutes") or extra.get("linkExtensions")):

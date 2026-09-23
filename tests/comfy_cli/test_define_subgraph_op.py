@@ -131,3 +131,28 @@ def test_definition_reader_rejects_oversized_files(tmp_path):
 
     with pytest.raises(ValueError, match="too large"):
         workflow_edit._read_subgraph_definition(Path(path))
+
+
+def test_define_subgraph_command_is_emit_only_in_its_own_contract():
+    """The command never writes the workflow, so it must not advertise otherwise:
+    no ``--stdout/--in-place`` switch (there is nothing to write in place) and a
+    file help text that says emit-only, matching ``insert-workflow``."""
+    import inspect
+    import typing
+
+    signature = inspect.signature(workflow_edit.define_subgraph_cmd)
+    assert "stdout" not in signature.parameters
+
+    hints = typing.get_type_hints(workflow_edit.define_subgraph_cmd, include_extras=True)
+    (_, typer_arg) = typing.get_args(hints["file"])
+    assert "not modified" in typer_arg.help
+    assert "to update" not in typer_arg.help
+
+
+def test_replace_ops_refuses_non_object_definitions_instead_of_crashing():
+    """``definitions`` that is truthy but not an object must be a clean refusal,
+    not an AttributeError from ``.get`` on a list or string."""
+    for definitions in (["not", "a", "dict"], "subgraphs", 7):
+        new = {"nodes": [], "links": [], "definitions": definitions}
+        with pytest.raises(workflow_ops.NotExpressibleError, match="definitions"):
+            workflow_ops.replace_ops({"nodes": [], "links": []}, new)
