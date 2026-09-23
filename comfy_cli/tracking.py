@@ -732,6 +732,44 @@ def filter_command_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Runs of a ``track_command`` command that have started and not yet sent
+# ``command_finished``, innermost last. ``flush_for_hard_exit`` finishes them,
+# because ``os._exit`` skips the wrapper's ``finally``.
+_OpenCommand = tuple[dict[str, Any], float]
+_open_commands: list[_OpenCommand] = []
+
+
+def _exit_code_of(exit_: typer.Exit | SystemExit) -> int:
+    if isinstance(exit_, typer.Exit):
+        return exit_.exit_code
+    # SystemExit(None) ends with 0 and SystemExit("message") with 1, as Python does.
+    if exit_.code is None:
+        return 0
+    return exit_.code if isinstance(exit_.code, int) else 1
+
+
+def _record_exit(finished: dict[str, Any], code: int) -> None:
+    # A zero exit is a normal end and carries no code; only a non-zero one names it.
+    if code == 0:
+        finished["outcome"] = "ok"
+    else:
+        finished.update(outcome="exit", exit_code=code)
+
+
+def _finish(run: _OpenCommand) -> None:
+    """Send ``command_finished`` for ``run`` once, whichever of the wrapper's
+    ``finally`` and ``flush_for_hard_exit`` gets there first."""
+    for index in range(len(_open_commands) - 1, -1, -1):
+        if _open_commands[index] is run:
+            del _open_commands[index]
+            break
+    else:
+        return
+    finished, started = run
+    finished["seconds"] = round(time.monotonic() - started, 3)
+    track_event("command_finished", properties=finished)
+
+
 def track_command(sub_command: str | None = None):
     """
     A decorator factory that records a command run as two events: the command's
@@ -741,11 +779,15 @@ def track_command(sub_command: str | None = None):
     commands, and a long-running command (``launch``, ``run``) is still counted the
     moment it starts rather than when, or whether, it exits. ``command_finished``
     carries ``command``, ``seconds`` and ``outcome``: ``ok`` for a normal return or
-    a zero exit, ``exit`` for a non-zero ``typer.Exit`` (with ``exit_code``), and
-    ``error`` for an exception (with ``error_type``, the class name only: a message
-    can carry a path or a credential). The exception, exit or Ctrl-C then
-    propagates as before. A command that never ends has a start row and no finish
-    row, which is itself the answer.
+    a zero exit, ``exit`` for a non-zero ``typer.Exit`` or ``SystemExit`` (with
+    ``exit_code``), and ``error`` for an exception (with ``error_type``, the class
+    name only: a message can carry a path or a credential). Most commands turn
+    Ctrl-C into exit 130, so it is usually an ``exit`` with ``exit_code`` 130; one
+    that lets ``KeyboardInterrupt`` through is an ``error`` of that type. The
+    exception or exit then propagates as before. A command that ends in
+    ``os._exit`` finishes through ``flush_for_hard_exit``, which must be given the
+    code. A command that never ends has a start row and no finish row, which is
+    itself the answer.
     """
 
     def decorator(func):
@@ -756,30 +798,21 @@ def track_command(sub_command: str | None = None):
             logging.debug(f"Tracking command: {command_name} with arguments: {filtered_kwargs}")
             track_event(command_name, properties=filtered_kwargs)
 
-            finished: dict[str, Any] = {"command": command_name}
-            started = time.monotonic()
+            run: _OpenCommand = ({"command": command_name}, time.monotonic())
+            _open_commands.append(run)
             try:
                 result = func(*args, **kwargs)
-            except typer.Exit as exit_:
-                # A zero exit is a normal end and carries no code, as the
-                # docstring promises; only a non-zero one names its code.
-                if exit_.exit_code == 0:
-                    finished["outcome"] = "ok"
-                else:
-                    finished.update(outcome="exit", exit_code=exit_.exit_code)
-                raise
-            except KeyboardInterrupt:
-                finished.update(outcome="error", error_type="KeyboardInterrupt")
+            except (typer.Exit, SystemExit) as exit_:
+                _record_exit(run[0], _exit_code_of(exit_))
                 raise
             except BaseException as error:
-                finished.update(outcome="error", error_type=type(error).__name__)
+                run[0].update(outcome="error", error_type=type(error).__name__)
                 raise
             else:
-                finished["outcome"] = "ok"
+                run[0]["outcome"] = "ok"
                 return result
             finally:
-                finished["seconds"] = round(time.monotonic() - started, 3)
-                track_event("command_finished", properties=finished)
+                _finish(run)
 
         return wrapper
 
@@ -912,8 +945,13 @@ def _flush_all_providers() -> None:
             logging.debug(f"telemetry flush timed out for {type(provider).__name__}; dropping in-flight events")
 
 
-def flush_for_hard_exit() -> None:
+def flush_for_hard_exit(exit_code: int | None = None) -> None:
     """Drain telemetry before an `os._exit`, which skips atexit handlers.
+
+    ``os._exit`` also skips ``track_command``'s ``finally``, so given the code
+    the process is about to exit with, every command still running is finished
+    with it first; without it, a background ``comfy launch`` that started fine
+    would have a start row and no finish, the same as one that was killed.
 
     `comfy launch` terminates through `os._exit` on both its background-success
     and failure paths, so `_flush_all_providers` never runs there. That was
@@ -926,6 +964,10 @@ def flush_for_hard_exit() -> None:
     best-effort: nothing it does may keep the caller from exiting.
     """
     try:
+        if exit_code is not None:
+            for run in reversed(list(_open_commands)):
+                _record_exit(run[0], exit_code)
+                _finish(run)
         _flush_all_providers()
     except BaseException:  # noqa: BLE001  # pragma: no cover - defensive
         pass

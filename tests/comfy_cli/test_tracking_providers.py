@@ -573,12 +573,14 @@ class TestHardExitDrain:
 
         calls = []
         with (
-            patch.object(tracking_mod, "flush_for_hard_exit", side_effect=lambda: calls.append("drain")),
+            patch.object(tracking_mod, "flush_for_hard_exit", side_effect=lambda code: calls.append(("drain", code))),
             patch.object(launch_mod.os, "_exit", side_effect=lambda code: calls.append(("exit", code))),
         ):
             launch_mod._hard_exit(3)
 
-        assert calls == ["drain", ("exit", 3)], "telemetry must be drained before the process is torn down"
+        assert calls == [("drain", 3), ("exit", 3)], (
+            "telemetry must be drained before the process is torn down, and told the code so the running command finishes with it"
+        )
 
     def test_launch_exits_even_if_the_drain_raises(self):
         import comfy_cli.tracking as tracking_mod
