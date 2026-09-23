@@ -89,6 +89,14 @@ def _supersedes(
 
 
 _ESTIMATE_FIELDS: Final = ("etaSecondsLow", "etaSecondsHigh", "bytesToFetch")
+# Optional in the answer, but `--json` passes the whole answer on, so each one
+# present must hold what deploy_up.json promises for it.
+_OPTIONAL_COUNTS: Final = ("bytesTotal", "bytesHeld")
+_OPTIONAL_FLAGS: Final = ("atLeast", "measured")
+
+
+def _is_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _deploy_estimate(client: DeployUpClient, release_id: str, compute: JsonObject) -> JsonObject | None:
@@ -106,10 +114,16 @@ def _deploy_estimate(client: DeployUpClient, release_id: str, compute: JsonObjec
         return None
     if estimate.get("enabled") is not True:
         return None
-    for field in _ESTIMATE_FIELDS:
-        value = estimate.get(field)
-        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-            return None
+    if not all(_is_count(estimate.get(field)) for field in _ESTIMATE_FIELDS):
+        return None
+    if any(field in estimate and not _is_count(estimate[field]) for field in _OPTIONAL_COUNTS):
+        return None
+    if any(field in estimate and not isinstance(estimate[field], bool) for field in _OPTIONAL_FLAGS):
+        return None
+    # The service quotes the short end from its fast rates and the long end from
+    # its slow ones; an answer that runs backwards is not one to repeat.
+    if estimate["etaSecondsLow"] > estimate["etaSecondsHigh"]:
+        return None
     return estimate
 
 
