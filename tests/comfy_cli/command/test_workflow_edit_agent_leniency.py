@@ -68,9 +68,10 @@ _BOOLISH = {
         "required": {
             "flag": ["COMBO", {"options": ["true", "false"]}],
             "tri": ["COMBO", {"options": ["on", "off"]}],
+            "mode": ["COMBO", {"options": ["true", "false", "auto"]}],
         }
     },
-    "input_order": {"required": ["flag", "tri"]},
+    "input_order": {"required": ["flag", "tri", "mode"]},
     "output": ["STRING"],
     "output_is_list": [False],
     "output_name": ["STRING"],
@@ -186,6 +187,13 @@ class TestBoolToTrueFalseCombo:
         workflow, add = workflow_ops.add_node(_empty(), graph, "BoolishCombos")
         with pytest.raises(ValueError, match="got bool"):
             workflow_ops.set_widget(workflow, graph, add["node_id"], "tri", True)
+
+    def test_bool_not_mapped_onto_a_true_option_among_others(self, graph):
+        # "true" is an option here, but so is "auto": the bool is not a toggle
+        # of this combo, so it keeps its error instead of being case-folded.
+        workflow, add = workflow_ops.add_node(_empty(), graph, "BoolishCombos")
+        with pytest.raises(ValueError, match="got bool"):
+            workflow_ops.set_widget(workflow, graph, add["node_id"], "mode", True)
 
     def test_string_true_still_accepted_unchanged(self, graph):
         workflow, add = workflow_ops.add_node(_empty(), graph, "MeshyTextToModelNode")

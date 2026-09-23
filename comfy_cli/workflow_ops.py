@@ -755,6 +755,10 @@ def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[A
     canon = _bool_combo_option(port, value)
     what = "option"
     if canon is None:
+        if isinstance(value, bool):
+            # Not a 'true'/'false' toggle: keep the bool so validation refuses
+            # it, rather than str(True) case-folding onto a 'true' option.
+            return value, None
         canon = port.canonical_combo(value)
         what = "model"
     if canon is None or canon == value:
