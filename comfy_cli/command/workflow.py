@@ -1760,6 +1760,7 @@ def validate_api_workflow(
                 hint="use ComfyUI's 'File > Export (API)' to save as API format",
             )
             raise typer.Exit(code=1)
+        editable_ids = _editable_node_ids(wf_data)
         wf_data = converted
         converted_from_ui = True
 
@@ -1774,9 +1775,10 @@ def validate_api_workflow(
     if converted_from_ui:
         for issue in (*result["errors"], *result["warnings"]):
             nid = str(issue.get("node_id", ""))
-            if ":" in nid:
+            editable = editable_ids.get(nid, nid.replace(":", "/") if ":" in nid else nid)
+            if editable != nid:
                 issue["api_node_id"] = nid
-                issue["node_id"] = nid.replace(":", "/")
+                issue["node_id"] = editable
 
     # Preview credit spend: partner-API (paid) nodes spend Comfy credits when the
     # workflow is run. This is the same detection `comfy run` uses (authoritative
@@ -1896,6 +1898,38 @@ def _invalid_workflow_error(result: dict[str, Any]) -> dict[str, Any] | None:
         "hint": "\n".join(hint_parts),
         "details": {"errors": errors, "warnings": result["warnings"]},
     }
+
+
+def _editable_node_ids(ui_workflow: dict) -> dict[str, str]:
+    """Map every API id UI→API lowering mints to the editable address of its node.
+
+    Lowering composes an interior node's id as ``<outer>:<inner>`` (nested:
+    ``<outer>:<mid>:<inner>``); the edit surface speaks ``<outer>/<inner>``. The
+    map is built from the canvas's real ids rather than by rewriting ``:`` —
+    a doc-host-inserted node's own id (``insert:<op>:root:node:13``) already
+    contains ``:`` and must come back verbatim.
+    """
+    from comfy_cli.cql.engine import _MAX_SUBGRAPH_DEPTH, _subgraph_defs_by_id
+
+    defs_by_id = _subgraph_defs_by_id(ui_workflow)
+    out: dict[str, str] = {}
+
+    def walk(nodes: list, api_prefix: str, edit_prefix: str, depth: int) -> None:
+        if depth > _MAX_SUBGRAPH_DEPTH:
+            return
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            nid = str(node.get("id", ""))
+            api_id = f"{api_prefix}:{nid}" if api_prefix else nid
+            edit_id = f"{edit_prefix}/{nid}" if edit_prefix else nid
+            out[api_id] = edit_id
+            sg = defs_by_id.get(str(node.get("type", "")))
+            if sg is not None:
+                walk(sg.get("nodes") or [], api_id, edit_id, depth + 1)
+
+    walk(ui_workflow.get("nodes") or [], "", "", 0)
+    return out
 
 
 @app.command(

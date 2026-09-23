@@ -3088,8 +3088,42 @@ _MAX_SUBGRAPH_DEPTH = 32
 #   ``10/9.prompt``     subgraph instance 10 → interior node 9, widget ``prompt``
 #   ``10/3/7.value``    instance 10 → interior subgraph node 3 → interior node 7
 # UUID subgraph class_types contain ``-`` but never ``/`` or top-level ``.`` in
-# an instance id, so the delimiters stay unambiguous.
+# an instance id. A node id itself CAN contain ``/``: the doc host's
+# ``insert_workflow`` remaps an interior node to
+# ``insert:<op>:root/definition:%22<uuid>%22:node:27`` — so split a path with
+# :func:`split_node_path`, which matches segments against real ids, never with
+# a bare ``str.split``.
 _SUBGRAPH_PATH_SEP = "/"
+
+
+def split_node_path(workflow: dict, node_path: str) -> list[str]:
+    """Split a ``/``-separated node path into the node ids it walks through.
+
+    Each hop takes the LONGEST run of ``/``-parts that is a real node id at that
+    level (top-level nodes first, then the interior of the definition the
+    previous hop instantiates), so an id that contains ``/`` stays one segment.
+    A hop that matches nothing falls back to the plain split for the rest of
+    the path, which leaves the resolvers' own "not found" errors unchanged.
+    """
+    parts = node_path.split(_SUBGRAPH_PATH_SEP)
+    defs_by_id = _subgraph_defs_by_id(workflow)
+    nodes = workflow.get("nodes") or []
+    segments: list[str] = []
+    i = 0
+    while i < len(parts):
+        ids = {str(n.get("id", "")): n for n in nodes if isinstance(n, dict)}
+        match = next(
+            (j for j in range(len(parts), i, -1) if _SUBGRAPH_PATH_SEP.join(parts[i:j]) in ids),
+            None,
+        )
+        if match is None:
+            return segments + parts[i:]
+        seg = _SUBGRAPH_PATH_SEP.join(parts[i:match])
+        segments.append(seg)
+        sg = defs_by_id.get(str(ids[seg].get("type", "")))
+        nodes = (sg or {}).get("nodes") or []
+        i = match
+    return segments
 
 
 def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
@@ -4012,7 +4046,7 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
     # Input names may legitimately contain dots (e.g. 'images.image0').
     # Always split on the FIRST dot so multi-dot input names are preserved.
     node_path, input_name = addr.split(".", 1)
-    segments = node_path.split(_SUBGRAPH_PATH_SEP)
+    segments = split_node_path(workflow, node_path)
     defs_by_id = _subgraph_defs_by_id(workflow)
 
     from comfy_cli.cql import promoted as _promoted
