@@ -180,7 +180,13 @@ UI_ONLY_NODE_TYPES = frozenset({"Note", "MarkdownNote", "PrimitiveNode", "GetNod
 # remaining four carry data flow the API converter resolves specially, so they
 # stay refused. Sourced from layout so the batch planner sizes them identically.
 AUTHORABLE_VIRTUAL_NODE_TYPES = layout.AUTHORABLE_VIRTUAL_NODE_TYPES
-assert AUTHORABLE_VIRTUAL_NODE_TYPES <= UI_ONLY_NODE_TYPES
+if not AUTHORABLE_VIRTUAL_NODE_TYPES <= UI_ONLY_NODE_TYPES:
+    # Not `assert`: this must hold under `python -O` too, because an authorable
+    # type outside the UI-only set would be minted AND lowered into the API prompt.
+    raise RuntimeError(
+        f"AUTHORABLE_VIRTUAL_NODE_TYPES must be a subset of UI_ONLY_NODE_TYPES; "
+        f"extra: {sorted(AUTHORABLE_VIRTUAL_NODE_TYPES - UI_ONLY_NODE_TYPES)}"
+    )
 
 # A subgraph INSTANCE's node `type` is the UUID id of its definition, and
 # `ls-nodes` prints that verbatim — so a caller reading ls-nodes output can
@@ -575,8 +581,14 @@ def add_node(
     than a silently dropped field — catalog widgets are addressed by name through
     ``set_widget``.
     """
-    m = graph.node(class_type)
-    if m is None and class_type in AUTHORABLE_VIRTUAL_NODE_TYPES:
+    # Annotation classes are decided by NAME, before the catalog is consulted:
+    # the frontend treats "Note"/"MarkdownNote" as editor-only regardless of
+    # what a backend registers, so a custom pack that happens to register a
+    # backend class with that name must not turn an agent's note into an
+    # executable node.
+    is_note = class_type in AUTHORABLE_VIRTUAL_NODE_TYPES
+    m = None if is_note else graph.node(class_type)
+    if is_note:
         if text is None:
             text = ""
         if not isinstance(text, str):
@@ -845,6 +857,15 @@ def _set_widget_impl(
 
     node = _require(workflow, node_id)
     class_type = node.get("type", "")
+    if class_type in AUTHORABLE_VIRTUAL_NODE_TYPES:
+        # No catalog entry, so `_widget_index` would report "(none — all inputs
+        # are links)", which is wrong: a note has exactly one positional body.
+        # Editing it after mint is not supported yet (see op-vocabulary §15.4).
+        raise ValueError(
+            f"node {node_id} is a {class_type}: it has no named widgets. Its body is `text`, set at add time "
+            f"(`add-node {class_type} --text ...`); editing an existing note is not supported yet — "
+            f"delete it and add a new one"
+        )
     widgets = _engine._widgets_as_positional(node.get("widgets_values"), graph, class_type)
     idx = _widget_index(graph, class_type, widget, widgets)  # raises on unknown widget name
     value, norm_note = _normalize_combo(graph, class_type, widget, value)
@@ -1325,6 +1346,13 @@ def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int =
         alias = _alias_for(original.get("type"), used)
         aliases[original["id"]] = alias
         pos = original.get("pos")
+        spec_keys: dict[str, Any] = {"at": pos, "as": alias, "allow_deprecated": True}
+        if original.get("type") in AUTHORABLE_VIRTUAL_NODE_TYPES:
+            # The op half carries the full node, but the SPEC half is what
+            # `apply_specs` replays (`templates fetch --emit-ops` → `apply`), and
+            # a note's only content is its positional body — without `text` here
+            # the replay remints every note as "".
+            spec_keys["text"] = _note_text(original)
         ops.append(
             _new_op(
                 "add_node",
@@ -1335,7 +1363,7 @@ def replace_ops(old: dict, new: dict, *, actor: str = "cli", base_version: int =
                 pos=pos,
                 node=node,
                 # spec keys; the node already existed, so a deprecated class replays
-                **{"at": pos, "as": alias, "allow_deprecated": True},
+                **spec_keys,
             )
         )
 
@@ -1502,7 +1530,16 @@ def substitute_params(ops: list, params: dict[str, Any]) -> list:
             return {k: sub(v) for k, v in value.items()}
         return value
 
-    return [sub(op) for op in ops]
+    def sub_op(op: Any) -> Any:
+        # A note's `text` is free-form prose for a human reader, not an op
+        # value: a recipe note saying "seed is ${seed}" must not blow up (or
+        # get rewritten) because of a literal dollar sign. Everything else on
+        # the add_node entry still interpolates.
+        if isinstance(op, dict) and op.get("op") == "add_node" and isinstance(op.get("text"), str):
+            return {k: (v if k == "text" else sub(v)) for k, v in op.items()}
+        return sub(op)
+
+    return [sub_op(op) for op in ops]
 
 
 def _param(name: str, params: dict[str, Any]) -> Any:
@@ -1566,7 +1603,8 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
                 "node_id": n["id"],
                 "class_type": n.get("type"),
                 "message": (
-                    f"{n.get('type')} (id {n['id']}) is UI-only and cannot be rebuilt by apply — skipped; "
+                    f"{n.get('type')} (id {n['id']}) is UI-only and never reaches the API — capture skips it "
+                    "by design (the recipe rebuilds the executable graph, not canvas decoration); "
                     "data flow through it (if any) is spliced to the real source"
                 ),
             }
@@ -1817,9 +1855,16 @@ def apply_specs(
                     # documented rule is that non-string text raises. Catch it here
                     # because only the spec layer can tell absent from explicit null.
                     if "text" in spec and spec["text"] is None:
-                        raise ValueError(
-                            f"spec #{i} (add_node): `text` must be a string, got null; omit the key for an empty note"
-                        )
+                        ct = spec.get("class_type")
+                        if isinstance(ct, str) and ct in AUTHORABLE_VIRTUAL_NODE_TYPES:
+                            hint = "omit the key for an empty note"
+                        else:
+                            hint = (
+                                f"`text` is only valid for annotation nodes "
+                                f"({', '.join(sorted(AUTHORABLE_VIRTUAL_NODE_TYPES))}) — "
+                                f"set a catalog node's widgets by name with set_widget"
+                            )
+                        raise ValueError(f"spec #{i} (add_node): `text` must be a string, got null; {hint}")
                     workflow, op = add_node(
                         workflow,
                         graph,
@@ -2572,6 +2617,17 @@ def _build_note_node(node_id: int, class_type: str, pos: list, size: list, text:
         "properties": {},
         "widgets_values": [text],
     }
+
+
+def _note_text(node: dict) -> str:
+    """The body of a serialised ``Note``/``MarkdownNote``: ``widgets_values[0]``
+    when it is a string, else ``""`` — a hand-edited or foreign document may
+    carry a missing/non-list/non-string slot, and the spec contract is "text is
+    a string"."""
+    values = node.get("widgets_values")
+    if isinstance(values, list) and values and isinstance(values[0], str):
+        return values[0]
+    return ""
 
 
 def _widget_index(graph, class_type: str, widget: str, widgets_values=None) -> int:

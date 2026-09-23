@@ -889,9 +889,19 @@ of `UI_ONLY_NODE_TYPES`). The spec gains one optional, spec-and-node key:
   `ValueError` — catalog widgets are addressed by name through `set_widget`;
   a stray `text` is an error, not a dropped field.
 * CLI: `comfy workflow add-node <file> Note --text "..."`. Envelope unchanged.
+* The class is decided by **name, before the catalog**: `Note` / `MarkdownNote`
+  mint the annotation shape even if a backend happens to register a class with
+  that name (the frontend treats those names as editor-only regardless of the
+  backend, so the CLI must not turn an agent's note into an executable node).
+* Recipe `${param}` substitution (`apply --param`, `foreach`) does **not**
+  interpolate `text`: a note is prose for a human reader, so
+  `"text": "seed is ${seed}"` applies verbatim and does not require a declared
+  `seed` param. Every other add_node key still interpolates.
 * Execution: unchanged. `workflow_to_api` owns the exclusion of UI-only types
   from the API prompt and keeps dropping these nodes; a test pins the exact
   shape `add_node` mints against the converter.
+* Telemetry: `text` joins the redacted argument names (it is user prose, like
+  a prompt), so a `--text` value never reaches the tracking payload.
 
 `Reroute`, `PrimitiveNode`, `GetNode`, `SetNode` remain refused
 (`node_not_found`, `details.ui_only: true`): they carry data flow the converter
@@ -901,11 +911,31 @@ surface does not model.
 ### 15.2 `capture` deliberately unchanged
 
 §13.2's capture behaviour stands: `capture` still skips UI-only nodes,
-including `Note` / `MarkdownNote`, and reports them as warnings. The recipe
+including `Note` / `MarkdownNote`, and reports them as `ui_only_node_skipped`
+warnings — worded as "skipped by design", not "apply cannot mint them", since
+the latter is no longer true for the two annotation types. The recipe
 rebuilds the executable graph, not the canvas decoration. Capturing notes into
 recipes (now that `apply` would accept them) is a possible follow-up; it is not
 part of this amendment so a recipe captured before v1.6 and one captured after
 stay byte-identical.
+
+### 15.3 `replace_ops` carries `text` on the spec half
+
+`replace_ops` (behind `templates fetch --emit-ops` / `replace`) emits
+dual-shape `add_node` entries: the op half carries the full `node`, the spec
+half is what `apply_specs` replays. For a `Note` / `MarkdownNote` the spec
+half now includes `text` (= the source node's `widgets_values[0]` when it is a
+string, else `""`), so replaying the emitted batch through `apply` reproduces
+the note body instead of reminting every note as `""`.
+
+### 15.4 `set_widget` on a note
+
+A minted note has no named widgets, so `set_widget` on it is refused with a
+targeted message ("its body is `text`, set at add time; delete and re-add"),
+instead of the generic "(none — all inputs are links)". Editing an existing
+note's body in place is a follow-up (it needs a positional write path every
+replica agrees on, like the `legacy_primitive` one); it is out of scope for
+v1.6.
 
 **No change to §§2-8.** No op kind was added, removed, or re-scoped;
 `FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched. Downstream repos

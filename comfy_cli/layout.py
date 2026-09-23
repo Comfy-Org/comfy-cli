@@ -342,8 +342,16 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
     for i, spec in enumerate(out):
         if not (isinstance(spec, dict) and spec.get("op") == "add_node"):
             continue
-        m = graph.node(spec.get("class_type") or "")
-        if m is not None:
+        class_type = spec.get("class_type")
+        # Name decides before the catalog (mirrors workflow_ops.add_node): a
+        # backend class that happens to be called "Note" still sizes as a note.
+        # `isinstance` first — a malformed spec (`class_type: ["Note"]`) must
+        # fall to DEFAULT_SIZE and let apply_specs report it, not TypeError here.
+        is_note = isinstance(class_type, str) and class_type in AUTHORABLE_VIRTUAL_NODE_TYPES
+        m = None if is_note else graph.node(class_type or "")
+        if is_note:
+            size = note_size(class_type)
+        elif m is not None:
             widget_names = tuple(graph.widget_order(spec["class_type"]))
             # object_info already marks multiline inputs; the catalog parses it into
             # PortOptions.multiline. Match by name because widget_order is the render
@@ -366,8 +374,6 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
                 output_labels=tuple(p.name for p in m.outputs),
                 widget_labels=widget_names,
             )
-        elif spec.get("class_type") in AUTHORABLE_VIRTUAL_NODE_TYPES:
-            size = note_size(spec["class_type"])
         else:
             size = list(DEFAULT_SIZE)  # unknown type: apply_specs will error later
         key = spec.get("as") or f"__new{i}"
