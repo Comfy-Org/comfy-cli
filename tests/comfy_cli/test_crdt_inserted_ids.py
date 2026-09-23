@@ -226,3 +226,14 @@ def test_resolved_bare_id_reports_the_real_widget_error(promoted_graph):
         workflow_ops.set_widget(copy.deepcopy(wf), promoted_graph, 57, "no_such_widget", "x")
     assert "node 57 not found" not in str(exc.value)
     assert "no_such_widget" in str(exc.value)
+
+
+def test_a_literal_node_error_is_not_retried_on_an_inserted_remap(promoted_graph):
+    """A real node `57` that rejects the edit keeps its error. The edit must not
+    land on `insert:…:node:57` just because that node has the widget."""
+    wf = _load(Z_IMAGE["cmp_inserted"])
+    literal = copy.deepcopy(next(n for n in wf["nodes"] if n["id"] == f"insert:{OP_ID}:root:node:9"))
+    literal["id"] = 57  # a SaveImage: no `text` widget
+    wf["nodes"].append(literal)
+    with pytest.raises(ValueError, match="text"):
+        workflow_ops.set_widget(copy.deepcopy(wf), promoted_graph, 57, "text", "a mountain lake")

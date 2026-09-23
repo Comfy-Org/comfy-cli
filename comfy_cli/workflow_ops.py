@@ -677,7 +677,9 @@ def set_widget(
                 return _set_widget_impl(workflow, graph, bound, widget, value, actor=actor, base_version=base_version)
             except ValueError:
                 pass
-        inserted = _inserted_node_id(workflow, node_id)
+        # Only for an id no node carries: a real node ``57`` that rejects the
+        # edit keeps its own error rather than the edit landing on its remap.
+        inserted = _inserted_node_id(workflow, node_id) if _find_by_str(workflow, node_id) is None else None
         if inserted is not None:
             # Unambiguous, so a failure past resolution (bad value, unknown
             # widget) is the error to report, not "node 57 not found".
@@ -701,8 +703,8 @@ def _inserted_node_id(workflow: dict, node_id: Any) -> str | None:
     when EXACTLY ONE top-level node is the remap of ``node_id``. With none,
     or with two inserts of the same template, it returns ``None`` and the
     caller's not-found error (which lists every candidate) stands. Consulted
-    only after the literal id failed to resolve, so a real node ``57`` always
-    wins.
+    only when no node carries the literal id, so a real node ``57`` always
+    wins, including its errors.
     """
     s = str(node_id)
     if not s.lstrip("-").isdigit():
