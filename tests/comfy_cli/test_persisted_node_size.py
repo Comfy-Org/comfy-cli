@@ -42,6 +42,29 @@ _OBJECT_INFO = {
         "name": "EmptyLatentImage",
         "display_name": "Empty Latent Image",
     },
+    "LoadImage": {
+        "input": {
+            "required": {
+                "image": [["fixture.png"], {"image_upload": True}],
+            }
+        },
+        "output": ["IMAGE", "MASK"],
+        "output_name": ["IMAGE", "MASK"],
+        "name": "LoadImage",
+        "display_name": "Load Image",
+    },
+    "SaveImage": {
+        "input": {
+            "required": {
+                "images": ["IMAGE", {}],
+                "filename_prefix": ["STRING", {"default": "ComfyUI"}],
+            }
+        },
+        "output": [],
+        "output_name": [],
+        "name": "SaveImage",
+        "display_name": "Save Image",
+    },
 }
 
 
@@ -198,4 +221,36 @@ def test_a_second_call_does_not_overlap_the_first_batch():
         for j in range(i + 1, len(rects)):
             assert not layout._overlaps(rects[i], rects[j]), (
                 f"node {i} at {wf['nodes'][i]['pos']} overlaps node {j} at {wf['nodes'][j]['pos']}"
+            )
+
+
+def test_populated_image_loaders_reserve_the_frontend_preview_height():
+    """Five loader→save rows stay disjoint after image previews materialize.
+
+    Regression for the reported five-loader overlap: object_info exposes the image combo and upload
+    button, but not the 190px DOM preview host the frontend adds after loading
+    the selected image. The old row pitch therefore looked aligned while every
+    loader overlapped the one below it once its preview appeared.
+    """
+    wf = {"nodes": [], "links": []}
+    specs = []
+    for i in range(5):
+        specs.extend(
+            [
+                {"op": "add_node", "class_type": "LoadImage", "as": f"load{i}"},
+                {"op": "add_node", "class_type": "SaveImage", "as": f"save{i}"},
+                {"op": "connect", "from": f"$load{i}.IMAGE", "to": f"$save{i}.images"},
+            ]
+        )
+
+    W.apply_specs(wf, _graph(), specs, actor="agent", base_version=1)
+
+    loaders = [n for n in wf["nodes"] if n.get("type") == "LoadImage"]
+    assert len(loaders) == 5
+    assert all(n["size"][1] >= layout.IMAGE_PREVIEW_MIN_H for n in loaders)
+    rects = [layout.occupied(n["pos"], n["size"]) for n in loaders]
+    for i in range(len(rects)):
+        for j in range(i + 1, len(rects)):
+            assert not layout._overlaps(rects[i], rects[j]), (
+                f"loader {i} at {loaders[i]['pos']} overlaps loader {j} at {loaders[j]['pos']}"
             )

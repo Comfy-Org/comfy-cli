@@ -578,6 +578,7 @@ def add_node(
         # wrong, so a second call would place the next node on top of a node it had itself
         # under-measured.
         n_multiline=layout.count_multiline(m, _widget_names),
+        n_image_previews=layout.count_image_previews(m, _widget_names),
         title=(getattr(m, "display_name", "") or class_type),
         input_labels=tuple(p.name for p in m.inputs if p.is_link),
         output_labels=tuple(p.name for p in m.outputs),

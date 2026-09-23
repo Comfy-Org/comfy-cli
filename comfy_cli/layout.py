@@ -87,6 +87,15 @@ _WIDGET_BLOCK_PAD = 8.0
 # dominant term in the overlap the browser harness reproduces.
 MULTILINE_WIDGET_H = 166.0
 
+# Image-upload widgets attach a DOM image host below their ordinary combo/button
+# rows. On its first populated render the frontend deliberately grows that host
+# to at least 190px (`createImageHost` in `src/scripts/ui/imagePreview.ts`). It is
+# not described as another object_info widget, so the catalog-only model used to
+# omit the whole block and stack rows of populated LoadImage nodes roughly 190px
+# into one another.
+IMAGE_PREVIEW_MIN_H = 190.0
+_IMAGE_PREVIEW_UPLOAD_FLAGS = frozenset({"image_upload", "animated_image_upload"})
+
 
 def count_multiline(node_meta, widget_names) -> int:
     """How many of `widget_names` are multiline, per the catalog.
@@ -105,6 +114,17 @@ def count_multiline(node_meta, widget_names) -> int:
         1
         for p in getattr(node_meta, "inputs", [])
         if p.name in names and getattr(getattr(p, "options", None), "multiline", False)
+    )
+
+
+def count_image_previews(node_meta, widget_names) -> int:
+    """Count frontend image hosts implied by upload-backed widget inputs."""
+    names = set(widget_names)
+    return sum(
+        1
+        for p in getattr(node_meta, "inputs", [])
+        if p.name in names
+        and bool(set(getattr(getattr(p, "options", None), "upload_flags", ())) & _IMAGE_PREVIEW_UPLOAD_FLAGS)
     )
 
 
@@ -208,6 +228,7 @@ def estimate_size(
     n_widgets: int,
     *,
     n_multiline: int = 0,
+    n_image_previews: int = 0,
     title: str | None = None,
     input_labels: tuple[str, ...] = (),
     output_labels: tuple[str, ...] = (),
@@ -224,7 +245,13 @@ def estimate_size(
     now modelled separately, so the estimate runs ~30px tall. Over-spacing is invisible;
     under-spacing is the overlap users report.
     """
-    h = HEADER_H + SLOT_H * max(n_link_inputs, n_outputs) + _widgets_height(n_widgets, n_multiline) + PAD_H
+    h = (
+        HEADER_H
+        + SLOT_H * max(n_link_inputs, n_outputs)
+        + _widgets_height(n_widgets, n_multiline)
+        + max(n_image_previews, 0) * IMAGE_PREVIEW_MIN_H
+        + PAD_H
+    )
     if title is None and not (input_labels or output_labels or widget_labels):
         w = NODE_W
     else:
@@ -388,6 +415,7 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
                 len(m.outputs),
                 len(widget_names),
                 n_multiline=count_multiline(m, widget_names),
+                n_image_previews=count_image_previews(m, widget_names),
                 # LiteGraph renders `display_name || name`, and width is derived from the
                 # title, so sizing from class_type under-estimates whenever they differ.
                 title=(getattr(m, "display_name", "") or spec["class_type"]),
