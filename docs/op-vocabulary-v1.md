@@ -101,7 +101,9 @@ and optionally `grow` (autogrow slot descriptor: `{name, type, widget?, inputcou
   tuple, no out-link entry. Autogrow connects are non-clobbering and therefore
   **not** gated: each grows a fresh slot keyed by `grow_id` (the link id), so
   both survive.
-* Invalid: type-mismatched slots are rejected at mint time; a link cannot cross
+* Invalid: type-mismatched slots are rejected at mint time, including a widget
+  converted to a linked input (checked against the widget's schema type, which
+  the grown input also carries); a link cannot cross
   a subgraph boundary (rejected with the boundary explanation).
 
 ### 1.3 `set_widget`

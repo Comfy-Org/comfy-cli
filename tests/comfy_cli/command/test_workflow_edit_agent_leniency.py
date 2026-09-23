@@ -244,6 +244,33 @@ class TestConnectDynamicComboWidget:
                 ],
             )
 
+    def test_selected_sub_widget_refuses_a_mismatched_source_type(self, graph):
+        # should_remesh defaults to "true", whose target_polycount is an INT.
+        with pytest.raises(ValueError, match="type mismatch: STRING .*INT"):
+            workflow_ops.apply_specs(
+                _empty(),
+                graph,
+                [
+                    {"op": "add_node", "class_type": "PrimitiveStringMultiline", "as": "tx"},
+                    {"op": "add_node", "class_type": "MeshyTextToModelNode", "as": "gen"},
+                    {"op": "connect", "from": "$tx.STRING", "to": "$gen.should_remesh.target_polycount"},
+                ],
+            )
+
+    def test_selected_sub_widget_input_carries_the_widget_type(self, graph):
+        workflow, _, aliases = workflow_ops.apply_specs(
+            _empty(),
+            graph,
+            [
+                {"op": "add_node", "class_type": "PrimitiveInt", "as": "n"},
+                {"op": "add_node", "class_type": "MeshyTextToModelNode", "as": "gen"},
+                {"op": "connect", "from": "$n.INT", "to": "$gen.should_remesh.target_polycount"},
+            ],
+        )
+        gen = _node(workflow, aliases["gen"])
+        linked = [i for i in gen.get("inputs") or [] if i.get("name") == "should_remesh.target_polycount"]
+        assert linked and linked[0].get("link") is not None and linked[0].get("type") == "INT"
+
 
 # ---------------------------------------------------------------------------
 # 3. `node` given as `$alias.<input>` (model error: the message names the fix)

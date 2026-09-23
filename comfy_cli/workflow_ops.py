@@ -2931,8 +2931,17 @@ def _resolve_input_target(
     # the schema group resolution so a real widget name always outranks the
     # bare-element guess (``image0``) a group's vocabulary might also match.
     node_type = node.get("type", "")
-    if graph is not None and isinstance(slot, str) and slot in _linkable_widget_names(node, graph):
-        return None, {"name": slot, "type": elem_type or "*", "widget": slot}
+    if graph is not None and isinstance(slot, str):
+        widget_type = _linkable_widget_type(node, graph, slot)
+        if widget_type is not None:
+            # Minted with no concrete index, so _connect_impl's slot check never
+            # sees it: check here, as the promoted and autogrow grows do.
+            if elem_type and widget_type and not _types_compatible(elem_type, widget_type):
+                raise ValueError(
+                    f"type mismatch: {elem_type} output cannot connect to {widget_type} widget input "
+                    f"{slot!r} of node {node.get('id')}"
+                )
+            return None, {"name": slot, "type": widget_type or elem_type or "*", "widget": slot}
     if graph is not None and isinstance(slot, str):
         resolved = _resolve_schema_autogrow(node, graph, slot, elem_type)
         if resolved is not None:
@@ -2986,6 +2995,26 @@ def _resolve_input_target(
             )
     names = [i.get("name") for i in ins]
     raise ValueError(f"input {slot!r} not found on node {node.get('id')}; inputs: {names}")
+
+
+def _linkable_widget_type(node: dict, graph, slot: str) -> str | None:
+    """The schema type of widget ``slot`` when a connect may convert it into a
+    linked input on ``node`` (see :func:`_linkable_widget_names`), ``""`` when
+    it is linkable but carries no schema port, or ``None`` when it is not a
+    linkable widget at all."""
+    from comfy_cli.cql import engine as _engine
+
+    if slot not in _linkable_widget_names(node, graph):
+        return None
+    m = graph.node(node.get("type", ""))
+    if m is None:
+        return ""
+    positional = _engine._widgets_as_positional(node.get("widgets_values"), graph, node.get("type", ""))
+    entry = next((e for e in _engine._expand_widget_entries(m, positional) if e.name == slot), None)
+    if entry is None or entry.port is None:
+        entry_port = next((p for p in m.inputs if p.name == slot), None)
+        return str(entry_port.type or "") if entry_port is not None else ""
+    return str(entry.port.type or "")
 
 
 def _linkable_widget_names(node: dict, graph) -> list[str]:
