@@ -10,11 +10,12 @@ diverging.
 
 Design (settled by the identity spike):
 
-* **Identity is leaderless & collision-free.** New node/link ids are random
-  53-bit integers (``mint_id``): no shared counter, no coordination, and still
-  ``int``-typed so the API converter (which gates link ids on ``isinstance(int)``)
-  and an int-keyed frontend keep working. ``last_node_id``/``last_link_id`` are
-  kept only as advisory high-water marks, never as allocators.
+* **Identity is leaderless.** New node/link ids are random integers with bit 40
+  set (``mint_id``), all below ``2**52``: no shared counter or coordination, and
+  still ``int``-typed so the API converter (which gates link ids on
+  ``isinstance(int)``) and an int-keyed frontend keep working. Collisions remain
+  possible between random draws. ``last_node_id``/``last_link_id`` are kept only
+  as advisory high-water marks, never as allocators.
 * **Widgets are name-addressed, never index-addressed.** ``set_widget`` carries
   the widget *name*; ``apply_op`` resolves name → ``widgets_values`` index against
   the live schema at apply time, so an op survives widget-layout drift.
@@ -74,8 +75,9 @@ from comfy_cli.cql.engine import (
     saved_widget_order,
 )
 
-# New ids live in [2**40, 2**53): always large (never collides with small
-# frontend counter ids), always inside JS Number.MAX_SAFE_INTEGER.
+# New ids have bit 40 set and are below 2**52. Agent-bound frontend ids have
+# bit 41 set and bit 40 clear, so the actor ranges are disjoint. Random draws
+# within this actor range can still collide.
 _ID_FLOOR = 1 << 40
 
 # Mirrored EXACTLY from comfy-multi-player's `src/limits.ts` at
@@ -379,7 +381,7 @@ def _rebind_op_digest(workflow: dict, op: dict, applied: str | None) -> None:
 
 
 def mint_id() -> int:
-    """A leaderless, collision-free, int-typed identity for a node or link."""
+    """A leaderless, random, int-typed identity for a node or link."""
     return _ID_FLOOR | random.getrandbits(52)
 
 
@@ -4610,10 +4612,11 @@ def _apply_reset_doc(workflow: dict, op: dict) -> None:
     """Replace the whole document with the empty baseline, bookkeeping included.
 
     Unlike ``_apply_clear`` this drops ``last_node_id``/``last_link_id``,
-    ``_applied_ops``, ``_widget_stamps`` and deferred writes — the history
-    barrier of §1.6. Ids
-    are minted at random in ``[2**40, 2**53)`` (``mint_id``), never allocated
-    from the high-water marks, so resetting them to 0 cannot cause id reuse.
+    ``_applied_ops``, ``_widget_stamps`` and deferred writes
+    (``_pending_dynamic_connects``, ``_deferred_widget_ops``) — the history
+    barrier of §1.6. Ids are minted at random with bit 40 set and below
+    ``2**52`` (``mint_id``), never allocated from the high-water marks, so
+    resetting them to 0 does not increase the chance of id reuse.
     """
     kept = {k: workflow[k] for k in _RESET_DOC_KEEP if k in workflow}
     workflow.clear()
