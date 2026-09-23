@@ -327,11 +327,17 @@ def set_node_field_cmd(
     renderer = get_renderer()
     renderer.command = "workflow set-node-field"
     p, workflow = _load_workflow_or_fail(renderer, file)
+    # Coerce a numeric id the same way every sibling command does (`_split_addr`
+    # for set-widget/connect, delete/delete-nodes' own coercion) — otherwise
+    # this node is minted as node_id "1" (str) here but 1 (int) everywhere
+    # else, splitting one node across two LWW registers for a consumer that
+    # doesn't normalize ids the way this module's `_find_by_str` does.
+    node_id: Any = int(node) if node.lstrip("-").isdigit() else node
     # No catalog needed: the writable fields are graph-independent node state,
     # unlike a widget name, which must be checked against the node's class.
     try:
         workflow, op = workflow_ops.set_node_field(
-            workflow, node, field, _parse_value(value), actor=actor, base_version=base_version
+            workflow, node_id, field, _parse_value(value), actor=actor, base_version=base_version
         )
     except ValueError as e:
         _emit_edit_error(
