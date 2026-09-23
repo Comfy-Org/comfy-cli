@@ -194,6 +194,15 @@ def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
             f"Deployment {deployment_id} could not stop and may still be billing.",
             hint=f"run `comfy deploy stop --deployment {deployment_id}` again",
         )
+    elif status == "unhealthy":
+        # `up` leaves an unhealthy deployment as it is, so saying nothing would
+        # read as success for one that is billing and not serving.
+        renderer.warn(
+            f"Deployment {deployment_id} is unhealthy: it came up, then its endpoint degraded. "
+            "It is still billing, and the service moves it back to ready if it recovers.",
+            hint=f"run `comfy deploy logs --deployment {deployment_id}` to see why, "
+            f"or `comfy deploy stop --deployment {deployment_id}` to stop billing",
+        )
     elif watch and status in {"failed", "stopped"}:
         renderer.warn(f"Deployment {deployment_id} reached terminal status {status}.")
     if result.dropped_bounds:
@@ -208,7 +217,7 @@ def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
             if status == "stop_failed"
             else f"run `comfy deploy scale --deployment {deployment_id} --min <n> --max <n>` to change them",
         )
-    terminal = status in {"failed", "stopped", "stop_failed"}
+    terminal = status in {"failed", "stopped", "stop_failed", "unhealthy"}
     renderer.emit(
         result.payload(),
         command="deploy up",

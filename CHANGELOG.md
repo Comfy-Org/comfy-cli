@@ -17,6 +17,24 @@ history.
 
 ### Added
 
+- `comfy build push` says how far along an upload is. It prints the plan before
+  the first byte ("3 files, 53.0 GB to upload, 2 already held"), then bytes sent,
+  rate and time left while each file moves. Under `--json-stream` the same numbers
+  are `upload_plan` / `upload_progress` / `upload_complete` events on stdout; under
+  `--json` they go to stderr so stdout stays the single envelope. The rate is
+  measured over the last ten seconds on a timer, so a stalled upload reports a
+  falling rate instead of going quiet. Schema: `build_push_event.json`.
+- `comfy deploy up --watch` and `comfy deploy status` show where a deployment that
+  is coming up has got to: the step, and while models are copied onto its storage
+  the model, bytes done of the total, rate and time left ("Staging models: model 1
+  of 2 sd_xl_base_1.0.safetensors, 3.5 GB of 7.3 GB, 44.2 MB/s, 1m 25s left"). The
+  numbers are the deploy service's own `progress` object, which `status --json`
+  and `up --json` now carry while the status is `provisioning` or `starting` and
+  omit otherwise. Under `--watch`, `--json-stream` emits a `deploy_progress` event
+  per new sample on stdout and `--json` puts the same lines on stderr. Ctrl-C
+  during `--watch` stops the watching and nothing else, and prints the command
+  that re-attaches. A service that sends no `progress` prints what it printed
+  before. Schema: `deploy_progress_event.json`.
 - `comfy build push` prints every warning a save returns, and `--release` cuts no
   release while one says a deployment could not download a model link
   (`build_release_held`); `--release-despite-warnings` cuts anyway.
@@ -43,8 +61,25 @@ history.
   carries that error code and no pick is marked. The flag is off by default
   because it fetches uncached template workflows and calls the local server.
 
+### Changed
+
+- `comfy deploy up` now follows the deployment until it settles, instead of
+  returning as soon as the deploy service accepts it. A script that relied on
+  `up` returning at once passes `--no-watch`.
+- A watch (`up`, or `status --watch`) now stops at `unhealthy` instead of
+  waiting for `ready`: the status only ever follows `ready`, so the wait could
+  last as long as the endpoint stayed degraded, with nothing printed. `up` reports
+  an unhealthy deployment as not ok (`deploy_status_terminal`, exit 1), with
+  or without the watch, since it is billing without serving; `status` still
+  reports it as recoverable.
+
 ### Fixed
 
+- `insert_workflow` (`comfy workflow insert-workflow`) now rebases the inserted
+  template beside the target graph's existing nodes instead of leaving its
+  original absolute `pos` values untouched, which could land it thousands of
+  pixels away as a disconnected cluster on canvas. The whole block moves by a
+  single delta, so the template's own internal relative layout is preserved.
 - `comfy deploy refs compute` and the `comfy deploy up` pickers now list every
   location the deploy service sells in, not only its datacenters, so B200, H100
   and H200, which are sold only under `us`, can be picked. The table gains

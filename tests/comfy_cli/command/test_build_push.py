@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import jsonschema
@@ -329,10 +330,10 @@ class _InterruptedBuilder(RecordingBuilder):
         super().__init__()
         self.survive = survive
 
-    def upload_blob(self, upload_url: str, path: Path) -> None:
+    def upload_blob(self, upload_url: str, path: Path, progress: Callable[[int], None] | None = None) -> None:
         if len(self.uploaded) >= self.survive:
             raise requests.ConnectionError("connection reset mid-upload")
-        super().upload_blob(upload_url, path)
+        super().upload_blob(upload_url, path, progress)
 
 
 def test_an_interrupted_push_keeps_the_blobs_it_already_uploaded(
@@ -379,7 +380,7 @@ class _SignedUrlBuilder(RecordingBuilder):
         super().__init__()
         self.error = error
 
-    def upload_blob(self, upload_url: str, path: Path) -> None:
+    def upload_blob(self, upload_url: str, path: Path, progress: Callable[[int], None] | None = None) -> None:
         raise self.error
 
 
@@ -501,6 +502,96 @@ def test_resuming_an_interrupted_push_uploads_only_what_is_missing(
     definition = reloaded(workspace)["definition"]
     assert isinstance(definition, dict)
     assert definition["models"][0]["blobId"] == "blob-1"
+
+
+def _upload_events(result) -> list[JsonObject]:
+    """The progress lines a `--json` push writes to stderr, among whatever else is there."""
+    events = []
+    for line in result.stderr.splitlines():
+        if line.startswith("{"):
+            parsed = json.loads(line)
+            if parsed.get("schema") == "event/1":
+                events.append(parsed)
+    return events
+
+
+def test_a_push_reports_each_upload_on_stderr_and_keeps_stdout_the_envelope(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An agent's stdout is a pipe, so it resolves to single-envelope JSON mode:
+    progress has to reach it without putting a second document on stdout."""
+    # Given
+    write_spec(workspace, build_id="build-1", revision="revision-0")
+    client = RecordingBuilder()
+    client.remote_revisions["build-1"] = "revision-0"
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert len([line for line in result.stdout.splitlines() if line.strip()]) == 1
+    events = _upload_events(result)
+    validator = jsonschema.Draft202012Validator(_schema("build_push_event.json"))
+    for event in events:
+        validator.validate(event)
+    assert [(event["type"], event.get("file")) for event in events] == [
+        ("upload_plan", None),
+        ("upload_progress", "base.safetensors"),
+        ("upload_complete", "base.safetensors"),
+        ("upload_progress", "local-node.zip"),
+        ("upload_complete", "local-node.zip"),
+    ]
+    assert events[0]["files"] == 2
+    assert events[0]["already_held"] == 0
+    assert events[0]["bytes_total"] == envelope(result)["data"]["upload_bytes"]
+    assert events[-1]["overall_bytes_done"] == events[0]["bytes_total"]
+
+
+def test_a_retry_says_what_it_already_holds_before_it_sends_the_rest(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given a push that died after the model landed
+    write_spec(workspace, build_id="build-1", revision="revision-0")
+    _install_client(monkeypatch, _InterruptedBuilder(survive=1))
+    interrupted = invoke_push(workspace)
+    assert interrupted.exit_code == 1
+    # The file that failed has a start and no completion: the error envelope follows it.
+    assert [(event["type"], event.get("file")) for event in _upload_events(interrupted)][-2:] == [
+        ("upload_complete", "base.safetensors"),
+        ("upload_progress", "local-node.zip"),
+    ]
+    retry = RecordingBuilder()
+    retry.remote_revisions["build-1"] = "revision-0"
+    _install_client(monkeypatch, retry)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    plan = _upload_events(result)[0]
+    assert (plan["type"], plan["files"], plan["already_held"]) == ("upload_plan", 1, 1)
+
+
+def test_a_push_with_nothing_to_upload_still_prints_the_plan(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given a spec whose blobs all landed on an earlier push
+    write_spec(workspace, build_id="build-1", revision="revision-0")
+    client = RecordingBuilder()
+    client.remote_revisions["build-1"] = "revision-0"
+    _install_client(monkeypatch, client)
+    assert invoke_push(workspace).exit_code == 0
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    events = _upload_events(result)
+    assert [event["type"] for event in events] == ["upload_plan"]
+    assert (events[0]["files"], events[0]["bytes_total"], events[0]["already_held"]) == (0, 0, 2)
+    assert envelope(result)["data"]["uploaded"] == 0
 
 
 def test_update_synchronizes_name_and_description(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:

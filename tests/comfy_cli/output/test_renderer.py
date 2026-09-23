@@ -654,3 +654,30 @@ class TestJsonDefault:
 
         Looped.MEMBER._value_ = Looped.MEMBER
         assert _json_default(Looped.MEMBER) == str(Looped.MEMBER)
+
+
+def test_progress_event_streams_on_stdout_under_ndjson(capsys):
+    r = _resolve(json_stream_flag=True)
+    r.progress_event("upload_progress", bytes_done=5)
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"schema": "event/1", "type": "upload_progress", "bytes_done": 5}
+    assert captured.err == ""
+
+
+def test_progress_event_goes_to_stderr_under_json_so_stdout_stays_one_envelope(capsys):
+    """A caller whose stdout is a pipe resolves to JSON mode without asking for
+    a stream. It still has to hear about a long transfer, and stdout is spoken
+    for: exactly one envelope."""
+    r = _resolve(json_flag=True)
+    r.progress_event("upload_progress", bytes_done=5)
+    r.emit({"uploaded": 1}, command="build push")
+    captured = capsys.readouterr()
+    assert json.loads(captured.err) == {"schema": "event/1", "type": "upload_progress", "bytes_done": 5}
+    assert json.loads(captured.out)["type"] == "envelope"
+
+
+def test_progress_event_is_silent_in_pretty_mode(capsys):
+    r = _resolve()
+    r.progress_event("upload_progress", bytes_done=5)
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""

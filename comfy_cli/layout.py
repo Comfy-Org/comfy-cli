@@ -93,6 +93,15 @@ _WIDGET_BLOCK_PAD = 8.0
 # dominant term in the overlap the browser harness reproduces.
 MULTILINE_WIDGET_H = 166.0
 
+# Image-upload widgets attach a DOM image host below their ordinary combo/button
+# rows. On its first populated render the frontend deliberately grows that host
+# to at least 190px (`createImageHost` in `src/scripts/ui/imagePreview.ts`). It is
+# not described as another object_info widget, so the catalog-only model used to
+# omit the whole block and stack rows of populated LoadImage nodes roughly 190px
+# into one another.
+IMAGE_PREVIEW_MIN_H = 190.0
+_IMAGE_PREVIEW_UPLOAD_FLAGS = frozenset({"image_upload", "animated_image_upload"})
+
 
 def count_multiline(node_meta, widget_names) -> int:
     """How many of `widget_names` are multiline, per the catalog.
@@ -111,6 +120,17 @@ def count_multiline(node_meta, widget_names) -> int:
         1
         for p in getattr(node_meta, "inputs", [])
         if p.name in names and getattr(getattr(p, "options", None), "multiline", False)
+    )
+
+
+def count_image_previews(node_meta, widget_names) -> int:
+    """Count frontend image hosts implied by upload-backed widget inputs."""
+    names = set(widget_names)
+    return sum(
+        1
+        for p in getattr(node_meta, "inputs", [])
+        if p.name in names
+        and bool(set(getattr(getattr(p, "options", None), "upload_flags", ())) & _IMAGE_PREVIEW_UPLOAD_FLAGS)
     )
 
 
@@ -214,6 +234,7 @@ def estimate_size(
     n_widgets: int,
     *,
     n_multiline: int = 0,
+    n_image_previews: int = 0,
     title: str | None = None,
     input_labels: tuple[str, ...] = (),
     output_labels: tuple[str, ...] = (),
@@ -230,7 +251,13 @@ def estimate_size(
     now modelled separately, so the estimate runs ~30px tall. Over-spacing is invisible;
     under-spacing is the overlap users report.
     """
-    h = HEADER_H + SLOT_H * max(n_link_inputs, n_outputs) + _widgets_height(n_widgets, n_multiline) + PAD_H
+    h = (
+        HEADER_H
+        + SLOT_H * max(n_link_inputs, n_outputs)
+        + _widgets_height(n_widgets, n_multiline)
+        + max(n_image_previews, 0) * IMAGE_PREVIEW_MIN_H
+        + PAD_H
+    )
     if title is None and not (input_labels or output_labels or widget_labels):
         w = NODE_W
     else:
@@ -332,6 +359,53 @@ def cascade_pos(workflow: dict, size: list[float]) -> list[float]:
     return [x, y]
 
 
+def rebase_template(existing_nodes: list, template: dict) -> None:
+    """Translate a whole inserted template so it lands beside the target
+    graph's existing nodes, instead of at whatever absolute coordinates the
+    template happened to be authored/exported with.
+
+    Mutates `template` in place. Every node (and group) that carries a `pos`
+    (or `bounding`) is shifted by the SAME delta, so the template's own
+    internal relative layout is preserved exactly -- this is a uniform
+    translation of the whole block, not a per-node reshuffle, the same
+    convention `cascade_pos` uses for a single new node.
+
+    A no-op when there is nothing to be beside (`existing_nodes` is empty) or
+    nothing positioned to move (no template node carries a `pos`); an
+    unpositioned node is left exactly as it was, matching the empty-graph
+    case in `cascade_pos`.
+    """
+    existing_box = _bbox([n for n in existing_nodes if isinstance(n, dict)])
+    if existing_box is None:
+        return
+
+    positioned = [n for n in template.get("nodes") or [] if isinstance(n, dict) and _pair(n.get("pos")) is not None]
+    if not positioned:
+        return
+
+    template_box = _bbox(positioned)
+    # Mirrors cascade_pos: place the block to the right of the existing
+    # bounding box, top-aligned with it. Both boxes are in the same
+    # occupied-space (title bar included), and that band cancels out of a
+    # delta, so it applies directly to `pos` values below.
+    dx = (existing_box[2] + COL_GAP) - template_box[0]
+    dy = existing_box[1] - template_box[1]
+
+    for node in positioned:
+        x, y = _pair(node["pos"])
+        node["pos"] = [x + dx, y + dy]
+
+    for group in template.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        bounding = group.get("bounding")
+        pair = _pair(bounding[:2]) if isinstance(bounding, (list, tuple)) and len(bounding) >= 2 else None
+        if pair is None:
+            continue
+        gx, gy = pair
+        group["bounding"] = [gx + dx, gy + dy, *bounding[2:]]
+
+
 def assign_positions(workflow: dict, graph, specs: list) -> list:
     """Fill `at` on every add_node spec that lacks one, using the batch's own
     connects for dataflow layering. Returns spec copies; non-add specs and
@@ -367,6 +441,7 @@ def assign_positions(workflow: dict, graph, specs: list) -> list:
                 len(m.outputs),
                 len(widget_names),
                 n_multiline=count_multiline(m, widget_names),
+                n_image_previews=count_image_previews(m, widget_names),
                 # LiteGraph renders `display_name || name`, and width is derived from the
                 # title, so sizing from class_type under-estimates whenever they differ.
                 title=(getattr(m, "display_name", "") or spec["class_type"]),

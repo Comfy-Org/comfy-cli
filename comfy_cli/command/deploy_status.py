@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import urllib.error
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Final
 
 import typer
@@ -11,6 +12,8 @@ import typer
 from comfy_cli.builder_api import BuilderAuthError
 from comfy_cli.command.build_paths import BuildSpecNotFoundError, resolve_build_paths
 from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, read_build_spec
+from comfy_cli.command.deploy_progress import DeployWatchReporter, progress_of
+from comfy_cli.command.deploy_progress import describe as describe_progress
 from comfy_cli.command.deploy_resolve import (
     _STATUS_RANK,
     BuilderReleaseClient,
@@ -60,14 +63,21 @@ class StatusResult:
     deployment: JsonObject | None
     release: JsonObject | None
     serving: JsonObject | None
+    # Where a deployment that is coming up has got to, as the service sent it.
+    progress: JsonObject | None = None
 
     def payload(self) -> JsonObject:
-        return {
+        payload: JsonObject = {
             "build": {"id": self.build_id, "name": self.build_name},
             "deployment": self.deployment,
             "release": self.release,
             "serving": self.serving,
         }
+        # Absent rather than null once the deployment has settled, and from a
+        # service that never sends it.
+        if self.progress is not None:
+            payload["progress"] = self.progress
+        return payload
 
 
 def _nullable_string(value: JsonObject, key: str) -> str | None:
@@ -161,7 +171,32 @@ def status_result(builder: BuilderReleaseClient, target: StatusTarget) -> Status
         _normalized_deployment(deployment),
         release,
         _normalized_serving(deployment),
+        progress_of(deployment),
     )
+
+
+def _interrupted_result(builder: BuilderReleaseClient, target: StatusTarget) -> StatusResult:
+    """The last read, for a watch the person stopped.
+
+    Its release summary needs one more read of the Build's releases, and a
+    person often presses Ctrl-C because the network went away. That read is not
+    worth turning an interrupt (130) into a server error (1): without it the
+    envelope still carries the deployment and its progress, with no release.
+    """
+    try:
+        return status_result(builder, target)
+    except (DeployAPIError, BuilderAuthError, ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError):
+        deployment = target.deployment
+        if deployment is None:
+            return StatusResult(target.build_id, target.build_name, None, None, None)
+        return StatusResult(
+            target.build_id,
+            target.build_name,
+            _normalized_deployment(deployment),
+            None,
+            _normalized_serving(deployment),
+            progress_of(deployment),
+        )
 
 
 def _render_serving(renderer: Renderer, serving: JsonObject | None) -> None:
@@ -233,6 +268,8 @@ def render_status(renderer: Renderer, result: StatusResult) -> None:
 
     status = _render_deployment(renderer, deployment)
     if renderer.is_pretty():
+        if result.progress is not None:
+            renderer.info(describe_progress(result.progress, now=datetime.now(timezone.utc)))
         _render_stop_reason(renderer, deployment)
         _render_serving(renderer, result.serving)
     release = result.release
@@ -263,7 +300,19 @@ def run_status(path: str | None, *, deployment_id: str | None = None, watch: boo
         builder, client = _command_clients()
         target = resolve_status(builder, client, path, deployment_id)
         if watch and target.deployment is not None:
-            watched = poll_deployment(client, required_string(target.deployment, "id"), _sleep)
+            watched_id = required_string(target.deployment, "id")
+            reporter = DeployWatchReporter(renderer, watched_id)
+            try:
+                watched = poll_deployment(client, watched_id, _sleep, reporter.snapshot)
+            except KeyboardInterrupt:
+                # Watching is all this command does, so Ctrl-C stops the watching
+                # and nothing else: the deployment is the service's to bring up.
+                reporter.interrupted()
+                if reporter.last is not None:
+                    render_status(renderer, _interrupted_result(builder, replace(target, deployment=reporter.last)))
+                raise typer.Exit(code=130) from None
+            finally:
+                reporter.close()
             target = replace(target, deployment=watched)
         render_status(renderer, status_result(builder, target))
     except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:

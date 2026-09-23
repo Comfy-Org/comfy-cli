@@ -621,6 +621,7 @@ def add_node(
             # wrong, so a second call would place the next node on top of a node it had itself
             # under-measured.
             n_multiline=layout.count_multiline(m, _widget_names),
+            n_image_previews=layout.count_image_previews(m, _widget_names),
             title=(getattr(m, "display_name", "") or class_type),
             input_labels=tuple(p.name for p in m.inputs if p.is_link),
             output_labels=tuple(p.name for p in m.outputs),
@@ -682,7 +683,33 @@ def set_widget(
     try:
         return _set_widget_impl(workflow, graph, node_id, widget, value, actor=actor, base_version=base_version)
     except ValueError as e:
+        bound = _binding_address(workflow, graph, node_id)
+        if bound is not None:
+            try:
+                return _set_widget_impl(workflow, graph, bound, widget, value, actor=actor, base_version=base_version)
+            except ValueError:
+                pass
         raise _enrich_resolution_error(e, workflow, graph, widget=widget) from e
+
+
+def _binding_address(workflow: dict, graph, node_id: Any) -> Any:
+    """The node address a ``print_workflow`` binding key stands for, or ``None``.
+
+    ``print_workflow`` names every node (``57/clip_text_encode`` → ``57/27``) and
+    callers copy those names back as the node part of an address. Consulted
+    only after the literal address failed to resolve, so a real node id always
+    wins over a binding that happens to spell it.
+    """
+    from comfy_cli.workflow_print import render_py
+
+    try:
+        bindings = render_py(workflow, graph).bindings
+    except Exception:  # noqa: BLE001 — a render failure just means "no alias"
+        return None
+    bound = bindings.get(str(node_id))
+    if bound is None or bound == str(node_id):
+        return None
+    return int(bound) if bound.lstrip("-").isdigit() else bound
 
 
 def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[Any, dict | None]:
@@ -914,7 +941,7 @@ def _resolve_widget_write(workflow: dict, graph, node_id: Any, widget: str):
 
     node_str = str(node_id)
     if _engine._SUBGRAPH_PATH_SEP in node_str:
-        segments = node_str.split(_engine._SUBGRAPH_PATH_SEP)
+        segments = _engine.split_node_path(workflow, node_str)
     elif ":" in node_str and _find_by_str(workflow, node_str) is None:
         segments = node_str.split(":")
     else:
@@ -945,7 +972,7 @@ def _subgraph_write_target(workflow: dict, node_id: Any, widget: str) -> tuple[l
     node_str = str(node_id)
     # Nested interior form: the interior path is explicit.
     if _engine._SUBGRAPH_PATH_SEP in node_str:
-        return node_str.split(_engine._SUBGRAPH_PATH_SEP), widget
+        return _engine.split_node_path(workflow, node_str), widget
     # Flattened composite form ("57:27"): the id namespace UI→API lowering mints
     # (workflow_to_api composes inner ids as `<outer>:<inner>`), which is what
     # `validate` output and server node_errors carry. Callers copy those ids
@@ -1032,7 +1059,7 @@ def _subgraph_boundary_error(workflow: dict, node_id: Any) -> ValueError | None:
     if _find_by_str(workflow, node_str) is not None:
         return None  # a literal node really has this id
     if _engine._SUBGRAPH_PATH_SEP in node_str:
-        segments = node_str.split(_engine._SUBGRAPH_PATH_SEP)
+        segments = _engine.split_node_path(workflow, node_str)
     elif ":" in node_str:
         # The flattened namespace UI→API lowering mints (`<outer>:<inner>`),
         # accepted everywhere set-widget accepts the `/` form.
@@ -1418,7 +1445,14 @@ def insert_workflow(
             raise ValueError(f"insert_workflow field {field} must be an array")
     if "definitions" in template and not isinstance(template["definitions"], dict):
         raise ValueError("insert_workflow field definitions must be an object")
-    return workflow, _new_op("insert_workflow", actor, base_version, workflow=copy.deepcopy(template))
+    inserted = copy.deepcopy(template)
+    # The template arrives with whatever absolute `pos` values it was
+    # authored/exported with, which can sit thousands of pixels from this
+    # graph's own nodes. Rebase the whole block beside the existing graph
+    # (see layout.rebase_template) so it doesn't land as a disconnected
+    # cluster on canvas; IDs and internal relative layout are untouched.
+    layout.rebase_template(workflow.get("nodes") or [], inserted)
+    return workflow, _new_op("insert_workflow", actor, base_version, workflow=inserted)
 
 
 def delete_node(
@@ -1613,14 +1647,15 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
     links = [ln for ln in (workflow.get("links") or []) if isinstance(ln, list) and len(ln) >= 5]
     # link_id -> (source_id, source_slot). Node identity is compared as a STRING
     # (amendment v1.2) — ids are legitimately either JSON type.
-    link_map = {ln[0]: (ln[1], ln[2]) for ln in links if isinstance(ln[0], int)}
+    # Link ids are ints, or strings once the doc host's insert_workflow remapped them.
+    link_map = {ln[0]: (ln[1], ln[2]) for ln in links if isinstance(ln[0], (int, str))}
     node_by_sid = {str(n["id"]): n for n in all_nodes}
 
     def _first_input_source(n: dict) -> tuple[Any, Any] | None:
         for inp in n.get("inputs") or []:
             if isinstance(inp, dict):
                 lid = inp.get("link")
-                if isinstance(lid, int) and lid in link_map:
+                if isinstance(lid, (int, str)) and lid in link_map:
                     return link_map[lid]
         return None
 
