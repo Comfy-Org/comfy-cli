@@ -8,13 +8,14 @@ first spelling instead.
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from comfy_cli import workflow_ops
+from comfy_cli import workflow_ops, workflow_to_api
 from comfy_cli.cql.engine import Graph
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
@@ -189,3 +190,46 @@ class TestBoolToTrueFalseCombo:
         _, op = workflow_ops.set_widget(workflow, graph, add["node_id"], "should_remesh", "true")
         assert op["value"] == "true"
         assert not any(w.get("code") == "normalized_value" for w in op.get("warnings", []))
+
+
+# ---------------------------------------------------------------------------
+# 4b. connect into a dynamic combo's widget-backed sub-input
+# ---------------------------------------------------------------------------
+
+
+class TestConnectDynamicComboWidget:
+    # Traces a6bdbb86 / 52b5712d / 28a0c48f / 9c0a6933 (nightly) and f3a953ac
+    # (prod): a connect from `$tx1.STRING` to `$sd1.model.prompt` failed "input 'model.prompt' not found on node …; inputs: []" — the
+    # widget→input conversion only knew the value-independent widget order,
+    # which lists a dynamic combo's selector but none of its sub-widgets.
+    def test_batch_links_string_into_selected_option_widget(self, graph, object_info):
+        workflow, ops, aliases = workflow_ops.apply_specs(
+            _empty(),
+            graph,
+            [
+                {"op": "add_node", "class_type": "PrimitiveStringMultiline", "as": "tx"},
+                {"op": "add_node", "class_type": "ByteDance2ReferenceNodeV2", "as": "sd"},
+                {"op": "connect", "from": "$tx.STRING", "to": "$sd.model.prompt"},
+            ],
+        )
+        sd = _node(workflow, aliases["sd"])
+        linked = [i for i in sd.get("inputs") or [] if i.get("name") == "model.prompt"]
+        assert linked and linked[0].get("link") is not None
+        api = workflow_to_api.convert_ui_to_api(copy.deepcopy(workflow), object_info)
+        assert api[str(aliases["sd"])]["inputs"]["model.prompt"] == [str(aliases["tx"]), 0]
+        replayed = _empty()
+        for op in ops:
+            replayed = workflow_ops.apply_op(replayed, op, graph)
+        assert workflow_ops.canonical(replayed) == workflow_ops.canonical(workflow)
+
+    def test_sub_input_of_unselected_option_is_still_refused(self, graph):
+        with pytest.raises(ValueError, match="not found"):
+            workflow_ops.apply_specs(
+                _empty(),
+                graph,
+                [
+                    {"op": "add_node", "class_type": "PrimitiveStringMultiline", "as": "tx"},
+                    {"op": "add_node", "class_type": "ByteDance2ReferenceNodeV2", "as": "sd"},
+                    {"op": "connect", "from": "$tx.STRING", "to": "$sd.model.no_such_widget"},
+                ],
+            )

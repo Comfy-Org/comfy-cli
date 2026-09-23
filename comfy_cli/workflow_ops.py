@@ -2878,7 +2878,7 @@ def _resolve_input_target(
     # the schema group resolution so a real widget name always outranks the
     # bare-element guess (``image0``) a group's vocabulary might also match.
     node_type = node.get("type", "")
-    if graph is not None and isinstance(slot, str) and slot in graph.widget_order(node_type):
+    if graph is not None and isinstance(slot, str) and slot in _linkable_widget_names(node, graph):
         return None, {"name": slot, "type": elem_type or "*", "widget": slot}
     if graph is not None and isinstance(slot, str):
         resolved = _resolve_schema_autogrow(node, graph, slot, elem_type)
@@ -2933,6 +2933,26 @@ def _resolve_input_target(
             )
     names = [i.get("name") for i in ins]
     raise ValueError(f"input {slot!r} not found on node {node.get('id')}; inputs: {names}")
+
+
+def _linkable_widget_names(node: dict, graph) -> list[str]:
+    """Widget names a connect may convert into a linked input on ``node``.
+
+    The value-independent :meth:`Graph.widget_order` lists only a dynamic
+    combo's selector. The sub-widgets of the CURRENT selection (``model.prompt``
+    on ByteDance2ReferenceNodeV2 / MinimaxHailuo03FirstLastFrameNode) are real
+    widget-backed inputs in the frontend and can take a link. Before this,
+    every connect to one failed "input 'model.prompt' not found … inputs: []"
+    (5 nightly + 1 prod comfy-agent traces, 2026-09-23). An option that is not
+    selected contributes nothing, as in the frontend.
+    """
+    from comfy_cli.cql import engine as _engine
+
+    node_type = node.get("type", "")
+    names = list(graph.widget_order(node_type))
+    positional = _engine._widgets_as_positional(node.get("widgets_values"), graph, node_type)
+    names += [n for n in graph.editable_widget_names(node_type, positional) if n not in names]
+    return names
 
 
 def _resolve_promoted_target(workflow: dict, node: dict, slot: Any, elem_type: str | None) -> dict | None:
