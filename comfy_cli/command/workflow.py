@@ -1992,6 +1992,9 @@ app.add_typer(_wfrag.fragment_app, name="fragment")
 
 from comfy_cli.command import workflow_edit as _wedit  # noqa: E402
 
+app.command("define-subgraph", help="Create a subgraph definition; emits one define_subgraph op.")(
+    _wedit.define_subgraph_cmd
+)
 app.command("insert-workflow", help="Insert a complete workflow; emits one insert_workflow op.")(
     _wedit.insert_workflow_cmd
 )

@@ -17,7 +17,7 @@ citation must point at a commit on that branch.
 
 ## 1. Frozen op kinds
 
-Seven kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
+Eight kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
 `ValueError("unknown op ...")` — it never ignores one.
 
 | Kind | Batchable | Standalone command | Summary |
@@ -28,6 +28,7 @@ Seven kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind wi
 | `delete_node` | yes | `comfy workflow delete` | Remove one node and its incident links |
 | `clear` | no | `comfy workflow clear` | Remove every node, link, and group |
 | `reset_doc` | no | `comfy workflow reset-doc --confirm` | Reset the whole document to an empty baseline |
+| `define_subgraph` | yes | `comfy workflow define-subgraph` | Create one subgraph definition |
 | `insert_workflow` | no | `comfy workflow insert-workflow` | Merge a complete workflow template in one transaction |
 
 Batchable = the kind is accepted by `apply_specs` (the `workflow apply` /
@@ -189,7 +190,34 @@ pre-reset `base_version` do not replay across it.
 * Never emitted implicitly: no `--emit-ops` surface and no bulk writer (§8.8)
   mints one. It exists only where a caller asked for it by name.
 
-### 1.7 `insert_workflow` — standalone only
+### 1.7 `define_subgraph`
+
+Command: `comfy workflow define-subgraph <file> <definition-file> [--id <uuid>]`.
+The command performs envelope shape and JSON-serialization checks, assigns its
+id from `--id`, the definition's `id`, or a new UUID, and emits exactly one
+stamped op without modifying the local workflow:
+
+```json
+{
+  "op": "define_subgraph",
+  "op_id": "<uuid4 hex>",
+  "actor": "cli",
+  "base_version": 0,
+  "stamp": [0, "cli"],
+  "subgraph_id": "<uuid>",
+  "subgraph_definition": {"id": "<uuid>", "nodes": [], "links": []}
+}
+```
+
+Only this op may carry `subgraph_id` or `subgraph_definition`; `definitions`
+is accepted only here and on `insert_workflow`. The CLI does not
+semantically validate, apply, replay, project, or resolve conflicts for the
+definition. cmp owns those operations: reusing an id with different content
+returns `definition_conflict`, and references to unknown ids follow cmp's
+unknown-node failure path. The CLI surfaces server errors verbatim. Subsequent
+interior edits use the existing id-addressed op scopes.
+
+### 1.8 `insert_workflow` — standalone only
 
 Command: `comfy workflow insert-workflow <file> <template>`, where `<template>`
 may be `-` to read the template payload from stdin. The CLI preserves the

@@ -14,6 +14,7 @@ collide; widgets are addressed by name, not array index. See ``workflow_ops``.
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -48,6 +49,7 @@ InputOpt = Annotated[str | None, typer.Option("--input", show_default=False)]
 HostOpt = Annotated[str | None, typer.Option(show_default=False)]
 PortOpt = Annotated[int | None, typer.Option(show_default=False)]
 WhereOpt = Annotated[str | None, typer.Option("--where", show_default=False, help="Catalog target: local | cloud.")]
+_MAX_DEFINITION_BYTES = 16 * 1024 * 1024
 
 
 def _emit_edit_error(renderer, e: ValueError, *, hint: str) -> None:
@@ -138,6 +140,56 @@ def _emit_op(renderer, p: Path, op: dict, base_version: int, command: str) -> No
 
 def _graph_or_exit(input_path, host, port, renderer, where=None):
     return _get_graph(input_path, host, port, where=where)
+
+
+# ---------------------------------------------------------------------------
+# define-subgraph
+# ---------------------------------------------------------------------------
+
+
+def _read_subgraph_definition(path: Path):
+    """Read a bounded regular JSON file without blocking on devices or FIFOs."""
+    file_stat = path.stat()
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise ValueError("subgraph definition must be a regular file")
+    if file_stat.st_size > _MAX_DEFINITION_BYTES:
+        raise ValueError(f"subgraph definition is too large (maximum {_MAX_DEFINITION_BYTES} bytes)")
+    try:
+        with path.open("rb") as definition_file:
+            raw = definition_file.read(_MAX_DEFINITION_BYTES + 1)
+        if len(raw) > _MAX_DEFINITION_BYTES:
+            raise ValueError(f"subgraph definition is too large (maximum {_MAX_DEFINITION_BYTES} bytes)")
+        return json.loads(raw.decode("utf-8"))
+    except (RecursionError, MemoryError) as error:
+        raise ValueError("subgraph definition is too deeply nested or too large") from error
+
+
+@tracking.track_command("workflow")
+def define_subgraph_cmd(
+    file: Annotated[str, typer.Argument(help="Source frontend-format workflow JSON; emit-only, file is not modified.")],
+    definition_file: Annotated[str, typer.Argument(help="Serializable subgraph definition JSON.")],
+    subgraph_id: Annotated[str | None, typer.Option("--id", show_default=False)] = None,
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+):
+    """Create one subgraph definition and emit one ``define_subgraph`` op."""
+    renderer = get_renderer()
+    renderer.command = "workflow define-subgraph"
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    try:
+        definition_path = Path(definition_file).expanduser()
+        definition = _read_subgraph_definition(definition_path)
+        _, op = workflow_ops.define_subgraph(
+            workflow,
+            definition,
+            subgraph_id=subgraph_id,
+            actor=actor,
+            base_version=base_version,
+        )
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as e:
+        _emit_edit_error(renderer, e, hint="provide a serializable subgraph definition JSON object")
+        raise typer.Exit(code=1) from e
+    _emit_op(renderer, p, op, base_version, "workflow define-subgraph")
 
 
 # ---------------------------------------------------------------------------
@@ -790,6 +842,18 @@ def apply_cmd(
         raise typer.Exit(code=1) from e
 
     try:
+        # Batchable-but-deferred kinds (define_subgraph) cannot be persisted by
+        # a local apply. Standalone-only deferred kinds (insert_workflow) fall
+        # through to apply_specs so they surface their own not-batchable code.
+        deferred = [
+            spec.get("op")
+            for spec in specs
+            if isinstance(spec, dict)
+            and spec.get("op") in workflow_ops.DEFERRED_OPS
+            and spec.get("op") in workflow_ops.BATCHABLE_OPS
+        ]
+        if deferred:
+            raise ValueError(f"local apply cannot persist deferred operation(s): {', '.join(deferred)}")
         workflow, ops, aliases = workflow_ops.apply_specs(
             workflow, graph, specs, actor=actor, base_version=base_version
         )
@@ -914,6 +978,15 @@ def _load_param_sets(raw: str, renderer) -> list[dict]:
     return sets
 
 
+def _reject_deferred_specs(specs: list) -> None:
+    """Refuse to persist a batch locally when any spec is a deferred op kind."""
+    deferred = [
+        spec.get("op") for spec in specs if isinstance(spec, dict) and spec.get("op") in workflow_ops.DEFERRED_OPS
+    ]
+    if deferred:
+        raise ValueError(f"local foreach cannot persist deferred operation(s): {', '.join(deferred)}")
+
+
 @tracking.track_command("workflow")
 def foreach_cmd(
     recipe_file: Annotated[str, typer.Argument(help="Recipe file: {params, ops}.")],
@@ -959,11 +1032,15 @@ def foreach_cmd(
     out.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
     try:
+        _reject_deferred_specs(specs_template)
         for i, pset in enumerate(param_sets):
             if not isinstance(pset, dict):
                 raise workflow_ops.RecipeError(f"param-set #{i} must be a JSON object")
             params = workflow_ops.resolve_params(params_decl, {k: str(v) for k, v in pset.items()})
             specs = workflow_ops.substitute_params(specs_template, params)
+            # The op kind itself may be a `${param}`, so the template check above
+            # cannot see a kind that only becomes deferred for this param-set.
+            _reject_deferred_specs(specs)
             wf: dict = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
             wf, _ops, _aliases = workflow_ops.apply_specs(wf, graph, specs, actor=actor, base_version=base_version)
             workflow_ops.strip_internal(wf)
