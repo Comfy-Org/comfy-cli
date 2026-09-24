@@ -1203,7 +1203,8 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
       order and ``model.images`` never steals a slot;
     * drop a trailing ``control_after_generate`` marker string when the
       just-consumed input is control-flagged (explicit flag or an implicit INT
-      ``seed``/``noise_seed``) — sub-inputs are handled identically via recursion.
+      ``seed``/``noise_seed``), or a legacy stray marker after another seed-like
+      INT that the next widget could not hold; sub-inputs recurse the same way.
 
     Returns ``[]`` when the schema declares no widget inputs, so the caller can
     fall back to node-input inspection exactly as before.
@@ -1277,7 +1278,10 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
                 )
             else:
                 for j, (sub_name, sub_spec) in enumerate(subs):
-                    consume(sub_name, sub_spec, depth + 1, next_widget_spec(subs, j + 1))
+                    # The last widget sub-input is followed by the parent's
+                    # successor, not by nothing.
+                    sub_next = next_widget_spec(subs, j + 1)
+                    consume(sub_name, sub_spec, depth + 1, next_spec if sub_next is None else sub_next)
         elif vidx < len(widget_values) and _has_control_after_generate_companion(
             name, spec, widget_values[vidx], next_spec
         ):
@@ -1467,32 +1471,25 @@ def _has_control_after_generate_companion(
     Two ways the frontend adds the companion widget:
 
     * Explicit: the input spec sets ``control_after_generate: True``.
-    * Implicit: a seed-like INT widget. The frontend's ``useIntWidget``
-      composable appends the companion after seed-like INT inputs even when
-      the schema omits the flag.
+    * Implicit: the schema omits the flag and the input is an INT named
+      exactly ``seed`` or ``noise_seed`` (the frontend's ``useIntWidget``).
 
-    The implicit path is *value-gated and node-agnostic*: we only consume the
-    next slot when it is literally one of the control keywords
-    (``"fixed"``/``"increment"``/``"decrement"``/``"randomize"``). That string
-    is only ever present when the frontend really did append the companion, so
-    it is a reliable signal regardless of schema flags or the exact input name.
+    The implicit path mirrors ``useIntWidget`` and the cql engine's
+    ``_has_control_after_generate_slot``: an unflagged INT named exactly
+    ``seed`` or ``noise_seed``. A dynamic-combo sub-input is dotted
+    (``model.seed``), so it never matches, same as in the engine. Even there we
+    only consume ``next_value`` when it is literally a control keyword, and not
+    when the next widget is a COMBO that lists it as one of its own options.
 
-    We still require the input to be a seed-like INT (name contains ``seed``,
-    case-insensitive) rather than *any* INT. Partner/API nodes name the widget
-    every which way -- ``seed``/``noise_seed`` (Bria/Kling/Vidu/Wan2),
-    ``image_seed``/``model_seed``/``texture_seed`` (Tripo), ``Seed`` (Rodin3D),
-    ``rand_seed``, ``noise_seed_sde``, ``variation_seed`` -- and several ship
-    the input *unflagged*, so the old exact ``seed``/``noise_seed`` match let
-    their companion survive and shifted every later widget by one. Keeping the
-    ``seed`` substring guard preserves the schema-aware path's protection
-    against a legitimate non-seed INT (e.g. ``steps``) that merely happens to
-    precede a COMBO/STRING widget whose value equals a control keyword.
+    Legacy leniency: older CLIs wrote a stray marker after other seed-like INTs
+    (``image_seed``/``texture_seed``/``variation_seed``/``Seed``, and dotted
+    sub-input seeds) even though the frontend adds no companion there. For
+    those we drop a control keyword only when the next widget could not hold it
+    (see ``_widget_rejects_control_value``). A STRING or a COMBO listing
+    ``"fixed"`` keeps it, so a real widget value is never eaten.
 
-    ``next_input_spec`` is the schema of the *next* widget input (when known). On
-    the implicit seed path we refuse to consume ``next_value`` when that next
-    widget is a COMBO that legitimately lists ``next_value`` as an option — there
-    the value is the combo's own saved selection, not a phantom companion, so
-    consuming it would drop a real widget value and shift every later widget.
+    ``next_input_spec`` is the schema of the next widget (``None`` when this is
+    the last one).
     """
     if not (isinstance(next_value, str) and next_value in _CONTROL_AFTER_GENERATE_VALUES):
         return False
@@ -1503,13 +1500,43 @@ def _has_control_after_generate_companion(
         # so a marker-like value belongs to the next widget.
         return bool(options["control_after_generate"])
     input_type = input_spec[0] if input_spec else None
-    # The `seed` substring also covers a dotted dynamic-combo sub-input
-    # (`model.seed`), so no separate leaf-name match is needed.
-    if not (input_type == "INT" and "seed" in input_name.lower()):
+    if input_type != "INT":
         return False
-    # Implicit seed path: don't steal a value that the next COMBO widget declares
-    # as one of its own options.
-    return not _combo_lists_option(next_input_spec, next_value)
+    if input_name in ("seed", "noise_seed"):
+        # Implicit seed path: don't steal a value that the next COMBO widget
+        # declares as one of its own options.
+        return not _combo_lists_option(next_input_spec, next_value)
+    if "seed" in input_name.lower():
+        # No companion per the frontend/engine rule; only a legacy stray marker
+        # that the next widget could not have held is dropped.
+        return _widget_rejects_control_value(next_input_spec, next_value)
+    return False
+
+
+def _widget_rejects_control_value(input_spec: Any, value: str) -> bool:
+    """True if a widget declared by ``input_spec`` could not hold ``value`` (a control keyword).
+
+    ``None`` (no next widget) rejects: a trailing marker is safe to drop. Numeric
+    and boolean widgets reject. A COMBO or dynamic combo rejects unless it lists
+    ``value``. Anything else (STRING, custom widget types) may hold the string,
+    so it does not reject.
+    """
+    if input_spec is None:
+        return True
+    if not isinstance(input_spec, (list, tuple)) or not input_spec:
+        return False
+    type_field = input_spec[0]
+    if isinstance(type_field, (list, tuple)):
+        return value not in type_field
+    if not isinstance(type_field, str):
+        return False
+    if type_field in ("INT", "FLOAT", "BOOLEAN"):
+        return True
+    if type_field == "COMBO":
+        return not _combo_lists_option(input_spec, value)
+    if _is_widget_input(input_spec)[1]:
+        return value not in _dynamic_combo_option_keys(input_spec)
+    return False
 
 
 def _collect_widget_inputs(
