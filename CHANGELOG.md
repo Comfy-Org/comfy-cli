@@ -17,7 +17,7 @@ history.
 
 ## [1.21.0] - 2026-09-24
 
-[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.21.0) · 50 commits since v1.20.0. No breaking changes.
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.21.0) · 50 commits since v1.20.0. Breaking changes are marked **Breaking** under Changed.
 
 ### Added
 
@@ -72,10 +72,10 @@ history.
 
 ### Changed
 
-- `comfy deploy up` now follows the deployment until it settles, instead of
+- **Breaking:** `comfy deploy up` now follows the deployment until it settles, instead of
   returning as soon as the deploy service accepts it. A script that relied on
   `up` returning at once passes `--no-watch`.
-- A watch (`up`, or `status --watch`) now stops at `unhealthy` instead of
+- **Breaking:** a watch (`up`, or `status --watch`) now stops at `unhealthy` instead of
   waiting for `ready`: the status only ever follows `ready`, so the wait could
   last as long as the endpoint stayed degraded, with nothing printed. `up` reports
   an unhealthy deployment as not ok (`deploy_status_terminal`, exit 1), with
