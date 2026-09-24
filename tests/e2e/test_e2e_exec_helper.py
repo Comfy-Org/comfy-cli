@@ -30,3 +30,22 @@ def test_exec_string_still_runs_through_shell():
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "2"
+
+
+def test_pypi_manager_override_bootstraps_pip_before_pip_install(monkeypatch, tmp_path):
+    # `--fast-deps --skip-manager` never calls ensure_pip during `comfy install`,
+    # so a uv-managed workspace venv may have no pip when the override runs.
+    calls = []
+    monkeypatch.setattr(_mod, "ensure_pip", lambda python, cwd=None: calls.append(("ensure_pip", python)))
+
+    def fake_exec(cmd, **kwargs):
+        calls.append(("exec", cmd))
+        stdout = "Name: comfyui-manager\nVersion: 4.3\n" if "show" in cmd else ""
+        return _mod.subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+    monkeypatch.setattr(_mod, "exec", fake_exec)
+
+    _mod._apply_manager_override(str(tmp_path), "/venv/bin/python", "4.3")
+
+    assert calls[0] == ("ensure_pip", "/venv/bin/python")
+    assert calls[1] == ("exec", ["/venv/bin/python", "-m", "pip", "install", "comfyui-manager==4.3", "--pre"])
