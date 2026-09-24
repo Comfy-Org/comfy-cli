@@ -436,8 +436,8 @@ def test_node_errors_survive_a_server_code_the_client_does_not_enumerate(monkeyp
 def _workflow_with_request_bytes(size: int) -> dict[str, Any]:
     """A workflow whose submission body encodes to exactly ``size`` bytes.
 
-    Shaped like the case that found this (DPLAT-1709): one node holding a long
-    inline string.
+    Shaped like the case that found this: one node holding a long inline
+    string.
     """
     empty = {"1": {"class_type": "PreviewAny", "inputs": {"source": ""}}}
     overhead = len(json.dumps({"workflow": empty}).encode("utf-8"))

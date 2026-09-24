@@ -27,9 +27,9 @@ _UNKNOWN_MESSAGE: Final = (
     "The job may exist: the submission was sent but no answer came back. This CLI cannot look "
     "the job up, so it cannot tell whether the job was created."
 )
-# The gateway refuses an /api/v2 body over this with a 413 before reading it
-# (cloud services/platform-gateway/server/server.go, `maxRequestBody = "10M"`,
-# which echo parses as decimal megabytes). Checked before sending rather than
+# The deployment gateway refuses an /api/v2 body over this with a 413 before
+# reading it (its limit is "10M", which its HTTP framework, Echo, parses as
+# decimal megabytes). Checked before sending rather than
 # left to that 413: the gateway answers after the first few hundred KB and
 # closes the connection, and urllib, still writing the body, sees a broken pipe
 # instead of the answer. Raise this together with the gateway's.
