@@ -68,6 +68,7 @@ def emit_status_error(
     message: str,
     hint: str | None,
     details: dict,
+    rate_limited_next_step: str = "retry it unchanged",
 ) -> None:
     """Emit the envelope for a cloud HTTP status that has no caller-specific code.
 
@@ -77,7 +78,9 @@ def emit_status_error(
     that was fine. It gets ``cloud_rate_limited`` and a retry hint instead,
     with the server's ``Retry-After`` in ``details.retry_after`` when it sent
     one. Every other status keeps the caller's ``cloud_http_error`` envelope
-    exactly as given.
+    exactly as given. ``rate_limited_next_step`` finishes the 429 hint for a
+    caller whose request already had an effect (``run``'s poll: the job was
+    submitted, so re-running would submit a second one).
     """
     if status != 429:
         renderer.error(code="cloud_http_error", message=message, hint=hint, details=details)
@@ -91,7 +94,7 @@ def emit_status_error(
     renderer.error(
         code="cloud_rate_limited",
         message=f"Comfy Cloud rate-limited the {operation} request (HTTP 429): too many requests",
-        hint=f"the request was throttled, not rejected — {wait} and retry it unchanged",
+        hint=f"the request was throttled, not rejected — {wait} and {rate_limited_next_step}",
         details=rate_details,
     )
 

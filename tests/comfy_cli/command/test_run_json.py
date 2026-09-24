@@ -2475,3 +2475,27 @@ class TestCloudRateLimited:
         err = _envelope(lines)["error"]
         assert err["code"] == "cloud_http_error"
         assert err["details"] == {"status": 500, "prompt_id": "cloud-pid"}
+
+
+class TestPollRateLimitedPointsAtTheSubmittedJob:
+    """A 429 while polling happens AFTER the prompt was accepted. "Retry it
+    unchanged" would re-run `comfy run`, submitting a second cloud job and
+    spending again — the hint must send the caller to the existing job."""
+
+    def test_poll_429_hint_watches_the_job_instead_of_resubmitting(self, monkeypatch, workflow_file, capsys):
+        from comfy_cli.comfy_client import HTTPError
+
+        base = _fake_client()
+
+        class Throttled(base):
+            def wait_for_completion(self, prompt_id, **k):
+                raise HTTPError(429, "Too Many Requests", retry_after=3.0)
+
+        _install_cloud_stubs(monkeypatch, client_cls=Throttled)
+        lines, _ = _cloud_capture(capsys, workflow_file, wait=True, timeout=5)
+
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_rate_limited"
+        assert "comfy jobs watch cloud-pid --where cloud" in err["hint"]
+        assert "retry it unchanged" not in err["hint"]
+        assert "3s" in err["hint"]

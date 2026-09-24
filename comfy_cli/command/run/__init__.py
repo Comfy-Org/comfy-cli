@@ -1280,6 +1280,10 @@ def execute_cloud(
                 message=f"Cloud server error while polling (HTTP {e.status}): {e.message}",
                 hint=None,
                 details={"status": e.status, "prompt_id": submit.prompt_id},
+                rate_limited_next_step=(
+                    f"follow the job already submitted with `comfy jobs watch {submit.prompt_id} --where cloud`"
+                    " — do not re-run, that would submit a second job"
+                ),
             )
             raise typer.Exit(code=1) from e
         except KeyboardInterrupt:
