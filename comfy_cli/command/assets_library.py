@@ -9,6 +9,7 @@ emitting a JSON envelope via the renderer. Cloud-only — there is no local
 
 from __future__ import annotations
 
+import re
 from typing import Annotated, Any
 
 import typer
@@ -22,6 +23,80 @@ from comfy_cli.command.cloud_http import (
 from comfy_cli.output.renderer import get_renderer
 
 app = typer.Typer(help="Browse your Comfy Cloud asset library (list, borrow).")
+
+# A Comfy Cloud content hash: BLAKE3, 32-byte digest, lowercase hex — bare or in
+# the canonical ``blake3:<hex>`` wire form. Comfy Cloud's from-hash lookup
+# matches every stored form of the content only for ``blake3:<hex>``.
+_HASH_WITH_EXT_RE = re.compile(r"^(?:blake3:)?([0-9a-f]{64})\.[A-Za-z0-9]{1,10}$")
+
+
+# A value that reads as a hex hash even when mangled: optional ``blake3:``,
+# 16-80 hex chars (a garbled copy can gain or lose a few), optional extension.
+_HEXISH_RE = re.compile(r"^(?:blake3:)?([0-9a-fA-F]{16,80})(?:\.[A-Za-z0-9]{1,10})?$")
+_HEX_DIGEST_RE = re.compile(r"^(?:blake3:)?([0-9a-f]{64})(?:\.[A-Za-z0-9]{1,10})?$")
+_MIN_SHARED_PREFIX = 4
+_MAX_SUGGESTIONS = 3
+# One page at the API's maximum, newest first. Never paged: a suggestion is a
+# best-effort hint on an error path, so it gets exactly one bounded request.
+_SUGGESTION_SCAN_LIMIT = 500
+
+
+def _near_hash_suggestions(value: str, target) -> list[dict]:
+    """Library assets whose hash shares the longest prefix (>= 4 hex chars) with
+    a hash that was not found — an agent copying a 64-char hex string tends to
+    keep the first few characters and garble the rest.
+
+    ``[]`` unless ``value`` looks like a hex hash; that check runs first, so an
+    ordinary file name costs no request. The listing is one request for the
+    newest :data:`_SUGGESTION_SCAN_LIMIT` assets you own; any failure there
+    yields ``[]`` so the not-found envelope is never lost to it.
+    """
+    import os.path
+    import urllib.parse
+
+    m = _HEXISH_RE.match(value)
+    if not m:
+        return []
+    wanted = m.group(1).lower()
+    query = urllib.parse.urlencode(
+        {"limit": _SUGGESTION_SCAN_LIMIT, "sort": "created_at", "order": "desc", "include_public": "false"}
+    )
+    try:
+        _, body = http_request(target.url("assets") + "?" + query, target)
+        rows = (body or {}).get("assets") or []
+    except Exception:  # noqa: BLE001 — best-effort hint on an error path
+        return []
+
+    scored = []
+    for r in rows if isinstance(rows, list) else []:
+        if not isinstance(r, dict) or not isinstance(r.get("hash"), str):
+            continue
+        hm = _HEX_DIGEST_RE.match(r["hash"])
+        if not hm:
+            continue
+        shared = len(os.path.commonprefix([wanted, hm.group(1)]))
+        if shared >= _MIN_SHARED_PREFIX:
+            scored.append((shared, r))
+    scored.sort(key=lambda t: -t[0])  # stable: ties keep newest-first order
+    return [
+        {"hash": r["hash"], "name": r.get("name"), "id": r.get("id"), "shared_prefix": shared}
+        for shared, r in scored[:_MAX_SUGGESTIONS]
+    ]
+
+
+def _normalize_content_hash(value: str) -> str:
+    """Map ``<hash>.<ext>`` — the stored file name an agent tends to pass — to
+    the canonical ``blake3:<hex>`` hash; leave anything else untouched.
+
+    A direct upload stores its blob under ``<hex>.<ext>``, so that is the name
+    the agent sees, but ``/api/assets/from-hash`` matches its input exactly
+    unless it is the canonical ``blake3:<hex>``, which matches every storage
+    shape of that content (bare hex, ``<hex>.<ext>``, canonical). Only a value
+    whose remainder is a full 64-hex digest is rewritten, so an ordinary file
+    name (``photo.png``) still reaches the server as given.
+    """
+    m = _HASH_WITH_EXT_RE.match(value)
+    return f"blake3:{m.group(1)}" if m else value
 
 
 @app.command("ls", help="List your assets on Comfy Cloud.")
@@ -100,7 +175,9 @@ def ensure_cmd(
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] or ["input"]
     url = target.url("assets/from-hash")
     try:
-        status, body = http_request(url, target, method="POST", body={"hash": hash, "tags": tag_list})
+        status, body = http_request(
+            url, target, method="POST", body={"hash": _normalize_content_hash(hash), "tags": tag_list}
+        )
     except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
         # The parameterized helper, not `cloud_http`'s: that one hardcodes the
         # saved-workflow vocabulary, so a 404 here read "workflow not found
@@ -109,18 +186,30 @@ def ensure_cmd(
         # the content hash belongs.
         from comfy_cli.command._cloud_errors import handle_cloud_http_error as _handle_cloud_http_error
 
+        not_found_hint = (
+            "pass the `hash` from `comfy --json assets library ls --name <file>` "
+            "(a file name is not a hash), or upload the file first with `comfy upload <file> --where cloud`"
+        )
+        extra = None
+        if isinstance(e, urllib.error.HTTPError) and e.code == 404:
+            suggestions = _near_hash_suggestions(hash, target)
+            if suggestions:
+                best = suggestions[0]
+                extra = {"suggestions": suggestions}
+                not_found_hint = (
+                    f"did you mean {best['hash']} ({best['name']})? copy the hash exactly from "
+                    "`comfy --json assets library ls` — see `details.suggestions`"
+                )
         raise _handle_cloud_http_error(
             renderer,
             e,
             operation="ensure",
             not_found_code="asset_not_found",
             not_found_message=f"no asset with content hash {hash!r} in your Comfy Cloud library",
-            not_found_hint=(
-                "pass the `hash` from `comfy --json assets library ls --name <file>` "
-                "(a file name is not a hash), or upload the file first with `comfy upload <file> --where cloud`"
-            ),
+            not_found_hint=not_found_hint,
             id_label="hash",
             resource_id=hash,
+            not_found_details=extra,
         ) from e
 
     b = body or {}
