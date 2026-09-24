@@ -35,13 +35,24 @@ class UnsupportedModelError(EmitError):
     the remedy is different — pick a model from ``supported`` — and an agent
     needs to branch on that without parsing prose. ``generate list`` exposes
     the same answer up front as ``emit_supported`` per row.
+
+    ``suggested`` is the subset of ``supported`` that produces the same kind of
+    media as ``model`` (image or video), the same partner's aliases first — the
+    alias to retry with in one step. Empty when ``model`` is not in the catalog.
     """
 
-    def __init__(self, model: str, supported: list[str]):
+    def __init__(self, model: str, supported: list[str], suggested: list[str] | None = None):
         self.model = model
         self.supported = supported
+        self.suggested = list(suggested or [])
+        closest = (
+            f"Closest emittable model: {self.suggested[0]} (`comfy generate {self.suggested[0]} … --emit-workflow`).\n"
+            if self.suggested
+            else ""
+        )
         super().__init__(
             f"--emit-workflow does not support model {model!r}.\n"
+            f"{closest}"
             f"Supported models: {', '.join(supported)}.\n"
             "These map to ComfyUI API nodes; other proxy models have no node mapping yet."
         )
@@ -328,10 +339,31 @@ def node_class_for(model: str) -> str | None:
     return found[1].node_class if found else None
 
 
+def _endpoint_kind(endpoint_id: str) -> tuple[str, str] | None:
+    """(partner, "IMAGE" | "VIDEO") for a curated endpoint id, or None when the
+    catalog does not list it. Read off the static allowlist — no spec load."""
+    for eid, category, _polling in spec._ENDPOINT_ALLOWLIST:
+        if eid == endpoint_id:
+            media = "VIDEO" if category.endswith("video") or category in {"video-extend", "lipsync"} else "IMAGE"
+            return eid.split("/", 1)[0], media
+    return None
+
+
+def suggested_models(model: str) -> list[str]:
+    """Emittable aliases producing the same media as ``model``, same partner
+    first — what to retry with when ``model`` itself has no node."""
+    kind = _endpoint_kind(spec.resolve_alias(model))
+    if kind is None:
+        return []
+    partner, media = kind
+    same = [a for a in supported_models() if MODEL_NODE_MAP[a].output == media]
+    return sorted(same, key=lambda a: (MODEL_NODE_MAP[a].endpoint.split("/", 1)[0] != partner, a))
+
+
 def _resolve_model(model: str) -> tuple[str, NodeSpec]:
     found = _lookup_model(model)
     if found is None:
-        raise UnsupportedModelError(model, supported_models())
+        raise UnsupportedModelError(model, supported_models(), suggested_models(model))
     return found
 
 
