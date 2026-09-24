@@ -95,6 +95,7 @@ def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str
 FROZEN_OPS: tuple[str, ...] = (
     "add_node",
     "connect",
+    "disconnect",
     "set_widget",
     "delete_node",
     "clear",
@@ -110,7 +111,7 @@ DEFERRED_OPS: tuple[str, ...] = ("insert_workflow",)
 #: Kinds a batch (``apply_specs``) dispatches. ``clear`` and ``reset_doc`` are
 #: standalone-only: they rewrite the whole document, so they never ride inside
 #: an atomic batch.
-BATCHABLE_OPS: tuple[str, ...] = ("add_node", "connect", "set_widget", "delete_node")
+BATCHABLE_OPS: tuple[str, ...] = ("add_node", "connect", "disconnect", "set_widget", "delete_node")
 
 #: Per-kind rendering for :class:`NotBatchableError` — the registered error code
 #: and the standalone command that DOES do the job. One entry per frozen kind
@@ -1191,6 +1192,47 @@ def connect(
         raise _enrich_resolution_error(e, workflow, graph) from e
 
 
+def disconnect(
+    workflow: dict,
+    graph,
+    to_node: Any,
+    to_slot: Any,
+    *,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, dict]:
+    """Remove the link occupying one concrete input slot."""
+    try:
+        boundary = _subgraph_boundary_error(workflow, to_node)
+        if boundary is not None:
+            raise boundary
+        dst = _require(workflow, to_node)
+        in_idx = _resolve_input_slot(dst, graph, to_slot)
+        inp = (dst.get("inputs") or [])[in_idx]
+        link_id = inp.get("link")
+        if link_id is None:
+            raise ValueError(f"input {to_slot!r} on node {to_node} is not connected")
+        op = _new_op(
+            "disconnect",
+            actor,
+            base_version,
+            link_id=link_id,
+            to_node=to_node,
+            to_slot=in_idx,
+        )
+        promoted = _resolve_promoted_target(workflow, dst, to_slot, None)
+        if promoted is not None:
+            op["grow"] = promoted
+        elif inp.get("grow_id") is not None:
+            # Dynamic inputs do not have a stable numeric index until their
+            # creating connect materializes them. Preserve their convergence
+            # identity so a disconnect replayed first can tombstone that link.
+            op["grow_id"] = inp["grow_id"]
+        return apply_op(workflow, op, graph), op
+    except ValueError as e:
+        raise _enrich_resolution_error(e, workflow, graph) from e
+
+
 def _connect_impl(
     workflow: dict,
     graph,
@@ -1944,6 +1986,9 @@ def apply_specs(
                     fn, fs = _split_ref_slot(spec["from"], aliases)
                     tn, ts = _split_ref_slot(spec["to"], aliases)
                     workflow, op = connect(workflow, graph, fn, fs, tn, ts, actor=actor, base_version=base_version)
+                elif kind == "disconnect":
+                    tn, ts = _split_ref_slot(spec["to"], aliases)
+                    workflow, op = disconnect(workflow, graph, tn, ts, actor=actor, base_version=base_version)
                 elif kind == "set_widget":
                     workflow, op = set_widget(
                         workflow,
@@ -2016,6 +2061,8 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
             _apply_set_widget(workflow, op, graph)
         elif kind == "connect":
             _apply_connect(workflow, op, graph)
+        elif kind == "disconnect":
+            _apply_disconnect(workflow, op)
         elif kind == "delete_node":
             _apply_delete_node(workflow, op)
         elif kind == "clear":
@@ -2195,6 +2242,7 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
     if dst is None:
         return
     grow = op.get("grow")
+    dynamic_wins = True
     if grow is not None:
         # Autogrow is NOT a shared register: every grow mints its own slot keyed
         # by ``grow_id``, so two concurrent grows onto one base both survive and
@@ -2233,6 +2281,24 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                 if prev is not None and prev != op["link_id"]:
                     _remove_link(workflow, prev)
                 ins[to_idx]["grow_id"] = op["link_id"]  # the register follows the winner
+        else:
+            # Each ordinary grow has its own identity, so this does not gate
+            # concurrent siblings. It only pairs the creating connect with a
+            # later disconnect of THAT grown input. If the disconnect arrived
+            # first, still materialize the same empty slot for convergence,
+            # but do not restore its link.
+            identity_op = {
+                "op": "disconnect",
+                "op_id": op["op_id"],
+                "actor": op.get("actor"),
+                "base_version": op.get("base_version"),
+                "stamp": op.get("stamp"),
+                "to_node": op["to_node"],
+                "grow_id": op["link_id"],
+            }
+            dynamic_wins = _lww_gate(workflow, identity_op)
+            if dynamic_wins:
+                _lww_commit(workflow, identity_op)
         if to_idx is None:
             inputcount = grow.get("inputcount")
             if grow.get("promoted"):
@@ -2284,6 +2350,8 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                 # counter) — the widget may undercount until the next
                 # explicit set_widget or connect on this node corrects it.
                 _apply_inputcount_bump(workflow, dst, op, graph, inputcount["widget"], inputcount["value"])
+        if not dynamic_wins:
+            return
     else:
         to_idx = op["to_slot"]
         ins = dst.get("inputs")
@@ -2372,6 +2440,47 @@ def _remove_link(workflow: dict, link_id: Any) -> None:
                 out["links"] = [lid for lid in out["links"] if lid != link_id]
 
 
+def _apply_disconnect(workflow: dict, op: dict) -> None:
+    """Apply a scalar write that leaves a concrete input unoccupied."""
+    dst = _find_by_str(workflow, op["to_node"])
+    if dst is None:
+        return
+    ins = dst.get("inputs")
+    grow = op.get("grow")
+    grow_id = op.get("grow_id")
+    if grow_id is not None or (grow is not None and grow.get("promoted")):
+        if not _lww_gate(workflow, op):
+            return
+        _lww_commit(workflow, op)
+        if not isinstance(ins, list):
+            return
+        if grow_id is not None:
+            to_idx = next((i for i, inp in enumerate(ins) if inp.get("grow_id") == grow_id), None)
+        else:
+            to_idx = next((i for i, inp in enumerate(ins) if inp.get("name") == grow["name"]), None)
+        if to_idx is not None:
+            current = ins[to_idx].get("link")
+            if current is not None:
+                _remove_link(workflow, current)
+        return
+    to_idx = op["to_slot"]
+    if (
+        not isinstance(ins, list)
+        or not isinstance(to_idx, int)
+        or isinstance(to_idx, bool)
+        or to_idx < 0
+        or to_idx >= len(ins)
+        or not isinstance(ins[to_idx], dict)
+    ):
+        return
+    if not _lww_gate(workflow, op):
+        return
+    _lww_commit(workflow, op)
+    current = ins[to_idx].get("link")
+    if current is not None:
+        _remove_link(workflow, current)
+
+
 def _apply_delete_node(workflow: dict, op: dict) -> None:
     node_id = str(op["node_id"])  # node identity is compared as a string (amendment v1.2)
     workflow["nodes"] = [n for n in workflow.get("nodes") or [] if str(n.get("id")) != node_id]
@@ -2452,7 +2561,7 @@ def _write_target(op: dict) -> tuple:
         return ("widget", str(op["node_id"]), op["widget"])
     if kind in ("add_node", "delete_node"):
         return ("node", str(op["node_id"]))
-    if kind == "connect":
+    if kind in ("connect", "disconnect"):
         grow = op.get("grow")
         if grow is not None:
             # Two autogrow connects onto the same base share a target (their
@@ -2466,6 +2575,8 @@ def _write_target(op: dict) -> tuple:
             # under a dynamic combo (``model.reference_images.image_1``) must
             # not share a target with its sibling (``model.reference_videos``).
             return ("input", str(op["to_node"]), "grow", _autogrow_base(str(grow["name"])))
+        if kind == "disconnect" and op.get("grow_id") is not None:
+            return ("input", str(op["to_node"]), "grow_id", op["grow_id"])
         return ("input", str(op["to_node"]), op["to_slot"])
     return (kind,)
 

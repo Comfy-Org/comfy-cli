@@ -1997,6 +1997,7 @@ app.command("insert-workflow", help="Insert a complete workflow; emits one inser
 )
 app.command("add-node", help="Add a node to the graph; emits an add_node op.")(_wedit.add_node_cmd)
 app.command("connect", help="Wire an output slot to an input slot; emits a connect op.")(_wedit.connect_cmd)
+app.command("disconnect", help="Remove the link from an input slot; emits a disconnect op.")(_wedit.disconnect_cmd)
 app.command("set-widget", help="Set a widget by name (`<id>.<widget>`); emits a set_widget op.")(_wedit.set_widget_cmd)
 app.command("delete-node", help="Delete a node and its links; emits a delete_node op.")(_wedit.delete_cmd)
 app.command(

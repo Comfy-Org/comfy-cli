@@ -346,6 +346,42 @@ def connect_cmd(
 
 
 # ---------------------------------------------------------------------------
+# disconnect
+# ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def disconnect_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    target: Annotated[str, typer.Argument(help="Target `<node_id>.<input_slot>` (slot name or index).")],
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+    input_path: InputOpt = None,
+    host: HostOpt = None,
+    port: PortOpt = None,
+    where: WhereOpt = None,
+):
+    renderer = get_renderer()
+    renderer.command = "workflow disconnect"
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    graph = _graph_or_exit(input_path, host, port, renderer, where)
+    to_node, to_slot = _split_addr(target, renderer)
+    try:
+        workflow, op = workflow_ops.disconnect(
+            workflow, graph, to_node, to_slot, actor=actor, base_version=base_version
+        )
+    except ValueError as e:
+        _emit_edit_error(
+            renderer,
+            e,
+            hint="run `comfy workflow print <file>` to inspect current links and input addresses",
+        )
+        raise typer.Exit(code=1) from e
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow disconnect")
+
+
+# ---------------------------------------------------------------------------
 # delete
 # ---------------------------------------------------------------------------
 
