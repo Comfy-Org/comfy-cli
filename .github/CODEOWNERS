@@ -1,14 +1,16 @@
-# Default review owners: the top two non-bot contributors over the past 12 months.
-* @mattmillerai @bigcat88
+# Routine CLI changes are eligible for standard approval; later rules override this default.
+* @Comfy-Org/cloud-infra @Comfy-Org/comfy-standard-approver
 
-# Credential handling: stored API keys and authentication commands.
-/comfy_cli/auth/ @mattmillerai @skishore23
+# Credential storage, OAuth, resolution, and transport safeguards.
+/comfy_cli/auth/ @Comfy-Org/cloud-infra
+/comfy_cli/cloud/ @Comfy-Org/cloud-infra
+/comfy_cli/credentials.py @Comfy-Org/cloud-infra
+/comfy_cli/http.py @Comfy-Org/cloud-infra
+/comfy_cli/target.py @Comfy-Org/cloud-infra
 
-# Credential handling: cloud OAuth tokens and authenticated API calls.
-/comfy_cli/cloud/ @mattmillerai @skishore23
+# Credential-bearing registry publication and PyPI release authority.
+/comfy_cli/registry/api.py @Comfy-Org/cloud-infra
+/.github/workflows/publish_package.yml @Comfy-Org/cloud-infra
 
-# Registry interaction: custom-node metadata and third-party code supply chain.
-/comfy_cli/registry/ @mattmillerai @bigcat88
-
-# Supply chain: publishing the CLI package to PyPI affects every downstream user.
-/.github/workflows/publish_package.yml @bigcat88
+# Changes to the approval boundary itself.
+/.github/CODEOWNERS @Comfy-Org/cloud-infra
