@@ -85,18 +85,35 @@ def emit_status_error(
     if status != 429:
         renderer.error(code="cloud_http_error", message=message, hint=hint, details=details)
         return
+    renderer.error(**rate_limited_error(operation, retry_after, details, next_step=rate_limited_next_step))
+
+
+def rate_limited_error(
+    operation: str,
+    retry_after: float | None,
+    details: dict,
+    *,
+    next_step: str = "retry it unchanged",
+) -> dict:
+    """The ``cloud_rate_limited`` envelope fields (``code``/``message``/``hint``/``details``).
+
+    Shared by :func:`emit_status_error` and callers that record the error
+    rather than render it (the detached job watcher's state file), so both
+    carry the same shape: ``details.status`` is 429 and ``details.retry_after``
+    holds the server's ``Retry-After`` when it sent one.
+    """
     rate_details = {**details, "status": 429}
     if retry_after is not None:
         rate_details["retry_after"] = int(retry_after) if float(retry_after).is_integer() else retry_after
         wait = f"wait {rate_details['retry_after']}s (`details.retry_after`)"
     else:
         wait = "wait a few seconds"
-    renderer.error(
-        code="cloud_rate_limited",
-        message=f"Comfy Cloud rate-limited the {operation} request (HTTP 429): too many requests",
-        hint=f"the request was throttled, not rejected — {wait} and {rate_limited_next_step}",
-        details=rate_details,
-    )
+    return {
+        "code": "cloud_rate_limited",
+        "message": f"Comfy Cloud rate-limited the {operation} request (HTTP 429): too many requests",
+        "hint": f"the request was throttled, not rejected — {wait} and {next_step}",
+        "details": rate_details,
+    }
 
 
 def handle_cloud_http_error(

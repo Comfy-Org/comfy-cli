@@ -2157,6 +2157,57 @@ def test_poll_cloud_once_records_in_progress_as_running():
     assert state.status not in jobs_state.TERMINAL_STATUSES
 
 
+class _RaisingCloudClient:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def get_job_status(self, prompt_id):
+        raise self._exc
+
+
+@pytest.mark.parametrize(("retry_after", "expected"), [(12.0, 12), (1.5, 1.5), (None, None)])
+def test_poll_cloud_once_maps_exhausted_429_to_cloud_rate_limited(retry_after, expected):
+    """Once the client gives up retrying a 429, the watcher must record the same
+    `cloud_rate_limited` envelope the foreground commands emit, with the prompt
+    id and the server's Retry-After, not a generic `watcher_poll_error`."""
+    from comfy_cli import jobs_state
+    from comfy_cli.comfy_client import HTTPError
+    from comfy_cli.command import job_watcher
+
+    client = _RaisingCloudClient(HTTPError(429, "Too Many Requests", retry_after=retry_after))
+    state = jobs_state.new(prompt_id="pid-429", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=client) is False
+    assert state.status not in jobs_state.TERMINAL_STATUSES
+    assert state.error is not None
+    assert state.error["code"] == "cloud_rate_limited"
+    assert state.error["hint"]
+    details = state.error["details"]
+    assert details["prompt_id"] == "pid-429"
+    assert details["status"] == 429
+    if expected is None:
+        assert "retry_after" not in details
+    else:
+        assert details["retry_after"] == expected
+
+
+@pytest.mark.parametrize("exc_factory", [lambda: _http_error(500), lambda: ConnectionResetError("reset")])
+def test_poll_cloud_once_keeps_watcher_poll_error_for_other_failures(exc_factory):
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=_RaisingCloudClient(exc_factory())) is False
+    assert state.error is not None
+    assert state.error["code"] == "watcher_poll_error"
+    assert state.error["details"] == {}
+
+
+def _http_error(status):
+    from comfy_cli.comfy_client import HTTPError
+
+    return HTTPError(status, "boom")
+
+
 def test_retryable_error_is_classified_everywhere_the_other_failures_are():
     """`retryable_error` is part of the raw cloud vocabulary `output/glyphs.py`
     already renders ✗, but was the one failure spelling missing from the shared
