@@ -52,7 +52,7 @@ def test_flux_2_still_refuses_an_output_format_it_cannot_produce():
 
 
 def test_flux_2_nightly_input_with_png_output_format_emits():
-    """Pin for the 2026-09-23 nightly failure (BE-17060): these exact args were
+    """Pin for an agent failure seen in telemetry: these exact args were
     refused with "does not map --output_format onto Flux2ImageNode" on a build
     that predated #921."""
     wf = emit.build_workflow(

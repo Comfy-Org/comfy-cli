@@ -497,16 +497,16 @@ def test_emitted_workflow_accepts_a_later_edit_stamped_below_its_base_version(tm
 
 
 def test_write_frontend_workflow_materializes_nano_banana_pro_from_the_nightly_input(tmp_path):
-    """Pin for the 2026-09-23 nightly failure (BE-17060): generate_workflow sent
-    exactly these args and got `emit_workflow_failed` — "'gemini-3-pro-image-preview'
+    """Pin for an agent failure seen in telemetry: generate_workflow sent
+    these args and got `emit_workflow_failed` — "'gemini-3-pro-image-preview'
     not in 1 known options for model — closest: gemini-2.5-flash-image" — because
     emit built GeminiImageNode. #921 routes that model to GeminiImage2Node; this
     replays the recorded input through the same frontend (canvas-ops) path."""
     wf, ops = emit.write_frontend_workflow(
         "nano-banana",
         {
-            "prompt": "Redraw this penguin character as a retro 16-bit pixel art meme.",
-            "image": "40593129d3344686a2e1c70eae8884cf882095df5e711c2a5261f7e935dbfc63.gif",
+            "prompt": "Redraw this character as 16-bit pixel art.",
+            "image": "abababababababababababababababababababababababababababababababab.gif",
             "model": "gemini-3-pro-image-preview",
         },
         tmp_path / "workflow.json",
