@@ -297,6 +297,9 @@ def set_widget_cmd(
         workflow, op = workflow_ops.set_widget(
             workflow, graph, node_id, widget, _parse_value(value), actor=actor, base_version=base_version
         )
+    except workflow_ops.NoteTextNotWritable as e:
+        _emit_edit_error(renderer, e, hint=e.hint)
+        raise typer.Exit(code=1) from e
     except ValueError as e:
         _emit_edit_error(
             renderer,

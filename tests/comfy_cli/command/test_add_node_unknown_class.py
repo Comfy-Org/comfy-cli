@@ -117,3 +117,24 @@ def test_non_note_ui_only_nodes_keep_their_hint(patched_graph, tmp_path, capsys)
     """Reroute/GetNode are wiring helpers, not annotations — no note route."""
     env = _add(tmp_path, capsys, "Reroute")
     assert "insert-workflow" not in (env["error"].get("hint") or "")
+
+
+def test_set_widget_on_a_note_names_the_replace_route(patched_graph, tmp_path, capsys):
+    """BE-17060, stg trace 78bccd97…: the user said "the nodes are blank"; the
+    agent called set_widget {"address": "insert:ab44…:root:node:101.text"} on a
+    MarkdownNote and got "widget 'text' not found on MarkdownNote; available
+    widgets: (none — all inputs are links)" — false (a note has no inputs) and
+    no way forward. A note's text is not name-addressable (the catalog has no
+    schema for it; the doc host stores it opaquely), so say that and name the
+    route that works: delete the note and insert a replacement."""
+    note_id = "insert:ab442b93211fce241c5fd0f44a23a070:root:node:101"
+    wf = _base_workflow()
+    wf["nodes"].append(
+        {"id": note_id, "type": "MarkdownNote", "pos": [0, 400], "inputs": [], "outputs": [], "widgets_values": [""]}
+    )
+    env = _run(["set-widget", str(_write(tmp_path, wf)), f"{note_id}.text", "## Seedance 2.5"], capsys)
+    assert env["ok"] is False
+    err = env["error"]
+    blob = json.dumps(err)
+    assert "all inputs are links" not in blob, err
+    assert "delete" in (err.get("hint") or "") and "insert-workflow" in (err.get("hint") or ""), err

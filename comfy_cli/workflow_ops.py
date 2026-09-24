@@ -190,6 +190,22 @@ def note_insert_hint(class_type: str) -> str:
         f"insert {example} — every node needs an `id`, and the note's text is widgets_values[0]"
     )
 
+
+class NoteTextNotWritable(ValueError):
+    """set_widget addressed a Note/MarkdownNote. Its text has no catalog schema
+    and the doc host stores it opaquely, so no name-addressed write can land;
+    ``hint`` names the route that does (delete + insert a replacement)."""
+
+    def __init__(self, node_id: Any, class_type: str, widget: str):
+        super().__init__(
+            f"{node_id} is a {class_type}: its text is not a widget set-widget can write "
+            f"(a note has no catalog schema, so {widget!r} has no widget position to address)"
+        )
+        self.hint = f"to change a note's text, delete node {node_id} and insert a replacement — " + note_insert_hint(
+            class_type
+        )
+
+
 # A subgraph INSTANCE's node `type` is the UUID id of its definition, and
 # `ls-nodes` prints that verbatim — so a caller reading ls-nodes output can
 # mistake it for a class name. There is no instantiate-a-subgraph command, so
@@ -683,6 +699,9 @@ def set_widget(
     """Set a widget, enriching a not-found node/widget error with the real
     address that carries ``widget`` so a mistargeted edit self-corrects in one
     step (see :func:`_enrich_resolution_error`)."""
+    for n in workflow.get("nodes") or []:
+        if isinstance(n, dict) and n.get("id") == node_id and n.get("type") in NOTE_NODE_TYPES:
+            raise NoteTextNotWritable(node_id, n["type"], widget)
     try:
         return _set_widget_impl(workflow, graph, node_id, widget, value, actor=actor, base_version=base_version)
     except ValueError as e:
