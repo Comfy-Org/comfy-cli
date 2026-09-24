@@ -48,15 +48,22 @@ pytestmark = [
 ]
 
 
-def exec(cmd: str, timeout: int = 600, **kwargs) -> subprocess.CompletedProcess[str]:
-    cmd = dedent(cmd).strip()
+def exec(cmd: str | list[str], timeout: int = 600, **kwargs) -> subprocess.CompletedProcess[str]:
+    """Run ``cmd``: a string goes through the shell, a list is run directly.
+
+    Use a list whenever an argument is a path that may contain spaces
+    (e.g. an interpreter under VIRTUAL_ENV/CONDA_PREFIX).
+    """
+    use_shell = isinstance(cmd, str)
+    if use_shell:
+        cmd = dedent(cmd).strip()
     print(f"cmd: {cmd}")
     try:
         proc = subprocess.run(
             args=cmd,
             capture_output=True,
             text=True,
-            shell=True,
+            shell=use_shell,
             encoding="utf-8",
             check=False,
             timeout=timeout,
@@ -172,14 +179,25 @@ def workspace():
                 shutil.rmtree(clone_dir)
             proc = exec(f"git clone --branch {branch} --depth 1 https://github.com/{repo_spec}.git {clone_dir}")
             assert proc.returncode == 0, f"Manager clone failed:\n{proc.stderr}"
-            proc = exec(f"uv pip install {clone_dir} --reinstall-package comfyui-manager --python {workspace_python}")
+            proc = exec(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    clone_dir,
+                    "--reinstall-package",
+                    "comfyui-manager",
+                    "--python",
+                    workspace_python,
+                ]
+            )
             assert proc.returncode == 0, f"Manager override install failed:\n{proc.stderr}"
         else:
             # PyPI version: "4.1b7". Install with deps so a newer Manager's new
             # requirements are pulled in; already-satisfied ones are left alone.
-            proc = exec(f"{workspace_python} -m pip install comfyui-manager=={manager_override} --pre")
+            proc = exec([workspace_python, "-m", "pip", "install", f"comfyui-manager=={manager_override}", "--pre"])
             assert proc.returncode == 0, f"Manager override failed:\n{proc.stderr}"
-            proc = exec(f"{workspace_python} -m pip show comfyui-manager")
+            proc = exec([workspace_python, "-m", "pip", "show", "comfyui-manager"])
             assert f"Version: {manager_override}\n" in proc.stdout, (
                 f"Manager override did not take effect:\n{proc.stdout}\n{proc.stderr}"
             )
