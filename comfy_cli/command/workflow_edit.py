@@ -60,10 +60,18 @@ def _emit_edit_error(renderer, e: ValueError, *, hint: str) -> None:
     """
     if isinstance(e, workflow_ops.FatalFindingError):
         f = e.finding
+        if f.get("best_match") is not None:
+            # One option shares the rejected value's leading token (the ratio
+            # in '16:9 (Landscape)'): lead with it rather than a flat list.
+            finding_hint = f"use {f['best_match']!r} — the only option with the same leading token"
+        elif f.get("did_you_mean"):
+            finding_hint = f"did you mean: {', '.join(str(v) for v in f['did_you_mean'])}?"
+        else:
+            finding_hint = hint
         renderer.error(
             code=f.get("code", "workflow_edit_invalid"),
             message=f.get("message", str(e)),
-            hint=(f"did you mean: {', '.join(str(v) for v in f['did_you_mean'])}?" if f.get("did_you_mean") else hint),
+            hint=finding_hint,
             details={k: v for k, v in f.items() if k != "message"},
         )
         return

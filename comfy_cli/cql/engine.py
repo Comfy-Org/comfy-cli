@@ -418,6 +418,23 @@ class Port:
                     break
         return out[:limit]
 
+    def best_combo_match(self, value: Any) -> str | None:
+        """The ONE option sharing a rejected value's leading token, else ``None``.
+
+        ``'16:9 (Landscape)'`` against ``'16:9 (Widescreen)'``/``'9:16 (...)'``/…:
+        the ratio is the part that matters and exactly one option has it, so
+        that option is the likely intent. The caller NAMES it and never writes
+        it. A single-token value (a filename, a bare word) has no qualifier to
+        disagree on and gets ``None``, as does a token two options share.
+        """
+        if self.type != "COMBO" or not self.enum_values:
+            return None
+        token, _, rest = str(value).strip().partition(" ")
+        if not token or not rest.strip():
+            return None
+        hits = [str(o) for o in self.enum_values if str(o).strip().partition(" ")[0] == token]
+        return hits[0] if len(hits) == 1 else None
+
     def validate_shape(self, value: Any) -> str | None:
         """Hard-reject on JSON-shape mismatch. Returns error message or None."""
         if self.type == "INT":
@@ -486,9 +503,16 @@ class Port:
                     "valid_options": list(self.enum_values),
                 }
                 suggestions = self.suggest_combo(value)
+                best = self.best_combo_match(value)
+                if best is not None:
+                    suggestions = [best, *(s for s in suggestions if s != best)]
+                    warning["best_match"] = best
                 if suggestions:
                     warning["did_you_mean"] = suggestions
                     warning["message"] += f" — closest: {', '.join(suggestions)}"
+                if best is not None:
+                    lead = str(value).strip().partition(" ")[0]
+                    warning["message"] += f" ({best!r} is the only option starting {lead!r})"
                 warnings.append(warning)
         elif self.type == "COMBO" and self.enum_declared:
             # The server declared this field's choices and shipped NONE of them:
