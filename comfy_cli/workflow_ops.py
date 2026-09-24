@@ -92,15 +92,26 @@ def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str
 # ---------------------------------------------------------------------------
 
 #: Every op kind in the v1 vocabulary, including defined-but-deferred kinds.
+#: ``set_node_field`` (amendment v1.6) is PROPOSED, not yet ratified — see
+#: docs/op-vocabulary-v1.md §1.8 for its status.
 FROZEN_OPS: tuple[str, ...] = (
     "add_node",
     "connect",
     "set_widget",
+    "set_node_field",
     "delete_node",
     "clear",
     "reset_doc",
     "insert_workflow",
 )
+
+#: The node fields ``set_node_field`` may write, as a CLOSED set (§1.8).
+#: Everything outside it either has an op of its own (``widgets_values`` is
+#: ``set_widget``'s; ``inputs``/``outputs`` belong to ``connect``) or is node
+#: identity (``id``, ``type``) that only ``add_node``/``delete_node`` may move.
+#: ``flags`` as a whole is excluded too: a whole-object write would reintroduce
+#: the clobber this op exists to avoid, so each flag is its own register.
+WRITABLE_NODE_FIELDS: tuple[str, ...] = ("title", "mode", "flags.collapsed", "flags.pinned")
 
 #: Kinds frozen in the contract whose replay is not implemented in the CLI.
 #: ``insert_workflow`` is emitted for cmp to validate and apply; the CLI must
@@ -110,7 +121,7 @@ DEFERRED_OPS: tuple[str, ...] = ("insert_workflow",)
 #: Kinds a batch (``apply_specs``) dispatches. ``clear`` and ``reset_doc`` are
 #: standalone-only: they rewrite the whole document, so they never ride inside
 #: an atomic batch.
-BATCHABLE_OPS: tuple[str, ...] = ("add_node", "connect", "set_widget", "delete_node")
+BATCHABLE_OPS: tuple[str, ...] = ("add_node", "connect", "set_widget", "set_node_field", "delete_node")
 
 #: Per-kind rendering for :class:`NotBatchableError` — the registered error code
 #: and the standalone command that DOES do the job. One entry per frozen kind
@@ -1170,6 +1181,82 @@ def _promoted_widget_error(workflow: dict, node: dict, slot: Any) -> ValueError 
     )
 
 
+#: Per-field value type for ``set_node_field`` (§1.8). ``None`` always means
+#: "clear the field", regardless of type — checked separately below.
+_NODE_FIELD_TYPES: dict[str, type] = {
+    "title": str,
+    "mode": int,
+    "flags.collapsed": bool,
+    "flags.pinned": bool,
+}
+
+
+def set_node_field(
+    workflow: dict,
+    node_id: Any,
+    field: str,
+    value: Any,
+    *,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, dict]:
+    """Write one durable, per-node scalar field — ``title``, ``mode``,
+    ``flags.collapsed`` or ``flags.pinned`` (§1.8, PROPOSED amendment v1.6,
+    superseding the withdrawn ``set_title`` proposal).
+
+    An ``add_node`` upsert could carry the same change, but only by replacing
+    the *whole* node: it rewrites the node's widget values and resets its
+    widget stamps, so a field change concurrent with a ``set_widget`` write on
+    that node discards the write. ``set_node_field`` instead claims one LWW
+    register per ``(node_id, field)`` (``_write_target``'s ``"node_field"``
+    namespace) — a title write and a flag write on the same node, or two
+    writers of two different flags, never contend.
+
+    ``field`` must be one of :data:`WRITABLE_NODE_FIELDS`. ``value`` must
+    match that field's type (``str`` for ``title``, ``int`` for ``mode``,
+    ``bool`` for the two ``flags.*`` fields — ``bool`` is checked before
+    ``int`` since ``bool`` is an ``int`` subclass in Python), or be ``None``
+    to clear the field, so it returns to absent the way workflow JSON
+    round-trips an unset flag. ``mode`` is additionally range-checked against
+    :data:`_VALID_NODE_MODES` (the same litegraph 0-4 enum ``add_node``
+    enforces), so an out-of-range value like ``-1`` is rejected here instead
+    of failing downstream at the applier.
+
+    Unlike ``set_widget``, no catalog is involved: none of these fields is a
+    catalogued widget name, so this never touches ``widgets_values``.
+
+    This mirrors comfy-multi-player#235's merged ``set_node_field`` CRDT op
+    (superseding that repo's earlier, single-field ``set_title``/ADR-032
+    prototype), with one deliberate difference: comfy-multi-player's register
+    is scoped by an optional ``node_incarnation`` because its Y.Doc can, in
+    principle, see a node id reused after a tombstoned delete. comfy-cli has
+    no equivalent field and does not need one — node ids here are minted by
+    ``mint_id()`` as leaderless random 53-bit integers and are never reused
+    (§6, §1.5's resurrection-hazard note), so a bare ``("node_field", node_id,
+    field)`` register is already collision-free.
+
+    There is no interior/subgraph-promoted variant in this amendment: the
+    write is top-level only, mirroring comfy-multi-player's own scope.
+    """
+    if field not in WRITABLE_NODE_FIELDS:
+        raise ValueError(f"field must be one of {', '.join(WRITABLE_NODE_FIELDS)}, got {field!r}")
+    expected = _NODE_FIELD_TYPES[field]
+    # `bool` is an `int` subclass in Python, so `mode` (int) must explicitly
+    # reject a bool value rather than accept it via isinstance(value, int).
+    type_ok = (
+        isinstance(value, bool) if expected is bool else isinstance(value, expected) and not isinstance(value, bool)
+    )
+    if value is not None and not type_ok:
+        raise ValueError(f"{field} must be a {expected.__name__} or null, got {value!r}")
+    if field == "mode" and value is not None and value not in _VALID_NODE_MODES:
+        raise ValueError(
+            f"invalid node mode {value!r}; valid: 0 (always), 1 (on-event), 2 (mute), 3 (on-trigger), 4 (bypass)"
+        )
+    _require(workflow, node_id)
+    op = _new_op("set_node_field", actor, base_version, node_id=node_id, field=field, value=value)
+    return apply_op(workflow, op, None), op
+
+
 def connect(
     workflow: dict,
     graph,
@@ -1954,6 +2041,15 @@ def apply_specs(
                         actor=actor,
                         base_version=base_version,
                     )
+                elif kind == "set_node_field":
+                    workflow, op = set_node_field(
+                        workflow,
+                        resolve_ref(spec.get("node", spec.get("node_id")), aliases),
+                        spec["field"],
+                        spec["value"],
+                        actor=actor,
+                        base_version=base_version,
+                    )
                 elif kind == "delete_node":
                     workflow, op = delete_node(
                         workflow, graph, resolve_ref(spec["node"], aliases), actor=actor, base_version=base_version
@@ -2014,6 +2110,8 @@ def apply_op(workflow: dict, op: dict, graph) -> dict:
             _apply_add_node(workflow, op)
         elif kind == "set_widget":
             _apply_set_widget(workflow, op, graph)
+        elif kind == "set_node_field":
+            _apply_set_node_field(workflow, op)
         elif kind == "connect":
             _apply_connect(workflow, op, graph)
         elif kind == "delete_node":
@@ -2123,6 +2221,30 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
     # dynamic-combo selector change must replace the old option's variable-width
     # sub-widget span before preserving trailing values such as seed/watermark.
     _engine._write_widget(node, op["widget"], op["value"], graph, extend=True)
+    _lww_commit(workflow, op)
+
+
+def _apply_set_node_field(workflow: dict, op: dict) -> None:
+    """§1.8 (PROPOSED, amendment v1.6). Same LWW/delete-wins shape as
+    ``_apply_set_widget``'s top-level branch, but no catalog is involved and
+    the target is the ``("node_field", node_id, field)`` namespace, never the
+    widget one — one register per ``(node, field)`` so two fields of one node
+    never contend."""
+    field = op["field"]
+    if field not in WRITABLE_NODE_FIELDS:
+        raise ValueError(f"malformed_op: {field!r} is not a writable node field")
+    if not _lww_gate(workflow, op):
+        return
+    node = _find_by_str(workflow, op["node_id"])
+    if node is None:
+        return  # target concurrently deleted => no-op (delete wins).
+    head, _, leaf = field.partition(".")
+    target = node.setdefault(head, {}) if leaf else node
+    key = leaf or head
+    if op["value"] is None:
+        target.pop(key, None)
+    else:
+        target[key] = op["value"]
     _lww_commit(workflow, op)
 
 
@@ -2450,6 +2572,11 @@ def _write_target(op: dict) -> tuple:
         if op.get("path"):
             return ("widget", tuple(str(s) for s in op["path"]), op["inner_widget"])
         return ("widget", str(op["node_id"]), op["widget"])
+    if kind == "set_node_field":
+        # One register per (node, field) — never the widget one (§1.8): a
+        # title write and a flag write on one node never contend, and
+        # neither collides with a same-named widget's register.
+        return ("node_field", str(op["node_id"]), op["field"])
     if kind in ("add_node", "delete_node"):
         return ("node", str(op["node_id"]))
     if kind == "connect":

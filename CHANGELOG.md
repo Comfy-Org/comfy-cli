@@ -44,6 +44,19 @@ history.
   download, from the deploy service's estimate. Under `--json` it is `estimate`
   in the output. A service that gives no estimate, or has it switched off,
   changes nothing and prints nothing.
+- `comfy workflow set-node-field FILE NODE_ID FIELD VALUE` (or `--clear`) writes
+  or clears one durable node field — `title`, `mode`, `flags.collapsed` or
+  `flags.pinned` — emitting a `set_node_field` op with one LWW register per
+  `(node, field)`, so it never clobbers a concurrent widget write on the same
+  node the way an `add_node` upsert would. **Proposed, pending ratification**:
+  `set_node_field` is a candidate addition to `docs/op-vocabulary-v1.md` (§1.8 /
+  amendment v1.6), mirroring comfy-multi-player#235's merged CRDT op of the
+  same name (superseding this project's earlier, title-only `set_title`
+  proposal, which never shipped in a release).
+
+- `comfy build push` prints every warning a save returns, and `--release` cuts no
+  release while one says a deployment could not download a model link
+  (`build_release_held`); `--release-despite-warnings` cuts anyway.
 - `comfy build release delete RELEASE` deletes the named release, freeing the slot
   it held against the workspace's release limit. It confirms first (`--yes` skips
   the prompt, `build_release_delete_needs_confirm` refuses a caller that cannot
