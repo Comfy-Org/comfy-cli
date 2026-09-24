@@ -55,28 +55,31 @@ argument you pass.
 | `deploy_workflow_empty` | Well-formed JSON object holding no nodes | Export a workflow with nodes in it |
 | `deploy_workflow_not_api_format` | Parsed as JSON but is not a workflow at all | Check the file is the right one |
 | `deploy_workflow_invalid` | The data plane rejected the nodes | Fix the nodes in `details.node_errors`, resubmit |
+| `deploy_workflow_too_large` | Over the 10 MB a deployment accepts; nothing was sent | Move large inline data (embedded images, long text) out of the workflow, resubmit |
 | `deploy_workflow_asset_outside_root` | A local input resolves outside every allowed root | Move it under `models/`, `input/`, `output/`, or pass `--asset-root <dir>` |
 | `deploy_workflow_asset_marker_reserved` | The workflow already claims a `local-asset:` id | Remove that reserved id |
 | `deploy_asset_missing` | An asset needs uploading and `--no-upload` was set | Drop `--no-upload`, or pre-upload it |
 | `deploy_asset_upload_failed` | Upload failed or the hash moved mid-read | Confirm the file is stable, retry |
 | `deploy_rate_limited` | Queue full or rate limited | Wait for capacity |
 | `deploy_idempotency_reuse` | That idempotency key was already used | The earlier submit landed; say so rather than resubmitting |
-| `deploy_job_submit_unknown` | Submit timed out and the job **may exist** | **Do not auto-resubmit.** No job lookup exists — ask the user |
+| `deploy_job_submit_unknown` | Submit timed out and the job **may exist** | **Do not auto-resubmit.** The CLI cannot look the job up — ask the user |
 | `deploy_job_failed` | The job ran and failed | Fix the workflow or its inputs |
 | `deploy_job_canceled` | The job was canceled | Resubmit if that was not intended |
 
 The first three are caught locally, before anything is submitted, so they cost
-nothing.
+nothing. So is `deploy_workflow_too_large`: the size is checked before sending,
+and a deployment that refuses the size does so before creating a job, so a
+resubmit after shrinking the workflow is safe.
 
 **`deploy_job_submit_unknown` is the one that can cost money twice.** The
 submission timed out, so the job may or may not have been created. Every `run` is
 a fresh idempotency key, which means a resubmit is a *second billed job* rather
 than a retry of the first.
 
-**The job itself cannot be found.** The API has no job-list endpoint, no lookup
-by idempotency key, and no client-supplied job id — the error message says as
-much. So "I looked and found nothing" is not evidence the job was never created,
-and must never be read as permission to resubmit. `comfy deploy status` is still
+**The CLI cannot find the job.** No `comfy` command looks a job up by the
+idempotency key the submission carried (`details.idempotency_key`). So "I looked
+and found nothing" is not evidence the job was never created, and must never be
+read as permission to resubmit. `comfy deploy status` is still
 the thing to read: the deployment's own state may be what caused the timeout, and
 the `serving` worker counts and `jobsInQueue` say whether *something* is running.
 Report that much, and let the user decide.

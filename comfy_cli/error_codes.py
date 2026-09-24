@@ -1482,6 +1482,17 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "fix the workflow as `message` describes, then submit again with a new idempotency key",
     ),
     ErrorCode(
+        "deploy_workflow_too_large",
+        "The job submission is larger than a deployment accepts, 10,000,000 bytes (10 MB), so no job was "
+        "created. Usually raised locally before anything is sent, with `details.request_bytes` and "
+        "`details.limit_bytes`; an HTTP 413 from the deployment, which refuses the request before creating a "
+        "job, maps here too. The size is almost always data held inline in the workflow, such as an embedded "
+        "base64 image or a long text value. Files the workflow names by path are uploaded separately and do "
+        "not count.",
+        "make the workflow smaller: move large inline data into a file under the install's input/ directory "
+        "and name that file in the node's input where the node accepts one, then submit again",
+    ),
+    ErrorCode(
         "deploy_workflow_empty",
         "The `--workflow` file is a JSON object but holds no nodes, so there is nothing to submit. Raised locally, "
         "before any deployment is contacted.",
@@ -1528,8 +1539,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_job_submit_unknown",
-        "A job submission timed out, lost its connection, or returned HTTP 5xx, so the job may exist. The v2 API has no job-list endpoint, idempotency-key lookup, or client-supplied job id with which to find it.",
-        "do not resubmit automatically because the possibly-created job cannot be found through the v2 API",
+        "A job submission timed out, lost its connection, or returned HTTP 5xx, so the job may exist. The CLI "
+        "has no command that looks a job up, so it cannot say whether it was created. `details.idempotency_key` "
+        "is the key the submission carried, which a job created by it also carries.",
+        "do not resubmit automatically: every `comfy deploy run` uses a new idempotency key, so a resubmit is a "
+        "second billed job if the first one was created",
     ),
     ErrorCode(
         "deploy_job_failed",

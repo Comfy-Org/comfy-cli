@@ -15,6 +15,19 @@ history.
 
 ## [Unreleased]
 
+### Fixed
+
+- `comfy deploy run` refuses a workflow bigger than the 10 MB a deployment
+  accepts before sending it, with `deploy_workflow_too_large`, whose message
+  names the request's size and the limit (`details.request_bytes`,
+  `details.limit_bytes`). It used to start sending, lose the connection when the
+  deployment refused, and report `deploy_job_submit_unknown` ("the job may
+  exist, do not resubmit") for a request that created nothing. A 413 from the
+  deployment now maps to the same code instead of `deploy_bad_request`.
+- `deploy_job_submit_unknown` no longer says the API has no job list. It says
+  the CLI cannot look the job up, and `details.idempotency_key` carries the key
+  the submission used.
+
 ## [1.21.0] - 2026-09-24
 
 [Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.21.0) · 50 commits since v1.20.0. Breaking changes are marked **Breaking** under Changed.

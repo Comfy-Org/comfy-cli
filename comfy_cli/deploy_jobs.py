@@ -24,9 +24,16 @@ _RETRIABLE_CODES: Final = frozenset({"deployment_not_ready", "queue_full"})
 # server-sent `Retry-After` may hold a foreground command.
 _MAX_RETRY_AFTER_SECONDS: Final = 10.0
 _UNKNOWN_MESSAGE: Final = (
-    "The job may exist, but the API has no job-list endpoint, no lookup by idempotency key, "
-    "and no client-supplied job id, so there is no way to find the possibly-created job."
+    "The job may exist: the submission was sent but no answer came back. This CLI cannot look "
+    "the job up, so it cannot tell whether the job was created."
 )
+# The gateway refuses an /api/v2 body over this with a 413 before reading it
+# (cloud services/platform-gateway/server/server.go, `maxRequestBody = "10M"`,
+# which echo parses as decimal megabytes). Checked before sending rather than
+# left to that 413: the gateway answers after the first few hundred KB and
+# closes the connection, and urllib, still writing the body, sees a broken pipe
+# instead of the answer. Raise this together with the gateway's.
+_MAX_REQUEST_BODY: Final = 10_000_000
 
 _SUBMIT_ERRORS: Final = {
     (401, "unauthorized"): {"code": "deploy_not_signed_in", "message": "the data-plane request is not authenticated"},
@@ -70,6 +77,10 @@ _STATUS_ERRORS: Final = {
     403: {"code": "deploy_forbidden", "message": "the job submission is forbidden"},
     404: {"code": "deploy_not_found", "message": "the deployment endpoint was not found"},
     409: {"code": "deploy_conflict", "message": "the job submission conflicts with the deployment state"},
+    413: {
+        "code": "deploy_workflow_too_large",
+        "message": "the workflow is too large to submit; the deployment refused it before creating a job",
+    },
     422: {"code": "deploy_workflow_invalid", "message": "the workflow is invalid"},
     429: {"code": "deploy_rate_limited", "message": "the deployment rejected the job rate"},
 }
@@ -199,6 +210,10 @@ class DeployJobClient:
         if request.partner_credential is not None:
             field, secret = request.partner_credential
             body["extra_data"] = {field: secret}
+        # Measured on the same encoding `request_json` sends.
+        size = len(json.dumps(body).encode("utf-8"))
+        if size > _MAX_REQUEST_BODY:
+            raise self._too_large(request.deployment_id, size)
         url = self.target.url("jobs")
         headers = {"Idempotency-Key": request.idempotency_key}
 
@@ -214,7 +229,7 @@ class DeployJobClient:
                 )
             except urllib.error.HTTPError as error:
                 if 500 <= error.code <= 599:
-                    raise self._unknown(request.deployment_id) from error
+                    raise self._unknown(request) from error
                 server = _server_error(error, url, secret)
                 delay = _retry_after(error)
                 if delay is not None and error.code == 429 and server.code in _RETRIABLE_CODES:
@@ -223,7 +238,7 @@ class DeployJobClient:
                         continue
                 raise self._mapped(error.code, server, request, control_plane) from error
             except (TimeoutError, urllib.error.URLError) as error:
-                raise self._unknown(request.deployment_id) from error
+                raise self._unknown(request) from error
 
             if status == 201 and isinstance(parsed, dict):
                 return parsed
@@ -236,11 +251,22 @@ class DeployJobClient:
         raise AssertionError("unreachable submission attempt state")
 
     @staticmethod
-    def _unknown(deployment_id: str) -> DeployAPIError:
+    def _unknown(request: JobSubmitRequest) -> DeployAPIError:
         return DeployAPIError(
             code="deploy_job_submit_unknown",
             message=_UNKNOWN_MESSAGE,
-            details={"deployment_id": deployment_id},
+            details={"deployment_id": request.deployment_id, "idempotency_key": request.idempotency_key},
+        )
+
+    @staticmethod
+    def _too_large(deployment_id: str, size: int) -> DeployAPIError:
+        return DeployAPIError(
+            code="deploy_workflow_too_large",
+            message=(
+                f"the workflow is too large to submit: the request is {size:,} bytes and a deployment "
+                f"accepts at most {_MAX_REQUEST_BODY:,} (10 MB); nothing was sent, so no job was created"
+            ),
+            details={"deployment_id": deployment_id, "request_bytes": size, "limit_bytes": _MAX_REQUEST_BODY},
         )
 
     @staticmethod
