@@ -172,6 +172,24 @@ class NotBatchableError(ValueError):
 # converter. Keep the two in sync.
 UI_ONLY_NODE_TYPES = frozenset({"Note", "MarkdownNote", "PrimitiveNode", "GetNode", "SetNode", "Reroute"})
 
+# The annotation subset of UI_ONLY_NODE_TYPES. The catalog has no schema for
+# them, so add-node / set-widget cannot build or address their text — but an
+# insert-workflow carrying the node verbatim (id + text in widgets_values) lands
+# one, and the doc host round-trips its widgets_values opaquely.
+NOTE_NODE_TYPES = frozenset({"Note", "MarkdownNote"})
+
+
+def note_insert_hint(class_type: str) -> str:
+    """How to put a ``Note``/``MarkdownNote`` with text on the canvas: the one
+    route that works, with a payload `workflow insert-workflow` accepts."""
+    example = json.dumps(
+        {"nodes": [{"id": 1, "type": class_type, "pos": [0, 0], "size": [300, 120], "widgets_values": ["<text>"]}]}
+    )
+    return (
+        f"a {class_type} is added with `comfy workflow insert-workflow` (the insert_workflow op), not add-node: "
+        f"insert {example} — every node needs an `id`, and the note's text is widgets_values[0]"
+    )
+
 # A subgraph INSTANCE's node `type` is the UUID id of its definition, and
 # `ls-nodes` prints that verbatim — so a caller reading ls-nodes output can
 # mistake it for a class name. There is no instantiate-a-subgraph command, so

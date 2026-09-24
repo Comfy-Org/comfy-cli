@@ -83,3 +83,37 @@ def test_uuid_class_type_is_named_as_a_subgraph_instance(patched_graph, tmp_path
 def test_known_class_still_adds(patched_graph, tmp_path, capsys):
     env = _add(tmp_path, capsys, "VAEDecode")
     assert env["ok"] is True, env
+
+
+@pytest.mark.parametrize("cls", ["Note", "MarkdownNote"])
+def test_note_refusal_hints_the_insert_workflow_route(patched_graph, tmp_path, capsys, cls):
+    """BE-17060. Ephemeral probe "Add exactly one Note node with the text hello"
+    (traces 050eee39…, 89e90ccd…, ca75643e…, f83727e9…, 401326900…): the agent
+    called add_node {"class_type": "Note"}, read the hint "use a real node class;
+    to annotate the graph, set a title/widget on an existing node instead", and
+    told the user notes cannot be added. They can: an insert_workflow carrying
+    the note node (with an `id` and its text in widgets_values) lands it (traces
+    1417ac22…, 8a2f036e…). The hint must name that route, and the example it
+    gives must itself be accepted by `workflow insert-workflow`."""
+    env = _add(tmp_path, capsys, cls)
+    assert env["ok"] is False
+    err = env["error"]
+    assert err["code"] == "node_not_found"
+    hint = err.get("hint") or ""
+    assert "insert-workflow" in hint, f"must name the route that adds a note: {err}"
+    assert "set a title/widget on an existing node instead" not in hint, err
+
+    example = json.loads(hint[hint.index("{") : hint.rindex("}") + 1])
+    node = example["nodes"][0]
+    assert node["type"] == cls and "id" in node and node["widgets_values"], example
+
+    tpl = _write(tmp_path, example, name="note.json")
+    ins = _run(["insert-workflow", str(_write(tmp_path, _base_workflow())), str(tpl)], capsys)
+    assert ins["ok"] is True, ins
+    assert ins["data"]["op"]["workflow"]["nodes"][0]["type"] == cls
+
+
+def test_non_note_ui_only_nodes_keep_their_hint(patched_graph, tmp_path, capsys):
+    """Reroute/GetNode are wiring helpers, not annotations — no note route."""
+    env = _add(tmp_path, capsys, "Reroute")
+    assert "insert-workflow" not in (env["error"].get("hint") or "")

@@ -232,7 +232,9 @@ def add_node_cmd(
         # Same envelope shape as `nodes show` so a caller can self-correct from
         # the error alone. (The old hint pointed at `comfy nodes types`, which
         # lists connection types — MODEL/LATENT/IMAGE — not class_types.)
-        if e.ui_only:
+        if e.ui_only and e.class_type in workflow_ops.NOTE_NODE_TYPES:
+            hint = workflow_ops.note_insert_hint(e.class_type)
+        elif e.ui_only:
             hint = "use a real node class; to annotate the graph, set a title/widget on an existing node instead"
         elif e.subgraph_id:
             hint = "pick a node CLASS from `comfy nodes search <text>`; a subgraph instance cannot be added"
