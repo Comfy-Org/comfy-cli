@@ -545,6 +545,36 @@ def _next_inputcount_name(ins: list, requested: str) -> str:
 _VALID_NODE_MODES = frozenset({0, 1, 2, 3, 4})
 
 
+_POS_STRING_RE = re.compile(r"\s*\[?\s*([^,\[\]]+?)\s*,\s*([^,\[\]]+?)\s*\]?\s*")
+
+
+def _coerce_pos(pos: Any) -> Any:
+    """Parse an ``"x,y"`` / ``"[x, y]"`` string position into two numbers.
+
+    Agents send ``"at": "40,90"`` as often as ``[40, 90]`` (prod comfy-agent
+    traces, 2026-09-23: every such batch was refused, then re-sent verbatim
+    with an array). The string has one reading, so it is parsed here — ints
+    stay ints so the frozen op matches the array spelling. Anything else
+    (other types, wrong arity, non-numbers) passes through untouched for the
+    caller's "two finite numbers" check to reject.
+    """
+    if not isinstance(pos, str):
+        return pos
+    m = _POS_STRING_RE.fullmatch(pos)
+    if m is None:
+        return pos
+    out: list[int | float] = []
+    for part in m.groups():
+        try:
+            out.append(int(part))
+        except ValueError:
+            try:
+                out.append(float(part))
+            except ValueError:
+                return pos
+    return out
+
+
 def add_node(
     workflow: dict,
     graph,
@@ -589,6 +619,7 @@ def add_node(
         # Decided at mint time so the position freezes into the op and replay
         # stays convergent (P1). Existing nodes are never moved.
         pos = layout.cascade_pos(workflow, size)
+    pos = _coerce_pos(pos)
     if (
         not isinstance(pos, (list, tuple))
         or len(pos) != 2
@@ -643,7 +674,43 @@ def set_widget(
                 return _set_widget_impl(workflow, graph, bound, widget, value, actor=actor, base_version=base_version)
             except ValueError:
                 pass
+        inserted = _inserted_node_id(workflow, node_id)
+        if inserted is not None:
+            # Unambiguous, so a failure past resolution (bad value, unknown
+            # widget) is the error to report, not "node 57 not found".
+            try:
+                return _set_widget_impl(
+                    workflow, graph, inserted, widget, value, actor=actor, base_version=base_version
+                )
+            except ValueError as e2:
+                raise _enrich_resolution_error(e2, workflow, graph, widget=widget) from e2
         raise _enrich_resolution_error(e, workflow, graph, widget=widget) from e
+
+
+def _inserted_node_id(workflow: dict, node_id: Any) -> str | None:
+    """The top-level ``insert:<op>:root:node:<id>`` node a bare template id means.
+
+    The doc host's ``insert_workflow`` remaps every template id, so a canvas
+    built by ``get_template`` has node ``insert:<op>:root:node:57`` and no node
+    ``57``. Agents still address ``57`` (the id the template showed). Prod/stg
+    comfy-agent traces (2026-09-23) show 5 turns refused this way, and each
+    re-sent the suggested ``insert:`` address. Returns the remapped id only
+    when EXACTLY ONE top-level node is the remap of ``node_id``. With none,
+    or with two inserts of the same template, it returns ``None`` and the
+    caller's not-found error (which lists every candidate) stands. Consulted
+    only after the literal id failed to resolve, so a real node ``57`` always
+    wins.
+    """
+    s = str(node_id)
+    if not s.lstrip("-").isdigit():
+        return None
+    pattern = re.compile(rf"insert:[^:/]+:root:node:{re.escape(s)}")
+    matches = [
+        n["id"]
+        for n in workflow.get("nodes") or []
+        if isinstance(n, dict) and isinstance(n.get("id"), str) and pattern.fullmatch(n["id"])
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _binding_address(workflow: dict, graph, node_id: Any) -> Any:
@@ -680,16 +747,41 @@ def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[A
     port = next((p for p in m.inputs if p.name == widget), None)
     if port is None:
         return value, None
-    canon = port.canonical_combo(value)
+    canon = _bool_combo_option(port, value)
+    what = "option"
+    if canon is None:
+        canon = port.canonical_combo(value)
+        what = "model"
     if canon is None or canon == value:
         return value, None
     return canon, {
         "code": "normalized_value",
         "field": widget,
-        "message": f"{value!r} is not an exact option; using the matching model {canon!r}",
+        "message": f"{value!r} is not an exact option; using the matching {what} {canon!r}",
         "from": str(value),
         "to": canon,
     }
+
+
+def _bool_combo_option(port, value: Any) -> str | None:
+    """The ``'true'``/``'false'`` option a JSON boolean means, or ``None``.
+
+    Some combos spell a toggle as the STRINGS ``'true'``/``'false'`` (e.g.
+    MeshyTextToModelNode's ``should_remesh`` dynamic combo), and agents write
+    ``true`` for them. Stg trace c9552f9f (2026-09-23) shows the batch refused
+    and then re-sent as ``"true"``. The value is mapped ONLY when the options
+    are exactly that pair, case-insensitively. Any other option set keeps the
+    bool and its error.
+    """
+    if not isinstance(value, bool):
+        return None
+    opts = list(port.enum_values or [])
+    if len(opts) != 2 or not all(isinstance(o, str) for o in opts):
+        return None
+    if sorted(o.lower() for o in opts) != ["false", "true"]:
+        return None
+    want = "true" if value else "false"
+    return next(o for o in opts if o.lower() == want)
 
 
 def _set_widget_impl(
@@ -1785,6 +1877,14 @@ def resolve_ref(ref: Any, aliases: dict[str, Any]) -> Any:
             return aliases[ref]
         if ref.lstrip("-").isdigit():
             return int(ref)
+        head, dot, rest = ref.partition(".")
+        if dot and head in aliases:
+            # `$kling.prompt` as a `node` (prod trace ce95cacf) — say what
+            # the field takes instead of "node kling.prompt not found".
+            raise ValueError(
+                f"node {'$' + ref!r} is an alias plus an input name; `node` takes the alias alone "
+                f"({'$' + head!r}) — put the input name ({rest!r}) in `widget`"
+            )
     return ref
 
 
@@ -1798,6 +1898,14 @@ def apply_specs(
     workflow: dict, graph, specs: list, *, actor: str = "cli", base_version: int = 0
 ) -> tuple[dict, list, dict]:
     """Apply edit specs to ``workflow`` in order. Returns (workflow, ops, aliases)."""
+    # Parse a string `at` up front: layout treats a pinned `at` as an obstacle
+    # and reads it as coordinates.
+    specs = [
+        {**spec, "at": _coerce_pos(spec["at"])}
+        if isinstance(spec, dict) and spec.get("op") == "add_node" and isinstance(spec.get("at"), str)
+        else spec
+        for spec in specs
+    ]
     specs = layout.assign_positions(workflow, graph, specs)
     # Snapshot the inventory BEFORE any op mutates the graph — on failure the
     # caller discards everything below, so this is what actually survives.
@@ -2814,7 +2922,7 @@ def _resolve_input_target(
     # the schema group resolution so a real widget name always outranks the
     # bare-element guess (``image0``) a group's vocabulary might also match.
     node_type = node.get("type", "")
-    if graph is not None and isinstance(slot, str) and slot in graph.widget_order(node_type):
+    if graph is not None and isinstance(slot, str) and slot in _linkable_widget_names(node, graph):
         return None, {"name": slot, "type": elem_type or "*", "widget": slot}
     if graph is not None and isinstance(slot, str):
         resolved = _resolve_schema_autogrow(node, graph, slot, elem_type)
@@ -2869,6 +2977,26 @@ def _resolve_input_target(
             )
     names = [i.get("name") for i in ins]
     raise ValueError(f"input {slot!r} not found on node {node.get('id')}; inputs: {names}")
+
+
+def _linkable_widget_names(node: dict, graph) -> list[str]:
+    """Widget names a connect may convert into a linked input on ``node``.
+
+    The value-independent :meth:`Graph.widget_order` lists only a dynamic
+    combo's selector. The sub-widgets of the CURRENT selection (``model.prompt``
+    on ByteDance2ReferenceNodeV2 / MinimaxHailuo03FirstLastFrameNode) are real
+    widget-backed inputs in the frontend and can take a link. Before this,
+    every connect to one failed "input 'model.prompt' not found … inputs: []"
+    (5 nightly + 1 prod comfy-agent traces, 2026-09-23). An option that is not
+    selected contributes nothing, as in the frontend.
+    """
+    from comfy_cli.cql import engine as _engine
+
+    node_type = node.get("type", "")
+    names = list(graph.widget_order(node_type))
+    positional = _engine._widgets_as_positional(node.get("widgets_values"), graph, node_type)
+    names += [n for n in graph.editable_widget_names(node_type, positional) if n not in names]
+    return names
 
 
 def _resolve_promoted_target(workflow: dict, node: dict, slot: Any, elem_type: str | None) -> dict | None:

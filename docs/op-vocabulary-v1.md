@@ -58,7 +58,8 @@ Spec form (batch input):
 ```
 
 `at` is optional (layout assigns a collision-free position at mint time; the
-position freezes into the op). `as` is optional and declares a batch-local alias
+position freezes into the op). A string `"x,y"` or `"[x, y]"` is parsed to the
+same two numbers; the minted `pos` is always numeric. `as` is optional and declares a batch-local alias
 (section 5). `mode` is optional (amendment v1.4): the litegraph execution mode
 the node is minted with — `0` always (default, omitted), `1` on-event, `2` mute,
 `3` on-trigger, `4` bypass. Mute/bypass change what executes, so a recipe that
@@ -112,9 +113,18 @@ Spec form:
 ```
 
 `node` is an int id, alias, `$alias`, or a subgraph-scoped id (section 6).
+The doc host's `insert_workflow` remaps template ids to
+`insert:<op>:root:node:<id>`. If a bare `<id>` names no node and exactly one
+top-level node has that remapped id, the bare id addresses that node, and
+the minted `node_id` is the full `insert:` id. If two inserts remapped the
+same id, the not-found error lists both.
 Minted op fields: `node_id`, `widget` (name, never index), `value`, `old`; for a
 subgraph interior write also `path` (resolved node path, list of strings) and
-`inner_widget`; optionally `warnings` (e.g. `normalized_value`).
+`inner_widget`; optionally `warnings` (e.g. `normalized_value`). A value that
+clearly means one option is rewritten at mint time and recorded with a
+`normalized_value` warning. Examples: a directory-prefixed model name, or a
+JSON boolean written to a combo whose only options are `'true'`/`'false'`
+(case-insensitive). The minted `value` is the real option.
 
 * Idempotency: `op_id` no-op.
 * Conflict: last-writer-wins per `(node, widget)` target (section 3).
