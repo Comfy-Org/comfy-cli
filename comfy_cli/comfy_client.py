@@ -66,7 +66,11 @@ def _redact(text: str) -> str:
 
 
 def _parse_retry_after(headers: Any) -> float | None:
-    """Parse a ``Retry-After`` header (seconds form) to a float, else None."""
+    """Parse a ``Retry-After`` header to seconds, else None.
+
+    Both RFC 9110 forms: delta-seconds, or an HTTP-date (converted to the
+    seconds remaining from now; a date already past is 0).
+    """
     if headers is None:
         return None
     value = headers.get("Retry-After")
@@ -75,7 +79,19 @@ def _parse_retry_after(headers: Any) -> float | None:
     try:
         return float(value)
     except (TypeError, ValueError):
+        pass
+    from datetime import datetime, timezone
+    from email.utils import parsedate_to_datetime
+
+    try:
+        when = parsedate_to_datetime(str(value))
+    except (TypeError, ValueError, IndexError):
         return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return float(max(0, round((when - datetime.now(timezone.utc)).total_seconds())))
 
 
 class HTTPError(Exception):

@@ -167,3 +167,22 @@ def test_other_statuses_stay_cloud_http_error(code: int):
     assert call["code"] == "cloud_http_error"
     assert call["details"]["status"] == code
     assert "retry_after" not in call["details"]
+
+
+def test_429_http_date_retry_after_becomes_seconds():
+    """Retry-After may be an HTTP-date instead of delta-seconds (RFC 9110 §10.2.3)."""
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    when = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=120), usegmt=True)
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error_with_headers(429, {"Retry-After": when}))
+
+    retry_after = renderer.calls[0]["details"]["retry_after"]
+    assert 100 <= retry_after <= 121
+
+
+def test_429_http_date_in_the_past_is_zero():
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error_with_headers(429, {"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}))
+    assert renderer.calls[0]["details"]["retry_after"] == 0
