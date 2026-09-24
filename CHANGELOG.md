@@ -44,21 +44,11 @@ history.
   download, from the deploy service's estimate. Under `--json` it is `estimate`
   in the output. A service that gives no estimate, or has it switched off,
   changes nothing and prints nothing.
-- `comfy build push` prints every warning a save returns, and `--release` cuts no
-  release while one says a deployment could not download a model link
-  (`build_release_held`); `--release-despite-warnings` cuts anyway.
 - `comfy build release delete RELEASE` deletes the named release, freeing the slot
   it held against the workspace's release limit. It confirms first (`--yes` skips
   the prompt, `build_release_delete_needs_confirm` refuses a caller that cannot
   answer one), and repeating the same id is safe: the builder answers success
   again for a release already deleted.
-- Three builder refusals an agent can act on now arrive under their own error
-  codes instead of the one `build_builder_error` envelope: `build_release_limit`
-  (the workspace holds as many releases as its limit allows),
-  `build_release_in_use` and `build_in_use` (a deployment still references the
-  release, or one of the build's releases). The builder's message is carried
-  whole up to 8 KiB, so the blocking deployment ids it names are no longer lost
-  to the 1000-byte cap on the raw body.
 - `comfy knowledge pick CAPABILITY --check-local` checks each `oss` pick's
   template against the local ComfyUI's model folders, the same check
   `comfy templates check` runs. A pick whose model files are missing gets
@@ -81,6 +71,27 @@ history.
   an unhealthy deployment as not ok (`deploy_status_terminal`, exit 1), with
   or without the watch, since it is billing without serving; `status` still
   reports it as recoverable.
+- **Breaking:** `comfy build push --release` cuts no release while a save warning
+  says a deployment could not download a model link: the build is saved, and the
+  push exits 1 with `build_release_held` where it used to cut regardless.
+  `--release-despite-warnings` cuts anyway. Every warning a save returns is now
+  printed.
+- **Breaking:** three builder refusals an agent can act on now arrive under their
+  own error codes instead of the one `build_builder_error` envelope:
+  `build_release_limit` (the workspace holds as many releases as its limit
+  allows), `build_release_in_use` and `build_in_use` (a deployment still
+  references the release, or one of the build's releases). A script that matched
+  `build_builder_error` for these now gets the new codes. The builder's message
+  is carried whole up to 8 KiB, so the blocking deployment ids it names are no
+  longer lost to the 1000-byte cap on the raw body.
+- **Breaking:** `comfy deploy refs compute` and the `comfy deploy up` pickers now
+  list every location the deploy service sells in, not only its datacenters, so
+  B200, H100 and H200, which are sold only under `us`, can be picked. The table
+  gains `level` and `parent` columns, the region picker names each location's
+  level, and `refs compute --json` now carries the wider rows too, so a script
+  reading its first row gets `anywhere` rather than a datacenter. The region
+  picker lists the broadest location first, so accepting its first choice now
+  creates at `anywhere`.
 
 ### Fixed
 
@@ -101,14 +112,6 @@ history.
   original absolute `pos` values untouched, which could land it thousands of
   pixels away as a disconnected cluster on canvas. The whole block moves by a
   single delta, so the template's own internal relative layout is preserved.
-- `comfy deploy refs compute` and the `comfy deploy up` pickers now list every
-  location the deploy service sells in, not only its datacenters, so B200, H100
-  and H200, which are sold only under `us`, can be picked. The table gains
-  `level` and `parent` columns, the region picker names each location's level,
-  and `refs compute --json` now carries the wider rows too, so a script reading
-  its first row gets `anywhere` rather than a datacenter. The region picker lists
-  the broadest location first, so accepting its first choice now creates at
-  `anywhere`.
 - A wait on a build or a deployment (`comfy build release create --watch`,
   `comfy build release logs --follow`, `comfy deploy up --watch`,
   `comfy deploy status --watch`) no longer fails once the sign-in token it
@@ -129,7 +132,7 @@ history.
   (`X-Goog-Credential`, `X-Goog-Signature`). The host and path are kept, so the
   failure still says what it failed to reach.
 - `comfy … | head` exits 0 again, and `--json` keeps stderr clean, on typer
-  >= 0.24. typer now runs on a vendored copy of click, so the broken-pipe guard
+  >= 0.26. typer now runs on a vendored copy of click, so the broken-pipe guard
   no longer recognized the stdout wrapper click installs on EPIPE and reported a
   genuine failure instead. The wrapper is now matched by class name and owning
   package, which also stops the deprecated `click.utils.PacifyFlushWrapper`
@@ -179,6 +182,10 @@ history.
 - **Breaking:** `import comfy_cli.distribution_api` no longer works. The
   deprecation shim is removed together with the surface it shimmed; import
   `comfy_cli.builder_api`.
+- **Breaking:** the `comfy_cli.builder_api` methods that still said version now
+  say release, with no aliases left behind: `cut_version` → `create_release`,
+  `get_version` → `get_release`, `get_version_logs` → `get_release_logs`, and
+  `get_version_manifest` → `get_release_manifest`.
 - **Breaking:** `comfy build` is restructured around a local `comfy-build.yaml`
   spec — `init`, `push`, `pull`, `status`, `ls`, `show`, `validate`, `update`,
   `delete`, plus `release`, `refs`, and `blob` subgroups. The `comfy distribution`
@@ -207,6 +214,14 @@ history.
 - **Breaking:** the global `--skip-prompt` now applies to `comfy build delete`,
   which previously ignored it. Combined with a non-agentic caller it accepts the
   delete confirmation, matching `build pull` and `build update`.
+- **Breaking:** `comfy generate <model>`, `comfy generate resume` and sync-mode
+  creates now emit the `envelope/1` contract in `--output json` / `ndjson` modes
+  instead of a bare partner blob: the partner payload is wrapped as
+  `data.result` (verbatim) with `data.saved` listing `--download` artifacts, so
+  a script that read the payload at the top level reads `data.result`. The
+  payload schema is registered as `comfy generate` → `generate_result.json` so
+  `comfy discover` advertises it. Pretty mode with a tail `--json` keeps the
+  legacy raw blob.
 - **Breaking:** packaging a local custom node is all-or-nothing. Anything under
   `custom_nodes/<node>/` that cannot be read now fails `init` / `update` /
   `status` / `push` / `pull` with one `build_spec_invalid` envelope naming the
@@ -294,13 +309,6 @@ history.
   (`createNodeMap(LoadImage): widgets_values has 2 entries but widget_order
   names only 1`) and `set-widget`/conversion read the values after such a
   slot one position off.
-- `comfy generate <model>`, `comfy generate resume` and sync-mode creates now
-  emit the `envelope/1` contract in `--output json` / `ndjson` modes instead
-  of a bare partner blob: the partner payload is wrapped as `data.result`
-  (verbatim) with `data.saved` listing `--download` artifacts, and the
-  payload schema is registered as `comfy generate` → `generate_result.json`
-  so `comfy discover` advertises it. Pretty mode with a tail `--json` keeps
-  the legacy raw blob.
 - `comfy build ls` and `comfy build release ls` show every row. The builder
   pages both reads, and the client took only the first page, so a workspace or
   a build past one page lost its tail — silently, with no error and nothing in
@@ -370,8 +378,8 @@ history.
   can no longer drift apart.
 - The builder client module is now `comfy_cli.builder_api` (was
   `comfy_cli.distribution_api`), and its methods say build and release
-  (`create_build`, `create_release`, `list_releases`, ...), matching the
-  builder's public API. The `distribution-definition/0` schema id is unchanged.
+  (`create_build`, `list_releases`, ...), matching the builder's public API.
+  The `distribution-definition/0` schema id is unchanged.
 - `comfy build --json` payloads carry the builder's vocabulary: `buildId`,
   `releaseId`, and `builds` and `releases` arrays. The retired `distributionId`,
   `versionId`, `distributions` and `versions` keys are emitted alongside them
