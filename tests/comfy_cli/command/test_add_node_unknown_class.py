@@ -87,13 +87,11 @@ def test_known_class_still_adds(patched_graph, tmp_path, capsys):
 
 @pytest.mark.parametrize("cls", ["Note", "MarkdownNote"])
 def test_note_refusal_hints_the_insert_workflow_route(patched_graph, tmp_path, capsys, cls):
-    """BE-17060. Ephemeral probe "Add exactly one Note node with the text hello"
-    (traces 050eee39…, 89e90ccd…, ca75643e…, f83727e9…, 401326900…): the agent
+    """Seen in agent tool telemetry: asked to add a Note, the agent
     called add_node {"class_type": "Note"}, read the hint "use a real node class;
     to annotate the graph, set a title/widget on an existing node instead", and
     told the user notes cannot be added. They can: an insert_workflow carrying
-    the note node (with an `id` and its text in widgets_values) lands it (traces
-    1417ac22…, 8a2f036e…). The hint must name that route, and the example it
+    the note node (with an `id` and its text in widgets_values) lands it. The hint must name that route, and the example it
     gives must itself be accepted by `workflow insert-workflow`."""
     env = _add(tmp_path, capsys, cls)
     assert env["ok"] is False
@@ -120,14 +118,14 @@ def test_non_note_ui_only_nodes_keep_their_hint(patched_graph, tmp_path, capsys)
 
 
 def test_set_widget_on_a_note_names_the_replace_route(patched_graph, tmp_path, capsys):
-    """BE-17060, stg trace 78bccd97…: the user said "the nodes are blank"; the
-    agent called set_widget {"address": "insert:ab44…:root:node:101.text"} on a
+    """Seen in agent tool telemetry: the
+    agent called set_widget {"address": "insert:cdcd…:root:node:101.text"} on a
     MarkdownNote and got "widget 'text' not found on MarkdownNote; available
     widgets: (none — all inputs are links)" — false (a note has no inputs) and
     no way forward. A note's text is not name-addressable (the catalog has no
     schema for it; the doc host stores it opaquely), so say that and name the
     route that works: delete the note and insert a replacement."""
-    note_id = "insert:ab442b93211fce241c5fd0f44a23a070:root:node:101"
+    note_id = "insert:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd:root:node:101"
     wf = _base_workflow()
     wf["nodes"].append(
         {"id": note_id, "type": "MarkdownNote", "pos": [0, 400], "inputs": [], "outputs": [], "widgets_values": [""]}
