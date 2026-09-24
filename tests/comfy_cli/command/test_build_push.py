@@ -70,6 +70,50 @@ def test_dry_run_is_signed_out_and_zero_http(workspace: Path, monkeypatch: pytes
     assert path.read_bytes() == before
 
 
+def test_a_dry_run_tells_a_person_what_it_would_upload(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    write_spec(workspace)
+    monkeypatch.setattr(build, "_builder_client", lambda *args, **kwargs: pytest.fail("constructed Builder client"))
+
+    # When
+    result = invoke_push(workspace, "--dry-run", agentic=False)
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert "2 files" in result.stdout
+    assert "to upload, 0 already held" in result.stdout
+    assert "nothing was sent" in result.stdout
+
+
+def test_a_dry_run_with_nothing_to_upload_says_so(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    write_spec(workspace, models=[], nodes=[])
+    monkeypatch.setattr(build, "_builder_client", lambda *args, **kwargs: pytest.fail("constructed Builder client"))
+
+    # When
+    result = invoke_push(workspace, "--dry-run", agentic=False)
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert "0 files" in result.stdout
+    assert "nothing was sent" in result.stdout
+
+
+def test_a_json_dry_run_prints_only_its_envelope(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    write_spec(workspace)
+    monkeypatch.setattr(build, "_builder_client", lambda *args, **kwargs: pytest.fail("constructed Builder client"))
+
+    # When
+    result = invoke_push(workspace, "--dry-run")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert len(lines) == 1, result.stdout
+    assert json.loads(lines[0])["data"]["dry_run"] is True
+
+
 def test_first_push_creates_instead_of_selecting_an_unknown_id(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

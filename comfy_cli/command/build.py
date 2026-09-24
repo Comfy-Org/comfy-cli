@@ -88,7 +88,7 @@ from comfy_cli.command.build_targets import (
     catalog_choices,
     parse_build_targets,
 )
-from comfy_cli.command.build_upload_progress import UploadProgressReporter
+from comfy_cli.command.build_upload_progress import UploadProgressReporter, plan_line
 from comfy_cli.command.build_validation import (
     lookup_public_model_sources,
     project_wire_definition,
@@ -1957,6 +1957,10 @@ def push_cmd(
         if reported:
             payload["skipped_symlinks"] = reported
         if dry_run:
+            # The envelope is the whole answer and prints nothing in pretty mode, so a
+            # person gets the real push's opening line and word that nothing moved.
+            renderer.info(plan_line(len(uploads), payload["upload_bytes"], already_held_count(preparation)))
+            renderer.info("--dry-run: nothing was sent.")
             renderer.emit(payload, command="build push", changed=False)
             return
         assert client is not None
