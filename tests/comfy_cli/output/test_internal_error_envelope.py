@@ -95,3 +95,41 @@ def test_a_handled_refusal_is_not_relabelled(workflow_file, object_info):
     )
     envelopes = [json.loads(ln) for ln in result.stdout.splitlines() if ln.strip().startswith("{")]
     assert [e["error"]["code"] for e in envelopes] == ["workflow_edit_invalid"], envelopes
+
+
+def test_the_envelope_carries_a_short_traceback_tail(monkeypatch, workflow_file, object_info):
+    monkeypatch.setattr(workflow_ops, "set_widget", _boom)
+    envelope = json.loads(_set_widget("--json", workflow_file, object_info).stdout.strip().splitlines()[-1])
+    frames = envelope["error"]["details"]["traceback"]
+    assert 1 <= len(frames) <= 3, frames
+    # file:line:func only, innermost last — no source text.
+    assert frames[-1].endswith(":_boom"), frames
+    assert all(f.count(":") >= 2 and "raise" not in f for f in frames), frames
+
+
+def test_the_message_is_capped_and_secrets_are_redacted(monkeypatch, workflow_file, object_info):
+    def leak(*_a, **_kw):
+        raise RuntimeError(
+            "GET https://api.comfy.org/x?api_key=sk-SECRET123&x=1 failed "
+            "Authorization: Bearer eyJSECRETTOKEN token=abc123secret " + "y" * 2000
+        )
+
+    monkeypatch.setattr(workflow_ops, "set_widget", leak)
+    err = json.loads(_set_widget("--json", workflow_file, object_info).stdout.strip().splitlines()[-1])["error"]
+    msg = err["message"]
+    assert len(msg) <= 520, len(msg)
+    for secret in ("sk-SECRET123", "eyJSECRETTOKEN", "abc123secret"):
+        assert secret not in json.dumps(err), err
+    assert "https://api.comfy.org/x" in msg, "keep the URL path, drop only the query"
+
+
+@pytest.mark.parametrize("exc_factory", [lambda: __import__("typer").Exit(0), lambda: __import__("click").Abort()])
+def test_click_control_flow_is_never_relabelled(monkeypatch, workflow_file, object_info, exc_factory):
+    """typer.Exit / Abort raised with NO prior envelope are control flow, not crashes."""
+
+    def raise_it(*_a, **_kw):
+        raise exc_factory()
+
+    monkeypatch.setattr(workflow_ops, "set_widget", raise_it)
+    result = _set_widget("--json", workflow_file, object_info)
+    assert "internal_error" not in result.stdout, result.stdout

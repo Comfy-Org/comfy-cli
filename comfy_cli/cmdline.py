@@ -1,6 +1,7 @@
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import webbrowser
@@ -150,13 +151,57 @@ def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | Non
         command = getattr(renderer, "command", None) or _command_path(ctx)
         renderer.error(
             code="internal_error",
-            message=f"{type(error).__name__}: {error}",
-            details={"exception": type(error).__name__, "command": f"comfy {command}".strip()},
+            message=_internal_error_message(error),
+            details={
+                "exception": type(error).__name__,
+                "command": f"comfy {command}".strip(),
+                "traceback": _traceback_tail(error),
+            },
             exit_code=1,
             command=command,
         )
     except Exception:  # noqa: BLE001 — never mask the original crash
         pass
+
+
+#: The envelope goes to stdout, i.e. into a model's context, where the raw
+#: traceback on stderr never went. So the exception text is capped and scrubbed
+#: of the secret shapes an exception message plausibly carries: a URL query
+#: string (`?api_key=...`), a bearer token, `key=value` / `key: value` token
+#: pairs, and `user:pass@` userinfo.
+_INTERNAL_ERROR_MESSAGE_CAP = 500
+_SECRET_PATTERNS = (
+    (re.compile(r"(https?://[^\s?#'\"]+)\?[^\s'\"]*", re.IGNORECASE), r"\1?***"),
+    (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]+", re.IGNORECASE), r"\1***"),
+    (
+        re.compile(
+            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|authorization)"
+            r"[\"']?\s*[:=]\s*[\"']?)(?!Bearer\b)[^\s&\"',;]+",
+            re.IGNORECASE,
+        ),
+        r"\1***",
+    ),
+    (re.compile(r"(://)[^\s/@'\"]+@"), r"\1***@"),
+)
+
+
+def _internal_error_message(error: BaseException) -> str:
+    text = f"{type(error).__name__}: {error}"
+    for pattern, repl in _SECRET_PATTERNS:
+        text = pattern.sub(repl, text)
+    if len(text) > _INTERNAL_ERROR_MESSAGE_CAP:
+        text = text[: _INTERNAL_ERROR_MESSAGE_CAP - 1] + "…"
+    return text
+
+
+def _traceback_tail(error: BaseException, frames: int = 3) -> list[str]:
+    """The innermost ``frames`` frames as ``file:line:func`` — enough to locate
+    the crash from the envelope alone, with no source text (which can hold
+    literals the caller should not see)."""
+    import traceback
+
+    tail = traceback.extract_tb(error.__traceback__)[-frames:]
+    return [f"{os.path.basename(f.filename)}:{f.lineno}:{f.name}" for f in tail]
 
 
 def _is_click_control_flow(error: BaseException) -> bool:
