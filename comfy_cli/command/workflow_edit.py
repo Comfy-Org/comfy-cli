@@ -307,7 +307,7 @@ def set_widget_cmd(
 
 
 # ---------------------------------------------------------------------------
-# set-node-field
+# set-node-field (PROPOSED, op-vocabulary-v1 amendment v1.6 — not yet ratified)
 # ---------------------------------------------------------------------------
 
 
@@ -319,13 +319,38 @@ def set_node_field_cmd(
         str,
         typer.Argument(help="Field: `title`, `mode`, `flags.collapsed` or `flags.pinned`."),
     ],
-    value: Annotated[str, typer.Argument(help="New value (parsed as JSON, else literal string).")],
+    value: Annotated[
+        str | None,
+        typer.Argument(
+            show_default=False,
+            help="New value (parsed as JSON, else literal string). Omit and pass --clear to clear the field.",
+        ),
+    ] = None,
+    clear: Annotated[
+        bool,
+        typer.Option("--clear", show_default=False, help="Clear the field back to absent."),
+    ] = False,
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
 ):
+    """Set, or clear, one durable node field; emits a ``set_node_field`` op.
+
+    PROPOSED: ``set_node_field`` is not yet part of the ratified
+    docs/op-vocabulary-v1.md contract — see that document's §1.8. It
+    supersedes the withdrawn, title-only ``set_title`` proposal and mirrors
+    comfy-multi-player#235's merged ``set_node_field`` CRDT op.
+    """
     renderer = get_renderer()
     renderer.command = "workflow set-node-field"
+    if clear == (value is not None):
+        renderer.error(
+            code="workflow_edit_invalid",
+            message="pass exactly one of VALUE or --clear",
+            hint='`comfy workflow set-node-field <file> <node_id> <field> "value"` or '
+            "`comfy workflow set-node-field <file> <node_id> <field> --clear`",
+        )
+        raise typer.Exit(code=1)
     p, workflow = _load_workflow_or_fail(renderer, file)
     # Coerce a numeric id the same way every sibling command does (`_split_addr`
     # for set-widget/connect, delete/delete-nodes' own coercion) — otherwise
@@ -333,11 +358,9 @@ def set_node_field_cmd(
     # else, splitting one node across two LWW registers for a consumer that
     # doesn't normalize ids the way this module's `_find_by_str` does.
     node_id: Any = int(node) if node.lstrip("-").isdigit() else node
-    # No catalog needed: the writable fields are graph-independent node state,
-    # unlike a widget name, which must be checked against the node's class.
     try:
         workflow, op = workflow_ops.set_node_field(
-            workflow, node_id, field, _parse_value(value), actor=actor, base_version=base_version
+            workflow, node_id, field, None if clear else _parse_value(value), actor=actor, base_version=base_version
         )
     except ValueError as e:
         _emit_edit_error(

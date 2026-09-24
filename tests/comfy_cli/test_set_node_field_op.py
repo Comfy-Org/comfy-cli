@@ -160,6 +160,42 @@ class TestSetNodeFieldCommand:
         assert env["ok"] is False
         assert json.loads(wf.read_text(encoding="utf-8")) == before
 
+    def test_clear_flag_clears_the_field(self, tmp_path: Path, capsys):
+        """`--clear` is the CLI's way to write `value: null` — the field
+        returns to absent the way workflow JSON round-trips it."""
+        wf = tmp_path / "wf_clear.json"
+        before = _populated()
+        before["nodes"][0]["flags"]["collapsed"] = True
+        wf.write_text(json.dumps(before), encoding="utf-8")
+
+        env = _run(["set-node-field", str(wf), "1", "flags.collapsed", "--clear"], capsys)
+
+        assert env["ok"] is True, env
+        op = env["data"]["op"]
+        assert op["value"] is None
+        node = json.loads(wf.read_text(encoding="utf-8"))["nodes"][0]
+        assert "collapsed" not in node["flags"]
+
+    def test_rejects_neither_value_nor_clear(self, tmp_path: Path, capsys):
+        wf = tmp_path / "wf_neither.json"
+        before = _populated()
+        wf.write_text(json.dumps(before), encoding="utf-8")
+
+        env = _run(["set-node-field", str(wf), "1", "title"], capsys)
+
+        assert env["ok"] is False
+        assert json.loads(wf.read_text(encoding="utf-8")) == before
+
+    def test_rejects_both_value_and_clear(self, tmp_path: Path, capsys):
+        wf = tmp_path / "wf_both.json"
+        before = _populated()
+        wf.write_text(json.dumps(before), encoding="utf-8")
+
+        env = _run(["set-node-field", str(wf), "1", "title", "New Name", "--clear"], capsys)
+
+        assert env["ok"] is False
+        assert json.loads(wf.read_text(encoding="utf-8")) == before
+
 
 class TestSetNodeFieldReplay:
     def test_apply_op_replays_the_op_idempotently(self):

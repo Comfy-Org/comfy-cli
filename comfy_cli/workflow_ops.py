@@ -92,6 +92,8 @@ def _new_op(kind: str, actor: str, base_version: int, **fields: Any) -> dict[str
 # ---------------------------------------------------------------------------
 
 #: Every op kind in the v1 vocabulary, including defined-but-deferred kinds.
+#: ``set_node_field`` (amendment v1.6) is PROPOSED, not yet ratified — see
+#: docs/op-vocabulary-v1.md §1.8 for its status.
 FROZEN_OPS: tuple[str, ...] = (
     "add_node",
     "connect",
@@ -103,10 +105,10 @@ FROZEN_OPS: tuple[str, ...] = (
     "insert_workflow",
 )
 
-#: The node fields ``set_node_field`` may write, as a CLOSED set. Everything
-#: outside it either has an op of its own (``widgets_values`` is
+#: The node fields ``set_node_field`` may write, as a CLOSED set (§1.8).
+#: Everything outside it either has an op of its own (``widgets_values`` is
 #: ``set_widget``'s; ``inputs``/``outputs`` belong to ``connect``) or is node
-#: identity (``id``, ``type``) that only ``add_node``/``delete_node`` move.
+#: identity (``id``, ``type``) that only ``add_node``/``delete_node`` may move.
 #: ``flags`` as a whole is excluded too: a whole-object write would reintroduce
 #: the clobber this op exists to avoid, so each flag is its own register.
 WRITABLE_NODE_FIELDS: tuple[str, ...] = ("title", "mode", "flags.collapsed", "flags.pinned")
@@ -1213,6 +1215,69 @@ def _promoted_widget_error(workflow: dict, node: dict, slot: Any) -> ValueError 
     )
 
 
+def set_node_field(
+    workflow: dict,
+    node_id: Any,
+    field: str,
+    value: Any,
+    *,
+    actor: str = "cli",
+    base_version: int = 0,
+) -> tuple[dict, dict]:
+    """Write one durable, per-node scalar field — ``title``, ``mode``,
+    ``flags.collapsed`` or ``flags.pinned`` (§1.8, PROPOSED amendment v1.6,
+    superseding the withdrawn ``set_title`` proposal).
+
+    An ``add_node`` upsert could carry the same change, but only by replacing
+    the *whole* node: it rewrites the node's widget values and resets its
+    widget stamps, so a field change concurrent with a ``set_widget`` write on
+    that node discards the write. ``set_node_field`` instead claims one LWW
+    register per ``(node_id, field)`` (``_write_target``'s ``"node_field"``
+    namespace) — a title write and a flag write on the same node, or two
+    writers of two different flags, never contend.
+
+    ``field`` must be one of :data:`WRITABLE_NODE_FIELDS`. ``value`` must
+    match that field's type (``str`` for ``title``, ``int`` for ``mode``,
+    ``bool`` for the two ``flags.*`` fields — ``bool`` is checked before
+    ``int`` since ``bool`` is an ``int`` subclass in Python), or be ``None``
+    to clear the field, so it returns to absent the way workflow JSON
+    round-trips an unset flag. ``mode`` is additionally range-checked against
+    :data:`_VALID_NODE_MODES` (the same litegraph 0-4 enum ``add_node``
+    enforces), so an out-of-range value like ``-1`` is rejected here instead
+    of failing downstream at the applier.
+
+    Unlike ``set_widget``, no catalog is involved: none of these fields is a
+    catalogued widget name, so this never touches ``widgets_values``.
+
+    This mirrors comfy-multi-player#235's merged ``set_node_field`` CRDT op
+    (superseding that repo's earlier, single-field ``set_title``/ADR-032
+    prototype), with one deliberate difference: comfy-multi-player's register
+    is scoped by an optional ``node_incarnation`` because its Y.Doc can, in
+    principle, see a node id reused after a tombstoned delete. comfy-cli has
+    no equivalent field and does not need one — node ids here are minted by
+    ``mint_id()`` as leaderless random 53-bit integers and are never reused
+    (§6, §1.5's resurrection-hazard note), so a bare ``("node_field", node_id,
+    field)`` register is already collision-free.
+
+    There is no interior/subgraph-promoted variant in this amendment: the
+    write is top-level only, mirroring comfy-multi-player's own scope.
+    """
+    if field not in WRITABLE_NODE_FIELDS:
+        raise ValueError(
+            f"malformed_op: {field!r} is not a writable node field; expected one of {', '.join(WRITABLE_NODE_FIELDS)}"
+        )
+    # Validated identically at mint and at replay (`_apply_set_node_field`) —
+    # a peer-authored or replayed op gets no less scrutiny than a freshly
+    # minted one.
+    _validate_node_field_value(field, value)
+    # String comparison (amendment v1.2): ids are legitimately either JSON
+    # type, and the CLI hands this one straight off the command line.
+    if _find_by_str(workflow, node_id) is None:
+        raise ValueError(f"node {node_id} not found in workflow")
+    op = _new_op("set_node_field", actor, base_version, node_id=node_id, field=field, value=value)
+    return apply_op(workflow, op, None), op
+
+
 def connect(
     workflow: dict,
     graph,
@@ -1526,37 +1591,6 @@ def insert_workflow(
     # cluster on canvas; IDs and internal relative layout are untouched.
     layout.rebase_template(workflow.get("nodes") or [], inserted)
     return workflow, _new_op("insert_workflow", actor, base_version, workflow=inserted)
-
-
-def set_node_field(
-    workflow: dict,
-    node_id: Any,
-    field: str,
-    value: Any,
-    *,
-    actor: str = "cli",
-    base_version: int = 0,
-) -> tuple[dict, dict]:
-    """Write one durable node field, claiming one LWW register per
-    ``(node, field)``.
-
-    An ``add_node`` upsert could carry the same change, but only by replacing
-    the whole node — it rewrites the node's widget values and clears its
-    widget stamps, so a field change concurrent with a widget write on that
-    node discards the write. ``value`` of ``None`` deletes the field, so a
-    flag returns to absent the way workflow JSON round-trips it.
-    """
-    if field not in WRITABLE_NODE_FIELDS:
-        raise ValueError(
-            f"malformed_op: {field!r} is not a writable node field; expected one of {', '.join(WRITABLE_NODE_FIELDS)}"
-        )
-    _validate_node_field_value(field, value)
-    # String comparison (amendment v1.2): ids are legitimately either JSON
-    # type, and the CLI hands this one straight off the command line.
-    if _find_by_str(workflow, node_id) is None:
-        raise ValueError(f"node {node_id} not found in workflow")
-    op = _new_op("set_node_field", actor, base_version, node_id=node_id, field=field, value=value)
-    return apply_op(workflow, op, None), op
 
 
 def delete_node(
@@ -2588,6 +2622,11 @@ def _write_target(op: dict) -> tuple:
         if op.get("path"):
             return ("widget", tuple(str(s) for s in op["path"]), op["inner_widget"])
         return ("widget", str(op["node_id"]), op["widget"])
+    if kind == "set_node_field":
+        # One register per (node, field) — never the widget one (§1.8): a
+        # title write and a flag write on one node never contend, and
+        # neither collides with a same-named widget's register.
+        return ("node_field", str(op["node_id"]), op["field"])
     if kind in ("add_node", "delete_node"):
         return ("node", str(op["node_id"]))
     if kind == "set_node_field":

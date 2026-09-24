@@ -2000,7 +2000,8 @@ app.command("connect", help="Wire an output slot to an input slot; emits a conne
 app.command("set-widget", help="Set a widget by name (`<id>.<widget>`); emits a set_widget op.")(_wedit.set_widget_cmd)
 app.command(
     "set-node-field",
-    help="Set a durable node field (title/mode/flags.collapsed/flags.pinned); emits a set_node_field op.",
+    help="Set or clear a durable node field (title/mode/flags.collapsed/flags.pinned); "
+    "emits a set_node_field op (PROPOSED, op-vocabulary-v1 §1.8).",
 )(_wedit.set_node_field_cmd)
 app.command("delete-node", help="Delete a node and its links; emits a delete_node op.")(_wedit.delete_cmd)
 app.command(

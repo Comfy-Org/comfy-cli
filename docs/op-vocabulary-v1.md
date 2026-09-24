@@ -17,15 +17,16 @@ citation must point at a commit on that branch.
 
 ## 1. Frozen op kinds
 
-Eight kinds. No other kind is valid in v1: `apply_op` rejects an unknown kind with
-`ValueError("unknown op ...")` — it never ignores one.
+Eight kinds as of amendment v1.6 (§15, below) — `set_node_field` is the
+eighth and is **PROPOSED**, not yet ratified; see §1.8. `apply_op` rejects an
+unknown kind with `ValueError("unknown op ...")` — it never ignores one.
 
 | Kind | Batchable | Standalone command | Summary |
 |------|-----------|--------------------|---------|
 | `add_node` | yes | `comfy workflow add-node` | Mint and insert one node |
 | `connect` | yes | `comfy workflow connect` | Wire one output slot to one input slot |
 | `set_widget` | yes | `comfy workflow set-widget` | Set one widget value by name |
-| `set_node_field` | yes | `comfy workflow set-node-field` | Set one durable node field (`title`, `mode`, `flags.collapsed`, `flags.pinned`) |
+| `set_node_field` | yes | `comfy workflow set-node-field` | Set or clear one node's durable field — `title`, `mode`, `flags.collapsed`, `flags.pinned` (§1.8, PROPOSED) |
 | `delete_node` | yes | `comfy workflow delete` | Remove one node and its incident links |
 | `clear` | no | `comfy workflow clear` | Remove every node, link, and group |
 | `reset_doc` | no | `comfy workflow reset-doc --confirm` | Reset the whole document to an empty baseline |
@@ -217,54 +218,83 @@ or write a mutated workflow document. Per the contract decision recorded in the 
 field as `malformed_op`. The kind is not batchable and a spec batch rejects it as
 `workflow_insert_workflow_not_batchable`.
 
-### 1.8 `set_node_field` (amendment v1.6)
+### 1.8 `set_node_field` — PROPOSED (amendment v1.6, not yet ratified)
 
-Spec form:
+Command: `comfy workflow set-node-field <file> <node_id> <field> <value>` or
+`... --clear`. Spec form (batch input):
 
 ```json
-{"op": "set_node_field", "node": "$sampler", "field": "flags.collapsed", "value": true}
+{"op": "set_node_field", "node": "$sampler", "field": "title", "value": "My Sampler"}
 ```
 
-`node` is an int id, alias, `$alias`, or a subgraph-scoped id (section 6) — the
-canonical spec key, exactly like `set_widget`'s `node`; there is no `node_id`
-spec alias. `field` is one of the CLOSED set in `WRITABLE_NODE_FIELDS`:
-`title`, `mode`, `flags.collapsed`, `flags.pinned`. Everything outside that set
-either has an op of its own (`widgets_values` is `set_widget`'s; `inputs` /
-`outputs` belong to `connect`) or is node identity (`id`, `type`) that only
-`add_node` / `delete_node` may move; `flags` as a whole is excluded too, since a
-whole-object write would reintroduce exactly the clobber this op exists to
-avoid — each flag is its own register. Minted op fields: `node_id`, `field`,
-`value`.
+`node` resolves exactly like `set_widget`'s (int id, alias, or `$alias`).
+`field` is one of the closed set `WRITABLE_NODE_FIELDS`: `title`, `mode`,
+`flags.collapsed`, `flags.pinned`. `value` matches that field's type (`title`
+is a string, `mode` an int, the two `flags.*` fields booleans), or is `null`
+to clear the field back to absent — so a flag returns to absent the way
+workflow JSON round-trips it. Minted op fields beyond the envelope:
+`node_id`, `field`, `value`.
 
-`value` of `null` clears the field — the delete-wins sentinel, so a flag
-returns to absent the way workflow JSON round-trips it. A null-delete against a
-node whose field is already absent (or, for `flags.*`, whose `flags` container
-is missing or not an object) is a true no-op: it never materializes an empty
-`flags: {}`, because two replicas that did/didn't see the op would otherwise
-diverge. A non-`null` value is validated against its field's shape at BOTH
-mint time and replay (`_validate_node_field_value`): `title` must be a string,
-`mode` a non-boolean int in `{0, 1, 2, 3, 4}` — the same set `add_node`'s
-`mode` enforces — and `flags.collapsed` / `flags.pinned` a boolean. A value of
-the wrong shape is rejected as `malformed_op` rather than reaching the
-document, where it could break `workflow_to_api`'s exact
-`mode in (_MODE_MUTED, _MODE_BYPASS)` check or make `ls-nodes` / `print` raise
-`TypeError: unhashable type`. Validating at replay too (not only at mint) means
-a peer-authored or replayed op that skipped the CLI's own check is rejected
-identically on every replica, regardless of whether it would have won the LWW
-gate below.
+* Idempotency: `op_id` no-op, exactly like `set_widget`.
+* Conflict: last-writer-wins per `(node_id, field)`, on its own register —
+  `("node_field", node_id, field)` — never the `("widget", node_id, widget)`
+  one, since none of the four writable fields is a catalogued widget name or
+  carries a `widget_order` position. One register per field means a `title`
+  write and a `flags.collapsed` write on the same node never contend, and
+  neither contends with a `set_widget` write on that node. Two writers of the
+  IDENTICAL value to the same `(node, field)` target are not escalated by
+  `detect_conflict` — the equal-value carve-out `set_widget` already had is
+  extended to `set_node_field`, since both are plain LWW registers. See §3
+  and §1.8.1 below.
+* Invalid: `field` outside the closed set is rejected at mint time; a
+  non-`null` `value` that doesn't match that field's type (`title` a string,
+  `mode` a non-boolean int in `{0, 1, 2, 3, 4}`, `flags.collapsed` /
+  `flags.pinned` a boolean) is rejected as `malformed_op` at BOTH mint time
+  and replay (`_validate_node_field_value`) — a peer-authored or replayed op
+  that skipped the CLI's own check gets no less scrutiny than a freshly
+  minted one. A missing node is rejected at mint time (mirrors `set_widget`'s
+  not-found handling), and at replay a since-deleted target is a no-op
+  (delete wins), same as every other write. A `null`-delete against a node
+  whose `flags` container is missing or not an object is also a true no-op —
+  it never materializes an empty `flags: {}`, which would otherwise make
+  replicas that did/didn't see the op diverge.
+* No catalog is required to mint or apply this op.
+* Why the field list is closed: everything outside it either has an op of
+  its own (`widgets_values` is `set_widget`'s; `inputs`/`outputs` belong to
+  `connect`) or is node identity (`id`, `type`) that only
+  `add_node`/`delete_node` may move. `flags` as a whole is excluded too — a
+  whole-object write would reintroduce exactly the clobber this op exists to
+  avoid.
+* No interior or subgraph-promoted variant exists in this amendment. A
+  subgraph-interior node's fields are out of scope; if that need is
+  confirmed, it should follow `set_widget`'s interior shape (`path` + a
+  field-equivalent of `inner_widget`) rather than growing a distinct
+  mechanism.
 
-* Idempotency: `op_id` no-op.
-* Conflict: last-writer-wins per `("node_field", node_id, field)` target
-  (section 3, gated targets) — one register per `(node, field)`, so a title
-  write and a flags write on one node never contend, and neither contends with
-  that node's widget registers. Two writers of the identical value to the same
-  `(node, field)` target are not escalated by `detect_conflict`: the
-  equal-value carve-out `set_widget` already had is extended to
-  `set_node_field`, since both are plain LWW registers.
-* Invalid: a `field` outside `WRITABLE_NODE_FIELDS`, or a non-null `value` of
-  the wrong shape for its field, is rejected at both mint time and replay
-  (`malformed_op`); a missing node is a no-op (delete wins).
-* Scope: top-level nodes only; a subgraph-interior node is out of scope for v1.6.
+#### 1.8.1 Relationship to comfy-multi-player's `set_node_field` (#235)
+
+comfy-multi-player PR #235 (merged to that repo's `main`, commit
+`28d2e6166867f16bc291f2ae60d7f4a6a0c0c9f7`) landed the generalized
+`set_node_field` op in its CRDT applier — superseding that repo's earlier,
+title-only `set_title` prototype (PR #232 / ADR-032) — because the
+title-stomp bug it originally closed generalized cleanly to the same four
+fields once `flags.collapsed`/`flags.pinned` sync came up against the same
+whole-node-upsert clobber, and a client-side sync fix should not wait on this
+document's own release cycle. This amendment brings comfy-cli's local op
+vocabulary into alignment with that merged upstream shape rather than the
+withdrawn single-field one.
+
+comfy-multi-player's op additionally carries an optional
+`node_incarnation` field — its Y.Doc can, in principle, see a node id reused
+after a tombstoned delete, so its LWW register is scoped by `(node_id,
+node_incarnation, field)`. **comfy-cli has no equivalent field and does not
+need one**: node ids here are minted by `mint_id()` as leaderless random
+53-bit integers and are never reused (§6, §1.5's resurrection-hazard note),
+so a bare `("node_field", node_id, field)` register is already
+collision-free. A future reconciliation pass (once this amendment is
+ratified) should confirm comfy-multi-player's applier accepts an op that
+omits `node_incarnation` rather than requiring one only because its own
+local model can need it.
 
 ## 2. Idempotency and identity
 
@@ -918,20 +948,90 @@ subgraph-input and boundary-link ids the repair mints, derived by SHA-256 from
 `(instance path, source node, widget)` so replay anywhere is byte-identical.
 The pinned contract text in §8.7 states the full rule.
 
-## 15. Amendment v1.6 — 2026-09-23 (`set_node_field`: durable per-field node writes)
+## 15. Amendment v1.6 — 2026-09-22 (`set_node_field`: a generalized node-field op — PROPOSED, pending ratification)
 
-**A new frozen kind, `set_node_field`** (§1.8): one LWW register per
-`(node, field)`, writing `title`, `mode`, `flags.collapsed`, or
-`flags.pinned` — the closed set in `WRITABLE_NODE_FIELDS`. The gap it closes:
-the only existing way to express "this node's title/mode/flag changed" was an
-`add_node` upsert, which replaces the WHOLE node — it rewrites the node's
-`widgets_values` and clears its widget stamps, so a field write concurrent
-with a `set_widget` on the same node silently discarded the widget write.
-`FROZEN_OPS` and `BATCHABLE_OPS` both list it; the frozen-kinds table (§1) now
-has eight rows, not seven.
+> **Status of this amendment: PROPOSED.** Every prior amendment in this
+> document (§§10–14) recorded a change already decided and shipped. This one
+> is different in kind: it adds a new frozen op kind, which §9 says requires
+> updating `FROZEN_OPS`/`BATCHABLE_OPS`, the dispatch tables, and this
+> document together — and this commit does exactly that so the contract test
+> (`tests/comfy_cli/test_op_vocabulary_contract.py`) stays green — but adding
+> a kind to a document three other repos pin BY SHA (see the top of this
+> document) is a decision for
+> this repo's maintainers, not something a single PR can ratify by merging.
+> Treat `set_node_field` as implemented-and-tested-but-not-yet-blessed until a
+> maintainer says otherwise; a downstream repo should not move its pin to
+> this SHA on the strength of this amendment alone.
+>
+> **This amendment supersedes the earlier, withdrawn `set_title` proposal**
+> that briefly occupied this same §1.8/§15 slot. That proposal covered only
+> `title`; it is replaced outright, not layered on top of, by the
+> generalized op below — see "Supersedes `set_title`" below for why.
 
-The kind landed without three things a real freeze needs, found by adversarial
-review rather than by testing against a live consumer:
+### What changed and why
+
+A node's `title`, `mode` and `flags` enter a workflow document only as
+passthrough fields on `add_node`'s initial `node` snapshot (§1.1). No op
+wrote any of them afterward: a rename, a mute/bypass, a collapse or a pin
+made after the node already existed — by hand, by a script, or by the in-app
+agent — produced no replayable op, so a merge consumer had nothing to
+receive and a concurrent edit from two sources resolved by accident (arrival
+order in whatever process last touched the file) rather than by any of this
+document's convergence guarantees. §1.8 adds `set_node_field` to close that
+gap for all four fields at once, following `set_widget`'s existing top-level
+shape (§8.1's stamp comparison, §2's idempotency, the delete-wins rule in
+§3) rather than introducing new machinery — one LWW register per
+`(node_id, field)` so none of the four, nor a `set_widget` write on the same
+node, ever contend with each other.
+
+### Supersedes `set_title`
+
+An earlier revision of this amendment proposed a title-only `set_title` op.
+It is withdrawn in favor of `set_node_field` because the identical
+whole-node-upsert clobber that motivated a title op turned out to apply
+equally to `mode` (mute/bypass) and the two `flags.*` fields once
+ComfyUI_frontend needed to sync `flags.collapsed`/`flags.pinned` out of the
+canvas — the same gap, one field wider each time. Rather than land three more
+single-field ops in sequence, this revision generalizes to the closed field
+list up front, matching the shape comfy-multi-player's own upstream PR
+converged on for the same reason (see below). No comfy-cli release ever
+shipped `set_title`; this is a same-PR replacement, not a deprecation.
+
+### Prior art: comfy-multi-player PR #235 (merged)
+
+comfy-multi-player PR #235 (merged to that repo's `main`, commit
+`28d2e6166867f16bc291f2ae60d7f4a6a0c0c9f7`) generalized its own earlier,
+title-only prototype (PR #232 / ADR-032) into the same `set_node_field` shape
+this amendment defines, ahead of this document, because the fix was scoped
+and needed there and a client-side sync fix should not wait on this
+document's own release cycle. This document's §1.8 defines the shape
+comfy-cli now implements; §1.8.1 records the one payload difference
+(`node_incarnation`) and why comfy-cli's model does not need it. Ratifying
+this amendment is what lets comfy-multi-player cite a real upstream
+definition for its already-merged op instead of the two living in permanent
+disagreement.
+
+### Scope of this change
+
+* `FROZEN_OPS` and `BATCHABLE_OPS` gain `set_node_field`
+  (`comfy_cli/workflow_ops.py`); `WRITABLE_NODE_FIELDS` is the closed field
+  list (`title`, `mode`, `flags.collapsed`, `flags.pinned`).
+* `apply_op` dispatches it via `_apply_set_node_field`; `apply_specs`
+  dispatches the `{"op": "set_node_field", "node": ..., "field": ...,
+  "value": ...}` spec form via the new `set_node_field()` primitive.
+* `_write_target` gains the `("node_field", node_id, field)` register
+  (§1.8) — one register per field, not per node.
+* `comfy workflow set-node-field <file> <node_id> <field> <value>` (or
+  `--clear`) is the new standalone/batch-authoring command, mirroring
+  `set-widget`'s CLI shape.
+* No change to any existing kind's semantics, to `DEFERRED_OPS`, or to
+  §§2–8.8 beyond the new §1.8 addition and this section.
+
+### Hardening — 2026-09-23, adversarial review
+
+Independent adversarial review (rather than testing against a live consumer)
+found the kind landed without three things a real freeze needs, plus two
+apply-time robustness bugs, both since fixed and folded into §1.8 above:
 
 * **Value validation was missing entirely.** The op validated the field NAME
   against `WRITABLE_NODE_FIELDS` but never the VALUE, at mint time or replay —
@@ -940,61 +1040,45 @@ review rather than by testing against a live consumer:
   and break `workflow_to_api`'s exact `mode in (_MODE_MUTED, _MODE_BYPASS)`
   check, or make `ls-nodes`/`print` raise `TypeError: unhashable type`.
   `_validate_node_field_value` now runs at both mint (`set_node_field`) and
-  replay (`_apply_set_node_field`), documented in §1.8. Because every writable
-  field is now a validated scalar (`str`, a five-value int, or `bool`) or
-  `null`, a container value can never reach `_apply_set_node_field`'s write —
-  there is no whole-object case left for that handler to deep-copy the way
-  `_apply_add_node` deep-copies `op["node"]`.
-* **§3's gated-target list didn't mention it.** `_write_target` already
-  returned `("node_field", node_id, field)` for the kind, but §3's prose only
-  named the `set_widget` rows and the connect-embedded registers. §3 now lists
-  it explicitly, and the "invalid / inapplicable ops" row now names
-  `set_node_field`'s `malformed_op` rejection alongside `set_widget`'s.
+  replay (`_apply_set_node_field`).
 * **The equal-value carve-out excluded it.** `detect_conflict` skips
   escalating two independent writes of the IDENTICAL value for `set_widget`
   (so two actors setting the same value don't get an unnecessary ask-to-merge)
   but gated that carve-out on both ops being `set_widget`. `set_node_field` is
   the same kind of plain LWW register — the carve-out now covers both.
-
-**Two apply-time robustness bugs, both in `_apply_set_node_field`**, found the
-same way:
-
-* `node.setdefault(head, {})` assumed an existing `flags` was dict-shaped, but
-  the schema does not forbid `flags: null` or any other shape — that node
-  raised a raw `TypeError`/`AttributeError` that escaped the handler's
-  `ValueError`/`KeyError` envelope wrapping and corrupted replay on any replica
-  holding such a document. It now coerces a non-dict container to `{}` only
-  when there is a real (non-null) write to make.
+* **§3's gated-target list didn't mention it.** `_write_target` already
+  returned `("node_field", node_id, field)` for the kind, but §3's prose only
+  named the `set_widget` rows and the connect-embedded registers; it now lists
+  `set_node_field` explicitly.
+* `node.setdefault(head, {})` in `_apply_set_node_field` assumed an existing
+  `flags` was dict-shaped, but the schema does not forbid `flags: null` or any
+  other shape — that node raised a raw `TypeError`/`AttributeError` that
+  escaped the handler's `ValueError`/`KeyError` envelope wrapping and corrupted
+  replay on any replica holding such a document. It now coerces a non-dict
+  container to `{}` only when there is a real (non-null) write to make.
 * The container was created, and hence the node mutated, BEFORE `op["value"]`
   was read — a missing `value` raised `KeyError` after the mutation had
   already happened, and rollback only undoes LWW stamps, not that partial
-  mutation, leaving a stray empty `flags: {}` behind. Relatedly, a `value:
-  null` delete against a node with no existing `flags` still materialized an
-  empty `flags: {}` — not neutral, since a replica that never saw the op would
-  disagree. `_apply_set_node_field` now reads and validates every required op
-  field before any mutation, and a null-delete against an absent or malformed
-  container is a true no-op: it never creates `flags` at all.
+  mutation, leaving a stray empty `flags: {}` behind. `_apply_set_node_field`
+  now reads and validates every required op field before any mutation, and a
+  null-delete against an absent or malformed container is a true no-op: it
+  never creates `flags` at all.
+* `set-node-field` is now registered in `discovery.COMMAND_SCHEMAS` like every
+  sibling structured-edit command, so `comfy discover` advertises its
+  `output_schema`.
+* The batch-spec dispatch now reads `spec["node"]`, not
+  `spec.get("node", spec.get("node_id"))`: `node` is the documented, canonical
+  key (matching `set_widget`'s `node`); `node_id` was never documented and is
+  no longer accepted. A missing `node` now raises the same `spec #i
+  (set_node_field) is missing required field 'node'` every sibling branch
+  raises, instead of silently resolving to `None` — which, since node matching
+  is by `str()`, could spuriously match a node whose id happens to be the
+  string `"None"`.
 
-**The CLI command, `set-node-field`, now coerces a numeric node id to `int`**
-before minting, matching `_split_addr` (used by `set-widget`/`connect`) and
-`delete`/`delete-nodes`' own coercion — previously `node_id` was minted as the
-raw command-line string, so the same node appeared as `"1"` from
-`set-node-field` and `1` everywhere else, splitting one node across two
-registers for a non-normalizing consumer.
+### What is explicitly NOT done here
 
-**`set-node-field` is now registered in `discovery.COMMAND_SCHEMAS`** like
-every sibling structured-edit command, so `comfy discover` advertises its
-`output_schema`.
-
-**§1's batch-spec dispatch now reads `spec["node"]`**, not
-`spec.get("node", spec.get("node_id"))`: `node` is the documented, canonical
-key (matching `set_widget`'s `node`); `node_id` was never documented and is no
-longer accepted. A missing `node` now raises the same
-`spec #i (set_node_field) is missing required field 'node'` every sibling
-branch raises, instead of silently resolving to `None` — which, since node
-matching is by `str()`, could spuriously match a node whose id happens to be
-the string `"None"`.
-
-**No change to §§2, 4-8.** No existing op kind was removed or re-scoped;
-`add_node`, `connect`, `set_widget`, `delete_node`, `clear`, `reset_doc`, and
-`insert_workflow` are untouched.
+* **Not ratified.** See the status callout above.
+* **No interior/subgraph-promoted `set_node_field` variant** — §1.8 states
+  this is out of scope, mirroring comfy-multi-player#235's own scope.
+* **No reconciliation commit against comfy-multi-player** — that is
+  follow-up work for once (and if) this amendment is accepted.
