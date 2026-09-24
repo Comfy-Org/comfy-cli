@@ -186,8 +186,10 @@ def note_insert_hint(class_type: str) -> str:
         {"nodes": [{"id": 1, "type": class_type, "pos": [0, 0], "size": [300, 120], "widgets_values": ["<text>"]}]}
     )
     return (
-        f"a {class_type} is added with `comfy workflow insert-workflow` (the insert_workflow op), not add-node: "
-        f"insert {example} — every node needs an `id`, and the note's text is widgets_values[0]"
+        f"a {class_type} is added with an insert_workflow op, not add-node: "
+        f"echo '{example}' | comfy workflow insert-workflow <workflow.json> - "
+        "(the template is a file path or `-` for stdin), then apply the emitted op to the source workflow — "
+        "insert-workflow only emits it. Every node needs an `id`; the note's text is widgets_values[0]"
     )
 
 

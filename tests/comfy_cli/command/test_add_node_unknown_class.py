@@ -111,6 +111,32 @@ def test_note_refusal_hints_the_insert_workflow_route(patched_graph, tmp_path, c
     assert ins["data"]["op"]["workflow"]["nodes"][0]["type"] == cls
 
 
+@pytest.mark.parametrize("cls", ["Note", "MarkdownNote"])
+def test_note_hint_is_a_runnable_invocation_whose_op_must_be_applied(patched_graph, tmp_path, capsys, cls):
+    """`insert-workflow` takes the template as a FILE PATH or `-` (stdin), never
+    inline JSON, and it only EMITS an op. A hint reading "insert {json}" is not
+    something a caller can run, and following it without applying the op
+    leaves no note on the canvas. The hint must spell a stdin invocation and
+    say the emitted op has to be applied to the source workflow."""
+    hint = _add(tmp_path, capsys, cls)["error"].get("hint") or ""
+    assert "comfy workflow insert-workflow <workflow.json> -" in hint, hint
+    assert "apply" in hint.lower(), hint
+
+    payload = hint[hint.index("echo '") + len("echo '") : hint.index("' | comfy workflow insert-workflow")]
+    from test_workflow_edit import _force_json_renderer  # type: ignore[import-not-found]
+    from typer.testing import CliRunner
+
+    from comfy_cli.command import workflow as workflow_cmd
+
+    _force_json_renderer()
+    src = _write(tmp_path, _base_workflow())
+    res = CliRunner().invoke(workflow_cmd.app, ["insert-workflow", str(src), "-"], input=payload, standalone_mode=False)
+    out = capsys.readouterr().out or res.stdout
+    env = json.loads([ln for ln in out.splitlines() if ln.strip()][-1])
+    assert env["ok"] is True, env
+    assert env["data"]["op"]["workflow"]["nodes"][0]["type"] == cls
+
+
 def test_non_note_ui_only_nodes_keep_their_hint(patched_graph, tmp_path, capsys):
     """Reroute/GetNode are wiring helpers, not annotations — no note route."""
     env = _add(tmp_path, capsys, "Reroute")
