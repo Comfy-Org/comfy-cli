@@ -249,7 +249,7 @@ comfy deploy status <dir>
   **`latestDeployable`**. `behind: true` means a newer deployable release exists
   and this deployment is not running it. Moving to it means a **new deployment**
   with a new endpoint URL, and retiring the old one — see the cost model above.
-- **`serving`** — `capacity` (`ready`, `busy` and `starting` workers, the same on
+- **`serving`**: `capacity` (`ready`, `busy` and `starting` workers, the same on
   every GPU provider), `jobsInQueue`, and `sampledAt`. It is a sample, not a live
   feed; `sampledAt` is how stale it is. A deprecated `workers` object carries the
   provider's own counts while the deploy service still sends them.

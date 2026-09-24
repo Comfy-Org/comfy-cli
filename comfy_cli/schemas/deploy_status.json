@@ -78,7 +78,6 @@
         "workers": {
           "description": "Deprecated: the GPU provider's own worker counts, present while the deploy service still sends them. Read capacity instead.",
           "type": "object",
-          "required": ["idle", "initializing", "ready", "running", "throttled", "unhealthy"],
           "additionalProperties": false,
           "properties": {
             "idle": {"type": "integer", "minimum": 0},

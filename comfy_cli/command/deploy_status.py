@@ -125,9 +125,13 @@ def _normalized_serving(deployment: JsonObject) -> JsonObject | None:
         "sampledAt": required_string(serving, "sampledAt"),
     }
     # The provider's own counts ride along while the service still sends them,
-    # so a script reading them keeps working; nothing here prints them.
+    # so a script reading them keeps working. Beside capacity they are passed
+    # through as sent, so a deprecated field that thins out cannot fail the
+    # command; only the fallback above needs every one.
     if isinstance(workers, dict):
-        normalized["workers"] = {state: required_int(workers, state) for state in _WORKER_STATES}
+        normalized["workers"] = {
+            state: workers[state] for state in _WORKER_STATES if isinstance(workers.get(state), int)
+        }
     return normalized
 
 
@@ -139,6 +143,8 @@ def _capacity(capacity: object, workers: object) -> JsonObject:
     """
     if isinstance(capacity, dict):
         return {key: required_int(capacity, key) for key in _CAPACITY}
+    if capacity is not None:
+        raise server_shape_error("the deployment serving sample has an invalid capacity")
     if not isinstance(workers, dict):
         raise server_shape_error("the deployment serving sample has neither capacity nor workers")
     return {
@@ -260,7 +266,14 @@ def _render_serving(renderer: Renderer, serving: JsonObject | None) -> None:
     counts = " ".join(f"{key}={required_int(capacity, key)}" for key in _CAPACITY)
     queue = required_int(serving, "jobsInQueue")
     sampled_at = required_string(serving, "sampledAt")
-    suffix = " — healthy idle (scale-to-zero)" if queue == 0 and all(value == 0 for value in capacity.values()) else ""
+    # Workers the provider reports as failing can take no job, so capacity never
+    # counts them; they are named here so an all-zero line is not read as healthy.
+    workers = serving.get("workers")
+    unhealthy = workers.get("unhealthy", 0) if isinstance(workers, dict) else 0
+    if unhealthy:
+        counts += f" unhealthy={unhealthy}"
+    idle = queue == 0 and not unhealthy and all(value == 0 for value in capacity.values())
+    suffix = ": healthy idle (scale-to-zero)" if idle else ""
     renderer.info(f"Serving: {counts} queued={queue}; sampledAt={sampled_at} ({_sample_age(sampled_at)}){suffix}")
 
 

@@ -310,6 +310,45 @@ def test_serving_renders_sample_vintage_beside_worker_counts(tmp_path, monkeypat
     assert "2026-08-21T09:12:03Z" in serving_line
 
 
+def test_unhealthy_workers_are_named_and_never_read_as_healthy_idle(tmp_path, monkeypatch) -> None:
+    """Capacity counts no failing worker, so a deployment whose workers all fail
+    reads all-zero; the line must say so rather than call it healthy."""
+    # Given
+    row = _status_deployment()
+    row["serving"] = _serving(unhealthy=3)
+    _install_clients(monkeypatch, FakeBuilder(), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_pretty(write_spec(tmp_path))
+
+    # Then
+    serving_line = next(line for line in result.stdout.splitlines() if "sampled" in line.lower())
+    assert "unhealthy=3" in serving_line
+    assert "healthy idle" not in serving_line
+
+
+def test_a_thinned_out_workers_object_beside_capacity_still_reads(tmp_path, monkeypatch) -> None:
+    """The old counts are deprecated: beside capacity, a missing state in them
+    must not fail the command."""
+    # Given
+    row = _status_deployment()
+    row["serving"] = {
+        "capacity": {"ready": 1, "busy": 0, "starting": 0},
+        "workers": {"idle": 1},
+        "jobsInQueue": 0,
+        "sampledAt": "2026-08-21T09:12:03Z",
+    }
+    _install_clients(monkeypatch, FakeBuilder(), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _json_envelope(result)["data"]["serving"]["capacity"]["ready"] == 1
+    jsonschema.Draft202012Validator(_schema("deploy_status.json")).validate(_json_envelope(result)["data"])
+
+
 def test_serving_prints_capacity_and_no_provider_state(tmp_path, monkeypatch) -> None:
     """The counts read the same on every GPU provider: RunPod's own states, such
     as a scale-to-zero endpoint's throttled slots, never reach the terminal."""
@@ -340,7 +379,7 @@ def test_serving_without_capacity_is_worked_out_from_the_old_counts(tmp_path, mo
     # Given a sample with only the old counts
     row = _status_deployment()
     row["serving"] = {
-        "workers": {"idle": 1, "initializing": 2, "ready": 1, "running": 3, "throttled": 2, "unhealthy": 0},
+        "workers": {"idle": 1, "initializing": 2, "ready": 1, "running": 3, "throttled": 4, "unhealthy": 0},
         "jobsInQueue": 0,
         "sampledAt": "2026-08-21T09:12:03Z",
     }
@@ -353,7 +392,7 @@ def test_serving_without_capacity_is_worked_out_from_the_old_counts(tmp_path, mo
     assert result.exit_code == 0, result.stderr
     serving = _json_envelope(result)["data"]["serving"]
     assert serving["capacity"] == {"ready": 1, "busy": 3, "starting": 2}
-    assert serving["workers"]["throttled"] == 2
+    assert serving["workers"]["throttled"] == 4
     jsonschema.Draft202012Validator(_schema("deploy_status.json")).validate(_json_envelope(result)["data"])
 
 
