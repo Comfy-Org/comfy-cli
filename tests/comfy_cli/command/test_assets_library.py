@@ -285,3 +285,18 @@ class TestEnsureSuggestsNearHashes:
 
         assert env["error"]["code"] == "cloud_http_error"
         assert len(calls) == 1
+
+
+class TestLongExtensions:
+    """Model files carry extensions longer than image ones (`.safetensors` is 11)."""
+
+    def test_hash_with_safetensors_extension_is_canonicalized(self, cloud_target, monkeypatch, capsys):
+        calls = _patch_urlopen(monkeypatch, {"id": "asset-1"})
+        _run(["ensure", "--hash", f"{_HEX}.safetensors", "--where", "cloud"], capsys)
+        assert json.loads(calls[0]["body"])["hash"] == f"blake3:{_HEX}"
+
+    def test_library_hash_with_safetensors_extension_is_suggested(self, cloud_target, monkeypatch, capsys):
+        library = [_asset(f"{_REAL}.safetensors", "model.safetensors")]
+        _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=library)
+        env = _run(["ensure", "--hash", f"{_GARBLED}.safetensors", "--where", "cloud"], capsys)
+        assert [s["name"] for s in env["error"]["details"]["suggestions"]] == ["model.safetensors"]

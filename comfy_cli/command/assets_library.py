@@ -27,13 +27,13 @@ app = typer.Typer(help="Browse your Comfy Cloud asset library (list, borrow).")
 # A Comfy Cloud content hash: BLAKE3, 32-byte digest, lowercase hex — bare or in
 # the canonical ``blake3:<hex>`` wire form. Comfy Cloud's from-hash lookup
 # matches every stored form of the content only for ``blake3:<hex>``.
-_HASH_WITH_EXT_RE = re.compile(r"^(?:blake3:)?([0-9a-f]{64})\.[A-Za-z0-9]{1,10}$")
+_HASH_WITH_EXT_RE = re.compile(r"^(?:blake3:)?([0-9a-f]{64})\.[A-Za-z0-9]+$")
 
 
 # A value that reads as a hex hash even when mangled: optional ``blake3:``,
 # 16-80 hex chars (a garbled copy can gain or lose a few), optional extension.
-_HEXISH_RE = re.compile(r"^(?:blake3:)?([0-9a-fA-F]{16,80})(?:\.[A-Za-z0-9]{1,10})?$")
-_HEX_DIGEST_RE = re.compile(r"^(?:blake3:)?([0-9a-f]{64})(?:\.[A-Za-z0-9]{1,10})?$")
+_HEXISH_RE = re.compile(r"^(?:blake3:)?([0-9a-fA-F]{16,80})(?:\.[A-Za-z0-9]+)?$")
+_HEX_DIGEST_RE = re.compile(r"^(?:blake3:)?([0-9a-f]{64})(?:\.[A-Za-z0-9]+)?$")
 _MIN_SHARED_PREFIX = 4
 _MAX_SUGGESTIONS = 3
 # One page at the API's maximum, newest first. Never paged: a suggestion is a
