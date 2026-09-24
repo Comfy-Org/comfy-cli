@@ -264,7 +264,7 @@ class DeployJobClient:
             code="deploy_workflow_too_large",
             message=(
                 f"the workflow is too large to submit: the request is {size:,} bytes and a deployment "
-                f"accepts at most {_MAX_REQUEST_BODY:,} (10 MB); nothing was sent, so no job was created"
+                f"accepts at most {_MAX_REQUEST_BODY:,} (10 MB); the job was not submitted, so no job was created"
             ),
             details={"deployment_id": deployment_id, "request_bytes": size, "limit_bytes": _MAX_REQUEST_BODY},
         )

@@ -55,7 +55,7 @@ argument you pass.
 | `deploy_workflow_empty` | Well-formed JSON object holding no nodes | Export a workflow with nodes in it |
 | `deploy_workflow_not_api_format` | Parsed as JSON but is not a workflow at all | Check the file is the right one |
 | `deploy_workflow_invalid` | The data plane rejected the nodes | Fix the nodes in `details.node_errors`, resubmit |
-| `deploy_workflow_too_large` | Over the 10 MB a deployment accepts; nothing was sent | Move large inline data (embedded images, long text) out of the workflow, resubmit |
+| `deploy_workflow_too_large` | Over the 10 MB a deployment accepts; the job was not submitted | Move large inline data (embedded images, long text) out of the workflow, resubmit |
 | `deploy_workflow_asset_outside_root` | A local input resolves outside every allowed root | Move it under `models/`, `input/`, `output/`, or pass `--asset-root <dir>` |
 | `deploy_workflow_asset_marker_reserved` | The workflow already claims a `local-asset:` id | Remove that reserved id |
 | `deploy_asset_missing` | An asset needs uploading and `--no-upload` was set | Drop `--no-upload`, or pre-upload it |
@@ -67,9 +67,11 @@ argument you pass.
 | `deploy_job_canceled` | The job was canceled | Resubmit if that was not intended |
 
 The first three are caught locally, before anything is submitted, so they cost
-nothing. So is `deploy_workflow_too_large`: the size is checked before sending,
-and a deployment that refuses the size does so before creating a job, so a
-resubmit after shrinking the workflow is safe.
+nothing. `deploy_workflow_too_large` creates no job either: the size is checked
+before the job request is sent, and a deployment that refuses the size does so
+before creating a job, so a resubmit after shrinking the workflow is safe. Files
+the workflow names may already have been uploaded as assets by then; a resubmit
+finds them by hash and does not upload them again.
 
 **`deploy_job_submit_unknown` is the one that can cost money twice.** The
 submission timed out, so the job may or may not have been created. Every `run` is

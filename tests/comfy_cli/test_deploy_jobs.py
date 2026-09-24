@@ -444,7 +444,7 @@ def _workflow_with_request_bytes(size: int) -> dict[str, Any]:
     return {"1": {"class_type": "PreviewAny", "inputs": {"source": "x" * (size - overhead)}}}
 
 
-def test_a_workflow_over_the_gateway_limit_is_refused_before_anything_is_sent(monkeypatch):
+def test_a_workflow_over_the_gateway_limit_is_refused_before_the_job_request(monkeypatch):
     # Given
     transport = _Transport()
     monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", transport)

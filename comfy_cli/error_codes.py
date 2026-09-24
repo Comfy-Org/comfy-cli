@@ -1484,9 +1484,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "deploy_workflow_too_large",
         "The job submission is larger than a deployment accepts, 10,000,000 bytes (10 MB), so no job was "
-        "created. Usually raised locally before anything is sent, with `details.request_bytes` and "
+        "created. Usually raised locally before the job request is sent, with `details.request_bytes` and "
         "`details.limit_bytes`; an HTTP 413 from the deployment, which refuses the request before creating a "
-        "job, maps here too. The size is almost always data held inline in the workflow, such as an embedded "
+        "job, maps here too. Files the workflow names may already have been uploaded as assets by then; a "
+        "resubmit finds them by hash and does not upload them again. The size is almost always data held inline in the workflow, such as an embedded "
         "base64 image or a long text value. Files the workflow names by path are uploaded separately and do "
         "not count.",
         "make the workflow smaller: move large inline data into a file under the install's input/ directory "

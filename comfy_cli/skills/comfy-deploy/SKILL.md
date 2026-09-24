@@ -209,8 +209,10 @@ comfy deploy run [PATH] --workflow <api-workflow>.json
   `deploy_workflow_empty`, and a JSON list, string or number is
   `deploy_workflow_not_api_format`. None of these cost anything.
 - **A job submission is at most 10 MB.** A bigger one is refused locally with
-  `deploy_workflow_too_large` before anything is sent, so no job exists and a
-  resubmit after shrinking it is safe. The size is almost always data held
+  `deploy_workflow_too_large` before the job request is sent, so no job exists
+  and a resubmit after shrinking it is safe. Files the workflow names may
+  already have been uploaded as assets; a resubmit finds them by hash and does
+  not upload them again. The size is almost always data held
   inline in the workflow (an embedded base64 image, a long text value); files
   the workflow names by path are uploaded separately and do not count.
 - **The deployment must be `ready`.** Anything else is `deploy_not_ready`. Wait
