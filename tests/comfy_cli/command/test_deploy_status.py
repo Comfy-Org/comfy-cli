@@ -47,7 +47,10 @@ def _status_deployment(release_id: str = "release-5", status: str = "ready") -> 
 
 
 def _serving(*, idle: int = 0, unhealthy: int = 0) -> JsonObject:
+    """A sample as the deploy service sends it now: capacity, and the provider's
+    own counts beside it while they are deprecated."""
     return {
+        "capacity": {"ready": idle, "busy": 0, "starting": 0},
         "workers": {
             "idle": idle,
             "initializing": 0,
@@ -231,6 +234,7 @@ def test_status_reads_a_ready_deployments_worker_counts_the_list_omits(tmp_path,
     assert result.exit_code == 0, result.stderr
     data = _json_envelope(result)["data"]
     assert client.get_calls == ["dep-status"]
+    assert data["serving"]["capacity"] == {"ready": 2, "busy": 0, "starting": 0}
     assert data["serving"]["workers"]["idle"] == 2
 
 
@@ -302,8 +306,80 @@ def test_serving_renders_sample_vintage_beside_worker_counts(tmp_path, monkeypat
 
     # Then
     serving_line = next(line for line in result.stdout.splitlines() if "sampled" in line.lower())
-    assert "idle=1" in serving_line
+    assert "ready=1" in serving_line
     assert "2026-08-21T09:12:03Z" in serving_line
+
+
+def test_serving_prints_capacity_and_no_provider_state(tmp_path, monkeypatch) -> None:
+    """The counts read the same on every GPU provider: RunPod's own states, such
+    as a scale-to-zero endpoint's throttled slots, never reach the terminal."""
+    # Given
+    row = _status_deployment()
+    row["serving"] = {
+        "capacity": {"ready": 1, "busy": 2, "starting": 3},
+        "workers": {"idle": 1, "initializing": 3, "ready": 1, "running": 2, "throttled": 3, "unhealthy": 0},
+        "jobsInQueue": 4,
+        "sampledAt": "2026-08-21T09:12:03Z",
+    }
+    _install_clients(monkeypatch, FakeBuilder(), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_pretty(write_spec(tmp_path))
+
+    # Then
+    serving_line = next(line for line in result.stdout.splitlines() if "sampled" in line.lower())
+    assert "ready=1 busy=2 starting=3 queued=4" in serving_line
+    for state in ("idle", "initializing", "running", "throttled", "unhealthy"):
+        assert state not in serving_line
+
+
+def test_serving_without_capacity_is_worked_out_from_the_old_counts(tmp_path, monkeypatch) -> None:
+    """A deploy service older than the capacity field still answers: the three
+    counts come from the provider's, with a warm worker RunPod counts as both
+    idle and ready counted once."""
+    # Given a sample with only the old counts
+    row = _status_deployment()
+    row["serving"] = {
+        "workers": {"idle": 1, "initializing": 2, "ready": 1, "running": 3, "throttled": 2, "unhealthy": 0},
+        "jobsInQueue": 0,
+        "sampledAt": "2026-08-21T09:12:03Z",
+    }
+    _install_clients(monkeypatch, FakeBuilder(), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    serving = _json_envelope(result)["data"]["serving"]
+    assert serving["capacity"] == {"ready": 1, "busy": 3, "starting": 2}
+    assert serving["workers"]["throttled"] == 2
+    jsonschema.Draft202012Validator(_schema("deploy_status.json")).validate(_json_envelope(result)["data"])
+
+
+def test_serving_without_the_old_counts_still_reads(tmp_path, monkeypatch) -> None:
+    """Once the deploy service drops the deprecated counts, status keeps working."""
+    # Given
+    row = _status_deployment()
+    row["serving"] = {
+        "capacity": {"ready": 0, "busy": 1, "starting": 0},
+        "jobsInQueue": 2,
+        "sampledAt": "2026-08-21T09:12:03Z",
+    }
+    _install_clients(monkeypatch, FakeBuilder(), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    serving = _json_envelope(result)["data"]["serving"]
+    assert serving == {
+        "capacity": {"ready": 0, "busy": 1, "starting": 0},
+        "jobsInQueue": 2,
+        "sampledAt": "2026-08-21T09:12:03Z",
+    }
+    jsonschema.Draft202012Validator(_schema("deploy_status.json")).validate(_json_envelope(result)["data"])
 
 
 def test_serving_says_how_old_the_sample_is(tmp_path, monkeypatch) -> None:
@@ -355,7 +431,7 @@ def test_an_unreadable_sampled_at_still_prints_the_counts(tmp_path, monkeypatch)
     # Then
     assert result.exit_code == 0, result.stderr
     serving_line = next(line for line in result.stdout.splitlines() if "sampled" in line.lower())
-    assert "idle=1" in serving_line
+    assert "ready=1" in serving_line
     assert "age unknown" in serving_line
 
 

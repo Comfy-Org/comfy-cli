@@ -47,6 +47,7 @@ from comfy_cli.output.renderer import Renderer
 from comfy_cli.utils import parse_rfc3339
 
 _WORKER_STATES: Final = ("idle", "initializing", "ready", "running", "throttled", "unhealthy")
+_CAPACITY: Final = ("ready", "busy", "starting")
 _STOP_REASONS: Final = frozenset({"user", "credits", "policy"})
 
 
@@ -118,12 +119,33 @@ def _normalized_serving(deployment: JsonObject) -> JsonObject | None:
     if not isinstance(serving, dict):
         raise server_shape_error("the deployment has an invalid serving sample")
     workers = serving.get("workers")
-    if not isinstance(workers, dict):
-        raise server_shape_error("the deployment serving sample has no workers")
-    return {
-        "workers": {state: required_int(workers, state) for state in _WORKER_STATES},
+    normalized: JsonObject = {
+        "capacity": _capacity(serving.get("capacity"), workers),
         "jobsInQueue": required_int(serving, "jobsInQueue"),
         "sampledAt": required_string(serving, "sampledAt"),
+    }
+    # The provider's own counts ride along while the service still sends them,
+    # so a script reading them keeps working; nothing here prints them.
+    if isinstance(workers, dict):
+        normalized["workers"] = {state: required_int(workers, state) for state in _WORKER_STATES}
+    return normalized
+
+
+def _capacity(capacity: object, workers: object) -> JsonObject:
+    """Ready, busy and starting workers, the same words on every GPU provider.
+
+    Read as the service sends it, or worked out from the provider's own counts
+    the way the service does, for a service that predates the field.
+    """
+    if isinstance(capacity, dict):
+        return {key: required_int(capacity, key) for key in _CAPACITY}
+    if not isinstance(workers, dict):
+        raise server_shape_error("the deployment serving sample has neither capacity nor workers")
+    return {
+        # RunPod counts one warm worker as both idle and ready, so idle alone.
+        "ready": required_int(workers, "idle"),
+        "busy": required_int(workers, "running"),
+        "starting": required_int(workers, "initializing"),
     }
 
 
@@ -232,13 +254,13 @@ def _render_serving(renderer: Renderer, serving: JsonObject | None) -> None:
     if serving is None:
         renderer.info("Serving: not sampled yet.")
         return
-    workers = serving["workers"]
-    if not isinstance(workers, dict):
-        raise server_shape_error("the normalized serving sample has no workers")
-    counts = " ".join(f"{state}={required_int(workers, state)}" for state in _WORKER_STATES)
+    capacity = serving["capacity"]
+    if not isinstance(capacity, dict):
+        raise server_shape_error("the normalized serving sample has no capacity")
+    counts = " ".join(f"{key}={required_int(capacity, key)}" for key in _CAPACITY)
     queue = required_int(serving, "jobsInQueue")
     sampled_at = required_string(serving, "sampledAt")
-    suffix = " — healthy idle (scale-to-zero)" if queue == 0 and all(value == 0 for value in workers.values()) else ""
+    suffix = " — healthy idle (scale-to-zero)" if queue == 0 and all(value == 0 for value in capacity.values()) else ""
     renderer.info(f"Serving: {counts} queued={queue}; sampledAt={sampled_at} ({_sample_age(sampled_at)}){suffix}")
 
 

@@ -61,10 +61,22 @@
     },
     "serving": {
       "type": ["object", "null"],
-      "required": ["workers", "jobsInQueue", "sampledAt"],
+      "required": ["capacity", "jobsInQueue", "sampledAt"],
       "additionalProperties": false,
       "properties": {
+        "capacity": {
+          "type": "object",
+          "description": "Workers by what they can do, the same on every GPU provider: ready can take a job now, busy is running one, starting is coming up.",
+          "required": ["ready", "busy", "starting"],
+          "additionalProperties": false,
+          "properties": {
+            "ready": {"type": "integer", "minimum": 0},
+            "busy": {"type": "integer", "minimum": 0},
+            "starting": {"type": "integer", "minimum": 0}
+          }
+        },
         "workers": {
+          "description": "Deprecated: the GPU provider's own worker counts, present while the deploy service still sends them. Read capacity instead.",
           "type": "object",
           "required": ["idle", "initializing", "ready", "running", "throttled", "unhealthy"],
           "additionalProperties": false,

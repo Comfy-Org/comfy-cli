@@ -15,6 +15,14 @@ history.
 
 ## [Unreleased]
 
+### Changed
+
+- `comfy deploy status` prints a deployment's workers as ready, busy and
+  starting, the same words on every GPU provider, in place of RunPod's own six
+  states. An idle scale-to-zero deployment no longer reads as throttled. The
+  `--json` output adds `serving.capacity`; `serving.workers` stays while the
+  deploy service still sends it and is deprecated.
+
 ## [1.21.0] - 2026-09-24
 
 [Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.21.0) · 50 commits since v1.20.0. Breaking changes are marked **Breaking** under Changed.
