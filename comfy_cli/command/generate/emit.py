@@ -37,8 +37,10 @@ class UnsupportedModelError(EmitError):
     the same answer up front as ``emit_supported`` per row.
 
     ``suggested`` is the subset of ``supported`` that produces the same kind of
-    media as ``model`` (image or video), the same partner's aliases first — the
-    alias to retry with in one step. Empty when ``model`` is not in the catalog.
+    media as ``model`` (image or video), the same partner's aliases first, and
+    whose required inputs the request already carries — the alias to retry
+    with in one step. Empty when ``model`` is not in the catalog or nothing
+    emittable fits the request as given.
     """
 
     def __init__(self, model: str, supported: list[str], suggested: list[str] | None = None):
@@ -114,6 +116,10 @@ class NodeSpec:
     # and needs no input (flux-2's `--output_format png`: SaveImage writes PNG).
     # Any other value is still refused as unmapped.
     implied_flag_values: dict[str, frozenset[Any]] = field(default_factory=dict)
+    # The node REQUIRES one of `image_params` (image-to-video). Such a model is
+    # only a retry suggestion when the request already carries an image;
+    # `test_emit_model_variants.py` holds this flag to the recorded catalog.
+    image_required: bool = False
 
 
 # Schema default (snapshot 2026-07) of the Gemini image nodes' system_prompt;
@@ -198,6 +204,7 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
             "generate_audio": "generate_audio",
         },
         image_params={"image": "image"},
+        image_required=True,
         fixed={
             "model": "seedance-1-0-pro-fast-251015",
             "resolution": "720p",
@@ -282,6 +289,7 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
             "duration": "duration",
         },
         image_params={"image": "start_frame", "start_frame": "start_frame"},
+        image_required=True,
         fixed={
             "negative_prompt": "",
             "model_name": "kling-v2-master",
@@ -349,21 +357,28 @@ def _endpoint_kind(endpoint_id: str) -> tuple[str, str] | None:
     return None
 
 
-def suggested_models(model: str) -> list[str]:
+def suggested_models(model: str, values: dict[str, Any] | None = None) -> list[str]:
     """Emittable aliases producing the same media as ``model``, same partner
-    first — what to retry with when ``model`` itself has no node."""
+    first — what to retry with when ``model`` itself has no node. A model whose
+    node requires an image is left out unless ``values`` already carries one:
+    swapping only the model name would emit a graph that cannot run."""
     kind = _endpoint_kind(spec.resolve_alias(model))
     if kind is None:
         return []
     partner, media = kind
-    same = [a for a in supported_models() if MODEL_NODE_MAP[a].output == media]
+    values = values or {}
+
+    def runnable(ns: NodeSpec) -> bool:
+        return not ns.image_required or any(values.get(flag) is not None for flag in ns.image_params)
+
+    same = [a for a in supported_models() if MODEL_NODE_MAP[a].output == media and runnable(MODEL_NODE_MAP[a])]
     return sorted(same, key=lambda a: (MODEL_NODE_MAP[a].endpoint.split("/", 1)[0] != partner, a))
 
 
-def _resolve_model(model: str) -> tuple[str, NodeSpec]:
+def _resolve_model(model: str, values: dict[str, Any] | None = None) -> tuple[str, NodeSpec]:
     found = _lookup_model(model)
     if found is None:
-        raise UnsupportedModelError(model, supported_models(), suggested_models(model))
+        raise UnsupportedModelError(model, supported_models(), suggested_models(model, values))
     return found
 
 
@@ -376,7 +391,7 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
     defaults. A ``SaveImageAdvanced``/``SaveVideo`` is appended so ``comfy run`` writes
     the result to disk.
     """
-    _alias, ns = _resolve_model(model)
+    _alias, ns = _resolve_model(model, values)
     ns = ns.model_variants.get(values.get("model"), ns)
 
     node_inputs: dict[str, Any] = dict(ns.fixed)
