@@ -186,3 +186,16 @@ def test_429_http_date_in_the_past_is_zero():
     renderer = _FakeRenderer()
     _handle(renderer, _http_error_with_headers(429, {"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}))
     assert renderer.calls[0]["details"]["retry_after"] == 0
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "-5"])
+def test_429_invalid_retry_after_is_dropped(value: str):
+    """A non-finite or negative delay must not reach the envelope: the renderer
+    would emit bare NaN/Infinity (not strict JSON), or a negative wait hint."""
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error_with_headers(429, {"Retry-After": value}))
+
+    call = renderer.calls[0]
+    assert call["code"] == "cloud_rate_limited"
+    assert "retry_after" not in call["details"]
+    assert value not in call["hint"]

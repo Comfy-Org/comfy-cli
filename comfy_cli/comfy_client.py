@@ -13,6 +13,7 @@ local-only.
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 import time
@@ -69,7 +70,9 @@ def _parse_retry_after(headers: Any) -> float | None:
     """Parse a ``Retry-After`` header to seconds, else None.
 
     Both RFC 9110 forms: delta-seconds, or an HTTP-date (converted to the
-    seconds remaining from now; a date already past is 0).
+    seconds remaining from now; a date already past is 0). A non-finite or
+    negative delay is None: it would reach ``time.sleep`` (which raises on
+    it) and the JSON envelope (which would carry a bare NaN/Infinity).
     """
     if headers is None:
         return None
@@ -77,9 +80,11 @@ def _parse_retry_after(headers: Any) -> float | None:
     if value is None:
         return None
     try:
-        return float(value)
+        seconds = float(value)
     except (TypeError, ValueError):
         pass
+    else:
+        return seconds if math.isfinite(seconds) and seconds >= 0 else None
     from datetime import datetime, timezone
     from email.utils import parsedate_to_datetime
 
