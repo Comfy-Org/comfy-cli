@@ -55,10 +55,14 @@ def test_unknown_class_emits_node_not_found_with_close_matches(patched_graph, tm
 
 
 def test_ui_only_node_is_rejected_with_a_specific_reason(patched_graph, tmp_path, capsys):
-    """Note/MarkdownNote/Reroute/GetNode/SetNode/PrimitiveNode exist only in the
-    UI graph. difflib gives no useful match for them (and for GetNode returns
-    actively misleading ones), so they need their own message."""
-    for cls in ("Note", "MarkdownNote", "GetNode", "Reroute"):
+    """Reroute/GetNode/SetNode/PrimitiveNode exist only in the UI graph and carry
+    data flow, so they stay refused. difflib gives no useful match for them (and
+    for GetNode returns actively misleading ones), so they need their own message.
+
+    Note/MarkdownNote used to be in this list; they are now authorable (see
+    test_add_node_virtual_notes.py) — the two traces at the top of this file were
+    the agent asking for exactly that."""
+    for cls in ("GetNode", "Reroute", "SetNode", "PrimitiveNode"):
         env = _add(tmp_path, capsys, cls)
         assert env["ok"] is False, cls
         err = env["error"]

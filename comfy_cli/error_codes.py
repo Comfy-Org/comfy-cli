@@ -664,8 +664,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "ui_only_node_skipped",
         "Warning (not fatal): `workflow capture` skipped a UI-only node (Note/MarkdownNote/"
-        "Reroute/GetNode/SetNode/PrimitiveNode) — those never reach the API and `apply` "
-        "refuses to mint them. Data flow through the node was spliced to the real source.",
+        "Reroute/GetNode/SetNode/PrimitiveNode) — those never reach the API, so capture "
+        "omits them by design even though `apply` can mint Note/MarkdownNote. Data flow "
+        "through the node was spliced to the real source.",
         "expected for annotated workflows; the recipe rebuilds the executable graph, not canvas decoration",
     ),
     ErrorCode(

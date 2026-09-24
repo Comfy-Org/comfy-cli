@@ -187,6 +187,14 @@ def add_node_cmd(
             "--allow-deprecated", show_default=False, help="Add the node even though the catalog marks it deprecated."
         ),
     ] = False,
+    text: Annotated[
+        str | None,
+        typer.Option(
+            "--text",
+            show_default=False,
+            help="Body text for a Note / MarkdownNote (annotation nodes; no catalog entry). Invalid for other classes.",
+        ),
+    ] = None,
     actor: ActorOpt = "cli",
     base_version: BaseVersionOpt = 0,
     stdout: StdoutOpt = False,
@@ -219,6 +227,7 @@ def add_node_cmd(
             actor=actor,
             base_version=base_version,
             allow_deprecated=allow_deprecated,
+            text=text,
         )
     except workflow_ops.DeprecatedNodeType as e:
         renderer.error(
@@ -233,7 +242,10 @@ def add_node_cmd(
         # the error alone. (The old hint pointed at `comfy nodes types`, which
         # lists connection types — MODEL/LATENT/IMAGE — not class_types.)
         if e.ui_only:
-            hint = "use a real node class; to annotate the graph, set a title/widget on an existing node instead"
+            hint = (
+                "use a real node class; to annotate the graph, add a `Note` or `MarkdownNote` with --text "
+                "(the only UI-only classes this surface can mint)"
+            )
         elif e.subgraph_id:
             hint = "pick a node CLASS from `comfy nodes search <text>`; a subgraph instance cannot be added"
         elif e.close_matches:
