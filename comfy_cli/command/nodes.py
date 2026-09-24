@@ -396,8 +396,23 @@ def show_cmd(
         # (UnknownNodeType subgraph_id); show was left behind with the generic
         # miss, and prod agents retried it verbatim. Say what the UUID is and
         # which surface CAN inspect it. difflib against a UUID is pure noise.
-        from comfy_cli.workflow_ops import _UUID_RE
+        from comfy_cli.workflow_ops import _UUID_RE, UI_ONLY_NODE_TYPES, UnknownNodeType
 
+        # Reroute/Note/PrimitiveNode/GetNode/SetNode are frontend-only: they sit
+        # on canvases (so a caller meets the name) but no object_info carries
+        # them. Checking before `add-node` must get the same answer add-node
+        # gives, not a generic miss with difflib noise.
+        if name.strip() in UI_ONLY_NODE_TYPES:
+            renderer.error(
+                code="node_not_found",
+                message=f"{UnknownNodeType(name.strip(), ui_only=True)} — the node catalog has no schema for it.",
+                hint=(
+                    "pick a real node class from `comfy nodes search <text>`; a UI-only node on an existing "
+                    "canvas is only read (print/ls-nodes), never added"
+                ),
+                details={"requested": name, "ui_only": True},
+            )
+            raise typer.Exit(code=1)
         if _UUID_RE.match(name.strip()):
             renderer.error(
                 code="node_not_found",
