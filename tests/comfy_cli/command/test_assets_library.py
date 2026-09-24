@@ -320,3 +320,16 @@ class TestSuggestionRequestIsShortLived:
 
         assert env["error"]["code"] == "asset_not_found"
         assert timeouts["listing"] is not None and timeouts["listing"] <= 5
+
+
+class TestUppercaseHex:
+    @pytest.mark.parametrize("value", [f"{_HEX.upper()}.png", f"blake3:{_HEX.upper()}.PNG"])
+    def test_uppercase_digest_with_extension_is_canonicalized_lowercase(self, cloud_target, monkeypatch, capsys, value):
+        calls = _patch_urlopen(monkeypatch, {"id": "asset-1"})
+        _run(["ensure", "--hash", value, "--where", "cloud"], capsys)
+        assert json.loads(calls[0]["body"])["hash"] == f"blake3:{_HEX}"
+
+    def test_bare_uppercase_digest_is_sent_unchanged(self, cloud_target, monkeypatch, capsys):
+        calls = _patch_urlopen(monkeypatch, {"id": "asset-1"})
+        _run(["ensure", "--hash", _HEX.upper(), "--where", "cloud"], capsys)
+        assert json.loads(calls[0]["body"])["hash"] == _HEX.upper()
