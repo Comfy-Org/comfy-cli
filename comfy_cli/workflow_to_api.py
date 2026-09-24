@@ -1497,8 +1497,11 @@ def _has_control_after_generate_companion(
     if not (isinstance(next_value, str) and next_value in _CONTROL_AFTER_GENERATE_VALUES):
         return False
     options = input_spec[1] if len(input_spec) >= 2 and isinstance(input_spec[1], dict) else {}
-    if options.get("control_after_generate"):
-        return True
+    if "control_after_generate" in options and options["control_after_generate"] is not None:
+        # An explicit flag wins over the seed-name rule, as in the frontend's
+        # ``control_after_generate ?? <name rule>``: false means no companion,
+        # so a marker-like value belongs to the next widget.
+        return bool(options["control_after_generate"])
     input_type = input_spec[0] if input_spec else None
     # The `seed` substring also covers a dotted dynamic-combo sub-input
     # (`model.seed`), so no separate leaf-name match is needed.

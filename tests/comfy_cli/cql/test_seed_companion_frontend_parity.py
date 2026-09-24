@@ -299,3 +299,37 @@ def test_explicit_false_flag_suppresses_the_implicit_seed_slot():
     order = graph.widget_order_for_node("NoControlSeed", saved)
     assert dict(zip(order, saved)) == {"noise_seed": 7, "steps": 30}
     assert dict(zip(order, saved)) == dict(workflow_to_api._schema_widget_pairs(info["NoControlSeed"], saved))
+
+
+def test_explicit_false_flag_keeps_a_marker_like_value_for_the_next_widget():
+    # With ``control_after_generate: false`` the frontend creates no companion,
+    # so a following STRING widget whose saved value happens to be "fixed" is a
+    # real value. The converter must not consume it as a seed marker, or every
+    # later widget shifts by one.
+    info = {
+        "NoControlSeedLabel": {
+            "input": {
+                "required": {
+                    "noise_seed": ["INT", {"default": 0, "control_after_generate": False}],
+                    "label": ["STRING", {"default": ""}],
+                    "steps": ["INT", {"default": 20}],
+                }
+            },
+            "input_order": {"required": ["noise_seed", "label", "steps"]},
+            "output": [],
+            "output_name": [],
+            "category": "test",
+            "display_name": "NoControlSeedLabel",
+            "python_module": "nodes",
+        }
+    }
+    graph = Graph.from_object_info(copy.deepcopy(info))
+    saved = [7, "fixed", 30]
+
+    order = graph.widget_order_for_node("NoControlSeedLabel", saved)
+    assert dict(zip(order, saved)) == {"noise_seed": 7, "label": "fixed", "steps": 30}
+    assert dict(workflow_to_api._schema_widget_pairs(info["NoControlSeedLabel"], saved)) == {
+        "noise_seed": 7,
+        "label": "fixed",
+        "steps": 30,
+    }
