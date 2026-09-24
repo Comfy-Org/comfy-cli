@@ -200,3 +200,25 @@ def test_every_address_that_resolves_to_a_note_is_refused_as_a_note(case):
     _, wf, addr = next(c for c in _note_workflows() if c[0] == case)
     with pytest.raises(workflow_ops.NoteTextNotWritable):
         workflow_ops.set_widget(wf, _graph(), addr, "text", "hello")
+
+
+@pytest.mark.parametrize("case", [c[0] for c in _note_workflows()])
+def test_the_note_replacement_route_names_an_address_delete_node_accepts(case):
+    """The hint's delete step must name the note's RESOLVED top-level id — the
+    exact id delete_node requires — not the address the caller typed ("42"
+    for node 42, a bare template id for an inserted node). An interior note
+    cannot be removed by delete_node at all, so its hint must not promise it."""
+    from comfy_cli import workflow_ops
+
+    _, wf, addr = next(c for c in _note_workflows() if c[0] == case)
+    with pytest.raises(workflow_ops.NoteTextNotWritable) as info:
+        workflow_ops.set_widget(wf, _graph(), addr, "text", "hello")
+    hint = info.value.hint
+    if case == "subgraph interior":
+        assert "delete node" not in hint, hint
+        assert "subgraph" in hint, hint
+        return
+    token = hint.split("delete node ", 1)[1].split(" ", 1)[0]
+    node_id = int(token) if token.lstrip("-").isdigit() else token
+    workflow_ops.delete_node(wf, _graph(), node_id)  # must not raise
+    assert info.value.node_id == node_id

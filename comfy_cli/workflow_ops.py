@@ -198,14 +198,26 @@ class NoteTextNotWritable(ValueError):
     and the doc host stores it opaquely, so no name-addressed write can land;
     ``hint`` names the route that does (delete + insert a replacement)."""
 
-    def __init__(self, node_id: Any, class_type: str, widget: str):
+    def __init__(self, node_id: Any, class_type: str, widget: str, *, interior: bool = False):
         super().__init__(
             f"{node_id} is a {class_type}: its text is not a widget set-widget can write "
             f"(a note has no catalog schema, so {widget!r} has no widget position to address)"
         )
-        self.hint = f"to change a note's text, delete node {node_id} and insert a replacement — " + note_insert_hint(
-            class_type
-        )
+        #: The note's resolved address — for a top-level note, the exact id
+        #: delete_node accepts (not the spelling the caller typed).
+        self.node_id = node_id
+        if interior:
+            # delete_node only removes top-level nodes, and insert_workflow only
+            # adds at the root, so there is no command route to replace it.
+            self.hint = (
+                f"{node_id} is a note inside a subgraph definition: delete-node only removes top-level nodes, "
+                "so its text can only be changed in the ComfyUI editor"
+            )
+        else:
+            self.hint = (
+                f"to change a note's text, delete node {node_id} and insert a replacement — "
+                + note_insert_hint(class_type)
+            )
 
 
 # A subgraph INSTANCE's node `type` is the UUID id of its definition, and
@@ -1038,7 +1050,9 @@ def _resolve_widget_write(workflow: dict, graph, node_id: Any, widget: str):
     except ValueError:
         target = None
     if isinstance(target, dict) and target.get("type") in NOTE_NODE_TYPES:
-        raise NoteTextNotWritable(node_id, target["type"], widget)
+        if len(segments) > 1:
+            raise NoteTextNotWritable("/".join(segments), target["type"], widget, interior=True)
+        raise NoteTextNotWritable(target.get("id"), target["type"], widget)
     return _promoted.resolve_write(workflow, graph, segments, widget)
 
 
