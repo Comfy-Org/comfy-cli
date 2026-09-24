@@ -2,8 +2,9 @@
 
 Tests the full stack: comfy node → execute_cm_cli → cm_cli subprocess.
 Uses ltdrdata's dedicated test packs (nodepack-test1-do-not-install,
-nodepack-test2-do-not-install) which intentionally conflict on ansible
-versions and contain no executable code.
+nodepack-test2-do-not-install) which intentionally conflict (test1 pins
+python-slugify==8.0.4, which needs text-unidecode>=1.3; test2 pins
+text-unidecode==1.2) and contain no executable code.
 
 Supply-chain safety policy:
     Only node packs from verified, controllable authors (ltdrdata,
@@ -19,18 +20,19 @@ Usage:
 import os
 import shutil
 import subprocess
-import sys
 import time
 from datetime import datetime
 from textwrap import dedent
 
 import pytest
 
+from comfy_cli.resolve_python import resolve_workspace_python
+
 # Real node packs for normal installation testing
 PACK_IMPACT = "comfyui-impact-pack"
 PACK_INSPIRE = "comfyui-inspire-pack"
 
-# Test node packs from ltdrdata — intentionally conflict on ansible versions
+# Test node packs from ltdrdata — intentionally conflict (python-slugify vs text-unidecode)
 REPO_TEST1 = "https://github.com/ltdrdata/nodepack-test1-do-not-install"
 REPO_TEST2 = "https://github.com/ltdrdata/nodepack-test2-do-not-install"
 PACK_TEST1 = "nodepack-test1-do-not-install"
@@ -152,11 +154,12 @@ def workspace():
 
     # Override Manager if MANAGER_OVERRIDE is set (skip PyPI/Core PR cycle).
     # Accepts:  "4.1b7" (PyPI)  or  "Comfy-Org/ComfyUI-Manager@branch" (git clone + uv)
-    venv_dir = os.path.join(ws, ".venv")
-    if sys.platform == "win32":
-        venv_python = os.path.join(venv_dir, "Scripts", "python.exe")
-    else:
-        venv_python = os.path.join(venv_dir, "bin", "python")
+    #
+    # Install into the same interpreter comfy-cli runs cm_cli with
+    # (execute_cm_cli -> resolve_workspace_python). That is the workspace .venv
+    # when one exists, but on CI runners with a writable global Python there is
+    # no .venv and cm_cli runs from sys.executable.
+    workspace_python = resolve_workspace_python(ws)
 
     manager_override = os.getenv("MANAGER_OVERRIDE", "")
     if manager_override:
@@ -169,14 +172,17 @@ def workspace():
                 shutil.rmtree(clone_dir)
             proc = exec(f"git clone --branch {branch} --depth 1 https://github.com/{repo_spec}.git {clone_dir}")
             assert proc.returncode == 0, f"Manager clone failed:\n{proc.stderr}"
-            proc = exec(f"uv pip install {clone_dir} --reinstall-package comfyui-manager --python {venv_dir}")
+            proc = exec(f"uv pip install {clone_dir} --reinstall-package comfyui-manager --python {workspace_python}")
             assert proc.returncode == 0, f"Manager override install failed:\n{proc.stderr}"
         else:
-            # PyPI version: "4.1b7"
-            proc = exec(
-                f"{venv_python} -m pip install comfyui-manager=={manager_override} --pre --force-reinstall --no-deps"
-            )
+            # PyPI version: "4.1b7". Install with deps so a newer Manager's new
+            # requirements are pulled in; already-satisfied ones are left alone.
+            proc = exec(f"{workspace_python} -m pip install comfyui-manager=={manager_override} --pre")
             assert proc.returncode == 0, f"Manager override failed:\n{proc.stderr}"
+            proc = exec(f"{workspace_python} -m pip show comfyui-manager")
+            assert f"Version: {manager_override}\n" in proc.stdout, (
+                f"Manager override did not take effect:\n{proc.stdout}\n{proc.stderr}"
+            )
 
     # Populate Manager cache before any node operations (blocking fetch).
     proc = exec(f"comfy --workspace {ws} node update-cache")
