@@ -300,3 +300,23 @@ class TestLongExtensions:
         _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=library)
         env = _run(["ensure", "--hash", f"{_GARBLED}.safetensors", "--where", "cloud"], capsys)
         assert [s["name"] for s in env["error"]["details"]["suggestions"]] == ["model.safetensors"]
+
+
+class TestSuggestionRequestIsShortLived:
+    def test_listing_uses_a_short_timeout(self, cloud_target, monkeypatch, capsys):
+        """The listing only feeds an optional hint; a stalled one must not hold
+        the asset_not_found envelope for the default 30s request timeout."""
+        timeouts: dict[str, float | None] = {}
+
+        def _fake(req, timeout=None):
+            if "/from-hash" in req.full_url:
+                timeouts["ensure"] = timeout
+                raise _http_error(404)
+            timeouts["listing"] = timeout
+            raise TimeoutError("stalled")
+
+        monkeypatch.setattr("urllib.request.urlopen", _fake)
+        env = _run(["ensure", "--hash", _GARBLED, "--where", "cloud"], capsys)
+
+        assert env["error"]["code"] == "asset_not_found"
+        assert timeouts["listing"] is not None and timeouts["listing"] <= 5

@@ -39,6 +39,9 @@ _MAX_SUGGESTIONS = 3
 # One page at the API's maximum, newest first. Never paged: a suggestion is a
 # best-effort hint on an error path, so it gets exactly one bounded request.
 _SUGGESTION_SCAN_LIMIT = 500
+# The listing only feeds an optional hint, so it must not hold the error for
+# the default 30s request timeout.
+_SUGGESTION_TIMEOUT_SECONDS = 5.0
 
 
 def _near_hash_suggestions(value: str, target) -> list[dict]:
@@ -62,7 +65,7 @@ def _near_hash_suggestions(value: str, target) -> list[dict]:
         {"limit": _SUGGESTION_SCAN_LIMIT, "sort": "created_at", "order": "desc", "include_public": "false"}
     )
     try:
-        _, body = http_request(target.url("assets") + "?" + query, target)
+        _, body = http_request(target.url("assets") + "?" + query, target, timeout=_SUGGESTION_TIMEOUT_SECONDS)
         rows = (body or {}).get("assets") or []
     except Exception:  # noqa: BLE001 — best-effort hint on an error path
         return []
