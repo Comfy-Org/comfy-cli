@@ -701,16 +701,17 @@ def set_widget(
     """Set a widget, enriching a not-found node/widget error with the real
     address that carries ``widget`` so a mistargeted edit self-corrects in one
     step (see :func:`_enrich_resolution_error`)."""
-    for n in workflow.get("nodes") or []:
-        if isinstance(n, dict) and n.get("id") == node_id and n.get("type") in NOTE_NODE_TYPES:
-            raise NoteTextNotWritable(node_id, n["type"], widget)
     try:
         return _set_widget_impl(workflow, graph, node_id, widget, value, actor=actor, base_version=base_version)
+    except NoteTextNotWritable:
+        raise
     except ValueError as e:
         bound = _binding_address(workflow, graph, node_id)
         if bound is not None:
             try:
                 return _set_widget_impl(workflow, graph, bound, widget, value, actor=actor, base_version=base_version)
+            except NoteTextNotWritable:
+                raise
             except ValueError:
                 pass
         inserted = _inserted_node_id(workflow, node_id)
@@ -721,6 +722,8 @@ def set_widget(
                 return _set_widget_impl(
                     workflow, graph, inserted, widget, value, actor=actor, base_version=base_version
                 )
+            except NoteTextNotWritable:
+                raise
             except ValueError as e2:
                 raise _enrich_resolution_error(e2, workflow, graph, widget=widget) from e2
         raise _enrich_resolution_error(e, workflow, graph, widget=widget) from e
@@ -1024,6 +1027,18 @@ def _resolve_widget_write(workflow: dict, graph, node_id: Any, widget: str):
         if _find(workflow, node_id) is None and _find_by_str(workflow, node_str) is None:
             _require(workflow, node_id)  # canonical not-found error
         segments = [node_str]
+    # A note (Note/MarkdownNote) has no catalog schema, so no widget address on
+    # it can be written — refuse on the RESOLVED node, whatever spelling (string
+    # id, subgraph path, retried alias) reached it, before widget validation.
+    try:
+        if len(segments) > 1:
+            target = _promoted._navigate(workflow, segments, _promoted.defs_by_id(workflow))
+        else:
+            target = _find(workflow, node_id) or _find_by_str(workflow, node_str)
+    except ValueError:
+        target = None
+    if isinstance(target, dict) and target.get("type") in NOTE_NODE_TYPES:
+        raise NoteTextNotWritable(node_id, target["type"], widget)
     return _promoted.resolve_write(workflow, graph, segments, widget)
 
 

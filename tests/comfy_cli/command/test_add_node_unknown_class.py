@@ -162,3 +162,41 @@ def test_set_widget_on_a_note_names_the_replace_route(patched_graph, tmp_path, c
     blob = json.dumps(err)
     assert "all inputs are links" not in blob, err
     assert "delete" in (err.get("hint") or "") and "insert-workflow" in (err.get("hint") or ""), err
+
+
+def _note(node_id, cls="MarkdownNote") -> dict:
+    return {"id": node_id, "type": cls, "pos": [0, 400], "inputs": [], "outputs": [], "widgets_values": [""]}
+
+
+_SG = "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f"
+
+
+def _note_workflows() -> list[tuple[str, dict, object]]:
+    """Every address form that resolves to a note: a string spelling of an int
+    id, an interior note inside a subgraph instance, and a bare template id
+    that only resolves through set_widget's retry onto the inserted node."""
+    by_str = _base_workflow()
+    by_str["nodes"].append(_note(42))
+
+    interior = _base_workflow()
+    interior["nodes"].append({"id": 5, "type": _SG, "pos": [0, 0], "inputs": [], "outputs": [], "widgets_values": []})
+    interior["definitions"] = {
+        "subgraphs": [{"id": _SG, "name": "sg", "nodes": [_note(9, "Note")], "links": [], "inputs": [], "outputs": []}]
+    }
+
+    retried = _base_workflow()
+    retried["nodes"].append(_note("insert:abababababababababababababababab:root:node:101"))
+    return [("string id", by_str, "42"), ("subgraph interior", interior, "5/9"), ("retry", retried, 101)]
+
+
+@pytest.mark.parametrize("case", [c[0] for c in _note_workflows()])
+def test_every_address_that_resolves_to_a_note_is_refused_as_a_note(case):
+    """The note guard must look at the RESOLVED target, not the raw id: a
+    string id, a subgraph interior path and the retry onto an inserted node
+    all reach a note, and each must raise NoteTextNotWritable instead of
+    the generic widget error."""
+    from comfy_cli import workflow_ops
+
+    _, wf, addr = next(c for c in _note_workflows() if c[0] == case)
+    with pytest.raises(workflow_ops.NoteTextNotWritable):
+        workflow_ops.set_widget(wf, _graph(), addr, "text", "hello")
