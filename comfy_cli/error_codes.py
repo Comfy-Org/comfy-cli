@@ -1196,7 +1196,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "build_spec_invalid",
         "A build spec or legacy scan definition could not be read, has an unsupported schema, or is invalid. "
-        "`details.path` carries the path when one is available.",
+        "`details.path` carries the path when one is available. When `validate` or `push` found model "
+        "entries the builder would refuse (a type that is not a model directory, an unsafe filename, a link "
+        "with no file extension and no filename, a malformed sha256), the message lists every one and "
+        "`details.invalid` carries each as `{field, reason, model}`, `model` naming the entry.",
         "fix the named field, or regenerate the file with `comfy build init`",
     ),
     ErrorCode(
@@ -1240,6 +1243,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "which could not vouch for one or more pins. Pushing anyway would save a definition that cannot "
         "reconstruct every requested public node.",
         "edit the spec to name a published registry version or normalized repository, or remove the node",
+    ),
+    ErrorCode(
+        "build_definition_invalid",
+        "The builder refused the build's definition, most often at `push --release` or `release create`. "
+        "The message lists each problem as `<field>: <reason>`, and `details.invalid` carries each as "
+        "`{field, reason}`. `models[<n>]` counts the models as the spec file lists them after a push.",
+        "fix each named field in the spec, then push again; a retry of the same definition is refused the same way",
     ),
     ErrorCode(
         "build_release_held",

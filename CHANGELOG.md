@@ -15,6 +15,21 @@ history.
 
 ## [Unreleased]
 
+### Changed
+
+- `comfy build validate` and `comfy build push` refuse model entries the builder's
+  release would refuse: a `type` that is not a model folder, an unsafe `filename`,
+  a link with no file extension and no `filename`, a malformed `sha256`. Every
+  such entry is named at once, with the model it is about, under
+  `build_spec_invalid` (`details.invalid` in JSON), and `push` refuses before
+  uploading anything. A case variant of a folder (`Loras` for `loras`) needs the
+  builder's list, so `push` and `validate --remote` read it and offline `validate`
+  does not. (DPLAT-1704)
+- A definition the builder refuses now arrives as `build_definition_invalid`, its
+  reasons one per line and in `details.invalid`, instead of `build_builder_error`
+  with the code as the message, the reasons in `details.body` and a hint to
+  re-run the cut. (DPLAT-1704)
+
 ## [1.21.0] - 2026-09-24
 
 [Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.21.0) · 50 commits since v1.20.0. Breaking changes are marked **Breaking** under Changed.

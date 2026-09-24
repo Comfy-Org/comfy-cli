@@ -662,3 +662,64 @@ def test_update_synchronizes_name_and_description(workspace: Path, monkeypatch: 
     (update,) = _calls(client, "update_build")
     assert update["name"] == "Renamed"
     assert update["description"] == "New description"
+
+
+def test_push_refuses_model_entries_the_builder_would_refuse_before_any_upload(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The builder would save these and refuse the release. Push names all four,
+    the folder's case included since it reads the builder's list, and sends nothing."""
+    # Given
+    write_spec(
+        workspace,
+        models=[
+            {"type": "Loras", "sourceUri": "https://h.example/a.safetensors"},
+            {"type": "loras", "sourceUri": "https://civitai.com/api/download/models/128713"},
+            {
+                "type": "loras",
+                "filename": "add_detail (v1.1).safetensors",
+                "sourceUri": "https://h.example/b.safetensors",
+            },
+            {"type": "loras", "sha256": "8A0B5F4C2E", "sourceUri": "https://h.example/c.safetensors"},
+        ],
+        nodes=[],
+    )
+    client = RecordingBuilder()
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert sorted(issue["field"].rsplit(".", 1)[1] for issue in error["details"]["invalid"]) == [
+        "filename",
+        "filename",
+        "sha256",
+        "type",
+    ]
+    assert client.calls == []
+    assert reloaded(workspace)["id"] is None
+
+
+def test_push_does_not_refuse_for_a_folder_list_it_could_not_read(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    write_spec(workspace, models=[{"type": "Loras", "sourceUri": "https://h.example/a.safetensors"}], nodes=[])
+    client = RecordingBuilder()
+
+    def unreachable() -> list[str]:
+        raise requests.ConnectionError("builder unreachable")
+
+    monkeypatch.setattr(client, "list_model_directories", unreachable)
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    assert len(_calls(client, "create_build")) == 1

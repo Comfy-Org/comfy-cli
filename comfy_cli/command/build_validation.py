@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Final, Literal, Protocol
+from urllib.parse import urlsplit
 
 from typing_extensions import assert_never
 
@@ -15,6 +17,19 @@ _AUTHORING_FIELDS: Final = frozenset({"source", "localPath", "localDigest", "loc
 MODEL_SOURCES: Final = ("blobId", "sourceUri")
 NODE_SOURCES: Final = ("blobId", "registryVersion", "repository")
 MODEL_RESOLVE_BATCH_SIZE: Final = 32
+
+# comfy-builder's own model rules (``definition.validateModels`` and
+# ``common.ValidModelDir``), so a spec its release cut would refuse is refused here,
+# before any upload, with every problem at once. The reasons are the builder's words,
+# so what this prints reads the same as what a save or a cut would say.
+_SAFE_SEGMENT: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}")
+_SHA256: Final = re.compile(r"[0-9a-f]{64}")
+_MAX_MODEL_DIR: Final = 255
+_RESERVED_MODEL_ROOTS: Final = frozenset({"configs", "custom_nodes"})
+_WINDOWS_RESERVED: Final = frozenset(
+    {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+)
+_MODEL_DIR_REASON: Final = "must be a model directory under models/ (e.g. checkpoints, insightface/models/antelopev2)"
 
 
 class ModelLookupState(str, Enum):
@@ -192,8 +207,112 @@ def _validate_wire_sources(original: JsonObject, projected: JsonObject, collecti
         raise BuildSpecInvalidError(f"definition.{collection}[{index}] has no effective builder source")
 
 
-def validate_local_build_spec(spec: JsonObject, paths: BuildPaths) -> JsonObject:
-    """Run authoring validation, then return the validated normalized wire copy."""
+def _valid_model_dir(value: str, directories: frozenset[str] | None) -> bool:
+    """``common.ValidModelDir``: a vetted directory, or a relative path that can only
+    land inside models/. A case variant of a vetted directory ("Loras") is a typo, and
+    only the builder's list can tell one, so without *directories* it passes here and
+    the save warns about it instead."""
+    if directories and value in directories:
+        return True
+    if not value or len(value) > _MAX_MODEL_DIR:
+        return False
+    if directories and value.lower() in {directory.lower() for directory in directories}:
+        return False
+    segments = value.split("/")
+    if segments[0].lower() in _RESERVED_MODEL_ROOTS:
+        return False
+    for segment in segments:
+        if not _SAFE_SEGMENT.fullmatch(segment) or segment.endswith("."):
+            return False
+        if segment.partition(".")[0].upper() in _WINDOWS_RESERVED:
+            return False
+    return True
+
+
+def _valid_filename(value: str) -> bool:
+    return _SAFE_SEGMENT.fullmatch(value) is not None and ".." not in value
+
+
+def _https_url(value: str) -> bool:
+    try:
+        parts = urlsplit(value.strip())
+    except ValueError:
+        return False
+    return parts.scheme == "https" and bool(parts.netloc)
+
+
+def _lacks_extension(uri: str) -> bool:
+    """Whether the name the builder derives from *uri* (Go's ``path.Base`` of its
+    path) has no extension, as a Civitai ``/api/download/models/<id>`` link does."""
+    path = urlsplit(uri.strip()).path
+    if not path:
+        return False  # path.Base("") is ".", which has one
+    base = path.rstrip("/").rsplit("/", 1)[-1] or "/"
+    return "." not in base
+
+
+def model_rule_problems(
+    definition: JsonObject, projected: JsonObject, directories: frozenset[str] | None = None
+) -> list[dict[str, str]]:
+    """Every model entry the builder's cut would refuse, as ``{field, reason,
+    model}``. ``models[<n>]`` counts the spec as it is read, which sorts the models,
+    so ``model`` names the entry (its filename, link or local path) for a person
+    looking for it in a file they ordered themselves. A ``source: local`` entry's
+    link and sha256 are left alone: push replaces both with what it uploads."""
+    problems: list[dict[str, str]] = []
+    model = ""
+
+    def refuse(field: str, reason: str) -> None:
+        problems.append({"field": field, "reason": reason, "model": model})
+
+    for index, (entry, wire) in enumerate(zip(_entries(definition, "models"), _entries(projected, "models"))):
+        location = f"definition.models[{index}]"
+        model = next(
+            (
+                value
+                for key in ("filename", "sourceUri", "localPath")
+                if isinstance(value := entry.get(key), str) and value.strip()
+            ),
+            "",
+        )
+        model_type = entry.get("type")
+        if isinstance(model_type, str) and not _valid_model_dir(model_type, directories):
+            refuse(f"{location}.type", _MODEL_DIR_REASON)
+        filename = entry.get("filename")
+        has_filename = isinstance(filename, str) and bool(filename.strip())
+        if has_filename and not _valid_filename(filename):
+            refuse(f"{location}.filename", "must be a safe filename")
+        if entry.get("source") == "local":
+            continue
+        uri = wire.get("sourceUri")
+        if isinstance(uri, str) and uri.strip():
+            if not _https_url(uri):
+                refuse(f"{location}.sourceUri", "must be an https URL")
+            elif not has_filename and _lacks_extension(uri):
+                refuse(f"{location}.filename", "sourceUri has no file extension; set an explicit filename")
+        sha256 = entry.get("sha256")
+        if isinstance(sha256, str) and sha256.strip() and not _SHA256.fullmatch(sha256.strip().lower()):
+            refuse(f"{location}.sha256", "must be a 64-character sha256")
+    return problems
+
+
+def _problems_message(problems: list[dict[str, str]]) -> str:
+    count = len(problems)
+    lines = [
+        f"  {problem['field']}" + (f" ({problem['model']})" if problem["model"] else "") + f": {problem['reason']}"
+        for problem in problems
+    ]
+    heading = f"{count} problem{'s' if count != 1 else ''} the builder would refuse this build for:"
+    return "\n".join([heading, *lines])
+
+
+def validate_local_build_spec(
+    spec: JsonObject, paths: BuildPaths, *, model_directories: frozenset[str] | None = None
+) -> JsonObject:
+    """Run authoring validation, then return the validated normalized wire copy.
+
+    *model_directories* is the builder's vetted list, when the caller has signed in
+    and read it; it is what tells a case variant of a folder from a new one."""
     if spec.get("schema") != SPEC_SCHEMA:
         raise BuildSpecInvalidError(f"unsupported build spec schema {spec.get('schema')!r}; expected {SPEC_SCHEMA!r}")
     definition: JsonValue = spec.get("definition")
@@ -203,6 +322,9 @@ def validate_local_build_spec(spec: JsonObject, paths: BuildPaths) -> JsonObject
     projected = project_wire_definition(definition)
     _validate_wire_sources(definition, projected, "models")
     _validate_wire_sources(definition, projected, "customNodes")
+    problems = model_rule_problems(definition, projected, model_directories)
+    if problems:
+        raise BuildSpecInvalidError(_problems_message(problems), issues=problems)
     return projected
 
 

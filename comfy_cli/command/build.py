@@ -1571,6 +1571,34 @@ def init_cmd(
     )
 
 
+def _raise_spec_invalid(renderer, error: BuildSpecInvalidError, spec_file: Path) -> NoReturn:
+    """The ``build_spec_invalid`` envelope for a spec the local checks refused. When
+    they found several problems the message lists each on its own line, and JSON also
+    carries them apart under ``details.invalid``."""
+    details: dict = {"path": str(spec_file)}
+    if error.issues and not renderer.is_pretty():
+        details["invalid"] = error.issues
+    renderer.error(code=error.code, message=str(error), details=details)
+    raise typer.Exit(code=1) from error
+
+
+def _model_directories(client, spec: Mapping) -> frozenset[str] | None:
+    """The builder's vetted model directories, read only by a signed-in command whose
+    spec has models, or None. They are what tells a case variant ("Loras") from a new
+    folder. A list that cannot be read refuses nothing: the save warns about the same
+    field."""
+    definition = spec.get("definition")
+    if client is None or not isinstance(definition, dict) or not definition.get("models"):
+        return None
+    try:
+        listed = client.list_model_directories()
+    except (OSError, requests.RequestException, ValueError, KeyError):
+        return None
+    if not isinstance(listed, list):
+        return None
+    return frozenset(name for name in listed if isinstance(name, str)) or None
+
+
 def _read_spec(renderer, spec_file: Path) -> dict:
     try:
         return read_build_spec(spec_file)
@@ -1931,15 +1959,15 @@ def push_cmd(
     # The scratch directory holds one archive per local node, and it is released
     # the moment the last upload lands: nothing after this block reads an
     # archive, and the create/update round-trip that follows can take a while.
+    directories = _model_directories(client, spec)
     with tempfile.TemporaryDirectory(prefix="comfy-build-push-") as package_dir:
         try:
-            validate_local_build_spec(spec, paths)
+            validate_local_build_spec(spec, paths, model_directories=directories)
             preparation = prepare_push(spec, paths, ModelDigestCache(_sha256_file), package_dir=Path(package_dir))
         except NodePackageError as error:
             _raise_node_package_error(renderer, error)
         except BuildSpecInvalidError as error:
-            renderer.error(code=error.code, message=str(error), details={"path": str(paths.spec_file)})
-            raise typer.Exit(code=1) from error
+            _raise_spec_invalid(renderer, error, paths.spec_file)
 
         uploads = pending_uploads(preparation)
         payload = {
@@ -2595,6 +2623,27 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None,
             )
             return
         builder_error, builder_message = _builder_error_fields(body)
+        # A definition the builder refused: its reasons lead, one per line, where the
+        # generic branch below would lead with the code and leave the reasons in the
+        # body excerpt as one JSON string. The caller's retry hint is dropped with it,
+        # since only an edit clears this.
+        if e.code == 400 and builder_error == "INVALID_DEFINITION":
+            invalid = _builder_invalid(body)
+            if invalid or builder_message:
+                details = {**(subject or {}), "status": e.code}
+                if invalid and not renderer.is_pretty():
+                    details["invalid"] = invalid
+                lines = [f"  {issue['field']}: {issue['reason']}" for issue in invalid]
+                renderer.error(
+                    code="build_definition_invalid",
+                    message=_capped_message(
+                        "\n".join(["the builder refused the build's definition:", *lines])
+                        if invalid
+                        else builder_message
+                    ),
+                    details=details,
+                )
+                return
         # All three refusals are 409 in the builder's contract and nothing else
         # sends them, so a mapped code under any other status came from something
         # that is not the builder and must not be answered with its remediation.
@@ -2708,6 +2757,23 @@ def _builder_error_fields(body: str) -> tuple[str, str]:
         _encodable(str(parsed.get("error") or "").strip()),
         _encodable(str(parsed.get("message") or "").strip()),
     )
+
+
+def _builder_invalid(body: str) -> list[dict[str, str]]:
+    """The ``invalid`` list of a builder 400 (``[{field, reason}]``), dropping any
+    entry in another shape, or ``[]`` when the body carries none."""
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        return []
+    raw = parsed.get("invalid") if isinstance(parsed, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [
+        {"field": _encodable(item["field"]), "reason": _encodable(item["reason"])}
+        for item in raw
+        if isinstance(item, dict) and isinstance(item.get("field"), str) and isinstance(item.get("reason"), str)
+    ]
 
 
 def _builder_msg(body: str) -> str:
@@ -3075,10 +3141,9 @@ def validate_cmd(
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
     try:
-        wire_definition = validate_local_build_spec(spec, paths)
+        wire_definition = validate_local_build_spec(spec, paths, model_directories=_model_directories(client, spec))
     except BuildSpecInvalidError as error:
-        renderer.error(code=error.code, message=str(error), details={"path": str(paths.spec_file)})
-        raise typer.Exit(code=1) from error
+        _raise_spec_invalid(renderer, error, paths.spec_file)
 
     result = {
         "spec_file": str(paths.spec_file),

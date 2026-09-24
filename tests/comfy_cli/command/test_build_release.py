@@ -866,3 +866,91 @@ def test_delete_uses_one_stripped_release_id_for_the_prompt_the_url_and_the_payl
         ["https://builder.test/v1/releases/release-9"],
         {"releaseId": "release-9", "deleted": True},
     )
+
+
+#: The four reasons the builder gave for the pasted model entries of DPLAT-1704.
+REFUSED_MODELS = [
+    {"field": "models[0].type", "reason": "must be a model directory under models/ (e.g. checkpoints)"},
+    {"field": "models[1].filename", "reason": "sourceUri has no file extension; set an explicit filename"},
+    {"field": "models[2].filename", "reason": "must be a safe filename"},
+    {"field": "models[3].sha256", "reason": "must be a 64-character sha256"},
+]
+
+
+def definition_refused(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+    raise refusal(400, {"error": "INVALID_DEFINITION", "invalid": REFUSED_MODELS}, url)
+
+
+def test_a_refused_definition_leads_with_every_reason(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cut's 400 carries its reasons as a list; the envelope names each one
+    rather than the code, and hands them to an agent apart."""
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", definition_refused)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_definition_invalid"
+    assert error["details"]["invalid"] == REFUSED_MODELS
+    assert error["details"]["buildId"] == "build-1"
+    for issue in REFUSED_MODELS:
+        assert f"{issue['field']}: {issue['reason']}" in error["message"]
+    assert "INVALID_DEFINITION" not in error["message"]
+    # Re-running the same definition is refused the same way, so the cut's retry
+    # hint would send the reader the wrong way.
+    assert "idempotent" not in (error.get("hint") or "")
+
+
+def test_a_refused_definition_prints_one_reason_per_line(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", definition_refused)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", agentic=False)
+
+    # Then
+    assert result.exit_code == 1
+    # Each reason starts its own line; the panel may wrap a long one after that.
+    lines = [line.strip("│ ") for line in result.output.splitlines()]
+    for issue in REFUSED_MODELS:
+        assert any(line.startswith(f"{issue['field']}: ") for line in lines), result.output
+    assert "idempotent" not in result.output
+
+
+def test_a_refused_definition_with_only_a_message_leads_with_the_message(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A save's refusal carries one message and no list; it leads too, without the code."""
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    reason = "the build's configuration is invalid: baseImage: must be one of: cuda-12.8"
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        raise refusal(400, {"error": "INVALID_DEFINITION", "message": reason}, url)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["message"]) == ("build_definition_invalid", reason)
+    assert "invalid" not in error["details"]

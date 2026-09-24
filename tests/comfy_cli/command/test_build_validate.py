@@ -314,3 +314,106 @@ def test_pretty_remote_output_keeps_none_and_lookup_errors_distinct(
     assert result.exit_code == 0, result.output
     assert "none_found" in result.stdout
     assert "lookup_error" in result.stdout
+
+
+#: Model entries as people paste them from Civitai or Hugging Face, each breaking
+#: one rule of the builder's release cut (DPLAT-1704).
+PASTED_MODELS: list[JsonObject] = [
+    {"type": "Loras", "sourceUri": "https://h.example/a.safetensors"},
+    {"type": "loras", "sourceUri": "https://civitai.com/api/download/models/128713"},
+    {"type": "loras", "filename": "add_detail (v1.1).safetensors", "sourceUri": "https://h.example/b.safetensors"},
+    {"type": "loras", "sha256": "8A0B5F4C2E", "sourceUri": "https://h.example/c.safetensors"},
+]
+
+
+def _refused(result) -> dict[str, str]:
+    """The refused entries, as the model each names to the rule it breaks."""
+    error = _envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid", error
+    return {issue["model"]: issue["field"].rsplit(".", 1)[1] for issue in error["details"]["invalid"]}
+
+
+def test_validate_names_every_model_entry_the_builder_would_refuse(workspace: Path) -> None:
+    """Offline it cannot know the builder's folders, so a case variant waits for the
+    save; the rest are named together, before anything is uploaded."""
+    # Given
+    write_spec(workspace, models=PASTED_MODELS, nodes=[])
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    assert _refused(result) == {
+        "https://civitai.com/api/download/models/128713": "filename",
+        "add_detail (v1.1).safetensors": "filename",
+        "https://h.example/c.safetensors": "sha256",
+    }
+    assert _envelope(result)["error"]["message"].startswith("3 problems the builder would refuse this build for:")
+
+
+def test_remote_validate_also_names_a_case_variant_of_a_folder(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    recorder = ResolveRecorder()
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", recorder)
+    write_spec(workspace, models=PASTED_MODELS, nodes=[])
+
+    # When
+    result = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then
+    assert result.exit_code == 1
+    assert _refused(result)["https://h.example/a.safetensors"] == "type"
+    assert len(_refused(result)) == 4
+    assert recorder.calls == [], "a refused spec looks nothing up"
+
+
+def test_pretty_validate_prints_each_problem_on_its_own_line(workspace: Path) -> None:
+    # Given
+    write_spec(workspace, models=PASTED_MODELS, nodes=[])
+
+    # When
+    result = _invoke(workspace, output="pretty")
+
+    # Then
+    assert result.exit_code == 1
+    lines = [line.strip("│ ") for line in result.output.splitlines()]
+    assert sum(line.startswith("definition.models[") for line in lines) == 3, result.output
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param({"type": "ipadapter/custom", "blobId": "blob-1"}, id="a-new-folder"),
+        pytest.param(
+            {"type": "loras", "filename": "ok.safetensors", "sourceUri": "https://civitai.com/api/download/models/1"},
+            id="a-link-with-a-filename",
+        ),
+        pytest.param(
+            {"type": "loras", "sourceUri": "https://h.example/x.safetensors", "sha256": "A" * 64}, id="upper-hex"
+        ),
+    ],
+)
+def test_validate_passes_what_the_builder_accepts(workspace: Path, model: JsonObject) -> None:
+    # Given
+    write_spec(workspace, models=[model], nodes=[])
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+
+
+def test_a_local_models_sha256_is_left_to_the_push(workspace: Path) -> None:
+    """Push hashes a local model and replaces its sha256, so a stale one refuses nothing."""
+    # Given
+    write_spec(workspace, models=[local_model(sha256="a")], nodes=[])
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stdout
