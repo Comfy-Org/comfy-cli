@@ -46,3 +46,10 @@ def test_single_token_value_names_no_best_match():
     """A bare filename or word has no qualifier to disagree on — difflib only."""
     [w] = _port(["sd_xl_base.safetensors", "v1-5-pruned.safetensors"]).validate_catalog("v1-5-prund.safetensors")
     assert "best_match" not in w, w
+
+
+def test_filename_value_names_no_best_match():
+    """'flux dev.safetensors' sharing 'flux' with 'flux schnell.safetensors' is a
+    different model, not a relabelled one — never promote it."""
+    [w] = _port(["flux schnell.safetensors", "sdxl base.safetensors"]).validate_catalog("flux dev.safetensors")
+    assert "best_match" not in w, w

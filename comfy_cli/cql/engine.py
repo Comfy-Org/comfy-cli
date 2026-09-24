@@ -425,11 +425,19 @@ class Port:
         the ratio is the part that matters and exactly one option has it, so
         that option is the likely intent. The caller NAMES it and never writes
         it. A single-token value (a filename, a bare word) has no qualifier to
-        disagree on and gets ``None``, as does a token two options share.
+        disagree on and gets ``None``, as does a token two options share and any
+        value with a file extension.
         """
         if self.type != "COMBO" or not self.enum_values:
             return None
-        token, _, rest = str(value).strip().partition(" ")
+        import re
+
+        text = str(value).strip()
+        # A filename ('flux dev.safetensors') sharing a leading word with
+        # another file is a different model, not a relabelled option.
+        if re.search(r"\.[A-Za-z][A-Za-z0-9]{0,11}$", text):
+            return None
+        token, _, rest = text.partition(" ")
         if not token or not rest.strip():
             return None
         hits = [str(o) for o in self.enum_values if str(o).strip().partition(" ")[0] == token]
