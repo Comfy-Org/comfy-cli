@@ -52,6 +52,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "fix the invocation; `details.command` plus `--help`, or `comfy --json discover`, gives the exact surface",
     ),
     ErrorCode(
+        "internal_error",
+        "The command crashed on an exception it did not handle (a comfy-cli bug, not a bad input the command "
+        "recognised). `details.exception` names the exception type and the message carries its text; the full "
+        "traceback is on stderr. Whether anything was written depends on where it crashed, so re-read state "
+        "before retrying.",
+        "re-read the file/state before retrying; if the same call crashes again, try another route and report "
+        "the message as a comfy-cli bug",
+    ),
+    ErrorCode(
         "not_in_workspace",
         "Resolved no workspace where one was required (e.g. `comfy which`).",
         "run `comfy install`, or pass `--workspace`",

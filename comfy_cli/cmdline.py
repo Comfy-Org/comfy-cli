@@ -133,13 +133,47 @@ def _command_path(ctx: click.Context | None) -> str:
     return " ".join(reversed(names))
 
 
+def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | None) -> None:
+    """Write the terminating ``ok:false`` envelope for an exception no command caught.
+
+    `workflow set-widget` could escape with a Python
+    traceback and no envelope. Edit commands catch only ``ValueError``, and
+    nothing above them did anything with the rest. A ``--json`` caller then sees
+    a stack dump and an empty stdout, indistinguishable from a transport failure.
+    The caller re-raises, so the traceback still reaches stderr for debugging
+    and the exit code stays 1. Pretty mode is left exactly as it was.
+    """
+    try:
+        renderer = get_renderer()
+        if not renderer.is_json() or renderer._envelope_emitted:
+            return
+        command = getattr(renderer, "command", None) or _command_path(ctx)
+        renderer.error(
+            code="internal_error",
+            message=f"{type(error).__name__}: {error}",
+            details={"exception": type(error).__name__, "command": f"comfy {command}".strip()},
+            exit_code=1,
+            command=command,
+        )
+    except Exception:  # noqa: BLE001 — never mask the original crash
+        pass
+
+
+def _is_click_control_flow(error: BaseException) -> bool:
+    """Click/typer's own exceptions (usage errors, ``typer.Exit``, ``Abort``) —
+    they already carry their exit semantics and are not crashes."""
+    return any(_click_error_is(error, name) for name in ("ClickException", "Exit", "Abort"))
+
+
 @contextlib.contextmanager
-def _usage_errors_as_envelopes(args: list[str] | None = None) -> Iterator[None]:
+def _usage_errors_as_envelopes(args: list[str] | None = None, ctx: click.Context | None = None) -> Iterator[None]:
     try:
         yield
     except Exception as error:
         if _click_error_is(error, "UsageError"):
             _emit_usage_error_envelope(error, args)
+        elif ctx is not None and not _is_click_control_flow(error):
+            _emit_internal_error_envelope(error, ctx)
         raise
 
 
@@ -160,7 +194,10 @@ class _RootGroup(LazyTyperGroup):
             return super().make_context(info_name, args, parent=parent, **kwargs)
 
     def invoke(self, ctx: click.Context):
-        with _usage_errors_as_envelopes():
+        # `ctx` turns on the crash envelope too: every command body runs inside
+        # this call, so an exception no command caught ends `--json` with an
+        # `internal_error` envelope instead of an empty stdout.
+        with _usage_errors_as_envelopes(ctx=ctx):
             return super().invoke(ctx)
 
 
