@@ -324,6 +324,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check `details.body` for the server's message",
     ),
     ErrorCode(
+        "cloud_rate_limited",
+        "Cloud throttled the request (HTTP 429). The request was not judged, so it is not invalid; "
+        "`details.retry_after` carries the server's Retry-After seconds when it sent one.",
+        "wait `details.retry_after` seconds (or a few seconds) and retry the same request unchanged",
+    ),
+    ErrorCode(
         "cloud_billing_unavailable",
         "`comfy cloud status` could not read `/api/billing/status`, so there is no tier or "
         "subscription state to report. Distinct from `cloud_unauthorized` (a rejected "

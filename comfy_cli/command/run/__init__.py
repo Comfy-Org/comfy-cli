@@ -908,6 +908,7 @@ def execute_cloud(
     (the ``comfy run --prompt`` injected default), mirroring :func:`execute`.
     """
     from comfy_cli.comfy_client import Client, HTTPError, Unauthenticated, _group_outputs
+    from comfy_cli.command._cloud_errors import emit_status_error
     from comfy_cli.target import resolve_target
 
     renderer = get_renderer()
@@ -1081,8 +1082,11 @@ def execute_cloud(
         renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e
     except HTTPError as e:
-        renderer.error(
-            code="cloud_http_error",
+        emit_status_error(
+            renderer,
+            status=e.status,
+            retry_after=e.retry_after,
+            operation="submit",
             message=f"Cloud server rejected the workflow (HTTP {e.status}): {e.message}",
             hint="check the workflow is valid and the cloud server has the required nodes",
             details={"status": e.status, "body": e.body[:2000]},
@@ -1266,11 +1270,15 @@ def execute_cloud(
             raise typer.Exit(code=1) from e
         except HTTPError as e:
             state.status = "error"
-            state.error = {"code": "cloud_http_error", "message": str(e)}
+            state.error = {"code": "cloud_rate_limited" if e.status == 429 else "cloud_http_error", "message": str(e)}
             jobs_state.write(state)
-            renderer.error(
-                code="cloud_http_error",
+            emit_status_error(
+                renderer,
+                status=e.status,
+                retry_after=e.retry_after,
+                operation="poll",
                 message=f"Cloud server error while polling (HTTP {e.status}): {e.message}",
+                hint=None,
                 details={"status": e.status, "prompt_id": submit.prompt_id},
             )
             raise typer.Exit(code=1) from e

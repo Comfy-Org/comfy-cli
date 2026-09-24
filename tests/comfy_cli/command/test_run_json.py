@@ -2393,3 +2393,85 @@ class TestErrorEnvelopeCarriesRoutedTarget:
         assert result.exit_code == 1
         assert second["error"]["code"] == "where_invalid"
         assert second["where"] is None
+
+
+class TestCloudRateLimited:
+    """A 429 from Comfy Cloud is throttling, not a rejected workflow.
+
+    The submit path used to report it as `cloud_http_error` with the hint
+    "check the workflow is valid and the cloud server has the required nodes",
+    sending the agent off to rewrite a valid workflow.
+    """
+
+    def test_submit_429_is_cloud_rate_limited(self, monkeypatch, workflow_file, capsys):
+        from comfy_cli.comfy_client import HTTPError
+
+        exc = HTTPError(429, "Too Many Requests", '{"error":{"message":"slow down"}}', retry_after=12.0)
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit_exc=exc))
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        assert exit_code == 1
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_rate_limited"
+        assert err["details"]["status"] == 429
+        assert err["details"]["retry_after"] == 12
+        assert "slow down" in err["details"]["body"]
+        assert "workflow is valid" not in err["hint"]
+        assert "retry" in err["hint"].lower()
+
+    def test_submit_429_without_retry_after_omits_it(self, monkeypatch, workflow_file, capsys):
+        from comfy_cli.comfy_client import HTTPError
+
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit_exc=HTTPError(429, "Too Many Requests")))
+        lines, _ = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_rate_limited"
+        assert "retry_after" not in err["details"]
+
+    @pytest.mark.parametrize("status", [400, 500, 503])
+    def test_submit_other_statuses_keep_cloud_http_error(self, monkeypatch, workflow_file, capsys, status):
+        from comfy_cli.comfy_client import HTTPError
+
+        exc = HTTPError(status, "nope", "body", retry_after=5.0)
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit_exc=exc))
+        lines, _ = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_http_error"
+        assert err["hint"] == "check the workflow is valid and the cloud server has the required nodes"
+        assert err["details"] == {"status": status, "body": "body"}
+
+    def test_poll_429_is_cloud_rate_limited(self, monkeypatch, workflow_file, capsys):
+        from comfy_cli.comfy_client import HTTPError
+
+        base = _fake_client()
+
+        class Throttled(base):
+            def wait_for_completion(self, prompt_id, **k):
+                raise HTTPError(429, "Too Many Requests", retry_after=3.0)
+
+        _install_cloud_stubs(monkeypatch, client_cls=Throttled)
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=True, timeout=5)
+
+        assert exit_code == 1
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_rate_limited"
+        assert err["details"]["prompt_id"] == "cloud-pid"
+        assert err["details"]["retry_after"] == 3
+
+    def test_poll_500_keeps_cloud_http_error(self, monkeypatch, workflow_file, capsys):
+        from comfy_cli.comfy_client import HTTPError
+
+        base = _fake_client()
+
+        class Broken(base):
+            def wait_for_completion(self, prompt_id, **k):
+                raise HTTPError(500, "Internal Server Error")
+
+        _install_cloud_stubs(monkeypatch, client_cls=Broken)
+        lines, _ = _cloud_capture(capsys, workflow_file, wait=True, timeout=5)
+
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_http_error"
+        assert err["details"] == {"status": 500, "prompt_id": "cloud-pid"}

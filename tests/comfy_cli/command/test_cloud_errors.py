@@ -120,3 +120,50 @@ def test_url_error_surfaces_network_hint():
     call = renderer.calls[0]
     assert call["code"] == "cloud_http_error"
     assert "comfy cloud whoami" in call["hint"]
+
+
+# --- 429: throttled, not rejected --------------------------------------------
+#
+# `comfy run` used to report a 429 as the generic `cloud_http_error` with a
+# hint to "check the workflow is valid" — sending the agent off to "fix" a valid
+# workflow. A 429 gets its own code and a retry hint, and carries the server's
+# Retry-After when it sent one.
+
+
+def _http_error_with_headers(code: int, headers: dict, body: bytes = b'{"error":"slow down"}'):
+    return urllib.error.HTTPError("https://cloud.example.com/x", code, "Too Many Requests", headers, io.BytesIO(body))
+
+
+def test_429_is_cloud_rate_limited_with_retry_after():
+    renderer = _FakeRenderer()
+    exit_exc = _handle(renderer, _http_error_with_headers(429, {"Retry-After": "30"}))
+
+    assert isinstance(exit_exc, typer.Exit)
+    call = renderer.calls[0]
+    assert call["code"] == "cloud_rate_limited"
+    assert call["details"]["status"] == 429
+    assert call["details"]["retry_after"] == 30
+    assert call["details"]["operation"] == "cancel"
+    assert call["details"]["prompt_id"] == "p1"
+    assert "slow down" in call["details"]["body"]
+    assert "retry" in call["hint"].lower()
+
+
+def test_429_without_retry_after_omits_it():
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error_with_headers(429, {}))
+
+    call = renderer.calls[0]
+    assert call["code"] == "cloud_rate_limited"
+    assert "retry_after" not in call["details"]
+
+
+@pytest.mark.parametrize("code", [400, 409, 500, 502])
+def test_other_statuses_stay_cloud_http_error(code: int):
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error_with_headers(code, {"Retry-After": "30"}))
+
+    call = renderer.calls[0]
+    assert call["code"] == "cloud_http_error"
+    assert call["details"]["status"] == code
+    assert "retry_after" not in call["details"]
