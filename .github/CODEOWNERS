@@ -1,0 +1,14 @@
+# Default review owners: the top two non-bot contributors over the past 12 months.
+* @mattmillerai @bigcat88
+
+# Credential handling: stored API keys and authentication commands.
+/comfy_cli/auth/ @mattmillerai @skishore23
+
+# Credential handling: cloud OAuth tokens and authenticated API calls.
+/comfy_cli/cloud/ @mattmillerai @skishore23
+
+# Registry interaction: custom-node metadata and third-party code supply chain.
+/comfy_cli/registry/ @mattmillerai @bigcat88
+
+# Supply chain: publishing the CLI package to PyPI affects every downstream user.
+/.github/workflows/publish_package.yml @bigcat88
