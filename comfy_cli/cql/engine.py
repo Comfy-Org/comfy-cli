@@ -1616,6 +1616,23 @@ class Graph:
                 describe(p, p.name, 0)
         return out
 
+    def dynamic_sub_widget_options(self, class_name: str, widget: str) -> tuple[str, list[str]] | None:
+        """``(selector, [option keys])`` when ``widget`` is a dynamic-combo
+        sub-widget that only SOME of the selector's options reveal, else ``None``.
+
+        ``MinimaxHailuo03TextToVideoNode`` + ``model.prompt_expansion_mode`` →
+        ``("model", ["MiniMax H3 Max", "MiniMax H3 Max Turbo"])``: the default
+        ``MiniMax H3`` has no such widget, so a write to it on a node still on
+        that option must say which option to select first. A widget every
+        option reveals (or none) returns ``None``.
+        """
+        for selector, spec in self.dynamic_combo_options(class_name).items():
+            options = spec.get("options") or {}
+            keys = [key for key, opt in options.items() if widget in (opt.get("widgets") or [])]
+            if keys and len(keys) < len(options):
+                return selector, keys
+        return None
+
     def widget_defaults(self, class_name: str) -> dict[str, Any]:
         """Default value per widget-order name — including dynamic-combo selectors
         (first key), their sub-widgets, and control_after_generate. Used by
@@ -3890,7 +3907,9 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     try:
         widget_idx = order.index(input_name)
     except ValueError:
-        warning = _unknown_dynamic_sub_warning(m, input_name, order, widgets)
+        warning = _unknown_dynamic_sub_warning(
+            m, input_name, order, widgets, revealed_by=graph.dynamic_sub_widget_options(node_type, input_name)
+        )
         if warning is not None:
             return [warning]
         avail = _editable_widget_names(entries)
@@ -3926,10 +3945,21 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     return warnings
 
 
-def _unknown_dynamic_sub_warning(m: Morphism, input_name: str, order: list[str], widgets: list[Any]) -> dict | None:
+def _unknown_dynamic_sub_warning(
+    m: Morphism,
+    input_name: str,
+    order: list[str],
+    widgets: list[Any],
+    *,
+    revealed_by: tuple[str, list[str]] | None = None,
+) -> dict | None:
     """Warning dict for a ``<combo>.<sub>`` address not present under the
     combo's CURRENT selector, or ``None`` when ``input_name`` isn't a
-    dynamic-combo sub-address (caller falls through to the hard error)."""
+    dynamic-combo sub-address (caller falls through to the hard error).
+
+    ``revealed_by`` is :meth:`Graph.dynamic_sub_widget_options` for the
+    address: when another option of the combo has the widget, the warning
+    names those options instead of a bare ``<option>`` placeholder."""
     if "." not in input_name:
         return None
     base = input_name.split(".", 1)[0]
@@ -3939,7 +3969,9 @@ def _unknown_dynamic_sub_warning(m: Morphism, input_name: str, order: list[str],
     base_idx = order.index(base)
     selector = widgets[base_idx] if base_idx < len(widgets) else None
     valid = [n for n in order if n.startswith(f"{base}.")]
-    return {
+    keys = revealed_by[1] if revealed_by is not None and revealed_by[0] == base else []
+    switch = " or ".join(repr(k) for k in keys) if keys else "<option>"
+    warning = {
         "code": "unknown_dynamic_sub_input",
         "field": input_name,
         "message": (
@@ -3950,9 +3982,12 @@ def _unknown_dynamic_sub_warning(m: Morphism, input_name: str, order: list[str],
             if valid
             else f"{base}={selector!r} has no widget sub-inputs"
         )
-        + f" — set {base}=<option> first to switch rosters",
+        + f" — set {base}={switch} first to switch rosters",
         "valid_addresses": valid,
     }
+    if keys:
+        warning["revealed_by"] = keys
+    return warning
 
 
 def _write_dynamic_combo_selector(
