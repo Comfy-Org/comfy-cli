@@ -120,6 +120,15 @@ comfy build push <install>
 comfy build release create <install> --target linux/nvidia --watch
 ```
 
+**A push that uploads models can run for a long time, and it tells you how it is
+going.** It opens with an `upload_plan` line (files, bytes, how many local files
+it already holds), then an `upload_progress` line per file about every two
+seconds with `bytes_done`, `bytes_per_second` and `eta_seconds`, then an
+`upload_complete` per file. Under `--json` these are JSON lines on **stderr**
+(stdout stays the one envelope); under `--json-stream` they are on stdout. Relay
+the rate and time left instead of waiting in silence. A `bytes_per_second` that
+falls to `0` means the connection stalled, not that the upload is slow.
+
 **What `init` does, and where it stops:**
 
 - **It fails rather than warns when it cannot read the environment.** No

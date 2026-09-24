@@ -27,7 +27,11 @@ from comfy_cli.deploy_api import DeployClient
 from comfy_cli.output.renderer import Renderer
 
 DEPLOY_POLL_SECONDS: Final = 2.0
-_WATCH_TERMINAL: Final = frozenset({"ready", "failed", "stopped", "stop_failed"})
+# Where a watch stops. `unhealthy` is here although the service can still move
+# it back to `ready`: it only ever follows `ready`, so a deployment in it has
+# already come up, and a watch that waited on it would wait silently for as
+# long as the endpoint stays degraded.
+_WATCH_TERMINAL: Final = frozenset({"ready", "unhealthy", "failed", "stopped", "stop_failed"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,9 +84,21 @@ def terminal_status_error(deployment_id: str, status: str) -> JsonObject:
     }
 
 
-def poll_deployment(client: DeployUpClient, deployment_id: str, sleep_fn: Callable[[float], None]) -> JsonObject:
+def poll_deployment(
+    client: DeployUpClient,
+    deployment_id: str,
+    sleep_fn: Callable[[float], None],
+    on_snapshot: Callable[[JsonObject], None] | None = None,
+) -> JsonObject:
+    """Read the deployment until it settles, handing each read to ``on_snapshot``.
+
+    The progress a watcher shows rides the same read the loop already makes, so
+    watching costs the service nothing it was not already answering.
+    """
     while True:
         snapshot = client.get_deployment(deployment_id)
+        if on_snapshot is not None:
+            on_snapshot(snapshot)
         status = required_string(snapshot, "status")
         if status in _WATCH_TERMINAL:
             return snapshot

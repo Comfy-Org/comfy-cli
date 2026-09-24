@@ -17,6 +17,29 @@ history.
 
 ### Added
 
+- `comfy build push` says how far along an upload is. It prints the plan before
+  the first byte ("3 files, 53.0 GB to upload, 2 already held"), then bytes sent,
+  rate and time left while each file moves. Under `--json-stream` the same numbers
+  are `upload_plan` / `upload_progress` / `upload_complete` events on stdout; under
+  `--json` they go to stderr so stdout stays the single envelope. The rate is
+  measured over the last ten seconds on a timer, so a stalled upload reports a
+  falling rate instead of going quiet. Schema: `build_push_event.json`.
+- `comfy deploy up --watch` and `comfy deploy status` show where a deployment that
+  is coming up has got to: the step, and while models are copied onto its storage
+  the model, bytes done of the total, rate and time left ("Staging models: model 1
+  of 2 sd_xl_base_1.0.safetensors, 3.5 GB of 7.3 GB, 44.2 MB/s, 1m 25s left"). The
+  numbers are the deploy service's own `progress` object, which `status --json`
+  and `up --json` now carry while the status is `provisioning` or `starting` and
+  omit otherwise. Under `--watch`, `--json-stream` emits a `deploy_progress` event
+  per new sample on stdout and `--json` puts the same lines on stderr. Ctrl-C
+  during `--watch` stops the watching and nothing else, and prints the command
+  that re-attaches. A service that sends no `progress` prints what it printed
+  before. Schema: `deploy_progress_event.json`.
+- `comfy deploy up` says roughly how long a new deployment will take to come up
+  before it waits: a range until ready and how many GB of models it has to
+  download, from the deploy service's estimate. Under `--json` it is `estimate`
+  in the output. A service that gives no estimate, or has it switched off,
+  changes nothing and prints nothing.
 - `comfy build push` prints every warning a save returns, and `--release` cuts no
   release while one says a deployment could not download a model link
   (`build_release_held`); `--release-despite-warnings` cuts anyway.
@@ -43,8 +66,34 @@ history.
   carries that error code and no pick is marked. The flag is off by default
   because it fetches uncached template workflows and calls the local server.
 
+### Changed
+
+- `comfy deploy up` now follows the deployment until it settles, instead of
+  returning as soon as the deploy service accepts it. A script that relied on
+  `up` returning at once passes `--no-watch`.
+- A watch (`up`, or `status --watch`) now stops at `unhealthy` instead of
+  waiting for `ready`: the status only ever follows `ready`, so the wait could
+  last as long as the endpoint stayed degraded, with nothing printed. `up` reports
+  an unhealthy deployment as not ok (`deploy_status_terminal`, exit 1), with
+  or without the watch, since it is billing without serving; `status` still
+  reports it as recoverable.
+
 ### Fixed
 
+- `comfy deploy up` now warns about each deployment of an older release of the
+  Build that is still running and billing, with the
+  `comfy deploy stop --deployment <id>` to run. `up` on a new release creates a
+  new deployment and leaves the old one running; the JSON `supersedes` array
+  already listed it, but the terminal said nothing. Under `--json` the warning
+  goes to stderr.
+- `comfy cloud status` shows the workspace balance at its real size. The balance
+  endpoint sends cents in fields named `*_micros`, and the CLI divided them by
+  1,000,000, so every balance and credit figure was 10,000 times too small.
+- `insert_workflow` (`comfy workflow insert-workflow`) now rebases the inserted
+  template beside the target graph's existing nodes instead of leaving its
+  original absolute `pos` values untouched, which could land it thousands of
+  pixels away as a disconnected cluster on canvas. The whole block moves by a
+  single delta, so the template's own internal relative layout is preserved.
 - `comfy deploy refs compute` and the `comfy deploy up` pickers now list every
   location the deploy service sells in, not only its datacenters, so B200, H100
   and H200, which are sold only under `us`, can be picked. The table gains
@@ -295,6 +344,13 @@ history.
   opened and read later, when urllib got round to consuming it; both now come
   from a single open handle, and the body is bounded to exactly the declared
   size.
+- `comfy deploy status` shows why a deployment failed and how many workers it
+  has. It read the deployment list, whose rows leave out `error` and `serving`,
+  so both were always empty; it now reads the chosen deployment in full, prints
+  the failure reason in the terminal rather than only under `--json`, and says
+  how old the worker-count sample is beside the counts. `comfy deploy logs` on a
+  deployment with no log yet says so, says the log arrives when the health check
+  finishes, and points at `comfy deploy events`.
 
 ## [1.16.0] - 2026-08-10
 

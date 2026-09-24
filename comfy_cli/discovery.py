@@ -215,6 +215,11 @@ COMMAND_SCHEMAS: dict[str, str] = {
 STREAM_EVENT_SCHEMAS: dict[str, str] = {
     "comfy run": "run_event",
     "comfy jobs watch": "run_event",
+    # upload progress; under plain --json the same lines go to stderr
+    "comfy build push": "build_push_event",
+    # the deployment coming up; same rule about stderr
+    "comfy deploy up": "deploy_progress_event",
+    "comfy deploy status": "deploy_progress_event",
 }
 
 

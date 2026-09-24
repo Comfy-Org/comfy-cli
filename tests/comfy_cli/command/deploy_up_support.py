@@ -9,6 +9,7 @@ import typer
 
 from comfy_cli.command import deploy
 from comfy_cli.command.build_spec import JsonObject
+from comfy_cli.deploy_api_errors import DeployAPIError
 
 
 def option_names(*path: str) -> set[str]:
@@ -72,6 +73,7 @@ class FakeDeploy:
         tombstone_first_create: bool = False,
         tombstone_all_creates: bool = False,
         get_statuses: list[str] | None = None,
+        estimate: JsonObject | Exception | None = None,
     ) -> None:
         self.rows = {str(row["id"]): copy.deepcopy(row) for row in rows or []}
         self.generation_barrier = generation_barrier
@@ -83,6 +85,10 @@ class FakeDeploy:
         self.update_calls: list[str] = []
         self.start_calls: list[str] = []
         self.catalog_calls = 0
+        # A service too old to estimate answers 404, which is what an unset
+        # estimate plays, so a case not about the estimate never meets one.
+        self.estimate = estimate
+        self.estimate_calls: list[tuple[str, str, str]] = []
         self._keys: dict[str, str] = {}
         self._tombstoned_once = False
         self._local = threading.local()
@@ -163,6 +169,14 @@ class FakeDeploy:
                 },
             ]
         }
+
+    def get_deploy_estimate(self, release_id: str, gpu_class: str, region: str) -> JsonObject:
+        self.estimate_calls.append((release_id, gpu_class, region))
+        if self.estimate is None:
+            raise DeployAPIError("deploy_not_found", "the deploy service has no estimate route", status=404)
+        if isinstance(self.estimate, Exception):
+            raise self.estimate
+        return copy.deepcopy(self.estimate)
 
     def soft_delete(self, deployment_id: str) -> None:
         with self._lock:

@@ -289,6 +289,27 @@ class Port:
         return None
 
     @property
+    def autogrow_required_slots(self) -> list[str]:
+        """Slot keys the server requires by name: the first ``min`` of the
+        group, when its template input is itself required.
+
+        Mirrors ``Autogrow._expand_schema_for_dynamic``: slot ``i`` is required
+        iff ``i < min`` and the template's input sits under ``required``, so a
+        lone ``videos.video1`` still leaves ``videos.video0`` missing. Empty
+        when the catalog ships no naming template — the name is then unknown.
+        """
+        template = self.autogrow_template
+        t = self.options.template
+        if template is None or not isinstance(t, dict):
+            return []
+        inputs = t.get("input") if isinstance(t.get("input"), dict) else {}
+        if not inputs.get("required"):
+            return []
+        lo, _ = self.autogrow_limits
+        names = template.get("names") or [f"{template['prefix']}{i}" for i in range(lo)]
+        return [f"{self.name}.{n}" for n in names[:lo]]
+
+    @property
     def autogrow_element_template(self) -> dict | None:
         """The element-naming template a caller should USE for this autogrow
         input — never None for an autogrow port.
@@ -646,6 +667,56 @@ def _edge_types_compatible(src_type: str, dst_type: str) -> bool:
     from comfy_cli.workflow_to_api import _is_valid_connection
 
     return _is_valid_connection(src_type, dst_type)
+
+
+#: ``(class_type, input)`` pairs whose value is a viewport capture the frontend
+#: serializes at queue time, read unconditionally by the node
+#: (``Load3D.execute``: ``image['image']``). A headless submit carries the
+#: add-node default ``""`` and crashes with "string indices must be integers".
+#: The ``viewport_state`` siblings tolerate a non-dict, so they are not listed.
+_FRONTEND_CAPTURE_INPUTS = frozenset({("Load3D", "image")})
+
+
+#: Types the frontend registers a widget constructor for (``ComfyWidgets`` in
+#: ``src/scripts/widgets.ts``) beyond the primitives: their value IS a literal
+#: (``COLOR: "#000000"``, ``BOUNDING_BOX: {x, y, width, height}``).
+_FRONTEND_REGISTERED_WIDGET_TYPES = frozenset(
+    {
+        "MARKDOWN", "IMAGEUPLOAD", "COLOR", "IMAGECOMPARE", "BOUNDING_BOX", "CHART", "GALLERIA",
+        "PAINTER", "COMPOSITOR", "TEXTAREA", "CURVE", "RANGE", "VIDEO_EDIT", "RESOLUTION_PREVIEW",
+        "BOUNDING_BOXES", "COLORS",
+        # Registered by frontend extensions (webcamCapture, uploadAudio); the
+        # node reads the value as a filename (WebcamCapture.image,
+        # RecordAudio.audio), so a literal is exactly right.
+        "WEBCAM", "AUDIO_RECORD",
+    }
+)  # fmt: skip
+
+
+def _literal_expected(port: Port, value: Any) -> bool:
+    """Whether a JSON literal can legitimately fill ``port``.
+
+    True for ``None`` on an optional port (the converter fills an unwired
+    optional socket from its ``default: null``, which the node reads as "not
+    connected"); for a
+    primitive anywhere in a comma-separated union (a ``forceInput`` INT or an
+    ``INT,FLOAT`` operand still takes ``5`` — the server converts it); for
+    wildcards and ``COMFY_*`` meta types; for frontend-registered widget
+    types; and for any port whose schema declares a non-null default — the
+    schema itself then says a literal is what the node reads (an extension
+    widget like ``COLORCODE: "#222222"``). What remains (``MODEL``,
+    ``VHS_BatchManager``, …) has no literal form.
+    """
+    type_id = port.type
+    if value is None:
+        # Only an OPTIONAL socket reads null as "not connected"; the server
+        # passes a required one's None straight to the node.
+        return not port.required
+    if not type_id or is_wildcard_type(type_id) or type_id.startswith("COMFY_"):
+        return True
+    if type_id in _FRONTEND_REGISTERED_WIDGET_TYPES or port.options.default is not None:
+        return True
+    return any(part.strip() in _IMPLICIT_WIDGET_TYPES for part in type_id.split(","))
 
 
 def _is_dynamic_combo_type(type_id: str) -> bool:
@@ -1500,6 +1571,51 @@ class Graph:
             return []
         return frontend_extra_widget_names(m)
 
+    def dynamic_combo_options(self, class_name: str) -> dict[str, dict[str, Any]]:
+        """Every dynamic-combo selector of ``class_name`` with EVERY option's slots.
+
+        ``{selector: {"default": <first key>, "options": {key: {"widgets": [...],
+        "defaults": {...}}}}}`` — per option, the DIRECT widget slots it inserts
+        after its selector, in positional order (the same walk as
+        :func:`_expand_widget_entries`: link-only sub-inputs own no slot, a
+        control-flagged one is followed by its ``control_after_generate``
+        marker), with the value a fresh selection seeds each with. A nested
+        selector is listed under its own full dotted name, so expanding the map
+        from ``widget_order`` reproduces :meth:`widget_order_for_node` for any
+        selection. This is what lets a consumer holding only the catalog (the
+        doc host's applier) handle a selection other than the first.
+        """
+        m = self._nodes.get(class_name)
+        if m is None:
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+
+        def describe(port: Port, name: str, depth: int) -> None:
+            if depth >= _MAX_DYNAMIC_COMBO_DEPTH or name in out:
+                return
+            keys = [o.get("key") for o in port.dynamic_options if o.get("key") is not None]
+            options: dict[str, Any] = {}
+            for key in keys:
+                widgets: list[str] = []
+                defaults: dict[str, Any] = {}
+                for sub in _dynamic_combo_sub_ports(port.dynamic_options, key, name):
+                    if sub.is_link:
+                        continue
+                    widgets.append(sub.name)
+                    defaults[sub.name] = _widget_default(sub)
+                    if sub.dynamic_options and _is_dynamic_combo_type(sub.type):
+                        describe(sub, sub.name, depth + 1)
+                    elif _has_control_after_generate_slot(sub):
+                        widgets.append("control_after_generate")
+                        defaults["control_after_generate"] = "fixed"
+                options[str(key)] = {"widgets": widgets, "defaults": defaults}
+            out[name] = {"default": str(keys[0]) if keys else None, "options": options}
+
+        for p in m.inputs:
+            if not p.is_link and p.dynamic_options and _is_dynamic_combo_type(p.type):
+                describe(p, p.name, 0)
+        return out
+
     def widget_defaults(self, class_name: str) -> dict[str, Any]:
         """Default value per widget-order name — including dynamic-combo selectors
         (first key), their sub-widgets, and control_after_generate. Used by
@@ -1899,7 +2015,51 @@ class Graph:
                     continue
 
                 port = port_by_name.get(input_name)
+                # A dotted key (`videos.video1`, `model.mask`) has no port of its
+                # own; it is checked for a literal against the slot or sub-input
+                # it resolves to, and every other check below is its group's.
+                link_port = port if port is not None else _dotted_slot_port(port_by_name, input_name, node_inputs)
+                # A literal on a socket that only carries a node's output. The
+                # server does not type-check custom types (only INT/FLOAT/
+                # STRING/BOOLEAN/COMBO), so it hands the string to the node,
+                # which crashes: VHS_LoadVideo got `meta_batch: "None"` and
+                # died on `meta_batch.inputs` 117 times in 30 days.
+                if link_port is not None and link_port.is_link and not _literal_expected(link_port, value):
+                    finding = {
+                        "node_id": node_id,
+                        "field": input_name,
+                        "code": "literal_on_link_input",
+                        "message": (
+                            f"input {input_name!r} is a {link_port.type} connection but holds the literal {value!r} "
+                            f"— the node receives a raw value where it expects a {link_port.type} object"
+                        ),
+                        "hint": (
+                            f"wire a node that outputs {link_port.type} into {input_name!r}, or remove the value "
+                            f"(`comfy nodes ls --produces {link_port.type}` to find a source)"
+                        ),
+                    }
+                    (errors if node_id in reachable else warnings).append(finding)
+                    continue
                 if port is None:
+                    continue
+                if (class_type, input_name) in _FRONTEND_CAPTURE_INPUTS and (
+                    not isinstance(value, dict) or "image" not in value
+                ):
+                    finding = {
+                        "node_id": node_id,
+                        "field": input_name,
+                        "code": "frontend_capture_required",
+                        "message": (
+                            f"{class_type}.{input_name} is the browser viewport capture ({{image, mask, normal, …}}) "
+                            f"that only the ComfyUI frontend produces at queue time; {value!r} makes the node crash "
+                            f"on the server"
+                        ),
+                        "hint": (
+                            "this node cannot run from a headless (CLI/agent) submit — load the model with a node "
+                            "that takes a file instead, or queue it from the ComfyUI canvas"
+                        ),
+                    }
+                    (errors if node_id in reachable else warnings).append(finding)
                     continue
                 # Shape check (hard error)
                 shape_err = port.validate_shape(value)
@@ -2797,7 +2957,21 @@ def _check_dynamic_combo_sub(
                 set(),
             )
         slot_prefix = f"{dotted}."
-        return [], [], {k for k in present if k.startswith(slot_prefix)}, set()
+        # `min: 0` (Seedream) yields no required slots; `min: 1` (Grok image
+        # edit's `model.images`) makes `model.images.image_1` a server-side
+        # required input — prod submitted one with no image wired.
+        missing = [s for s in port.autogrow_required_slots if s not in present] if sub_required else []
+        errors = [
+            {
+                "node_id": node_id,
+                "field": slot,
+                "code": "required_input_missing",
+                "message": f"required autogrow slot {slot!r} is not connected — the server will reject this node",
+                "hint": f"wire {slot!r} first; slots fill in order ({port.autogrow_slot_example()})",
+            }
+            for slot in missing
+        ]
+        return errors, [], {k for k in present if k.startswith(slot_prefix)}, set()
 
     if dotted not in present:
         if not sub_required:
@@ -2926,6 +3100,20 @@ def _check_autogrow_required(
                     "hint": f"wire one key per connection: {port.autogrow_slot_example()}",
                 }
             )
+            continue
+        if not port.required:
+            continue
+        for slot in port.autogrow_required_slots:
+            if slot not in inputs:
+                errors.append(
+                    {
+                        "node_id": node_id,
+                        "field": slot,
+                        "code": "required_input_missing",
+                        "message": f"required autogrow slot {slot!r} is not connected — the server will reject this node",
+                        "hint": f"wire {slot!r} first; slots fill in order ({port.autogrow_slot_example()})",
+                    }
+                )
     return errors
 
 
@@ -3043,8 +3231,42 @@ _MAX_SUBGRAPH_DEPTH = 32
 #   ``10/9.prompt``     subgraph instance 10 → interior node 9, widget ``prompt``
 #   ``10/3/7.value``    instance 10 → interior subgraph node 3 → interior node 7
 # UUID subgraph class_types contain ``-`` but never ``/`` or top-level ``.`` in
-# an instance id, so the delimiters stay unambiguous.
+# an instance id. A node id itself CAN contain ``/``: the doc host's
+# ``insert_workflow`` remaps an interior node to
+# ``insert:<op>:root/definition:%22<uuid>%22:node:27`` — so split a path with
+# :func:`split_node_path`, which matches segments against real ids, never with
+# a bare ``str.split``.
 _SUBGRAPH_PATH_SEP = "/"
+
+
+def split_node_path(workflow: dict, node_path: str) -> list[str]:
+    """Split a ``/``-separated node path into the node ids it walks through.
+
+    Each hop takes the LONGEST run of ``/``-parts that is a real node id at that
+    level (top-level nodes first, then the interior of the definition the
+    previous hop instantiates), so an id that contains ``/`` stays one segment.
+    A hop that matches nothing falls back to the plain split for the rest of
+    the path, which leaves the resolvers' own "not found" errors unchanged.
+    """
+    parts = node_path.split(_SUBGRAPH_PATH_SEP)
+    defs_by_id = _subgraph_defs_by_id(workflow)
+    nodes = workflow.get("nodes") or []
+    segments: list[str] = []
+    i = 0
+    while i < len(parts):
+        ids = {str(n.get("id", "")): n for n in nodes if isinstance(n, dict)}
+        match = next(
+            (j for j in range(len(parts), i, -1) if _SUBGRAPH_PATH_SEP.join(parts[i:j]) in ids),
+            None,
+        )
+        if match is None:
+            return segments + parts[i:]
+        seg = _SUBGRAPH_PATH_SEP.join(parts[i:match])
+        segments.append(seg)
+        sg = defs_by_id.get(str(ids[seg].get("type", "")))
+        nodes = (sg or {}).get("nodes") or []
+        i = match
+    return segments
 
 
 def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
@@ -3967,7 +4189,7 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
     # Input names may legitimately contain dots (e.g. 'images.image0').
     # Always split on the FIRST dot so multi-dot input names are preserved.
     node_path, input_name = addr.split(".", 1)
-    segments = node_path.split(_SUBGRAPH_PATH_SEP)
+    segments = split_node_path(workflow, node_path)
     defs_by_id = _subgraph_defs_by_id(workflow)
 
     from comfy_cli.cql import promoted as _promoted

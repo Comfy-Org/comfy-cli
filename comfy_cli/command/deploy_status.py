@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import urllib.error
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Final
 
 import typer
@@ -11,6 +12,8 @@ import typer
 from comfy_cli.builder_api import BuilderAuthError
 from comfy_cli.command.build_paths import BuildSpecNotFoundError, resolve_build_paths
 from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, read_build_spec
+from comfy_cli.command.deploy_progress import DeployWatchReporter, progress_of
+from comfy_cli.command.deploy_progress import describe as describe_progress
 from comfy_cli.command.deploy_resolve import (
     _STATUS_RANK,
     BuilderReleaseClient,
@@ -41,6 +44,7 @@ from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output import get_renderer
 from comfy_cli.output.renderer import Renderer
+from comfy_cli.utils import parse_rfc3339
 
 _WORKER_STATES: Final = ("idle", "initializing", "ready", "running", "throttled", "unhealthy")
 _STOP_REASONS: Final = frozenset({"user", "credits", "policy"})
@@ -60,14 +64,21 @@ class StatusResult:
     deployment: JsonObject | None
     release: JsonObject | None
     serving: JsonObject | None
+    # Where a deployment that is coming up has got to, as the service sent it.
+    progress: JsonObject | None = None
 
     def payload(self) -> JsonObject:
-        return {
+        payload: JsonObject = {
             "build": {"id": self.build_id, "name": self.build_name},
             "deployment": self.deployment,
             "release": self.release,
             "serving": self.serving,
         }
+        # Absent rather than null once the deployment has settled, and from a
+        # service that never sends it.
+        if self.progress is not None:
+            payload["progress"] = self.progress
+        return payload
 
 
 def _nullable_string(value: JsonObject, key: str) -> str | None:
@@ -161,7 +172,60 @@ def status_result(builder: BuilderReleaseClient, target: StatusTarget) -> Status
         _normalized_deployment(deployment),
         release,
         _normalized_serving(deployment),
+        progress_of(deployment),
     )
+
+
+def _interrupted_result(builder: BuilderReleaseClient, target: StatusTarget) -> StatusResult:
+    """The last read, for a watch the person stopped.
+
+    Its release summary needs one more read of the Build's releases, and a
+    person often presses Ctrl-C because the network went away. That read is not
+    worth turning an interrupt (130) into a server error (1): without it the
+    envelope still carries the deployment and its progress, with no release.
+    """
+    try:
+        return status_result(builder, target)
+    except (DeployAPIError, BuilderAuthError, ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError):
+        deployment = target.deployment
+        if deployment is None:
+            return StatusResult(target.build_id, target.build_name, None, None, None)
+        return StatusResult(
+            target.build_id,
+            target.build_name,
+            _normalized_deployment(deployment),
+            None,
+            _normalized_serving(deployment),
+            progress_of(deployment),
+        )
+
+
+def _sample_age(sampled_at: str) -> str:
+    """How long ago the counts were taken, for the line that prints them.
+
+    The counts are a snapshot the control plane refreshes on its own schedule,
+    and a deployment whose endpoint stopped answering keeps the last one it got,
+    so the timestamp alone does not say whether these numbers still describe
+    now. Never raises: a timestamp this cannot read still has to print its
+    counts, so an unreadable one degrades to saying the age is unknown.
+    """
+    try:
+        elapsed = (datetime.now(timezone.utc) - parse_rfc3339(sampled_at)).total_seconds()
+    except ValueError:
+        return "age unknown"
+    seconds = int(elapsed)
+    if seconds < 0:
+        # The sample is stamped by the server, so a clock a little apart from
+        # ours reads as the future rather than as an age.
+        return "just now"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        hours, rest = divmod(seconds, 3600)
+        return f"{hours}h {rest // 60}m ago"
+    return f"{seconds // 86400}d ago"
 
 
 def _render_serving(renderer: Renderer, serving: JsonObject | None) -> None:
@@ -175,7 +239,22 @@ def _render_serving(renderer: Renderer, serving: JsonObject | None) -> None:
     queue = required_int(serving, "jobsInQueue")
     sampled_at = required_string(serving, "sampledAt")
     suffix = " — healthy idle (scale-to-zero)" if queue == 0 and all(value == 0 for value in workers.values()) else ""
-    renderer.info(f"Serving: {counts} queued={queue}; sampledAt={sampled_at}{suffix}")
+    renderer.info(f"Serving: {counts} queued={queue}; sampledAt={sampled_at} ({_sample_age(sampled_at)}){suffix}")
+
+
+def _render_error(renderer: Renderer, deployment: JsonObject) -> None:
+    """The failure detail the deployment carries, which only `--json` showed.
+
+    Set when the status is failed (why it failed) or stop_failed (why the stop
+    could not release the compute); null otherwise, so this prints nothing for
+    a deployment that is fine.
+    """
+    error = deployment.get("error")
+    if error is None:
+        return
+    if not isinstance(error, str):
+        raise server_shape_error("the normalized deployment has an invalid error")
+    renderer.warn(f"Reason: {error}")
 
 
 def _render_stop_reason(renderer: Renderer, deployment: JsonObject) -> None:
@@ -233,6 +312,9 @@ def render_status(renderer: Renderer, result: StatusResult) -> None:
 
     status = _render_deployment(renderer, deployment)
     if renderer.is_pretty():
+        if result.progress is not None:
+            renderer.info(describe_progress(result.progress, now=datetime.now(timezone.utc)))
+        _render_error(renderer, deployment)
         _render_stop_reason(renderer, deployment)
         _render_serving(renderer, result.serving)
     release = result.release
@@ -263,8 +345,25 @@ def run_status(path: str | None, *, deployment_id: str | None = None, watch: boo
         builder, client = _command_clients()
         target = resolve_status(builder, client, path, deployment_id)
         if watch and target.deployment is not None:
-            watched = poll_deployment(client, required_string(target.deployment, "id"), _sleep)
+            watched_id = required_string(target.deployment, "id")
+            reporter = DeployWatchReporter(renderer, watched_id)
+            try:
+                watched = poll_deployment(client, watched_id, _sleep, reporter.snapshot)
+            except KeyboardInterrupt:
+                # Watching is all this command does, so Ctrl-C stops the watching
+                # and nothing else: the deployment is the service's to bring up.
+                reporter.interrupted()
+                if reporter.last is not None:
+                    render_status(renderer, _interrupted_result(builder, replace(target, deployment=reporter.last)))
+                raise typer.Exit(code=130) from None
+            finally:
+                reporter.close()
             target = replace(target, deployment=watched)
+        elif target.deployment is not None:
+            # The list reply is a summary without `error` or `serving`, so the
+            # one deployment this reports on is read again in full.
+            full = client.get_deployment(required_string(target.deployment, "id"))
+            target = replace(target, deployment=full)
         render_status(renderer, status_result(builder, target))
     except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:
         render_spec_error(renderer, error)

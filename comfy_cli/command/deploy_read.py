@@ -97,6 +97,17 @@ def _logs(renderer: Renderer, client: DeploymentReadClient, deployment_id: str) 
         renderer.info(f"capturedAt: {captured_at if captured_at is not None else 'not captured yet'}")
         if log:
             renderer.print(log)
+        elif captured_at is None:
+            # The log is written once the health check finishes, so it is absent
+            # in two different states: a deployment still coming up has one on
+            # the way, and one that failed before a container ran never will.
+            # Saying only the second would tell a booting deployment's owner
+            # their deploy is dead.
+            renderer.info(
+                "No log yet. The log is captured when the health check finishes, so a deployment that is "
+                "still coming up has none yet, and one that failed before a container ran never will. "
+                f"`comfy deploy events --deployment {deployment_id}` shows which of the two this is."
+            )
     renderer.emit(logs, command="deploy logs", changed=False)
 
 

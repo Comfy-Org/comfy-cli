@@ -18,6 +18,7 @@ from comfy_cli.command.build_paths import BuildSpecNotFoundError
 from comfy_cli.command.build_spec import BuildSpecInvalidError
 from comfy_cli.command.deploy_compute import prompt_gpu as _prompt_gpu
 from comfy_cli.command.deploy_compute import prompt_region as _prompt_region
+from comfy_cli.command.deploy_progress import DeployWatchReporter
 from comfy_cli.command.deploy_resolve import DeployResolveError
 from comfy_cli.command.deploy_runtime import command_clients as _command_clients
 from comfy_cli.command.deploy_runtime import poll_deployment as _poll_deployment
@@ -38,6 +39,7 @@ from comfy_cli.command.deploy_up import (
 )
 from comfy_cli.command.deploy_up import (
     _render_result,
+    estimate_line,
     reconcile_up,
 )
 from comfy_cli.command.deploy_up import (
@@ -202,6 +204,8 @@ def status_cmd(
         typer.Argument(help="ComfyUI install directory or build spec path. Default: the current directory."),
     ] = None,
     deployment_id: DeploymentOption = None,
+    # `status` answers a question and exits; watching is the caller asking to
+    # stay, so here it stays opt-in. `up` starts the wait, so there it is on.
     watch: Annotated[bool, typer.Option("--watch", help="Poll until the deployment reaches a terminal state.")] = False,
 ) -> None:
     _run_status(path, deployment_id=deployment_id, watch=watch)
@@ -234,7 +238,16 @@ def up_cmd(
     ] = None,
     release: Annotated[str | None, typer.Option("--release", help="Deploy this release id.")] = None,
     deployment_id: DeploymentOption = None,
-    watch: Annotated[bool, typer.Option("--watch", help="Poll until the deployment reaches a terminal state.")] = False,
+    # Watching is what someone who just asked for a deployment wants: the command
+    # that starts a several-minute wait should say how the wait is going. Ctrl-C
+    # and --no-watch both leave the deploy running and print how to re-attach.
+    watch: Annotated[
+        bool,
+        typer.Option(
+            "--watch/--no-watch",
+            help="Follow the deployment until it settles. Use --no-watch to return as soon as it is accepted.",
+        ),
+    ] = True,
 ) -> None:
     renderer = get_renderer()
     _require_paired_bounds(renderer, minimum, maximum)
@@ -269,8 +282,22 @@ def up_cmd(
                 ctx=ctx,
             )
             result = reconcile_up(builder, client, replace(request, gpu=selected_gpu, region=selected_region))
+        if result.estimate is not None and renderer.is_pretty():
+            renderer.info(estimate_line(result.estimate))
         if watch:
-            watched = _poll_deployment(client, _required_string(result.deployment, "id"), _sleep)
+            watched_id = _required_string(result.deployment, "id")
+            reporter = DeployWatchReporter(renderer, watched_id)
+            try:
+                watched = _poll_deployment(client, watched_id, _sleep, reporter.snapshot)
+            except KeyboardInterrupt:
+                # The deploy runs on the service's side and never needed this
+                # process: say so, report where it had got to, and leave it be.
+                reporter.interrupted()
+                if reporter.last is not None:
+                    _render_result(renderer, replace(result, deployment=reporter.last), watch=False)
+                raise typer.Exit(code=130) from None
+            finally:
+                reporter.close()
             result = replace(result, deployment=watched)
         _render_result(renderer, result, watch=watch)
     except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:

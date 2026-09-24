@@ -398,6 +398,81 @@ time. If the callback never arrives, the terminal envelope is an
 {"schema": "event/1", "type": "login_url", "url": "https://api.comfy.org/oauth/authorize?...", "timeout_s": 300}
 ```
 
+### `upload_plan`, `upload_progress`, `upload_complete`
+
+Emitted by `comfy build push` while it uploads model files and packaged custom
+nodes. They are part of the push, not the `run` stream, and validate against
+`build_push_event.json`.
+
+Where they go depends on the mode. Under `--json-stream` they are on stdout,
+ahead of the envelope, like every other event. Under plain `--json` (which is
+what a caller with a piped stdout resolves to, so every agent) they are on
+**stderr**, because stdout in that mode is exactly one envelope. Read stderr line
+by line and keep the lines that parse as JSON with `schema: "event/1"`.
+
+A push opens with one `upload_plan`, sent before the first byte and sent even
+when there is nothing to upload. Each file that transfers gets an
+`upload_progress` as it starts and about every two seconds after, then one
+`upload_complete`. A file the builder already held gets only an
+`upload_complete` with `deduplicated: true`. A file whose upload fails gets no
+`upload_complete`; the error envelope is the next line.
+
+```json
+{"schema": "event/1", "type": "upload_plan", "files": 3, "bytes_total": 56908316672, "already_held": 2}
+{"schema": "event/1", "type": "upload_progress", "file": "model.safetensors", "kind": "model", "index": 1, "of": 3, "bytes_done": 1288490188, "bytes_total": 23761671782, "bytes_per_second": 47500000, "eta_seconds": 473, "overall_bytes_done": 1288490188, "overall_bytes_total": 56908316672, "overall_eta_seconds": 1171}
+{"schema": "event/1", "type": "upload_complete", "file": "model.safetensors", "kind": "model", "index": 1, "of": 3, "bytes_total": 23761671782, "seconds": 498.2, "bytes_per_second": 47695045, "deduplicated": false, "overall_bytes_done": 23761671782, "overall_bytes_total": 56908316672}
+```
+
+`bytes_per_second` on a progress event is measured over the last ten seconds
+and is sampled on a timer, not on bytes moving, so a stalled connection keeps
+reporting and its rate falls to `0` with `eta_seconds: null`. That is how to
+tell a slow upload from a dead one. `bytes_done` counts bytes handed to the
+connection, which runs slightly ahead of bytes the server has acknowledged.
+
+At a terminal the same numbers render as one redrawn progress line; with output
+piped under `--no-json` they are plain lines every five seconds, with no
+carriage returns.
+### `deploy_progress`
+
+Emitted by `comfy deploy up --watch` and `comfy deploy status --watch` while the
+deployment's status is `provisioning` or `starting`. It is part of those
+commands, not the `run` stream, and validates against
+`deploy_progress_event.json`.
+
+Where it goes depends on the mode, the same way upload progress does. Under
+`--json-stream` it is on stdout, ahead of the envelope. Under plain `--json`
+(what a caller with a piped stdout resolves to, so every agent) it is on
+**stderr**, because stdout in that mode is exactly one envelope.
+
+```json
+{"schema": "event/1", "type": "deploy_progress", "deployment_id": "dep-7edc1262", "status": "provisioning", "stale": false, "progress": {"step": "staging_models", "modelsDone": 0, "modelsTotal": 2, "bytesDone": 3536540667, "bytesTotal": 7272719498, "currentModel": "models/checkpoints/sd_xl_base_1.0.safetensors", "bytesPerSecond": 44205525, "etaSeconds": 85, "attempt": 1, "startedAt": "2026-09-20T01:59:55Z", "updatedAt": "2026-09-20T02:01:15Z"}}
+{"schema": "event/1", "type": "deploy_progress", "deployment_id": "dep-7edc1262", "status": "starting", "stale": false, "progress": {"step": "waiting_for_worker", "attempt": 1, "startedAt": "2026-09-20T02:02:46Z", "updatedAt": "2026-09-20T02:02:46Z"}}
+```
+
+The event's own fields are snake_case like every other event. `progress` is the
+deploy service's object, passed through unchanged, so its fields are the API's
+camelCase, the same as `computeConfig` and `endpointUrl` in the envelopes. The
+service computes `bytesPerSecond` and `etaSeconds`; the CLI computes nothing, so
+the portal and the CLI show the same numbers.
+
+One event per new sample: the CLI polls every two seconds and the service writes
+about every three, and a sample is keyed on its `updatedAt` (on its whole content
+where a sample carries no `updatedAt`). If a sample then goes
+a minute without being rewritten, one more event carries it with `stale: true`.
+The service's writes are best-effort, so a stale sample is not evidence that the
+deploy stopped; `status` remains the verdict. A service that sends no `progress`
+object produces no events, and the command behaves as it did before.
+
+`comfy deploy status --json` (with or without `--watch`) and `comfy deploy up
+--json` carry the same object as `data.progress` while the deployment is coming
+up, and omit the key otherwise.
+
+At a terminal the numbers render as one redrawn progress line; with output piped
+under `--no-json` they are plain lines, one per new sample, with no carriage
+returns. Ctrl-C during `--watch` exits 130 after printing that the deployment
+keeps coming up and the command that re-attaches, and in the JSON modes still
+writes the envelope for the last state it read.
+
 ## Success envelope
 
 On `--wait` success, `data` carries:

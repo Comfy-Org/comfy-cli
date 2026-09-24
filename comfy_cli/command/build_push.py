@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,11 +28,19 @@ class ModelDigest(Protocol):
 class BlobClient(Protocol):
     def create_blob(self, kind: str, filename: str, sha256: str, size_bytes: int) -> tuple[str, str | None]: ...
 
-    def upload_blob(self, upload_url: str, path: Path) -> None: ...
+    def upload_blob(self, upload_url: str, path: Path, progress: Callable[[int], None] | None = None) -> None: ...
 
 
 class Persist(Protocol):
     def __call__(self) -> None: ...
+
+
+class UploadReporter(Protocol):
+    """Who ``upload_assets`` tells about each blob (``build_upload_progress``)."""
+
+    def uploading(self, item: PushUpload, index: int, of: int) -> AbstractContextManager[Callable[[int], None]]: ...
+
+    def deduplicated(self, item: PushUpload, index: int, of: int) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +216,23 @@ def pending_uploads(preparation: PushPreparation) -> tuple[PushUpload, ...]:
     )
 
 
+def already_held_count(preparation: PushPreparation) -> int:
+    """How many local models and nodes this push does not have to send.
+
+    A local entry drops out of the upload plan when it already carries a
+    ``blobId`` from an earlier push, or, for a model, a public ``sourceUri`` the
+    deployment can download from instead. Either way its bytes stay put.
+    """
+    definition = preparation.definition
+    local = sum(
+        1
+        for collection in ("models", "customNodes")
+        for entry in _entries(definition, collection)
+        if entry.get("source") == "local"
+    )
+    return local - len(pending_uploads(preparation))
+
+
 def _still_unresolved(entry: JsonObject, kind: Literal["model", "node_zip"]) -> bool:
     """Whether *entry* still needs its bytes uploaded.
 
@@ -241,7 +268,12 @@ def spec_without_stale_source_uris(original: JsonObject, preparation: PushPrepar
     return cleaned
 
 
-def upload_assets(preparation: PushPreparation, client: BlobClient, persist: Persist | None = None) -> int:
+def upload_assets(
+    preparation: PushPreparation,
+    client: BlobClient,
+    persist: Persist | None = None,
+    reporter: UploadReporter | None = None,
+) -> int:
     """Upload every pending blob, checkpointing each id the moment it lands.
 
     The spec file is this command's resume store — ``prepare_push`` skips any
@@ -253,6 +285,9 @@ def upload_assets(preparation: PushPreparation, client: BlobClient, persist: Per
     process is not merely re-uploaded — it orphans the bytes stored under the
     first one.
 
+    ``reporter`` hears about each blob as it moves: bytes while it transfers,
+    and one completion, which for content the builder already held says so.
+
     Returns the number of blobs whose bytes were actually transferred. A
     builder that already holds the content answers ``create_blob`` with the
     existing id and no upload URL, so the pending count is an upper bound.
@@ -260,7 +295,7 @@ def upload_assets(preparation: PushPreparation, client: BlobClient, persist: Per
     uploaded = 0
     uploads = pending_uploads(preparation)
     definition = preparation.definition
-    for upload in uploads:
+    for position, upload in enumerate(uploads, start=1):
         if upload.path is None:
             # A ValueError, not a BuildSpecInvalidError: `build._builder_call`
             # wraps this call and maps the former to a CLI error, while the
@@ -271,8 +306,14 @@ def upload_assets(preparation: PushPreparation, client: BlobClient, persist: Per
             )
         blob_id, upload_url = client.create_blob(upload.kind, upload.filename, upload.sha256, upload.size_bytes)
         if upload_url is not None:
-            client.upload_blob(upload_url, upload.path)
+            if reporter is None:
+                client.upload_blob(upload_url, upload.path)
+            else:
+                with reporter.uploading(upload, position, len(uploads)) as progress:
+                    client.upload_blob(upload_url, upload.path, progress=progress)
             uploaded += 1
+        elif reporter is not None:
+            reporter.deduplicated(upload, position, len(uploads))
         _entries(definition, upload.collection)[upload.index]["blobId"] = blob_id
         if persist is not None:
             persist()

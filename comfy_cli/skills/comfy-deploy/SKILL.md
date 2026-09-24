@@ -54,7 +54,7 @@ refs    compute — deployable regions and GPU classes with availability.
 ```shell
 comfy build release show                          # confirm deployable: true
 comfy deploy refs compute                         # read the real GPU/region pairs
-comfy deploy up <dir> --gpu <class> --region <region> --min 0 --max 1 --watch
+comfy deploy up <dir> --gpu <class> --region <region> --min 0 --max 1
 comfy deploy status <dir>
 comfy deploy run <dir> --workflow <api-workflow>.json
 comfy deploy stop <dir>                           # when the user is done
@@ -73,11 +73,12 @@ running and keeps billing.
 
 The CLI tells you this: `up` returns a `supersedes` array naming every other
 live deployment of this Build still holding compute, with its id, status and
-release version. **Read it and act on it.** An empty array means nothing else is
-running; a non-empty one is a bill the user has not agreed to.
+release version, and prints a "still running and billing" warning for each
+(on stderr under `--json`). **Read it and act on it.** An empty array means
+nothing else is running; a non-empty one is a bill the user has not agreed to.
 
 ```shell
-comfy deploy up <dir> --watch          # note `supersedes` in the output
+comfy deploy up <dir>                  # note `supersedes` in the output
 comfy deploy stop --deployment <old-id>
 ```
 
@@ -109,8 +110,39 @@ as a pair, `--min` accepts 0–20 and `--max` 1–20.
 | `stop_failed` | **maybe** | Stop did not take; retry it |
 | `failed` | no | Permanent failure |
 
-`--watch` on `up` and `status` polls until `ready`, `failed`, `stopped` or
-`stop_failed`. The other five are transitional and it keeps waiting.
+`up` follows the deployment by default; pass `--no-watch` to return as soon as it
+is accepted. `status` waits only when asked, with `--watch`. Either way the wait
+ends at `ready`, `unhealthy`, `failed`, `stopped` or `stop_failed`. `unhealthy`
+only ever follows `ready`, so the deployment already came up: `up` reports it as
+not ok (`deploy_status_terminal`, exit 1) because it is billing without serving,
+and `status` reports it as recoverable. Through `queued`, `provisioning`,
+`starting` and `stopping` it keeps waiting.
+
+While the status is `provisioning` or `starting` the deployment carries a
+`progress` object, and `status --json` returns it as `data.progress`: `step`
+(`staging_models`, `creating_endpoint`, `waiting_for_worker`) and, while models
+are copied onto the deployment's storage, `modelsDone` / `modelsTotal`,
+`bytesDone` / `bytesTotal`, `currentModel`, `bytesPerSecond` and `etaSeconds`.
+Under `--watch` the same object arrives as `deploy_progress` events, one per new
+sample (the service rewrites it about every three seconds in every step): on **stderr** under `--json`,
+on stdout under `--json-stream`. Relay those numbers instead of "still
+provisioning". Things to read correctly:
+
+- `bytesTotal` absent means nobody measured the release, so there is no time
+  left to quote; `0` means every model was already in place.
+- `bytesTotalIsFloor: true` means "at least this much", with no `etaSeconds`.
+- `etaSeconds` covers staging only. Creating the endpoint and the first worker's
+  cold start come after it.
+- `attempt` above 1 means the step was restarted, and `bytesDone` started again.
+- `stale: true` on an event means the service has not rewritten the sample for a
+  minute. Its writes are best-effort, so that is not evidence the deploy stopped;
+  the status is still the verdict.
+- How long a step has run is now minus `startedAt`. `updatedAt` only says how
+  fresh the sample is, and it moves every few seconds in every step.
+- No `progress` at all is an older service, or a status other than the two above.
+
+Interrupting the wait leaves the deployment coming up on the service's side;
+`comfy deploy status --deployment <id> --watch` attaches again.
 
 `status` also reports **why** a deployment stopped, as `stopReason`: `user`,
 `credits`, or `policy`. `credits` is a billing problem and not something a retry
@@ -120,7 +152,7 @@ fixes — say so rather than restarting into the same wall.
 
 ```shell
 comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
-                       [--release <id>] [--deployment <id>] [--watch]
+                       [--release <id>] [--deployment <id>] [--no-watch]
 ```
 
 - **It selects the newest deployable release of the Build** unless `--release`
@@ -151,6 +183,17 @@ comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
   reported back as dropped.
 - **It restarts a `stopped` or `failed` deployment** for that release instead of
   creating another.
+- **A create carries the service's estimate** of how long the deployment takes to
+  come up, as `estimate` in the output: `etaSecondsLow`/`etaSecondsHigh` until
+  ready and `bytesToFetch` of models to download, with `atLeast: true` when some
+  models have no recorded size. A person at a terminal sees it before `up` starts
+  following the deployment. Under `--json` it arrives with the one envelope, after
+  the watch, so to relay it before a long wait run `up --no-watch`, tell the user,
+  then follow with `comfy deploy status --watch`. It is a range, not a promise,
+  and it stops at ready: the first run can still wait for a worker to start.
+  Absent on a restart, an edit, when the service gave none, or when the service
+  has the estimate switched off; that is not an error, so never retry for it or
+  mention its absence.
 
 ## `comfy deploy run`
 

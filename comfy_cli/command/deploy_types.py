@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from comfy_cli.command.build_spec import JsonObject, JsonValue
+from comfy_cli.command.deploy_progress import progress_of
 from comfy_cli.deploy_api_errors import DeployAPIError
 
 
@@ -23,6 +24,8 @@ class DeployUpClient(Protocol):
     def start_deployment(self, deployment_id: str) -> JsonObject: ...
 
     def get_compute_catalog(self) -> JsonObject: ...
+
+    def get_deploy_estimate(self, release_id: str, gpu_class: str, region: str) -> JsonObject: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +56,11 @@ class UpResult:
     # it are dropped — silently discarding explicit input is the same defect as
     # silently resetting it, so the renderer says so.
     dropped_bounds: tuple[str, ...] = ()
+    # The service's estimate of how long a new deployment takes to come up,
+    # asked just before the create. ``None`` on every other branch, and on a
+    # create the service could not estimate: the estimate is advice and never
+    # stops a deploy.
+    estimate: JsonObject | None = None
 
     def payload(self) -> JsonObject:
         supersedes: list[JsonValue] = [*self.supersedes]
@@ -61,12 +69,21 @@ class UpResult:
             "status": required_string(self.deployment, "status"),
             "created": self.created,
         }
-        return {
+        payload: JsonObject = {
             "deployment": deployment,
             "release": self.release,
             "computeConfig": self.compute_config,
             "supersedes": supersedes,
         }
+        # Present only while the deployment is coming up, and absent rather than
+        # null otherwise: an older service never sends it, and a settled
+        # deployment has nothing left to narrate.
+        progress = progress_of(self.deployment)
+        if progress is not None:
+            payload["progress"] = progress
+        if self.estimate is not None:
+            payload["estimate"] = self.estimate
+        return payload
 
 
 class ComputeRequiredError(Exception):

@@ -133,7 +133,7 @@ def test_happy_path_active_creator_positive_balance(monkeypatch, capsys):
         capsys,
         {
             "/billing/status": _ACTIVE_CREATOR,
-            "/billing/balance": {"effective_balance_micros": 12_500_000},
+            "/billing/balance": {"effective_balance_micros": 1250},
             "/features": {"max_concurrent_jobs": 3},
             "/workspaces/current": _WORKSPACE,
             "/billing/plans": _PLANS,
@@ -157,6 +157,21 @@ def test_happy_path_active_creator_positive_balance(monkeypatch, capsys):
     assert data["upgrade_suggestion"]["price_usd"] == pytest.approx(50.0)
     # The unavailable tier is reported with the server's reason, not silently dropped.
     assert {"plan_slug": "enterprise", "reason": "requires_team"} in data["blocked_upgrades"]
+
+
+def test_balance_fields_are_read_as_cents(monkeypatch, capsys):
+    """The ``*_micros`` fields carry cents: 347,867 is $3,478.67, not $0.35."""
+    env = _run(
+        monkeypatch,
+        capsys,
+        {
+            "/billing/status": _ACTIVE_CREATOR,
+            "/billing/balance": {"effective_balance_micros": 347_867},
+        },
+    )
+    data = env["data"]
+    assert data["credit_balance_usd"] == pytest.approx(3478.67)
+    assert data["credit_balance_credits"] == int(3478.67 * billing.CREDITS_PER_USD)
 
 
 def test_plans_flag_includes_full_tier_table(monkeypatch, capsys):
@@ -183,12 +198,12 @@ def test_zero_effective_balance_does_not_mask_positive_component(monkeypatch, ca
             "/billing/balance": {
                 "effective_balance_micros": 0,
                 "amount_micros": 0,
-                "cloud_credit_balance_micros": 7_000_000,
+                "cloud_credit_balance_micros": 700,
             },
         },
     )
     data = env["data"]
-    assert data["effective_balance_micros"] == 7_000_000
+    assert data["effective_balance_micros"] == 700
     assert data["credit_balance_usd"] == pytest.approx(7.0)
     assert data["balance_confirmed"] is True
 
@@ -199,11 +214,11 @@ def test_negative_effective_balance_is_reported_not_clamped(monkeypatch, capsys)
         capsys,
         {
             "/billing/status": _ACTIVE_CREATOR,
-            "/billing/balance": {"effective_balance_micros": -2_250_000},
+            "/billing/balance": {"effective_balance_micros": -225},
         },
     )
     data = env["data"]
-    assert data["effective_balance_micros"] == -2_250_000
+    assert data["effective_balance_micros"] == -225
     assert data["credit_balance_usd"] == pytest.approx(-2.25)
     assert data["credit_balance_credits"] < 0
     assert data["balance_confirmed"] is True
@@ -287,7 +302,7 @@ def test_legacy_rail_annotated_even_when_balance_is_confirmed(monkeypatch, capsy
         capsys,
         {
             "/billing/status": {**_ACTIVE_CREATOR, "billing_rail": "legacy_stripe"},
-            "/billing/balance": {"effective_balance_micros": 5_000_000},
+            "/billing/balance": {"effective_balance_micros": 500},
         },
     )
     data = env["data"]
@@ -308,7 +323,7 @@ def test_missing_workspaces_current_degrades_to_null_not_failure(monkeypatch, ca
         capsys,
         {
             "/billing/status": _ACTIVE_CREATOR,
-            "/billing/balance": {"effective_balance_micros": 1_000_000},
+            "/billing/balance": {"effective_balance_micros": 100},
             "/features": {"max_concurrent_jobs": 3},
             # /workspaces/current deliberately absent -> 404
         },
@@ -436,7 +451,7 @@ def test_payload_validates_against_the_shipped_schema(monkeypatch, capsys):
         capsys,
         {
             "/billing/status": _ACTIVE_CREATOR,
-            "/billing/balance": {"effective_balance_micros": 12_500_000},
+            "/billing/balance": {"effective_balance_micros": 1250},
             "/features": {"max_concurrent_jobs": 3},
             "/workspaces/current": _WORKSPACE,
             "/billing/plans": _PLANS,
@@ -491,7 +506,7 @@ def test_pretty_mode_renders_a_confirmed_balance(monkeypatch, capsys):
         monkeypatch,
         {
             "/billing/status": _ACTIVE_CREATOR,
-            "/billing/balance": {"effective_balance_micros": 12_500_000},
+            "/billing/balance": {"effective_balance_micros": 1250},
             "/features": {"max_concurrent_jobs": 3},
             "/workspaces/current": _WORKSPACE,
         },
@@ -509,7 +524,7 @@ def test_pretty_mode_does_not_interpret_markup_from_a_server_supplied_name(monke
         monkeypatch,
         {
             "/billing/status": _ACTIVE_CREATOR,
-            "/billing/balance": {"effective_balance_micros": 1_000_000},
+            "/billing/balance": {"effective_balance_micros": 100},
             "/workspaces/current": {**_WORKSPACE, "name": "[red]pwned[/red]"},
         },
     )
@@ -688,7 +703,7 @@ def test_wrongly_typed_server_scalars_are_coerced_or_dropped(monkeypatch, capsys
                 "occupied_seats": 39.0,
                 "renewal_date": 20260911,
             },
-            "/billing/balance": {"effective_balance_micros": "1500000"},
+            "/billing/balance": {"effective_balance_micros": "150"},
             "/features": {"max_concurrent_jobs": "5", "free_tier_balance": {"allowance": "100", "remaining": "60"}},
             "/workspaces/current": {"id": "w-1", "name": 12345, "type": "team", "role": None},
         },
@@ -745,7 +760,7 @@ def test_panel_sanitizes_escape_sequences_from_features(monkeypatch, capsys):
         monkeypatch,
         {
             "/billing/status": _ACTIVE_CREATOR,
-            "/billing/balance": {"effective_balance_micros": 1_000_000},
+            "/billing/balance": {"effective_balance_micros": 100},
             "/features": {"max_concurrent_jobs": 1, "free_tier_balance": {"allowance": "\x1b]0;pwned\x07100"}},
         },
     )
@@ -761,7 +776,7 @@ def test_panel_falls_back_to_the_tier_default_concurrency(monkeypatch, capsys):
         monkeypatch,
         {
             "/billing/status": _ACTIVE_CREATOR,
-            "/billing/balance": {"effective_balance_micros": 1_000_000},
+            "/billing/balance": {"effective_balance_micros": 100},
             # /features absent -> 404
         },
     )
