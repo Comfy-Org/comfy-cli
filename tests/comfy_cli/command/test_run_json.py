@@ -2499,3 +2499,12 @@ class TestPollRateLimitedPointsAtTheSubmittedJob:
         assert "comfy jobs watch cloud-pid --where cloud" in err["hint"]
         assert "retry it unchanged" not in err["hint"]
         assert "3s" in err["hint"]
+
+    def test_documented_poll_guidance_targets_the_cloud(self):
+        """Without `--where cloud`, `comfy jobs watch` follows the default
+        (often local) target and cannot see the submitted cloud job."""
+        from pathlib import Path
+
+        doc = (Path(__file__).resolve().parents[3] / "docs" / "json-output.md").read_text()
+        row = next(line for line in doc.splitlines() if line.startswith("| `cloud_rate_limited`"))
+        assert "comfy jobs watch <prompt_id> --where cloud" in row

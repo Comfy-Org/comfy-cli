@@ -181,7 +181,7 @@ the `--print-prompt` and `--no-wait` stream shapes.
 | -------------------- | ------------------------------------------------------------------ | -------------------------------- | ---- |
 | `cloud_unauthorized` | No usable cloud session, or the session was rejected — run `comfy cloud login` | —                     | 1 |
 | `cloud_http_error`   | The cloud API returned a non-2xx response on submit or while polling | `status` (int), `body` (str) on submit; `status`, `prompt_id` while polling | 1 |
-| `cloud_rate_limited` | The cloud API throttled the request (HTTP 429) on submit or while polling — the workflow was not judged invalid. On submit, wait and retry it unchanged; while polling, the job was already submitted, so follow it with `comfy jobs watch <prompt_id>` instead of re-running | same as `cloud_http_error`, plus `retry_after` (seconds) when the server sent `Retry-After` | 1 |
+| `cloud_rate_limited` | The cloud API throttled the request (HTTP 429) on submit or while polling — the workflow was not judged invalid. On submit, wait and retry it unchanged; while polling, the job was already submitted, so follow it with `comfy jobs watch <prompt_id> --where cloud` instead of re-running | same as `cloud_http_error`, plus `retry_after` (seconds) when the server sent `Retry-After` | 1 |
 | `cloud_timeout`      | The cloud job produced no progress for `--timeout` seconds          | `prompt_id` (str)               | 1 |
 | `cql_no_graph`       | A UI-format workflow needs the cloud `object_info` snapshot to be lowered to API format, and it could not be loaded — run `comfy nodes refresh --where cloud` | — | 1 |
 
