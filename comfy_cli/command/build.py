@@ -1959,8 +1959,13 @@ def push_cmd(
         if dry_run:
             # The envelope is the whole answer and prints nothing in pretty mode, so a
             # person gets the real push's opening line and word that nothing moved.
-            renderer.info(plan_line(len(uploads), payload["upload_bytes"], already_held_count(preparation)))
-            renderer.info("--dry-run: nothing was sent.")
+            # "Already held" is what the spec records; the builder, never asked,
+            # may hold more.
+            if renderer.is_pretty():
+                renderer.info(plan_line(len(uploads), payload["upload_bytes"], already_held_count(preparation)))
+                renderer.info(
+                    "--dry-run: nothing was sent; the builder may already hold more of these than the spec records."
+                )
             renderer.emit(payload, command="build push", changed=False)
             return
         assert client is not None

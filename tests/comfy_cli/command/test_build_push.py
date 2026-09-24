@@ -112,6 +112,7 @@ def test_a_json_dry_run_prints_only_its_envelope(workspace: Path, monkeypatch: p
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     assert len(lines) == 1, result.stdout
     assert json.loads(lines[0])["data"]["dry_run"] is True
+    assert result.stderr == ""
 
 
 def test_first_push_creates_instead_of_selecting_an_unknown_id(
