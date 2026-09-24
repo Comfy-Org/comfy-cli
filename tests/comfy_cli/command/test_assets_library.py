@@ -154,6 +154,14 @@ class TestEnsureHashWithExtension:
         assert env["ok"] is True
         assert json.loads(calls[0]["body"])["hash"] == f"blake3:{_HEX}"
 
+    def test_response_without_hash_reports_the_normalized_hash(self, cloud_target, monkeypatch, capsys):
+        # The success payload falls back to the hash that was SENT, not the raw
+        # `<hex>.<ext>` input, when the server omits `hash`.
+        _patch_urlopen(monkeypatch, {"id": "asset-1"})
+        env = _run(["ensure", "--hash", f"{_HEX}.png", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["hash"] == f"blake3:{_HEX}"
+
     def test_canonical_hash_with_extension_drops_the_extension(self, cloud_target, monkeypatch, capsys):
         calls = _patch_urlopen(monkeypatch, {"id": "asset-1"})
         _run(["ensure", "--hash", f"blake3:{_HEX}.mp4", "--where", "cloud"], capsys)

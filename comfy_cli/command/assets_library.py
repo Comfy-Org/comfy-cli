@@ -177,10 +177,9 @@ def ensure_cmd(
 
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] or ["input"]
     url = target.url("assets/from-hash")
+    normalized_hash = _normalize_content_hash(hash)
     try:
-        status, body = http_request(
-            url, target, method="POST", body={"hash": _normalize_content_hash(hash), "tags": tag_list}
-        )
+        status, body = http_request(url, target, method="POST", body={"hash": normalized_hash, "tags": tag_list})
     except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
         # The parameterized helper, not `cloud_http`'s: that one hardcodes the
         # saved-workflow vocabulary, so a 404 here read "workflow not found
@@ -218,7 +217,7 @@ def ensure_cmd(
     b = body or {}
     payload = {
         "id": b.get("id"),
-        "hash": b.get("hash", hash),
+        "hash": b.get("hash", normalized_hash),
         "created_new": status == 201,
     }
     renderer.emit(payload, command="assets library ensure", where="cloud")
