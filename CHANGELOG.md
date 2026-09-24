@@ -80,6 +80,10 @@ history.
 
 ### Fixed
 
+- `comfy build push --dry-run` prints what it would upload, and how much the
+  spec already records as uploaded, followed by a line saying nothing was sent,
+  instead of exiting with no output at all. `--json` output is unchanged.
+
 - `comfy deploy up` now warns about each deployment of an older release of the
   Build that is still running and billing, with the
   `comfy deploy stop --deployment <id>` to run. `up` on a new release creates a
