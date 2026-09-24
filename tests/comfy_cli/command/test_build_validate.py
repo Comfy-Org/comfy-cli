@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from comfy_cli.cmdline import app as cli_app
 from comfy_cli.command import build
 from comfy_cli.command.build_spec import JsonObject
+from comfy_cli.command.build_validation import _https_url, _lacks_extension, _valid_filename, _valid_model_dir
 
 
 @pytest.fixture(autouse=True)
@@ -317,7 +318,7 @@ def test_pretty_remote_output_keeps_none_and_lookup_errors_distinct(
 
 
 #: Model entries as people paste them from Civitai or Hugging Face, each breaking
-#: one rule of the builder's release cut (DPLAT-1704).
+#: one rule of the builder's release cut.
 PASTED_MODELS: list[JsonObject] = [
     {"type": "Loras", "sourceUri": "https://h.example/a.safetensors"},
     {"type": "loras", "sourceUri": "https://civitai.com/api/download/models/128713"},
@@ -394,6 +395,13 @@ def test_pretty_validate_prints_each_problem_on_its_own_line(workspace: Path) ->
         pytest.param(
             {"type": "loras", "sourceUri": "https://h.example/x.safetensors", "sha256": "A" * 64}, id="upper-hex"
         ),
+        pytest.param(
+            {"type": "loras", "sourceUri": "https://h.example/x.safetensors", "sha256": f" {'a' * 64}\n"},
+            id="padded-sha256",
+        ),
+        pytest.param(
+            {"type": "loras", "filename": "  ", "sourceUri": "https://h.example/x.safetensors"}, id="blank-filename"
+        ),
     ],
 )
 def test_validate_passes_what_the_builder_accepts(workspace: Path, model: JsonObject) -> None:
@@ -417,3 +425,179 @@ def test_a_local_models_sha256_is_left_to_the_push(workspace: Path) -> None:
 
     # Then
     assert result.exit_code == 0, result.stdout
+
+
+#: Links with the builder's answer for each: (``validHTTPSURL``, ``derivedFilenameLacksExt``).
+#: Every row was checked against those two Go functions, copied verbatim from
+#: comfy-builder's definition.go and run under go1.26.4. The builder reads a link
+#: with Go's ``url.Parse``, which decodes the path and refuses some links Python's
+#: ``urlsplit`` takes.
+BUILDER_LINK_ANSWERS = [
+    pytest.param("https://h.example/x.safetensors", True, False, id="plain"),
+    pytest.param("https://civitai.com/api/download/models/128713", True, True, id="civitai-id"),
+    pytest.param("https://h.example/m%2Esafetensors", True, False, id="escaped-dot-is-an-extension"),
+    pytest.param("https://h.example/model.safetensors%2F123", True, True, id="escaped-slash-ends-the-name"),
+    pytest.param("https://h.example/a%20b.safetensors", True, False, id="escaped-space"),
+    pytest.param("https://h.example/100%.safetensors", False, False, id="bad-escape"),
+    pytest.param("https://h.example/x.safetensors#100%", False, False, id="bad-escape-in-fragment"),
+    pytest.param("https://h.example:abc/x.safetensors", False, False, id="port-not-a-number"),
+    pytest.param("https://h.example:8443/x.safetensors", True, False, id="port"),
+    pytest.param("https://h.example:1:2/x.safetensors", False, False, id="two-ports"),
+    pytest.param("https://h.example/a\tb.safetensors", False, False, id="tab"),
+    pytest.param("\x1fhttps://h.example/x.safetensors", False, False, id="control-char-str-strip-drops"),
+    pytest.param("https://h.example/x.safetensors#frag\x01", True, False, id="control-char-in-fragment"),
+    pytest.param("  https://h.example/x.safetensors\n", True, False, id="surrounding-space"),
+    pytest.param("HTTPS://h.example/x.safetensors", True, False, id="scheme-case"),
+    pytest.param("http://h.example/x.safetensors", False, False, id="http"),
+    pytest.param("https:h.example/x.safetensors", False, False, id="opaque"),
+    pytest.param("https:models/128713", False, False, id="opaque-has-no-path"),
+    pytest.param("https:///x.safetensors", False, False, id="no-host"),
+    pytest.param("https://h ex.example/x.safetensors", False, False, id="space-in-host"),
+    pytest.param("https://%41.example/x.safetensors", False, False, id="ascii-escape-in-host"),
+    pytest.param("https://us er@h.example/x.safetensors", False, False, id="space-in-userinfo"),
+    pytest.param("https://[::1]/x.safetensors", True, False, id="ipv6"),
+    pytest.param("https://[1.2.3.4]/x.safetensors", False, False, id="ipv4-in-brackets"),
+    pytest.param("https://h.example", True, False, id="no-path"),
+    pytest.param("https://h.example/models/", True, True, id="trailing-slash"),
+    pytest.param("https://h.example/x.safetensors/", True, False, id="trailing-slash-after-a-name"),
+    pytest.param("https://h.example/dl?file=x.safetensors", True, True, id="name-in-query"),
+]
+
+
+@pytest.mark.parametrize(("uri", "https", "lacks_extension"), BUILDER_LINK_ANSWERS)
+def test_links_read_as_the_builder_reads_them(uri: str, https: bool, lacks_extension: bool) -> None:
+    assert (_https_url(uri), _lacks_extension(uri)) == (https, lacks_extension)
+
+
+@pytest.mark.parametrize(
+    ("uri", "field"),
+    [
+        pytest.param("https://h.example/m%2Esafetensors", None, id="escaped-dot"),
+        pytest.param("https://h.example/model.safetensors%2F123", "filename", id="escaped-slash"),
+        pytest.param("https://h.example/100%.safetensors", "sourceUri", id="bad-escape"),
+    ],
+)
+def test_validate_answers_a_link_as_the_builder_would(workspace: Path, uri: str, field: str | None) -> None:
+    # Given
+    write_spec(workspace, models=[{"type": "loras", "sourceUri": uri}], nodes=[])
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    if field is None:
+        assert result.exit_code == 0, result.stdout
+    else:
+        assert result.exit_code == 1
+        assert _refused(result) == {uri: field}
+
+
+#: The builder's vetted folders as the tests' list carries them.
+DIRECTORIES = frozenset({"checkpoints", "loras", "vae"})
+
+
+#: Each row checked against Go ``common.ValidModelDir`` (whose own list holds these
+#: three), imported from the cloud repo and run under go1.26.4.
+@pytest.mark.parametrize(
+    ("value", "valid"),
+    [
+        pytest.param("loras", True, id="vetted"),
+        pytest.param("Loras", False, id="case-variant"),
+        pytest.param("LORAS", False, id="case-variant-upper"),
+        pytest.param("ipadapter/custom", True, id="new-folder"),
+        pytest.param("insightface/models/antelopev2", True, id="nested"),
+        pytest.param("configs", False, id="reserved-configs"),
+        pytest.param("CONFIGS/x", False, id="reserved-configs-any-case"),
+        pytest.param("custom_nodes", False, id="reserved-custom-nodes"),
+        pytest.param("Custom_Nodes/foo", False, id="reserved-custom-nodes-any-case"),
+        pytest.param("foo./bar", False, id="trailing-dot-segment"),
+        pytest.param("con", False, id="windows-device"),
+        pytest.param("aux.x", False, id="windows-device-with-extension"),
+        pytest.param("lpt9.bin", False, id="windows-lpt"),
+        pytest.param("com0", True, id="not-a-windows-device"),
+        pytest.param("a b", False, id="space"),
+        pytest.param("-lead", False, id="leading-dash"),
+        pytest.param("a//b", False, id="empty-segment"),
+        pytest.param("/abs", False, id="absolute"),
+        pytest.param("../x", False, id="parent"),
+        pytest.param("a" * 127 + "/" + "a" * 127, True, id="255-chars"),
+        pytest.param("a" * 127 + "/" + "a" * 128, False, id="too-long"),
+        pytest.param("", False, id="empty"),
+    ],
+)
+def test_model_directories_as_the_builder_reads_them(value: str, valid: bool) -> None:
+    assert _valid_model_dir(value, DIRECTORIES) is valid
+
+
+def test_a_case_variant_passes_without_the_builders_list() -> None:
+    """Offline there is no list to tell "Loras" from a new folder, so it is left to
+    the save, which warns about it; the builder itself refuses it."""
+    assert _valid_model_dir("Loras", None) is True
+    assert _valid_model_dir("Loras", DIRECTORIES) is False
+
+
+#: Each row checked against Go ``definition.ValidFilename``, under go1.26.4.
+@pytest.mark.parametrize(
+    ("value", "valid"),
+    [
+        pytest.param("x.safetensors", True, id="plain"),
+        pytest.param("a.b.c", True, id="dots"),
+        pytest.param("..", False, id="dot-dot"),
+        pytest.param("a..b", False, id="dot-dot-inside"),
+        pytest.param(".hidden", False, id="leading-dot"),
+        pytest.param("a/b", False, id="separator"),
+        pytest.param("a b", False, id="space"),
+        pytest.param("a" * 256, False, id="too-long"),
+    ],
+)
+def test_filenames_as_the_builder_reads_them(value: str, valid: bool) -> None:
+    assert _valid_filename(value) is valid
+
+
+def test_one_problem_is_counted_singular_and_names_its_model(workspace: Path) -> None:
+    # Given
+    write_spec(
+        workspace,
+        models=[{"type": "loras", "sha256": "8A0B5F4C2E", "sourceUri": "https://h.example/c.safetensors"}],
+        nodes=[],
+    )
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    assert _envelope(result)["error"]["message"] == (
+        "1 problem the builder would refuse this build for:\n"
+        "  definition.models[0].sha256 (https://h.example/c.safetensors): must be a 64-character sha256"
+    )
+
+
+def test_an_entry_with_nothing_to_name_it_by_has_no_parentheses(workspace: Path) -> None:
+    # Given
+    write_spec(workspace, models=[{"type": "Bad Folder", "blobId": "blob-1"}], nodes=[])
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    message = _envelope(result)["error"]["message"]
+    assert message.splitlines()[1] == "  definition.models[0].type: " + (
+        "must be a model directory under models/ (e.g. checkpoints, insightface/models/antelopev2)"
+    )
+
+
+def test_pretty_validate_leaves_the_problem_list_out_of_the_details(workspace: Path) -> None:
+    """Pretty mode already lists every problem in the message; the list is for JSON."""
+    # Given
+    write_spec(workspace, models=PASTED_MODELS, nodes=[])
+
+    # When
+    json_result = _invoke(workspace)
+    pretty_result = _invoke(workspace, output="pretty")
+
+    # Then
+    assert len(_envelope(json_result)["error"]["details"]["invalid"]) == 3
+    lines = [line.strip("│ ") for line in pretty_result.output.splitlines()]
+    assert any(line.startswith("path") for line in lines), pretty_result.output
+    assert not any(line.startswith("invalid") for line in lines), pretty_result.output

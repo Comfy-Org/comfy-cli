@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import sys
@@ -19,11 +20,13 @@ from build_push_support import (
     write_spec,
 )
 
+from comfy_cli.builder_api import BuilderClient
 from comfy_cli.command import build
 from comfy_cli.command.build_package import package_node
 from comfy_cli.command.build_paths import resolve_build_paths
 from comfy_cli.command.build_push import pending_uploads, prepare_push
 from comfy_cli.command.build_spec import JsonObject
+from comfy_cli.http import ResponseTooLarge
 
 
 @pytest.fixture(autouse=True)
@@ -715,6 +718,44 @@ def test_push_does_not_refuse_for_a_folder_list_it_could_not_read(
         raise requests.ConnectionError("builder unreachable")
 
     monkeypatch.setattr(client, "list_model_directories", unreachable)
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    assert len(_calls(client, "create_build")) == 1
+
+
+def _a_list_body() -> list[str]:
+    """What ``list_model_directories`` does with a 200 whose body is a JSON list."""
+    client = BuilderClient("https://builder.test", "token")
+    client._send = lambda url, **kwargs: (200, ["loras"])  # type: ignore[method-assign]
+    return client.list_model_directories()
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(http.client.IncompleteRead(b"{"), id="cut-off-body"),
+        pytest.param(ResponseTooLarge("over the cap"), id="oversized-body"),
+        pytest.param(_a_list_body, id="list-body"),
+    ],
+)
+def test_push_does_not_stop_for_any_failure_reading_the_folder_list(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, read
+) -> None:
+    # Given
+    write_spec(workspace, models=[{"type": "loras", "sourceUri": "https://h.example/a.safetensors"}], nodes=[])
+    client = RecordingBuilder()
+
+    def failing() -> list[str]:
+        if callable(read):
+            return read()
+        raise read
+
+    monkeypatch.setattr(client, "list_model_directories", failing)
     _install_client(monkeypatch, client)
 
     # When

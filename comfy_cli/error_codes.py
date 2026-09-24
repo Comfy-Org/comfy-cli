@@ -1248,7 +1248,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "build_definition_invalid",
         "The builder refused the build's definition, most often at `push --release` or `release create`. "
         "The message lists each problem as `<field>: <reason>`, and `details.invalid` carries each as "
-        "`{field, reason}`. `models[<n>]` counts the models as the spec file lists them after a push.",
+        "`{field, reason}`. `models[<n>]` counts the models as the spec file lists them after a push. "
+        "A `blob:<id>` field (`not uploaded`, `unknown blob`, an uploaded size or content that does not "
+        "match) is no rule of the spec: the file that blob holds never reached the builder whole, and the "
+        "hint then says to delete that `blobId` from its entry and push again, which uploads the file.",
         "fix each named field in the spec, then push again; a retry of the same definition is refused the same way",
     ),
     ErrorCode(

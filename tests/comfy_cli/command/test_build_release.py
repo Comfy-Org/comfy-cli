@@ -11,6 +11,7 @@ import typer
 from build_push_support import envelope, make_workspace, write_spec
 from typer.testing import CliRunner
 
+from comfy_cli import error_codes
 from comfy_cli.caller import Caller
 from comfy_cli.cmdline import app as cli_app
 from comfy_cli.command import build
@@ -868,7 +869,7 @@ def test_delete_uses_one_stripped_release_id_for_the_prompt_the_url_and_the_payl
     )
 
 
-#: The four reasons the builder gave for the pasted model entries of DPLAT-1704.
+#: The four reasons the builder gave for model entries as people paste them.
 REFUSED_MODELS = [
     {"field": "models[0].type", "reason": "must be a model directory under models/ (e.g. checkpoints)"},
     {"field": "models[1].filename", "reason": "sourceUri has no file extension; set an explicit filename"},
@@ -906,7 +907,7 @@ def test_a_refused_definition_leads_with_every_reason(workspace: Path, monkeypat
     assert "INVALID_DEFINITION" not in error["message"]
     # Re-running the same definition is refused the same way, so the cut's retry
     # hint would send the reader the wrong way.
-    assert "idempotent" not in (error.get("hint") or "")
+    assert error["hint"] == error_codes.get("build_definition_invalid").hint
 
 
 def test_a_refused_definition_prints_one_reason_per_line(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -928,6 +929,9 @@ def test_a_refused_definition_prints_one_reason_per_line(workspace: Path, monkey
     for issue in REFUSED_MODELS:
         assert any(line.startswith(f"{issue['field']}: ") for line in lines), result.output
     assert "idempotent" not in result.output
+    # The message already lists them; the list apart is for JSON.
+    assert any(line.startswith("buildId") for line in lines), result.output
+    assert not any(line.startswith("invalid") for line in lines), result.output
 
 
 def test_a_refused_definition_with_only_a_message_leads_with_the_message(
@@ -954,3 +958,73 @@ def test_a_refused_definition_with_only_a_message_leads_with_the_message(
     error = envelope(result)["error"]
     assert (error["code"], error["message"]) == ("build_definition_invalid", reason)
     assert "invalid" not in error["details"]
+
+
+#: The cut's refusal for a file the definition names that is not in storage, as
+#: releases_cut.go ``verifyReferencedBlobs`` words it.
+BLOB_NOT_UPLOADED = {"field": "blob:blob-7", "reason": "not uploaded"}
+
+
+@pytest.mark.parametrize(
+    ("invalid", "also_the_spec"),
+    [
+        pytest.param([BLOB_NOT_UPLOADED], False, id="only-a-blob"),
+        pytest.param([REFUSED_MODELS[3], BLOB_NOT_UPLOADED], True, id="a-blob-and-a-field"),
+    ],
+)
+def test_a_blob_never_uploaded_says_to_push_it_again(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, invalid: list[dict[str, str]], also_the_spec: bool
+) -> None:
+    """No edit to the spec's rules clears it: the file has to upload, and a push
+    skips an entry that already carries a ``blobId``."""
+    # Given
+    from comfy_cli.builder_api import BuilderClient
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        raise refusal(400, {"error": "INVALID_DEFINITION", "invalid": invalid}, url)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["code"] == "build_definition_invalid"
+    assert "blob:blob-7: not uploaded" in error["message"]
+    assert "delete that `blobId`" in error["hint"]
+    assert "`comfy build push`" in error["hint"]
+    assert error["hint"].startswith("fix each other named field") is also_the_spec
+
+
+def test_only_well_formed_reasons_are_kept() -> None:
+    body = json.dumps(
+        {
+            "error": "INVALID_DEFINITION",
+            "invalid": [
+                {"field": "models[0].type", "reason": "must be a model directory"},
+                "models[1]: must be an object",
+                {"field": "models[2].sha256"},
+                {"field": 3, "reason": "must be a 64-character sha256"},
+                {"field": "models[4].filename", "reason": None},
+            ],
+        }
+    )
+
+    assert build._builder_invalid(body) == [{"field": "models[0].type", "reason": "must be a model directory"}]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("not json", id="not-json"),
+        pytest.param(json.dumps(["models[0]"]), id="a-list"),
+        pytest.param(json.dumps({"error": "INVALID_DEFINITION", "invalid": "models[0]"}), id="invalid-not-a-list"),
+        pytest.param(json.dumps({"error": "INVALID_DEFINITION"}), id="no-invalid"),
+    ],
+)
+def test_a_body_without_a_reason_list_gives_none(body: str) -> None:
+    assert build._builder_invalid(body) == []

@@ -78,7 +78,10 @@ refuse with `build_spec_invalid`, one line per entry and `details.invalid` as
 comes back as **`build_definition_invalid`**, with the builder's reasons one per
 line and in `details.invalid`; the same definition is refused the same way every
 time, so edit it rather than retrying. Its `models[<n>]` counts the spec as the
-last push wrote it.
+last push wrote it. A `blob:<id>` field (`not uploaded`, `unknown blob`, a size
+or content mismatch) is not the spec's rules but a file that never reached the
+builder whole: delete that `blobId` from its entry and run `comfy build push`,
+which uploads the file again, since a push skips an entry that has a `blobId`.
 
 - `must be a 64-character sha256` — a model entry's `sha256`. Correct it from the
   candidate you took it off rather than uploading anything.

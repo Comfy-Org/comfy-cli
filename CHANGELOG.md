@@ -24,11 +24,12 @@ history.
   `build_spec_invalid` (`details.invalid` in JSON), and `push` refuses before
   uploading anything. A case variant of a folder (`Loras` for `loras`) needs the
   builder's list, so `push` and `validate --remote` read it and offline `validate`
-  does not. (DPLAT-1704)
+  does not.
 - A definition the builder refuses now arrives as `build_definition_invalid`, its
   reasons one per line and in `details.invalid`, instead of `build_builder_error`
   with the code as the message, the reasons in `details.body` and a hint to
-  re-run the cut. (DPLAT-1704)
+  re-run the cut. A file the definition names that never reached the builder
+  (`blob:<id>`) gets a hint to delete that `blobId` and push again.
 
 ## [1.21.0] - 2026-09-24
 

@@ -1592,7 +1592,8 @@ def _model_directories(client, spec: Mapping) -> frozenset[str] | None:
         return None
     try:
         listed = client.list_model_directories()
-    except (OSError, requests.RequestException, ValueError, KeyError):
+    except Exception:
+        # Advisory, so no failure to read it (a cut-off body, an oversized one) stops the command.
         return None
     if not isinstance(listed, list):
         return None
@@ -2641,6 +2642,7 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None,
                         if invalid
                         else builder_message
                     ),
+                    hint=_definition_invalid_hint(invalid),
                     details=details,
                 )
                 return
@@ -2774,6 +2776,22 @@ def _builder_invalid(body: str) -> list[dict[str, str]]:
         for item in raw
         if isinstance(item, dict) and isinstance(item.get("field"), str) and isinstance(item.get("reason"), str)
     ]
+
+
+def _definition_invalid_hint(invalid: list[dict[str, str]]) -> str | None:
+    """The hint for a refused definition, or None for the registered one. A
+    ``blob:<id>`` field is no rule of the spec: the cut found the file that blob
+    holds missing from storage or different from what was declared, and a push
+    uploads again only an entry without a ``blobId``."""
+    blobs = sum(issue["field"].startswith("blob:") for issue in invalid)
+    if not blobs:
+        return None
+    hint = (
+        "a `blob:<id>` field is a file the definition names that never reached the builder whole: "
+        "delete that `blobId` from its entry in the spec, then run `comfy build push`, which uploads "
+        "the file again and saves its new id"
+    )
+    return hint if blobs == len(invalid) else f"fix each other named field in the spec; {hint}"
 
 
 def _builder_msg(body: str) -> str:

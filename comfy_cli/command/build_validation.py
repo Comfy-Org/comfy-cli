@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import ipaddress
 import re
 from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Final, Literal, Protocol
-from urllib.parse import urlsplit
+from urllib.parse import unquote
 
 from typing_extensions import assert_never
 
@@ -30,6 +31,22 @@ _WINDOWS_RESERVED: Final = frozenset(
     {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
 )
 _MODEL_DIR_REASON: Final = "must be a model directory under models/ (e.g. checkpoints, insightface/models/antelopev2)"
+
+# Go's ``url.Parse``, as far as the builder's two link rules read it (``_go_url``).
+# ``_GO_SPACE`` is what ``strings.TrimSpace`` trims: ``str.strip`` also trims
+# \x1c-\x1f, which Go keeps and then refuses as control characters.
+_GO_SPACE: Final = (
+    "\t\n\v\f\r \x85\xa0\u1680" + "".join(map(chr, range(0x2000, 0x200B))) + "\u2028\u2029\u202f\u205f\u3000"
+)
+_URL_CONTROL: Final = re.compile(r"[\x00-\x1f\x7f]")
+_URL_BAD_ESCAPE: Final = re.compile(r"%(?![0-9A-Fa-f]{2})")
+_URL_SCHEME: Final = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*(?=:)")
+_URL_PORT: Final = re.compile(r"(:[0-9]*)?")
+_URL_USERINFO: Final = re.compile(r"[A-Za-z0-9\-._:~!$&'()*+,;=%@]*")
+# The ASCII a host may hold unescaped; ':' and '[' are further bound by the port
+# and IPv6 rules.
+_HOST_SAFE: Final = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~!$&'()*+,;=:[]<>\"")
+_HEX: Final = frozenset("0123456789abcdefABCDEF")
 
 
 class ModelLookupState(str, Enum):
@@ -233,21 +250,107 @@ def _valid_filename(value: str) -> bool:
     return _SAFE_SEGMENT.fullmatch(value) is not None and ".." not in value
 
 
+def _go_url(value: str) -> tuple[str, str, str] | None:
+    """Go's ``url.Parse(strings.TrimSpace(value))`` as far as the builder reads it:
+    the lower-cased scheme, the host and the percent-decoded path, or None where Go
+    returns an error. Written out because ``urlsplit`` accepts what Go refuses (a
+    control character, a bad ``%`` escape, a port that is not a number) and leaves
+    the path encoded, so ``m%2Esafetensors`` would have no extension."""
+    rest, _, fragment = value.strip(_GO_SPACE).partition("#")
+    if _URL_CONTROL.search(rest) or _URL_BAD_ESCAPE.search(fragment) or rest.startswith(":"):
+        return None
+    scheme = ""
+    if match := _URL_SCHEME.match(rest):
+        scheme, rest = match[0].lower(), rest[match.end() + 1 :]
+    rest = rest.partition("?")[0]
+    if not rest.startswith("/"):
+        if scheme:
+            return scheme, "", ""  # opaque, as "https:h.example/x" is: no host, no path
+        if ":" in rest.partition("/")[0]:
+            return None
+    host = ""
+    if rest.startswith("//") and (scheme or not rest.startswith("///")):
+        authority, slash, path = rest[2:].partition("/")
+        rest = slash + path
+        parsed_host = _go_host(scheme, authority)
+        if parsed_host is None:
+            return None
+        host = parsed_host
+    if _URL_BAD_ESCAPE.search(rest):
+        return None
+    return scheme, host, unquote(rest, errors="surrogateescape")
+
+
+def _go_host(scheme: str, authority: str) -> str | None:
+    """Go's ``parseAuthority``: the host of *authority*, or None where Go refuses it."""
+    userinfo, at, host = authority.rpartition("@")
+    if at and (not _URL_USERINFO.fullmatch(userinfo) or _URL_BAD_ESCAPE.search(userinfo)):
+        return None
+    if "[" in host[1:]:
+        return None
+    if host.startswith("["):
+        close = host.rfind("]")
+        if close < 0 or not _URL_PORT.fullmatch(host[close + 1 :]):
+            return None
+        address, zoned, zone = host[1:close].partition("%25")
+        if not _go_host_unescapes(address, zone=False) or not _go_host_unescapes(zoned + zone, zone=True):
+            return None
+        # netip.ParseAddr, which takes only an IPv6 address here: a zone after the
+        # first "%" must not be empty, and may itself hold one.
+        ip, percent, zone_name = unquote(address + zoned + zone).partition("%")
+        if percent and not zone_name:
+            return None
+        try:
+            ipaddress.IPv6Address(ip)
+        except ValueError:
+            return None
+        return host
+    # Go ends the host at its first ':' in an http(s) link, at the last in any other.
+    colon = host.find(":") if scheme in ("http", "https") else host.rfind(":")
+    if colon >= 0 and not _URL_PORT.fullmatch(host[colon:]):
+        return None
+    if not _go_host_unescapes(host, zone=False):
+        return None
+    return unquote(host, errors="surrogateescape")
+
+
+def _go_host_unescapes(part: str, *, zone: bool) -> bool:
+    """Whether Go's ``unescape`` takes *part* in host mode, or zone mode for an IPv6
+    zone. An escape is two hex digits and, in a host, ``%25`` or a non-ASCII byte;
+    in a zone, ``%25``, a space or a byte a host may hold unescaped."""
+    index = 0
+    while index < len(part):
+        char = part[index]
+        if char != "%":
+            if char < "\x80" and char not in _HOST_SAFE:
+                return False
+            index += 1
+            continue
+        code = part[index + 1 : index + 3]
+        if len(code) < 2 or not set(code) <= _HEX:
+            return False
+        byte = int(code, 16)
+        refused = (byte != 0x20 and chr(byte) not in _HOST_SAFE) if zone else byte < 0x80
+        if refused and code != "25":
+            return False
+        index += 3
+    return True
+
+
 def _https_url(value: str) -> bool:
-    try:
-        parts = urlsplit(value.strip())
-    except ValueError:
-        return False
-    return parts.scheme == "https" and bool(parts.netloc)
+    """``validHTTPSURL``: Go parses it, with an https scheme and a host."""
+    parsed = _go_url(value)
+    return parsed is not None and parsed[0] == "https" and bool(parsed[1])
 
 
 def _lacks_extension(uri: str) -> bool:
     """Whether the name the builder derives from *uri* (Go's ``path.Base`` of its
-    path) has no extension, as a Civitai ``/api/download/models/<id>`` link does."""
-    path = urlsplit(uri.strip()).path
-    if not path:
+    decoded path) has no extension, as a Civitai ``/api/download/models/<id>`` link
+    does. A link Go cannot parse is False, as there."""
+    parsed = _go_url(uri)
+    if parsed is None or not parsed[2]:
         return False  # path.Base("") is ".", which has one
-    base = path.rstrip("/").rsplit("/", 1)[-1] or "/"
+    base = parsed[2].rstrip("/").rsplit("/", 1)[-1] or "/"
     return "." not in base
 
 
