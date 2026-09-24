@@ -38,7 +38,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Final, NoReturn
+from typing import TYPE_CHECKING, Annotated, Any, Final, NoReturn
 from urllib.parse import urlsplit
 
 import requests
@@ -65,6 +65,7 @@ from comfy_cli.command.build_paths import (
 from comfy_cli.command.build_pull import UnsyncedDefinitionError, merge_pulled_spec
 from comfy_cli.command.build_push import (
     SkippedSymlink,
+    already_held_count,
     pending_uploads,
     prepare_push,
     public_node_identities,
@@ -87,6 +88,7 @@ from comfy_cli.command.build_targets import (
     catalog_choices,
     parse_build_targets,
 )
+from comfy_cli.command.build_upload_progress import UploadProgressReporter, plan_line
 from comfy_cli.command.build_validation import (
     lookup_public_model_sources,
     project_wire_definition,
@@ -1855,6 +1857,13 @@ def push_cmd(
         bool,
         typer.Option("--force", help="Overwrite remote changes, retrying a bounded GET-then-PATCH."),
     ] = False,
+    release_despite_warnings: Annotated[
+        bool,
+        typer.Option(
+            "--release-despite-warnings",
+            help="With --release, cut the release even though the save warned about a model link.",
+        ),
+    ] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Compute uploads locally; send no HTTP requests.")] = False,
     models_dir: Annotated[
         str | None,
@@ -1873,6 +1882,14 @@ def push_cmd(
             message="--release cuts a release from a real push, and --dry-run sends nothing.",
             hint="drop --dry-run to cut the release, or drop --release to preview the push",
             details={"conflict": ["--release", "--dry-run"]},
+        )
+        raise typer.Exit(code=1)
+    if release_despite_warnings and not release:
+        renderer.error(
+            code="build_missing_input",
+            message="--release-despite-warnings applies only to the release --release cuts.",
+            hint="pass --release to cut a release despite the save's model link warnings",
+            details={"missing": ["--release"]},
         )
         raise typer.Exit(code=1)
     targets = _parse_release_targets(renderer, target or ())
@@ -1940,6 +1957,15 @@ def push_cmd(
         if reported:
             payload["skipped_symlinks"] = reported
         if dry_run:
+            # The envelope is the whole answer and prints nothing in pretty mode, so a
+            # person gets the real push's opening line and word that nothing moved.
+            # "Already held" is what the spec records; the builder, never asked,
+            # may hold more.
+            if renderer.is_pretty():
+                renderer.info(plan_line(len(uploads), payload["upload_bytes"], already_held_count(preparation)))
+                renderer.info(
+                    "--dry-run: nothing was sent; the builder may already hold more of these than the spec records."
+                )
             renderer.emit(payload, command="build push", changed=False)
             return
         assert client is not None
@@ -1975,24 +2001,42 @@ def push_cmd(
                 )
                 raise typer.Exit(code=1)
 
+        # Said before the first byte moves, and said even when nothing will: a
+        # multi-GB upload is otherwise silent until it ends, and "0 files" is
+        # the answer to "is it going to upload that again?".
+        reporter = UploadProgressReporter(renderer)
+        reporter.plan(uploads, already_held=already_held_count(preparation))
+
         # Checkpoint the reconciled spec after every blob so an interrupted push
         # resumes instead of restarting: `prepare_push` skips entries that
         # already carry a `blobId`, and until this lands on disk the ids exist
         # only in memory — a crash would re-upload the same bytes under new ids
         # and orphan the ones the builder already stored.
-        uploaded = _builder_call(
-            renderer,
-            lambda: upload_assets(
-                preparation, client, lambda: _write_spec(renderer, paths.spec_file, preparation.spec)
-            ),
-        )
+        started = time.monotonic()
+        try:
+            uploaded = _builder_call(
+                renderer,
+                lambda: upload_assets(
+                    preparation, client, lambda: _write_spec(renderer, paths.spec_file, preparation.spec), reporter
+                ),
+            )
+        except BaseException:
+            _track_push_upload(uploads, uploaded=None, seconds=time.monotonic() - started)
+            raise
+        _track_push_upload(uploads, uploaded=uploaded, seconds=time.monotonic() - started)
     wire_definition = project_wire_definition(preparation.definition)
     target_id = build_id or stored_id
     name = str(spec["name"])
     description = str(spec["description"])
     if target_id is None:
-        target_id = _builder_call(renderer, lambda: client.create_build(name, wire_definition, description))
-        saved = _builder_call(renderer, lambda: client.get_build(target_id))
+        created_build = _builder_call(
+            renderer, lambda: client.create_build_response(name, wire_definition, description)
+        )
+        target_id = created_build["id"]
+        saved = {
+            **_builder_call(renderer, lambda: client.get_build(target_id)),
+            "warnings": created_build.get("warnings"),
+        }
         created = True
     elif force:
         saved = _force_update(renderer, client, target_id, wire_definition, name, description)
@@ -2028,6 +2072,12 @@ def push_cmd(
             "deduped": len(uploads) - uploaded,
         }
     )
+    warnings = _save_warnings(saved)
+    if warnings:
+        payload["warnings"] = warnings
+    _hold_release_on_link_warnings(
+        renderer, warnings, target_id, saved["updatedAt"], release and not release_despite_warnings
+    )
     release_summary: dict[str, str] | None = None
     if release:
         requested = [item.as_wire() for item in targets]
@@ -2048,6 +2098,73 @@ def push_cmd(
             renderer.print(f"  release: {release_summary['releaseId']}")
             renderer.print(f"  status:  {release_summary['statusUrl']}")
     renderer.emit(payload, command="build push", changed=True)
+
+
+# A warning at this field is comfy-builder's for a model link a deployment could
+# not download; it is the whole contract a held release rests on. Any other
+# field, such as pipDependencies, is printed and never holds a release.
+_MODEL_LINK_FIELD = re.compile(r"models\[\d+\]\.sourceUri")
+
+
+def _save_warnings(saved: dict) -> list[dict[str, str]]:
+    """The warnings a save returned, as field and reason, dropping anything the
+    builder sent in another shape rather than failing a push that landed."""
+    raw = saved.get("warnings")
+    if not isinstance(raw, list):
+        return []
+    return [
+        {"field": item["field"], "reason": item["reason"]}
+        for item in raw
+        if isinstance(item, dict) and isinstance(item.get("field"), str) and isinstance(item.get("reason"), str)
+    ]
+
+
+def _hold_release_on_link_warnings(
+    renderer, warnings: list[dict[str, str]], build_id: str, revision: str, cutting: bool
+) -> None:
+    """Print every warning the save returned, and refuse the cut a push asked for
+    while one is about a model link a deployment could not download. The build is
+    already saved and the spec already carries its revision, so a second push with
+    the go-ahead option cuts without saving anything twice."""
+    for warning in warnings:
+        renderer.warn(f"{warning['field']}: {warning['reason']}")
+    held = [warning for warning in warnings if _MODEL_LINK_FIELD.fullmatch(warning["field"])]
+    if not cutting or not held:
+        return
+    details: dict = {"id": build_id, "syncedRevision": revision}
+    # Text mode has already printed each warning above; only JSON carries them again.
+    if not renderer.is_pretty():
+        details["warnings"] = warnings
+    renderer.error(
+        code="build_release_held",
+        message=f"saved build {build_id}, but cut no release: the save warned that a deployment could not "
+        "download " + ", ".join(warning["field"] for warning in held),
+        details=details,
+    )
+    raise typer.Exit(code=1)
+
+
+def _track_push_upload(uploads, *, uploaded: int | None, seconds: float) -> None:
+    """One event per push that had something to upload: how much, how long, how it
+    ended. Nothing measured an upload before this, in the CLI or the portal, so the
+    size and the seconds are what say whether a change to uploads changed anything
+    for anyone. No filename: a private model's name is the customer's.
+
+    ``uploaded`` is None when the upload did not finish; then ``deduped`` is not
+    known either and is left out rather than guessed.
+    """
+    if not uploads:
+        return
+    properties: dict[str, Any] = {
+        "upload_count": len(uploads),
+        "upload_bytes": sum(upload.size_bytes for upload in uploads),
+        "seconds": round(seconds, 3),
+        "outcome": "ok" if uploaded is not None else "error",
+    }
+    if uploaded is not None:
+        properties["uploaded"] = uploaded
+        properties["deduped"] = len(uploads) - uploaded
+    tracking.track_event("build:push_upload", properties=properties)
 
 
 def _prompt_build_id(renderer, client) -> str | None:
@@ -2456,6 +2573,21 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None,
             body = (e.read(_BUILDER_ERROR_READ) or b"").decode("utf-8", "replace")
         except Exception:
             pass
+        # A 401 means the sign-in itself was refused, and the client has already
+        # tried a refresh, so the only way forward is signing in again.
+        if e.code == 401:
+            renderer.error(
+                code="build_not_signed_in",
+                message="the builder refused the sign-in token (401)",
+                # A token passed in through the environment is never refreshed, and
+                # signing in again would not replace it, so it has to be swapped.
+                hint=(
+                    "replace COMFY_BUILDER_TOKEN with a fresh Cloud JWT"
+                    if os.environ.get("COMFY_BUILDER_TOKEN")
+                    else "run `comfy cloud login` first"
+                ),
+            )
+            return
         if e.code == 403 and "FEATURE_NOT_ENABLED" in body:
             renderer.error(
                 code="build_not_enabled",

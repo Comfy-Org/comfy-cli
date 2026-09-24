@@ -98,9 +98,11 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow notes": "workflow",
     "comfy workflow print": "workflow",
     # structured edit primitives + recipes (CRDT op-based authoring)
+    "comfy workflow insert-workflow": "workflow",
     "comfy workflow add-node": "workflow",
     "comfy workflow connect": "workflow",
     "comfy workflow set-widget": "workflow",
+    "comfy workflow set-node-field": "workflow",
     "comfy workflow delete-node": "workflow",
     "comfy workflow delete-nodes": "workflow",
     "comfy workflow ls-nodes": "workflow",
@@ -213,6 +215,11 @@ COMMAND_SCHEMAS: dict[str, str] = {
 STREAM_EVENT_SCHEMAS: dict[str, str] = {
     "comfy run": "run_event",
     "comfy jobs watch": "run_event",
+    # upload progress; under plain --json the same lines go to stderr
+    "comfy build push": "build_push_event",
+    # the deployment coming up; same rule about stderr
+    "comfy deploy up": "deploy_progress_event",
+    "comfy deploy status": "deploy_progress_event",
 }
 
 

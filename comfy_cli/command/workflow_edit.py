@@ -128,6 +128,14 @@ def _finish(renderer, p, workflow: dict, op: dict, base_version: int, stdout: bo
     renderer.emit(payload, command=command, changed=not stdout)
 
 
+def _emit_op(renderer, p: Path, op: dict, base_version: int, command: str) -> None:
+    """Emit an op without applying it or writing the source workflow."""
+    payload = {"workflow": str(p), "op": op, "base_version": base_version, "wrote": None}
+    if renderer.is_pretty():
+        rprint(f"[bold green]✓[/bold green] {op['op']} emitted for [dim]{p}[/dim]")
+    renderer.emit(payload, command=command, changed=False)
+
+
 def _graph_or_exit(input_path, host, port, renderer, where=None):
     return _get_graph(input_path, host, port, where=where)
 
@@ -135,6 +143,34 @@ def _graph_or_exit(input_path, host, port, renderer, where=None):
 # ---------------------------------------------------------------------------
 # add-node
 # ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def insert_workflow_cmd(
+    file: Annotated[str, typer.Argument(help="Source frontend-format workflow JSON; emit-only, file is not modified.")],
+    template: Annotated[str, typer.Argument(help="Frontend-format workflow JSON to insert, or '-' for stdin.")],
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+):
+    """Insert a workflow template and emit one atomic ``insert_workflow`` op."""
+    renderer = get_renderer()
+    renderer.command = "workflow insert-workflow"
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    try:
+        if template == "-":
+            import sys
+
+            raw = sys.stdin.read()
+        else:
+            raw = Path(template).expanduser().read_text(encoding="utf-8")
+        inserted = json.loads(raw)
+        if not isinstance(inserted, dict):
+            raise ValueError("template must be a JSON object")
+        _, op = workflow_ops.insert_workflow(workflow, inserted, actor=actor, base_version=base_version)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+        _emit_edit_error(renderer, e, hint="provide a frontend-format workflow template JSON file")
+        raise typer.Exit(code=1) from e
+    _emit_op(renderer, p, op, base_version, "workflow insert-workflow")
 
 
 @tracking.track_command("workflow")
@@ -273,6 +309,69 @@ def set_widget_cmd(
         )
         raise typer.Exit(code=1) from e
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow set-widget")
+
+
+# ---------------------------------------------------------------------------
+# set-node-field (PROPOSED, op-vocabulary-v1 amendment v1.6 — not yet ratified)
+# ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def set_node_field_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    node: Annotated[str, typer.Argument(help="Node id.")],
+    field: Annotated[
+        str,
+        typer.Argument(help="Field: `title`, `mode`, `flags.collapsed` or `flags.pinned`."),
+    ],
+    value: Annotated[
+        str | None,
+        typer.Argument(
+            show_default=False,
+            help="New value (parsed as JSON, else literal string). Omit and pass --clear to clear the field.",
+        ),
+    ] = None,
+    clear: Annotated[
+        bool,
+        typer.Option("--clear", show_default=False, help="Clear the field back to absent."),
+    ] = False,
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+):
+    """Set, or clear, one durable node field; emits a ``set_node_field`` op.
+
+    PROPOSED: ``set_node_field`` is not yet part of the ratified
+    docs/op-vocabulary-v1.md contract — see that document's §1.8. It
+    supersedes the withdrawn, title-only ``set_title`` proposal and mirrors
+    comfy-multi-player#235's merged ``set_node_field`` CRDT op.
+    """
+    renderer = get_renderer()
+    renderer.command = "workflow set-node-field"
+    if clear == (value is not None):
+        renderer.error(
+            code="workflow_edit_invalid",
+            message="pass exactly one of VALUE or --clear",
+            hint='`comfy workflow set-node-field <file> <node_id> <field> "value"` or '
+            "`comfy workflow set-node-field <file> <node_id> <field> --clear`",
+        )
+        raise typer.Exit(code=1)
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    # No catalog is needed to write these fields (unlike set-widget): none of
+    # `title`/`mode`/`flags.collapsed`/`flags.pinned` is a catalogued widget.
+    node_id: Any = int(node) if node.lstrip("-").isdigit() else node
+    try:
+        workflow, op = workflow_ops.set_node_field(
+            workflow, node_id, field, None if clear else _parse_value(value), actor=actor, base_version=base_version
+        )
+    except ValueError as e:
+        _emit_edit_error(
+            renderer,
+            e,
+            hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read",
+        )
+        raise typer.Exit(code=1) from e
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow set-node-field")
 
 
 # ---------------------------------------------------------------------------
@@ -765,7 +864,13 @@ def apply_cmd(
     except workflow_ops.NotBatchableError as e:
         # A standalone-only op (clear) inside the batch: its own registered code,
         # with the hint naming the standalone command to run instead.
-        renderer.error(code=e.code, message=f"batch failed: {e}", hint=e.hint)
+        details = None
+        if ack == "summary":
+            details = {
+                "failed": {"index": e.spec_index, "op": e.spec_op, "code": e.code},
+                "applied_count": e.applied_count,
+            }
+        renderer.error(code=e.code, message=f"batch failed: {e}", hint=e.hint, details=details)
         raise typer.Exit(code=1) from e
     except workflow_ops.DeprecatedNodeType as e:
         renderer.error(

@@ -643,6 +643,12 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "run the standalone `comfy workflow reset-doc <file> --confirm` first, then apply the remaining ops as a batch",
     ),
     ErrorCode(
+        "workflow_insert_workflow_not_batchable",
+        "A batch contained an `insert_workflow` op. A complete workflow insertion is one standalone atomic op, "
+        "so nesting it in the spec batch protocol is rejected and nothing is applied.",
+        "run `comfy workflow insert-workflow <file> <template>` instead",
+    ),
+    ErrorCode(
         "workflow_reset_doc_unconfirmed",
         "`comfy workflow reset-doc` was called without `--confirm`. The command fails closed: it erases every "
         "node AND the document's replay history, which no later op can undo.",
@@ -1236,6 +1242,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "edit the spec to name a published registry version or normalized repository, or remove the node",
     ),
     ErrorCode(
+        "build_release_held",
+        "`comfy build push --release` saved the build, but the save warned about a model link a deployment "
+        "could not download, so no release was cut. `details` carries the saved `id`, `syncedRevision` and "
+        "every `warnings` entry; a warning at `models[<n>].sourceUri` is the one that holds a release.",
+        "fix the model links and push again, or push with --release --release-despite-warnings to cut anyway",
+    ),
+    ErrorCode(
         "build_release_limit",
         "The builder refused the release cut because the workspace already holds as many releases as its "
         "limit allows, counting every status. `message` is the builder's own wording. `comfy build release "
@@ -1427,9 +1440,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`details.status` names the state. The two commands differ, deliberately: `comfy deploy status` "
         "reports only `failed` and `stop_failed`, since a `stopped` deployment is a normal thing to be "
         "asked about; `comfy deploy up` adds `stopped` (with or without `--watch`), because a deployment it was "
-        "asked to bring up and that is stopped did not come up.",
+        "asked to bring up and that is stopped did not come up, and `unhealthy`, because one that came up and "
+        "then degraded is billing without serving and `up` does not change it.",
         "for `failed`, inspect `comfy deploy logs` and redeploy with `comfy deploy up`; for `stop_failed`, "
-        "re-run `comfy deploy stop` -- it may still be billing; for `stopped`, `comfy deploy start`",
+        "re-run `comfy deploy stop` -- it may still be billing; for `stopped`, `comfy deploy start`; for "
+        "`unhealthy`, inspect `comfy deploy logs`, or `comfy deploy stop` to stop billing",
     ),
     ErrorCode(
         "deploy_delete_needs_confirm",

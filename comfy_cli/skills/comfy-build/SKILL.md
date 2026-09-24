@@ -120,6 +120,15 @@ comfy build push <install>
 comfy build release create <install> --target linux/nvidia --watch
 ```
 
+**A push that uploads models can run for a long time, and it tells you how it is
+going.** It opens with an `upload_plan` line (files, bytes, how many local files
+it already holds), then an `upload_progress` line per file about every two
+seconds with `bytes_done`, `bytes_per_second` and `eta_seconds`, then an
+`upload_complete` per file. Under `--json` these are JSON lines on **stderr**
+(stdout stays the one envelope); under `--json-stream` they are on stdout. Relay
+the rate and time left instead of waiting in silence. A `bytes_per_second` that
+falls to `0` means the connection stalled, not that the upload is slow.
+
 **What `init` does, and where it stops:**
 
 - **It fails rather than warns when it cannot read the environment.** No
@@ -288,6 +297,14 @@ for comes back as a refusal envelope and exits 1: `build_update_needs_confirm`,
 `build_release_delete_needs_confirm`, `build_missing_input`, `build_id_unknown`.
 Pass `--yes`, or the option it named, once the user has actually agreed. Do not
 pass `--yes` first and disclose after.
+
+**`build_release_held` asks the same way, with its own option.** `comfy build push
+--release` saved the build but cut no release, because the save warned that a
+deployment could not download a model link. Under `--json` the error carries them
+in `details.warnings`; in text mode the tool printed each just above it. Tell the
+user which links fail and how, and pass `--release-despite-warnings` only after they say
+yes; a fixed link needs no option. `comfy build release create` cuts without this
+check.
 
 **Three other refusals block rather than ask — `--yes` does nothing for them.**
 Each is cleared by deleting something, and each exits 1:

@@ -4,7 +4,7 @@ import os
 import urllib.error
 import urllib.parse
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 from comfy_cli import credentials
@@ -79,6 +79,9 @@ class DeployClient:
         resolved_url = _resolved_base_url(base_url).rstrip("/")
         assert_safe_deploy_url(resolved_url, source=_base_url_source(base_url))
         self.target = Target(kind="cloud", base_url=resolved_url, path_prefix="/v1", auth_token=token)
+        # Only a client built from the stored sign-in may swap its token; one
+        # handed a token directly keeps it and lets a 401 surface.
+        self._refreshes_on_401 = False
 
     @classmethod
     def from_session(cls, base_url: str | None = None) -> DeployClient:
@@ -87,7 +90,9 @@ class DeployClient:
         session = credentials.get_session(refresh=True)
         if not session or not session.access_token:
             raise DeployAuthError
-        return cls(resolved_url, session.access_token)
+        client = cls(resolved_url, session.access_token)
+        client._refreshes_on_401 = True
+        return client
 
     def _request(self, request: _Request) -> dict:
         url = self.target.url(*request.parts)
@@ -96,7 +101,16 @@ class DeployClient:
             if query:
                 url = f"{url}?{query}"
         try:
-            _, parsed = request_json(
+            _, parsed = self._send(url, request)
+        except urllib.error.HTTPError as error:
+            raise mapped_error(request.operation, error, url) from error
+        except (TimeoutError, urllib.error.URLError) as error:
+            raise transport_error(request.operation, error) from error
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _send(self, url: str, request: _Request) -> tuple[int, dict | list | None]:
+        def send() -> tuple[int, dict | list | None]:
+            return request_json(
                 url,
                 self.target,
                 method=request.method,
@@ -104,11 +118,20 @@ class DeployClient:
                 headers=request.headers,
                 max_bytes=request.max_bytes,
             )
+
+        try:
+            return send()
         except urllib.error.HTTPError as error:
-            raise mapped_error(request.operation, error, url) from error
-        except (TimeoutError, urllib.error.URLError) as error:
-            raise transport_error(request.operation, error) from error
-        return parsed if isinstance(parsed, dict) else {}
+            # The access token lasts fifteen minutes, so a wait that polls past
+            # that is refused here. The server refuses before acting, so sending
+            # the same request again is safe for every method.
+            if error.code != 401 or not self._refreshes_on_401:
+                raise
+            token = credentials.refreshed_access_token(self.target.auth_token)
+            if token is None:
+                raise
+            self.target = replace(self.target, auth_token=token)
+            return send()
 
     def _get(self, operation: str, parts: tuple[str, ...], params: dict | None = None) -> dict:
         return self._request(_Request(operation=operation, parts=parts, params=params))
@@ -201,5 +224,12 @@ class DeployClient:
             _Request(operation="logs", parts=("deployments", deployment_id, "logs"), max_bytes=_MAX_LOG_JSON)
         )
 
+    def get_deploy_estimate(self, release_id: str, gpu_class: str, region: str) -> dict:
+        return self._get(
+            "estimate", ("deploy-estimate",), {"releaseId": release_id, "gpuClass": gpu_class, "region": region}
+        )
+
     def get_compute_catalog(self) -> dict:
-        return self._get("compute", ("compute-catalog",))
+        # Without levels=all the service answers with datacenters alone, and a GPU
+        # sold only on a wider location never appears.
+        return self._get("compute", ("compute-catalog",), {"levels": "all"})

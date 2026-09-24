@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import http.client
 import importlib
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
 
@@ -14,9 +16,9 @@ from typer.testing import CliRunner
 
 from comfy_cli.caller import Caller
 from comfy_cli.cmdline import app
-from comfy_cli.command.deploy_runtime import DEPLOY_POLL_SECONDS
-from comfy_cli.deploy_api import _validate_compute_config
+from comfy_cli.deploy_api import DeployClient, _validate_compute_config
 from comfy_cli.deploy_api_errors import DeployAPIError
+from comfy_cli.http import ResponseTooLarge
 
 
 def _deploy() -> ModuleType:
@@ -443,7 +445,12 @@ def test_the_dropped_bound_warning_reaches_a_json_caller_on_stderr(tmp_path, mon
     monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
 
     # When
-    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3", "--max", "8"])
+    # --no-watch because this is about the warning, not the wait. Restarting a
+    # stopped deployment leaves it `queued`, and watch (now the default) polls a
+    # fake that never leaves that status, so the run would never end.
+    result = CliRunner().invoke(
+        app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--min", "3", "--max", "8", "--no-watch"]
+    )
 
     # Then
     assert "--min had no effect" in result.stderr
@@ -467,6 +474,63 @@ def test_a_stop_failed_deployment_is_not_pointed_at_a_scale_that_would_bounce(tm
     assert "--min had no effect" in result.stderr
     assert "comfy deploy scale" not in result.stderr
     assert "comfy deploy stop --deployment" in result.stderr
+
+
+def test_up_warns_that_an_older_release_deployment_is_still_billing(tmp_path, monkeypatch) -> None:
+    """A new release gets a new deployment and the old one keeps billing. Only
+    the JSON `supersedes` array said so; the terminal has to say it too."""
+    # Given a ready deployment on release 3 and the live one on release 5
+    module = _deploy()
+    releases = [
+        {"id": "release-5", "buildId": "build-1", "version": 5, "deployable": True},
+        {"id": "release-3", "buildId": "build-1", "version": 3, "deployable": True},
+    ]
+    client = FakeDeploy([deployment("dep-live"), deployment("dep-old", release_id="release-3", status="ready")])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(releases), client))
+
+    # When
+    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path))])
+
+    # Then the old deployment is named with the command that stops it
+    assert result.exit_code == 0, result.stderr
+    assert "Deployment dep-old (release v3, ready) is still running and billing." in result.stderr
+    assert "comfy deploy stop --deployment dep-old" in result.stderr
+    assert [row["id"] for row in _json_envelope(result)["data"]["supersedes"]] == ["dep-old"]
+
+
+def test_a_person_at_the_terminal_sees_the_billing_warning(tmp_path, monkeypatch) -> None:
+    # Given a ready deployment on release 3 and the live one on release 5
+    module = _deploy()
+    releases = [
+        {"id": "release-5", "buildId": "build-1", "version": 5, "deployable": True},
+        {"id": "release-3", "buildId": "build-1", "version": 3, "deployable": True},
+    ]
+    client = FakeDeploy([deployment("dep-live"), deployment("dep-old", release_id="release-3", status="ready")])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(releases), client))
+
+    # When run with human output
+    result = CliRunner().invoke(app, ["deploy", "up", str(write_spec(tmp_path))], env={"COMFY_OUTPUT": "pretty"})
+
+    # Then the warning is on stdout, after the deployment's own line
+    assert result.exit_code == 0, result.stderr
+    assert result.stdout.index("Deployment dep-live: ready") < result.stdout.index(
+        "Deployment dep-old (release v3, ready) is still running and billing."
+    )
+    assert "comfy deploy stop --deployment dep-old" in result.stdout
+
+
+def test_up_with_nothing_else_running_prints_no_billing_warning(tmp_path, monkeypatch) -> None:
+    # Given only the live deployment of this release
+    module = _deploy()
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), FakeDeploy([deployment("dep-live")])))
+
+    # When
+    result = CliRunner().invoke(app, ["--json", "deploy", "up", str(write_spec(tmp_path))])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert "still running and billing" not in result.stderr
+    assert _json_envelope(result)["data"]["supersedes"] == []
 
 
 def test_reconcile_rejects_an_immutable_gpu_change() -> None:
@@ -579,8 +643,8 @@ def test_watch_exits_immediately_on_stop_failed_with_stop_remedy(tmp_path, monke
     assert sleeps == []
 
 
-def test_watch_continues_through_unhealthy_until_ready(tmp_path, monkeypatch) -> None:
-    # Given
+def test_watch_stops_at_unhealthy_and_reports_it_as_not_ok(tmp_path, monkeypatch) -> None:
+    # Given a deployment the watch reads as unhealthy
     module = _deploy()
     client = FakeDeploy(get_statuses=["queued", "unhealthy", "ready"])
     monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
@@ -591,9 +655,294 @@ def test_watch_continues_through_unhealthy_until_ready(tmp_path, monkeypatch) ->
     result = CliRunner().invoke(
         app,
         ["--json", "deploy", "up", str(write_spec(tmp_path)), "--gpu", "l4", "--region", "US-MO-2", "--watch"],
+        env={"COLUMNS": "400"},
+    )
+
+    # Then: `unhealthy` only follows `ready`, so the watch ends there, loudly
+    assert result.exit_code == 1
+    envelope = _json_envelope(result)
+    assert envelope["data"]["deployment"]["status"] == "unhealthy"
+    assert envelope["error"]["code"] == "deploy_status_terminal"
+    assert envelope["error"]["details"]["status"] == "unhealthy"
+    assert "still billing" in result.stderr
+    assert "comfy deploy stop --deployment dep-1" in result.stderr
+    assert sleeps == []
+
+
+def test_up_on_a_deployment_already_unhealthy_does_not_wait_for_ever(tmp_path, monkeypatch) -> None:
+    """`up` leaves an unhealthy deployment as it is, so a watch that waited for
+    `ready` would poll for as long as the endpoint stays degraded, saying
+    nothing."""
+    # Given the release's deployment is unhealthy and stays so
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-1", status="unhealthy")])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) > 5:
+            raise AssertionError("the watch kept polling an unhealthy deployment")
+
+    monkeypatch.setattr(module, "_sleep", sleep)
+
+    # When
+    result = CliRunner().invoke(app, ["--no-json", "deploy", "up", str(write_spec(tmp_path))], env={"COLUMNS": "400"})
+
+    # Then
+    assert result.exception is None or isinstance(result.exception, SystemExit), result.exception
+    assert result.exit_code == 1
+    assert sleeps == []
+    assert "Deployment dep-1 is unhealthy" in result.stdout + result.stderr
+    assert client.start_calls == [] and client.update_calls == []
+
+
+_GIB = 1024**3
+_ESTIMATE = {
+    "enabled": True,
+    "bytesTotal": 42 * _GIB,
+    "bytesHeld": 0,
+    "bytesToFetch": 42 * _GIB,
+    "measured": True,
+    "unsizedModelCount": 0,
+    "atLeast": False,
+    "stagingSecondsLow": 444,
+    "stagingSecondsHigh": 4260,
+    "startupSecondsLow": 60,
+    "startupSecondsHigh": 600,
+    "etaSecondsLow": 504,
+    "etaSecondsHigh": 4860,
+}
+
+
+def test_a_create_asks_for_the_estimate_with_its_release_and_compute() -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy(estimate=_ESTIMATE)
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module))
+
+    # Then
+    assert client.estimate_calls == [("release-5", "l4", "US-MO-2")]
+    assert result.estimate == _ESTIMATE
+    assert result.payload()["estimate"] == _ESTIMATE
+
+
+@pytest.mark.parametrize("status", ["ready", "stopped"])
+def test_a_reconcile_that_creates_nothing_asks_for_no_estimate(status: str) -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy([deployment("dep-live", status=status)], estimate=_ESTIMATE)
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module))
+
+    # Then
+    assert client.estimate_calls == []
+    assert result.estimate is None
+    assert "estimate" not in result.payload()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        DeployAPIError("deploy_not_found", "no route", status=404),
+        DeployAPIError("deploy_server_error", "boom", status=503),
+        {**_ESTIMATE, "etaSecondsHigh": None},
+        {**_ESTIMATE, "bytesToFetch": -1},
+        {**_ESTIMATE, "etaSecondsLow": True},
+        {**_ESTIMATE, "etaSecondsLow": 3600, "etaSecondsHigh": 60},
+        {**_ESTIMATE, "bytesTotal": -1},
+        {**_ESTIMATE, "bytesHeld": "0"},
+        {**_ESTIMATE, "atLeast": "yes"},
+        ConnectionResetError("peer reset"),
+        ResponseTooLarge("https://deploy.test/v1/deploy-estimate is over the cap"),
+        http.client.IncompleteRead(b'{"etaSecondsLow": 5', 40),
+    ],
+    ids=[
+        "no_route",
+        "server_error",
+        "missing_number",
+        "negative",
+        "bool",
+        "runs_backwards",
+        "negative_total",
+        "held_a_string",
+        "flag_a_string",
+        "connection_reset",
+        "too_large",
+        "cut_short",
+    ],
+)
+def test_a_create_the_service_cannot_estimate_still_deploys(answer) -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy(estimate=answer)
+
+    # When
+    result = module.reconcile_up(FakeBuilder(), client, _request(module))
+
+    # Then
+    assert result.created is True
+    assert result.estimate is None
+    assert len(client.create_keys) == 1
+
+
+class _CutShortEstimate(BaseHTTPRequestHandler):
+    # Promises a 64-byte chunk, sends part of it, then hangs up.
+    protocol_version = "HTTP/1.1"
+
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        self.wfile.write(b'40\r\n{"etaSecondsLow": 5')
+        self.wfile.flush()
+        self.close_connection = True
+
+    def log_message(self, *args) -> None:
+        pass
+
+
+class _EstimateFromServer(FakeDeploy):
+    def __init__(self, base_url: str) -> None:
+        super().__init__()
+        self._real = DeployClient(base_url, "token")
+
+    def get_deploy_estimate(self, release_id: str, gpu_class: str, region: str):
+        return self._real.get_deploy_estimate(release_id, gpu_class, region)
+
+
+def test_an_estimate_response_cut_short_on_the_wire_still_deploys() -> None:
+    # Given
+    module = _deploy()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _CutShortEstimate)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = _EstimateFromServer(f"http://127.0.0.1:{server.server_address[1]}")
+
+        # When
+        result = module.reconcile_up(FakeBuilder(), client, _request(module))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # Then
+    assert result.created is True
+    assert result.estimate is None
+    assert len(client.create_keys) == 1
+
+
+def test_the_estimate_validates_against_the_published_up_schema(tmp_path, monkeypatch) -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy(estimate=_ESTIMATE)
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+
+    # When
+    result = CliRunner().invoke(
+        app, ["--json", "deploy", "up", str(write_spec(tmp_path)), "--gpu", "l4", "--region", "US-MO-2"]
     )
 
     # Then
-    assert result.exit_code == 0
-    assert _json_envelope(result)["data"]["deployment"]["status"] == "ready"
-    assert sleeps == [DEPLOY_POLL_SECONDS]
+    assert result.exit_code == 0, result.stderr
+    data = _json_envelope(result)["data"]
+    assert data["estimate"]["etaSecondsHigh"] == 4860
+    jsonschema.Draft202012Validator(_schema("deploy_up.json")).validate(data)
+
+
+def test_a_person_sees_the_estimate_before_the_watch_starts(tmp_path, monkeypatch) -> None:
+    # Given
+    module = _deploy()
+    client = FakeDeploy(estimate=_ESTIMATE, get_statuses=["queued", "ready"])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+    monkeypatch.setattr(module, "_sleep", lambda _: None)
+
+    # When
+    result = CliRunner().invoke(
+        app,
+        ["--no-json", "deploy", "up", str(write_spec(tmp_path)), "--gpu", "l4", "--region", "US-MO-2", "--watch"],
+    )
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert "Expected ready in 8-81 min (42.0 GB of models to download)." in result.output
+    assert result.output.index("Expected ready") < result.output.index("Deployment dep-1: ready")
+
+
+@pytest.mark.parametrize(
+    ("changes", "line"),
+    [
+        ({}, "Expected ready in 8-81 min (42.0 GB of models to download)."),
+        ({"atLeast": True}, "Expected ready in 8-81 min (at least 42.0 GB of models to download)."),
+        (
+            {"bytesToFetch": 0, "etaSecondsLow": 120, "etaSecondsHigh": 900},
+            "Expected ready in 2-15 min (nothing to download).",
+        ),
+        (
+            {"etaSecondsLow": 3000, "etaSecondsHigh": 4 * 3600 + 60},
+            "Expected ready in 0.5-4.5 h (42.0 GB of models to download).",
+        ),
+        (
+            {"etaSecondsLow": 840, "etaSecondsHigh": 7800},
+            "Expected ready in 14-130 min (42.0 GB of models to download).",
+        ),
+        ({"etaSecondsLow": 60, "etaSecondsHigh": 60}, "Expected ready in 1 min (42.0 GB of models to download)."),
+        ({"etaSecondsLow": 30, "etaSecondsHigh": 45}, "Expected ready in 0-1 min (42.0 GB of models to download)."),
+        (
+            {"measured": False, "atLeast": True, "bytesToFetch": 0},
+            "Expected ready in 8-81 min (the release's models were never measured, so this counts starting the endpoint alone).",
+        ),
+    ],
+    ids=[
+        "sized",
+        "at_least",
+        "nothing_to_fetch",
+        "hours",
+        "short_end_under_half_an_hour",
+        "one_number",
+        "short_end_under_a_minute",
+        "unmeasured",
+    ],
+)
+def test_estimate_line_rounds_outward_and_says_what_downloads(changes, line) -> None:
+    from comfy_cli.command.deploy_up import estimate_line
+
+    assert estimate_line({**_ESTIMATE, **changes}) == line
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"enabled": False},
+        {**_ESTIMATE, "enabled": False},
+        {k: v for k, v in _ESTIMATE.items() if k != "enabled"},
+        {**_ESTIMATE, "enabled": None},
+        {**_ESTIMATE, "enabled": "true"},
+    ],
+    ids=["bare", "with_numbers", "enabled_missing", "enabled_null", "enabled_a_string"],
+)
+def test_a_switched_off_estimate_prints_nothing_and_adds_nothing(tmp_path, monkeypatch, answer) -> None:
+    """``enabled: false`` is the service saying the estimate is off, not a failure:
+    no line for a person, no ``estimate`` under --json, no warning either way. An
+    ``enabled`` that is not ``true`` reads the same way, as the site reads it."""
+    # Given
+    module = _deploy()
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), FakeDeploy(estimate=answer)))
+    args = ["deploy", "up", str(write_spec(tmp_path)), "--gpu", "l4", "--region", "US-MO-2"]
+
+    # When
+    pretty = CliRunner().invoke(app, ["--no-json", *args])
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), FakeDeploy(estimate=answer)))
+    as_json = CliRunner().invoke(app, ["--json", *args])
+
+    # Then
+    assert pretty.exit_code == 0, pretty.output
+    assert "Expected ready" not in pretty.output
+    assert "estimate" not in pretty.output.lower()
+    assert as_json.exit_code == 0, as_json.stderr
+    assert "estimate" not in _json_envelope(as_json)["data"]
+    assert as_json.stderr.strip() == ""

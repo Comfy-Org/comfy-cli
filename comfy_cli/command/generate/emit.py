@@ -6,7 +6,7 @@ is convenient but leaves no reusable artifact: no workflow JSON you can re-run,
 edit, or drop into a fragment pipeline. The same partner models also exist as
 ComfyUI **API NODES**. ``--emit-workflow <path>`` takes the exact same
 ``--param`` values the proxy path would consume and writes an API-format
-workflow that drives the partner node, plus a ``SaveImage``/``SaveVideo`` so the
+workflow that drives the partner node, plus a ``SaveImageAdvanced``/``SaveVideo`` so the
 result lands on disk when run with ``comfy run``.
 
 The proxy-model → node-class mapping is intentionally small and explicit: it
@@ -61,7 +61,7 @@ class NodeSpec:
     that must be materialized with a ``LoadImage`` node and wired into the
     partner node's matching input. ``fixed`` are node inputs always set to a
     constant (defaults the node requires but that ``generate`` doesn't surface).
-    ``output`` selects the save node (IMAGE → SaveImage, VIDEO → SaveVideo) and
+    ``output`` selects the save node (IMAGE → SaveImageAdvanced, VIDEO → SaveVideo) and
     the partner node's output port that carries the media.
 
     COMPLETENESS CONTRACT for ``fixed``: it must supply a default for EVERY
@@ -95,6 +95,28 @@ class NodeSpec:
     # ride a blanket exemption. `test_emit.py` asserts the flag matches the
     # recorded catalog in both directions.
     deprecated_ok: bool = False
+    # `--model` value → the spec that runs it, for aliases whose models live on
+    # different node classes (nano-banana's gemini-3-pro-image-preview is only
+    # on GeminiImage2Node). Consulted before anything is built.
+    model_variants: dict[str, NodeSpec] = field(default_factory=dict)
+    # Flag → values the emitted graph already produces, so the flag is accepted
+    # and needs no input (flux-2's `--output_format png`: SaveImage writes PNG).
+    # Any other value is still refused as unmapped.
+    implied_flag_values: dict[str, frozenset[Any]] = field(default_factory=dict)
+
+
+# Schema default (snapshot 2026-07) of the Gemini image nodes' system_prompt;
+# execute() falls back to "" but the UI serializes this steering prompt, so
+# match it.
+_GEMINI_SYSTEM_PROMPT = (
+    "You are an expert image-generation engine. You must ALWAYS produce an image.\n"
+    "Interpret all user input—regardless of format, intent, or abstraction—as literal "
+    "visual directives for image composition.\n"
+    "If a prompt is conversational or lacks specific visual details, you must creatively "
+    "invent a concrete visual scenario that depicts the concept.\n"
+    "Prioritize generating the visual representation above any text, formatting, or "
+    "conversational requests."
+)
 
 
 # proxy model alias → partner node spec. Param keys are the *generate* flag
@@ -117,19 +139,34 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
             "seed": 42,
             "aspect_ratio": "auto",
             "response_modalities": "IMAGE+TEXT",
-            # Schema default (snapshot 2026-07); the node's execute() falls back
-            # to "" but the UI serializes this steering prompt, so match it.
-            "system_prompt": (
-                "You are an expert image-generation engine. You must ALWAYS produce an image.\n"
-                "Interpret all user input—regardless of format, intent, or abstraction—as literal "
-                "visual directives for image composition.\n"
-                "If a prompt is conversational or lacks specific visual details, you must creatively "
-                "invent a concrete visual scenario that depicts the concept.\n"
-                "Prioritize generating the visual representation above any text, formatting, or "
-                "conversational requests."
-            ),
+            "system_prompt": _GEMINI_SYSTEM_PROMPT,
         },
         output="IMAGE",
+        model_variants={
+            # Nano Banana Pro. Node: GeminiImage2Node — the only class whose
+            # `model` combo offers it.
+            "gemini-3-pro-image-preview": NodeSpec(
+                node_class="GeminiImage2Node",
+                endpoint="vertexai/gemini/{model}",
+                param_map={
+                    "prompt": "prompt",
+                    "model": "model",
+                    "seed": "seed",
+                    "aspect_ratio": "aspect_ratio",
+                    "resolution": "resolution",
+                },
+                image_params={"image": "images", "images": "images"},
+                fixed={
+                    "model": "gemini-3-pro-image-preview",
+                    "seed": 42,
+                    "aspect_ratio": "auto",
+                    "resolution": "1K",
+                    "response_modalities": "IMAGE+TEXT",
+                    "system_prompt": _GEMINI_SYSTEM_PROMPT,
+                },
+                output="IMAGE",
+            ),
+        },
     ),
     # ByteDance Seedance image-to-video. Node: ByteDanceImageToVideoNode.
     "seedance": NodeSpec(
@@ -195,6 +232,7 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
         # --emit-workflow still sends it straight to the proxy.
         fixed={"model": "Flux.2 [pro]", "model.width": 1024, "model.height": 768, "seed": 0},
         output="IMAGE",
+        implied_flag_values={"output_format": frozenset({"png"})},
     ),
     # BFL Flux 1.1 [pro] Ultra (text-to-image). Node: FluxProUltraImageNode.
     # The node takes an `aspect_ratio` string where the proxy schema takes
@@ -303,10 +341,11 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
     ``values`` are the parsed ``--param`` values (same dict the proxy client
     receives). Local-file image params are materialized as ``LoadImage`` nodes
     and wired into the partner node; scalar params override the node's fixed
-    defaults. A ``SaveImage``/``SaveVideo`` is appended so ``comfy run`` writes
+    defaults. A ``SaveImageAdvanced``/``SaveVideo`` is appended so ``comfy run`` writes
     the result to disk.
     """
     _alias, ns = _resolve_model(model)
+    ns = ns.model_variants.get(values.get("model"), ns)
 
     node_inputs: dict[str, Any] = dict(ns.fixed)
 
@@ -373,6 +412,7 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
     # (flux-2's `input_image` into `model.images`). Either way the emitted graph
     # would ignore the flag, so the error names the mapping, not the node.
     handled = set(ns.param_map) | set(ns.image_params)
+    handled |= {flag for flag, implied in ns.implied_flag_values.items() if values.get(flag) in implied}
     if ns.aspect_from_wh:
         handled |= {"width", "height"}
     unsupported = sorted(flag for flag, value in values.items() if value is not None and flag not in handled)
@@ -406,9 +446,13 @@ def build_workflow(model: str, values: dict[str, Any], *, output_prefix: str = "
         }
     else:
         workflow[save_id] = {
-            "class_type": "SaveImage",
+            "class_type": "SaveImageAdvanced",
             "_meta": {"title": "save generated image"},
-            "inputs": {"images": ["1", ns.media_port], "filename_prefix": output_prefix},
+            "inputs": {
+                "images": ["1", ns.media_port],
+                "filename_prefix": output_prefix,
+                "format": "png",
+            },
         }
     return workflow
 

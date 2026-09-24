@@ -102,6 +102,14 @@ STATUS_ERRORS: Final = {
     ("compute", 409): _CONFLICT,
     ("compute", 429): _QUOTA_EXCEEDED,
     ("compute", 500): _SERVER_ERROR,
+    ("estimate", 400): _BAD_REQUEST,
+    ("estimate", 401): _NOT_SIGNED_IN,
+    ("estimate", 402): _PAYMENT_REQUIRED,
+    ("estimate", 403): _FORBIDDEN,
+    ("estimate", 404): _NOT_FOUND,
+    ("estimate", 409): _CONFLICT,
+    ("estimate", 429): _QUOTA_EXCEEDED,
+    ("estimate", 500): _SERVER_ERROR,
 }
 
 

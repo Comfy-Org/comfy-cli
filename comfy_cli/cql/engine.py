@@ -14,11 +14,12 @@ import difflib
 import hashlib as _hashlib
 import json
 import logging
+import math
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from comfy_cli.cql._net import is_loopback_host
@@ -46,6 +47,22 @@ _FRONTEND_DOM_WIDGET_TYPES = frozenset(
 # these for NON-trailing slots (``Load3D.image`` sits before ``width``), or the
 # frontend reads ``width`` into the viewport slot.
 _FRONTEND_DOM_WIDGET_DEFAULTS: dict[str, Any] = {"LOAD_3D": "", "LOAD_3D_ADVANCED": "", "PREVIEW_3D": ""}
+
+# ``getCustomWidgets().LOAD_3D`` adds three button widgets BEFORE its own
+# component widget, and only when the node already carries a ``model_file``
+# widget — which is why the ``model_3d``-fed viewers (``Preview3DAdvanced``,
+# ``SaveGaussianSplat``, …) get none. A button serializes its VALUE, so each
+# owns a positional slot holding a fixed string. ``(widget name, value)``; the
+# sibling ``PREVIEW_3D`` factory injects no buttons.
+_LOAD_3D_BUTTON_SLOTS: tuple[tuple[str, str], ...] = (
+    ("upload 3d model", "upload3dmodel"),
+    ("upload extra resources", "uploadExtraResources"),
+    ("clear", "clear"),
+)
+# The values, for the converter's gate: it skips a slot only when the saved
+# value IS one of these, so a shape written without the buttons keeps its
+# straight positional mapping.
+LOAD_3D_BUTTON_VALUES = frozenset(value for _name, value in _LOAD_3D_BUTTON_SLOTS)
 
 # Widget names the FRONTEND injects into a node's inputs after object_info
 # (``beforeRegisterNodeDef`` in ``uploadImage.ts``/``uploadAudio.ts``/
@@ -109,6 +126,10 @@ class PortOptions:
     multiline: bool = False
     control_after_generate: bool = False
     force_input: bool = False
+    # ``socketless``: a display-only input (ImageCompare's compare_view slider,
+    # Painter's canvas). The frontend renders it and serializes nothing for it,
+    # and the server never asks for one, so it is not a required input.
+    socketless: bool = False
     # For COMFY_DYNAMICCOMBO_V3: the raw options list ({key, inputs} dicts) so the
     # engine can expand key-dependent sub-widgets (e.g. model → model.resolution),
     # matching the converter. None for ordinary inputs.
@@ -160,6 +181,11 @@ class Port:
     # in the spec's ``options`` blocks and is NOT recoverable from the parsed
     # fields above. Output ports carry ``None``.
     raw_spec: Any = None
+
+    @property
+    def is_socketless(self) -> bool:
+        """Display-only input: no socket, no widget value, nothing submitted."""
+        return self.options.socketless
 
     @property
     def is_autogrow(self) -> bool:
@@ -261,6 +287,27 @@ class Port:
         if isinstance(prefix, str) and prefix:
             return {"prefix": prefix}
         return None
+
+    @property
+    def autogrow_required_slots(self) -> list[str]:
+        """Slot keys the server requires by name: the first ``min`` of the
+        group, when its template input is itself required.
+
+        Mirrors ``Autogrow._expand_schema_for_dynamic``: slot ``i`` is required
+        iff ``i < min`` and the template's input sits under ``required``, so a
+        lone ``videos.video1`` still leaves ``videos.video0`` missing. Empty
+        when the catalog ships no naming template — the name is then unknown.
+        """
+        template = self.autogrow_template
+        t = self.options.template
+        if template is None or not isinstance(t, dict):
+            return []
+        inputs = t.get("input") if isinstance(t.get("input"), dict) else {}
+        if not inputs.get("required"):
+            return []
+        lo, _ = self.autogrow_limits
+        names = template.get("names") or [f"{template['prefix']}{i}" for i in range(lo)]
+        return [f"{self.name}.{n}" for n in names[:lo]]
 
     @property
     def autogrow_element_template(self) -> dict | None:
@@ -376,6 +423,12 @@ class Port:
         if self.type == "INT":
             if isinstance(value, bool) or not isinstance(value, int | float):
                 return f"{self.name}: expected INT, got {type(value).__name__} {value!r}"
+            # json.loads accepts the bare NaN/Infinity tokens, so a workflow file
+            # can carry one. int() raises on both (ValueError / OverflowError),
+            # which escaped validate_workflow and left `--json` with no envelope
+            # to print; the server answers `invalid_input_type` instead.
+            if isinstance(value, float) and not math.isfinite(value):
+                return f"{self.name}: expected INT, got {value!r}"
             if isinstance(value, float) and value != int(value):
                 return f"{self.name}: expected integer, got {value}"
         elif self.type in ("FLOAT", "NUMBER"):
@@ -584,7 +637,7 @@ def finding_severity(code: str) -> str:
     return SEVERITY_ERROR if code in FATAL_FINDING_CODES else SEVERITY_WARNING
 
 
-def _is_wildcard_type(type_id: str) -> bool:
+def is_wildcard_type(type_id: str) -> bool:
     """True when a socket type accepts/produces any type.
 
     Matches COMFY_MATCHTYPE_V3 by prefix rather than exact string so a future
@@ -608,12 +661,62 @@ def _edge_types_compatible(src_type: str, dst_type: str) -> bool:
     12 of the 23 such warnings in a 3-day prod window were this shape, on
     edges the frontend draws and the server runs.
     """
-    if _is_wildcard_type(src_type) or _is_wildcard_type(dst_type):
+    if is_wildcard_type(src_type) or is_wildcard_type(dst_type):
         return True
     # Lazy: workflow_to_api imports this module at load time.
     from comfy_cli.workflow_to_api import _is_valid_connection
 
     return _is_valid_connection(src_type, dst_type)
+
+
+#: ``(class_type, input)`` pairs whose value is a viewport capture the frontend
+#: serializes at queue time, read unconditionally by the node
+#: (``Load3D.execute``: ``image['image']``). A headless submit carries the
+#: add-node default ``""`` and crashes with "string indices must be integers".
+#: The ``viewport_state`` siblings tolerate a non-dict, so they are not listed.
+_FRONTEND_CAPTURE_INPUTS = frozenset({("Load3D", "image")})
+
+
+#: Types the frontend registers a widget constructor for (``ComfyWidgets`` in
+#: ``src/scripts/widgets.ts``) beyond the primitives: their value IS a literal
+#: (``COLOR: "#000000"``, ``BOUNDING_BOX: {x, y, width, height}``).
+_FRONTEND_REGISTERED_WIDGET_TYPES = frozenset(
+    {
+        "MARKDOWN", "IMAGEUPLOAD", "COLOR", "IMAGECOMPARE", "BOUNDING_BOX", "CHART", "GALLERIA",
+        "PAINTER", "COMPOSITOR", "TEXTAREA", "CURVE", "RANGE", "VIDEO_EDIT", "RESOLUTION_PREVIEW",
+        "BOUNDING_BOXES", "COLORS",
+        # Registered by frontend extensions (webcamCapture, uploadAudio); the
+        # node reads the value as a filename (WebcamCapture.image,
+        # RecordAudio.audio), so a literal is exactly right.
+        "WEBCAM", "AUDIO_RECORD",
+    }
+)  # fmt: skip
+
+
+def _literal_expected(port: Port, value: Any) -> bool:
+    """Whether a JSON literal can legitimately fill ``port``.
+
+    True for ``None`` on an optional port (the converter fills an unwired
+    optional socket from its ``default: null``, which the node reads as "not
+    connected"); for a
+    primitive anywhere in a comma-separated union (a ``forceInput`` INT or an
+    ``INT,FLOAT`` operand still takes ``5`` — the server converts it); for
+    wildcards and ``COMFY_*`` meta types; for frontend-registered widget
+    types; and for any port whose schema declares a non-null default — the
+    schema itself then says a literal is what the node reads (an extension
+    widget like ``COLORCODE: "#222222"``). What remains (``MODEL``,
+    ``VHS_BatchManager``, …) has no literal form.
+    """
+    type_id = port.type
+    if value is None:
+        # Only an OPTIONAL socket reads null as "not connected"; the server
+        # passes a required one's None straight to the node.
+        return not port.required
+    if not type_id or is_wildcard_type(type_id) or type_id.startswith("COMFY_"):
+        return True
+    if type_id in _FRONTEND_REGISTERED_WIDGET_TYPES or port.options.default is not None:
+        return True
+    return any(part.strip() in _IMPLICIT_WIDGET_TYPES for part in type_id.split(","))
 
 
 def _is_dynamic_combo_type(type_id: str) -> bool:
@@ -643,6 +746,22 @@ def _has_control_after_generate_slot(port: Port) -> bool:
     # consumer wrote into the marker slot.
     leaf_name = port.name.rsplit(".", 1)[-1]
     return port.type == "INT" and "seed" in leaf_name.lower()
+
+
+def load_3d_button_slots(m: Morphism) -> tuple[tuple[str, str], ...]:
+    """The button slots the LOAD_3D custom widget injects into ``m``, if any.
+
+    ``getCustomWidgets().LOAD_3D`` attaches them only when the node already
+    carries a ``model_file`` WIDGET (``hasModelFileWidget``), so the loaders
+    (``Load3D``, ``Load3DAdvanced``) get them and the viewers fed by a
+    ``model_3d`` link (``Preview3DAdvanced``, ``SaveGaussianSplat``, …) do not.
+    They are constructed before the component widget, so the caller places them
+    immediately BEFORE the ``LOAD_3D`` slot — unlike every entry in
+    ``frontend_extra_widget_names``, which trails the declared inputs.
+    """
+    if not any(p.name == "model_file" and not p.is_link for p in m.inputs):
+        return ()
+    return _LOAD_3D_BUTTON_SLOTS
 
 
 def frontend_extra_widget_names(m: Morphism) -> list[str]:
@@ -678,9 +797,17 @@ def frontend_extra_widget_names(m: Morphism) -> list[str]:
     return [e for e in extras if e not in declared]
 
 
-def _is_link(type_id: str, is_enum: bool, force_input: bool, widget_type: str | None = None) -> bool:
+def _is_link(
+    type_id: str, is_enum: bool, force_input: bool, widget_type: str | None = None, socketless: bool = False
+) -> bool:
     """Determine if an input participates in typed wiring (link) or is inline (widget)."""
     if is_enum:
+        return False
+    # ``socketless`` hides the input SOCKET and nothing else: litegraph renders
+    # the widget as usual and it serializes positionally like any other
+    # (``ColorToRGBInt ["#ffffff"]``, ``Painter ["p.png", 1024, 1024,
+    # "#000000"]``). An explicit ``forceInput`` still demotes it to a link.
+    if socketless and not force_input:
         return False
     # ``widgetType`` overrides the socket type for widget selection (a
     # ``FLOAT,INT`` math input with ``widgetType: "STRING"``, Preview3D's
@@ -760,6 +887,7 @@ def _parse_port_options(opts_raw: dict) -> PortOptions:
         multiline=bool(opts_raw.get("multiline", False)),
         control_after_generate=_control_after_generate_set(opts_raw.get("control_after_generate")),
         force_input=bool(opts_raw.get("forceInput", False)),
+        socketless=bool(opts_raw.get("socketless", False)),
         template=template_raw if isinstance(template_raw, dict) else None,
         upload=_upload_marked(opts_raw),
         upload_declared=_upload_declared(opts_raw),
@@ -878,7 +1006,7 @@ def _port_from_spec(name: str, spec: Any, required: bool) -> Port:
         name=name,
         type=type_id,
         required=required,
-        is_link=_is_link(type_id, is_enum, opts.force_input, opts.widget_type),
+        is_link=_is_link(type_id, is_enum, opts.force_input, opts.widget_type, opts.socketless),
         enum_values=enum_values,
         enum_declared=enum_declared,
         options=opts,
@@ -1387,9 +1515,12 @@ class Graph:
         if m is None:
             return []
         order: list[str] = []
+        buttons = load_3d_button_slots(m)
         for p in m.inputs:
             if p.is_link:
                 continue
+            if buttons and p.type == "LOAD_3D":
+                order.extend(name for name, _value in buttons)
             order.append(p.name)
             if _has_control_after_generate_slot(p):
                 order.append("control_after_generate")
@@ -1440,6 +1571,51 @@ class Graph:
             return []
         return frontend_extra_widget_names(m)
 
+    def dynamic_combo_options(self, class_name: str) -> dict[str, dict[str, Any]]:
+        """Every dynamic-combo selector of ``class_name`` with EVERY option's slots.
+
+        ``{selector: {"default": <first key>, "options": {key: {"widgets": [...],
+        "defaults": {...}}}}}`` — per option, the DIRECT widget slots it inserts
+        after its selector, in positional order (the same walk as
+        :func:`_expand_widget_entries`: link-only sub-inputs own no slot, a
+        control-flagged one is followed by its ``control_after_generate``
+        marker), with the value a fresh selection seeds each with. A nested
+        selector is listed under its own full dotted name, so expanding the map
+        from ``widget_order`` reproduces :meth:`widget_order_for_node` for any
+        selection. This is what lets a consumer holding only the catalog (the
+        doc host's applier) handle a selection other than the first.
+        """
+        m = self._nodes.get(class_name)
+        if m is None:
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+
+        def describe(port: Port, name: str, depth: int) -> None:
+            if depth >= _MAX_DYNAMIC_COMBO_DEPTH or name in out:
+                return
+            keys = [o.get("key") for o in port.dynamic_options if o.get("key") is not None]
+            options: dict[str, Any] = {}
+            for key in keys:
+                widgets: list[str] = []
+                defaults: dict[str, Any] = {}
+                for sub in _dynamic_combo_sub_ports(port.dynamic_options, key, name):
+                    if sub.is_link:
+                        continue
+                    widgets.append(sub.name)
+                    defaults[sub.name] = _widget_default(sub)
+                    if sub.dynamic_options and _is_dynamic_combo_type(sub.type):
+                        describe(sub, sub.name, depth + 1)
+                    elif _has_control_after_generate_slot(sub):
+                        widgets.append("control_after_generate")
+                        defaults["control_after_generate"] = "fixed"
+                options[str(key)] = {"widgets": widgets, "defaults": defaults}
+            out[name] = {"default": str(keys[0]) if keys else None, "options": options}
+
+        for p in m.inputs:
+            if not p.is_link and p.dynamic_options and _is_dynamic_combo_type(p.type):
+                describe(p, p.name, 0)
+        return out
+
     def widget_defaults(self, class_name: str) -> dict[str, Any]:
         """Default value per widget-order name — including dynamic-combo selectors
         (first key), their sub-widgets, and control_after_generate. Used by
@@ -1451,10 +1627,16 @@ class Graph:
         # Same walk as ``widget_order_default`` (first key at every dynamic
         # combo, link-only sub-inputs skipped), so the two can never disagree
         # about which names own a slot.
+        button_values = dict(load_3d_button_slots(m))
         for entry in _expand_widget_entries(m, [], first_key=True):
             if entry.port is None:
                 if entry.name == "control_after_generate":
                     out[entry.name] = "fixed"
+                elif entry.name in button_values:
+                    # A LOAD_3D button DOES serialize (its own value) and sits
+                    # before the viewport slot, so a fresh node must write it
+                    # or every later value lands one slot early.
+                    out[entry.name] = button_values[entry.name]
                 # Frontend-injected marker slots (``upload``, ``audioUI``) are
                 # trailing and ``serialize: false`` on current frontends: no
                 # default, no value.
@@ -1535,12 +1717,23 @@ class Graph:
             if not isinstance(class_type, str):
                 class_type = ""
             if not class_type:
-                warnings.append(
+                # The server answers `missing_node_type` for this node itself
+                # ("Node has no class_type"). Reporting it as a warning and then
+                # hard-failing whoever links to it (dangling_edge) sent the
+                # reader to the wrong node. Advisory on a node no output
+                # reaches, which the server prunes without looking.
+                # Not gated on reachability, unlike required-presence and the
+                # range checks: the server reads class_type while it BUILDS the
+                # graph, so it answers `missing_node_type` ("Node 'ID #9' has no
+                # class_type") even for a node no output reaches. Verified
+                # against a live server on both an orphan and a wired node.
+                errors.append(
                     {
                         "node_id": node_id,
                         "field": node_id,
-                        "code": "non_node_key",
-                        "message": f"key {node_id!r} has no class_type and will be ignored by the server",
+                        "code": "missing_class_type",
+                        "message": f"node {node_id!r} has no class_type — the server will reject this workflow",
+                        "hint": 'give it a class_type, e.g. {"class_type": "PreviewImage", "inputs": {…}}',
                     }
                 )
                 continue
@@ -1617,15 +1810,97 @@ class Graph:
                         }
                     )
                     continue
+
+                # Declared = the node's schema knows this key. A dotted key
+                # only counts when it RESOLVES to a slot the current schema and
+                # selections actually declare (an autogrow slot
+                # `images.image0`, a combo sub-input `model.images.image0`).
+                # Only an autogrow group or a dynamic combo takes dotted keys.
+                # Accepting any dotted suffix whose first segment names a port
+                # made `images.extra` on a plain IMAGE input look declared, and
+                # a malformed link under that decoy hard-failed a prompt the
+                # server runs — it ignores every key a node does not declare.
+                declared_input = _node_declares_input(port_by_name, input_name)
+
+                # The server validates only output-reachable nodes and prunes
+                # the rest, so a structural break on a pruned node does not stop
+                # the prompt: it is accepted and runs. Same gate the required,
+                # range and edge-type checks above already use.
+                def _structural(finding: dict, _node_id: str = node_id, _declared: bool = declared_input) -> None:
+                    # The server reads the inputs a node DECLARES and ignores
+                    # any other key, so junk under an unknown name cannot fail
+                    # a prompt (verified live). The unknown_input warning
+                    # already reports the key itself.
+                    (errors if _node_id in reachable and _declared else warnings).append(finding)
+
+                # A list value is a link or it is nothing: the server accepts
+                # only `[node_id, slot_index]` and answers `bad_linked_input`,
+                # "must be a length-2 list", for every other list. Treating a
+                # wrong-length list as an opaque literal let `["1"]` validate.
+                if isinstance(value, list) and len(value) != 2:
+                    _structural(
+                        {
+                            "node_id": node_id,
+                            "field": input_name,
+                            "code": "bad_link_shape",
+                            "message": (
+                                f"input {input_name!r} is a {len(value)}-element list; a link must be "
+                                f"[node_id, output_index]"
+                            ),
+                            "hint": 'wire it as ["<source node id>", <output index>], or give a literal value',
+                        }
+                    )
+                    continue
                 # Link references: [source_node_id, output_index]
                 if isinstance(value, list) and len(value) == 2:
+                    # Prompt keys are strings, so a numeric source id is a node
+                    # the server cannot look up: `prompt[1]` raises KeyError and
+                    # the submit 400s. str() here resolved it and validated clean.
+                    if not isinstance(value[0], str):
+                        _structural(
+                            {
+                                "node_id": node_id,
+                                "field": input_name,
+                                "code": "bad_link_shape",
+                                "message": (
+                                    f"input {input_name!r} references node id {value[0]!r} "
+                                    f"({type(value[0]).__name__}); node ids are strings"
+                                ),
+                                "hint": f'use ["{value[0]}", {value[1]!r}]',
+                            }
+                        )
+                        continue
                     src_id = str(value[0])
-                    out_idx = value[1] if isinstance(value[1], int) else None
+                    # The index must be an int. Folding a wrong-typed one into
+                    # the range check reported "index 0 out of range" for
+                    # `["1", "0"]` — nonsense on a node whose only valid index
+                    # IS 0. The server calls it a type error too (TypeError:
+                    # tuple indices must be integers).
+                    if not isinstance(value[1], int) or isinstance(value[1], bool):
+                        _structural(
+                            {
+                                "node_id": node_id,
+                                "field": input_name,
+                                "code": "output_index_not_an_integer",
+                                "message": (
+                                    f"input {input_name!r} has output index {value[1]!r} "
+                                    f"({type(value[1]).__name__}); it must be an integer"
+                                ),
+                                "hint": f'use ["{src_id}", 0] for the first output',
+                            }
+                        )
+                        continue
+                    out_idx = value[1]
 
                     # (i) source node exists in workflow
                     src_data = workflow.get(src_id)
-                    if not isinstance(src_data, dict) or not src_data.get("class_type"):
-                        errors.append(
+                    if isinstance(src_data, dict) and not src_data.get("class_type"):
+                        # It exists; it is malformed, and its own
+                        # missing_class_type error says so. Calling it "does
+                        # not exist" here sent the reader to this node instead.
+                        continue
+                    if not isinstance(src_data, dict):
+                        _structural(
                             {
                                 "node_id": node_id,
                                 "field": input_name,
@@ -1648,7 +1923,7 @@ class Graph:
                     # (ii) output index in range
                     if out_idx is None or out_idx < 0 or out_idx >= len(src_m.outputs):
                         valid_indices = ", ".join(f"[{i}]={p.type}" for i, p in enumerate(src_m.outputs))
-                        errors.append(
+                        _structural(
                             {
                                 "node_id": node_id,
                                 "field": input_name,
@@ -1694,7 +1969,7 @@ class Graph:
                     # known-type/empty-intersection mismatch is ever promoted —
                     # a wildcard, a union overlap, or a blank/unknown type on
                     # either end still yields no finding at all.
-                    port = port_by_name.get(input_name)
+                    port = port_by_name.get(input_name) or _dotted_slot_port(port_by_name, input_name, node_inputs)
                     if port is not None:
                         src_type = src_m.outputs[out_idx].type
                         dst_type = port.type
@@ -1740,7 +2015,51 @@ class Graph:
                     continue
 
                 port = port_by_name.get(input_name)
+                # A dotted key (`videos.video1`, `model.mask`) has no port of its
+                # own; it is checked for a literal against the slot or sub-input
+                # it resolves to, and every other check below is its group's.
+                link_port = port if port is not None else _dotted_slot_port(port_by_name, input_name, node_inputs)
+                # A literal on a socket that only carries a node's output. The
+                # server does not type-check custom types (only INT/FLOAT/
+                # STRING/BOOLEAN/COMBO), so it hands the string to the node,
+                # which crashes: VHS_LoadVideo got `meta_batch: "None"` and
+                # died on `meta_batch.inputs` 117 times in 30 days.
+                if link_port is not None and link_port.is_link and not _literal_expected(link_port, value):
+                    finding = {
+                        "node_id": node_id,
+                        "field": input_name,
+                        "code": "literal_on_link_input",
+                        "message": (
+                            f"input {input_name!r} is a {link_port.type} connection but holds the literal {value!r} "
+                            f"— the node receives a raw value where it expects a {link_port.type} object"
+                        ),
+                        "hint": (
+                            f"wire a node that outputs {link_port.type} into {input_name!r}, or remove the value "
+                            f"(`comfy nodes ls --produces {link_port.type}` to find a source)"
+                        ),
+                    }
+                    (errors if node_id in reachable else warnings).append(finding)
+                    continue
                 if port is None:
+                    continue
+                if (class_type, input_name) in _FRONTEND_CAPTURE_INPUTS and (
+                    not isinstance(value, dict) or "image" not in value
+                ):
+                    finding = {
+                        "node_id": node_id,
+                        "field": input_name,
+                        "code": "frontend_capture_required",
+                        "message": (
+                            f"{class_type}.{input_name} is the browser viewport capture ({{image, mask, normal, …}}) "
+                            f"that only the ComfyUI frontend produces at queue time; {value!r} makes the node crash "
+                            f"on the server"
+                        ),
+                        "hint": (
+                            "this node cannot run from a headless (CLI/agent) submit — load the model with a node "
+                            "that takes a file instead, or queue it from the ComfyUI canvas"
+                        ),
+                    }
+                    (errors if node_id in reachable else warnings).append(finding)
                     continue
                 # Shape check (hard error)
                 shape_err = port.validate_shape(value)
@@ -1804,6 +2123,21 @@ class Graph:
                     "code": "prompt_no_outputs",
                     "message": "workflow has no output nodes — the server will reject it (prompt_no_outputs)",
                     "hint": "add an output node such as SaveImage/PreviewImage",
+                }
+            )
+
+        # A cycle is rejected by the server (`dependency_cycle`) before it runs
+        # anything, so it is an error here too — reported once for the whole
+        # graph rather than once per node on it.
+        cycle = _dependency_cycle(workflow, reachable, self)
+        if cycle is not None:
+            errors.append(
+                {
+                    "node_id": cycle[0],
+                    "field": None,
+                    "code": "dependency_cycle",
+                    "message": ("dependency cycle: " + " -> ".join(cycle) + " — the server will reject this workflow"),
+                    "hint": "break the loop: an input cannot depend on its own node's output, directly or indirectly",
                 }
             )
 
@@ -2041,6 +2375,45 @@ def _input_payload(p: Port, depth: int) -> dict[str, Any]:
 # error/warning dicts for the caller to append — no shared state is threaded.
 
 
+def _dependency_cycle(workflow: dict[str, Any], reachable: set[str], graph: Graph) -> list[str] | None:
+    """A cycle among the nodes the server would validate, as the node ids on it.
+
+    ComfyUI walks each output's inputs depth-first and rejects the prompt with
+    `dependency_cycle` the moment it re-enters a node already on the current
+    path (execution.py). It only ever walks what an output reaches, so a cycle
+    off to the side is pruned and must not be reported: an unreachable one
+    submits fine. Returns the path of the first cycle found, else None.
+    """
+    state: dict[str, int] = {}  # 0 = on the current path, 1 = finished
+    for root in sorted(reachable):
+        if state.get(root) == 1:
+            continue
+        # Iterative DFS: a deep chain would blow the recursion limit, and the
+        # validator must not die on the graph it is judging.
+        path: list[str] = []
+        stack: list[tuple[str, bool]] = [(root, False)]
+        while stack:
+            node_id, leaving = stack.pop()
+            if leaving:
+                state[node_id] = 1
+                path.pop()
+                continue
+            if state.get(node_id) == 1:
+                continue
+            if state.get(node_id) == 0:
+                return path[path.index(node_id) :] + [node_id]
+            state[node_id] = 0
+            path.append(node_id)
+            stack.append((node_id, True))
+            node_data = workflow.get(node_id)
+            if not isinstance(node_data, dict):
+                continue
+            for src_id in _declared_link_targets(node_data, graph):
+                if src_id in reachable and state.get(src_id) != 1:
+                    stack.append((src_id, False))
+    return None
+
+
 def _output_reachable_node_ids(workflow: dict[str, Any], graph: Graph) -> set[str]:
     """Node ids the server would actually validate: output nodes and their
     transitive input ancestors.
@@ -2071,17 +2444,10 @@ def _output_reachable_node_ids(workflow: dict[str, Any], graph: Graph) -> set[st
         node_data = workflow.get(stack.pop())
         if not isinstance(node_data, dict):
             continue
-        node_inputs = node_data.get("inputs")
-        # Guard against a truthy non-dict `inputs` from malformed JSON, which
-        # would slip past `or {}` and raise AttributeError on `.values()`.
-        if not isinstance(node_inputs, dict):
-            continue
-        for value in node_inputs.values():
-            if isinstance(value, list) and len(value) == 2:
-                src_id = str(value[0])
-                if src_id in workflow and src_id not in reachable:
-                    reachable.add(src_id)
-                    stack.append(src_id)
+        for src_id in _declared_link_targets(node_data, graph):
+            if src_id in workflow and src_id not in reachable:
+                reachable.add(src_id)
+                stack.append(src_id)
     return reachable
 
 
@@ -2193,6 +2559,11 @@ def _check_required_present(node_id: str, m: Morphism, node_data: dict) -> list[
     is a genuine authoring error; we do not skip ports with defaults.
     """
     present = node_data.get("inputs") or {}
+    # Same guard as _check_autogrow_required: a truthy non-dict `inputs` gets
+    # past `or {}` and raises on the membership test below. Nothing is present
+    # on such a node, which is what the required-input errors should say.
+    if not isinstance(present, dict):
+        present = {}
     errors: list[dict] = []
     for port in m.inputs:
         if not port.required or port.is_autogrow:
@@ -2586,7 +2957,21 @@ def _check_dynamic_combo_sub(
                 set(),
             )
         slot_prefix = f"{dotted}."
-        return [], [], {k for k in present if k.startswith(slot_prefix)}, set()
+        # `min: 0` (Seedream) yields no required slots; `min: 1` (Grok image
+        # edit's `model.images`) makes `model.images.image_1` a server-side
+        # required input — prod submitted one with no image wired.
+        missing = [s for s in port.autogrow_required_slots if s not in present] if sub_required else []
+        errors = [
+            {
+                "node_id": node_id,
+                "field": slot,
+                "code": "required_input_missing",
+                "message": f"required autogrow slot {slot!r} is not connected — the server will reject this node",
+                "hint": f"wire {slot!r} first; slots fill in order ({port.autogrow_slot_example()})",
+            }
+            for slot in missing
+        ]
+        return errors, [], {k for k in present if k.startswith(slot_prefix)}, set()
 
     if dotted not in present:
         if not sub_required:
@@ -2640,6 +3025,26 @@ def _check_dynamic_combo_sub(
     return errs, warns, set(), set()
 
 
+def _autogrow_first_slot(port: Port) -> str:
+    """The slot name this group's FIRST connection must use.
+
+    A modern group names its slots outright (``names: [image_1, …]``, the
+    convention ClaudeNode and most partner nodes ship) and there is no
+    ``image0`` in that scheme at all; guessing one rejected 51 of the 517
+    shipped templates, every one of them correctly wired. Only a group with no
+    names list is numbered from ``{prefix}0``.
+    """
+    template = port.autogrow_element_template or {}
+    names = template.get("names")
+    if isinstance(names, list) and names and isinstance(names[0], str) and names[0]:
+        return names[0]
+    prefix = template.get("prefix")
+    if not (isinstance(prefix, str) and prefix):
+        last = port.name.rsplit(".", 1)[-1]
+        prefix = last[:-1] if last.endswith("s") else last
+    return f"{prefix}0"
+
+
 def _check_autogrow_required(
     node_id: str, autogrow_ports: dict[str, Port], autogrow_seen: set[str], node_data: dict
 ) -> list[dict]:
@@ -2649,9 +3054,41 @@ def _check_autogrow_required(
     cryptic downstream reject.
     """
     inputs = node_data.get("inputs") or {}
+    # A truthy non-dict `inputs` (a scalar from a hand-edited or generated file)
+    # survives `or {}` and then raises on the membership tests below —
+    # TypeError: argument of type 'int' is not iterable — which escaped as a
+    # crash with no envelope. The node is junk either way; treat it as having
+    # no inputs so the required-presence checks report it as a verdict.
+    if not isinstance(inputs, dict):
+        inputs = {}
     errors: list[dict] = []
     for base, port in autogrow_ports.items():
-        if port.required and base not in autogrow_seen and base not in inputs:
+        if port.required and base in autogrow_seen:
+            # The group grows from index 0: the server asks for `image0` by name
+            # and answers `required_input_missing` when a group is wired from
+            # image1 up, even though later slots are present. A gap ABOVE the
+            # anchor is fine (image0 + image2 submits), so only index 0 is
+            # checked here.
+            slots = {k.split(".", 1)[1] for k in inputs if isinstance(k, str) and k.startswith(f"{base}.")}
+            first = _autogrow_first_slot(port)
+            if slots and first not in slots:
+                errors.append(
+                    {
+                        "node_id": node_id,
+                        "field": base,
+                        "code": "autogrow_missing_first_slot",
+                        "message": (
+                            f"autogrow input {base!r} is wired from {sorted(slots)[0]!r} but has no "
+                            f"{first} slot — the server requires the first slot"
+                        ),
+                        "hint": f"wire the first slot: {port.autogrow_slot_example()}",
+                    }
+                )
+        # `required` names where the group LIVES in the schema, not how many
+        # connections it needs: GLSLShader.floats and friends sit under
+        # required with min 0, and a shader using no float uniforms runs.
+        minimum, _ = port.autogrow_limits
+        if port.required and minimum >= 1 and base not in autogrow_seen and base not in inputs:
             errors.append(
                 {
                     "node_id": node_id,
@@ -2663,6 +3100,20 @@ def _check_autogrow_required(
                     "hint": f"wire one key per connection: {port.autogrow_slot_example()}",
                 }
             )
+            continue
+        if not port.required:
+            continue
+        for slot in port.autogrow_required_slots:
+            if slot not in inputs:
+                errors.append(
+                    {
+                        "node_id": node_id,
+                        "field": slot,
+                        "code": "required_input_missing",
+                        "message": f"required autogrow slot {slot!r} is not connected — the server will reject this node",
+                        "hint": f"wire {slot!r} first; slots fill in order ({port.autogrow_slot_example()})",
+                    }
+                )
     return errors
 
 
@@ -2780,8 +3231,42 @@ _MAX_SUBGRAPH_DEPTH = 32
 #   ``10/9.prompt``     subgraph instance 10 → interior node 9, widget ``prompt``
 #   ``10/3/7.value``    instance 10 → interior subgraph node 3 → interior node 7
 # UUID subgraph class_types contain ``-`` but never ``/`` or top-level ``.`` in
-# an instance id, so the delimiters stay unambiguous.
+# an instance id. A node id itself CAN contain ``/``: the doc host's
+# ``insert_workflow`` remaps an interior node to
+# ``insert:<op>:root/definition:%22<uuid>%22:node:27`` — so split a path with
+# :func:`split_node_path`, which matches segments against real ids, never with
+# a bare ``str.split``.
 _SUBGRAPH_PATH_SEP = "/"
+
+
+def split_node_path(workflow: dict, node_path: str) -> list[str]:
+    """Split a ``/``-separated node path into the node ids it walks through.
+
+    Each hop takes the LONGEST run of ``/``-parts that is a real node id at that
+    level (top-level nodes first, then the interior of the definition the
+    previous hop instantiates), so an id that contains ``/`` stays one segment.
+    A hop that matches nothing falls back to the plain split for the rest of
+    the path, which leaves the resolvers' own "not found" errors unchanged.
+    """
+    parts = node_path.split(_SUBGRAPH_PATH_SEP)
+    defs_by_id = _subgraph_defs_by_id(workflow)
+    nodes = workflow.get("nodes") or []
+    segments: list[str] = []
+    i = 0
+    while i < len(parts):
+        ids = {str(n.get("id", "")): n for n in nodes if isinstance(n, dict)}
+        match = next(
+            (j for j in range(len(parts), i, -1) if _SUBGRAPH_PATH_SEP.join(parts[i:j]) in ids),
+            None,
+        )
+        if match is None:
+            return segments + parts[i:]
+        seg = _SUBGRAPH_PATH_SEP.join(parts[i:match])
+        segments.append(seg)
+        sg = defs_by_id.get(str(ids[seg].get("type", "")))
+        nodes = (sg or {}).get("nodes") or []
+        i = match
+    return segments
 
 
 def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
@@ -2907,6 +3392,103 @@ def frontend_injected_widget_error(node_type: str, widget: str, available: list[
     )
 
 
+def _node_declares_input(port_by_name: dict[str, Port], key: Any) -> bool:
+    """Whether a node whose ports are ``port_by_name`` declares ``key``.
+
+    The server reads the inputs a class DECLARES (``validate_inputs`` walks
+    ``INPUT_TYPES``) and ignores every other key, so this is the one rule that
+    decides whether a key can fail a prompt or be followed as an edge. Only an
+    autogrow group or a dynamic combo takes dotted keys; a dotted suffix on an
+    ordinary port (``images.extra`` on a plain IMAGE input) is not declared.
+    """
+    if not isinstance(key, str):
+        return False
+    if key in port_by_name:
+        return True
+    base = port_by_name.get(key.split(".", 1)[0])
+    return base is not None and (base.is_autogrow or base.is_dynamic_combo)
+
+
+def _declared_link_targets(node_data: dict, graph: Graph) -> list[str]:
+    """The node ids this node links to through keys it actually declares.
+
+    Both graph walks — output-reachability and cycle detection — used to follow
+    every two-item list in ``inputs``, so a decoy key could pull a pruned node
+    into the validated set or close a cycle that does not exist. Live proof of
+    the latter: a graph whose only cycle ran through ``images.extra`` on a
+    plain IMAGE input was accepted by the server (200, no node_errors) while
+    the validator reported ``dependency_cycle``.
+
+    An unknown class_type keeps the old permissive walk: with no schema there
+    is nothing to check a key against, and the unknown class is reported on its
+    own.
+    """
+    node_inputs = node_data.get("inputs")
+    if not isinstance(node_inputs, dict):
+        return []
+    m = graph.node(node_data.get("class_type", "")) if isinstance(node_data.get("class_type"), str) else None
+    port_by_name = {p.name: p for p in m.inputs} if m is not None else None
+    targets: list[str] = []
+    for key, value in node_inputs.items():
+        if port_by_name is not None and not _node_declares_input(port_by_name, key):
+            continue
+        if isinstance(value, list) and len(value) == 2:
+            targets.append(str(value[0]))
+    return targets
+
+
+def _dotted_slot_port(port_by_name: dict[str, Port], dotted: str, node_inputs: dict) -> Port | None:
+    """The port a dotted wire key targets: an autogrow slot or a combo sub-input.
+
+    The server type-checks every entry in a node's ``inputs`` by name, dotted
+    or not, so ``images.image0`` and ``resize_type.multiplier`` need a type to
+    compare against just as much as a top-level name does — including when the
+    group is nested under a dynamic combo's selected option
+    (``model.images.image0``, ``model.mode.budget``).
+
+    Returns ``None`` when the key resolves to nothing the CURRENT schema and
+    selections declare: an unknown group, a sub-key left over from another
+    selection, a dotted suffix on an ordinary port, or a template with no
+    element type. The server ignores all of those, so none may hard-fail.
+    """
+    base, _, leaf = dotted.partition(".")
+    if not leaf:
+        return None
+    port = port_by_name.get(base)
+    if port is None:
+        return None
+    return _resolve_dotted_under(port, dotted, node_inputs, 0)
+
+
+def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int) -> Port | None:
+    """Walk ``dotted`` down from ``port``, whose name is a prefix of it.
+
+    The FULL dotted path is carried the whole way: a nested selector is read
+    from ``inputs`` under its own full name (``model.mode``), and a nested
+    autogrow group's slots keep every segment (``model.images.image0``).
+    Dropping a segment to recurse looked up a name no map is keyed by, which
+    silently skipped the check the caller only runs when a port comes back.
+    """
+    if port.is_autogrow:
+        element = port.autogrow_element_type
+        if not element:
+            return None
+        # A slot carries the group's element type; the slot NAME is checked
+        # elsewhere (autogrow_unknown_slot), so an odd name still gets the
+        # type comparison the server will make.
+        return replace(port, name=dotted, type=element)
+    if port.is_dynamic_combo:
+        if depth >= _MAX_DYNAMIC_COMBO_DEPTH:
+            return None
+        selector = node_inputs.get(port.name)
+        for sub in _dynamic_combo_sub_ports(port.dynamic_options, selector, port.name):
+            if sub.name == dotted:
+                return sub
+            if dotted.startswith(f"{sub.name}."):
+                return _resolve_dotted_under(sub, dotted, node_inputs, depth + 1)
+    return None
+
+
 def _dynamic_combo_sub_ports(dynamic_options: list[dict], selector: Any, prefix: str) -> list[Port]:
     """The selected option's sub-inputs as Ports, dotted under ``prefix``.
 
@@ -2977,9 +3559,13 @@ def _expand_widget_entries(
         elif _has_control_after_generate_slot(port):
             entries.append(_WidgetEntry(name="control_after_generate", port=None, owner=owner))
 
+    buttons = load_3d_button_slots(m)
     for p in m.inputs:
         if p.is_link:
             continue
+        if buttons and p.type == "LOAD_3D":
+            for name, _value in buttons:
+                entries.append(_WidgetEntry(name=name, port=None, owner=None, frontend_injected=True))
         emit(p.name, p, None, 0)
     for name in frontend_extra_widget_names(m):
         entries.append(_WidgetEntry(name=name, port=None, owner=None, frontend_injected=True))
@@ -3603,7 +4189,7 @@ def _apply_one_slot_impl(workflow: dict, addr: str, value: Any, graph: Graph) ->
     # Input names may legitimately contain dots (e.g. 'images.image0').
     # Always split on the FIRST dot so multi-dot input names are preserved.
     node_path, input_name = addr.split(".", 1)
-    segments = node_path.split(_SUBGRAPH_PATH_SEP)
+    segments = split_node_path(workflow, node_path)
     defs_by_id = _subgraph_defs_by_id(workflow)
 
     from comfy_cli.cql import promoted as _promoted

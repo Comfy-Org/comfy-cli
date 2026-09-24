@@ -61,7 +61,14 @@ WIRES = [
         args=("dep-1",),
         max_bytes=MAX_LOG_JSON,
     ),
-    Wire("compute", "get_compute_catalog", "GET", f"{BASE}/v1/compute-catalog"),
+    Wire("compute", "get_compute_catalog", "GET", f"{BASE}/v1/compute-catalog?levels=all"),
+    Wire(
+        "estimate",
+        "get_deploy_estimate",
+        "GET",
+        f"{BASE}/v1/deploy-estimate?releaseId=v1&gpuClass=l4&region=US-MO-2",
+        args=("v1", "l4", "US-MO-2"),
+    ),
 ]
 
 

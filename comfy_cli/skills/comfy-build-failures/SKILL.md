@@ -85,6 +85,11 @@ the message names the field:
 - `build_spec_stale` — the remote moved under you, or `--id` names a Build the
   spec's `syncedRevision` does not belong to. See *Revising*.
 
+- **`build_release_held`** — the save warned that a deployment could not download a
+  model link, so the push cut no release. Under `--json`, `details.warnings` names
+  each link and how its host refused; in text mode the tool printed each just above. Fix the link, or ask the user before passing
+  `--release-despite-warnings`.
+
 Two refusals are the workspace being full rather than the definition being wrong,
 and neither is fixed by editing anything:
 

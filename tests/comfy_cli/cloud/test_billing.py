@@ -64,9 +64,9 @@ def test_unknown_and_zero_are_distinguishable():
 # ---------------------------------------------------------------------------
 
 
-def test_micros_and_credits_conversions():
-    assert billing.micros_to_usd(12_500_000) == pytest.approx(12.5)
-    assert billing.micros_to_usd(None) is None
+def test_cents_and_credits_conversions():
+    assert billing.cents_to_usd(1250) == pytest.approx(12.5)
+    assert billing.cents_to_usd(None) is None
     assert billing.usd_to_credits(1.0) == billing.CREDITS_PER_USD
     assert billing.usd_to_credits(None) is None
 
@@ -277,10 +277,10 @@ def test_absurdly_large_integers_are_rejected():
     assert billing._coerce_int(10**12) == 10**12
 
 
-def test_micros_to_usd_survives_every_value_coerce_int_admits():
+def test_cents_to_usd_survives_every_value_coerce_int_admits():
     """No input that clears _coerce_int may raise downstream."""
     for raw in (10**18, -(10**18), 0, 1):
-        assert billing.micros_to_usd(billing._coerce_int(raw)) is not None
+        assert billing.cents_to_usd(billing._coerce_int(raw)) is not None
 
 
 @pytest.mark.parametrize(

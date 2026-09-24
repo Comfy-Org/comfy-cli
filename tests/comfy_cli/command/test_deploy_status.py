@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import jsonschema
@@ -10,7 +11,6 @@ from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app
 from comfy_cli.command.build_spec import JsonObject
-from comfy_cli.command.deploy_runtime import DEPLOY_POLL_SECONDS
 
 
 class RecordingDeploy(FakeDeploy):
@@ -184,6 +184,85 @@ def test_older_release_reports_behind_with_latest_deployable_and_new_url_hint(tm
     assert "new url" in result.stderr.lower()
 
 
+class SummaryListDeploy(RecordingDeploy):
+    """The list endpoint's summary shape: no `error` and no `serving`."""
+
+    def list_all_deployments(self) -> list[JsonObject]:
+        rows = super().list_all_deployments()
+        for row in rows:
+            row.pop("error", None)
+            row.pop("serving", None)
+        return rows
+
+
+def test_status_reads_the_failed_deployments_error_the_list_omits(tmp_path, monkeypatch) -> None:
+    """A failed deployment carries `error` and no `serving`: the control plane drops
+    the sample once the deployment no longer claims compute, and `failed` never
+    does. So the full read is what the failure reason rides in on, not the counts."""
+    # Given
+    row = _status_deployment(status="failed")
+    row["error"] = "the model download was refused"
+    client = SummaryListDeploy([row])
+    _install_clients(monkeypatch, FakeBuilder([_release(5)]), client, [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then
+    data = _json_envelope(result)["data"]
+    assert client.get_calls == ["dep-status"]
+    assert data["deployment"]["error"] == "the model download was refused"
+    assert data["serving"] is None
+
+
+def test_status_reads_a_ready_deployments_worker_counts_the_list_omits(tmp_path, monkeypatch) -> None:
+    """The other half of the full read: a ready deployment is sampled, and the
+    counts live only on the single-deployment reply."""
+    # Given
+    row = _status_deployment()
+    row["serving"] = _serving(idle=2)
+    client = SummaryListDeploy([row])
+    _install_clients(monkeypatch, FakeBuilder([_release(5)]), client, [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _json_envelope(result)["data"]
+    assert client.get_calls == ["dep-status"]
+    assert data["serving"]["workers"]["idle"] == 2
+
+
+def test_failed_deployment_prints_its_reason_in_the_terminal(tmp_path, monkeypatch) -> None:
+    """The point of the ticket: someone reading the terminal, not `--json`, is the
+    one who cannot tell why their deploy died."""
+    # Given
+    row = _status_deployment(status="failed")
+    row["error"] = "model staging made no progress for 2m0s"
+    _install_clients(monkeypatch, FakeBuilder([_release(5)]), SummaryListDeploy([row]), [])
+
+    # When
+    result = _invoke_pretty(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 1
+    output = result.stdout + result.stderr
+    assert "Reason: model staging made no progress for 2m0s" in output
+
+
+def test_a_healthy_deployment_prints_no_reason_line(tmp_path, monkeypatch) -> None:
+    # Given
+    _install_clients(monkeypatch, FakeBuilder([_release(5)]), SummaryListDeploy([_status_deployment()]), [])
+
+    # When
+    result = _invoke_pretty(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 0
+    assert "Reason:" not in result.stdout + result.stderr
+
+
 def test_null_serving_renders_not_sampled_yet(tmp_path, monkeypatch) -> None:
     # Given
     _install_clients(monkeypatch, FakeBuilder(), RecordingDeploy([_status_deployment()]), [])
@@ -225,6 +304,59 @@ def test_serving_renders_sample_vintage_beside_worker_counts(tmp_path, monkeypat
     serving_line = next(line for line in result.stdout.splitlines() if "sampled" in line.lower())
     assert "idle=1" in serving_line
     assert "2026-08-21T09:12:03Z" in serving_line
+
+
+def test_serving_says_how_old_the_sample_is(tmp_path, monkeypatch) -> None:
+    """A bare timestamp does not say whether the counts still describe now: the
+    control plane refreshes on its own schedule, and a deployment whose endpoint
+    stopped answering keeps the last sample it got. The age is what says so."""
+    # Given a sample taken two hours ago
+    row = _status_deployment()
+    sampled = datetime.now(timezone.utc) - timedelta(hours=2, minutes=5)
+    row["serving"] = {**_serving(idle=1), "sampledAt": sampled.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    _install_clients(monkeypatch, FakeBuilder(), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_pretty(write_spec(tmp_path))
+
+    # Then
+    serving_line = next(line for line in result.stdout.splitlines() if "sampled" in line.lower())
+    assert "2h 5m ago" in serving_line
+
+
+def test_a_sample_stamped_in_the_future_reads_as_just_now(tmp_path, monkeypatch) -> None:
+    """A server clock a little ahead of ours must not print a negative age."""
+    # Given
+    row = _status_deployment()
+    sampled = datetime.now(timezone.utc) + timedelta(minutes=3)
+    row["serving"] = {**_serving(idle=1), "sampledAt": sampled.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    _install_clients(monkeypatch, FakeBuilder(), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_pretty(write_spec(tmp_path))
+
+    # Then
+    serving_line = next(line for line in result.stdout.splitlines() if "sampled" in line.lower())
+    assert "(just now)" in serving_line
+
+
+def test_an_unreadable_sampled_at_still_prints_the_counts(tmp_path, monkeypatch) -> None:
+    """`sampledAt` is rendered, not just carried, so a timestamp the parser cannot
+    read must degrade to an unknown age rather than raise out of the renderer,
+    where nothing catches ValueError and the whole command would traceback."""
+    # Given
+    row = _status_deployment()
+    row["serving"] = {**_serving(idle=1), "sampledAt": "last tuesday"}
+    _install_clients(monkeypatch, FakeBuilder(), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_pretty(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    serving_line = next(line for line in result.stdout.splitlines() if "sampled" in line.lower())
+    assert "idle=1" in serving_line
+    assert "age unknown" in serving_line
 
 
 def test_unhealthy_is_recoverable_and_not_an_error(tmp_path, monkeypatch) -> None:
@@ -273,7 +405,9 @@ def test_credit_stop_is_not_attributed_to_the_user(tmp_path, monkeypatch) -> Non
     assert "user-initiated" not in rendered
 
 
-def test_watch_continues_after_first_unhealthy_sample(tmp_path, monkeypatch) -> None:
+def test_watch_stops_at_unhealthy_and_calls_it_recoverable(tmp_path, monkeypatch) -> None:
+    """`unhealthy` only follows `ready`: the deployment came up. Waiting on it
+    for `ready` would wait silently for as long as the endpoint is degraded."""
     # Given
     client = RecordingDeploy([_status_deployment(status="queued")], get_statuses=["unhealthy", "ready"])
     sleeps: list[float] = []
@@ -284,9 +418,9 @@ def test_watch_continues_after_first_unhealthy_sample(tmp_path, monkeypatch) -> 
 
     # Then
     assert result.exit_code == 0
-    assert _json_envelope(result)["data"]["deployment"]["status"] == "ready"
-    assert client.get_calls == ["dep-status", "dep-status"]
-    assert sleeps == [DEPLOY_POLL_SECONDS]
+    assert _json_envelope(result)["data"]["deployment"]["status"] == "unhealthy"
+    assert client.get_calls == ["dep-status"]
+    assert sleeps == []
 
 
 def test_watch_exits_promptly_on_stop_failed_with_retry_stop_hint(tmp_path, monkeypatch) -> None:
