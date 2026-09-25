@@ -22,6 +22,43 @@ history.
   states. An idle scale-to-zero deployment no longer reads as throttled. The
   `--json` output adds `serving.capacity`; `serving.workers` stays while the
   deploy service still sends it and is deprecated.
+- `comfy build validate` and `comfy build push` refuse model entries the builder's
+  release would refuse: a `type` that is not a model folder, an unsafe `filename`,
+  a link with no file extension and no `filename`, a malformed `sha256`. Every
+  such entry is named at once, with the model it is about, under
+  `build_spec_invalid` (`details.invalid` in JSON), and `push` refuses before
+  uploading anything. A case variant of a folder (`Loras` for `loras`) needs the
+  builder's list, so `push` and `validate --remote` read it and offline `validate`
+  and a `--dry-run` push do not. When a spec with models was not checked for a
+  folder's case (offline `validate`, a `--dry-run` push, a list that could not be
+  read or named no folder), the command prints a line saying so, and its `--json`
+  payload carries `folder_case_checked: false` (`true` when the case was checked;
+  absent for a spec with no models).
+- A definition the builder refuses now arrives as `build_definition_invalid`, its
+  reasons one per line and in `details.invalid` when the builder lists them (else
+  its message), instead of `build_builder_error`
+  with the code as the message, the reasons in `details.body` and a hint to
+  re-run the cut. A file the definition names that never reached the builder
+  (`blob:<id>`, a model's file or a node's zip) gets a hint to delete that
+  `blobId` and push again, pointing an entry that had only the `blobId` at the
+  file (`source: local`, `localPath`) or another source it can take (a model's
+  `sourceUri`, a node's `registryVersion` or `repository`) first. A `--target`
+  the cut refuses (`targets[<n>]`, a repeated or unbuildable os/gpu pair) says the
+  builder refused the release, not the definition, and points at the `--target`
+  values and `comfy build refs build-targets`; a refusal of several kinds names
+  each fix. Under `push --release` a refused `models[<n>]` also names its model,
+  in the message and as `model` in `details.invalid`. A list too long for the
+  message stops on a whole line and ends `... and N more`, pointing at `--json`
+  (or `details.invalid`, which holds every one).
+- The local model rules trim a value as the builder does (Go's
+  `strings.TrimSpace`, which keeps `\x1c`-`\x1f`), so a `sha256` or `filename`
+  holding one is refused locally as the builder would refuse it. A refused entry
+  named by its link is named without the link's query, fragment and userinfo,
+  where a signed link or a Civitai `?token=` carries its credential.
+- `comfy build push` checks the link a local model keeps (its file still matches
+  its `sha256`, so it is not uploaded) by the same rules as any other link,
+  before anything uploads. The link is checked after its file is hashed, so a bad
+  kept link is reported once the spec's other problems are fixed, not with them.
 
 ### Fixed
 

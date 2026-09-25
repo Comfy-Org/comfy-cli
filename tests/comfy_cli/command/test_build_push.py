@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import http.client
+import io
 import json
 import os
 import sys
+import urllib.error
 from collections.abc import Callable
 from pathlib import Path
 
@@ -13,17 +17,21 @@ from build_push_support import (
     RecordingBuilder,
     envelope,
     invoke_push,
+    local_model,
     local_node,
     make_workspace,
     reloaded,
     write_spec,
 )
 
+from comfy_cli.builder_api import BuilderClient
 from comfy_cli.command import build
 from comfy_cli.command.build_package import package_node
 from comfy_cli.command.build_paths import resolve_build_paths
 from comfy_cli.command.build_push import pending_uploads, prepare_push
-from comfy_cli.command.build_spec import JsonObject
+from comfy_cli.command.build_spec import JsonObject, JsonValue
+from comfy_cli.http import ResponseTooLarge
+from comfy_cli.output import get_renderer
 
 
 @pytest.fixture(autouse=True)
@@ -662,3 +670,357 @@ def test_update_synchronizes_name_and_description(workspace: Path, monkeypatch: 
     (update,) = _calls(client, "update_build")
     assert update["name"] == "Renamed"
     assert update["description"] == "New description"
+
+
+def test_push_refuses_model_entries_the_builder_would_refuse_before_any_upload(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The builder would save these and refuse the release. Push names all four,
+    the folder's case included since it reads the builder's list, and sends nothing."""
+    # Given
+    write_spec(
+        workspace,
+        models=[
+            {"type": "Loras", "sourceUri": "https://h.example/a.safetensors"},
+            {"type": "loras", "sourceUri": "https://civitai.com/api/download/models/128713"},
+            {
+                "type": "loras",
+                "filename": "add_detail (v1.1).safetensors",
+                "sourceUri": "https://h.example/b.safetensors",
+            },
+            {"type": "loras", "sha256": "8A0B5F4C2E", "sourceUri": "https://h.example/c.safetensors"},
+        ],
+        nodes=[],
+    )
+    client = RecordingBuilder()
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert sorted(issue["field"].rsplit(".", 1)[1] for issue in error["details"]["invalid"]) == [
+        "filename",
+        "filename",
+        "sha256",
+        "type",
+    ]
+    assert client.calls == []
+    assert reloaded(workspace)["id"] is None
+
+
+#: sha256 of the fixture model's bytes (``make_workspace``), so push keeps the link.
+_BASE_DIGEST = hashlib.sha256(b"MODEL").hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("entry", "field"),
+    [
+        pytest.param(local_model(sourceUri="http://h.example/base.safetensors"), "sourceUri", id="http"),
+        pytest.param(
+            {
+                k: v
+                for k, v in local_model(sourceUri="https://civitai.com/api/download/models/1").items()
+                if k != "filename"
+            },
+            "filename",
+            id="no-extension-no-filename",
+        ),
+        pytest.param(local_model(sourceUri="https://h.example/%zz.safetensors"), "sourceUri", id="go-cannot-parse"),
+    ],
+)
+def test_push_refuses_a_local_models_kept_link_before_any_upload(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, entry: JsonObject, field: str
+) -> None:
+    """A local model whose file still matches its sha256 keeps its link and is not
+    uploaded, so the builder reads that link: push checks it as it would any other."""
+    # Given
+    write_spec(workspace, models=[{**entry, "sha256": _BASE_DIGEST}], nodes=[])
+    client = RecordingBuilder()
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert [issue["field"] for issue in error["details"]["invalid"]] == [f"definition.models[0].{field}"]
+    assert client.calls == []
+
+
+def test_push_uploads_a_local_model_whose_changed_file_drops_a_bad_link(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    write_spec(
+        workspace, models=[local_model(sha256="0" * 64, sourceUri="http://h.example/base.safetensors")], nodes=[]
+    )
+    client = RecordingBuilder()
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    (create,) = _calls(client, "create_build")
+    assert create["definition"]["models"][0]["blobId"] == "blob-1"
+    assert "sourceUri" not in create["definition"]["models"][0]
+
+
+def test_push_does_not_refuse_for_a_folder_list_it_could_not_read(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    write_spec(workspace, models=[{"type": "Loras", "sourceUri": "https://h.example/a.safetensors"}], nodes=[])
+    client = RecordingBuilder()
+    reads: list[str] = []
+
+    def unreachable() -> list[str]:
+        reads.append("read")
+        raise requests.ConnectionError("builder unreachable")
+
+    monkeypatch.setattr(client, "list_model_directories", unreachable)
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    assert len(_calls(client, "create_build")) == 1
+    assert reads == ["read"]
+    assert _FOLDER_CASE_UNCHECKED in " ".join(result.stderr.split())
+
+
+def _a_list_body() -> list[str]:
+    """What ``list_model_directories`` does with a 200 whose body is a JSON list."""
+    client = BuilderClient("https://builder.test", "token")
+    client._send = lambda url, **kwargs: (200, ["loras"])  # type: ignore[method-assign]
+    return client.list_model_directories()
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        pytest.param(http.client.IncompleteRead(b"{"), id="cut-off-body"),
+        pytest.param(ResponseTooLarge("over the cap"), id="oversized-body"),
+        pytest.param(_a_list_body, id="list-body"),
+    ],
+)
+def test_push_does_not_stop_for_any_failure_reading_the_folder_list(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, read
+) -> None:
+    # Given
+    write_spec(workspace, models=[{"type": "loras", "sourceUri": "https://h.example/a.safetensors"}], nodes=[])
+    client = RecordingBuilder()
+    reads: list[str] = []
+
+    def failing() -> list[str]:
+        reads.append("read")
+        if callable(read):
+            return read()
+        raise read
+
+    monkeypatch.setattr(client, "list_model_directories", failing)
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    assert len(_calls(client, "create_build")) == 1
+    assert reads == ["read"]
+    assert _FOLDER_CASE_UNCHECKED in " ".join(result.stderr.split())
+
+
+#: What a push or validate says when it could not check a folder's case.
+_FOLDER_CASE_UNCHECKED = "a folder's case (`Loras` for `loras`) was not checked"
+
+
+class _FolderList:
+    """A client whose folder list answers with *listed*, counting the reads."""
+
+    def __init__(self, listed: object) -> None:
+        self.listed = listed
+        self.reads = 0
+
+    def list_model_directories(self) -> object:
+        self.reads += 1
+        return self.listed
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        pytest.param({}, id="no-models"),
+        pytest.param({"models": []}, id="empty-models"),
+        pytest.param(["models"], id="not-a-mapping"),
+    ],
+)
+def test_a_spec_without_models_reads_no_folder_list(definition: JsonValue) -> None:
+    # Given
+    client = _FolderList(["loras"])
+
+    # When
+    directories = build._model_directories(get_renderer(), client, {"definition": definition})
+
+    # Then
+    assert directories is None
+    assert client.reads == 0
+
+
+@pytest.mark.parametrize(
+    ("listed", "directories"),
+    [
+        pytest.param(["loras", 3], frozenset({"loras"}), id="names-kept"),
+        pytest.param("loras", None, id="a-string"),
+        pytest.param({"loras": True}, None, id="a-mapping"),
+        pytest.param([], None, id="empty"),
+        pytest.param([1, None], None, id="no-names"),
+        pytest.param([""], None, id="an-empty-name"),
+        pytest.param(["  "], None, id="a-blank-name"),
+        # str.strip calls \x1f blank; Go's TrimSpace, which the builder trims with, keeps it.
+        pytest.param(["\x1f"], frozenset({"\x1f"}), id="a-separator-go-does-not-trim"),
+    ],
+)
+def test_a_folder_list_refuses_nothing_unless_it_names_folders(
+    listed: object, directories: frozenset[str] | None
+) -> None:
+    # Given
+    client = _FolderList(listed)
+
+    # When
+    read = build._model_directories(get_renderer(), client, {"definition": {"models": [{"type": "loras"}]}})
+
+    # Then
+    assert read == directories
+    assert client.reads == 1
+
+
+def test_a_dry_run_says_it_did_not_check_a_folders_case(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dry run reads nothing from the builder, so "Loras" passes it and the real
+    push refuses it."""
+    # Given
+    write_spec(workspace, models=[{"type": "Loras", "sourceUri": "https://h.example/a.safetensors"}], nodes=[])
+
+    # When
+    result = invoke_push(workspace, "--dry-run", agentic=False)
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert _FOLDER_CASE_UNCHECKED in " ".join(result.stdout.split())
+
+
+@pytest.mark.parametrize(
+    ("args", "checked"),
+    [
+        pytest.param(("--dry-run",), False, id="dry-run"),
+        pytest.param((), True, id="push"),
+    ],
+)
+def test_the_payload_says_whether_a_folders_case_was_checked(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, args: tuple[str, ...], checked: bool
+) -> None:
+    """The line a dry run prints never reaches an agent, so the payload carries it."""
+    # Given
+    write_spec(workspace, models=[{"type": "loras", "sourceUri": "https://h.example/a.safetensors"}], nodes=[])
+    _install_client(monkeypatch, RecordingBuilder())
+
+    # When
+    result = invoke_push(workspace, *args)
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    data = envelope(result)["data"]
+    assert data["folder_case_checked"] is checked
+    jsonschema.Draft202012Validator(_schema("build_push.json")).validate(data)
+
+
+def test_a_push_whose_folder_list_names_no_folder_says_the_case_was_not_checked(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    write_spec(workspace, models=[{"type": "Loras", "sourceUri": "https://h.example/a.safetensors"}], nodes=[])
+    client = RecordingBuilder()
+    monkeypatch.setattr(client, "list_model_directories", lambda: [])
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    assert envelope(result)["data"]["folder_case_checked"] is False
+    assert _FOLDER_CASE_UNCHECKED in " ".join(result.stderr.split())
+
+
+def test_a_push_without_models_says_nothing_of_a_folders_case(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    write_spec(workspace, models=[], nodes=[])
+
+    # When
+    result = invoke_push(workspace, "--dry-run")
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    assert "folder_case_checked" not in envelope(result)["data"]
+
+
+def test_a_refused_release_names_each_model_the_push_saved(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cut counts the models of the definition the push just saved; push has
+    that definition, so each line names the model too."""
+    # Given
+    write_spec(
+        workspace,
+        models=[
+            {"type": "loras", "filename": "a.safetensors", "sourceUri": "https://h.example/a.safetensors"},
+            {"type": "loras", "sourceUri": "https://h.example/b.safetensors?token=s3cr3t"},
+        ],
+        nodes=[],
+    )
+    client = RecordingBuilder()
+    invalid = [
+        {"field": "models[0].sourceUri", "reason": "link is not reachable"},
+        {"field": "models[7].type", "reason": "no such model"},
+        {"field": "targets[0]", "reason": "not buildable"},
+    ]
+
+    def refused(build_id: str, targets: list[JsonObject] | None = None) -> tuple[str, str]:
+        raise urllib.error.HTTPError(
+            "https://builder.test/v1/builds/build-1/releases",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(json.dumps({"error": "INVALID_DEFINITION", "invalid": invalid}).encode()),
+        )
+
+    monkeypatch.setattr(client, "create_release", refused)
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace, "--release", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["code"] == "build_definition_invalid"
+    # The spec sorts its models, and the entry with no filename comes first.
+    (create,) = _calls(client, "create_build")
+    assert "filename" not in create["definition"]["models"][0]
+    assert error["message"].splitlines()[1:] == [
+        "  models[0].sourceUri (https://h.example/b.safetensors): link is not reachable",
+        "  models[7].type: no such model",
+        "  targets[0]: not buildable",
+    ]
+    assert [issue.get("model") for issue in error["details"]["invalid"]] == [
+        "https://h.example/b.safetensors",
+        None,
+        None,
+    ]
+    assert "s3cr3t" not in result.output

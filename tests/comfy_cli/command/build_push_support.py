@@ -27,6 +27,8 @@ class RecordingBuilder:
         self.always_stale = False
         # What every save answers with under ``warnings``; empty means none.
         self.save_warnings: list[JsonObject] = []
+        # The builder's vetted model directories, read before the local checks.
+        self.model_directories: list[str] = ["checkpoints", "loras", "vae"]
         self.build_targets: list[JsonObject] = [
             {"target": {"os": "linux", "gpu": "nvidia"}, "label": "Linux NVIDIA", "artifactKind": "image"},
             {"target": {"os": "linux", "gpu": "cpu"}, "label": "Linux CPU", "artifactKind": "image"},
@@ -62,6 +64,10 @@ class RecordingBuilder:
                 else:
                     checked.append({"name": raw["dirName"], "repository": raw["url"]})
         return {"definition": {"customNodes": checked}, "report": {}}
+
+    def list_model_directories(self) -> list[str]:
+        # Not recorded: tests assert the order of the calls that move bytes or save.
+        return list(self.model_directories)
 
     def resolve_models(self, filenames: list[str]) -> list[JsonObject]:
         self.calls.append({"method": "resolve_models", "filenames": filenames})

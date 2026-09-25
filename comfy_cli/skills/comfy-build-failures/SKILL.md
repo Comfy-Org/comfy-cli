@@ -72,7 +72,29 @@ with `--json`.
 ## A refusal is not a cut
 
 `push` and `release create` can reject a definition before anything is built, and
-the message names the field:
+the message names the field. `validate` and `push` check model entries first and
+refuse with `build_spec_invalid`, one line per entry and `details.invalid` as
+`{field, reason, model}`, before anything uploads. A local model's kept link is
+checked after `push` hashes its file, so it is reported once the other problems
+are fixed: a second refusal after a fix is that, not a new problem. What reaches the builder anyway
+comes back as **`build_definition_invalid`**. When the builder lists its reasons,
+they come one per line and in `details.invalid` (a list too long for the message
+stops on a whole line and ends `... and N more`; `details.invalid` holds every
+one); otherwise the reason is the builder's `message`, with no `details.invalid`.
+The same definition is refused the same way every
+time, so edit it rather than retrying. Its `models[<n>]` counts the spec as the
+last push wrote it, and under `push --release` each such line also names the
+model, as `details.invalid[].model` does in JSON. Two kinds of field are not the definition, and the message
+then says the builder refused the release. A `targets[<n>]` field is the n-th
+`--target` value (a repeated os/gpu pair, or one the builder cannot build): run
+the command again with the targets `comfy build refs build-targets` lists. A
+`blob:<id>` field (`not uploaded`, `unknown blob`, a size or content mismatch) is
+a model's file or a node's zip that never reached the builder whole: delete that
+`blobId` from its entry and run `comfy build push`, which uploads the file again,
+since a push skips an entry that has a `blobId`. A push uploads only a
+`source: local` entry, so one that had only the `blobId` needs `source: local`
+with a `localPath` (the model's file, the node's directory), or another source it
+can take (a model's `sourceUri`, a node's `registryVersion` or `repository`), first.
 
 - `must be a 64-character sha256` — a model entry's `sha256`. Correct it from the
   candidate you took it off rather than uploading anything.
