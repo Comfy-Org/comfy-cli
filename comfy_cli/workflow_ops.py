@@ -183,6 +183,54 @@ class NotBatchableError(ValueError):
 # converter. Keep the two in sync.
 UI_ONLY_NODE_TYPES = frozenset({"Note", "MarkdownNote", "PrimitiveNode", "GetNode", "SetNode", "Reroute"})
 
+# The annotation subset of UI_ONLY_NODE_TYPES. The catalog has no schema for
+# them, so add-node / set-widget cannot build or address their text — but an
+# insert-workflow carrying the node verbatim (id + text in widgets_values) lands
+# one, and the doc host round-trips its widgets_values opaquely.
+NOTE_NODE_TYPES = frozenset({"Note", "MarkdownNote"})
+
+
+def note_insert_hint(class_type: str) -> str:
+    """How to put a ``Note``/``MarkdownNote`` with text on the canvas: the one
+    route that works, with a payload `workflow insert-workflow` accepts."""
+    example = json.dumps(
+        {"nodes": [{"id": 1, "type": class_type, "pos": [0, 0], "size": [300, 120], "widgets_values": ["<text>"]}]}
+    )
+    return (
+        f"a {class_type} is added with an insert_workflow op, not add-node: "
+        f"echo '{example}' | comfy workflow insert-workflow <workflow.json> - "
+        "(the template is a file path or `-` for stdin), then apply the emitted op to the source workflow — "
+        "insert-workflow only emits it. Every node needs an `id`; the note's text is widgets_values[0]"
+    )
+
+
+class NoteTextNotWritable(ValueError):
+    """set_widget addressed a Note/MarkdownNote. Its text has no catalog schema
+    and the doc host stores it opaquely, so no name-addressed write can land;
+    ``hint`` names the route that does (delete + insert a replacement)."""
+
+    def __init__(self, node_id: Any, class_type: str, widget: str, *, interior: bool = False):
+        super().__init__(
+            f"{node_id} is a {class_type}: its text is not a widget set-widget can write "
+            f"(a note has no catalog schema, so {widget!r} has no widget position to address)"
+        )
+        #: The note's resolved address — for a top-level note, the exact id
+        #: delete_node accepts (not the spelling the caller typed).
+        self.node_id = node_id
+        if interior:
+            # delete_node only removes top-level nodes, and insert_workflow only
+            # adds at the root, so there is no command route to replace it.
+            self.hint = (
+                f"{node_id} is a note inside a subgraph definition: delete-node only removes top-level nodes, "
+                "so its text can only be changed in the ComfyUI editor"
+            )
+        else:
+            self.hint = (
+                f"to change a note's text, delete node {node_id} and insert a replacement — "
+                + note_insert_hint(class_type)
+            )
+
+
 # A subgraph INSTANCE's node `type` is the UUID id of its definition, and
 # `ls-nodes` prints that verbatim — so a caller reading ls-nodes output can
 # mistake it for a class name. There is no instantiate-a-subgraph command, so
@@ -678,11 +726,15 @@ def set_widget(
     step (see :func:`_enrich_resolution_error`)."""
     try:
         return _set_widget_impl(workflow, graph, node_id, widget, value, actor=actor, base_version=base_version)
+    except NoteTextNotWritable:
+        raise
     except ValueError as e:
         bound = _binding_address(workflow, graph, node_id)
         if bound is not None:
             try:
                 return _set_widget_impl(workflow, graph, bound, widget, value, actor=actor, base_version=base_version)
+            except NoteTextNotWritable:
+                raise
             except ValueError:
                 pass
         inserted = _inserted_node_id(workflow, node_id)
@@ -693,6 +745,8 @@ def set_widget(
                 return _set_widget_impl(
                     workflow, graph, inserted, widget, value, actor=actor, base_version=base_version
                 )
+            except NoteTextNotWritable:
+                raise
             except ValueError as e2:
                 raise _enrich_resolution_error(e2, workflow, graph, widget=widget) from e2
         raise _enrich_resolution_error(e, workflow, graph, widget=widget) from e
@@ -996,6 +1050,20 @@ def _resolve_widget_write(workflow: dict, graph, node_id: Any, widget: str):
         if _find(workflow, node_id) is None and _find_by_str(workflow, node_str) is None:
             _require(workflow, node_id)  # canonical not-found error
         segments = [node_str]
+    # A note (Note/MarkdownNote) has no catalog schema, so no widget address on
+    # it can be written — refuse on the RESOLVED node, whatever spelling (string
+    # id, subgraph path, retried alias) reached it, before widget validation.
+    try:
+        if len(segments) > 1:
+            target = _promoted._navigate(workflow, segments, _promoted.defs_by_id(workflow))
+        else:
+            target = _find(workflow, node_id) or _find_by_str(workflow, node_str)
+    except ValueError:
+        target = None
+    if isinstance(target, dict) and target.get("type") in NOTE_NODE_TYPES:
+        if len(segments) > 1:
+            raise NoteTextNotWritable("/".join(segments), target["type"], widget, interior=True)
+        raise NoteTextNotWritable(target.get("id"), target["type"], widget)
     return _promoted.resolve_write(workflow, graph, segments, widget)
 
 
