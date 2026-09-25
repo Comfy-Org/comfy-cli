@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import os
@@ -14,6 +15,7 @@ from build_push_support import (
     RecordingBuilder,
     envelope,
     invoke_push,
+    local_model,
     local_node,
     make_workspace,
     reloaded,
@@ -705,6 +707,67 @@ def test_push_refuses_model_entries_the_builder_would_refuse_before_any_upload(
     ]
     assert client.calls == []
     assert reloaded(workspace)["id"] is None
+
+
+#: sha256 of the fixture model's bytes (``make_workspace``), so push keeps the link.
+_BASE_DIGEST = hashlib.sha256(b"MODEL").hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("entry", "field"),
+    [
+        pytest.param(local_model(sourceUri="http://h.example/base.safetensors"), "sourceUri", id="http"),
+        pytest.param(
+            {
+                k: v
+                for k, v in local_model(sourceUri="https://civitai.com/api/download/models/1").items()
+                if k != "filename"
+            },
+            "filename",
+            id="no-extension-no-filename",
+        ),
+        pytest.param(local_model(sourceUri="https://h.example/%zz.safetensors"), "sourceUri", id="go-cannot-parse"),
+    ],
+)
+def test_push_refuses_a_local_models_kept_link_before_any_upload(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, entry: JsonObject, field: str
+) -> None:
+    """A local model whose file still matches its sha256 keeps its link and is not
+    uploaded, so the builder reads that link: push checks it as it would any other."""
+    # Given
+    write_spec(workspace, models=[{**entry, "sha256": _BASE_DIGEST}], nodes=[])
+    client = RecordingBuilder()
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    error = envelope(result)["error"]
+    assert error["code"] == "build_spec_invalid"
+    assert [issue["field"] for issue in error["details"]["invalid"]] == [f"definition.models[0].{field}"]
+    assert client.calls == []
+
+
+def test_push_uploads_a_local_model_whose_changed_file_drops_a_bad_link(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    write_spec(
+        workspace, models=[local_model(sha256="0" * 64, sourceUri="http://h.example/base.safetensors")], nodes=[]
+    )
+    client = RecordingBuilder()
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    (create,) = _calls(client, "create_build")
+    assert create["definition"]["models"][0]["blobId"] == "blob-1"
+    assert "sourceUri" not in create["definition"]["models"][0]
 
 
 def test_push_does_not_refuse_for_a_folder_list_it_could_not_read(

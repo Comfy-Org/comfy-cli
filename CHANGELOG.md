@@ -34,7 +34,12 @@ history.
   reasons one per line and in `details.invalid`, instead of `build_builder_error`
   with the code as the message, the reasons in `details.body` and a hint to
   re-run the cut. A file the definition names that never reached the builder
-  (`blob:<id>`) gets a hint to delete that `blobId` and push again.
+  (`blob:<id>`) gets a hint to delete that `blobId` and push again, pointing an
+  entry that had only the `blobId` at the file (`source: local`, `localPath`) or
+  a `sourceUri` first.
+- `comfy build push` checks the link a local model keeps (its file still matches
+  its `sha256`, so it is not uploaded) by the same rules as any other link,
+  before anything uploads.
 
 ## [1.21.0] - 2026-09-24
 

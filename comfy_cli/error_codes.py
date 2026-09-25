@@ -1253,7 +1253,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`{field, reason}`. `models[<n>]` counts the models as the spec file lists them after a push. "
         "A `blob:<id>` field (`not uploaded`, `unknown blob`, an uploaded size or content that does not "
         "match) is no rule of the spec: the file that blob holds never reached the builder whole, and the "
-        "hint then says to delete that `blobId` from its entry and push again, which uploads the file.",
+        "hint then says to delete that `blobId` from its entry and push again, which uploads the file; "
+        "an entry with no `source: local` first needs one, with a `localPath`, or a `sourceUri`.",
         "fix each named field in the spec, then push again; a retry of the same definition is refused the same way",
     ),
     ErrorCode(

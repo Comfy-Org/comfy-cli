@@ -354,6 +354,31 @@ def _lacks_extension(uri: str) -> bool:
     return "." not in base
 
 
+def _model_label(entry: JsonObject) -> str:
+    return next(
+        (
+            value
+            for key in ("filename", "sourceUri", "localPath")
+            if isinstance(value := entry.get(key), str) and value.strip()
+        ),
+        "",
+    )
+
+
+def _link_problem(entry: JsonObject, wire: JsonObject) -> tuple[str, str] | None:
+    """The builder's two link rules on the ``sourceUri`` *wire* sends, as ``(field,
+    reason)``."""
+    uri = wire.get("sourceUri")
+    if not isinstance(uri, str) or not uri.strip():
+        return None
+    if not _https_url(uri):
+        return "sourceUri", "must be an https URL"
+    filename = entry.get("filename")
+    if not (isinstance(filename, str) and filename.strip()) and _lacks_extension(uri):
+        return "filename", "sourceUri has no file extension; set an explicit filename"
+    return None
+
+
 def model_rule_problems(
     definition: JsonObject, projected: JsonObject, directories: frozenset[str] | None = None
 ) -> list[dict[str, str]]:
@@ -361,7 +386,8 @@ def model_rule_problems(
     model}``. ``models[<n>]`` counts the spec as it is read, which sorts the models,
     so ``model`` names the entry (its filename, link or local path) for a person
     looking for it in a file they ordered themselves. A ``source: local`` entry's
-    link and sha256 are left alone: push replaces both with what it uploads."""
+    link and sha256 are left alone here: push replaces both with what it uploads,
+    and checks a link it keeps with ``validate_kept_links``."""
     problems: list[dict[str, str]] = []
     model = ""
 
@@ -370,33 +396,40 @@ def model_rule_problems(
 
     for index, (entry, wire) in enumerate(zip(_entries(definition, "models"), _entries(projected, "models"))):
         location = f"definition.models[{index}]"
-        model = next(
-            (
-                value
-                for key in ("filename", "sourceUri", "localPath")
-                if isinstance(value := entry.get(key), str) and value.strip()
-            ),
-            "",
-        )
+        model = _model_label(entry)
         model_type = entry.get("type")
         if isinstance(model_type, str) and not _valid_model_dir(model_type, directories):
             refuse(f"{location}.type", _MODEL_DIR_REASON)
         filename = entry.get("filename")
-        has_filename = isinstance(filename, str) and bool(filename.strip())
-        if has_filename and not _valid_filename(filename):
+        if isinstance(filename, str) and filename.strip() and not _valid_filename(filename):
             refuse(f"{location}.filename", "must be a safe filename")
         if entry.get("source") == "local":
             continue
-        uri = wire.get("sourceUri")
-        if isinstance(uri, str) and uri.strip():
-            if not _https_url(uri):
-                refuse(f"{location}.sourceUri", "must be an https URL")
-            elif not has_filename and _lacks_extension(uri):
-                refuse(f"{location}.filename", "sourceUri has no file extension; set an explicit filename")
+        if link := _link_problem(entry, wire):
+            refuse(f"{location}.{link[0]}", link[1])
         sha256 = entry.get("sha256")
         if isinstance(sha256, str) and sha256.strip() and not _SHA256.fullmatch(sha256.strip().lower()):
             refuse(f"{location}.sha256", "must be a 64-character sha256")
     return problems
+
+
+def validate_kept_links(definition: JsonObject) -> None:
+    """The link rules on each ``source: local`` model of a definition ``prepare_push``
+    reconciled. One whose file still matches its sha256 keeps its ``sourceUri`` and
+    is not uploaded, so that link is what the builder reads."""
+    projected = project_wire_definition(definition)
+    _refuse(
+        [
+            {"field": f"definition.models[{index}].{link[0]}", "reason": link[1], "model": _model_label(entry)}
+            for index, (entry, wire) in enumerate(zip(_entries(definition, "models"), _entries(projected, "models")))
+            if entry.get("source") == "local" and (link := _link_problem(entry, wire))
+        ]
+    )
+
+
+def _refuse(problems: list[dict[str, str]]) -> None:
+    if problems:
+        raise BuildSpecInvalidError(_problems_message(problems), issues=problems)
 
 
 def _problems_message(problems: list[dict[str, str]]) -> str:
@@ -425,9 +458,7 @@ def validate_local_build_spec(
     projected = project_wire_definition(definition)
     _validate_wire_sources(definition, projected, "models")
     _validate_wire_sources(definition, projected, "customNodes")
-    problems = model_rule_problems(definition, projected, model_directories)
-    if problems:
-        raise BuildSpecInvalidError(_problems_message(problems), issues=problems)
+    _refuse(model_rule_problems(definition, projected, model_directories))
     return projected
 
 

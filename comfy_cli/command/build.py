@@ -92,6 +92,7 @@ from comfy_cli.command.build_upload_progress import UploadProgressReporter, plan
 from comfy_cli.command.build_validation import (
     lookup_public_model_sources,
     project_wire_definition,
+    validate_kept_links,
     validate_local_build_spec,
 )
 from comfy_cli.command.pack_scan import read_pyproject
@@ -1965,6 +1966,7 @@ def push_cmd(
         try:
             validate_local_build_spec(spec, paths, model_directories=directories)
             preparation = prepare_push(spec, paths, ModelDigestCache(_sha256_file), package_dir=Path(package_dir))
+            validate_kept_links(preparation.definition)
         except NodePackageError as error:
             _raise_node_package_error(renderer, error)
         except BuildSpecInvalidError as error:
@@ -2782,14 +2784,16 @@ def _definition_invalid_hint(invalid: list[dict[str, str]]) -> str | None:
     """The hint for a refused definition, or None for the registered one. A
     ``blob:<id>`` field is no rule of the spec: the cut found the file that blob
     holds missing from storage or different from what was declared, and a push
-    uploads again only an entry without a ``blobId``."""
+    uploads again only a ``source: local`` entry without a ``blobId``. Which kind
+    the entry is lives in the spec, not here, so the hint covers both."""
     blobs = sum(issue["field"].startswith("blob:") for issue in invalid)
     if not blobs:
         return None
     hint = (
         "a `blob:<id>` field is a file the definition names that never reached the builder whole: "
-        "delete that `blobId` from its entry in the spec, then run `comfy build push`, which uploads "
-        "the file again and saves its new id"
+        "delete that `blobId` from its entry in the spec, and if that entry has no `source: local`, "
+        "give it `source: local` with a `localPath` to the file, or a `sourceUri`; then run "
+        "`comfy build push`, which uploads a local file again and saves its new id"
     )
     return hint if blobs == len(invalid) else f"fix each other named field in the spec; {hint}"
 

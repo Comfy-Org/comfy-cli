@@ -976,7 +976,8 @@ def test_a_blob_never_uploaded_says_to_push_it_again(
     workspace: Path, monkeypatch: pytest.MonkeyPatch, invalid: list[dict[str, str]], also_the_spec: bool
 ) -> None:
     """No edit to the spec's rules clears it: the file has to upload, and a push
-    skips an entry that already carries a ``blobId``."""
+    skips an entry that already carries a ``blobId``. An entry with only the
+    ``blobId`` has nothing left to push from once it goes, so the hint names both."""
     # Given
     from comfy_cli.builder_api import BuilderClient
 
@@ -997,6 +998,9 @@ def test_a_blob_never_uploaded_says_to_push_it_again(
     assert "blob:blob-7: not uploaded" in error["message"]
     assert "delete that `blobId`" in error["hint"]
     assert "`comfy build push`" in error["hint"]
+    assert "if that entry has no `source: local`" in error["hint"]
+    assert "`localPath`" in error["hint"]
+    assert "`sourceUri`" in error["hint"]
     assert error["hint"].startswith("fix each other named field") is also_the_spec
 
 
