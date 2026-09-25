@@ -1544,8 +1544,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "deploy_job_submit_unknown",
         "A job submission timed out, lost its connection, or returned HTTP 5xx, so the job may exist. No job id "
         "came back, and the CLI has no command that finds a job by its idempotency key, so it cannot say whether "
-        "the job was created. `details.idempotency_key` is the key the submission carried, which a job created "
-        "by it also carries.",
+        "the job was created. `details.idempotency_key` is the key sent with the submission.",
         "do not resubmit automatically: every `comfy deploy run` uses a new idempotency key, so a resubmit is a "
         "second billed job if the first one was created",
     ),
