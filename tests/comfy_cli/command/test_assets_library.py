@@ -189,10 +189,14 @@ class TestEnsureHashWithExtension:
         assert f"{_HEX}.png" in err["message"]
 
 
-# Synthetic: an asset's real hash, and a garbled 65-char copy of it that keeps
-# only the first four characters — the shape an agent's mangled copy takes.
-_REAL = "ab12" + "cd" * 30
-_GARBLED = "ab12" + "ef" * 30 + "0"
+# Synthetic: an asset's real hash and the shapes a mangled copy of it takes.
+# A 4-char shared prefix is weak evidence (common by chance across a library
+# page), so it must NOT produce a suggestion; the strong forms must.
+_REAL = "0123456789abcdef" * 4
+_GARBLED = _REAL[:10] + "f" + _REAL[10:]  # one extra char mid-hash (65 chars)
+_DROPPED = _REAL[:30] + _REAL[31:]  # one char lost (63 chars)
+_TRUNCATED_TAIL = _REAL[:20] + "e" * 45  # first 20 chars kept, tail garbled (65 chars)
+_WEAK = _REAL[:4] + "e" * 61  # only 4 chars shared (65 chars)
 
 
 def _route_urlopen(monkeypatch: pytest.MonkeyPatch, *, ensure_outcome, library):
@@ -230,17 +234,20 @@ def _asset(hash_value: str, name: str) -> dict:
 
 
 class TestEnsureSuggestsNearHashes:
-    """When the hash is not found and looks like a (garbled) hex hash, suggest
-    the library assets sharing its longest prefix — from ONE bounded listing."""
+    """When the hash is not found and looks mangled, suggest library assets it
+    is almost certainly a copy of, from ONE bounded listing. Evidence must be
+    strong: within one inserted/dropped/changed char of a stored hash, or a
+    shared prefix of >= 16 hex chars."""
 
-    def test_garbled_hash_suggests_the_real_one(self, cloud_target, monkeypatch, capsys):
+    @pytest.mark.parametrize("mangled", [_GARBLED, _DROPPED, _TRUNCATED_TAIL])
+    def test_mangled_hash_suggests_the_real_one(self, cloud_target, monkeypatch, capsys, mangled):
         library = [
             _asset("blake3:" + "ffff" + "0" * 60, "other.png"),
             _asset(f"{_REAL}.png", "beach.png"),
-            _asset("ab1" + "1" * 61, "near-miss-3-chars.png"),
+            _asset(_REAL[:4] + "1" * 60, "weak-4-char-prefix.png"),
         ]
         calls = _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=library)
-        env = _run(["ensure", "--hash", f"{_GARBLED}.png", "--where", "cloud"], capsys)
+        env = _run(["ensure", "--hash", f"{mangled}.png", "--where", "cloud"], capsys)
 
         err = env["error"]
         assert err["code"] == "asset_not_found"
@@ -253,24 +260,48 @@ class TestEnsureSuggestsNearHashes:
         assert len(calls) == 2
         assert "/api/assets?" in calls[1] and "limit=500" in calls[1]
 
-    def test_suggestions_rank_by_longest_prefix_and_cap_at_three(self, cloud_target, monkeypatch, capsys):
-        target = "abcdef" + "0" * 58
-        library = [_asset(p + "9" * (64 - len(p)), f"{p}.png") for p in ("abcd", "abcde", "abcdef1", "abcd1", "abc")]
-        _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=library)
-        env = _run(["ensure", "--hash", target, "--where", "cloud"], capsys)
+    def test_bare_uppercase_digest_suggests_its_lowercase_form(self, cloud_target, monkeypatch, capsys):
+        _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=[_asset(_REAL, "beach.png")])
+        env = _run(["ensure", "--hash", _REAL.upper(), "--where", "cloud"], capsys)
+        assert [s["hash"] for s in env["error"]["details"]["suggestions"]] == [_REAL]
 
-        names = [s["name"] for s in env["error"]["details"]["suggestions"]]
-        assert names == ["abcdef1.png", "abcde.png", "abcd.png"]
-
-    def test_no_prefix_match_gives_no_suggestions(self, cloud_target, monkeypatch, capsys):
-        library = [_asset("ffff" + "0" * 60, "a.png"), _asset("ab1" + "0" * 61, "b.png")]
+    def test_short_shared_prefix_is_not_evidence(self, cloud_target, monkeypatch, capsys):
+        library = [_asset(f"{_REAL}.png", "beach.png"), _asset(_REAL[:15] + "e" * 49, "fifteen.png")]
         _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=library)
-        env = _run(["ensure", "--hash", f"{_GARBLED}.png", "--where", "cloud"], capsys)
+        env = _run(["ensure", "--hash", _WEAK, "--where", "cloud"], capsys)
 
         err = env["error"]
         assert err["code"] == "asset_not_found"
         assert "suggestions" not in err["details"]
         assert "did you mean" not in err["hint"]
+
+    def test_suggestions_rank_by_longest_prefix_and_cap_at_three(self, cloud_target, monkeypatch, capsys):
+        wanted = "a" * 22 + "0" * 43  # 65 chars: mangled length
+        library = [_asset("a" * k + "b" * (64 - k), f"{k}.png") for k in (16, 18, 20, 17, 15)]
+        _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=library)
+        env = _run(["ensure", "--hash", wanted, "--where", "cloud"], capsys)
+
+        names = [s["name"] for s in env["error"]["details"]["suggestions"]]
+        assert names == ["20.png", "18.png", "17.png"]
+
+    def test_one_edit_match_outranks_a_long_prefix(self, cloud_target, monkeypatch, capsys):
+        library = [_asset(_REAL[:40] + "e" * 24, "long-prefix.png"), _asset(_REAL, "exact-but-one.png")]
+        _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=library)
+        env = _run(["ensure", "--hash", _DROPPED, "--where", "cloud"], capsys)
+
+        names = [s["name"] for s in env["error"]["details"]["suggestions"]]
+        assert names[0] == "exact-but-one.png"
+
+    @pytest.mark.parametrize("value", [_REAL, f"blake3:{_REAL}", f"{_REAL}.png", f"blake3:{_REAL}.png"])
+    def test_well_formed_digest_that_is_missing_makes_no_library_call(self, cloud_target, monkeypatch, capsys, value):
+        """A full lowercase 64-hex digest is not mangled; it simply is not in the
+        library. Listing would cost a request and could only guess."""
+        calls = _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=[_asset(_REAL, "x.png")])
+        env = _run(["ensure", "--hash", value, "--where", "cloud"], capsys)
+
+        assert env["error"]["code"] == "asset_not_found"
+        assert "suggestions" not in env["error"]["details"]
+        assert len(calls) == 1
 
     def test_non_hex_name_makes_no_library_call(self, cloud_target, monkeypatch, capsys):
         calls = _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=[_asset(_REAL, "x.png")])

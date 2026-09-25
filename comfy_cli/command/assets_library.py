@@ -34,7 +34,11 @@ _HASH_WITH_EXT_RE = re.compile(r"^(?:blake3:)?([0-9a-fA-F]{64})\.[A-Za-z0-9]+$")
 # 16-80 hex chars (a garbled copy can gain or lose a few), optional extension.
 _HEXISH_RE = re.compile(r"^(?:blake3:)?([0-9a-fA-F]{16,80})(?:\.[A-Za-z0-9]+)?$")
 _HEX_DIGEST_RE = re.compile(r"^(?:blake3:)?([0-9a-f]{64})(?:\.[A-Za-z0-9]+)?$")
-_MIN_SHARED_PREFIX = 4
+# Evidence a missing hash is a mangled copy of a stored one: a shared prefix
+# this long (chance of a random match across a page of hashes is ~1e-16; a
+# 4-char prefix, by contrast, matches by chance in a sizable library), or a
+# single inserted / dropped / changed character anywhere.
+_MIN_SHARED_PREFIX = 16
 _MAX_SUGGESTIONS = 3
 # One page at the API's maximum, newest first. Never paged: a suggestion is a
 # best-effort hint on an error path, so it gets exactly one bounded request.
@@ -44,21 +48,37 @@ _SUGGESTION_SCAN_LIMIT = 500
 _SUGGESTION_TIMEOUT_SECONDS = 5.0
 
 
-def _near_hash_suggestions(value: str, target) -> list[dict]:
-    """Library assets whose hash shares the longest prefix (>= 4 hex chars) with
-    a hash that was not found — an agent copying a 64-char hex string tends to
-    keep the first few characters and garble the rest.
+def _within_one_edit(a: str, b: str) -> bool:
+    """True when ``a`` and ``b`` differ by at most one inserted, dropped or
+    changed character (the common ways a copied hash picks up a typo)."""
+    import os.path
 
-    ``[]`` unless ``value`` looks like a hex hash; that check runs first, so an
-    ordinary file name costs no request. The listing is one request for the
-    newest :data:`_SUGGESTION_SCAN_LIMIT` assets you own; any failure there
-    yields ``[]`` so the not-found envelope is never lost to it.
+    if abs(len(a) - len(b)) > 1:
+        return False
+    prefix = len(os.path.commonprefix([a, b]))
+    suffix = len(os.path.commonprefix([a[::-1], b[::-1]]))
+    if len(a) == len(b):
+        return prefix + suffix >= len(a) - 1
+    return prefix + suffix >= min(len(a), len(b))
+
+
+def _near_hash_suggestions(value: str, target) -> list[dict]:
+    """Library assets whose hash the not-found ``value`` is almost certainly a
+    mangled copy of: within one character edit of it, or sharing a prefix of
+    at least :data:`_MIN_SHARED_PREFIX` hex chars.
+
+    ``[]`` without a request unless ``value`` looks like a MANGLED hex hash: a
+    well-formed digest (64 lowercase hex, bare, canonical or with an
+    extension) that is not found is simply absent, and an ordinary file name
+    is not a hash. Otherwise one request lists the newest
+    :data:`_SUGGESTION_SCAN_LIMIT` assets you own; any failure there yields
+    ``[]`` so the not-found envelope is never lost to it.
     """
     import os.path
     import urllib.parse
 
     m = _HEXISH_RE.match(value)
-    if not m:
+    if not m or _HEX_DIGEST_RE.match(value):
         return []
     wanted = m.group(1).lower()
     query = urllib.parse.urlencode(
@@ -77,13 +97,15 @@ def _near_hash_suggestions(value: str, target) -> list[dict]:
         hm = _HEX_DIGEST_RE.match(r["hash"])
         if not hm:
             continue
-        shared = len(os.path.commonprefix([wanted, hm.group(1)]))
-        if shared >= _MIN_SHARED_PREFIX:
-            scored.append((shared, r))
-    scored.sort(key=lambda t: -t[0])  # stable: ties keep newest-first order
+        stored = hm.group(1)
+        shared = len(os.path.commonprefix([wanted, stored]))
+        one_edit = _within_one_edit(wanted, stored)
+        if one_edit or shared >= _MIN_SHARED_PREFIX:
+            scored.append(((one_edit, shared), shared, r))
+    scored.sort(key=lambda t: t[0], reverse=True)  # stable: ties keep newest-first order
     return [
         {"hash": r["hash"], "name": r.get("name"), "id": r.get("id"), "shared_prefix": shared}
-        for shared, r in scored[:_MAX_SUGGESTIONS]
+        for _, shared, r in scored[:_MAX_SUGGESTIONS]
     ]
 
 
