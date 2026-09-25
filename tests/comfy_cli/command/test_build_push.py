@@ -914,6 +914,61 @@ def test_a_dry_run_says_it_did_not_check_a_folders_case(workspace: Path, monkeyp
     assert _FOLDER_CASE_UNCHECKED in " ".join(result.stdout.split())
 
 
+@pytest.mark.parametrize(
+    ("args", "checked"),
+    [
+        pytest.param(("--dry-run",), False, id="dry-run"),
+        pytest.param((), True, id="push"),
+    ],
+)
+def test_the_payload_says_whether_a_folders_case_was_checked(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, args: tuple[str, ...], checked: bool
+) -> None:
+    """The line a dry run prints never reaches an agent, so the payload carries it."""
+    # Given
+    write_spec(workspace, models=[{"type": "loras", "sourceUri": "https://h.example/a.safetensors"}], nodes=[])
+    _install_client(monkeypatch, RecordingBuilder())
+
+    # When
+    result = invoke_push(workspace, *args)
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    data = envelope(result)["data"]
+    assert data["folder_case_checked"] is checked
+    jsonschema.Draft202012Validator(_schema("build_push.json")).validate(data)
+
+
+def test_a_push_whose_folder_list_names_no_folder_says_the_case_was_not_checked(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    write_spec(workspace, models=[{"type": "Loras", "sourceUri": "https://h.example/a.safetensors"}], nodes=[])
+    client = RecordingBuilder()
+    monkeypatch.setattr(client, "list_model_directories", lambda: [])
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace)
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    assert envelope(result)["data"]["folder_case_checked"] is False
+    assert _FOLDER_CASE_UNCHECKED in " ".join(result.stderr.split())
+
+
+def test_a_push_without_models_says_nothing_of_a_folders_case(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    write_spec(workspace, models=[], nodes=[])
+
+    # When
+    result = invoke_push(workspace, "--dry-run")
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    assert "folder_case_checked" not in envelope(result)["data"]
+
+
 def test_a_refused_release_names_each_model_the_push_saved(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The cut counts the models of the definition the push just saved; push has
     that definition, so each line names the model too."""

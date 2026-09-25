@@ -74,7 +74,9 @@ with `--json`.
 `push` and `release create` can reject a definition before anything is built, and
 the message names the field. `validate` and `push` check model entries first and
 refuse with `build_spec_invalid`, one line per entry and `details.invalid` as
-`{field, reason, model}`, before anything uploads. What reaches the builder anyway
+`{field, reason, model}`, before anything uploads. A local model's kept link is
+checked after `push` hashes its file, so it is reported once the other problems
+are fixed: a second refusal after a fix is that, not a new problem. What reaches the builder anyway
 comes back as **`build_definition_invalid`**, with the builder's reasons one per
 line and in `details.invalid`; the same definition is refused the same way every
 time, so edit it rather than retrying. Its `models[<n>]` counts the spec as the

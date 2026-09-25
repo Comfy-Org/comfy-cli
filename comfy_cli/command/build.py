@@ -1588,23 +1588,28 @@ def _raise_spec_invalid(renderer, error: BuildSpecInvalidError, spec_file: Path)
 _FOLDER_CASE_UNCHECKED = "a folder's case (`Loras` for `loras`) was not checked"
 
 
+def _has_models(spec: Mapping) -> bool:
+    definition = spec.get("definition")
+    return isinstance(definition, dict) and bool(definition.get("models"))
+
+
 def _model_directories(renderer, client, spec: Mapping) -> frozenset[str] | None:
     """The builder's vetted model directories, read only by a signed-in command whose
     spec has models, or None. They are what tells a case variant ("Loras") from a new
-    folder. A list that cannot be read refuses nothing, and says so: the save warns
-    about the same field."""
-    definition = spec.get("definition")
-    if client is None or not isinstance(definition, dict) or not definition.get("models"):
+    folder. A list that cannot be read, or names no folder, refuses nothing, and says
+    so: the save warns about the same field."""
+    if client is None or not _has_models(spec):
         return None
     try:
         listed = client.list_model_directories()
     except Exception:
         # Advisory, so no failure to read it (a cut-off body, an oversized one) stops the command.
         listed = None
-    if not isinstance(listed, list):
+    vetted = frozenset(name for name in listed if isinstance(name, str)) if isinstance(listed, list) else None
+    if not vetted:
         renderer.warn(f"could not read the builder's model folders, so {_FOLDER_CASE_UNCHECKED}")
         return None
-    return frozenset(name for name in listed if isinstance(name, str)) or None
+    return vetted
 
 
 def _read_spec(renderer, spec_file: Path) -> dict:
@@ -1990,6 +1995,8 @@ def push_cmd(
             "uploaded": 0,
             "deduped": 0,
         }
+        if _has_models(spec):
+            payload["folder_case_checked"] = directories is not None
         reported = _warn_skipped_symlinks(renderer, preparation.skipped_symlinks)
         if reported:
             payload["skipped_symlinks"] = reported
@@ -2003,7 +2010,7 @@ def push_cmd(
                 renderer.info(
                     "--dry-run: nothing was sent; the builder may already hold more of these than the spec records."
                 )
-                if (spec.get("definition") or {}).get("models"):
+                if _has_models(spec):
                     renderer.info(f"--dry-run reads no folder list from the builder, so {_FOLDER_CASE_UNCHECKED}.")
             renderer.emit(payload, command="build push", changed=False)
             return
@@ -3232,10 +3239,9 @@ def validate_cmd(
         renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
+    directories = _model_directories(renderer, client, spec)
     try:
-        wire_definition = validate_local_build_spec(
-            spec, paths, model_directories=_model_directories(renderer, client, spec)
-        )
+        wire_definition = validate_local_build_spec(spec, paths, model_directories=directories)
     except BuildSpecInvalidError as error:
         _raise_spec_invalid(renderer, error, paths.spec_file)
 
@@ -3245,11 +3251,16 @@ def validate_cmd(
         "wire_definition": wire_definition,
         "model_lookups": [],
     }
+    if _has_models(spec):
+        result["folder_case_checked"] = directories is not None
     if client is not None:
         lookups = _builder_call(renderer, lambda: lookup_public_model_sources(wire_definition, client.resolve_models))
         result["model_lookups"] = [lookup.as_json() for lookup in lookups]
     if renderer.is_pretty():
         renderer.success(f"Build spec is valid → {paths.spec_file}")
+        # A failed read of the list has already said so.
+        if client is None and _has_models(spec):
+            renderer.info(f"validate reads the builder's folder list only with --remote, so {_FOLDER_CASE_UNCHECKED}.")
         for lookup in result["model_lookups"]:
             label = lookup["filename"] or lookup["entry"]
             detail = f": {lookup['error']}" if lookup.get("error") else ""

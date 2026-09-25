@@ -297,7 +297,10 @@ source either way.
 model entries it applies the builder's own rules (the folder, the filename, a link
 with no extension, the sha256) and names every entry that breaks one at once,
 each with the model it is about; only a case variant of a folder needs the
-builder's list, so `--remote` and `push` catch that one and offline does not. It
+builder's list, so `--remote` and `push` catch that one and offline does not
+(it says so, and `--json` carries `folder_case_checked: false`). A local model's
+link is left to `push`, which checks the link it keeps after hashing its file, so
+that one is reported once the other problems are fixed. It
 is the only check available on this path, because the conflict prediction in
 `comfy-build-pins` reads requirement files this machine does not have. It echoes
 the policy fields back unchecked, so a pass showing your `mode` is not

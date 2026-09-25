@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 
+import jsonschema
 import pytest
 from build_validate_support import ResolveRecorder, local_model, local_node, remote_model, write_spec
 from typer.testing import CliRunner
@@ -402,6 +403,9 @@ def test_pretty_validate_prints_each_problem_on_its_own_line(workspace: Path) ->
         pytest.param(
             {"type": "loras", "filename": "  ", "sourceUri": "https://h.example/x.safetensors"}, id="blank-filename"
         ),
+        pytest.param(
+            {"type": "loras", "sourceUri": "https://h.example/x.safetensors", "sha256": ""}, id="empty-sha256"
+        ),
     ],
 )
 def test_validate_passes_what_the_builder_accepts(workspace: Path, model: JsonObject) -> None:
@@ -579,6 +583,38 @@ def test_a_refused_link_is_named_without_its_credentials(workspace: Path, output
         assert _refused(result) == {"https://civitai.com/api/download/models/1": "filename"}
 
 
+def test_a_refused_link_is_named_without_its_fragment(workspace: Path) -> None:
+    # Given
+    write_spec(
+        workspace, models=[{"type": "loras", "sourceUri": "https://civitai.com/api/download/models/1#part"}], nodes=[]
+    )
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    assert _refused(result) == {"https://civitai.com/api/download/models/1": "filename"}
+
+
+def test_a_blank_filename_does_not_name_a_link_with_no_extension(workspace: Path) -> None:
+    """The builder trims the filename first, so blank is no filename at all."""
+    # Given
+    link = "https://civitai.com/api/download/models/1"
+    write_spec(workspace, models=[{"type": "loras", "filename": " \t", "sourceUri": link}], nodes=[])
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    (issue,) = _envelope(result)["error"]["details"]["invalid"]
+    assert (issue["field"], issue["reason"]) == (
+        "definition.models[0].filename",
+        "sourceUri has no file extension; set an explicit filename",
+    )
+
+
 #: The builder's vetted folders as the tests' list carries them.
 DIRECTORIES = frozenset({"checkpoints", "loras", "vae"})
 
@@ -688,3 +724,99 @@ def test_pretty_validate_leaves_the_problem_list_out_of_the_details(workspace: P
     lines = [line.strip("│ ") for line in pretty_result.output.splitlines()]
     assert any(line.startswith("path") for line in lines), pretty_result.output
     assert not any(line.startswith("invalid") for line in lines), pretty_result.output
+
+
+#: What validate says when it did not check a folder's case.
+_FOLDER_CASE_UNCHECKED = "a folder's case (`Loras` for `loras`) was not checked"
+
+#: A case variant only the builder's list tells from a new folder.
+CASE_VARIANT: list[JsonObject] = [{"type": "Loras", "sourceUri": "https://h.example/a.safetensors"}]
+
+
+def _schema(name: str) -> JsonObject:
+    path = Path(__file__).parent.parent.parent.parent / "comfy_cli" / "schemas" / name
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_offline_validate_says_it_did_not_check_a_folders_case(workspace: Path) -> None:
+    """The builder refuses "Loras" at the release, so a pass that could not tell it
+    from a new folder says so, to a person and to an agent."""
+    # Given
+    write_spec(workspace, models=CASE_VARIANT, nodes=[])
+
+    # When
+    pretty = _invoke(workspace, output="pretty")
+    agent = _invoke(workspace)
+
+    # Then
+    assert pretty.exit_code == 0, pretty.output
+    assert _FOLDER_CASE_UNCHECKED in " ".join(pretty.output.split())
+    assert agent.exit_code == 0, agent.output
+    data = _envelope(agent)["data"]
+    assert data["folder_case_checked"] is False
+    jsonschema.Draft202012Validator(_schema("build_validate.json")).validate(data)
+
+
+def test_remote_validate_says_it_checked_a_folders_case(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", ResolveRecorder())
+    write_spec(workspace, models=[{"type": "loras", "sourceUri": "https://h.example/a.safetensors"}], nodes=[])
+
+    # When
+    pretty = _invoke(workspace, "--remote", token="tok_test", output="pretty")
+    agent = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then
+    assert pretty.exit_code == 0, pretty.output
+    assert _FOLDER_CASE_UNCHECKED not in " ".join(pretty.output.split())
+    assert _envelope(agent)["data"]["folder_case_checked"] is True
+
+
+def test_validate_without_models_says_nothing_of_a_folders_case(workspace: Path) -> None:
+    # Given
+    write_spec(workspace, models=[], nodes=[])
+
+    # When
+    pretty = _invoke(workspace, output="pretty")
+    agent = _invoke(workspace)
+
+    # Then
+    assert _FOLDER_CASE_UNCHECKED not in " ".join(pretty.output.split())
+    assert "folder_case_checked" not in _envelope(agent)["data"]
+
+
+@pytest.mark.parametrize(
+    "listed",
+    [
+        pytest.param({"directories": []}, id="empty-list"),
+        pytest.param({}, id="no-list"),
+        pytest.param({"directories": [1, 2]}, id="no-names"),
+    ],
+)
+def test_remote_validate_treats_a_list_naming_no_folder_as_unread(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, listed: JsonObject
+) -> None:
+    """A 200 that names no folder checks no case, so "Loras" passes as it does when
+    the read fails, and the command says so."""
+    # Given
+    recorder = ResolveRecorder()
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        if url == "https://builder.test/v1/model-directories":
+            return 200, listed
+        return recorder(url, target, method=method, body=body, timeout=timeout, max_bytes=max_bytes)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    write_spec(workspace, models=CASE_VARIANT, nodes=[])
+
+    # When
+    pretty = _invoke(workspace, "--remote", token="tok_test", output="pretty")
+    agent = _invoke(workspace, "--remote", token="tok_test")
+
+    # Then
+    assert pretty.exit_code == 0, pretty.output
+    said = " ".join(pretty.output.split())
+    assert f"could not read the builder's model folders, so {_FOLDER_CASE_UNCHECKED}" in said
+    assert said.count(_FOLDER_CASE_UNCHECKED) == 1, pretty.output
+    assert agent.exit_code == 0, agent.output
+    assert _envelope(agent)["data"]["folder_case_checked"] is False

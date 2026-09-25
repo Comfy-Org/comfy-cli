@@ -961,6 +961,36 @@ def test_a_refused_definition_with_only_a_message_leads_with_the_message(
     assert "invalid" not in error["details"]
 
 
+def test_a_refused_definition_carries_the_status(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given
+    _refusing_builder(monkeypatch, 400, {"error": "INVALID_DEFINITION", "invalid": REFUSED_MODELS})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["details"]["status"]) == ("build_definition_invalid", 400)
+
+
+def test_a_long_list_of_refused_fields_obeys_the_message_cap(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each reason is a line of the message, so a definition refused for hundreds of
+    fields would otherwise carry every one of them into the envelope."""
+    # Given
+    invalid = [{"field": f"models[{index}].sha256", "reason": "must be a 64-character sha256"} for index in range(400)]
+    _refusing_builder(monkeypatch, 400, {"error": "INVALID_DEFINITION", "invalid": invalid})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["code"] == "build_definition_invalid"
+    assert error["message"].startswith("the builder refused the build's definition:\n")
+    assert len(error["message"].encode("utf-8")) == build._BUILDER_MESSAGE_CAP
+    assert len(error["details"]["invalid"]) == 400
+
+
 #: The cut's refusal for a file the definition names that is not in storage, as
 #: releases_cut.go ``verifyReferencedBlobs`` words it.
 BLOB_NOT_UPLOADED = {"field": "blob:blob-7", "reason": "not uploaded"}

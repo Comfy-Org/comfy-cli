@@ -1201,7 +1201,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`details.path` carries the path when one is available. When `validate` or `push` found model "
         "entries the builder would refuse (a type that is not a model directory, an unsafe filename, a link "
         "with no file extension and no filename, a malformed sha256), the message lists every one and "
-        "`details.invalid` carries each as `{field, reason, model}`, `model` naming the entry.",
+        "`details.invalid` carries each as `{field, reason, model}`, `model` naming the entry. `push` checks "
+        "the link a local model keeps after it hashes the model's file, so a bad kept link is reported once "
+        "the other problems are fixed.",
         "fix the named field, or regenerate the file with `comfy build init`",
     ),
     ErrorCode(

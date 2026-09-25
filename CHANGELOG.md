@@ -29,8 +29,11 @@ history.
   `build_spec_invalid` (`details.invalid` in JSON), and `push` refuses before
   uploading anything. A case variant of a folder (`Loras` for `loras`) needs the
   builder's list, so `push` and `validate --remote` read it and offline `validate`
-  does not, and says so: a `--dry-run` push, and a command whose read of the
-  list failed, print that a folder's case was not checked.
+  and a `--dry-run` push do not. When a spec with models was not checked for a
+  folder's case (offline `validate`, a `--dry-run` push, a list that could not be
+  read or named no folder), the command prints a line saying so, and its `--json`
+  payload carries `folder_case_checked: false` (`true` when the case was checked;
+  absent for a spec with no models).
 - A definition the builder refuses now arrives as `build_definition_invalid`, its
   reasons one per line and in `details.invalid`, instead of `build_builder_error`
   with the code as the message, the reasons in `details.body` and a hint to
@@ -51,7 +54,8 @@ history.
   where a signed link or a Civitai `?token=` carries its credential.
 - `comfy build push` checks the link a local model keeps (its file still matches
   its `sha256`, so it is not uploaded) by the same rules as any other link,
-  before anything uploads.
+  before anything uploads. The link is checked after its file is hashed, so a bad
+  kept link is reported once the spec's other problems are fixed, not with them.
 
 ## [1.21.0] - 2026-09-24
 

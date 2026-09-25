@@ -25,6 +25,10 @@
     "upload_bytes": {"type": "integer", "minimum": 0},
     "uploaded": {"description": "Blobs whose bytes were transferred. Never exceeds `upload_count`: the builder answers with an id it already holds, and no upload URL, when the workspace already stored those exact bytes.", "type": "integer", "minimum": 0},
     "deduped": {"description": "Blobs the builder already held, so `upload_count` was planned but not transferred. Always `upload_count - uploaded`.", "type": "integer", "minimum": 0},
+    "folder_case_checked": {
+      "description": "Present only when the spec has models. False when no usable folder list was read from the builder (`--dry-run`; a read that failed or named no folder), so a case variant of a folder (`Loras` for `loras`) passed unchecked; the builder refuses it at the release.",
+      "type": "boolean"
+    },
     "warnings": {
       "description": "Non-blocking advisories the save returned; present only when it returned at least one. A warning at `models[<n>].sourceUri` names a model link a deployment could not download.",
       "type": "array",
