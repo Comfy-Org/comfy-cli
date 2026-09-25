@@ -20,6 +20,7 @@ from comfy_cli.http import (
     ResponseTooLarge,
     authed_urlopen,
     build_authed_request,
+    encode_json_body,
     no_redirect_urlopen,
     read_capped,
     request_json,
@@ -389,6 +390,18 @@ def test_request_json_post_attaches_json_body_and_content_type(monkeypatch, clou
     assert req.get_method() == "POST"
     assert json.loads(req.data) == {"name": "wf"}
     assert req.get_header("Content-type") == "application/json"
+
+
+def test_request_json_sends_exactly_the_shared_encoding(monkeypatch, cloud_target):
+    """Callers that bound their request size measure ``encode_json_body``; it must be what goes out."""
+    seen = _patch_urlopen(monkeypatch, b"{}", status=201)
+    monkeypatch.setattr("comfy_cli.http.encode_json_body", lambda body: b'{"sentinel": true}')
+    request_json("https://cloud.example/api/thing", cloud_target, method="POST", body={"name": "wf"}, max_bytes=1024)
+    assert seen[0].data == b'{"sentinel": true}'
+
+
+def test_encode_json_body_is_the_default_json_dumps_encoding():
+    assert encode_json_body({"name": "wf", "n": 1}) == b'{"name": "wf", "n": 1}'
 
 
 def test_request_json_attaches_auth_headers_for_cloud(monkeypatch, cloud_target):

@@ -11,7 +11,7 @@ from typing import Final, Protocol
 
 from comfy_cli.command.build_spec import JsonObject
 from comfy_cli.deploy_api_errors import DeployAPIError, assert_safe_deploy_url
-from comfy_cli.http import ResponseTooLarge, read_capped, request_json
+from comfy_cli.http import ResponseTooLarge, encode_json_body, read_capped, request_json
 from comfy_cli.target import Target
 
 _MAX_JSON: Final = 5 * 1024 * 1024
@@ -24,8 +24,8 @@ _RETRIABLE_CODES: Final = frozenset({"deployment_not_ready", "queue_full"})
 # server-sent `Retry-After` may hold a foreground command.
 _MAX_RETRY_AFTER_SECONDS: Final = 10.0
 _UNKNOWN_MESSAGE: Final = (
-    "The job may exist: the submission was sent but no answer came back. This CLI cannot look "
-    "the job up, so it cannot tell whether the job was created."
+    "The job may exist: the submission's outcome is unknown. This CLI cannot look the job up, "
+    "so it cannot tell whether the job was created."
 )
 # The deployment gateway refuses an /api/v2 body over this with a 413 before
 # reading it (its limit is "10M", which its HTTP framework, Echo, parses as
@@ -210,8 +210,8 @@ class DeployJobClient:
         if request.partner_credential is not None:
             field, secret = request.partner_credential
             body["extra_data"] = {field: secret}
-        # Measured on the same encoding `request_json` sends.
-        size = len(json.dumps(body).encode("utf-8"))
+        # `encode_json_body` is what `request_json` sends, so this is the wire size.
+        size = len(encode_json_body(body))
         if size > _MAX_REQUEST_BODY:
             raise self._too_large(request.deployment_id, size)
         url = self.target.url("jobs")
