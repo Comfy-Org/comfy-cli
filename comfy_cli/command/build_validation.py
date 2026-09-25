@@ -42,7 +42,8 @@ _URL_CONTROL: Final = re.compile(r"[\x00-\x1f\x7f]")
 # What starts a link's authority, which a label keeps; the userinfo after it is
 # left out with the query and fragment.
 _LINK_AUTHORITY: Final = re.compile(r"(?:[A-Za-z][A-Za-z0-9+.-]*:)?//")
-# What names a link whose userinfo cannot be told from its path or query.
+# What names a link whose userinfo cannot be told from its path or query, where
+# no file it points at can be named either.
 HIDDEN_LINK_LABEL: Final = "<link not shown: it may hold a password>"
 _URL_BAD_ESCAPE: Final = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _URL_SCHEME: Final = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*(?=:)")
@@ -376,11 +377,11 @@ def model_label(entry: JsonObject) -> str:
 
 
 def _link_label(link: str) -> str:
-    """*link* without its userinfo, query and fragment, or ``HIDDEN_LINK_LABEL``
-    where its userinfo cannot be told apart. A password pasted as is (a base64 token
-    holds '/', and may hold '?' or '#') ends the authority early, so an '@' after
-    the first '/', '?' or '#' may close a password as well as sit in a path or a
-    query: then no part of the link is shown, whether Go parses it or not."""
+    """*link* without its userinfo, query and fragment, or only the file it points
+    at where its userinfo cannot be told apart. A password pasted as is (a base64
+    token holds '/', and may hold '?' or '#') ends the authority early, so an '@'
+    after the first '/', '?' or '#' may close a password as well as sit in a path
+    or a query: then the link is not shown, whether Go parses it or not."""
     link = link.strip()
     authority = _LINK_AUTHORITY.match(link)
     start = authority.end() if authority else 0
@@ -388,9 +389,22 @@ def _link_label(link: str) -> str:
     at = rest.rfind("@")
     if at >= 0:
         if any(0 <= rest.find(char) < at for char in "/?#"):
-            return HIDDEN_LINK_LABEL
+            return _hidden_link_label(rest[:at], rest[at + 1 :])
         rest = rest[at + 1 :]
     return link[:start] + re.split(r"[?#]", rest, maxsplit=1)[0]
+
+
+def _hidden_link_label(before: str, after: str) -> str:
+    """The last path segment of the text *after* a hidden link's last '@', as
+    ``…/<segment>``, so two such models are told apart; ``HIDDEN_LINK_LABEL`` where
+    there is none. No userinfo reaches past that '@', but a '?' or '#' *before* it
+    may start a query or fragment the '@' sits in, and then every segment may be
+    part of one: nothing is shown."""
+    if "?" in before or "#" in before:
+        return HIDDEN_LINK_LABEL
+    path = re.split(r"[?#]", after, maxsplit=1)[0]
+    segment = next((part for part in reversed(path.split("/")) if part.strip()), "")
+    return f"…/{segment}" if segment else HIDDEN_LINK_LABEL
 
 
 def _link_problem(entry: JsonObject, wire: JsonObject) -> tuple[str, str] | None:

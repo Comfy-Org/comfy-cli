@@ -596,7 +596,7 @@ def test_a_refused_link_is_named_without_its_credentials(workspace: Path, output
         pytest.param(
             "https://alice:s3cr/et+tok@host.example/m.safetensors",
             ("alice", "s3cr", "et+tok"),
-            HIDDEN_LINK_LABEL,
+            "…/m.safetensors",
             id="slash-in-the-password",
         ),
         pytest.param(
@@ -621,7 +621,7 @@ def test_a_refused_link_is_named_without_its_credentials(workspace: Path, output
             # Go parses this one: host alice, port 8841, path /Zk9x@host.example/...
             "https://alice:8841/Zk9x@host.example/m.safetensors",
             ("alice", ":8841", "Zk9x"),
-            HIDDEN_LINK_LABEL,
+            "…/m.safetensors",
             id="password-go-reads-as-a-port",
         ),
         pytest.param(
@@ -643,7 +643,9 @@ def test_a_model_label_never_shows_a_links_credentials(
 ) -> None:
     """A password pasted as is (a base64 token holds '/', and may hold '?' or '#')
     makes a link Go cannot parse, or parses as something else; the label names no
-    part of it, and still shows the scheme, host and path of a link that parses."""
+    part of it, and still shows the scheme, host and path of a link that parses. A
+    hidden link is named by the file after its last '@', unless a '?' or '#' before
+    that '@' may have started a query it sits in."""
     # Given
     write_spec(workspace, models=[{"type": "loras", "sourceUri": link, "sha256": "nope"}], nodes=[])
 
@@ -659,6 +661,38 @@ def test_a_model_label_never_shows_a_links_credentials(
     if output == "json":
         issues = _envelope(result)["error"]["details"]["invalid"]
         assert {issue["model"] for issue in issues} == {label}
+
+
+@pytest.mark.parametrize("output", ["json", "pretty"])
+def test_hidden_links_still_name_their_models_apart(workspace: Path, output: str) -> None:
+    """A jsDelivr ``@version`` path puts an '@' after the first '/', so the link is
+    not shown; each model is still named by the file its link points at, as
+    ``models[n]`` counts the sorted spec and a JSON consumer keys by ``model``."""
+    # Given
+    write_spec(
+        workspace,
+        models=[
+            {"type": "loras", "sourceUri": "https://cdn.jsdelivr.net/gh/team/loras@v1/a.safetensors", "sha256": "no"},
+            {"type": "loras", "sourceUri": "https://cdn.jsdelivr.net/gh/team/loras@v1/b", "sha256": "a" * 64},
+        ],
+        nodes=[],
+    )
+
+    # When
+    result = _invoke(workspace, output=output)
+
+    # Then
+    assert result.exit_code == 1, result.output
+    said = "".join(result.output.split())
+    assert "".join(HIDDEN_LINK_LABEL.split()) not in said
+    assert "…/a.safetensors" in said
+    assert "(…/b)" in said or '"…/b"' in said
+    if output == "json":
+        issues = _envelope(result)["error"]["details"]["invalid"]
+        assert {issue["model"]: issue["field"].rsplit(".", 1)[-1] for issue in issues} == {
+            "…/a.safetensors": "sha256",
+            "…/b": "filename",
+        }
 
 
 def test_a_refused_link_is_named_without_its_fragment(workspace: Path) -> None:
