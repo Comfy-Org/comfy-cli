@@ -89,6 +89,35 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, outcome):
     return calls
 
 
+def _patch_urlopen_raw(monkeypatch: pytest.MonkeyPatch, raw: bytes, status: int = 201):
+    """Serve ``raw`` verbatim, unlike ``_patch_urlopen`` which JSON-encodes it.
+
+    Needed for the bodies a real proxy/gateway returns — an HTML error page,
+    nothing at all — which never survive a ``json.dumps`` round trip.
+    """
+    calls: list[dict] = []
+
+    class _Resp:
+        def __init__(self):
+            self.status = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=None):
+            return raw
+
+    def _fake(req, timeout=None):
+        calls.append({"url": req.full_url, "method": req.get_method(), "body": req.data})
+        return _Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake)
+    return calls
+
+
 class TestEnsure:
     def test_404_is_asset_not_found_not_workflow_not_found(self, cloud_target, monkeypatch, capsys):
         _patch_urlopen(monkeypatch, _http_error(404))
@@ -104,6 +133,44 @@ class TestEnsure:
         assert "workflow list" not in err["hint"]
         assert err["details"]["hash"] == "comfyorg_logo.png"
         assert err["details"]["operation"] == "ensure"
+
+    def test_non_object_body_is_cloud_http_error(self, cloud_target, monkeypatch, capsys):
+        # Pre-fix: `AttributeError: 'list' object has no attribute 'get'` and no envelope at all.
+        _patch_urlopen(monkeypatch, [1, 2, 3])
+        env = _run(["ensure", "--hash", "a" * 64, "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+        assert error_codes.is_registered(env["error"]["code"])
+        assert env["error"]["details"]["got_type"] == "list"
+        assert env["error"]["details"]["operation"] == "ensure"
+        assert "created_new" not in json.dumps(env)
+
+    def test_unparseable_body_is_cloud_http_error_not_fake_success(self, cloud_target, monkeypatch, capsys):
+        # Pre-fix: `{"ok": true, "data": {"id": null, "hash": <the caller's own hash>, "created_new": true}}`
+        # — a borrow the server never confirmed, reported as done.
+        _patch_urlopen_raw(monkeypatch, b"<html><body>502 Bad Gateway</body></html>")
+        env = _run(["ensure", "--hash", "a" * 64, "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+        assert error_codes.is_registered(env["error"]["code"])
+        assert "created_new" not in json.dumps(env)
+
+    def test_empty_body_is_cloud_http_error(self, cloud_target, monkeypatch, capsys):
+        # A POST with no body cannot confirm the borrow: unlike `ls`, empty is an error here.
+        _patch_urlopen_raw(monkeypatch, b"", status=200)
+        env = _run(["ensure", "--hash", "a" * 64, "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+        assert error_codes.is_registered(env["error"]["code"])
+        assert "created_new" not in json.dumps(env)
+
+    def test_whitespace_body_is_cloud_http_error(self, cloud_target, monkeypatch, capsys):
+        _patch_urlopen_raw(monkeypatch, b"\n")
+        env = _run(["ensure", "--hash", "a" * 64, "--where", "cloud"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "cloud_http_error"
+        assert error_codes.is_registered(env["error"]["code"])
+        assert "created_new" not in json.dumps(env)
 
     def test_401_is_still_cloud_unauthorized(self, cloud_target, monkeypatch, capsys):
         _patch_urlopen(monkeypatch, _http_error(401))
