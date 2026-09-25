@@ -59,6 +59,15 @@ def retry_after_from_headers(headers) -> float | None:
     return _parse_retry_after(headers)
 
 
+# How a 429 hint ends when the caller has nothing more specific to say. A 429
+# means the server is throttling; it does not by itself prove the request had
+# no effect, so a request that creates or changes something is checked before
+# it is repeated.
+_DEFAULT_RATE_LIMITED_NEXT_STEP = (
+    "retry; if the request creates or changes something, check first that it did not already go through"
+)
+
+
 def emit_status_error(
     renderer,
     *,
@@ -68,19 +77,20 @@ def emit_status_error(
     message: str,
     hint: str | None,
     details: dict,
-    rate_limited_next_step: str = "retry it unchanged",
+    rate_limited_next_step: str = _DEFAULT_RATE_LIMITED_NEXT_STEP,
 ) -> None:
     """Emit the envelope for a cloud HTTP status that has no caller-specific code.
 
-    A 429 is throttling, not a rejection: the request was never judged, so the
-    generic ``cloud_http_error`` (whose callers' hints say "check the workflow
-    is valid", "check `details.body`") sends an agent off to rewrite a request
-    that was fine. It gets ``cloud_rate_limited`` and a retry hint instead,
-    with the server's ``Retry-After`` in ``details.retry_after`` when it sent
-    one. Every other status keeps the caller's ``cloud_http_error`` envelope
-    exactly as given. ``rate_limited_next_step`` finishes the 429 hint for a
-    caller whose request already had an effect (``run``'s poll: the job was
-    submitted, so re-running would submit a second one).
+    A 429 is throttling, which says nothing about whether the request is valid,
+    so the generic ``cloud_http_error`` (whose callers' hints say "check the
+    workflow is valid", "check `details.body`") would send an agent off to
+    rewrite a request that may be fine. It gets ``cloud_rate_limited`` and a
+    wait-then-next-step hint instead, with the server's ``Retry-After`` in
+    ``details.retry_after`` when it sent one. Every other status keeps the
+    caller's ``cloud_http_error`` envelope exactly as given.
+    ``rate_limited_next_step`` finishes the 429 hint for a caller that knows
+    more (``run``'s submit: check the job list before re-running; its poll: the
+    job exists, so follow it rather than re-running).
     """
     if status != 429:
         renderer.error(code="cloud_http_error", message=message, hint=hint, details=details)
@@ -93,14 +103,14 @@ def rate_limited_error(
     retry_after: float | None,
     details: dict,
     *,
-    next_step: str = "retry it unchanged",
+    next_step: str = _DEFAULT_RATE_LIMITED_NEXT_STEP,
 ) -> dict:
     """The ``cloud_rate_limited`` envelope fields (``code``/``message``/``hint``/``details``).
 
     Shared by :func:`emit_status_error` and callers that record the error
-    rather than render it (the detached job watcher's state file), so both
-    carry the same shape: ``details.status`` is 429 and ``details.retry_after``
-    holds the server's ``Retry-After`` when it sent one.
+    rather than render it (the job state file), so both carry the same shape:
+    ``details.status`` is 429 and ``details.retry_after`` holds the server's
+    ``Retry-After`` when it sent one.
     """
     rate_details = {**details, "status": 429}
     if retry_after is not None:
@@ -111,7 +121,7 @@ def rate_limited_error(
     return {
         "code": "cloud_rate_limited",
         "message": f"Comfy Cloud rate-limited the {operation} request (HTTP 429): too many requests",
-        "hint": f"the request was throttled, not rejected — {wait} and {next_step}",
+        "hint": f"{wait}, then {next_step}",
         "details": rate_details,
     }
 

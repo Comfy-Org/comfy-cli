@@ -4618,3 +4618,22 @@ def test_jobs_schema_empty_base_url_does_not_buy_the_host_port_exemption():
 
     # A real cloud payload is untouched by either guard.
     validator.validate({"prompt_id": "p", "status": "completed", "base_url": "https://api.comfy.example"})
+
+
+def test_poll_cloud_once_clears_a_recorded_rate_limit_on_the_next_good_poll():
+    """`run --wait` leaves a poll 429 as a non-terminal record carrying
+    `cloud_rate_limited`; the next successful status poll must clear it."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+    from comfy_cli.command._cloud_errors import rate_limited_error
+
+    state = jobs_state.new(prompt_id="pid-429", client_id="c", workflow="w", where="cloud")
+    state.error = rate_limited_error("poll", 3.0, {"prompt_id": "pid-429"})
+
+    class _Ok:
+        def get_job_status(self, prompt_id):
+            return {"status": "in_progress"}
+
+    assert job_watcher._poll_cloud_once(state, client=_Ok()) is False
+    assert state.error is None
+    assert state.status not in jobs_state.TERMINAL_STATUSES

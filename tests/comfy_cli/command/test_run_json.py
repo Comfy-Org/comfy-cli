@@ -2419,6 +2419,22 @@ class TestCloudRateLimited:
         assert "workflow is valid" not in err["hint"]
         assert "retry" in err["hint"].lower()
 
+    def test_submit_429_hint_checks_for_the_job_before_resubmitting(self, monkeypatch, workflow_file, capsys):
+        """A 429 does not prove the submit had no effect. The hint must not say
+        "not rejected" / "retry unchanged"; it sends the caller to the job list
+        first, so a submit that did go through is not repeated."""
+        from comfy_cli.comfy_client import HTTPError
+
+        exc = HTTPError(429, "Too Many Requests", "", retry_after=12.0)
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit_exc=exc))
+        lines, _ = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        hint = _envelope(lines)["error"]["hint"]
+        assert "comfy jobs ls --where cloud" in hint
+        assert "not rejected" not in hint
+        assert "unchanged" not in hint
+        assert "12s" in hint
+
     def test_submit_429_without_retry_after_omits_it(self, monkeypatch, workflow_file, capsys):
         from comfy_cli.comfy_client import HTTPError
 
@@ -2508,3 +2524,60 @@ class TestPollRateLimitedPointsAtTheSubmittedJob:
         doc = (Path(__file__).resolve().parents[3] / "docs" / "json-output.md").read_text()
         row = next(line for line in doc.splitlines() if line.startswith("| `cloud_rate_limited`"))
         assert "comfy jobs watch <prompt_id> --where cloud" in row
+
+
+class TestPollRateLimitedIsNotTerminal:
+    """A 429 while `--wait` polls says nothing about the job, which was already
+    accepted and may still be running. The record must stay non-terminal (so a
+    later `comfy jobs watch` / status poll can finish it and clear the error),
+    and the recorded error keeps the prompt id and Retry-After."""
+
+    def test_poll_429_leaves_the_record_non_terminal(self, monkeypatch, workflow_file, capsys):
+        from comfy_cli import jobs_state as jobs_state_mod
+        from comfy_cli.comfy_client import HTTPError
+
+        base = _fake_client()
+
+        class Throttled(base):
+            def wait_for_completion(self, prompt_id, **k):
+                raise HTTPError(429, "Too Many Requests", retry_after=3.0)
+
+        _install_cloud_stubs(monkeypatch, client_cls=Throttled)
+        writes: list[tuple] = []
+
+        def fake_write(state):
+            writes.append((state.status, dict(state.error) if state.error else None))
+            return "/tmp/state.json"
+
+        monkeypatch.setattr(jobs_state_mod, "write", fake_write)
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=True, timeout=5)
+
+        assert exit_code == 1
+        assert _envelope(lines)["error"]["code"] == "cloud_rate_limited"
+        status, error = writes[-1]
+        assert status not in jobs_state_mod.TERMINAL_STATUSES
+        assert error["code"] == "cloud_rate_limited"
+        assert error["details"]["prompt_id"] == "cloud-pid"
+        assert error["details"]["retry_after"] == 3
+        assert error["details"]["status"] == 429
+
+    def test_poll_500_still_records_a_terminal_error(self, monkeypatch, workflow_file, capsys):
+        from comfy_cli import jobs_state as jobs_state_mod
+        from comfy_cli.comfy_client import HTTPError
+
+        base = _fake_client()
+
+        class Broken(base):
+            def wait_for_completion(self, prompt_id, **k):
+                raise HTTPError(500, "Internal Server Error")
+
+        _install_cloud_stubs(monkeypatch, client_cls=Broken)
+        writes: list[tuple] = []
+        monkeypatch.setattr(
+            jobs_state_mod, "write", lambda state: writes.append((state.status, state.error)) or "/tmp/state.json"
+        )
+        _cloud_capture(capsys, workflow_file, wait=True, timeout=5)
+
+        status, error = writes[-1]
+        assert status == "error"
+        assert error["code"] == "cloud_http_error"

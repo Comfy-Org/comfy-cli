@@ -199,3 +199,48 @@ def test_429_invalid_retry_after_is_dropped(value: str):
     assert call["code"] == "cloud_rate_limited"
     assert "retry_after" not in call["details"]
     assert value not in call["hint"]
+
+
+# --- 429 hint stays honest about what a 429 proves ---------------------------
+#
+# HTTP 429 says the server is throttling; it does not by itself prove the
+# request had no effect. The hint must not claim "not rejected" or tell the
+# caller to repeat a request unconditionally, since repeating a submit that did
+# go through would create a second job.
+
+
+def test_429_hint_does_not_claim_the_request_had_no_effect():
+    from comfy_cli.command._cloud_errors import rate_limited_error
+
+    err = rate_limited_error("save", 5.0, {})
+    hint = err["hint"].lower()
+    assert "not rejected" not in hint
+    assert "unchanged" not in hint
+    assert "5s" in hint
+    # A request that creates or changes something gets checked before a retry.
+    assert "check" in hint
+
+
+def test_429_hint_takes_a_caller_specific_next_step():
+    from comfy_cli.command._cloud_errors import rate_limited_error
+
+    err = rate_limited_error("job status", None, {"prompt_id": "p"}, next_step="the watcher keeps polling")
+    assert err["hint"].endswith("the watcher keeps polling")
+    assert "a few seconds" in err["hint"]
+    assert err["details"] == {"prompt_id": "p", "status": 429}
+
+
+def test_registry_scopes_cloud_rate_limited_to_cloud():
+    """Local `comfy run` reports a 429 from its own server as `client_error`
+    (`details.status` 429); `cloud_rate_limited` is the Cloud-only code, and the
+    registry says so, so a consumer does not expect it from a local target."""
+    from comfy_cli import error_codes
+
+    by_code = {c.code: c for c in error_codes.REGISTRY}
+    rate_limited = by_code["cloud_rate_limited"]
+    assert "Cloud only" in rate_limited.meaning
+    assert "client_error" in rate_limited.meaning
+    assert "429" in by_code["client_error"].meaning
+    hint = rate_limited.hint.lower()
+    assert "unchanged" not in hint
+    assert "comfy jobs ls" in hint

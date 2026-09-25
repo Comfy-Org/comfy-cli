@@ -36,11 +36,13 @@ from comfy_cli.http import assert_safe_url as _assert_safe_url
 from comfy_cli.target import Target
 
 # Transient HTTP failures during polling should back off and retry, not abort.
-# 429 (rate limit) is retried for any method — the request was rejected, not
-# processed, so even a POST is safe to repeat. Transient 5xx is retried for
-# GET only, since a 5xx on a POST may have partially applied (double-submit).
+# Only idempotent requests are retried in-request, for 429 and transient 5xx
+# alike: neither status proves a POST had no effect, and repeating a submit
+# that did go through would queue a second job. A throttled POST surfaces its
+# 429 (with Retry-After) to the caller instead.
 _MAX_TRANSIENT_RETRIES = 4
 _RETRYABLE_5XX = {502, 503, 504}
+_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 # Poll-level resilience for wait_for_completion: a sustained 429 storm (or a
 # plain 500, which the in-request layer never retries) must not abort a wait
@@ -315,9 +317,8 @@ class Client:
                     timeout=timeout,
                     _retried=True,
                 )
-            # Transient: back off and retry. 429 for any method (rejected, not
-            # processed); 5xx for idempotent GETs only.
-            retryable = e.code == 429 or (e.code in _RETRYABLE_5XX and method == "GET")
+            # Transient: back off and retry, for idempotent requests only.
+            retryable = method.upper() in _IDEMPOTENT_METHODS and (e.code == 429 or e.code in _RETRYABLE_5XX)
             if retryable and _attempt < _MAX_TRANSIENT_RETRIES:
                 time.sleep(self._retry_delay(e, _attempt))
                 return self._request(
