@@ -181,6 +181,10 @@ def add_node_cmd(
         str | None,
         typer.Option("--at", show_default=False, help="Canvas position 'x,y' for the new node."),
     ] = None,
+    title: Annotated[
+        str | None,
+        typer.Option("--title", show_default=False, help="Custom display title for the new node."),
+    ] = None,
     allow_deprecated: Annotated[
         bool,
         typer.Option(
@@ -216,6 +220,7 @@ def add_node_cmd(
             graph,
             class_type,
             pos=pos,
+            title=title,
             actor=actor,
             base_version=base_version,
             allow_deprecated=allow_deprecated,
@@ -232,7 +237,9 @@ def add_node_cmd(
         # Same envelope shape as `nodes show` so a caller can self-correct from
         # the error alone. (The old hint pointed at `comfy nodes types`, which
         # lists connection types — MODEL/LATENT/IMAGE — not class_types.)
-        if e.ui_only:
+        if e.ui_only and e.class_type in workflow_ops.NOTE_NODE_TYPES:
+            hint = workflow_ops.note_insert_hint(e.class_type)
+        elif e.ui_only:
             hint = "use a real node class; to annotate the graph, set a title/widget on an existing node instead"
         elif e.subgraph_id:
             hint = "pick a node CLASS from `comfy nodes search <text>`; a subgraph instance cannot be added"
@@ -295,6 +302,9 @@ def set_widget_cmd(
         workflow, op = workflow_ops.set_widget(
             workflow, graph, node_id, widget, _parse_value(value), actor=actor, base_version=base_version
         )
+    except workflow_ops.NoteTextNotWritable as e:
+        _emit_edit_error(renderer, e, hint=e.hint)
+        raise typer.Exit(code=1) from e
     except ValueError as e:
         _emit_edit_error(
             renderer,

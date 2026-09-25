@@ -34,7 +34,10 @@ save_image = SaveImage(images=vae_decode, filename_prefix="SD1.5")  # 9
 
 def test_sd15_golden_source(sd15_workflow, sd15_graph):
     res = render_py(sd15_workflow, sd15_graph)
-    body = "\n".join(ln for ln in res.source.splitlines() if not ln.startswith("# note")) + "\n"
+    body = (
+        "\n".join(ln for ln in res.source.splitlines() if not ln.startswith("# note") and not ln.startswith("# group"))
+        + "\n"
+    )
     assert body == SD15_GOLDEN
     assert res.bindings == {
         "checkpoint_loader_simple": "4",
@@ -48,6 +51,28 @@ def test_sd15_golden_source(sd15_workflow, sd15_graph):
     assert res.node_count == 7
     assert {s["type"] for s in res.skipped} == {"MarkdownNote"}
     assert len(res.skipped) == 4
+
+
+def test_sd15_groups_are_visible_in_the_source(sd15_workflow, sd15_graph):
+    # The in-app agent's canvas read (this renderer) must enumerate canvas
+    # groups, not just nodes and links, or an agent asked "are there any
+    # groups on the canvas?" has no way to answer correctly even when one is
+    # drawn on screen with a title bar. The bundled sd15 fixture carries
+    # three real, titled groups; each must reach the rendered source.
+    groups = sd15_workflow["groups"]
+    assert groups, "fixture must define at least one group to prove this"
+    src = render_py(sd15_workflow, sd15_graph).source
+    for group in groups:
+        assert group["title"] in src
+
+    # And the membership a reader infers from the comment should match what
+    # the bounding boxes actually enclose (verified by hand against the
+    # fixture's node pos/size): group 1 encloses only the checkpoint loader,
+    # group 3 encloses both CLIPTextEncode nodes, group 2 encloses the
+    # EmptyLatentImage — KSampler/VAEDecode/SaveImage sit outside every box.
+    assert '# group 1 "Step 1 - Load model": nodes 4' in src
+    assert '# group 3 "Step 2 - Prompt": nodes 6, 7' in src
+    assert '# group 2 "Step 3 - Image size": nodes 5' in src
 
 
 def test_sd15_notes_print_as_comments(sd15_workflow, sd15_graph):
@@ -584,7 +609,10 @@ def test_sd15_golden_unaffected_by_live_link_widget_fix(sd15_workflow, sd15_grap
     # from a real node, so the fix in test_widget_backed_input_with_live_link_uses_edge_ref
     # must not touch this golden.
     res = render_py(sd15_workflow, sd15_graph)
-    body = "\n".join(ln for ln in res.source.splitlines() if not ln.startswith("# note")) + "\n"
+    body = (
+        "\n".join(ln for ln in res.source.splitlines() if not ln.startswith("# note") and not ln.startswith("# group"))
+        + "\n"
+    )
     assert body == SD15_GOLDEN
 
 
@@ -820,7 +848,10 @@ def test_bypassed_source_is_marked_on_the_consumer(sd15_graph):
 
 def test_bypass_marker_does_not_touch_the_sd15_golden(sd15_workflow, sd15_graph):
     res = render_py(sd15_workflow, sd15_graph)
-    body = "\n".join(ln for ln in res.source.splitlines() if not ln.startswith("# note")) + "\n"
+    body = (
+        "\n".join(ln for ln in res.source.splitlines() if not ln.startswith("# note") and not ln.startswith("# group"))
+        + "\n"
+    )
     assert body == SD15_GOLDEN
     assert "via bypassed" not in res.source
 

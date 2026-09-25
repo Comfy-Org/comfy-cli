@@ -380,6 +380,7 @@ def test_cli_emit_unsupported_model_has_its_own_error_code(runner, tmp_path, mon
     assert err["code"] == "emit_workflow_unsupported_model"
     assert err["details"]["model"] == "flux-pro"
     assert err["details"]["supported"] == emit.supported_models()
+    assert err["details"]["suggested"][0] == "flux-2"
     assert "generate list" in err["hint"]
     assert not out.exists()
 

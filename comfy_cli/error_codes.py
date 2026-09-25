@@ -1009,8 +1009,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "emit_workflow_unsupported_model",
         "`generate --emit-workflow` has no ComfyUI partner-node mapping for the requested model "
         "(`details.model`); most of the proxy catalog is proxy-only. `details.supported` lists the "
-        "aliases that can be emitted — the same set `generate list` flags with `emit_supported: true`.",
-        "pick a model with `emit_supported: true` in `comfy --json generate list`, or drop "
+        "aliases that can be emitted — the same set `generate list` flags with `emit_supported: true`; "
+        "`details.suggested` is the subset producing the same media as the requested model whose required "
+        "inputs the request already carries, same partner first (empty when none fits as given).",
+        "retry with the first alias in `details.suggested`, or pick any with `emit_supported: true`, or drop "
         "--emit-workflow and call the model through the proxy",
     ),
     ErrorCode(
