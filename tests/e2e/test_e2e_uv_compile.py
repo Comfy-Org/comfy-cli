@@ -2,8 +2,9 @@
 
 Tests the full stack: comfy node → execute_cm_cli → cm_cli subprocess.
 Uses ltdrdata's dedicated test packs (nodepack-test1-do-not-install,
-nodepack-test2-do-not-install) which intentionally conflict on ansible
-versions and contain no executable code.
+nodepack-test2-do-not-install) which intentionally conflict (test1 pins
+python-slugify==8.0.4, which needs text-unidecode>=1.3; test2 pins
+text-unidecode==1.2) and contain no executable code.
 
 Supply-chain safety policy:
     Only node packs from verified, controllable authors (ltdrdata,
@@ -19,18 +20,20 @@ Usage:
 import os
 import shutil
 import subprocess
-import sys
 import time
 from datetime import datetime
 from textwrap import dedent
 
 import pytest
 
+from comfy_cli.resolve_python import resolve_workspace_python
+from comfy_cli.uv import ensure_pip
+
 # Real node packs for normal installation testing
 PACK_IMPACT = "comfyui-impact-pack"
 PACK_INSPIRE = "comfyui-inspire-pack"
 
-# Test node packs from ltdrdata — intentionally conflict on ansible versions
+# Test node packs from ltdrdata — intentionally conflict (python-slugify vs text-unidecode)
 REPO_TEST1 = "https://github.com/ltdrdata/nodepack-test1-do-not-install"
 REPO_TEST2 = "https://github.com/ltdrdata/nodepack-test2-do-not-install"
 PACK_TEST1 = "nodepack-test1-do-not-install"
@@ -46,15 +49,22 @@ pytestmark = [
 ]
 
 
-def exec(cmd: str, timeout: int = 600, **kwargs) -> subprocess.CompletedProcess[str]:
-    cmd = dedent(cmd).strip()
+def exec(cmd: str | list[str], timeout: int = 600, **kwargs) -> subprocess.CompletedProcess[str]:
+    """Run ``cmd``: a string goes through the shell, a list is run directly.
+
+    Use a list whenever an argument is a path that may contain spaces
+    (e.g. an interpreter under VIRTUAL_ENV/CONDA_PREFIX).
+    """
+    use_shell = isinstance(cmd, str)
+    if use_shell:
+        cmd = dedent(cmd).strip()
     print(f"cmd: {cmd}")
     try:
         proc = subprocess.run(
             args=cmd,
             capture_output=True,
             text=True,
-            shell=True,
+            shell=use_shell,
             encoding="utf-8",
             check=False,
             timeout=timeout,
@@ -98,6 +108,48 @@ def _rmtree_retry(path, retries=5, delay=2.0):
             if attempt < retries - 1:
                 time.sleep(delay)
     shutil.rmtree(path, ignore_errors=True)
+
+
+def _apply_manager_override(ws: str, workspace_python: str, manager_override: str) -> None:
+    """Install a specific ComfyUI-Manager into ``workspace_python`` (skips the PyPI/Core PR cycle).
+
+    ``manager_override`` is either a PyPI version ("4.1b7") or a git ref
+    ("Comfy-Org/ComfyUI-Manager@branch", cloned and installed with uv).
+    """
+    if "@" in manager_override and "/" in manager_override:
+        # Branch install: "Comfy-Org/ComfyUI-Manager@fix-branch"
+        # Uses uv (not pip) because Manager repo has flat-layout incompatible with setuptools.
+        repo_spec, branch = manager_override.rsplit("@", 1)
+        clone_dir = os.path.join(ws, "_manager_override")
+        if os.path.isdir(clone_dir):
+            shutil.rmtree(clone_dir)
+        proc = exec(f"git clone --branch {branch} --depth 1 https://github.com/{repo_spec}.git {clone_dir}")
+        assert proc.returncode == 0, f"Manager clone failed:\n{proc.stderr}"
+        proc = exec(
+            [
+                "uv",
+                "pip",
+                "install",
+                clone_dir,
+                "--reinstall-package",
+                "comfyui-manager",
+                "--python",
+                workspace_python,
+            ]
+        )
+        assert proc.returncode == 0, f"Manager override install failed:\n{proc.stderr}"
+    else:
+        # PyPI version: "4.1b7". Install with deps so a newer Manager's new
+        # requirements are pulled in; already-satisfied ones are left alone.
+        # `comfy install --fast-deps --skip-manager` never bootstraps pip, and a
+        # uv-managed workspace venv may not ship it, so make sure it is there.
+        ensure_pip(workspace_python, cwd=ws)
+        proc = exec([workspace_python, "-m", "pip", "install", f"comfyui-manager=={manager_override}", "--pre"])
+        assert proc.returncode == 0, f"Manager override failed:\n{proc.stderr}"
+        proc = exec([workspace_python, "-m", "pip", "show", "comfyui-manager"])
+        assert f"Version: {manager_override}\n" in proc.stdout, (
+            f"Manager override did not take effect:\n{proc.stdout}\n{proc.stderr}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -150,33 +202,13 @@ def workspace():
     proc = exec("comfy --skip-prompt --no-enable-telemetry env")
     assert proc.returncode == 0, f"env failed:\n{proc.stdout}\n{proc.stderr}"
 
-    # Override Manager if MANAGER_OVERRIDE is set (skip PyPI/Core PR cycle).
-    # Accepts:  "4.1b7" (PyPI)  or  "Comfy-Org/ComfyUI-Manager@branch" (git clone + uv)
-    venv_dir = os.path.join(ws, ".venv")
-    if sys.platform == "win32":
-        venv_python = os.path.join(venv_dir, "Scripts", "python.exe")
-    else:
-        venv_python = os.path.join(venv_dir, "bin", "python")
-
+    # Install into the same interpreter comfy-cli runs cm_cli with
+    # (execute_cm_cli -> resolve_workspace_python). That is the workspace .venv
+    # when one exists, but on CI runners with a writable global Python there is
+    # no .venv and cm_cli runs from sys.executable.
     manager_override = os.getenv("MANAGER_OVERRIDE", "")
     if manager_override:
-        if "@" in manager_override and "/" in manager_override:
-            # Branch install: "Comfy-Org/ComfyUI-Manager@fix-branch"
-            # Uses uv (not pip) because Manager repo has flat-layout incompatible with setuptools.
-            repo_spec, branch = manager_override.rsplit("@", 1)
-            clone_dir = os.path.join(ws, "_manager_override")
-            if os.path.isdir(clone_dir):
-                shutil.rmtree(clone_dir)
-            proc = exec(f"git clone --branch {branch} --depth 1 https://github.com/{repo_spec}.git {clone_dir}")
-            assert proc.returncode == 0, f"Manager clone failed:\n{proc.stderr}"
-            proc = exec(f"uv pip install {clone_dir} --reinstall-package comfyui-manager --python {venv_dir}")
-            assert proc.returncode == 0, f"Manager override install failed:\n{proc.stderr}"
-        else:
-            # PyPI version: "4.1b7"
-            proc = exec(
-                f"{venv_python} -m pip install comfyui-manager=={manager_override} --pre --force-reinstall --no-deps"
-            )
-            assert proc.returncode == 0, f"Manager override failed:\n{proc.stderr}"
+        _apply_manager_override(ws, resolve_workspace_python(ws), manager_override)
 
     # Populate Manager cache before any node operations (blocking fetch).
     proc = exec(f"comfy --workspace {ws} node update-cache")

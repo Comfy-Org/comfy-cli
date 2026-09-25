@@ -307,6 +307,69 @@ def set_widget_cmd(
 
 
 # ---------------------------------------------------------------------------
+# set-node-field (PROPOSED, op-vocabulary-v1 amendment v1.6 — not yet ratified)
+# ---------------------------------------------------------------------------
+
+
+@tracking.track_command("workflow")
+def set_node_field_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    node: Annotated[str, typer.Argument(help="Node id.")],
+    field: Annotated[
+        str,
+        typer.Argument(help="Field: `title`, `mode`, `flags.collapsed` or `flags.pinned`."),
+    ],
+    value: Annotated[
+        str | None,
+        typer.Argument(
+            show_default=False,
+            help="New value (parsed as JSON, else literal string). Omit and pass --clear to clear the field.",
+        ),
+    ] = None,
+    clear: Annotated[
+        bool,
+        typer.Option("--clear", show_default=False, help="Clear the field back to absent."),
+    ] = False,
+    actor: ActorOpt = "cli",
+    base_version: BaseVersionOpt = 0,
+    stdout: StdoutOpt = False,
+):
+    """Set, or clear, one durable node field; emits a ``set_node_field`` op.
+
+    PROPOSED: ``set_node_field`` is not yet part of the ratified
+    docs/op-vocabulary-v1.md contract — see that document's §1.8. It
+    supersedes the withdrawn, title-only ``set_title`` proposal and mirrors
+    comfy-multi-player#235's merged ``set_node_field`` CRDT op.
+    """
+    renderer = get_renderer()
+    renderer.command = "workflow set-node-field"
+    if clear == (value is not None):
+        renderer.error(
+            code="workflow_edit_invalid",
+            message="pass exactly one of VALUE or --clear",
+            hint='`comfy workflow set-node-field <file> <node_id> <field> "value"` or '
+            "`comfy workflow set-node-field <file> <node_id> <field> --clear`",
+        )
+        raise typer.Exit(code=1)
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    # No catalog is needed to write these fields (unlike set-widget): none of
+    # `title`/`mode`/`flags.collapsed`/`flags.pinned` is a catalogued widget.
+    node_id: Any = int(node) if node.lstrip("-").isdigit() else node
+    try:
+        workflow, op = workflow_ops.set_node_field(
+            workflow, node_id, field, None if clear else _parse_value(value), actor=actor, base_version=base_version
+        )
+    except ValueError as e:
+        _emit_edit_error(
+            renderer,
+            e,
+            hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read",
+        )
+        raise typer.Exit(code=1) from e
+    _finish(renderer, p, workflow, op, base_version, stdout, "workflow set-node-field")
+
+
+# ---------------------------------------------------------------------------
 # connect
 # ---------------------------------------------------------------------------
 
