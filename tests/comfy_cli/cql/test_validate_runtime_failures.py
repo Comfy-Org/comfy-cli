@@ -1,6 +1,6 @@
-"""Graphs that validated clean but failed on Comfy Cloud (Langfuse, Sep 2026).
+"""Graphs that validated clean but failed on Comfy Cloud.
 
-Each test reproduces one observed failure with the schema the cloud catalog
+Each test reproduces one failure shape with the schema the cloud catalog
 shipped for the node, so validate catches what the worker's ComfyUI would
 otherwise reject or crash on.
 """
@@ -347,7 +347,7 @@ class TestAutogrowSlots:
         assert ("required_input_missing", "videos.video0") in _codes(result)
 
     def test_required_autogrow_inside_dynamic_combo_needs_a_slot(self):
-        # Prod 9/14: Grok image edit submitted with no image wired.
+        # A Grok image edit submitted with no image wired.
         wf = {
             "1": {
                 "class_type": "GrokImageEditNodeV2",

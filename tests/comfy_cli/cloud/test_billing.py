@@ -203,7 +203,7 @@ def test_suggest_upgrade_on_the_top_plan_returns_none():
 def test_suggest_upgrade_stays_quiet_when_the_current_price_is_unknown():
     """No suggestion beats a wrong one.
 
-    Observed in prod: /api/billing/status reports plan_slug
+    An account can have /api/billing/status report plan_slug
     "team-pro-monthly" while /api/billing/plans carries no such slug. A
     "cheapest available" fallback then suggested a $0.00 per-credit plan as an
     upgrade from PRO, which is worse than saying nothing.

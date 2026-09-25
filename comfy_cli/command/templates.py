@@ -1110,7 +1110,7 @@ def get_cmd(
 ):
     """Fuse `templates ls` (find) + `templates fetch` (get) into one hop.
 
-    Measured agent loops run ls → fetch with the name copied verbatim; `get`
+    Agent loops typically run ls → fetch with the name copied verbatim; `get`
     resolves the same filter predicates and, when exactly ONE template matches,
     returns its workflow in the same envelope `fetch` uses.
     """

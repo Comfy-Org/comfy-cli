@@ -1,7 +1,7 @@
 """`workflow add-node` must fail like `nodes show` does when a class is unknown.
 
-Measured on prod comfy-agent traces (2026-07-23 → 07-28): 12 failures where the
-agent named a class that does not exist, and it got NO suggestions back:
+When an agent named a class that does not exist, `workflow add-node` gave NO
+suggestions back:
 
   add_node:  "unknown node type 'MarkdownNote'"
   add_node:  "unknown node type 'Note'"
@@ -87,12 +87,13 @@ def test_known_class_still_adds(patched_graph, tmp_path, capsys):
 
 @pytest.mark.parametrize("cls", ["Note", "MarkdownNote"])
 def test_note_refusal_hints_the_insert_workflow_route(patched_graph, tmp_path, capsys, cls):
-    """Seen in agent tool telemetry: asked to add a Note, the agent
-    called add_node {"class_type": "Note"}, read the hint "use a real node class;
-    to annotate the graph, set a title/widget on an existing node instead", and
-    told the user notes cannot be added. They can: an insert_workflow carrying
-    the note node (with an `id` and its text in widgets_values) lands it. The hint must name that route, and the example it
-    gives must itself be accepted by `workflow insert-workflow`."""
+    """Asked to add a Note, an agent could call add_node {"class_type": "Note"},
+    read the hint "use a real node class; to annotate the graph, set a
+    title/widget on an existing node instead", and tell the user notes cannot
+    be added. They can: an insert_workflow carrying the note node (with an `id`
+    and its text in widgets_values) lands it. The hint must name that route,
+    and the example it gives must itself be accepted by
+    `workflow insert-workflow`."""
     env = _add(tmp_path, capsys, cls)
     assert env["ok"] is False
     err = env["error"]
@@ -144,10 +145,10 @@ def test_non_note_ui_only_nodes_keep_their_hint(patched_graph, tmp_path, capsys)
 
 
 def test_set_widget_on_a_note_names_the_replace_route(patched_graph, tmp_path, capsys):
-    """Seen in agent tool telemetry: the
-    agent called set_widget {"address": "insert:cdcd…:root:node:101.text"} on a
-    MarkdownNote and got "widget 'text' not found on MarkdownNote; available
-    widgets: (none — all inputs are links)" — false (a note has no inputs) and
+    """An agent calling set_widget
+    {"address": "insert:cdcd…:root:node:101.text"} on a MarkdownNote got
+    "widget 'text' not found on MarkdownNote; available widgets: (none — all
+    inputs are links)" — false (a note has no inputs) and
     no way forward. A note's text is not name-addressable (the catalog has no
     schema for it; the doc host stores it opaquely), so say that and name the
     route that works: delete the note and insert a replacement."""

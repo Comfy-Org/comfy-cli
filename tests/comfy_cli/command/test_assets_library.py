@@ -1,12 +1,11 @@
 """``comfy assets library`` error envelopes.
 
-Pins the 404 mapping for ``assets library ensure``. Found in prod (Langfuse
-2026-08-25, ``use_asset_as_input``): an agent passed a FILE NAME
-(``comfyorg_logo.png``) where the content hash belongs, the API answered 404,
-and the CLI reported ``workflow_not_found`` / "workflow not found (ensure)"
+Pins the 404 mapping for ``assets library ensure``. When a caller passed a FILE
+NAME (``comfyorg_logo.png``) where the content hash belongs, the API answered
+404, and the CLI reported ``workflow_not_found`` / "workflow not found (ensure)"
 with a hint to list *workflows* — the shared cloud-HTTP helper's 404 branch
 was written for the saved-workflow commands and hardcoded their vocabulary.
-The agent had to guess its way past a message about the wrong resource.
+The caller had to guess its way past a message about the wrong resource.
 """
 
 from __future__ import annotations

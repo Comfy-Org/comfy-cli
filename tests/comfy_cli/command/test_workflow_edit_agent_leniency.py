@@ -1,9 +1,8 @@
 """Edit shapes agents send that the CLI refused although their meaning is unambiguous.
 
-Every case here is a real comfy-agent tool input from prod/staging Langfuse
-traces (2026-09-22 → 09-23). Each failure cost the agent a round-trip; the
-retry that followed was the same edit re-spelled, so the CLI accepts the
-first spelling instead.
+Every case here is an edit shape an agent can plausibly send. Each refusal
+cost the caller a round-trip; the retry that followed was the same edit
+re-spelled, so the CLI accepts the first spelling instead.
 """
 
 from __future__ import annotations
@@ -107,8 +106,8 @@ def _node(workflow: dict, node_id: Any) -> dict:
 
 
 class TestPositionString:
-    # Trace dbe5e3c6 (prod): {"op":"add_node","class_type":"LoadVideo","as":"load1","at":"40,90"}
-    # Trace 65b781cb (stg):  {"op":"add_node","class_type":"UNETLoader","as":"unet","at":"0,0"}
+    # e.g. {"op":"add_node","class_type":"LoadVideo","as":"load1","at":"40,90"}
+    # or   {"op":"add_node","class_type":"UNETLoader","as":"unet","at":"0,0"}
     @pytest.mark.parametrize(
         ("at", "pos"),
         [("40,90", [40, 90]), ("0,0", [0, 0]), ("[430, 90]", [430, 90]), (" -12.5 , 7 ", [-12.5, 7])],
@@ -154,7 +153,7 @@ class TestPositionString:
 
 
 class TestBoolToTrueFalseCombo:
-    # Trace c9552f9f (stg): {"op":"set_widget","node":"$gen","widget":"should_remesh","value":true}
+    # e.g. {"op":"set_widget","node":"$gen","widget":"should_remesh","value":true}
     def test_batch_maps_json_true_to_dynamic_combo_option(self, graph):
         workflow, ops, aliases = workflow_ops.apply_specs(
             _empty(),
@@ -198,8 +197,8 @@ class TestBoolToTrueFalseCombo:
 
 
 class TestConnectDynamicComboWidget:
-    # Traces a6bdbb86 / 52b5712d / 28a0c48f / 9c0a6933 (nightly) and f3a953ac
-    # (prod): a connect from `$tx1.STRING` to `$sd1.model.prompt` failed "input 'model.prompt' not found on node …; inputs: []" — the
+    # A connect from `$tx1.STRING` to `$sd1.model.prompt` failed
+    # "input 'model.prompt' not found on node …; inputs: []" — the
     # widget→input conversion only knew the value-independent widget order,
     # which lists a dynamic combo's selector but none of its sub-widgets.
     def test_batch_links_string_into_selected_option_widget(self, graph, object_info):
@@ -241,7 +240,7 @@ class TestConnectDynamicComboWidget:
 
 
 class TestAliasWithInputSuffix:
-    # Trace ce95cacf (prod): set_widget with node "$kling.prompt" and widget
+    # A set_widget with node "$kling.prompt" and widget
     # "prompt" failed with "node kling.prompt not found in workflow", which
     # does not say that `node` takes the alias alone.
     def test_error_names_the_alias_and_the_widget_field(self, graph):

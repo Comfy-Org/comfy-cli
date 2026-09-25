@@ -3,11 +3,10 @@
 ``widget_order`` is value-blind: it expands each ``COMFY_DYNAMICCOMBO_V3`` at
 its first key (``Graph.widget_order_default``). A consumer that only has the
 catalog — the doc host's applier (comfy-multi-player) — therefore cannot name,
-validate or position the sub-widgets of any OTHER selection. Measured on
-stg-v2/nightly comfy-agent traces (2026-09-20..21): after
-``set_widget 1.mode faithful`` on ``MagnificImageSkinEnhancerNode``, the
-applier refused ``1.mode.skin_detail`` with "available: sharpen, smart_grain,
-mode", although ``list_slots`` had just advertised it.
+validate or position the sub-widgets of any OTHER selection. For example,
+after ``set_widget 1.mode faithful`` on ``MagnificImageSkinEnhancerNode``, the
+applier would refuse ``1.mode.skin_detail`` with "available: sharpen,
+smart_grain, mode", although ``list_slots`` had just advertised it.
 
 The frontend (``src/core/graph/widgets/dynamicWidgets.ts``) names an option's
 inputs ``<selector>.<key>`` (required, then optional), inserts the widget ones
@@ -33,8 +32,8 @@ from comfy_cli.cql.widget_catalog import build_types
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
-# Verbatim from cloud services/ingest/data/object_info.json (the class behind the
-# stg-v2 unknown_widget failures), hidden inputs dropped.
+# Verbatim from Comfy Cloud's object_info (the class behind the
+# unknown_widget refusals described above), hidden inputs dropped.
 MAGNIFIC = {
     "MagnificImageSkinEnhancerNode": {
         "input": {

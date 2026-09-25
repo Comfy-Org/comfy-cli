@@ -544,9 +544,9 @@ def _load_clearable_workflow_or_fail(renderer, path: str) -> tuple[Path, dict[st
     API-format document (``workflow_not_frontend_format``), because slot
     addressing needs ``nodes[]``/``links[]``. ``clear`` and ``reset-doc`` do
     not: the result is the empty frontend document either way. Gating them on
-    the format of what is being thrown away locked a tab in prod — a
+    the format of what is being thrown away could lock a tab — a
     ``generate --emit-workflow`` API-format draft could then be neither edited
-    NOR cleared, and the agent abandoned the tab.
+    NOR cleared, leaving the caller nothing to do but abandon the tab.
 
     An API-format file is replaced by the empty frontend baseline (the same
     shape ``foreach`` mints a fresh document from) so the op applies to a

@@ -11,8 +11,8 @@ Two pins:
     caller replays it instead of re-deriving the semantics.
 
 Plus the outcome rule itself: a fatal finding refuses the edit and leaves the
-document untouched, which is the behaviour the ~750 lines of Go in
-`services/agent/internal/loop/enumgate.go` existed to synthesize.
+document untouched, which is the behaviour a downstream consumer otherwise
+had to synthesize on its own.
 """
 
 from __future__ import annotations

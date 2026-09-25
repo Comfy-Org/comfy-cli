@@ -12,12 +12,11 @@ So a live canvas holds string link ids, top-level node ids with ``:`` in them,
 and interior node ids with ``/`` in them. The fixtures under
 ``fixtures/crdt_insert/`` are the output of cmp's own
 ``remapInsertedWorkflowIds`` (comfy-multi-player 622865b) over the gallery
-fixtures, with the op_id of a real failing stg-v2 turn — see the README there.
+fixtures, with a fixed op_id — see the README there.
 
-Measured on stg-v2/nightly comfy-agent traces (2026-09-20..21): every
-``validate`` failure was a link-carried ``required_input_missing`` on an
-``insert:`` node, and set_widget refused the exact interior address
-``list_slots`` had just advertised (77 times).
+Before these ids were understood, ``validate`` could report a link-carried
+``required_input_missing`` on an ``insert:`` node, and set_widget could refuse
+the exact interior address ``list_slots`` had just advertised.
 """
 
 from __future__ import annotations
@@ -165,13 +164,11 @@ def test_lowering_skips_a_link_whose_id_is_unhashable():
 # A bare template id addressing its remapped `insert:` node
 # ---------------------------------------------------------------------------
 #
-# Measured on prod/stg comfy-agent traces (2026-09-23: c607e8ee, c6d64309,
-# c0115100, 47cae255, 2a78e219): after get_template the agent writes
-# `57.text` (the id it read in the template), set_widget refuses it as not
-# found, and the error suggests the `insert:<op>:root:node:57` address. Every
-# one of those turns then re-sent the suggested address and succeeded. When
-# exactly one top-level node is the remap of that id, there is only one
-# thing `57` can mean.
+# After get_template an agent writes `57.text` (the id it read in the
+# template), set_widget refuses it as not found, and the error suggests the
+# `insert:<op>:root:node:57` address, which the agent then re-sends and
+# succeeds with. When exactly one top-level node is the remap of that id,
+# there is only one thing `57` can mean.
 
 INSERTED_57 = f"insert:{OP_ID}:root:node:57"
 

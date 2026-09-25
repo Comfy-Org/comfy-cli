@@ -1,9 +1,9 @@
 """An output slot may be addressed with a case/separator variant of its name.
 
-Prod comfy-agent traces (2026-07-23 → 07-28) show the agent addressing outputs
-by their TYPE because no discovery surface showed it the NAME (fixed separately
-in cloud#5828). Where the name and type differ only in case or separators, the
-intent is unambiguous and refusing it is pure friction:
+Agents address outputs by their TYPE when no discovery surface has shown them
+the NAME (fixed separately in cloud#5828). Where the name and type differ only
+in case or separators, the intent is unambiguous and refusing it is pure
+friction:
 
   output 'IMAGE'          on a node whose outputs are ['image','alpha']
   output 'MODEL_TASK_ID'  on Tripo nodes whose output is named 'model task_id'
@@ -34,8 +34,8 @@ def g():
 @pytest.mark.parametrize(
     "asked,outputs,want_idx",
     [
-        ("IMAGE", [("image", "IMAGE"), ("alpha", "MASK")], 0),  # prod: BeebleSwitchXImageEdit
-        ("MODEL_TASK_ID", [("model task_id", "MODEL_TASK_ID")], 0),  # prod: Tripo* (space -> _)
+        ("IMAGE", [("image", "IMAGE"), ("alpha", "MASK")], 0),  # e.g. BeebleSwitchXImageEdit
+        ("MODEL_TASK_ID", [("model task_id", "MODEL_TASK_ID")], 0),  # e.g. Tripo* (space -> _)
         ("Florence2_Model", [("florence2_model", "FL2MODEL")], 0),  # case only
         ("alpha", [("image", "IMAGE"), ("alpha", "MASK")], 1),  # exact still wins
     ],

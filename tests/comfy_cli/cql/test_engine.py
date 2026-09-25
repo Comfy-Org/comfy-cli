@@ -2187,11 +2187,11 @@ class TestValidateUnmarkedInputFileCombo:
     """A COMBO whose options are the server's INPUT-FOLDER listing is upload-
     backed even when object_info carries no ``<kind>_upload`` marker.
 
-    Found in prod (Langfuse 2026-08-25, 3 ``run`` failures, one user): the
-    agent uploaded eight ``.mp4`` shots to Comfy Cloud, wired each content hash
-    into a ``VHS_LoadVideo.video`` widget, and ``comfy run`` refused every node
-    with ``unknown_enum_value '<64hex>.mp4' not in 1 known options for video
-    (did you mean: bedroom.mp4?)``. The whole assembly never rendered.
+    For example: an agent uploads several ``.mp4`` shots to Comfy Cloud, wires
+    each content hash into a ``VHS_LoadVideo.video`` widget, and ``comfy run``
+    refused every node with ``unknown_enum_value '<64hex>.mp4' not in 1 known
+    options for video (did you mean: bedroom.mp4?)``, so the whole assembly
+    never rendered.
 
     The marker is the frontend's contract for CORE loaders only. VideoHelperSuite
     builds ``video`` from ``folder_paths.get_input_directory()`` filtered by its
@@ -3825,9 +3825,9 @@ class TestMatchTypeWildcard:
     """COMFY_MATCHTYPE_V3 is the V3 schema's generic port: its concrete type is
     resolved at runtime from whatever it is wired to. It was not recognised as a
     wildcard, so every edge touching one was reported as edge_type_mismatch —
-    ~30 spurious warnings in a single 48h prod window on graphs that were
-    correct (ComfySwitchNode, ResizeImageMaskNode). The agent explained them away
-    in nearly every reply, which teaches it to discount validator output.
+    spurious warnings on graphs that were correct (ComfySwitchNode,
+    ResizeImageMaskNode). An agent then explains them away in nearly every
+    reply, which teaches it to discount validator output.
     """
 
     @staticmethod
@@ -3929,11 +3929,10 @@ class TestMultiTypeEdge:
     ``INT,FLOAT`` input — a connection the frontend's ``isValidConnection``
     accepts and the server runs — was reported as ``edge_type_mismatch``.
 
-    Langfuse 2026-08-25..28: 23 ``edge_type_mismatch`` warnings across 55
-    validate calls, 12 of them exactly this shape (``input 'b' expects
-    INT,FLOAT but PrimitiveFloat[0] produces FLOAT``; ``input 'model_3d'
-    expects FILE_3D_GLB,FILE_3D_GLTF,… but MeshyImageToModelNode[2] produces
-    FILE_3D_GLB``). Shapes copied from the cloud catalog (``SimpleMath+``,
+    Typical warnings of this shape: ``input 'b' expects INT,FLOAT but
+    PrimitiveFloat[0] produces FLOAT``; ``input 'model_3d' expects
+    FILE_3D_GLB,FILE_3D_GLTF,… but MeshyImageToModelNode[2] produces
+    FILE_3D_GLB``. Shapes copied from the cloud catalog (``SimpleMath+``,
     ``PrimitiveFloat``).
     """
 
@@ -4291,10 +4290,9 @@ class TestUnreachableNodeIsVisible:
     check here skips pruned nodes — so such a graph could validate as
     "0 errors, 0 warnings" while doing nothing the author intended.
 
-    Prod repro: a depth-ControlNet whose output was never wired into the sampler
-    validated completely clean. The graph then ran twice, produced an image with
-    no pose applied, and cost two paid GPU runs and three turns of "it does
-    nothing" / "still no pose" before the dangling link was found.
+    Repro: a depth-ControlNet whose output was never wired into the sampler
+    validated completely clean. The graph would then run, produce an image with
+    no pose applied, and cost paid GPU runs before the dangling link was found.
     """
 
     @staticmethod

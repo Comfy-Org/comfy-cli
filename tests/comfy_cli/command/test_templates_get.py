@@ -1,7 +1,7 @@
 """Tests for ``comfy templates get --where k=v`` (V1-018).
 
-The measured agent loop is ``templates ls`` (to find the name) → ``templates
-fetch`` (copying that name back, 100% verbatim). ``get`` fuses the two: the
+A typical agent loop is ``templates ls`` (to find the name) → ``templates
+fetch`` (copying that name back verbatim). ``get`` fuses the two: the
 same ls filter predicates (``_matches``, reused exactly — no new query
 language) resolve the template, and when exactly one matches its workflow is
 fetched and returned in one envelope.

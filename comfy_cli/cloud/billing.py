@@ -391,9 +391,9 @@ def suggest_upgrade(plans: list[dict[str, Any]], current_plan_slug: str | None) 
     from the endpoint, so ranking on it cannot go stale.
 
     When the current plan's price cannot be established we return None rather
-    than guessing. Guessing is actively harmful here and prod proves it: the
-    live team account reports ``plan_slug: "team-pro-monthly"`` from
-    /api/billing/status while /api/billing/plans carries no such slug, and a
+    than guessing. Guessing is actively harmful here: an account can report
+    ``plan_slug: "team-pro-monthly"`` from /api/billing/status while
+    /api/billing/plans carries no such slug, and a
     "cheapest available plan" fallback then suggested a $0.00 per-credit plan
     as an *upgrade* from PRO. No suggestion is strictly better than a wrong
     one, so an unresolvable current price means we stay quiet.
