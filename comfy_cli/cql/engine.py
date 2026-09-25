@@ -2956,8 +2956,9 @@ def _check_dynamic_combo_sub(
         slot_prefix = f"{dotted}."
         # `min: 0` (Seedream) yields no required slots; `min: 1` (Grok image
         # edit's `model.images`) makes `model.images.image_1` a server-side
-        # required input — a graph with no image wired there validates here
-        # but fails on submit.
+        # required input. A graph with no image wired there gets
+        # required_input_missing here, instead of passing validation and
+        # failing on submit.
         missing = [s for s in port.autogrow_required_slots if s not in present] if sub_required else []
         errors = [
             {
