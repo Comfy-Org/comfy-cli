@@ -119,6 +119,8 @@ def _normalized_serving(deployment: JsonObject) -> JsonObject | None:
     if not isinstance(serving, dict):
         raise server_shape_error("the deployment has an invalid serving sample")
     workers = serving.get("workers")
+    if workers is not None and not isinstance(workers, dict):
+        raise server_shape_error("the deployment serving sample has invalid workers")
     normalized: JsonObject = {
         "capacity": _capacity(serving.get("capacity"), workers),
         "jobsInQueue": required_int(serving, "jobsInQueue"),

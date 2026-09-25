@@ -377,8 +377,15 @@ def test_an_unhealthy_deployment_at_zero_is_never_healthy_idle(tmp_path, monkeyp
         {"capacity": {"ready": True, "busy": 0, "starting": 0}},
         {"workers": {"idle": -1, "initializing": 0, "ready": 0, "running": 0, "throttled": 0, "unhealthy": 0}},
         {"capacity": {"ready": 0, "busy": 0, "starting": 0}, "workers": {"unhealthy": "3"}},
+        {"capacity": {"ready": 0, "busy": 0, "starting": 0}, "workers": "unhealthy"},
     ],
-    ids=["negative capacity", "boolean capacity", "negative old count", "malformed present old count"],
+    ids=[
+        "negative capacity",
+        "boolean capacity",
+        "negative old count",
+        "malformed present old count",
+        "old counts not an object",
+    ],
 )
 def test_a_malformed_count_is_a_shape_error_not_a_quiet_zero(tmp_path, monkeypatch, serving) -> None:
     """A count the schema would reject is refused, never dropped or passed on,
