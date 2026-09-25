@@ -159,3 +159,70 @@ def test_lowering_skips_a_link_whose_id_is_unhashable():
     wf["links"].append([[], wf["nodes"][0]["id"], 0, wf["nodes"][1]["id"], 0, "MODEL"])
     lowered = _linked_inputs(convert_ui_to_api(wf, {}))
     assert lowered == _linked_inputs(convert_ui_to_api(_load(SD15["original"]), {}))
+
+
+# ---------------------------------------------------------------------------
+# A bare template id addressing its remapped `insert:` node
+# ---------------------------------------------------------------------------
+#
+# Measured on prod/stg comfy-agent traces (2026-09-23: c607e8ee, c6d64309,
+# c0115100, 47cae255, 2a78e219): after get_template the agent writes
+# `57.text` (the id it read in the template), set_widget refuses it as not
+# found, and the error suggests the `insert:<op>:root:node:57` address. Every
+# one of those turns then re-sent the suggested address and succeeded. When
+# exactly one top-level node is the remap of that id, there is only one
+# thing `57` can mean.
+
+INSERTED_57 = f"insert:{OP_ID}:root:node:57"
+
+
+def test_bare_template_id_resolves_to_its_unique_inserted_node(promoted_graph):
+    wf = _load(Z_IMAGE["cmp_inserted"])
+    via_bare, op_bare = workflow_ops.set_widget(copy.deepcopy(wf), promoted_graph, 57, "text", "a mountain lake")
+    via_full, op_full = workflow_ops.set_widget(
+        copy.deepcopy(wf), promoted_graph, INSERTED_57, "text", "a mountain lake"
+    )
+    assert op_bare["node_id"] == INSERTED_57
+    assert workflow_ops.canonical(via_bare) == workflow_ops.canonical(via_full)
+    # The minted op names the real node, so a replica replays it without the alias.
+    replayed = workflow_ops.apply_op(copy.deepcopy(wf), op_bare, promoted_graph)
+    assert workflow_ops.canonical(replayed) == workflow_ops.canonical(via_bare)
+
+
+def test_bare_template_id_resolves_inside_an_apply_batch(promoted_graph):
+    wf = _load(Z_IMAGE["cmp_inserted"])
+    _, ops, _ = workflow_ops.apply_specs(
+        copy.deepcopy(wf),
+        promoted_graph,
+        [{"op": "set_widget", "node": "57", "widget": "width", "value": 1344}],
+    )
+    assert ops[0]["node_id"] == INSERTED_57
+
+
+def test_bare_id_stays_refused_when_two_inserts_remapped_it(promoted_graph):
+    wf = _load(Z_IMAGE["cmp_inserted"])
+    twin = copy.deepcopy(next(n for n in wf["nodes"] if n["id"] == INSERTED_57))
+    twin["id"] = "insert:ffffffffffffffffffffffffffffffff:root:node:57"
+    wf["nodes"].append(twin)
+    with pytest.raises(ValueError, match="node 57 not found") as exc:
+        workflow_ops.set_widget(copy.deepcopy(wf), promoted_graph, 57, "text", "x")
+    assert INSERTED_57 in str(exc.value) and twin["id"] in str(exc.value)
+
+
+def test_a_literal_node_id_wins_over_an_inserted_remap(promoted_graph):
+    wf = _load(Z_IMAGE["original"])
+    remapped = copy.deepcopy(next(n for n in wf["nodes"] if n["id"] == 57))
+    remapped["id"] = INSERTED_57
+    wf["nodes"].append(remapped)
+    _, op = workflow_ops.set_widget(copy.deepcopy(wf), promoted_graph, 57, "text", "x")
+    assert op["node_id"] == 57
+
+
+def test_resolved_bare_id_reports_the_real_widget_error(promoted_graph):
+    """Once `57` unambiguously means the inserted node, a bad widget name is
+    the error to report — not a misleading "node 57 not found"."""
+    wf = _load(Z_IMAGE["cmp_inserted"])
+    with pytest.raises(ValueError) as exc:
+        workflow_ops.set_widget(copy.deepcopy(wf), promoted_graph, 57, "no_such_widget", "x")
+    assert "node 57 not found" not in str(exc.value)
+    assert "no_such_widget" in str(exc.value)
