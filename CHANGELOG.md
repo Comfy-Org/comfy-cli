@@ -35,7 +35,8 @@ history.
   payload carries `folder_case_checked: false` (`true` when the case was checked;
   absent for a spec with no models).
 - A definition the builder refuses now arrives as `build_definition_invalid`, its
-  reasons one per line and in `details.invalid`, instead of `build_builder_error`
+  reasons one per line and in `details.invalid` when the builder lists them (else
+  its message), instead of `build_builder_error`
   with the code as the message, the reasons in `details.body` and a hint to
   re-run the cut. A file the definition names that never reached the builder
   (`blob:<id>`, a model's file or a node's zip) gets a hint to delete that

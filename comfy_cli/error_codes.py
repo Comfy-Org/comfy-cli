@@ -1251,8 +1251,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "build_definition_invalid",
         "The builder refused the build's definition, most often at `push --release` or `release create`. "
-        "The message lists each problem as `<field>: <reason>`, and `details.invalid` carries each as "
-        "`{field, reason}`. `models[<n>]` counts the models as the spec file lists them after a push, and "
+        "When the builder lists its reasons, the message lists each problem as `<field>: <reason>`, and "
+        "`details.invalid` carries each as `{field, reason}`; otherwise the message is the builder's own "
+        "and `details.invalid` is absent. `models[<n>]` counts the models as the spec file lists them after a push, and "
         "under `push --release` each such line and entry also names its model (`model`: its filename, "
         "else its link without query, fragment or userinfo, else its local path). "
         "The cut refuses two things under this code that are not the definition, and the message then "

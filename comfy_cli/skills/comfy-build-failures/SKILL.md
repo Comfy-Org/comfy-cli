@@ -77,9 +77,11 @@ refuse with `build_spec_invalid`, one line per entry and `details.invalid` as
 `{field, reason, model}`, before anything uploads. A local model's kept link is
 checked after `push` hashes its file, so it is reported once the other problems
 are fixed: a second refusal after a fix is that, not a new problem. What reaches the builder anyway
-comes back as **`build_definition_invalid`**, with the builder's reasons one per
-line and in `details.invalid` (a list too long for the message stops on a whole
-line and ends `... and N more`; `details.invalid` holds every one); the same definition is refused the same way every
+comes back as **`build_definition_invalid`**. When the builder lists its reasons,
+they come one per line and in `details.invalid` (a list too long for the message
+stops on a whole line and ends `... and N more`; `details.invalid` holds every
+one); otherwise the reason is the builder's `message`, with no `details.invalid`.
+The same definition is refused the same way every
 time, so edit it rather than retrying. Its `models[<n>]` counts the spec as the
 last push wrote it, and under `push --release` each such line also names the
 model, as `details.invalid[].model` does in JSON. Two kinds of field are not the definition, and the message
