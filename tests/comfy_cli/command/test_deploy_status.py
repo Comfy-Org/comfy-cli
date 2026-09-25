@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import jsonschema
+import pytest
 from deploy_up_support import FakeBuilder, FakeDeploy, deployment, option_names, write_spec
 from typer.testing import CliRunner
 
@@ -347,6 +348,52 @@ def test_a_thinned_out_workers_object_beside_capacity_still_reads(tmp_path, monk
     assert result.exit_code == 0, result.stderr
     assert _json_envelope(result)["data"]["serving"]["capacity"]["ready"] == 1
     jsonschema.Draft202012Validator(_schema("deploy_status.json")).validate(_json_envelope(result)["data"])
+
+
+def test_an_unhealthy_deployment_at_zero_is_never_healthy_idle(tmp_path, monkeypatch) -> None:
+    """Once the service stops sending the old counts, only the status can say a
+    deployment is unhealthy, so the label must read it."""
+    # Given
+    row = _status_deployment(status="unhealthy")
+    row["serving"] = {
+        "capacity": {"ready": 0, "busy": 0, "starting": 0},
+        "jobsInQueue": 0,
+        "sampledAt": "2026-08-21T09:12:03Z",
+    }
+    _install_clients(monkeypatch, FakeBuilder(), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_pretty(write_spec(tmp_path))
+
+    # Then
+    serving_line = next(line for line in result.stdout.splitlines() if "sampled" in line.lower())
+    assert "healthy idle" not in serving_line
+
+
+@pytest.mark.parametrize(
+    "serving",
+    [
+        {"capacity": {"ready": -1, "busy": 0, "starting": 0}},
+        {"capacity": {"ready": True, "busy": 0, "starting": 0}},
+        {"workers": {"idle": -1, "initializing": 0, "ready": 0, "running": 0, "throttled": 0, "unhealthy": 0}},
+        {"capacity": {"ready": 0, "busy": 0, "starting": 0}, "workers": {"unhealthy": "3"}},
+    ],
+    ids=["negative capacity", "boolean capacity", "negative old count", "malformed present old count"],
+)
+def test_a_malformed_count_is_a_shape_error_not_a_quiet_zero(tmp_path, monkeypatch, serving) -> None:
+    """A count the schema would reject is refused, never dropped or passed on,
+    since a dropped unhealthy count would read as healthy."""
+    # Given
+    row = _status_deployment()
+    row["serving"] = {**serving, "jobsInQueue": 0, "sampledAt": "2026-08-21T09:12:03Z"}
+    _install_clients(monkeypatch, FakeBuilder(), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code != 0
+    assert _json_envelope(result)["ok"] is False
 
 
 def test_serving_prints_capacity_and_no_provider_state(tmp_path, monkeypatch) -> None:

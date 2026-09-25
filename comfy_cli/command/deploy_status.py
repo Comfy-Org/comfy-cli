@@ -125,14 +125,19 @@ def _normalized_serving(deployment: JsonObject) -> JsonObject | None:
         "sampledAt": required_string(serving, "sampledAt"),
     }
     # The provider's own counts ride along while the service still sends them,
-    # so a script reading them keeps working. Beside capacity they are passed
-    # through as sent, so a deprecated field that thins out cannot fail the
-    # command; only the fallback above needs every one.
+    # so a script reading them keeps working. A state the service leaves out is
+    # left out, so a deprecated field that thins out cannot fail the command;
+    # one it sends malformed is still a shape error.
     if isinstance(workers, dict):
-        normalized["workers"] = {
-            state: workers[state] for state in _WORKER_STATES if isinstance(workers.get(state), int)
-        }
+        normalized["workers"] = {state: _count(workers, state) for state in _WORKER_STATES if state in workers}
     return normalized
+
+
+def _count(value: JsonObject, key: str) -> int:
+    count = required_int(value, key)
+    if count < 0:
+        raise server_shape_error(f"the deploy service returned a negative {key}", field=key)
+    return count
 
 
 def _capacity(capacity: object, workers: object) -> JsonObject:
@@ -142,16 +147,16 @@ def _capacity(capacity: object, workers: object) -> JsonObject:
     the way the service does, for a service that predates the field.
     """
     if isinstance(capacity, dict):
-        return {key: required_int(capacity, key) for key in _CAPACITY}
+        return {key: _count(capacity, key) for key in _CAPACITY}
     if capacity is not None:
         raise server_shape_error("the deployment serving sample has an invalid capacity")
     if not isinstance(workers, dict):
         raise server_shape_error("the deployment serving sample has neither capacity nor workers")
     return {
         # RunPod counts one warm worker as both idle and ready, so idle alone.
-        "ready": required_int(workers, "idle"),
-        "busy": required_int(workers, "running"),
-        "starting": required_int(workers, "initializing"),
+        "ready": _count(workers, "idle"),
+        "busy": _count(workers, "running"),
+        "starting": _count(workers, "initializing"),
     }
 
 
@@ -256,7 +261,7 @@ def _sample_age(sampled_at: str) -> str:
     return f"{seconds // 86400}d ago"
 
 
-def _render_serving(renderer: Renderer, serving: JsonObject | None) -> None:
+def _render_serving(renderer: Renderer, serving: JsonObject | None, status: str) -> None:
     if serving is None:
         renderer.info("Serving: not sampled yet.")
         return
@@ -272,7 +277,9 @@ def _render_serving(renderer: Renderer, serving: JsonObject | None) -> None:
     unhealthy = workers.get("unhealthy", 0) if isinstance(workers, dict) else 0
     if unhealthy:
         counts += f" unhealthy={unhealthy}"
-    idle = queue == 0 and not unhealthy and all(value == 0 for value in capacity.values())
+    # Only a ready deployment is called healthy: its status, not the provider's
+    # deprecated counts, is what says so.
+    idle = status == "ready" and queue == 0 and not unhealthy and all(value == 0 for value in capacity.values())
     suffix = ": healthy idle (scale-to-zero)" if idle else ""
     renderer.info(f"Serving: {counts} queued={queue}; sampledAt={sampled_at} ({_sample_age(sampled_at)}){suffix}")
 
@@ -351,7 +358,7 @@ def render_status(renderer: Renderer, result: StatusResult) -> None:
             renderer.info(describe_progress(result.progress, now=datetime.now(timezone.utc)))
         _render_error(renderer, deployment)
         _render_stop_reason(renderer, deployment)
-        _render_serving(renderer, result.serving)
+        _render_serving(renderer, result.serving, status)
     release = result.release
     if release is not None and release.get("behind") is True:
         latest = release.get("latestDeployable")
