@@ -12,7 +12,13 @@ from typer.testing import CliRunner
 from comfy_cli.cmdline import app as cli_app
 from comfy_cli.command import build
 from comfy_cli.command.build_spec import JsonObject
-from comfy_cli.command.build_validation import _https_url, _lacks_extension, _valid_filename, _valid_model_dir
+from comfy_cli.command.build_validation import (
+    HIDDEN_LINK_LABEL,
+    _https_url,
+    _lacks_extension,
+    _valid_filename,
+    _valid_model_dir,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -581,6 +587,78 @@ def test_a_refused_link_is_named_without_its_credentials(workspace: Path, output
         assert secret not in result.output
     if output == "json":
         assert _refused(result) == {"https://civitai.com/api/download/models/1": "filename"}
+
+
+@pytest.mark.parametrize("output", ["json", "pretty"])
+@pytest.mark.parametrize(
+    ("link", "secrets", "label"),
+    [
+        pytest.param(
+            "https://alice:s3cr/et+tok@host.example/m.safetensors",
+            ("alice", "s3cr", "et+tok"),
+            HIDDEN_LINK_LABEL,
+            id="slash-in-the-password",
+        ),
+        pytest.param(
+            "https://alice:s3cr?et@host.example/m.safetensors",
+            ("alice", "s3cr", "et@"),
+            HIDDEN_LINK_LABEL,
+            id="question-mark-in-the-password",
+        ),
+        pytest.param(
+            "https://alice:s3cr#et@host.example/m.safetensors",
+            ("alice", "s3cr", "et@"),
+            HIDDEN_LINK_LABEL,
+            id="hash-in-the-password",
+        ),
+        pytest.param(
+            "https://bob:Pq7?Zr8#Wk9/Xy6@host.example/m.safetensors",
+            ("bob", "Pq7", "Zr8", "Wk9", "Xy6"),
+            HIDDEN_LINK_LABEL,
+            id="question-mark-and-hash-in-the-password",
+        ),
+        pytest.param(
+            # Go parses this one: host alice, port 8841, path /Zk9x@host.example/...
+            "https://alice:8841/Zk9x@host.example/m.safetensors",
+            ("alice", ":8841", "Zk9x"),
+            HIDDEN_LINK_LABEL,
+            id="password-go-reads-as-a-port",
+        ),
+        pytest.param(
+            "https://host.example/m.safetensors?sig=Ab3@Zk9q",
+            ("sig=", "Ab3", "Zk9q"),
+            HIDDEN_LINK_LABEL,
+            id="at-in-the-query",
+        ),
+        pytest.param(
+            "https://alice:s3cret@host.example/dir/m.safetensors?token=T0kn#frag",
+            ("alice", "s3cret", "T0kn", "frag"),
+            "https://host.example/dir/m.safetensors",
+            id="a-link-that-parses",
+        ),
+    ],
+)
+def test_a_model_label_never_shows_a_links_credentials(
+    workspace: Path, link: str, secrets: tuple[str, ...], label: str, output: str
+) -> None:
+    """A password pasted as is (a base64 token holds '/', and may hold '?' or '#')
+    makes a link Go cannot parse, or parses as something else; the label names no
+    part of it, and still shows the scheme, host and path of a link that parses."""
+    # Given
+    write_spec(workspace, models=[{"type": "loras", "sourceUri": link, "sha256": "nope"}], nodes=[])
+
+    # When
+    result = _invoke(workspace, output=output)
+
+    # Then
+    assert result.exit_code == 1, result.output
+    said = "".join(result.output.split())
+    for secret in secrets:
+        assert secret not in said, result.output
+    assert "".join(label.split()) in said
+    if output == "json":
+        issues = _envelope(result)["error"]["details"]["invalid"]
+        assert {issue["model"] for issue in issues} == {label}
 
 
 def test_a_refused_link_is_named_without_its_fragment(workspace: Path) -> None:

@@ -39,8 +39,11 @@ _GO_SPACE: Final = (
     "\t\n\v\f\r \x85\xa0\u1680" + "".join(map(chr, range(0x2000, 0x200B))) + "\u2028\u2029\u202f\u205f\u3000"
 )
 _URL_CONTROL: Final = re.compile(r"[\x00-\x1f\x7f]")
-# A link's userinfo, which a label leaves out with its query and fragment.
-_LINK_USERINFO: Final = re.compile(r"^((?:[A-Za-z][A-Za-z0-9+.-]*:)?//)[^/?#]*@")
+# What starts a link's authority, which a label keeps; the userinfo after it is
+# left out with the query and fragment.
+_LINK_AUTHORITY: Final = re.compile(r"(?:[A-Za-z][A-Za-z0-9+.-]*:)?//")
+# What names a link whose userinfo cannot be told from its path or query.
+HIDDEN_LINK_LABEL: Final = "<link not shown: it may hold a password>"
 _URL_BAD_ESCAPE: Final = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _URL_SCHEME: Final = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*(?=:)")
 _URL_PORT: Final = re.compile(r"(:[0-9]*)?")
@@ -368,10 +371,26 @@ def model_label(entry: JsonObject) -> str:
     for key in ("filename", "sourceUri", "localPath"):
         value = entry.get(key)
         if isinstance(value, str) and value.strip():
-            if key == "sourceUri":
-                return _LINK_USERINFO.sub(r"\1", value.strip().partition("#")[0].partition("?")[0])
-            return value
+            return _link_label(value) if key == "sourceUri" else value
     return ""
+
+
+def _link_label(link: str) -> str:
+    """*link* without its userinfo, query and fragment, or ``HIDDEN_LINK_LABEL``
+    where its userinfo cannot be told apart. A password pasted as is (a base64 token
+    holds '/', and may hold '?' or '#') ends the authority early, so an '@' after
+    the first '/', '?' or '#' may close a password as well as sit in a path or a
+    query: then no part of the link is shown, whether Go parses it or not."""
+    link = link.strip()
+    authority = _LINK_AUTHORITY.match(link)
+    start = authority.end() if authority else 0
+    rest = link[start:]
+    at = rest.rfind("@")
+    if at >= 0:
+        if any(0 <= rest.find(char) < at for char in "/?#"):
+            return HIDDEN_LINK_LABEL
+        rest = rest[at + 1 :]
+    return link[:start] + re.split(r"[?#]", rest, maxsplit=1)[0]
 
 
 def _link_problem(entry: JsonObject, wire: JsonObject) -> tuple[str, str] | None:
