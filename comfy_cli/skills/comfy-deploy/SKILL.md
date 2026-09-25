@@ -208,6 +208,13 @@ comfy deploy run [PATH] --workflow <api-workflow>.json
   use ComfyUI's *File → Export (API)*. An empty object is
   `deploy_workflow_empty`, and a JSON list, string or number is
   `deploy_workflow_not_api_format`. None of these cost anything.
+- **A job submission is at most 10 MB.** A bigger one is refused locally with
+  `deploy_workflow_too_large` before the job request is sent, so no job exists
+  and a resubmit after shrinking it is safe. Files the workflow names may
+  already have been uploaded as assets; a resubmit finds them by hash and does
+  not upload them again. The size is almost always data held
+  inline in the workflow (an embedded base64 image, a long text value); files
+  the workflow names by path are uploaded separately and do not count.
 - **The deployment must be `ready`.** Anything else is `deploy_not_ready`. Wait
   if the status is transitional; investigate if it is terminal.
 - **Local files in the workflow are uploaded, and only from allowed roots.** The
@@ -227,8 +234,8 @@ comfy deploy run [PATH] --workflow <api-workflow>.json
   `failed`, `expired`.
 - **Each `run` is a fresh idempotency key, so a resubmit is a second billed job.**
   `deploy_job_submit_unknown` means the submission timed out and the job **may
-  have been created**, and nothing can settle which: the API has no job-list
-  endpoint, no lookup by idempotency key, and no client-supplied job id. Read
+  have been created**, and the CLI cannot settle which: no `comfy` command looks
+  a job up by the idempotency key it carried (`details.idempotency_key`). Read
   `comfy deploy status` anyway — the deployment's own state may be what caused
   the timeout, and `serving` plus `jobsInQueue` say whether *something* is
   running — but it cannot tell you that something is your job. Report what it
@@ -318,8 +325,8 @@ ever hit one, because the wrong reflex costs money or trust:
 
 - **`deploy_job_submit_unknown`** — the submission timed out and the job **may
   have been created**. Every `run` mints a fresh idempotency key, so a resubmit is
-  a *second billed job*, not a retry — and no lookup exists to confirm the first
-  one either way. Stop, and hand the ambiguity to the user.
+  a *second billed job*, not a retry — and the CLI cannot look the first one up
+  to confirm it either way. Stop, and hand the ambiguity to the user.
 - **`deploy_endpoint_unknown` / `deploy_insecure_url`** — a refusal to trust the
   server, not a transport failure. The CLI talks only to deployment hosts under
   its configured suffixes and downloads outputs only from its configured storage
