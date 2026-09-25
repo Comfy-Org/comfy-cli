@@ -1250,11 +1250,18 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "build_definition_invalid",
         "The builder refused the build's definition, most often at `push --release` or `release create`. "
         "The message lists each problem as `<field>: <reason>`, and `details.invalid` carries each as "
-        "`{field, reason}`. `models[<n>]` counts the models as the spec file lists them after a push. "
-        "A `blob:<id>` field (`not uploaded`, `unknown blob`, an uploaded size or content that does not "
-        "match) is no rule of the spec: the file that blob holds never reached the builder whole, and the "
-        "hint then says to delete that `blobId` from its entry and push again, which uploads the file; "
-        "an entry with no `source: local` first needs one, with a `localPath`, or a `sourceUri`.",
+        "`{field, reason}`. `models[<n>]` counts the models as the spec file lists them after a push, and "
+        "under `push --release` each such line and entry also names its model (`model`: its filename, "
+        "else its link without query, fragment or userinfo, else its local path). "
+        "The cut refuses two things under this code that are not the definition, and the message then "
+        "says the builder refused the release: a `targets[<n>]` field (a repeated os/gpu pair, one the "
+        "builder cannot build) is the n-th `--target` value, and the hint points at "
+        "`comfy build refs build-targets`; a `blob:<id>` field (`not uploaded`, `unknown blob`, an uploaded "
+        "size or content that does not match) is a model's file or a node's zip that never reached the "
+        "builder whole, and the hint says to delete that `blobId` from its entry and push again, which "
+        "uploads the file; an entry with no `source: local` first needs one, with a `localPath`, or "
+        "another source it can take (a model's `sourceUri`, a node's `registryVersion` or `repository`). "
+        "A refusal of several kinds names each fix.",
         "fix each named field in the spec, then push again; a retry of the same definition is refused the same way",
     ),
     ErrorCode(

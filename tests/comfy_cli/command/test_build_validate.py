@@ -461,6 +461,38 @@ BUILDER_LINK_ANSWERS = [
     pytest.param("https://h.example/models/", True, True, id="trailing-slash"),
     pytest.param("https://h.example/x.safetensors/", True, False, id="trailing-slash-after-a-name"),
     pytest.param("https://h.example/dl?file=x.safetensors", True, True, id="name-in-query"),
+    pytest.param("//h.example/model", False, True, id="no-scheme-with-a-host"),
+    pytest.param("models/128713", False, True, id="no-scheme-relative-path"),
+    pytest.param("/model", False, True, id="no-scheme-absolute-path"),
+    pytest.param("///models/128713", False, True, id="no-scheme-three-slashes-is-all-path"),
+    pytest.param("https:x", False, False, id="opaque-short"),
+    pytest.param("1h:80/model", False, False, id="no-scheme-colon-in-first-segment"),
+    pytest.param("https://localhost", True, False, id="host-with-no-dot-and-no-path"),
+    pytest.param("https://h.example:abc/model", False, False, id="bad-port-before-a-bare-name"),
+    pytest.param("https://u:p@h.example/model", True, True, id="userinfo"),
+    pytest.param("https://us er@h.example/model", False, False, id="bad-userinfo-before-a-bare-name"),
+    pytest.param("https://u%zz@h.example/model", False, False, id="bad-escape-in-userinfo"),
+    pytest.param("https://h[x.example/model", False, False, id="bracket-inside-a-host"),
+    pytest.param("https://[::1]:8443/model", True, True, id="ipv6-with-port"),
+    pytest.param("https://[::1]:x/model", False, False, id="ipv6-bad-port"),
+    pytest.param("https://[::1]x/model", False, False, id="ipv6-junk-after-the-bracket"),
+    pytest.param("https://[::1/model", False, False, id="ipv6-unclosed"),
+    pytest.param("https://[fe80::1%25en0]/model", True, True, id="ipv6-zone"),
+    pytest.param("https://[fe80::1%25en0]:8443/model", True, True, id="ipv6-zone-with-port"),
+    pytest.param("https://[fe80::1%25]/model", False, False, id="ipv6-empty-zone"),
+    pytest.param("https://[fe80::1%25en%200]/model", True, True, id="ipv6-zone-escaped-space"),
+    pytest.param("https://[fe80::1%25en%2F0]/model", False, False, id="ipv6-zone-escaped-slash"),
+    pytest.param("https://[fe80::1%en0]/model", False, False, id="ipv6-zone-unescaped-percent"),
+    pytest.param("https://[fe%3A80::1]/model", False, False, id="ipv6-escape-before-the-zone"),
+    pytest.param("https://h%zz.example/model", False, False, id="bad-escape-in-host"),
+    pytest.param("https://h%4/model", False, False, id="short-escape-in-host"),
+    pytest.param("https://h%C3%A9.example/model", True, True, id="non-ascii-escape-in-host"),
+    pytest.param("https://h%25.example/model", True, True, id="escaped-percent-in-host"),
+    pytest.param("https://h.example:/model", True, True, id="empty-port"),
+    pytest.param("https://h.example:1:2/model", False, False, id="https-port-ends-at-the-first-colon"),
+    pytest.param("http://h.example:1:2/model", False, False, id="http-port-ends-at-the-first-colon"),
+    pytest.param("ftp://h.example:1:2/model", False, True, id="other-scheme-port-ends-at-the-last-colon"),
+    pytest.param("ftp://h.example:abc/model", False, False, id="other-scheme-bad-port"),
 ]
 
 
@@ -490,6 +522,61 @@ def test_validate_answers_a_link_as_the_builder_would(workspace: Path, uri: str,
     else:
         assert result.exit_code == 1
         assert _refused(result) == {uri: field}
+
+
+#: Values Python's ``str.strip`` reads as blank and Go's ``strings.TrimSpace`` does
+#: not (\x1c-\x1f), each with the field the builder refuses, as ``definition.go``
+#: ``validateModels`` answers it under go1.26.4.
+@pytest.mark.parametrize(
+    ("model", "field"),
+    [
+        pytest.param(
+            {"type": "loras", "sourceUri": "https://h.example/x.safetensors", "sha256": "a" * 64 + "\x1c"},
+            "sha256",
+            id="sha256-with-a-separator",
+        ),
+        pytest.param(
+            {"type": "loras", "filename": "\x1f", "sourceUri": "https://h.example/x.safetensors"},
+            "filename",
+            id="filename-of-a-separator",
+        ),
+        pytest.param(
+            {"type": "loras", "filename": "x.safetensors", "sourceUri": "\x1c"},
+            "sourceUri",
+            id="link-of-a-separator",
+        ),
+    ],
+)
+def test_the_rules_trim_as_the_builder_does(workspace: Path, model: JsonObject, field: str) -> None:
+    # Given
+    write_spec(workspace, models=[model], nodes=[])
+
+    # When
+    result = _invoke(workspace)
+
+    # Then
+    assert result.exit_code == 1
+    assert list(_refused(result).values()) == [field]
+
+
+@pytest.mark.parametrize("output", ["json", "pretty"])
+def test_a_refused_link_is_named_without_its_credentials(workspace: Path, output: str) -> None:
+    """A link names an entry that has no filename, and a signed link or a Civitai
+    ``?token=`` carries a credential that must not reach a terminal or a CI log."""
+    # Given
+    link = "https://me:hunter2@civitai.com/api/download/models/1?token=s3cr3t&type=Model#part"
+    write_spec(workspace, models=[{"type": "loras", "sourceUri": link}], nodes=[])
+
+    # When
+    result = _invoke(workspace, output=output)
+
+    # Then
+    assert result.exit_code == 1
+    assert "definition.models[0].filename" in result.output
+    for secret in ("hunter2", "s3cr3t", "type=Model", "#part"):
+        assert secret not in result.output
+    if output == "json":
+        assert _refused(result) == {"https://civitai.com/api/download/models/1": "filename"}
 
 
 #: The builder's vetted folders as the tests' list carries them.

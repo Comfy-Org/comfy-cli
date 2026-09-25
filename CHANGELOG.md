@@ -29,14 +29,26 @@ history.
   `build_spec_invalid` (`details.invalid` in JSON), and `push` refuses before
   uploading anything. A case variant of a folder (`Loras` for `loras`) needs the
   builder's list, so `push` and `validate --remote` read it and offline `validate`
-  does not.
+  does not, and says so: a `--dry-run` push, and a command whose read of the
+  list failed, print that a folder's case was not checked.
 - A definition the builder refuses now arrives as `build_definition_invalid`, its
   reasons one per line and in `details.invalid`, instead of `build_builder_error`
   with the code as the message, the reasons in `details.body` and a hint to
   re-run the cut. A file the definition names that never reached the builder
-  (`blob:<id>`) gets a hint to delete that `blobId` and push again, pointing an
-  entry that had only the `blobId` at the file (`source: local`, `localPath`) or
-  a `sourceUri` first.
+  (`blob:<id>`, a model's file or a node's zip) gets a hint to delete that
+  `blobId` and push again, pointing an entry that had only the `blobId` at the
+  file (`source: local`, `localPath`) or another source it can take (a model's
+  `sourceUri`, a node's `registryVersion` or `repository`) first. A `--target`
+  the cut refuses (`targets[<n>]`, a repeated or unbuildable os/gpu pair) says the
+  builder refused the release, not the definition, and points at the `--target`
+  values and `comfy build refs build-targets`; a refusal of several kinds names
+  each fix. Under `push --release` a refused `models[<n>]` also names its model,
+  in the message and as `model` in `details.invalid`.
+- The local model rules trim a value as the builder does (Go's
+  `strings.TrimSpace`, which keeps `\x1c`-`\x1f`), so a `sha256` or `filename`
+  holding one is refused locally as the builder would refuse it. A refused entry
+  named by its link is named without the link's query, fragment and userinfo,
+  where a signed link or a Civitai `?token=` carries its credential.
 - `comfy build push` checks the link a local model keeps (its file still matches
   its `sha256`, so it is not uploaded) by the same rules as any other link,
   before anything uploads.

@@ -78,12 +78,18 @@ refuse with `build_spec_invalid`, one line per entry and `details.invalid` as
 comes back as **`build_definition_invalid`**, with the builder's reasons one per
 line and in `details.invalid`; the same definition is refused the same way every
 time, so edit it rather than retrying. Its `models[<n>]` counts the spec as the
-last push wrote it. A `blob:<id>` field (`not uploaded`, `unknown blob`, a size
-or content mismatch) is not the spec's rules but a file that never reached the
-builder whole: delete that `blobId` from its entry and run `comfy build push`,
-which uploads the file again, since a push skips an entry that has a `blobId`.
-A push uploads only a `source: local` entry, so one that had only the `blobId`
-needs `source: local` with a `localPath` to the file, or a `sourceUri`, first.
+last push wrote it, and under `push --release` each such line also names the
+model, as `details.invalid[].model` does in JSON. Two kinds of field are not the definition, and the message
+then says the builder refused the release. A `targets[<n>]` field is the n-th
+`--target` value (a repeated os/gpu pair, or one the builder cannot build): run
+the command again with the targets `comfy build refs build-targets` lists. A
+`blob:<id>` field (`not uploaded`, `unknown blob`, a size or content mismatch) is
+a model's file or a node's zip that never reached the builder whole: delete that
+`blobId` from its entry and run `comfy build push`, which uploads the file again,
+since a push skips an entry that has a `blobId`. A push uploads only a
+`source: local` entry, so one that had only the `blobId` needs `source: local`
+with a `localPath` (the model's file, the node's directory), or another source it
+can take (a model's `sourceUri`, a node's `registryVersion` or `repository`), first.
 
 - `must be a 64-character sha256` — a model entry's `sha256`. Correct it from the
   candidate you took it off rather than uploading anything.

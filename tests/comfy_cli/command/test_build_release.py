@@ -902,6 +902,7 @@ def test_a_refused_definition_leads_with_every_reason(workspace: Path, monkeypat
     assert error["code"] == "build_definition_invalid"
     assert error["details"]["invalid"] == REFUSED_MODELS
     assert error["details"]["buildId"] == "build-1"
+    assert error["message"].startswith("the builder refused the build's definition:\n")
     for issue in REFUSED_MODELS:
         assert f"{issue['field']}: {issue['reason']}" in error["message"]
     assert "INVALID_DEFINITION" not in error["message"]
@@ -1001,7 +1002,7 @@ def test_a_blob_never_uploaded_says_to_push_it_again(
     assert "if that entry has no `source: local`" in error["hint"]
     assert "`localPath`" in error["hint"]
     assert "`sourceUri`" in error["hint"]
-    assert error["hint"].startswith("fix each other named field") is also_the_spec
+    assert error["hint"].startswith("fix each named definition field in the spec") is also_the_spec
 
 
 def test_only_well_formed_reasons_are_kept() -> None:
@@ -1032,3 +1033,118 @@ def test_only_well_formed_reasons_are_kept() -> None:
 )
 def test_a_body_without_a_reason_list_gives_none(body: str) -> None:
     assert build._builder_invalid(body) == []
+
+
+def _cut_refuses(monkeypatch: pytest.MonkeyPatch, answer: dict) -> None:
+    """Every builder call answers a 400 with *answer* as its body."""
+    from comfy_cli.builder_api import BuilderClient
+
+    def request_json(url, target, *, method="GET", body=None, timeout=30.0, max_bytes):
+        raise refusal(400, answer, url)
+
+    monkeypatch.setattr("comfy_cli.builder_api.request_json", request_json)
+    monkeypatch.setattr(
+        build, "_builder_client", lambda renderer, builder_url: BuilderClient("https://builder.test", "token")
+    )
+
+
+#: The cut's refusals of its ``--target`` values, as releases_cut.go
+#: ``validateTargets`` and ``validateTargetShape`` word them.
+TARGET_REPEATED = {
+    "field": "targets[1]",
+    "reason": "linux/nvidia is already requested by targets[0]; each os/gpu pair builds one artifact",
+}
+TARGET_BAD_GPU = {"field": "targets[0].gpu", "reason": "must be nvidia, amd, cpu, or mps"}
+
+
+@pytest.mark.parametrize("issue", [TARGET_REPEATED, TARGET_BAD_GPU], ids=["repeated", "bad-gpu"])
+def test_a_refused_target_names_the_target_option_not_the_spec(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, issue: dict[str, str]
+) -> None:
+    """The cut checks the ``--target`` values under the same code as the definition;
+    no edit to the spec clears one."""
+    # Given
+    _cut_refuses(monkeypatch, {"error": "INVALID_DEFINITION", "invalid": [issue]})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["code"] == "build_definition_invalid"
+    assert error["message"] == f"the builder refused the release:\n  {issue['field']}: {issue['reason']}"
+    assert "`--target`" in error["hint"]
+    assert "`comfy build refs build-targets`" in error["hint"]
+    assert "spec" not in error["hint"]
+
+
+@pytest.mark.parametrize(
+    ("invalid", "parts"),
+    [
+        pytest.param([REFUSED_MODELS[3], TARGET_REPEATED], ("spec", "targets"), id="a-field-and-a-target"),
+        pytest.param([TARGET_REPEATED, BLOB_NOT_UPLOADED], ("targets", "blob"), id="a-target-and-a-blob"),
+        pytest.param(
+            [BLOB_NOT_UPLOADED, TARGET_REPEATED, REFUSED_MODELS[3]], ("spec", "targets", "blob"), id="all-three"
+        ),
+    ],
+)
+def test_a_refused_release_names_each_fix_that_applies(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, invalid: list[dict[str, str]], parts: tuple[str, ...]
+) -> None:
+    # Given
+    _cut_refuses(monkeypatch, {"error": "INVALID_DEFINITION", "invalid": invalid})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["message"].startswith("the builder refused the release:\n")
+    found = {
+        "spec": "fix each named definition field in the spec" in error["hint"],
+        "targets": "`--target`" in error["hint"],
+        "blob": "delete that `blobId`" in error["hint"],
+    }
+    assert found == {kind: kind in parts for kind in found}
+
+
+def test_the_blob_hint_fits_a_node_as_well_as_a_model(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cut checks a node's zip as well as a model's file, and a node has no
+    ``sourceUri``: the hint names the sources each can take."""
+    # Given
+    issue = {"field": "blob:node-blob-1", "reason": "uploaded content does not match declared sha256"}
+    _cut_refuses(monkeypatch, {"error": "INVALID_DEFINITION", "invalid": [issue]})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    hint = envelope(result)["error"]["hint"]
+    assert "a model's `sourceUri`" in hint
+    assert "a node's `registryVersion` or `repository`" in hint
+    assert "or a `sourceUri`" not in hint
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"error": "INVALID_DEFINITION"}, id="bare"),
+        pytest.param({"error": "INVALID_DEFINITION", "invalid": [], "message": ""}, id="empty"),
+    ],
+)
+def test_a_refused_definition_with_no_reason_is_a_builder_error(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, body: dict
+) -> None:
+    """With nothing to list, there is no refusal to lead with: the generic envelope
+    keeps the code and the body."""
+    # Given
+    _cut_refuses(monkeypatch, body)
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["code"] == "build_builder_error"
+    assert "INVALID_DEFINITION" in error["message"]
+    assert error["details"]["status"] == 400

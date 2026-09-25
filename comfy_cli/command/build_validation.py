@@ -39,6 +39,8 @@ _GO_SPACE: Final = (
     "\t\n\v\f\r \x85\xa0\u1680" + "".join(map(chr, range(0x2000, 0x200B))) + "\u2028\u2029\u202f\u205f\u3000"
 )
 _URL_CONTROL: Final = re.compile(r"[\x00-\x1f\x7f]")
+# A link's userinfo, which a label leaves out with its query and fragment.
+_LINK_USERINFO: Final = re.compile(r"^((?:[A-Za-z][A-Za-z0-9+.-]*:)?//)[^/?#]*@")
 _URL_BAD_ESCAPE: Final = re.compile(r"%(?![0-9A-Fa-f]{2})")
 _URL_SCHEME: Final = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*(?=:)")
 _URL_PORT: Final = re.compile(r"(:[0-9]*)?")
@@ -47,6 +49,11 @@ _URL_USERINFO: Final = re.compile(r"[A-Za-z0-9\-._:~!$&'()*+,;=%@]*")
 # and IPv6 rules.
 _HOST_SAFE: Final = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~!$&'()*+,;=:[]<>\"")
 _HEX: Final = frozenset("0123456789abcdefABCDEF")
+
+
+def _go_trim(value: str) -> str:
+    """``strings.TrimSpace``, which the builder's rules trim with."""
+    return value.strip(_GO_SPACE)
 
 
 class ModelLookupState(str, Enum):
@@ -108,7 +115,7 @@ def _set_sources(entry: JsonObject, fields: tuple[str, ...], *, location: str) -
             continue
         if not isinstance(value, str):
             raise BuildSpecInvalidError(f"{location}.{field} must be a string or null")
-        if value.strip():
+        if _go_trim(value):
             sources[field] = value
     return sources
 
@@ -256,7 +263,7 @@ def _go_url(value: str) -> tuple[str, str, str] | None:
     returns an error. Written out because ``urlsplit`` accepts what Go refuses (a
     control character, a bad ``%`` escape, a port that is not a number) and leaves
     the path encoded, so ``m%2Esafetensors`` would have no extension."""
-    rest, _, fragment = value.strip(_GO_SPACE).partition("#")
+    rest, _, fragment = _go_trim(value).partition("#")
     if _URL_CONTROL.search(rest) or _URL_BAD_ESCAPE.search(fragment) or rest.startswith(":"):
         return None
     scheme = ""
@@ -354,40 +361,47 @@ def _lacks_extension(uri: str) -> bool:
     return "." not in base
 
 
-def _model_label(entry: JsonObject) -> str:
-    return next(
-        (
-            value
-            for key in ("filename", "sourceUri", "localPath")
-            if isinstance(value := entry.get(key), str) and value.strip()
-        ),
-        "",
-    )
+def model_label(entry: JsonObject) -> str:
+    """What names *entry* in a refusal: its filename, else its link, else its local
+    path. A link is named without its query, fragment and userinfo, where a signed
+    link or a Civitai ``?token=`` carries its credential."""
+    for key in ("filename", "sourceUri", "localPath"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            if key == "sourceUri":
+                return _LINK_USERINFO.sub(r"\1", value.strip().partition("#")[0].partition("?")[0])
+            return value
+    return ""
 
 
 def _link_problem(entry: JsonObject, wire: JsonObject) -> tuple[str, str] | None:
     """The builder's two link rules on the ``sourceUri`` *wire* sends, as ``(field,
     reason)``."""
     uri = wire.get("sourceUri")
-    if not isinstance(uri, str) or not uri.strip():
+    if not isinstance(uri, str) or not _go_trim(uri):
         return None
     if not _https_url(uri):
         return "sourceUri", "must be an https URL"
     filename = entry.get("filename")
-    if not (isinstance(filename, str) and filename.strip()) and _lacks_extension(uri):
+    if not (isinstance(filename, str) and _go_trim(filename)) and _lacks_extension(uri):
         return "filename", "sourceUri has no file extension; set an explicit filename"
     return None
 
 
 def model_rule_problems(
-    definition: JsonObject, projected: JsonObject, directories: frozenset[str] | None = None
+    definition: JsonObject,
+    projected: JsonObject,
+    directories: frozenset[str] | None = None,
+    *,
+    kept_links: bool = False,
 ) -> list[dict[str, str]]:
     """Every model entry the builder's cut would refuse, as ``{field, reason,
     model}``. ``models[<n>]`` counts the spec as it is read, which sorts the models,
     so ``model`` names the entry (its filename, link or local path) for a person
     looking for it in a file they ordered themselves. A ``source: local`` entry's
-    link and sha256 are left alone here: push replaces both with what it uploads,
-    and checks a link it keeps with ``validate_kept_links``."""
+    link and sha256 are left alone here: push replaces both with what it uploads.
+    With *kept_links* only the link of each ``source: local`` entry is checked, for
+    ``validate_kept_links``."""
     problems: list[dict[str, str]] = []
     model = ""
 
@@ -396,19 +410,24 @@ def model_rule_problems(
 
     for index, (entry, wire) in enumerate(zip(_entries(definition, "models"), _entries(projected, "models"))):
         location = f"definition.models[{index}]"
-        model = _model_label(entry)
+        model = model_label(entry)
+        local = entry.get("source") == "local"
+        if kept_links:
+            if local and (link := _link_problem(entry, wire)):
+                refuse(f"{location}.{link[0]}", link[1])
+            continue
         model_type = entry.get("type")
         if isinstance(model_type, str) and not _valid_model_dir(model_type, directories):
             refuse(f"{location}.type", _MODEL_DIR_REASON)
         filename = entry.get("filename")
-        if isinstance(filename, str) and filename.strip() and not _valid_filename(filename):
+        if isinstance(filename, str) and _go_trim(filename) and not _valid_filename(filename):
             refuse(f"{location}.filename", "must be a safe filename")
-        if entry.get("source") == "local":
+        if local:
             continue
         if link := _link_problem(entry, wire):
             refuse(f"{location}.{link[0]}", link[1])
         sha256 = entry.get("sha256")
-        if isinstance(sha256, str) and sha256.strip() and not _SHA256.fullmatch(sha256.strip().lower()):
+        if isinstance(sha256, str) and _go_trim(sha256) and not _SHA256.fullmatch(_go_trim(sha256).lower()):
             refuse(f"{location}.sha256", "must be a 64-character sha256")
     return problems
 
@@ -417,14 +436,7 @@ def validate_kept_links(definition: JsonObject) -> None:
     """The link rules on each ``source: local`` model of a definition ``prepare_push``
     reconciled. One whose file still matches its sha256 keeps its ``sourceUri`` and
     is not uploaded, so that link is what the builder reads."""
-    projected = project_wire_definition(definition)
-    _refuse(
-        [
-            {"field": f"definition.models[{index}].{link[0]}", "reason": link[1], "model": _model_label(entry)}
-            for index, (entry, wire) in enumerate(zip(_entries(definition, "models"), _entries(projected, "models")))
-            if entry.get("source") == "local" and (link := _link_problem(entry, wire))
-        ]
-    )
+    _refuse(model_rule_problems(definition, project_wire_definition(definition), kept_links=True))
 
 
 def _refuse(problems: list[dict[str, str]]) -> None:

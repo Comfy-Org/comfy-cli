@@ -91,6 +91,7 @@ from comfy_cli.command.build_targets import (
 from comfy_cli.command.build_upload_progress import UploadProgressReporter, plan_line
 from comfy_cli.command.build_validation import (
     lookup_public_model_sources,
+    model_label,
     project_wire_definition,
     validate_kept_links,
     validate_local_build_spec,
@@ -1583,11 +1584,15 @@ def _raise_spec_invalid(renderer, error: BuildSpecInvalidError, spec_file: Path)
     raise typer.Exit(code=1) from error
 
 
-def _model_directories(client, spec: Mapping) -> frozenset[str] | None:
+#: Said when no folder list was read, so a case variant of a folder passed unchecked.
+_FOLDER_CASE_UNCHECKED = "a folder's case (`Loras` for `loras`) was not checked"
+
+
+def _model_directories(renderer, client, spec: Mapping) -> frozenset[str] | None:
     """The builder's vetted model directories, read only by a signed-in command whose
     spec has models, or None. They are what tells a case variant ("Loras") from a new
-    folder. A list that cannot be read refuses nothing: the save warns about the same
-    field."""
+    folder. A list that cannot be read refuses nothing, and says so: the save warns
+    about the same field."""
     definition = spec.get("definition")
     if client is None or not isinstance(definition, dict) or not definition.get("models"):
         return None
@@ -1595,8 +1600,9 @@ def _model_directories(client, spec: Mapping) -> frozenset[str] | None:
         listed = client.list_model_directories()
     except Exception:
         # Advisory, so no failure to read it (a cut-off body, an oversized one) stops the command.
-        return None
+        listed = None
     if not isinstance(listed, list):
+        renderer.warn(f"could not read the builder's model folders, so {_FOLDER_CASE_UNCHECKED}")
         return None
     return frozenset(name for name in listed if isinstance(name, str)) or None
 
@@ -1961,7 +1967,7 @@ def push_cmd(
     # The scratch directory holds one archive per local node, and it is released
     # the moment the last upload lands: nothing after this block reads an
     # archive, and the create/update round-trip that follows can take a while.
-    directories = _model_directories(client, spec)
+    directories = _model_directories(renderer, client, spec)
     with tempfile.TemporaryDirectory(prefix="comfy-build-push-") as package_dir:
         try:
             validate_local_build_spec(spec, paths, model_directories=directories)
@@ -1997,6 +2003,8 @@ def push_cmd(
                 renderer.info(
                     "--dry-run: nothing was sent; the builder may already hold more of these than the spec records."
                 )
+                if (spec.get("definition") or {}).get("models"):
+                    renderer.info(f"--dry-run reads no folder list from the builder, so {_FOLDER_CASE_UNCHECKED}.")
             renderer.emit(payload, command="build push", changed=False)
             return
         assert client is not None
@@ -2117,6 +2125,7 @@ def push_cmd(
             lambda: client.create_release(target_id, requested),
             {"buildId": target_id},
             hint=_CUT_RETRY_HINT,
+            models=preparation.definition.get("models") or [],
         )
         release_summary = {"releaseId": release_id, "statusUrl": status_url}
         payload["targets"] = requested
@@ -2562,7 +2571,13 @@ def _without_signed_query(e: BaseException) -> str:
     return _URL_QUERY_RE.sub(lambda m: m.group(0).partition("?")[0], str(e))
 
 
-def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None, hint: str | None = None) -> None:
+def _report_builder_error(
+    renderer,
+    e,
+    subject: Mapping[str, str] | None = None,
+    hint: str | None = None,
+    models: Sequence[Mapping] = (),
+) -> None:
     """Emit one error envelope for a builder failure. Prefers the limited-beta 403,
     then the builder's own error body (e.g. `INVALID_DEFINITION: …` or
     `PAYMENT_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
@@ -2631,18 +2646,23 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None,
         # body excerpt as one JSON string. The caller's retry hint is dropped with it,
         # since only an edit clears this.
         if e.code == 400 and builder_error == "INVALID_DEFINITION":
-            invalid = _builder_invalid(body)
+            invalid = _named_models(_builder_invalid(body), models)
             if invalid or builder_message:
                 details = {**(subject or {}), "status": e.code}
                 if invalid and not renderer.is_pretty():
                     details["invalid"] = invalid
-                lines = [f"  {issue['field']}: {issue['reason']}" for issue in invalid]
+                lines = [
+                    f"  {issue['field']}"
+                    + (f" ({issue['model']})" if "model" in issue else "")
+                    + f": {issue['reason']}"
+                    for issue in invalid
+                ]
+                # Only the cut refuses a target or a blob, and neither is the definition.
+                refused = "the build's definition" if _invalid_kinds(invalid) <= {"spec"} else "the release"
                 renderer.error(
                     code="build_definition_invalid",
                     message=_capped_message(
-                        "\n".join(["the builder refused the build's definition:", *lines])
-                        if invalid
-                        else builder_message
+                        "\n".join([f"the builder refused {refused}:", *lines]) if invalid else builder_message
                     ),
                     hint=_definition_invalid_hint(invalid),
                     details=details,
@@ -2695,7 +2715,14 @@ def _report_builder_error(renderer, e, subject: Mapping[str, str] | None = None,
     )
 
 
-def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None, *, hint: str | None = None):
+def _builder_call(
+    renderer,
+    fn,
+    subject: Mapping[str, str] | None = None,
+    *,
+    hint: str | None = None,
+    models: Sequence[Mapping] = (),
+):
     """Run a builder API call, mapping every failure class to one error envelope
     + exit(1) via _report_builder_error. *subject* names the id the command is
     acting on, so a refusal an agent must act on says which one.
@@ -2707,7 +2734,8 @@ def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None, *, hin
 
     ``hint`` rides through to the builder-error and transport envelopes for calls
     whose failure leaves the caller unable to tell whether the write landed. See
-    ``_CUT_RETRY_HINT``.
+    ``_CUT_RETRY_HINT``. ``models`` are the models of the definition the builder
+    read, when the caller has them, so a refused ``models[<n>]`` names its model.
     """
     import urllib.error
 
@@ -2724,7 +2752,7 @@ def _builder_call(renderer, fn, subject: Mapping[str, str] | None = None, *, hin
     # ``InvalidURL`` and ``InvalidSchema`` subclass both, and a malformed builder-supplied upload
     # URL is the builder's failure, reported redacted, not the caller's input.
     except (urllib.error.URLError, requests.RequestException, KeyError) as e:
-        _report_builder_error(renderer, e, subject, hint)
+        _report_builder_error(renderer, e, subject, hint, models)
         raise typer.Exit(code=1) from e
     except ValueError as e:
         renderer.error(code="build_missing_input", message=str(e))
@@ -2780,22 +2808,64 @@ def _builder_invalid(body: str) -> list[dict[str, str]]:
     ]
 
 
+_MODEL_FIELD: Final = re.compile(r"models\[(\d+)\]")
+
+
+def _named_models(invalid: list[dict[str, str]], models: Sequence[Mapping]) -> list[dict[str, str]]:
+    """*invalid* with each ``models[<n>]`` issue naming its model as a local refusal
+    does (``model_label``), when *models* are the ones the builder counted."""
+    named = []
+    for issue in invalid:
+        match = _MODEL_FIELD.match(issue["field"])
+        index = int(match[1]) if match else len(models)
+        entry = models[index] if index < len(models) else None
+        label = model_label(entry) if isinstance(entry, dict) else ""
+        named.append({**issue, "model": _encodable(label)} if label else issue)
+    return named
+
+
+def _invalid_kinds(invalid: list[dict[str, str]]) -> set[str]:
+    """What each refused field is about: ``targets`` for the cut's ``targets[<n>]``
+    (the n-th ``--target``), ``blob`` for its ``blob:<id>``, ``spec`` for the rest."""
+    return {
+        "targets" if issue["field"].startswith("targets[") else "blob" if issue["field"].startswith("blob:") else "spec"
+        for issue in invalid
+    }
+
+
+#: The fix for a ``targets[<n>]`` field, which releases_cut.go ``validateTargets``
+#: returns for a repeated os/gpu pair or one the builder cannot build.
+_TARGETS_HINT = (
+    "a `targets[<n>]` field is the n-th `--target` value, counting from 0: drop a repeated one or "
+    "pick one `comfy build refs build-targets` lists, then run the command again with those `--target` values"
+)
+
+#: The fix for a ``blob:<id>`` field. The cut checks a node's zip as well as a
+#: model's file, and a push uploads again only a ``source: local`` entry without a
+#: ``blobId``. Which kind the entry is lives in the spec, not here, so it covers both.
+_BLOB_HINT = (
+    "a `blob:<id>` field is a file the definition names (a model's file, a node's zip) that never "
+    "reached the builder whole: delete that `blobId` from its entry in the spec, and if that entry has "
+    "no `source: local`, give it `source: local` with a `localPath` to the model's file or the node's "
+    "directory, or another source it can take (a model's `sourceUri`, a node's `registryVersion` or "
+    "`repository`); then run `comfy build push`, which uploads a local file again and saves its new id"
+)
+
+
 def _definition_invalid_hint(invalid: list[dict[str, str]]) -> str | None:
-    """The hint for a refused definition, or None for the registered one. A
-    ``blob:<id>`` field is no rule of the spec: the cut found the file that blob
-    holds missing from storage or different from what was declared, and a push
-    uploads again only a ``source: local`` entry without a ``blobId``. Which kind
-    the entry is lives in the spec, not here, so the hint covers both."""
-    blobs = sum(issue["field"].startswith("blob:") for issue in invalid)
-    if not blobs:
+    """The hint for a refused definition or release, or None for the registered one.
+    The cut refuses a ``--target`` value and a file that never reached storage under
+    the same code as the definition, and no edit to the spec's rules clears either, so
+    each kind present names its own fix."""
+    kinds = _invalid_kinds(invalid)
+    if kinds <= {"spec"}:
         return None
-    hint = (
-        "a `blob:<id>` field is a file the definition names that never reached the builder whole: "
-        "delete that `blobId` from its entry in the spec, and if that entry has no `source: local`, "
-        "give it `source: local` with a `localPath` to the file, or a `sourceUri`; then run "
-        "`comfy build push`, which uploads a local file again and saves its new id"
-    )
-    return hint if blobs == len(invalid) else f"fix each other named field in the spec; {hint}"
+    fixes = {
+        "spec": "fix each named definition field in the spec and push it again",
+        "targets": _TARGETS_HINT,
+        "blob": _BLOB_HINT,
+    }
+    return "; ".join(fix for kind, fix in fixes.items() if kind in kinds)
 
 
 def _builder_msg(body: str) -> str:
@@ -3163,7 +3233,9 @@ def validate_cmd(
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
     try:
-        wire_definition = validate_local_build_spec(spec, paths, model_directories=_model_directories(client, spec))
+        wire_definition = validate_local_build_spec(
+            spec, paths, model_directories=_model_directories(renderer, client, spec)
+        )
     except BuildSpecInvalidError as error:
         _raise_spec_invalid(renderer, error, paths.spec_file)
 

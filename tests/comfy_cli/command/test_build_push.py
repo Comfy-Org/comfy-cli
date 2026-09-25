@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import io
 import json
 import os
 import sys
+import urllib.error
 from collections.abc import Callable
 from pathlib import Path
 
@@ -27,8 +29,9 @@ from comfy_cli.command import build
 from comfy_cli.command.build_package import package_node
 from comfy_cli.command.build_paths import resolve_build_paths
 from comfy_cli.command.build_push import pending_uploads, prepare_push
-from comfy_cli.command.build_spec import JsonObject
+from comfy_cli.command.build_spec import JsonObject, JsonValue
 from comfy_cli.http import ResponseTooLarge
+from comfy_cli.output import get_renderer
 
 
 @pytest.fixture(autouse=True)
@@ -776,8 +779,10 @@ def test_push_does_not_refuse_for_a_folder_list_it_could_not_read(
     # Given
     write_spec(workspace, models=[{"type": "Loras", "sourceUri": "https://h.example/a.safetensors"}], nodes=[])
     client = RecordingBuilder()
+    reads: list[str] = []
 
     def unreachable() -> list[str]:
+        reads.append("read")
         raise requests.ConnectionError("builder unreachable")
 
     monkeypatch.setattr(client, "list_model_directories", unreachable)
@@ -789,6 +794,8 @@ def test_push_does_not_refuse_for_a_folder_list_it_could_not_read(
     # Then
     assert result.exit_code == 0, result.stdout
     assert len(_calls(client, "create_build")) == 1
+    assert reads == ["read"]
+    assert _FOLDER_CASE_UNCHECKED in " ".join(result.stderr.split())
 
 
 def _a_list_body() -> list[str]:
@@ -812,8 +819,10 @@ def test_push_does_not_stop_for_any_failure_reading_the_folder_list(
     # Given
     write_spec(workspace, models=[{"type": "loras", "sourceUri": "https://h.example/a.safetensors"}], nodes=[])
     client = RecordingBuilder()
+    reads: list[str] = []
 
     def failing() -> list[str]:
+        reads.append("read")
         if callable(read):
             return read()
         raise read
@@ -827,3 +836,132 @@ def test_push_does_not_stop_for_any_failure_reading_the_folder_list(
     # Then
     assert result.exit_code == 0, result.stdout
     assert len(_calls(client, "create_build")) == 1
+    assert reads == ["read"]
+    assert _FOLDER_CASE_UNCHECKED in " ".join(result.stderr.split())
+
+
+#: What a push or validate says when it could not check a folder's case.
+_FOLDER_CASE_UNCHECKED = "a folder's case (`Loras` for `loras`) was not checked"
+
+
+class _FolderList:
+    """A client whose folder list answers with *listed*, counting the reads."""
+
+    def __init__(self, listed: object) -> None:
+        self.listed = listed
+        self.reads = 0
+
+    def list_model_directories(self) -> object:
+        self.reads += 1
+        return self.listed
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        pytest.param({}, id="no-models"),
+        pytest.param({"models": []}, id="empty-models"),
+        pytest.param(["models"], id="not-a-mapping"),
+    ],
+)
+def test_a_spec_without_models_reads_no_folder_list(definition: JsonValue) -> None:
+    # Given
+    client = _FolderList(["loras"])
+
+    # When
+    directories = build._model_directories(get_renderer(), client, {"definition": definition})
+
+    # Then
+    assert directories is None
+    assert client.reads == 0
+
+
+@pytest.mark.parametrize(
+    ("listed", "directories"),
+    [
+        pytest.param(["loras", 3], frozenset({"loras"}), id="names-kept"),
+        pytest.param("loras", None, id="a-string"),
+        pytest.param({"loras": True}, None, id="a-mapping"),
+        pytest.param([], None, id="empty"),
+        pytest.param([1, None], None, id="no-names"),
+    ],
+)
+def test_a_folder_list_refuses_nothing_unless_it_names_folders(
+    listed: object, directories: frozenset[str] | None
+) -> None:
+    # Given
+    client = _FolderList(listed)
+
+    # When
+    read = build._model_directories(get_renderer(), client, {"definition": {"models": [{"type": "loras"}]}})
+
+    # Then
+    assert read == directories
+    assert client.reads == 1
+
+
+def test_a_dry_run_says_it_did_not_check_a_folders_case(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A dry run reads nothing from the builder, so "Loras" passes it and the real
+    push refuses it."""
+    # Given
+    write_spec(workspace, models=[{"type": "Loras", "sourceUri": "https://h.example/a.safetensors"}], nodes=[])
+
+    # When
+    result = invoke_push(workspace, "--dry-run", agentic=False)
+
+    # Then
+    assert result.exit_code == 0, result.output
+    assert _FOLDER_CASE_UNCHECKED in " ".join(result.stdout.split())
+
+
+def test_a_refused_release_names_each_model_the_push_saved(workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cut counts the models of the definition the push just saved; push has
+    that definition, so each line names the model too."""
+    # Given
+    write_spec(
+        workspace,
+        models=[
+            {"type": "loras", "filename": "a.safetensors", "sourceUri": "https://h.example/a.safetensors"},
+            {"type": "loras", "sourceUri": "https://h.example/b.safetensors?token=s3cr3t"},
+        ],
+        nodes=[],
+    )
+    client = RecordingBuilder()
+    invalid = [
+        {"field": "models[0].sourceUri", "reason": "link is not reachable"},
+        {"field": "models[7].type", "reason": "no such model"},
+        {"field": "targets[0]", "reason": "not buildable"},
+    ]
+
+    def refused(build_id: str, targets: list[JsonObject] | None = None) -> tuple[str, str]:
+        raise urllib.error.HTTPError(
+            "https://builder.test/v1/builds/build-1/releases",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(json.dumps({"error": "INVALID_DEFINITION", "invalid": invalid}).encode()),
+        )
+
+    monkeypatch.setattr(client, "create_release", refused)
+    _install_client(monkeypatch, client)
+
+    # When
+    result = invoke_push(workspace, "--release", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert error["code"] == "build_definition_invalid"
+    # The spec sorts its models, and the entry with no filename comes first.
+    (create,) = _calls(client, "create_build")
+    assert "filename" not in create["definition"]["models"][0]
+    assert error["message"].splitlines()[1:] == [
+        "  models[0].sourceUri (https://h.example/b.safetensors): link is not reachable",
+        "  models[7].type: no such model",
+        "  targets[0]: not buildable",
+    ]
+    assert [issue.get("model") for issue in error["details"]["invalid"]] == [
+        "https://h.example/b.safetensors",
+        None,
+        None,
+    ]
+    assert "s3cr3t" not in result.output
