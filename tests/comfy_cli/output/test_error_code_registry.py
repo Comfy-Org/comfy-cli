@@ -273,7 +273,7 @@ def test_deploy_error_codes_are_the_exact_final_set() -> None:
         deploy_missing_input deploy_compute_unavailable deploy_forbidden deploy_conflict deploy_immutable_compute
         deploy_deleted deploy_payment_required deploy_quota_exceeded deploy_delete_needs_confirm deploy_endpoint_unknown
         deploy_not_ready deploy_workflow_invalid deploy_asset_missing deploy_asset_upload_failed deploy_job_failed
-        deploy_job_canceled deploy_rate_limited deploy_ambiguous_deployment deploy_job_submit_unknown deploy_bad_request
+        deploy_job_canceled deploy_rate_limited deploy_ambiguous_deployment deploy_job_submit_unknown deploy_endpoint_unreachable deploy_bad_request
         deploy_server_error deploy_idempotency_reuse deploy_workflow_format_ui
         deploy_workflow_asset_outside_root deploy_workflow_asset_marker_reserved
         deploy_insecure_url deploy_unrelated_deployment deploy_workflow_empty
@@ -284,7 +284,7 @@ def test_deploy_error_codes_are_the_exact_final_set() -> None:
     actual = {code for code in error_codes.all_codes() if code.startswith("deploy_")}
 
     # Then
-    assert len(actual) == 34
+    assert len(actual) == 35
     assert actual == expected
 
 

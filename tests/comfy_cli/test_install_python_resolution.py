@@ -53,7 +53,7 @@ class TestExecute:
             patch("comfy_cli.command.install.ensure_workspace_python", return_value="/resolved/python") as mock_ensure,
             patch("comfy_cli.command.install.ensure_pip"),  # pip-bootstrap step; exercised in tests/uv
             patch("comfy_cli.command.install.clone_comfyui"),
-            patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, None)),
+            patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, repo_dir)),
             patch("comfy_cli.command.install.pip_install_comfyui_dependencies") as mock_pip_deps,
             patch("comfy_cli.command.install.WorkspaceManager"),
             patch("comfy_cli.config_manager.ConfigManager"),
@@ -78,7 +78,7 @@ class TestExecute:
         with (
             patch("comfy_cli.command.install.ensure_workspace_python", return_value="/resolved/python"),
             patch("comfy_cli.command.install.clone_comfyui"),
-            patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, None)),
+            patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, repo_dir)),
             patch("comfy_cli.command.install.DependencyCompiler") as MockCompiler,
             patch("comfy_cli.command.install.WorkspaceManager"),
             patch("comfy_cli.config_manager.ConfigManager"),
@@ -109,7 +109,7 @@ class TestExecute:
         with (
             patch("comfy_cli.command.install.ensure_workspace_python", return_value="/resolved/python"),
             patch("comfy_cli.command.install.clone_comfyui"),
-            patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, None)),
+            patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, repo_dir)),
             patch("comfy_cli.command.install.DependencyCompiler") as MockCompiler,
             patch("comfy_cli.command.install.WorkspaceManager"),
             patch("comfy_cli.config_manager.ConfigManager"),
@@ -138,7 +138,7 @@ class TestExecute:
         with (
             patch("comfy_cli.command.install.ensure_workspace_python", return_value="/resolved/python"),
             patch("comfy_cli.command.install.clone_comfyui"),
-            patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, None)),
+            patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, repo_dir)),
             patch("comfy_cli.command.install.DependencyCompiler") as MockCompiler,
             patch("comfy_cli.command.install.WorkspaceManager"),
             patch("comfy_cli.config_manager.ConfigManager"),
@@ -167,7 +167,7 @@ class TestExecute:
         with (
             patch("comfy_cli.command.install.ensure_workspace_python", return_value="/resolved/python"),
             patch("comfy_cli.command.install.clone_comfyui"),
-            patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, None)),
+            patch("comfy_cli.command.install.check_comfy_repo", return_value=(True, repo_dir)),
             patch("comfy_cli.command.install.DependencyCompiler") as MockCompiler,
             patch("comfy_cli.command.install.WorkspaceManager"),
             patch("comfy_cli.config_manager.ConfigManager"),

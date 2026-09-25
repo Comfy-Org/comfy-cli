@@ -19,6 +19,7 @@ from comfy_cli import constants, download_state, tracking, ui
 from comfy_cli.command.models import search as models_search_command
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import DEFAULT_COMFY_MODEL_PATH
+from comfy_cli.detach import popen_detached
 from comfy_cli.file_utils import (
     DownloadCancelled,
     DownloadException,
@@ -796,28 +797,20 @@ def _spawn_download_worker(state_file: pathlib.Path, log_file: pathlib.Path) -> 
     stdin is /dev/null and stdout/stderr are *appended* to the download's log so
     a crashed worker leaves a trace. POSIX gets its own session (so the worker
     outlives the terminal and `download-cancel` can signal one process group);
-    Windows gets DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP for the equivalent.
+    Windows gets DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP for the equivalent,
+    plus CREATE_BREAKAWAY_FROM_JOB so a parent Job Object closing doesn't take
+    the worker down with it (see :mod:`comfy_cli.detach`).
     """
     argv = [sys.executable, "-m", "comfy_cli", "model", "_download-worker", "--state", str(state_file)]
 
-    kwargs: dict = {}
-    if sys.platform == "win32":
-        # Not module-level attributes on POSIX, hence the getattr lookups.
-        detached = getattr(subprocess, "DETACHED_PROCESS", 0)
-        new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        kwargs["creationflags"] = detached | new_group
-    else:
-        kwargs["start_new_session"] = True
-
     logfh = open(log_file, "ab")
     try:
-        proc = subprocess.Popen(
+        proc = popen_detached(
             argv,
             stdin=subprocess.DEVNULL,
             stdout=logfh,
             stderr=subprocess.STDOUT,
             close_fds=True,
-            **kwargs,
         )
     finally:
         logfh.close()

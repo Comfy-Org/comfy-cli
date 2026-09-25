@@ -42,7 +42,7 @@ class TestWatcherSpawnFlags:
         assert watcher._spawn_watcher("abc123", where="local", host="127.0.0.1", port=8188) is True
 
         kwargs = popen.call_args.kwargs
-        assert kwargs["creationflags"] == 0x8 | 0x200
+        assert kwargs["creationflags"] == 0x8 | 0x200 | 0x01000000
         assert "start_new_session" not in kwargs
 
     def test_stdio_stays_detached_from_the_parent(self, monkeypatch):

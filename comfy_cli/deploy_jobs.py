@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import socket
 import time
 import urllib.error
+import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Final, Protocol
@@ -223,6 +225,8 @@ class DeployJobClient:
                         continue
                 raise self._mapped(error.code, server, request, control_plane) from error
             except (TimeoutError, urllib.error.URLError) as error:
+                if _never_sent(error):
+                    raise _unreachable(url, request.deployment_id, error) from error
                 raise self._unknown(request.deployment_id) from error
 
             if status == 201 and isinstance(parsed, dict):
@@ -274,3 +278,26 @@ class DeployJobClient:
         if not isinstance(code, str) or not isinstance(message, str):
             raise AssertionError("invalid job-submission error rule")
         return DeployAPIError(code, server.message or message, status=status, details=details)
+
+
+def _never_sent(error: BaseException) -> bool:
+    """True when the submit provably never reached the data plane.
+
+    A refused TCP connection, a name that does not resolve, or a proxy that
+    refuses the CONNECT tunnel all fail before a byte of the request is sent,
+    so no job can exist and a retry is safe. Anything else (a timeout, a reset
+    after sending) stays ambiguous.
+    """
+    reason = getattr(error, "reason", None)
+    if isinstance(reason, (ConnectionRefusedError, socket.gaierror)):
+        return True
+    return isinstance(reason, OSError) and str(reason).startswith("Tunnel connection failed")
+
+
+def _unreachable(url: str, deployment_id: str, error: BaseException) -> DeployAPIError:
+    host = urllib.parse.urlsplit(url).hostname or url
+    return DeployAPIError(
+        code="deploy_endpoint_unreachable",
+        message=f"could not reach the deployment endpoint {host}: {getattr(error, 'reason', error)}; the job was not submitted",
+        details={"deployment_id": deployment_id, "host": host},
+    )

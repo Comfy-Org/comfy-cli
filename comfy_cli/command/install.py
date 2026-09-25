@@ -4,8 +4,8 @@ import platform
 import re
 import subprocess
 import sys
-from typing import TypedDict
-from urllib.parse import urlparse
+from typing import NoReturn, TypedDict
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import requests
 import semver
@@ -25,7 +25,7 @@ from comfy_cli.command.version_validators import (  # noqa: F401 — re-exported
 from comfy_cli.constants import GPU_OPTION
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG
 from comfy_cli.git_utils import checkout_pr, git_checkout_tag, reject_option_like_ref
-from comfy_cli.output import rprint
+from comfy_cli.output import get_renderer, rprint
 from comfy_cli.resolve_python import ensure_workspace_python
 from comfy_cli.uv import DependencyCompiler, ensure_pip
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
@@ -163,6 +163,95 @@ def _install_manager_with_fallback(repo_dir, python, *, bootstrap_pip: bool):
         rprint("[yellow]Manager not installed. Launch will run without manager flags.[/yellow]")
 
 
+def _is_git_repo(path: str) -> bool:
+    import git
+
+    try:
+        git.Repo(path)
+    except Exception:  # noqa: BLE001 — InvalidGitRepositoryError, NoSuchPathError, …
+        return False
+    return True
+
+
+def _redact_remote_url(url: str) -> str:
+    """Mask the userinfo of a git remote URL (``https://user:tok@host/x`` -> ``https://***@host/x``).
+
+    Remote URLs can embed a username/token; they are echoed into the error
+    message and envelope, so the credential must not ride along. scp-style
+    remotes (``git@host:owner/repo``) have no scheme and carry no secret — they
+    are returned unchanged.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.scheme or "@" not in parts.netloc:
+        return url
+    host = parts.netloc.rpartition("@")[2]
+    return urlunsplit(parts._replace(netloc=f"***@{host}"))
+
+
+def _is_comfy_repo_root(repo_dir: str) -> bool:
+    """True only when ``repo_dir`` itself is a recognized ComfyUI root.
+
+    ``check_comfy_repo`` walks up to a parent checkout (right for workspace
+    detection), so ``<ComfyUI>/leftover`` would otherwise pass as an install
+    target and the install would run inside the parent's subfolder.
+    """
+    ok, resolved = check_comfy_repo(repo_dir)
+    if not ok or resolved is None:
+        return False
+
+    def norm(p: str) -> str:
+        return os.path.normcase(os.path.realpath(p))
+
+    return norm(resolved) == norm(repo_dir)
+
+
+_INVALID_TARGET_HINT = "choose another --workspace, or remove/rename the existing folder and re-run `comfy install`"
+
+
+def _reject_invalid_install_target(repo_dir: str) -> NoReturn:
+    """Fail ``comfy install`` for an existing directory that isn't a ComfyUI checkout.
+
+    Emits an ``ok: false`` envelope (JSON) / error panel (pretty) and exits 1 —
+    nothing has been installed, so neither the shell status nor the envelope may
+    claim success.
+    """
+    import git
+
+    renderer = get_renderer()
+    try:
+        repo = git.Repo(repo_dir)
+    except (git.InvalidGitRepositoryError, git.NoSuchPathError):
+        renderer.error(
+            code="install_target_not_git_repo",
+            message=f"'{repo_dir}' exists but is not a valid git repository; nothing was installed.",
+            hint=_INVALID_TARGET_HINT,
+            details={"path": repo_dir},
+        )
+        raise typer.Exit(code=1) from None
+    except Exception:  # noqa: BLE001 — any other GitPython failure: still an unusable target
+        remote_urls: list[str] = []
+    else:
+        try:
+            remote_urls = [_redact_remote_url(r.url) for r in repo.remotes]
+        except Exception:  # noqa: BLE001
+            remote_urls = []
+
+    message = f"'{repo_dir}' exists but is not a recognized ComfyUI repository; nothing was installed."
+    if remote_urls:
+        message += f" Found remotes: {', '.join(remote_urls)}."
+    message += " Recognized sources: Comfy-Org, comfyanonymous, drip-art, ltdrdata."
+    renderer.error(
+        code="install_target_not_comfyui",
+        message=message,
+        hint=_INVALID_TARGET_HINT,
+        details={"path": repo_dir, "remotes": remote_urls},
+    )
+    raise typer.Exit(code=1)
+
+
 def execute(
     url: str,
     comfy_path: str,
@@ -201,8 +290,20 @@ def execute(
     if not os.path.exists(parent_path):
         os.makedirs(parent_path, exist_ok=True)
 
-    if not os.path.exists(repo_dir):
+    preexisting = os.path.exists(repo_dir)
+    if not preexisting:
         clone_comfyui(url=url, repo_dir=repo_dir)
+
+    # Refuse a target nothing below can install into. Nightly has always
+    # required a recognized ComfyUI checkout; a versioned install only needs a
+    # git repo to check a tag out in, so there we reject just a pre-existing
+    # folder that isn't one (a leftover/unrelated directory). The ComfyUI check
+    # is rooted at ``repo_dir``: a subfolder of some other checkout is not one.
+    if version == "nightly":
+        if not _is_comfy_repo_root(repo_dir):
+            _reject_invalid_install_target(repo_dir)
+    elif preexisting and not _is_comfy_repo_root(repo_dir) and not _is_git_repo(repo_dir):
+        _reject_invalid_install_target(repo_dir)
 
     if version != "nightly":
         try:
@@ -210,27 +311,6 @@ def execute(
         except GitHubRateLimitError as e:
             rprint(f"[bold red]Error checking out ComfyUI version: {e}[/bold red]")
             raise typer.Exit(code=1) from e
-
-    elif not check_comfy_repo(repo_dir)[0]:
-        # Get actual remote URL for better error message
-        import git
-
-        try:
-            repo = git.Repo(repo_dir)
-            remote_urls = [r.url for r in repo.remotes]
-            rprint(
-                f"[bold red]'{repo_dir}' exists but its remote URL is not a recognized ComfyUI repository.[/bold red]"
-            )
-            if remote_urls:
-                rprint(f"[yellow]Found remotes: {', '.join(remote_urls)}[/yellow]")
-            rprint("[yellow]Recognized sources: Comfy-Org, comfyanonymous, drip-art, ltdrdata[/yellow]")
-        except git.InvalidGitRepositoryError:
-            rprint(f"[bold red]'{repo_dir}' exists but is not a valid git repository.[/bold red]")
-        except Exception:
-            rprint(
-                f"[bold red]'{repo_dir}' already exists. But it is an invalid ComfyUI repository. Remove it and retry.[/bold red]"
-            )
-        raise typer.Exit(code=1)
 
     # checkout specified commit
     if commit is not None:

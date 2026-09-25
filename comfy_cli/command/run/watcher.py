@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 
+from comfy_cli.detach import popen_detached
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
 from comfy_cli.output.sanitize import sanitize_markup
@@ -101,7 +102,8 @@ def _spawn_watcher(
     Fully decoupled from the parent: stdio redirected to /dev/null, and a
     detached process group so a controlling terminal closing doesn't kill it.
     POSIX gets its own session; Windows gets
-    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP for the equivalent, because
+    DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP (+ CREATE_BREAKAWAY_FROM_JOB,
+    see :mod:`comfy_cli.detach`) for the equivalent, because
     ``start_new_session`` is POSIX-only and CPython ignores it there. We don't
     track the PID — the watcher writes its own PID into the state file so
     callers can find it there if needed.
@@ -119,23 +121,13 @@ def _spawn_watcher(
         argv += ["--port", str(port)]
     argv += ["--notify"] if notify else ["--no-notify"]
 
-    kwargs: dict = {}
-    if sys.platform == "win32":
-        # Not module-level attributes on POSIX, hence the getattr lookups.
-        detached = getattr(subprocess, "DETACHED_PROCESS", 0)
-        new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        kwargs["creationflags"] = detached | new_group
-    else:
-        kwargs["start_new_session"] = True
-
     try:
-        subprocess.Popen(
+        popen_detached(
             argv,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
             close_fds=True,
-            **kwargs,
         )
         return True
     except (OSError, ValueError):

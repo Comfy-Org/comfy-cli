@@ -1062,6 +1062,21 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "CLI usage error).",
         "read the cm-cli output above for the failing pack, then re-run `comfy update all`",
     ),
+    # --- ComfyUI install (`comfy install`) ------------------------------------
+    ErrorCode(
+        "install_target_not_git_repo",
+        "`comfy install` found the target workspace directory already present but it is not a git "
+        "repository (e.g. a leftover or unrelated folder), so nothing was cloned or installed. "
+        "`details.path` is the directory.",
+        "choose another --workspace, or remove/rename the existing folder and re-run `comfy install`",
+    ),
+    ErrorCode(
+        "install_target_not_comfyui",
+        "`comfy install` found the target workspace directory already present as a git repository that "
+        "is not a recognized ComfyUI checkout, so nothing was installed. `details.path` is the directory "
+        "and `details.remotes` its git remote URLs.",
+        "choose another --workspace, or remove/rename the existing folder and re-run `comfy install`",
+    ),
     ErrorCode(
         "version_switch_unknown_version",
         "`comfy update comfy --version X` could not resolve X to a ComfyUI tag; the workspace was left untouched.",
@@ -1527,6 +1542,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "deploy_idempotency_reuse",
         "The v2 data plane rejected a previously used single-use idempotency key and did not execute the duplicate request.",
         "do not retry the duplicate invocation automatically",
+    ),
+    ErrorCode(
+        "deploy_endpoint_unreachable",
+        "A job submission failed before reaching the deployment's data plane (connection refused, DNS failure, or a proxy refused the tunnel), so no job was created.",
+        "check the network path to the endpoint host in details.host (a proxy or firewall must allow it), then submit again",
     ),
     ErrorCode(
         "deploy_job_submit_unknown",
