@@ -679,6 +679,18 @@ class TestAddNode:
         assert wf["nodes"][-1]["pos"] == [400, 200]
         assert op["pos"] == [400, 200]
 
+    def test_add_node_can_set_title_at_creation(self):
+        """Applying a title when creating a node should show the requested
+        title immediately, not the node's default class-derived title."""
+        g = _graph()
+        wf = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+        wf, op = workflow_ops.add_node(wf, g, "KSampler", title="My Sampler")
+        node = wf["nodes"][-1]
+        assert node.get("title") == "My Sampler"
+        # The op is the unit of replay (P1 fidelity) — a title set at
+        # creation must be frozen into it, not just the local node dict.
+        assert op.get("title") == "My Sampler"
+
     def test_add_node_size_reflects_widget_count(self):
         """Size is estimated from the node's real inputs/outputs/widgets, not
         the old blind [210, 100] default."""

@@ -17,6 +17,17 @@ as an indented block addressed as ``<first instance address>/<inner id>`` —
 fully qualified through every nesting level, matching
 ``workflow_ops._navigate_subgraph_path``.
 
+Canvas groups (``workflow["groups"]``, and a subgraph definition's own
+``groups``) own no printable line either — a group is a bounding box drawn
+around other nodes, not a node — but each one gets a trailing
+``# group <id> "<title>": nodes <a>, <b>`` comment so a reader (this
+renderer's own output is the in-app agent's one canvas read) can see that a
+titled group exists on the canvas, and roughly what it encloses. Membership
+follows the same any-overlap rule LiteGraph's own
+``LGraphGroup.recomputeInsideNodes`` uses (a node counts as inside its
+bounding box even when the box doesn't fully enclose it) — not a role this
+module tracks precisely, hence "roughly".
+
 Two rules keep the printed names the ones the editors take:
 
 * a regular node's widgets print by their value-aware names
@@ -290,6 +301,58 @@ def _note_comment(node: dict) -> str:
     if extra_lines > 0:
         comment += f" (+{extra_lines} lines)"
     return comment
+
+
+def _rect_overlaps(gx: float, gy: float, gw: float, gh: float, nx: float, ny: float, nw: float, nh: float) -> bool:
+    """LiteGraph's ``overlapBounding``: true unless the two axis-aligned boxes
+    are disjoint on some axis. Any overlap counts — a group's bounding box
+    does not have to fully enclose a node for the frontend to treat it as a
+    member."""
+    return not (nx > gx + gw or nx + nw < gx or ny > gy + gh or ny + nh < gy)
+
+
+def _group_member_ids(group: dict, nodes: list[dict]) -> list[str]:
+    """Ids of ``nodes`` whose own ``pos``/``size`` bounding box overlaps
+    ``group["bounding"]`` — the same rule LiteGraph's
+    ``LGraphGroup.recomputeInsideNodes`` uses to decide a group's live
+    membership; there's no separate list of member ids serialized on the
+    group itself. A malformed/missing ``bounding``, or a node with no
+    usable ``pos``/``size``, is dropped from consideration rather than
+    guessed at — this is a best-effort display aid, not a canvas-geometry
+    engine."""
+    bounding = group.get("bounding")
+    if not (isinstance(bounding, list) and len(bounding) == 4):
+        return []
+    try:
+        gx, gy, gw, gh = (float(v) for v in bounding)
+    except (TypeError, ValueError):
+        return []
+    members: list[str] = []
+    for n in nodes:
+        pos = n.get("pos")
+        size = n.get("size")
+        if not (isinstance(pos, list) and len(pos) >= 2 and isinstance(size, list) and len(size) >= 2):
+            continue
+        try:
+            nx, ny, nw, nh = float(pos[0]), float(pos[1]), float(size[0]), float(size[1])
+        except (TypeError, ValueError):
+            continue
+        if _rect_overlaps(gx, gy, gw, gh, nx, ny, nw, nh):
+            members.append(str(n.get("id")))
+    return members
+
+
+def _group_comment(group: dict, nodes: list[dict]) -> str:
+    """The line-comment for one canvas group: its id, its title (or a
+    synthesized ``group <id>`` when untitled), and the bare ids of whatever
+    nodes fall inside its bounding box today — the ``_note_comment``
+    counterpart for a construct that, like a note, owns no printable line of
+    its own."""
+    gid = group.get("id")
+    title = group.get("title") or f"group {gid}"
+    members = sorted(_group_member_ids(group, nodes), key=_sort_key)
+    tail = f": nodes {', '.join(members)}" if members else ": no nodes inside its bounding box"
+    return f"# group {gid} {json.dumps(title, ensure_ascii=False)}{tail}"
 
 
 # ---------------------------------------------------------------------------
@@ -1241,6 +1304,15 @@ def _render_definition_block(
         reason = state.primitive_reason.get(addr, "spliced") if t == "PrimitiveNode" else "spliced"
         state.skipped.append({"id": addr, "type": t, "reason": reason})
 
+    raw_groups = sg_def.get("groups") or []
+    def_groups = [g for g in raw_groups if isinstance(g, dict)]
+    if len(def_groups) != len(raw_groups):
+        state.warnings.append(
+            f"subgraph {def_id}: ignoring {len(raw_groups) - len(def_groups)} non-object group entries"
+        )
+    for g in sorted(def_groups, key=lambda g: _sort_key(str(g.get("id")))):
+        lines.append(_group_comment(g, interior_nodes))
+
     out_sources: dict[Any, tuple] = {}
     for oid, oslot, tid, tslot in all_links.values():
         if str(tid) != _PROXY_OUT:
@@ -1343,6 +1415,13 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         addr = ctx.qualify(n.get("id"))
         reason = state.primitive_reason.get(addr, "spliced") if t == "PrimitiveNode" else "spliced"
         skipped.append({"id": addr, "type": t, "reason": reason})
+
+    raw_groups = workflow.get("groups") or []
+    groups = [g for g in raw_groups if isinstance(g, dict)]
+    if len(groups) != len(raw_groups):
+        warnings.append(f"workflow: ignoring {len(raw_groups) - len(groups)} non-object group entries")
+    for g in sorted(groups, key=lambda g: _sort_key(str(g.get("id")))):
+        lines.append(_group_comment(g, nodes))
 
     # Render every definition block first (this may discover further nested
     # definitions, appended to state.def_order and picked up by this same
