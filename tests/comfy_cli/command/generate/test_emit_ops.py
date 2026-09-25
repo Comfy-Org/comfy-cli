@@ -494,3 +494,25 @@ def test_emitted_workflow_accepts_a_later_edit_stamped_below_its_base_version(tm
     assert edited.exit_code == 0, edited.output
     lowered = convert_ui_to_api(json.loads(out.read_text()), _object_info())
     assert _api_by_class(lowered)["GeminiImageNode"]["prompt"] == "EDITED", "the edit was discarded by a stale stamp"
+
+
+def test_write_frontend_workflow_materializes_nano_banana_pro_from_the_nightly_input(tmp_path):
+    """Pin for an agent failure seen in telemetry: generate_workflow sent
+    these args and got `emit_workflow_failed` — "'gemini-3-pro-image-preview'
+    not in 1 known options for model — closest: gemini-2.5-flash-image" — because
+    emit built GeminiImageNode. #921 routes that model to GeminiImage2Node; this
+    replays the recorded input through the same frontend (canvas-ops) path."""
+    wf, ops = emit.write_frontend_workflow(
+        "nano-banana",
+        {
+            "prompt": "Redraw this character as 16-bit pixel art.",
+            "image": "abababababababababababababababababababababababababababababababab.gif",
+            "model": "gemini-3-pro-image-preview",
+        },
+        tmp_path / "workflow.json",
+        _graph(),
+        actor="agent",
+    )
+    assert ops
+    partner = next(n for n in wf["nodes"] if n["type"] == "GeminiImage2Node")
+    assert "gemini-3-pro-image-preview" in partner["widgets_values"]
