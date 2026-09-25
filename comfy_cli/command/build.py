@@ -90,6 +90,7 @@ from comfy_cli.command.build_targets import (
 )
 from comfy_cli.command.build_upload_progress import UploadProgressReporter, plan_line
 from comfy_cli.command.build_validation import (
+    _go_trim,
     lookup_public_model_sources,
     model_label,
     project_wire_definition,
@@ -1597,7 +1598,7 @@ def _model_directories(renderer, client, spec: Mapping) -> frozenset[str] | None
     """The builder's vetted model directories, read only by a signed-in command whose
     spec has models, or None. They are what tells a case variant ("Loras") from a new
     folder. A list that cannot be read, or names no folder, refuses nothing, and says
-    so: the save warns about the same field."""
+    so: the save warns about the same field. A blank name ("", "  ") names no folder."""
     if client is None or not _has_models(spec):
         return None
     try:
@@ -1605,7 +1606,11 @@ def _model_directories(renderer, client, spec: Mapping) -> frozenset[str] | None
     except Exception:
         # Advisory, so no failure to read it (a cut-off body, an oversized one) stops the command.
         listed = None
-    vetted = frozenset(name for name in listed if isinstance(name, str)) if isinstance(listed, list) else None
+    vetted = (
+        frozenset(name for name in listed if isinstance(name, str) and _go_trim(name))
+        if isinstance(listed, list)
+        else None
+    )
     if not vetted:
         renderer.warn(f"could not read the builder's model folders, so {_FOLDER_CASE_UNCHECKED}")
         return None

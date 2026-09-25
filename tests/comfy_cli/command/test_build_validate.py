@@ -791,6 +791,8 @@ def test_validate_without_models_says_nothing_of_a_folders_case(workspace: Path)
         pytest.param({"directories": []}, id="empty-list"),
         pytest.param({}, id="no-list"),
         pytest.param({"directories": [1, 2]}, id="no-names"),
+        pytest.param({"directories": [""]}, id="an-empty-name"),
+        pytest.param({"directories": ["  "]}, id="a-blank-name"),
     ],
 )
 def test_remote_validate_treats_a_list_naming_no_folder_as_unread(

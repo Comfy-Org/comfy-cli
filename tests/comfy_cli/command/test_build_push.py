@@ -884,6 +884,8 @@ def test_a_spec_without_models_reads_no_folder_list(definition: JsonValue) -> No
         pytest.param({"loras": True}, None, id="a-mapping"),
         pytest.param([], None, id="empty"),
         pytest.param([1, None], None, id="no-names"),
+        pytest.param([""], None, id="an-empty-name"),
+        pytest.param(["  "], None, id="a-blank-name"),
     ],
 )
 def test_a_folder_list_refuses_nothing_unless_it_names_folders(
