@@ -181,11 +181,17 @@ _SECRET_PATTERNS = (
     (re.compile(r"(https?://[^\s?#'\"]+)\?[^\s'\"]*", re.IGNORECASE), r"\1?***"),
     (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]+", re.IGNORECASE), r"\1***"),
     # An `Authorization:` value is `<scheme> <credential>` for ANY scheme
-    # (Basic, Bearer, Token, Digest with its comma-separated params, ...), so
-    # scheme and credential are masked as one value, up to the end of the line
-    # or the closing quote.
+    # (Basic, Bearer, Token, Digest with its quoted comma-separated params,
+    # ...), so scheme and credential are masked as one value. A quoted value
+    # (a dict repr) is masked up to its MATCHING quote, so the other quote
+    # kind inside it (Digest's response="...") is covered; an unquoted header
+    # line is masked to the end of the line, quotes included.
     (
-        re.compile(r"((?:proxy-)?authorization[\"']?\s*[:=]\s*[\"']?)[^\r\n\"']+", re.IGNORECASE),
+        re.compile(r"((?:proxy-)?authorization[\"']?\s*[:=]\s*)([\"'])(?:(?!\2)[^\r\n])*\2?", re.IGNORECASE),
+        r"\1\2***\2",
+    ),
+    (
+        re.compile(r"((?:proxy-)?authorization[\"']?\s*[:=]\s*)(?![\"'])[^\r\n]+", re.IGNORECASE),
         r"\1***",
     ),
     (

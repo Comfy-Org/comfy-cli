@@ -152,6 +152,8 @@ def test_click_control_flow_is_never_relabelled(monkeypatch, workflow_file, obje
         "authorization=Token dXNlcjpwYXNz",
         "Proxy-Authorization: Digest username=dXNlcjpwYXNz",
         "headers={'Authorization': 'Basic dXNlcjpwYXNz'}",
+        'Authorization: Digest username="alice", realm="x", response="deadbeef00"',
+        "headers={'Authorization': 'Digest username=\"alice\", response=\"deadbeef00\"'}",
     ],
 )
 def test_an_authorization_header_is_masked_scheme_and_credential(monkeypatch, workflow_file, object_info, header):
@@ -164,7 +166,7 @@ def test_an_authorization_header_is_masked_scheme_and_credential(monkeypatch, wo
     monkeypatch.setattr(workflow_ops, "set_widget", leak)
     err = json.loads(_set_widget("--json", workflow_file, object_info).stdout.strip().splitlines()[-1])["error"]
     dumped = json.dumps(err)
-    for secret in ("dXNlcjpwYXNz", "abc.def-ghi"):
+    for secret in ("dXNlcjpwYXNz", "abc.def-ghi", "deadbeef00", "alice"):
         assert secret not in dumped, err
     assert "status=401" in err["message"], "text before the header survives"
 
