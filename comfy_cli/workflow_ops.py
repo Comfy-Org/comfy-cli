@@ -915,10 +915,12 @@ def _set_widget_impl(
         inner_type = target.get("type", "")
         value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value)
         cur = _engine._widgets_as_positional(target.get("widgets_values"), graph, inner_type)
-        order = graph.widget_order_for_node(inner_type, cur)
         old = None
-        if inner_widget in order:
-            i = order.index(inner_widget)
+        if graph.node(inner_type) is not None:
+            # Same resolution as a top-level node, so a sub-widget the current
+            # dynamic-combo option hides is refused here too instead of
+            # recording an op that writes nothing.
+            i = _widget_index(graph, inner_type, inner_widget, cur, node_id="/".join(str(s) for s in segments))
             old = cur[i] if i < len(cur) else None
         warnings = _validate_widget(graph, inner_type, inner_widget, value)  # raises on shape mismatch
         if norm_note:
@@ -2798,8 +2800,13 @@ def _other_option_widget_error(
     if found is None:
         return None
     selector, keys = found
+    if selector not in order:
+        # A nested selector the node's current outer option hides (`model.mode`
+        # under a `model` option without it). "Set model.mode first" would
+        # send the caller on a write that fails too, so keep the plain refusal.
+        return None
     current = None
-    if selector in order and widgets_values is not None:
+    if widgets_values is not None:
         idx = order.index(selector)
         if idx < len(widgets_values):
             current = widgets_values[idx]

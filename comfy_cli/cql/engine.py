@@ -3998,6 +3998,12 @@ def _unknown_dynamic_sub_warning(
     base_port = next((p for p in m.inputs if p.name == base), None)
     if base_port is None or not _is_dynamic_combo_type(base_port.type) or base not in order:
         return None
+    # A nested selector (`model.mode` for `model.mode.refine`) is the one to
+    # name when the node's current outer option has it. Otherwise fall back to
+    # the outer combo with no option hint rather than point at a selector the
+    # node does not have.
+    if revealed_by is not None and revealed_by[0] in order:
+        base = revealed_by[0]
     base_idx = order.index(base)
     selector = widgets[base_idx] if base_idx < len(widgets) else None
     valid = [n for n in order if n.startswith(f"{base}.")]
