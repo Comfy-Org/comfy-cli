@@ -46,7 +46,9 @@ history.
   builder refused the release, not the definition, and points at the `--target`
   values and `comfy build refs build-targets`; a refusal of several kinds names
   each fix. Under `push --release` a refused `models[<n>]` also names its model,
-  in the message and as `model` in `details.invalid`.
+  in the message and as `model` in `details.invalid`. A list too long for the
+  message stops on a whole line and ends `... and N more`, pointing at `--json`
+  (or `details.invalid`, which holds every one).
 - The local model rules trim a value as the builder does (Go's
   `strings.TrimSpace`, which keeps `\x1c`-`\x1f`), so a `sha256` or `filename`
   holding one is refused locally as the builder would refuse it. A refused entry

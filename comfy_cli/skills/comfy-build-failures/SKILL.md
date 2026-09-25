@@ -78,7 +78,8 @@ refuse with `build_spec_invalid`, one line per entry and `details.invalid` as
 checked after `push` hashes its file, so it is reported once the other problems
 are fixed: a second refusal after a fix is that, not a new problem. What reaches the builder anyway
 comes back as **`build_definition_invalid`**, with the builder's reasons one per
-line and in `details.invalid`; the same definition is refused the same way every
+line and in `details.invalid` (a list too long for the message stops on a whole
+line and ends `... and N more`; `details.invalid` holds every one); the same definition is refused the same way every
 time, so edit it rather than retrying. Its `models[<n>]` counts the spec as the
 last push wrote it, and under `push --release` each such line also names the
 model, as `details.invalid[].model` does in JSON. Two kinds of field are not the definition, and the message

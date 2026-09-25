@@ -987,8 +987,93 @@ def test_a_long_list_of_refused_fields_obeys_the_message_cap(workspace: Path, mo
     error = envelope(result)["error"]
     assert error["code"] == "build_definition_invalid"
     assert error["message"].startswith("the builder refused the build's definition:\n")
-    assert len(error["message"].encode("utf-8")) == build._BUILDER_MESSAGE_CAP
+    assert len(error["message"].encode("utf-8")) <= build._BUILDER_MESSAGE_CAP
     assert len(error["details"]["invalid"]) == 400
+
+
+class _ErrorRecorder:
+    """A renderer in one mode that keeps the error it was handed."""
+
+    def __init__(self, pretty: bool) -> None:
+        self.pretty = pretty
+        self.emitted: dict = {}
+
+    def is_pretty(self) -> bool:
+        return self.pretty
+
+    def error(self, **fields) -> None:
+        self.emitted = fields
+
+
+@pytest.mark.parametrize(
+    ("pretty", "where"),
+    [
+        pytest.param(True, "read every one with `--json`", id="pretty"),
+        pytest.param(False, "read every one in `details.invalid`", id="json"),
+    ],
+)
+def test_a_refusal_past_the_cap_ends_on_a_whole_line_and_counts_the_rest(pretty: bool, where: str) -> None:
+    """Cut at the cap, the message stopped mid-reason with nothing to say the rest
+    was dropped, and in pretty mode `details.invalid` is left out, so the rest was
+    nowhere."""
+    # Given
+    reason = "must be a model directory under models/ (e.g. checkpoints, insightface/models/antelopev2)"
+    invalid = [{"field": f"models[{index}].type", "reason": reason} for index in range(80)]
+    models = [{"type": "Loras", "filename": f"lora-{index:03d}.safetensors"} for index in range(80)]
+    body = json.dumps({"error": "INVALID_DEFINITION", "invalid": invalid}).encode()
+    renderer = _ErrorRecorder(pretty)
+
+    # When
+    build._report_builder_error(
+        renderer, refusal(400, body, "https://builder.test/v1/builds"), {"buildId": "build-1"}, None, models
+    )
+
+    # Then
+    error = renderer.emitted
+    assert error["code"] == "build_definition_invalid"
+    assert len(error["message"].encode("utf-8")) <= build._BUILDER_MESSAGE_CAP
+    heading, *shown, last = error["message"].split("\n")
+    assert heading == "the builder refused the build's definition:"
+    assert shown == [f"  models[{index}].type (lora-{index:03d}.safetensors): {reason}" for index in range(len(shown))]
+    assert last == f"  ... and {80 - len(shown)} more; {where}"
+    assert 0 < len(shown) < 80
+    assert ("invalid" in error["details"]) is not pretty
+    if not pretty:
+        assert len(error["details"]["invalid"]) == 80
+
+
+def test_a_refused_definition_under_another_status_keeps_the_builder_error(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the builder's 400 means the definition was refused; the same body under
+    a 500 came from something else and keeps the generic envelope and its body."""
+    # Given
+    _refusing_builder(monkeypatch, 500, {"error": "INVALID_DEFINITION", "invalid": REFUSED_MODELS})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["details"]["status"]) == ("build_builder_error", 500)
+    assert "invalid" not in error["details"]
+    assert "INVALID_DEFINITION" in error["details"]["body"]
+
+
+def test_a_reason_list_in_another_shape_falls_back_to_the_message(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    reason = "the build's configuration is invalid: baseImage: must be one of: cuda-12.8"
+    _refusing_builder(monkeypatch, 400, {"error": "INVALID_DEFINITION", "invalid": 5, "message": reason})
+
+    # When
+    result = invoke_release("create", "--target", "linux/nvidia")
+
+    # Then
+    error = envelope(result)["error"]
+    assert (error["code"], error["message"]) == ("build_definition_invalid", reason)
+    assert "invalid" not in error["details"]
 
 
 #: The cut's refusal for a file the definition names that is not in storage, as

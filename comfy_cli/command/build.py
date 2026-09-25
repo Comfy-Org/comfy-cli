@@ -2552,6 +2552,28 @@ def _capped_message(text: str) -> str:
     return encoded[:_BUILDER_MESSAGE_CAP].decode("utf-8", "ignore")
 
 
+def _capped_lines(heading: str, lines: list[str], where: str) -> str:
+    """*heading* and as many whole *lines* as fit ``_BUILDER_MESSAGE_CAP``, then, when
+    some did not fit, a line counting them that says *where* every one is listed.
+
+    ``_capped_message`` would stop the last line mid-word with nothing to say the
+    rest were dropped, and the pretty panel leaves ``details.invalid`` out, so the
+    rest would be nowhere. Room for the count line is kept back at its longest,
+    since how many are dropped is only known once the kept lines are chosen."""
+    text = "\n".join([heading, *lines])
+    if len(text.encode("utf-8", "replace")) <= _BUILDER_MESSAGE_CAP:
+        return text
+    more = "  ... and {} more; " + where
+    room = _BUILDER_MESSAGE_CAP - len(heading.encode("utf-8", "replace")) - 1 - len(more.format(len(lines)).encode())
+    kept = []
+    for line in lines:
+        room -= len(line.encode("utf-8", "replace")) + 1
+        if room < 0:
+            break
+        kept.append(line)
+    return "\n".join([heading, *kept, more.format(len(lines) - len(kept))])
+
+
 #: Any URL in an exception's text, with its query string. Both shapes ``requests``
 #: produces quote what they were talking to: ``raise_for_status`` gives the whole
 #: URL ("... for url: https://host/o?sig=..."), while a ``ConnectionError`` gives
@@ -2666,10 +2688,16 @@ def _report_builder_error(
                 ]
                 # Only the cut refuses a target or a blob, and neither is the definition.
                 refused = "the build's definition" if _invalid_kinds(invalid) <= {"spec"} else "the release"
+                # The list apart is only in JSON, so that is where the count line points.
+                where = (
+                    "read every one with `--json`" if renderer.is_pretty() else "read every one in `details.invalid`"
+                )
                 renderer.error(
                     code="build_definition_invalid",
-                    message=_capped_message(
-                        "\n".join([f"the builder refused {refused}:", *lines]) if invalid else builder_message
+                    message=(
+                        _capped_lines(f"the builder refused {refused}:", lines, where)
+                        if invalid
+                        else _capped_message(builder_message)
                     ),
                     hint=_definition_invalid_hint(invalid),
                     details=details,
