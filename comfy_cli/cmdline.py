@@ -146,6 +146,12 @@ def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | Non
     """
     try:
         renderer = get_renderer()
+        if not renderer.is_json():
+            # The root callback installs the renderer, so a crash in it (or
+            # before it) still sees the pretty default. The root flags did
+            # parse, so decide the mode from them. No version lookup: that
+            # lookup is one of the things that can have crashed.
+            renderer = Renderer.resolve(command=_command_path(ctx), **_output_flags(ctx))
         if not renderer.is_json() or renderer._envelope_emitted:
             return
         command = getattr(renderer, "command", None) or _command_path(ctx)
@@ -167,15 +173,24 @@ def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | Non
 #: The envelope goes to stdout, i.e. into a model's context, where the raw
 #: traceback on stderr never went. So the exception text is capped and scrubbed
 #: of the secret shapes an exception message plausibly carries: a URL query
-#: string (`?api_key=...`), a bearer token, `key=value` / `key: value` token
-#: pairs, and `user:pass@` userinfo.
+#: string (`?api_key=...`), a bearer token, an `Authorization:` header value
+#: (scheme and credential together), `key=value` / `key: value` token pairs,
+#: and `user:pass@` userinfo.
 _INTERNAL_ERROR_MESSAGE_CAP = 500
 _SECRET_PATTERNS = (
     (re.compile(r"(https?://[^\s?#'\"]+)\?[^\s'\"]*", re.IGNORECASE), r"\1?***"),
     (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]+", re.IGNORECASE), r"\1***"),
+    # An `Authorization:` value is `<scheme> <credential>` for ANY scheme
+    # (Basic, Bearer, Token, Digest with its comma-separated params, ...), so
+    # scheme and credential are masked as one value, up to the end of the line
+    # or the closing quote.
+    (
+        re.compile(r"((?:proxy-)?authorization[\"']?\s*[:=]\s*[\"']?)[^\r\n\"']+", re.IGNORECASE),
+        r"\1***",
+    ),
     (
         re.compile(
-            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|authorization)"
+            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password)"
             r"[\"']?\s*[:=]\s*[\"']?)(?!Bearer\b)[^\s&\"',;]+",
             re.IGNORECASE,
         ),

@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 
+import click
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from comfy_cli import workflow_ops
@@ -123,8 +125,14 @@ def test_the_message_is_capped_and_secrets_are_redacted(monkeypatch, workflow_fi
     assert "https://api.comfy.org/x" in msg, "keep the URL path, drop only the query"
 
 
-@pytest.mark.parametrize("exc_factory", [lambda: __import__("typer").Exit(0), lambda: __import__("click").Abort()])
-def test_click_control_flow_is_never_relabelled(monkeypatch, workflow_file, object_info, exc_factory):
+@pytest.mark.parametrize(
+    "exc_factory, expected_exit",
+    [
+        pytest.param(lambda: typer.Exit(0), 0, id="typer-exit-0"),
+        pytest.param(lambda: click.Abort(), 1, id="click-abort"),
+    ],
+)
+def test_click_control_flow_is_never_relabelled(monkeypatch, workflow_file, object_info, exc_factory, expected_exit):
     """typer.Exit / Abort raised with NO prior envelope are control flow, not crashes."""
 
     def raise_it(*_a, **_kw):
@@ -133,3 +141,49 @@ def test_click_control_flow_is_never_relabelled(monkeypatch, workflow_file, obje
     monkeypatch.setattr(workflow_ops, "set_widget", raise_it)
     result = _set_widget("--json", workflow_file, object_info)
     assert "internal_error" not in result.stdout, result.stdout
+    assert result.exit_code == expected_exit, result.output
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "Authorization: Basic dXNlcjpwYXNz",
+        "Authorization: Bearer abc.def-ghi",
+        "authorization=Token dXNlcjpwYXNz",
+        "Proxy-Authorization: Digest username=dXNlcjpwYXNz",
+        "headers={'Authorization': 'Basic dXNlcjpwYXNz'}",
+    ],
+)
+def test_an_authorization_header_is_masked_scheme_and_credential(monkeypatch, workflow_file, object_info, header):
+    """The auth scheme and its credential are one value. Masking only the
+    scheme word (``Basic``) would leave the credential in the envelope."""
+
+    def leak(*_a, **_kw):
+        raise RuntimeError(f"request failed status=401\n{header}")
+
+    monkeypatch.setattr(workflow_ops, "set_widget", leak)
+    err = json.loads(_set_widget("--json", workflow_file, object_info).stdout.strip().splitlines()[-1])["error"]
+    dumped = json.dumps(err)
+    for secret in ("dXNlcjpwYXNz", "abc.def-ghi"):
+        assert secret not in dumped, err
+    assert "status=401" in err["message"], "text before the header survives"
+
+
+def test_a_crash_in_the_root_callback_still_emits_the_envelope(monkeypatch, workflow_file, object_info):
+    """The root callback crashing before it installs the --json renderer must
+    still end stdout with an envelope, resolved from the parsed root flags."""
+    from comfy_cli import cmdline
+
+    class _BrokenConfig:
+        def get_cli_version(self):
+            raise OSError("config unreadable")
+
+    monkeypatch.setattr(cmdline, "ConfigManager", _BrokenConfig)
+    result = _set_widget("--json", workflow_file, object_info)
+    assert result.exit_code == 1, result.output
+    lines = [ln for ln in result.stdout.splitlines() if ln.strip()]
+    assert lines, "stdout must not be empty"
+    envelope = json.loads(lines[-1])
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "internal_error", envelope
+    assert envelope["error"]["details"]["exception"] == "OSError", envelope
