@@ -65,10 +65,12 @@ same two numbers; the minted `pos` is always numeric. `as` is optional and decla
 (section 5). `mode` is optional (amendment v1.4): the litegraph execution mode
 the node is minted with — `0` always (default, omitted), `1` on-event, `2` mute,
 `3` on-trigger, `4` bypass. Mute/bypass change what executes, so a recipe that
-dropped them rebuilt a different API prompt. Minted op fields beyond the
-envelope: `node_id` (mint_id int), `class_type`, `pos`, `node` (the complete
-node object — replay inserts it verbatim; a nonzero mode is stamped into it and
-echoed as an op-level `mode` field). `allow_deprecated` is optional and spec-only
+dropped them rebuilt a different API prompt. `title` is optional (amendment
+v1.7, §16): a custom display title for the node, in place of the class's
+default title. Minted op fields beyond the envelope: `node_id` (mint_id int),
+`class_type`, `pos`, `node` (the complete node object — replay inserts it
+verbatim; a nonzero mode or a given title is stamped into it and echoed as an
+op-level `mode`/`title` field). `allow_deprecated` is optional and spec-only
 (never minted into the op): a `class_type` the catalog marks `deprecated` is
 refused with `node_deprecated` unless it is `true`.
 
@@ -1023,3 +1025,31 @@ disagreement.
   this is out of scope, mirroring comfy-multi-player#235's own scope.
 * **No reconciliation commit against comfy-multi-player** — that is
   follow-up work for once (and if) this amendment is accepted.
+
+## 16. Amendment v1.7 — 2026-09-20 (node title at creation)
+
+### 16.1 `add_node` carries an optional `title`
+
+A spec (and the minted op) may set `title` to a string: a custom display title
+for the node, in place of the class's default class-derived title. Before this
+amendment `add_node()` took no `title` kwarg, `_build_node()` never wrote a
+`title` key into a fresh node, and neither `add-node`'s CLI surface nor the
+`apply_specs` vocabulary exposed one — there was no way to name a node at
+creation, nor any separate rename/set-title op to do it afterward.
+
+`title` is omitted from the node object entirely when not given (the
+pre-amendment shape), so a fresh node keeps falling back to the frontend's
+class-derived default exactly as before. When given, it is stamped into
+`op.node["title"]` (which stays authoritative for replay, §8.5) and echoed as
+an op-level `title` field, mirroring how `mode` (amendment v1.4) is carried.
+An op without `title` is exactly the pre-amendment shape, so existing ops
+replay unchanged.
+
+This is independent of amendment v1.6's `set_node_field` (§15): that op
+writes `title` (among other fields) on a node that already exists, while this
+amendment is the only way to set it at `add_node` mint time. The two do not
+contend — `add_node` mints the node before any `set_node_field` write could
+target it — and neither depends on the other landing.
+
+**No change to §§2-8.** No op kind was added, removed, or re-scoped;
+`FROZEN_OPS` / `DEFERRED_OPS` / `BATCHABLE_OPS` are untouched.

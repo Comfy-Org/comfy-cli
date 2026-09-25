@@ -181,6 +181,10 @@ def add_node_cmd(
         str | None,
         typer.Option("--at", show_default=False, help="Canvas position 'x,y' for the new node."),
     ] = None,
+    title: Annotated[
+        str | None,
+        typer.Option("--title", show_default=False, help="Custom display title for the new node."),
+    ] = None,
     allow_deprecated: Annotated[
         bool,
         typer.Option(
@@ -216,6 +220,7 @@ def add_node_cmd(
             graph,
             class_type,
             pos=pos,
+            title=title,
             actor=actor,
             base_version=base_version,
             allow_deprecated=allow_deprecated,
