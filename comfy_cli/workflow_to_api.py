@@ -1203,14 +1203,13 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
       order and ``model.images`` never steals a slot;
     * drop a trailing ``control_after_generate`` marker string when the
       just-consumed input is control-flagged (explicit flag or an implicit INT
-      ``seed``/``noise_seed``) — sub-inputs are handled identically via recursion.
+      ``seed``/``noise_seed``), or a legacy stray marker after another seed-like
+      INT that the next widget could not hold; sub-inputs recurse the same way.
 
     Returns ``[]`` when the schema declares no widget inputs, so the caller can
     fall back to node-input inspection exactly as before.
     """
     input_def = _schema_input_def(schema)
-    pairs: list[tuple[str, Any]] = []
-    vidx = 0
     # ``hasModelFileWidget`` in the frontend's LOAD_3D factory: the buttons are
     # attached to the loaders (Load3D, Load3DAdvanced) and NOT to the viewers
     # fed by a ``model_3d`` link (Preview3DAdvanced, SaveGaussianSplat, …).
@@ -1227,61 +1226,6 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
             if _is_widget_input(s)[0]:
                 return s
         return None
-
-    def consume(name: str, spec: Any, depth: int = 0, next_spec: Any = None) -> None:
-        # ``next_spec`` is the schema of the widget that follows this one at the
-        # same level. The implicit-seed rule matches any INT whose name contains
-        # `seed` (partner nodes call it variation_seed/image_seed/...), so it
-        # needs the next widget's schema to avoid eating a value that the next
-        # COMBO legitimately lists as one of its own options.
-        nonlocal vidx
-        is_widget, is_dynamic = _is_widget_input(spec)
-        if not is_widget:
-            return
-        if injects_load_3d_buttons and depth == 0 and _is_load_3d_spec(spec):
-            # The LOAD_3D custom widget adds its three buttons before its own
-            # component widget, so their values sit between ``model_file`` and
-            # this slot. Consuming them here read "upload3dmodel" into the
-            # viewport input and shifted width/height by three.
-            while (
-                vidx < len(widget_values)
-                and isinstance(widget_values[vidx], str)
-                and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
-            ):
-                vidx += 1
-        if vidx >= len(widget_values):
-            return
-        value = widget_values[vidx]
-        pairs.append((name, value))
-        vidx += 1
-        if is_dynamic:
-            subs = _dynamic_combo_selected_subs(name, spec, value)
-            if not subs and value not in _dynamic_combo_option_keys(spec):
-                # The saved selector no longer names any option in the current
-                # schema (model renamed/removed server-side, or object_info /
-                # workflow version skew). Its sub-input value slots go
-                # unconsumed, so every following widget reads a shifted slot.
-                # We can't recover the alignment, but warn so the corruption
-                # isn't silent.
-                logger.warning(
-                    "Dynamic-combo input %r selector %r matched no option in the current "
-                    "schema; following widget values may be misaligned",
-                    name,
-                    value,
-                )
-            elif depth >= _MAX_DYNAMIC_COMBO_DEPTH:
-                logger.warning(
-                    "Dynamic-combo nesting for input %r exceeded depth %d; stopping sub-input expansion",
-                    name,
-                    _MAX_DYNAMIC_COMBO_DEPTH,
-                )
-            else:
-                for j, (sub_name, sub_spec) in enumerate(subs):
-                    consume(sub_name, sub_spec, depth + 1, next_widget_spec(subs, j + 1))
-        elif vidx < len(widget_values) and _has_control_after_generate_companion(
-            name, spec, widget_values[vidx], next_spec
-        ):
-            vidx += 1
 
     # Flatten required+optional first so each input knows its successor's
     # schema. Within each section, honor ``input_order`` the way the cql
@@ -1304,8 +1248,97 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
             listed = [n for n in section_order if n in section_def]
             names = listed + [n for n in names if n not in listed]
         ordered.extend((n, section_def[n]) for n in names)
-    for i, (input_name, input_spec) in enumerate(ordered):
-        consume(input_name, input_spec, 0, next_widget_spec(ordered, i + 1))
+
+    def walk(strict: bool) -> tuple[list[tuple[str, Any]], bool, list[tuple[Any, ...]]]:
+        # ``strict`` assumes the current frontend's slot layout: every exact
+        # ``seed``/``noise_seed`` INT is followed by its companion slot, so a
+        # control keyword there is always consumed. Returns the pairs and
+        # whether the walk used every value with no widget left short, plus
+        # the warnings it would log (only the chosen walk's are emitted).
+        pairs: list[tuple[str, Any]] = []
+        warnings: list[tuple[Any, ...]] = []
+        vidx = 0
+        short = False
+
+        def consume(name: str, spec: Any, depth: int = 0, next_spec: Any = None) -> None:
+            # ``next_spec`` is the schema of the widget that follows this one at the
+            # same level. The implicit-seed rule matches any INT whose name contains
+            # `seed` (partner nodes call it variation_seed/image_seed/...), so it
+            # needs the next widget's schema to avoid eating a value that the next
+            # COMBO legitimately lists as one of its own options.
+            nonlocal vidx, short
+            is_widget, is_dynamic = _is_widget_input(spec)
+            if not is_widget:
+                return
+            if injects_load_3d_buttons and depth == 0 and _is_load_3d_spec(spec):
+                # The LOAD_3D custom widget adds its three buttons before its own
+                # component widget, so their values sit between ``model_file`` and
+                # this slot. Consuming them here read "upload3dmodel" into the
+                # viewport input and shifted width/height by three.
+                while (
+                    vidx < len(widget_values)
+                    and isinstance(widget_values[vidx], str)
+                    and widget_values[vidx] in LOAD_3D_BUTTON_VALUES
+                ):
+                    vidx += 1
+            if vidx >= len(widget_values):
+                short = True
+                return
+            value = widget_values[vidx]
+            pairs.append((name, value))
+            vidx += 1
+            if is_dynamic:
+                subs = _dynamic_combo_selected_subs(name, spec, value)
+                if not subs and value not in _dynamic_combo_option_keys(spec):
+                    # The saved selector no longer names any option in the current
+                    # schema (model renamed/removed server-side, or object_info /
+                    # workflow version skew). Its sub-input value slots go
+                    # unconsumed, so every following widget reads a shifted slot.
+                    # We can't recover the alignment, but warn so the corruption
+                    # isn't silent.
+                    warnings.append(
+                        (
+                            "Dynamic-combo input %r selector %r matched no option in the current "
+                            "schema; following widget values may be misaligned",
+                            name,
+                            value,
+                        )
+                    )
+                elif depth >= _MAX_DYNAMIC_COMBO_DEPTH:
+                    warnings.append(
+                        (
+                            "Dynamic-combo nesting for input %r exceeded depth %d; stopping sub-input expansion",
+                            name,
+                            _MAX_DYNAMIC_COMBO_DEPTH,
+                        )
+                    )
+                else:
+                    for j, (sub_name, sub_spec) in enumerate(subs):
+                        # The last widget sub-input is followed by the parent's
+                        # successor, not by nothing.
+                        sub_next = next_widget_spec(subs, j + 1)
+                        consume(sub_name, sub_spec, depth + 1, next_spec if sub_next is None else sub_next)
+            elif vidx < len(widget_values) and _has_control_after_generate_companion(
+                name, spec, widget_values[vidx], next_spec, companion_slots_present=strict
+            ):
+                vidx += 1
+
+        for i, (input_name, input_spec) in enumerate(ordered):
+            consume(input_name, input_spec, 0, next_widget_spec(ordered, i + 1))
+        return pairs, not short and vidx == len(widget_values), warnings
+
+    # Two stream shapes exist. Current frontends save a companion slot after an
+    # unflagged ``seed``/``noise_seed`` INT, and it may hold "randomize" even
+    # when the next COMBO also lists "randomize". Older streams have no
+    # companion there, so the same keyword can be the COMBO's real value. Try
+    # the current layout first and keep it only when it accounts for every
+    # value exactly; otherwise fall back to the lenient walk, which refuses to
+    # take a keyword the next COMBO lists.
+    pairs, exact, warnings = walk(strict=True)
+    if not exact:
+        pairs, _exact, warnings = walk(strict=False)
+    for warning in warnings:
+        logger.warning(*warning)
     return pairs
 
 
@@ -1460,53 +1493,93 @@ def _combo_lists_option(input_spec: Any, value: Any) -> bool:
 
 
 def _has_control_after_generate_companion(
-    input_name: str, input_spec: Any, next_value: Any, next_input_spec: Any = None
+    input_name: str,
+    input_spec: Any,
+    next_value: Any,
+    next_input_spec: Any = None,
+    *,
+    companion_slots_present: bool = False,
 ) -> bool:
     """True if ``next_value`` should be consumed as a control_after_generate marker.
 
     Two ways the frontend adds the companion widget:
 
     * Explicit: the input spec sets ``control_after_generate: True``.
-    * Implicit: a seed-like INT widget. The frontend's ``useIntWidget``
-      composable appends the companion after seed-like INT inputs even when
-      the schema omits the flag.
+    * Implicit: the schema omits the flag and the input is an INT named
+      exactly ``seed`` or ``noise_seed`` (the frontend's ``useIntWidget``).
 
-    The implicit path is *value-gated and node-agnostic*: we only consume the
-    next slot when it is literally one of the control keywords
-    (``"fixed"``/``"increment"``/``"decrement"``/``"randomize"``). That string
-    is only ever present when the frontend really did append the companion, so
-    it is a reliable signal regardless of schema flags or the exact input name.
+    The implicit path mirrors ``useIntWidget`` and the cql engine's
+    ``_has_control_after_generate_slot``: an unflagged INT named exactly
+    ``seed`` or ``noise_seed``. A dynamic-combo sub-input is dotted
+    (``model.seed``), so it never matches, same as in the engine. Even there we
+    only consume ``next_value`` when it is literally a control keyword, and not
+    when the next widget is a COMBO that lists it as one of its own options.
 
-    We still require the input to be a seed-like INT (name contains ``seed``,
-    case-insensitive) rather than *any* INT. Partner/API nodes name the widget
-    every which way -- ``seed``/``noise_seed`` (Bria/Kling/Vidu/Wan2),
-    ``image_seed``/``model_seed``/``texture_seed`` (Tripo), ``Seed`` (Rodin3D),
-    ``rand_seed``, ``noise_seed_sde``, ``variation_seed`` -- and several ship
-    the input *unflagged*, so the old exact ``seed``/``noise_seed`` match let
-    their companion survive and shifted every later widget by one. Keeping the
-    ``seed`` substring guard preserves the schema-aware path's protection
-    against a legitimate non-seed INT (e.g. ``steps``) that merely happens to
-    precede a COMBO/STRING widget whose value equals a control keyword.
+    Legacy leniency: older CLIs wrote a stray marker after other seed-like INTs
+    (``image_seed``/``texture_seed``/``variation_seed``/``Seed``, and dotted
+    sub-input seeds) even though the frontend adds no companion there. For
+    those we drop a control keyword only when the next widget could not hold it
+    (see ``_widget_rejects_control_value``). A STRING or a COMBO listing
+    ``"fixed"`` keeps it, so a real widget value is never eaten.
 
-    ``next_input_spec`` is the schema of the *next* widget input (when known). On
-    the implicit seed path we refuse to consume ``next_value`` when that next
-    widget is a COMBO that legitimately lists ``next_value`` as an option — there
-    the value is the combo's own saved selection, not a phantom companion, so
-    consuming it would drop a real widget value and shift every later widget.
+    ``next_input_spec`` is the schema of the next widget (``None`` when this is
+    the last one).
+
+    ``companion_slots_present`` says the caller already knows the stream has the
+    current frontend's companion slots (its length matches that layout). Then
+    a control keyword after an exact ``seed``/``noise_seed`` is the companion
+    even when the next COMBO lists the same keyword.
     """
     if not (isinstance(next_value, str) and next_value in _CONTROL_AFTER_GENERATE_VALUES):
         return False
     options = input_spec[1] if len(input_spec) >= 2 and isinstance(input_spec[1], dict) else {}
-    if options.get("control_after_generate"):
-        return True
+    if "control_after_generate" in options and options["control_after_generate"] is not None:
+        # An explicit flag wins over the seed-name rule, as in the frontend's
+        # ``control_after_generate ?? <name rule>``: false means no companion,
+        # so a marker-like value belongs to the next widget.
+        return bool(options["control_after_generate"])
     input_type = input_spec[0] if input_spec else None
-    # The `seed` substring also covers a dotted dynamic-combo sub-input
-    # (`model.seed`), so no separate leaf-name match is needed.
-    if not (input_type == "INT" and "seed" in input_name.lower()):
+    if input_type != "INT":
         return False
-    # Implicit seed path: don't steal a value that the next COMBO widget declares
-    # as one of its own options.
-    return not _combo_lists_option(next_input_spec, next_value)
+    if input_name in ("seed", "noise_seed"):
+        # Implicit seed path. With the companion slot known to be present the
+        # keyword is always the companion. Otherwise (a stream that may predate
+        # the companion) don't steal a value that the next COMBO widget
+        # declares as one of its own options.
+        if companion_slots_present:
+            return True
+        return not _combo_lists_option(next_input_spec, next_value)
+    if "seed" in input_name.lower():
+        # No companion per the frontend/engine rule; only a legacy stray marker
+        # that the next widget could not have held is dropped.
+        return _widget_rejects_control_value(next_input_spec, next_value)
+    return False
+
+
+def _widget_rejects_control_value(input_spec: Any, value: str) -> bool:
+    """True if a widget declared by ``input_spec`` could not hold ``value`` (a control keyword).
+
+    ``None`` (no next widget) rejects: a trailing marker is safe to drop. Numeric
+    and boolean widgets reject. A COMBO or dynamic combo rejects unless it lists
+    ``value``. Anything else (STRING, custom widget types) may hold the string,
+    so it does not reject.
+    """
+    if input_spec is None:
+        return True
+    if not isinstance(input_spec, (list, tuple)) or not input_spec:
+        return False
+    type_field = input_spec[0]
+    if isinstance(type_field, (list, tuple)):
+        return value not in type_field
+    if not isinstance(type_field, str):
+        return False
+    if type_field in ("INT", "FLOAT", "BOOLEAN"):
+        return True
+    if type_field == "COMBO":
+        return not _combo_lists_option(input_spec, value)
+    if _is_widget_input(input_spec)[1]:
+        return value not in _dynamic_combo_option_keys(input_spec)
+    return False
 
 
 def _collect_widget_inputs(

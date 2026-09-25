@@ -124,7 +124,9 @@ class PortOptions:
     step: float | None = None
     default: Any = None
     multiline: bool = False
-    control_after_generate: bool = False
+    # None when the spec omits the flag, so an explicit ``False`` can override
+    # the seed/noise_seed name rule (``useIntWidget`` uses ``??``).
+    control_after_generate: bool | None = None
     force_input: bool = False
     # ``socketless``: a display-only input (ImageCompare's compare_view slider,
     # Painter's canvas). The frontend renders it and serializes nothing for it,
@@ -728,24 +730,21 @@ def _is_dynamic_combo_type(type_id: str) -> bool:
 
 def _has_control_after_generate_slot(port: Port) -> bool:
     """True if the frontend places a ``control_after_generate`` marker widget
-    right after this port — explicit (schema ``control_after_generate: True``)
-    or implicit (the frontend's ``useIntWidget`` composable always companions
-    an INT ``seed``/``noise_seed`` input, regardless of the schema flag).
-    ``port.name`` may be dotted for a dynamic-combo sub-input (``model.seed``);
-    the implicit rule keys off the leaf name, same as the converter.
-    Mirrors ``workflow_to_api._has_control_after_generate_companion``'s
-    schema-level test."""
-    if port.options.control_after_generate:
-        return True
-    # Same seed-like rule as the converter's companion guard: partner nodes
-    # name the widget every which way — ``image_seed``/``model_seed`` (Tripo),
-    # ``Seed`` (Rodin3D), ``rand_seed``, ``noise_seed_sde``, ``variation_seed``
-    # — and several ship it UNFLAGGED, yet the frontend still appends the
-    # companion. An exact ``seed``/``noise_seed`` match here made the exported
-    # widget catalog off by one for every such node, so a name<->index
-    # consumer wrote into the marker slot.
-    leaf_name = port.name.rsplit(".", 1)[-1]
-    return port.type == "INT" and "seed" in leaf_name.lower()
+    right after this port.
+
+    Mirrors ``useIntWidget``: the schema flag when present (an explicit ``false``
+    suppresses the slot), else the legacy convention of an
+    INT input named exactly ``seed`` or ``noise_seed``. A dynamic-combo
+    sub-input is named ``<selector>.<key>`` (``sampling_mode.seed``), so the
+    name rule never applies to it, and ``image_seed``/``texture_seed`` get a
+    companion only when flagged. Reserving a slot the frontend does not create
+    shifts every later widget by one on a saved node (TextGenerate's
+    ``presence_penalty`` read from ``thinking``) and makes ``add_node`` write
+    stray markers the canvas then loads positionally (Tripo P-series).
+    """
+    if port.options.control_after_generate is not None:
+        return port.options.control_after_generate
+    return port.type == "INT" and port.name in ("seed", "noise_seed")
 
 
 def load_3d_button_slots(m: Morphism) -> tuple[tuple[str, str], ...]:
@@ -900,9 +899,9 @@ def _parse_port_options(opts_raw: dict) -> PortOptions:
     )
 
 
-def _control_after_generate_set(val: Any) -> bool:
+def _control_after_generate_set(val: Any) -> bool | None:
     if val is None:
-        return False
+        return None
     if isinstance(val, bool):
         return val
     if isinstance(val, str):
