@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import http.client
 import json
+import sys
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated
 
 import typer
@@ -59,11 +61,46 @@ REFUSED_REQUEST_HINT = (
 )
 UNKNOWN_REQUEST_HINT = "run `comfy agent permissions` to see the requests waiting; each shows its id"
 GRANT_HINTS = {
-    "approve": "comfy agent allow --approve <id>",
-    "deny": "comfy agent deny <id>",
-    "path": 'comfy agent allow --path "<folder>" --reason "<why>"',
-    "host": "comfy agent allow --host <host> --reason <why>",
+    "approve": "{cli} agent allow{dir} --approve <id>",
+    "deny": "{cli} agent deny{dir} <id>",
+    "path": '{cli} agent allow{dir} --path "<folder>" --reason "<why>"',
+    "host": "{cli} agent allow{dir} --host <host> --reason <why>",
 }
+
+# The entry points pyproject installs. Anything else in argv[0] -- a test
+# runner, an embedding host -- is not a way to call this CLI, so the hints name
+# the installed command rather than whatever started the process.
+_CLI_NAMES = frozenset({"comfy", "comfy-cli", "comfycli"})
+
+
+def _cli_invocation() -> str:
+    """How to call this CLI, as this process was started.
+
+    ``comfy`` for an installed entry point (``comfy.exe`` folded to the same),
+    ``<python> -m comfy_cli`` when started as a module, and ``comfy`` for
+    anything else -- a hint is for the user's terminal, and a path that only
+    works inside the agent's sandbox is exactly what sent users to paste a venv
+    path that answered "Access is denied".
+    """
+    argv0 = Path(sys.argv[0] or "")
+    if argv0.name == "__main__.py":
+        return f"{Path(sys.executable).name} -m comfy_cli"
+    name = argv0.name[:-4] if argv0.name.lower().endswith(".exe") else argv0.name
+    return name if name in _CLI_NAMES else "comfy"
+
+
+def grant_hints(root: Path) -> dict[str, str]:
+    """The exact commands that approve or grant against ``root``.
+
+    ``--data-dir`` rides along whenever the agent's dir is not the one a bare
+    terminal resolves (``AGENT_DATA_DIR``, else ``~/.comfy-agent``): the user's
+    shell is a different process, and without it ``--approve`` answers
+    ``agent_unknown_request`` while the request is still waiting. A relative
+    dir is emitted absolute: the user's shell need not share this process's cwd.
+    """
+    flag = "" if root.is_absolute() and root == data_dir(None) else f' --data-dir "{root.absolute()}"'
+    cli = _cli_invocation()
+    return {k: v.format(cli=cli, dir=flag) for k, v in GRANT_HINTS.items()}
 
 
 def _age(requested_at: object, now: datetime | None = None) -> str:
@@ -151,7 +188,7 @@ def permissions_cmd(data_dir_opt: _DATA_DIR_OPT = None):
         "pending": state.pending,
         "paths": state.paths,
         "hosts": state.hosts,
-        "grant": dict(GRANT_HINTS),
+        "grant": grant_hints(root),
     }
     if renderer.is_pretty():
         # Everything interpolated below came from files on disk or a local
@@ -171,14 +208,15 @@ def permissions_cmd(data_dir_opt: _DATA_DIR_OPT = None):
             )
         if state.pending:
             first = state.pending[0]["id"]
-            rprint(f"  [dim]comfy agent allow --approve {first}    comfy agent deny {first}[/dim]")
+            approve_cmd, deny_cmd = (payload["grant"][k].replace("<id>", first) for k in ("approve", "deny"))
+            rprint(f"  [dim]{esc(approve_cmd)}    {esc(deny_cmd)}[/dim]")
         rprint("[bold]folders the user approved[/bold]" + ("" if state.paths else "  (none)"))
         for e in state.paths:
             rprint(f"  {esc(e.get('path'))}  — {esc(e.get('reason', ''))}")
         rprint("[bold]hosts the user approved[/bold]" + ("" if state.hosts else "  (none)"))
         for e in state.hosts:
             rprint(f"  {esc(e.get('host'))}  — {esc(e.get('reason', ''))}")
-        rprint("\n[dim]" + "\n".join(GRANT_HINTS.values()) + "[/dim]")
+        rprint("\n[dim]" + "\n".join(esc(h) for h in payload["grant"].values()) + "[/dim]")
     renderer.emit(payload, command="agent permissions")
 
 

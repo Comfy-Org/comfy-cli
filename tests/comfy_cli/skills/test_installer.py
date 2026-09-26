@@ -941,3 +941,19 @@ def test_description_is_read_from_frontmatter_only():
         "Example config:\n\n```yaml\ndescription: an example, not this skill\n```\n"
     )
     assert frontmatter_description(with_example) == "The real one."
+
+
+def test_agent_permissions_skill_names_every_permanently_refused_host():
+    """The skill tells the model not to request these, because `approve` vets
+    with `vet_host` and refuses them: a request for one waits until denied. A
+    host added to `_REFUSED_HOSTS` without a line here would be requested."""
+    from comfy_cli.agent import _REFUSED_HOSTS
+
+    rows = [
+        line
+        for line in skill_content("comfy-agent-permissions").splitlines()
+        if line.startswith("|") and "do **not** call `request_host`" in line
+    ]
+    assert len(rows) == 1, "expected exactly one 'never request this host' row in the blocked-by table"
+    for host in _REFUSED_HOSTS:
+        assert host in rows[0], f"the row should name the refused host {host}"
