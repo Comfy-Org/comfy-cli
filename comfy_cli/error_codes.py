@@ -620,7 +620,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "workflow_print_unsupported",
         "`comfy workflow print` refused: the workflow contains something it cannot render faithfully "
-        "(legacy group node, duplicate node id, link to a missing node/slot, non-integer link slot, "
+        "(legacy group node, duplicate node id, link to a missing node or output slot, non-integer link slot, "
         "link cycle, unknown `--format`). `details.reasons` lists every reason.",
         "fix the listed reasons, or read the graph with `comfy workflow slots` / `comfy workflow ls-nodes`",
     ),
