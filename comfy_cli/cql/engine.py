@@ -198,15 +198,16 @@ class Port:
 
     @property
     def is_dynamic_combo(self) -> bool:
-        """V3 dynamic combo (e.g. ``COMFY_DYNAMICCOMBO_V3``): the schema declares
+        """Dynamic combo (e.g. ``COMFY_DYNAMICCOMBO_V3``): the schema declares
         ONE selector input, but the option the selector names carries its own
         ``INPUT_TYPES`` block, which the frontend — and ``convert_ui_to_api`` —
         lower into dotted slot keys (``model.size_preset``, ``model.width``, …).
 
-        Deliberately the same test the converter applies
-        (``workflow_to_api._is_widget_input``), so validation expands exactly the
-        tree the converter lowered."""
-        return self.type.startswith("COMFY_") and "COMBO" in self.type
+        Most servers use a ``COMFY_*COMBO*`` type, while some partner schemas
+        expose the same option tree under a plain ``COMBO``. Parsing retains
+        that tree in ``dynamic_options``, so its presence is authoritative.
+        """
+        return bool(self.dynamic_options) or (self.type.startswith("COMFY_") and "COMBO" in self.type)
 
     def autogrow_slot_example(self) -> str:
         """Slot-key example for hints: the first two slot names this group
@@ -1817,7 +1818,7 @@ class Graph:
                 # made `images.extra` on a plain IMAGE input look declared, and
                 # a malformed link under that decoy hard-failed a prompt the
                 # server runs — it ignores every key a node does not declare.
-                declared_input = _node_declares_input(port_by_name, input_name)
+                declared_input = _node_declares_input(port_by_name, input_name, node_inputs)
 
                 # The server validates only output-reachable nodes and prunes
                 # the rest, so a structural break on a pruned node does not stop
@@ -3391,21 +3392,26 @@ def frontend_injected_widget_error(node_type: str, widget: str, available: list[
     )
 
 
-def _node_declares_input(port_by_name: dict[str, Port], key: Any) -> bool:
+def _node_declares_input(port_by_name: dict[str, Port], key: Any, node_inputs: dict) -> bool:
     """Whether a node whose ports are ``port_by_name`` declares ``key``.
 
     The server reads the inputs a class DECLARES (``validate_inputs`` walks
     ``INPUT_TYPES``) and ignores every other key, so this is the one rule that
-    decides whether a key can fail a prompt or be followed as an edge. Only an
-    autogrow group or a dynamic combo takes dotted keys; a dotted suffix on an
-    ordinary port (``images.extra`` on a plain IMAGE input) is not declared.
+    decides whether a key can fail a prompt or be followed as an edge. Autogrow
+    groups take generated dotted slots; a dynamic combo takes only the dotted
+    inputs exposed by its current selection. A stale key from another selection
+    and a dotted suffix on an ordinary port are not declared.
     """
     if not isinstance(key, str):
         return False
     if key in port_by_name:
         return True
     base = port_by_name.get(key.split(".", 1)[0])
-    return base is not None and (base.is_autogrow or base.is_dynamic_combo)
+    if base is None:
+        return False
+    if base.is_autogrow:
+        return True
+    return base.is_dynamic_combo and _dotted_slot_port(port_by_name, key, node_inputs) is not None
 
 
 def _declared_link_targets(node_data: dict, graph: Graph) -> list[str]:
@@ -3429,7 +3435,7 @@ def _declared_link_targets(node_data: dict, graph: Graph) -> list[str]:
     port_by_name = {p.name: p for p in m.inputs} if m is not None else None
     targets: list[str] = []
     for key, value in node_inputs.items():
-        if port_by_name is not None and not _node_declares_input(port_by_name, key):
+        if port_by_name is not None and not _node_declares_input(port_by_name, key, node_inputs):
             continue
         if isinstance(value, list) and len(value) == 2:
             targets.append(str(value[0]))
@@ -3471,7 +3477,11 @@ def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int
     if port.is_autogrow:
         element = port.autogrow_element_type
         if not element:
-            return None
+            # Older/partial catalogs can omit the element schema while still
+            # declaring the generated slot. Preserve structural link checks
+            # and accept any source type, matching the validator's historical
+            # behavior for these otherwise-untyped slots.
+            element = "*"
         # A slot carries the group's element type; the slot NAME is checked
         # elsewhere (autogrow_unknown_slot), so an odd name still gets the
         # type comparison the server will make.
