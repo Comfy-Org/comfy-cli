@@ -1,0 +1,16 @@
+# Routine CLI changes are eligible for standard approval; later rules override this default.
+* @Comfy-Org/cloud-infra @Comfy-Org/comfy-standard-approver
+
+# Credential storage, OAuth, resolution, and transport safeguards.
+/comfy_cli/auth/ @Comfy-Org/cloud-infra
+/comfy_cli/cloud/ @Comfy-Org/cloud-infra
+/comfy_cli/credentials.py @Comfy-Org/cloud-infra
+/comfy_cli/http.py @Comfy-Org/cloud-infra
+/comfy_cli/target.py @Comfy-Org/cloud-infra
+
+# Credential-bearing registry publication and PyPI release authority.
+/comfy_cli/registry/api.py @Comfy-Org/cloud-infra
+/.github/workflows/publish_package.yml @Comfy-Org/cloud-infra
+
+# Changes to the approval boundary itself.
+/.github/CODEOWNERS @Comfy-Org/cloud-infra
