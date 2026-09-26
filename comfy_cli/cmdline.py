@@ -185,14 +185,16 @@ _SECRET_PATTERNS = (
     # ...), so scheme and credential are masked as one value. A quoted value
     # (a dict repr) is masked up to its MATCHING quote, so the other quote
     # kind inside it (Digest's response="...") is covered; an unquoted header
-    # line is masked to the end of the line, quotes included.
+    # line is masked to the end of the line, quotes included. Both shapes are
+    # ONE alternation applied in one pass, so each value is masked exactly
+    # once: as two passes, the unquoted one re-matched the quoted one's output
+    # and swallowed the headers after it.
     (
-        re.compile(r"((?:proxy-)?authorization[\"']?\s*[:=]\s*)([\"'])(?:(?!\2)[^\r\n])*\2?", re.IGNORECASE),
-        r"\1\2***\2",
-    ),
-    (
-        re.compile(r"((?:proxy-)?authorization[\"']?\s*[:=]\s*)(?![\"'])[^\r\n]+", re.IGNORECASE),
-        r"\1***",
+        re.compile(
+            r"((?:proxy-)?authorization[\"']?\s*[:=]\s*)(?:([\"'])(?:(?!\2)[^\r\n])*\2?|[^\r\n]+)",
+            re.IGNORECASE,
+        ),
+        lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
     ),
     (
         re.compile(

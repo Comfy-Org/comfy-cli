@@ -171,6 +171,42 @@ def test_an_authorization_header_is_masked_scheme_and_credential(monkeypatch, wo
     assert "status=401" in err["message"], "text before the header survives"
 
 
+@pytest.mark.parametrize(
+    "text, kept",
+    [
+        (
+            "{'Authorization': 'Bearer tok123', 'X-Request-Id': 'req-abc-789', 'Content-Type': 'application/json'}",
+            ("'X-Request-Id': 'req-abc-789'", "'Content-Type': 'application/json'}"),
+        ),
+        (
+            '{"Authorization": "Basic dG9rMTIz", "X-Request-Id": "req-abc-789"}',
+            ('"X-Request-Id": "req-abc-789"}',),
+        ),
+        (
+            "headers={'Authorization': 'Digest username=\"tok123\"'} status=401",
+            ("} status=401",),
+        ),
+        ("Authorization: Token tok123\nX-Request-Id: req-abc-789", ("X-Request-Id: req-abc-789",)),
+    ],
+)
+def test_an_authorization_value_is_masked_once_and_what_follows_survives(
+    monkeypatch, workflow_file, object_info, text, kept
+):
+    """Masking the header value must not eat the rest of the line: the other
+    headers and trailing text after it are what a --json caller acts on."""
+
+    def leak(*_a, **_kw):
+        raise RuntimeError(text)
+
+    monkeypatch.setattr(workflow_ops, "set_widget", leak)
+    err = json.loads(_set_widget("--json", workflow_file, object_info).stdout.strip().splitlines()[-1])["error"]
+    for secret in ("tok123", "dG9rMTIz"):
+        assert secret not in err["message"], err
+    for fragment in kept:
+        assert fragment in err["message"], err
+    assert err["message"].count("***") == 1, err
+
+
 def test_a_crash_in_the_root_callback_still_emits_the_envelope(monkeypatch, workflow_file, object_info):
     """The root callback crashing before it installs the --json renderer must
     still end stdout with an envelope, resolved from the parsed root flags."""
