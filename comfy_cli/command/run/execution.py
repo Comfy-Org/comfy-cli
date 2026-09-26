@@ -39,7 +39,7 @@ from rich.table import Column, Table
 from comfy_cli import execution_errors
 from comfy_cli.caller import usage_source
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW, _node_errors_to_list
-from comfy_cli.http import no_redirect_urlopen
+from comfy_cli.http import USAGE_SOURCE_HEADERS, no_redirect_urlopen
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
 from comfy_cli.output.sanitize import sanitize_markup
@@ -208,8 +208,9 @@ class WorkflowExecution:
             data["extra_data"].update(self.extra_data)
         elif self.api_key:
             data["extra_data"]["api_key_comfy_org"] = self.api_key
-        req = request.Request(f"http://{self.host}:{self.port}/prompt", json.dumps(data).encode("utf-8"))
-        req.add_header("Comfy-Usage-Source", "comfy-cli")
+        req = request.Request(
+            f"http://{self.host}:{self.port}/prompt", json.dumps(data).encode("utf-8"), headers=USAGE_SOURCE_HEADERS
+        )
         try:
             # No-redirect, not ``plain_urlopen``: ``extra_data`` can carry a
             # Comfy Org credential, so this submit gets the same refuse-a-30x

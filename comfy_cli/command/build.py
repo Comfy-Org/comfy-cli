@@ -99,6 +99,7 @@ from comfy_cli.command.build_validation import (
 )
 from comfy_cli.command.pack_scan import read_pyproject
 from comfy_cli.constants import SUPPORTED_PT_EXTENSIONS
+from comfy_cli.http import USAGE_SOURCE_HEADERS
 from comfy_cli.interaction import confirm, require_option
 from comfy_cli.output import get_renderer
 from comfy_cli.registry.api import sanitize_error_body
@@ -538,7 +539,7 @@ def detect_comfy_version_from_server(base_url: str) -> str | None:
     at the data root. Returns None if no server answers (fast-fail) or the field
     is absent."""
     try:
-        resp = requests.get(base_url.rstrip("/") + "/system_stats", timeout=2)
+        resp = requests.get(base_url.rstrip("/") + "/system_stats", headers=USAGE_SOURCE_HEADERS, timeout=2)
         resp.raise_for_status()
         version = resp.json().get("system", {}).get("comfyui_version")
     except (requests.RequestException, ValueError):
