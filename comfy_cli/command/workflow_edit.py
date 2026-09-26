@@ -362,8 +362,11 @@ def set_node_field_cmd(
         )
         raise typer.Exit(code=1)
     p, workflow = _load_workflow_or_fail(renderer, file)
-    # No catalog is needed to write these fields (unlike set-widget): none of
-    # `title`/`mode`/`flags.collapsed`/`flags.pinned` is a catalogued widget.
+    # Coerce a numeric id the same way every sibling command does (`_split_addr`
+    # for set-widget/connect, delete/delete-nodes' own coercion) — otherwise
+    # this node is minted as node_id "1" (str) here but 1 (int) everywhere
+    # else, splitting one node across two LWW registers for a consumer that
+    # doesn't normalize ids the way this module's `_find_by_str` does.
     node_id: Any = int(node) if node.lstrip("-").isdigit() else node
     try:
         workflow, op = workflow_ops.set_node_field(
@@ -373,7 +376,8 @@ def set_node_field_cmd(
         _emit_edit_error(
             renderer,
             e,
-            hint="run `comfy workflow print <file>` to see every node, edge and widget value with its id in one read",
+            hint=f"writable fields are {', '.join(workflow_ops.WRITABLE_NODE_FIELDS)}; run "
+            "`comfy workflow ls-nodes <file>` to see the node ids that exist",
         )
         raise typer.Exit(code=1) from e
     _finish(renderer, p, workflow, op, base_version, stdout, "workflow set-node-field")

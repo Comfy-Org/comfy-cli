@@ -464,12 +464,13 @@ def _lww_gate(workflow: dict, op: dict) -> bool:
     target already claimed by a higher-or-equal stamp is dropped, making the
     surviving value independent of apply order.
 
-    Gated targets (``_write_target``): ``set_widget``'s ``("widget", …)``, the
-    connect-embedded ``inputcount`` bump that shares a connect's stamp (§8.4),
-    and — since amendment v1.2 — a concrete connect's ``("input", to_node,
-    to_slot)``. The register store is still spelled ``_widget_stamps`` for
-    on-the-wire compatibility with documents written before v1.2; it holds every
-    gated target, not just widgets."""
+    Gated targets (``_write_target``): ``set_widget``'s ``("widget", …)``,
+    ``set_node_field``'s ``("node_field", node_id, field)`` (amendment v1.6),
+    the connect-embedded ``inputcount`` bump that shares a connect's stamp
+    (§8.4), and — since amendment v1.2 — a concrete connect's ``("input",
+    to_node, to_slot)``. The register store is still spelled ``_widget_stamps``
+    for on-the-wire compatibility with documents written before v1.2; it holds
+    every gated target, not just widgets."""
     prior = workflow.get("_widget_stamps", {}).get(json.dumps(_write_target(op), default=str))
     return prior is None or _stamp_key(op) > list(prior)
 
@@ -600,6 +601,39 @@ def _next_inputcount_name(ins: list, requested: str) -> str:
 # 4 bypass. Mirrors workflow_to_api._MODE_MUTED/_MODE_BYPASS and the
 # _MODE_LABELS table in workflow_edit's ls-nodes.
 _VALID_NODE_MODES = frozenset({0, 1, 2, 3, 4})
+
+
+def _validate_node_field_value(field: str, value: Any) -> None:
+    """Validate a ``set_node_field`` value against its field's shape.
+
+    Run at BOTH mint time (:func:`set_node_field`) and replay
+    (:func:`_apply_set_node_field`) — a peer-authored or replayed op gets no
+    less scrutiny than a freshly minted one, so a malformed value (a string
+    ``mode``, an out-of-range int, a bool standing in for an int, a container)
+    can never reach the document via either path. Unlike the field-name
+    allowlist, the pre-fix code enforced no shape at all here, which let a
+    bogus ``mode`` (e.g. ``"bypass"``, ``99``, a list) break
+    ``workflow_to_api``'s exact ``mode in (_MODE_MUTED, _MODE_BYPASS)`` check
+    and made ``ls-nodes``/``print`` raise ``TypeError: unhashable type``.
+
+    ``value`` of ``None`` is always valid — it is the "clear" sentinel
+    (delete-wins semantics) for every field, never a type violation.
+    """
+    if value is None:
+        return
+    if field == "title":
+        if not isinstance(value, str):
+            raise ValueError(f"malformed_op: title must be a string or null, got {value!r}")
+    elif field == "mode":
+        # Mirrors add_node's own mode validation just below.
+        if not isinstance(value, int) or isinstance(value, bool) or value not in _VALID_NODE_MODES:
+            raise ValueError(
+                f"malformed_op: invalid node mode {value!r}; valid: 0 (always), 1 (on-event), 2 (mute), "
+                "3 (on-trigger), 4 (bypass), or null to clear"
+            )
+    elif field in ("flags.collapsed", "flags.pinned"):
+        if not isinstance(value, bool):
+            raise ValueError(f"malformed_op: {field} must be a boolean or null, got {value!r}")
 
 
 _POS_STRING_RE = re.compile(r"\s*\[?\s*([^,\[\]]+?)\s*,\s*([^,\[\]]+?)\s*\]?\s*")
@@ -1249,16 +1283,6 @@ def _promoted_widget_error(workflow: dict, node: dict, slot: Any) -> ValueError 
     )
 
 
-#: Per-field value type for ``set_node_field`` (§1.8). ``None`` always means
-#: "clear the field", regardless of type — checked separately below.
-_NODE_FIELD_TYPES: dict[str, type] = {
-    "title": str,
-    "mode": int,
-    "flags.collapsed": bool,
-    "flags.pinned": bool,
-}
-
-
 def set_node_field(
     workflow: dict,
     node_id: Any,
@@ -1307,20 +1331,17 @@ def set_node_field(
     write is top-level only, mirroring comfy-multi-player's own scope.
     """
     if field not in WRITABLE_NODE_FIELDS:
-        raise ValueError(f"field must be one of {', '.join(WRITABLE_NODE_FIELDS)}, got {field!r}")
-    expected = _NODE_FIELD_TYPES[field]
-    # `bool` is an `int` subclass in Python, so `mode` (int) must explicitly
-    # reject a bool value rather than accept it via isinstance(value, int).
-    type_ok = (
-        isinstance(value, bool) if expected is bool else isinstance(value, expected) and not isinstance(value, bool)
-    )
-    if value is not None and not type_ok:
-        raise ValueError(f"{field} must be a {expected.__name__} or null, got {value!r}")
-    if field == "mode" and value is not None and value not in _VALID_NODE_MODES:
         raise ValueError(
-            f"invalid node mode {value!r}; valid: 0 (always), 1 (on-event), 2 (mute), 3 (on-trigger), 4 (bypass)"
+            f"malformed_op: {field!r} is not a writable node field; expected one of {', '.join(WRITABLE_NODE_FIELDS)}"
         )
-    _require(workflow, node_id)
+    # Validated identically at mint and at replay (`_apply_set_node_field`) —
+    # a peer-authored or replayed op gets no less scrutiny than a freshly
+    # minted one.
+    _validate_node_field_value(field, value)
+    # String comparison (amendment v1.2): ids are legitimately either JSON
+    # type, and the CLI hands this one straight off the command line.
+    if _find_by_str(workflow, node_id) is None:
+        raise ValueError(f"node {node_id} not found in workflow")
     op = _new_op("set_node_field", actor, base_version, node_id=node_id, field=field, value=value)
     return apply_op(workflow, op, None), op
 
@@ -2111,9 +2132,16 @@ def apply_specs(
                         base_version=base_version,
                     )
                 elif kind == "set_node_field":
+                    # "node" is the canonical spec key (matches every sibling
+                    # branch: set_widget's "node", delete_node's "node").
+                    # `spec["node"]` (not `.get`) so a missing key raises the
+                    # standard "missing required field" error instead of
+                    # silently resolving to None — which, since node matching
+                    # is by str(), could spuriously hit a node whose id
+                    # happens to be the string "None".
                     workflow, op = set_node_field(
                         workflow,
-                        resolve_ref(spec.get("node", spec.get("node_id")), aliases),
+                        resolve_ref(spec["node"], aliases),
                         spec["field"],
                         spec["value"],
                         actor=actor,
@@ -2218,6 +2246,52 @@ def _apply_add_node(workflow: dict, op: dict) -> None:
         workflow["last_node_id"] = max(workflow.get("last_node_id") or 0, op["node_id"])
 
 
+def _apply_set_node_field(workflow: dict, op: dict) -> None:
+    field = op["field"]
+    if field not in WRITABLE_NODE_FIELDS:
+        raise ValueError(f"malformed_op: {field!r} is not a writable node field")
+    # Read and validate every required op field BEFORE any mutation — a
+    # KeyError on a missing `value`, or a malformed value, must never leave a
+    # stray partial mutation behind (rollback only undoes LWW stamps, not a
+    # container this handler already created). This also makes validation
+    # unconditional, so a malformed op is rejected identically on every
+    # replica regardless of whether it would have won the LWW gate.
+    value = op["value"]
+    _validate_node_field_value(field, value)
+    if not _lww_gate(workflow, op):
+        return
+    node = _find_by_str(workflow, op["node_id"])
+    # Delete-wins: the target is gone, so the write is a silent no-op whose
+    # op_id is still consumed by the caller.
+    if node is None:
+        return
+    head, _, leaf = field.partition(".")
+    if leaf:
+        container = node.get(head)
+        if not isinstance(container, dict):
+            # `flags` is schema-unconstrained — null, a list, anything is
+            # possible on a document this replica did not mint. A null-delete
+            # against a malformed/absent container is already the state the
+            # write wants, so leave it alone rather than materializing an
+            # empty `{}` (that would make replicas that did/didn't see this
+            # op diverge). A real write coerces it instead of raising
+            # TypeError/AttributeError, which would escape this function's
+            # ValueError/KeyError envelope.
+            if value is None:
+                _lww_commit(workflow, op)
+                return
+            container = {}
+            node[head] = container
+        target, key = container, leaf
+    else:
+        target, key = node, head
+    if value is None:
+        target.pop(key, None)
+    else:
+        target[key] = value
+    _lww_commit(workflow, op)
+
+
 def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
     # Last-writer-wins: a lower-stamped concurrent write to this target is
     # dropped, so the surviving value is the same in any apply order.
@@ -2290,30 +2364,6 @@ def _apply_set_widget(workflow: dict, op: dict, graph) -> None:
     # dynamic-combo selector change must replace the old option's variable-width
     # sub-widget span before preserving trailing values such as seed/watermark.
     _engine._write_widget(node, op["widget"], op["value"], graph, extend=True)
-    _lww_commit(workflow, op)
-
-
-def _apply_set_node_field(workflow: dict, op: dict) -> None:
-    """§1.8 (PROPOSED, amendment v1.6). Same LWW/delete-wins shape as
-    ``_apply_set_widget``'s top-level branch, but no catalog is involved and
-    the target is the ``("node_field", node_id, field)`` namespace, never the
-    widget one — one register per ``(node, field)`` so two fields of one node
-    never contend."""
-    field = op["field"]
-    if field not in WRITABLE_NODE_FIELDS:
-        raise ValueError(f"malformed_op: {field!r} is not a writable node field")
-    if not _lww_gate(workflow, op):
-        return
-    node = _find_by_str(workflow, op["node_id"])
-    if node is None:
-        return  # target concurrently deleted => no-op (delete wins).
-    head, _, leaf = field.partition(".")
-    target = node.setdefault(head, {}) if leaf else node
-    key = leaf or head
-    if op["value"] is None:
-        target.pop(key, None)
-    else:
-        target[key] = op["value"]
     _lww_commit(workflow, op)
 
 
@@ -2648,6 +2698,11 @@ def _write_target(op: dict) -> tuple:
         return ("node_field", str(op["node_id"]), op["field"])
     if kind in ("add_node", "delete_node"):
         return ("node", str(op["node_id"]))
+    if kind == "set_node_field":
+        # One register per (node, field), so a title write and a flag write on
+        # one node never contend — and neither contends with that node's
+        # widget registers.
+        return ("node_field", str(op["node_id"]), op["field"])
     if kind == "connect":
         grow = op.get("grow")
         if grow is not None:
@@ -2683,7 +2738,13 @@ def detect_conflict(a: dict, b: dict) -> bool:
             return True
     if target_a != target_b:
         return False
-    if a["op"] == "set_widget" and b["op"] == "set_widget":
+    # Both kinds are plain LWW registers: two independent writes of the
+    # IDENTICAL value (e.g. two actors both collapsing the same node) are not
+    # escalated — only a genuine value disagreement is. (Reaching here with
+    # differing op kinds is impossible: their write targets are tagged with a
+    # different first element, so `target_a != target_b` above already
+    # returned.)
+    if a["op"] in ("set_widget", "set_node_field") and b["op"] in ("set_widget", "set_node_field"):
         return a.get("value") != b.get("value")
     return True
 

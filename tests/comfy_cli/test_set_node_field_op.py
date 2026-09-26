@@ -1,31 +1,19 @@
-"""``set_node_field`` — a per-field write to a node's durable scalar state
-(op-vocabulary-v1 proposal, superseding the withdrawn ``set_title`` proposal).
+"""``set_node_field`` — a per-field write to a node's durable scalar state.
 
 The vocabulary can already express "this node changed" only as an ``add_node``
-upsert, which replaces the WHOLE node: it rewrites the node's widget values
-and clears its widget stamps, so a title/mode/flag change concurrent with a
-``set_widget`` write on that node discards the write. Nothing wrote
-``title``, ``mode`` or ``flags.collapsed``/``flags.pinned`` after a node
-already existed — by hand, by a script, or by the in-app agent — so a merge
-consumer had nothing to receive and a concurrent edit from two sources
-resolved by accident (arrival order) rather than by any of this document's
-convergence guarantees. This is the same clobber class comfy-multi-player#235
-(merged, superseding that repo's earlier title-only #232/ADR-032 prototype)
-fixed for the CRDT multiplayer doc; this suite proves (and then closes) the
-matching gap in comfy-cli's own local op vocabulary.
+upsert, which replaces the WHOLE node: it rewrites the node's widget values and
+clears its widget stamps, so a title or flag change concurrent with a widget
+write on that node discards the write. ``set_node_field`` claims one LWW
+register per ``(node, field)`` instead.
 
-Before this change: ``workflow_ops`` has no ``set_node_field``, no CLI command
-exists to write one of these fields without hand-editing the JSON, and
-``apply_op`` rejects a ``set_node_field`` op outright (``unknown op``). The
-tests below fail against that baseline; the accompanying implementation makes
-them pass.
-
-See docs/op-vocabulary-v1.md §1.8 / Amendment v1.6 for the normative shape.
-This is a PROPOSED amendment (not yet ratified) — see the PR description.
+These tests pin the CLI half of that: the ``comfy workflow set-node-field``
+command mints a replayable op, ``apply_op`` replays it, the field allowlist is
+closed, and it rides inside a batch.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -37,12 +25,7 @@ from comfy_cli import workflow_ops
 from comfy_cli.caller import Caller
 from comfy_cli.command import workflow as workflow_cmd
 from comfy_cli.cql.engine import Graph
-from comfy_cli.output.renderer import (
-    OutputMode,
-    Renderer,
-    reset_renderer_for_testing,
-    set_renderer,
-)
+from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
 
 
 @pytest.fixture(autouse=True)
@@ -66,15 +49,15 @@ def _force_json_renderer():
 
 def _object_info() -> dict[str, Any]:
     return {
-        "KSampler": {
-            "input": {"required": {"seed": ["INT", {"default": 0}]}},
-            "input_order": {"required": ["seed"]},
-            "output": ["LATENT"],
-            "output_name": ["LATENT"],
-            "category": "sampling",
-            "display_name": "KSampler",
+        "TinyLoader": {
+            "input": {"required": {"ckpt_name": [["a.safetensors"]]}},
+            "input_order": {"required": ["ckpt_name"]},
+            "output": ["MODEL"],
+            "output_name": ["MODEL"],
+            "category": "loaders",
+            "display_name": "Tiny Loader",
             "python_module": "nodes",
-        }
+        },
     }
 
 
@@ -82,27 +65,27 @@ def _graph() -> Graph:
     return Graph.from_object_info(_object_info())
 
 
-def _sampler(node_id: int = 3, **extra: Any) -> dict[str, Any]:
-    node = {
-        "id": node_id,
-        "type": "KSampler",
-        "pos": [0, 0],
-        "inputs": [],
-        "outputs": [{"name": "LATENT", "type": "LATENT", "links": []}],
-        "widgets_values": [0],
+def _populated() -> dict[str, Any]:
+    return {
+        "id": "wf-1",
+        "revision": 0,
+        "nodes": [
+            {
+                "id": 1,
+                "type": "TinyLoader",
+                "pos": [0, 0],
+                "title": "Tiny Loader",
+                "mode": 0,
+                "flags": {},
+                "inputs": [],
+                "outputs": [],
+                "widgets_values": ["a.safetensors"],
+            },
+        ],
+        "links": [],
+        "last_node_id": 1,
+        "last_link_id": 0,
     }
-    node.update(extra)
-    return node
-
-
-def _base_workflow(**extra: Any) -> dict[str, Any]:
-    return {"last_node_id": 3, "last_link_id": 0, "nodes": [_sampler(3, **extra)], "links": []}
-
-
-def _write(tmp_path: Path, data: dict, name: str = "wf.json") -> Path:
-    p = tmp_path / name
-    p.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return p
 
 
 def _run(args: list[str], capsys) -> dict[str, Any]:
@@ -112,8 +95,7 @@ def _run(args: list[str], capsys) -> dict[str, Any]:
     captured = capsys.readouterr().out
     if not captured.strip():
         captured = result.stdout or ""
-    lines = [ln for ln in captured.strip().splitlines() if ln.strip()]
-    for line in reversed(lines):
+    for line in reversed(captured.strip().splitlines()):
         try:
             return json.loads(line)
         except json.JSONDecodeError:
@@ -121,258 +103,376 @@ def _run(args: list[str], capsys) -> dict[str, Any]:
     raise AssertionError(f"no JSON envelope (rc={result.exit_code}, exc={result.exception}, out={captured[:600]})")
 
 
-def _op(tag: str, actor: str, base_version: int, node_id: int, field: str, value: Any) -> dict[str, Any]:
-    op_id = (tag + "0" * 32)[:32]
-    return {
-        "op": "set_node_field",
-        "op_id": op_id,
-        "actor": actor,
-        "base_version": base_version,
-        "stamp": [base_version, actor],
-        "node_id": node_id,
-        "field": field,
-        "value": value,
-    }
-
-
-# ---------------------------------------------------------------------------
-# workflow_ops core: minting, applying, converging
-# ---------------------------------------------------------------------------
-
-
-class TestSetNodeFieldOp:
-    def test_kind_is_in_the_frozen_vocabulary(self):
-        assert "set_node_field" in workflow_ops.FROZEN_OPS
-        assert "set_node_field" in workflow_ops.BATCHABLE_OPS
-
-    def test_writable_fields_is_the_closed_set(self):
-        assert workflow_ops.WRITABLE_NODE_FIELDS == ("title", "mode", "flags.collapsed", "flags.pinned")
-
-    @pytest.mark.parametrize(
-        ("field", "value"),
-        [
-            ("title", "My Sampler"),
-            ("mode", 4),
-            ("flags.collapsed", True),
-            ("flags.pinned", True),
-        ],
-    )
-    def test_set_node_field_emits_op_and_writes_the_field(self, field, value):
-        wf = _base_workflow()
-        wf, op = workflow_ops.set_node_field(wf, 3, field, value)
-        assert op["op"] == "set_node_field"
-        assert op["node_id"] == 3
-        assert op["field"] == field
-        assert op["value"] == value
-        node = next(n for n in wf["nodes"] if n["id"] == 3)
-        head, _, leaf = field.partition(".")
-        assert (node[head][leaf] if leaf else node[head]) == value
-
-    @pytest.mark.parametrize("field", ["title", "mode", "flags.collapsed", "flags.pinned"])
-    def test_null_value_clears_the_field(self, field):
-        head, _, leaf = field.partition(".")
-        extra = {head: {leaf: True}} if leaf else {head: "was set"}
-        wf = _base_workflow(**extra)
-        wf, op = workflow_ops.set_node_field(wf, 3, field, None)
-        assert op["value"] is None
-        node = next(n for n in wf["nodes"] if n["id"] == 3)
-        if leaf:
-            assert leaf not in node.get(head, {})
-        else:
-            assert head not in node
-
-    def test_unknown_node_is_rejected_at_mint_time(self):
-        wf = _base_workflow()
-        with pytest.raises(ValueError):
-            workflow_ops.set_node_field(wf, 999, "title", "Nope")
-
-    def test_field_outside_the_allowlist_is_rejected(self):
-        """``widgets_values`` is ``set_widget``'s register and ``type`` is
-        node identity; neither may be moved by a field write."""
-        wf = _base_workflow()
-        with pytest.raises(ValueError):
-            workflow_ops.set_node_field(wf, 3, "widgets_values", [])
-        with pytest.raises(ValueError):
-            workflow_ops.set_node_field(wf, 3, "type", "Other")
-
-    @pytest.mark.parametrize(
-        ("field", "bad_value"),
-        [
-            ("title", 42),
-            ("mode", "not-a-number"),
-            ("mode", True),  # bool is an int subclass -- must NOT pass as mode
-            ("flags.collapsed", "true"),
-            ("flags.pinned", 1),
-        ],
-    )
-    def test_value_of_the_wrong_type_is_rejected(self, field, bad_value):
-        wf = _base_workflow()
-        with pytest.raises(ValueError):
-            workflow_ops.set_node_field(wf, 3, field, bad_value)
-
-    @pytest.mark.parametrize("bad_mode", [-1, -100, 5, 6, 100])
-    def test_mode_value_out_of_range_is_rejected(self, bad_mode):
-        """``mode`` is a litegraph int, but not *any* int: only 0-4 (always,
-        on-event, mute, on-trigger, bypass) are valid execution modes. A
-        negative or otherwise out-of-range value must be caught here, at the
-        CLI/producer boundary, rather than passing this op's type check and
-        failing only when a downstream applier (e.g. comfy-multi-player's
-        ``validateSetNodeFieldValue``) rejects it."""
-        wf = _base_workflow()
-        with pytest.raises(ValueError, match="invalid node mode"):
-            workflow_ops.set_node_field(wf, 3, "mode", bad_mode)
-        node = next(n for n in wf["nodes"] if n["id"] == 3)
-        assert "mode" not in node
-
-    def test_op_id_is_frozen_shape(self):
-        wf = _base_workflow()
-        _, op = workflow_ops.set_node_field(wf, 3, "title", "Renamed")
-        assert len(op["op_id"]) == 32
-        assert all(c in "0123456789abcdef" for c in op["op_id"])
-        assert op["stamp"] == [op["base_version"], op["actor"]]
-
-    def test_idempotent_replay(self):
-        wf = _base_workflow()
-        op = _op("a", "human:u1:tab_1", 0, 3, "title", "Renamed once")
-        wf = workflow_ops.apply_op(wf, op, None)
-        wf = workflow_ops.apply_op(wf, op, None)  # re-delivered, same op_id
-        node = next(n for n in wf["nodes"] if n["id"] == 3)
-        assert node["title"] == "Renamed once"
-        assert wf["_applied_ops"].count(op["op_id"]) == 1
-
-    def test_delete_wins_over_a_racing_write(self):
-        wf = _base_workflow()
-        write = _op("a", "human:u1:tab_1", 0, 3, "title", "Too late")
-        delete = {
-            "op": "delete_node",
-            "op_id": "b" * 32,
-            "actor": "human:u2:tab_1",
-            "base_version": 0,
-            "stamp": [0, "human:u2:tab_1"],
-            "node_id": 3,
-            "removed_links": [],
-        }
-        wf = workflow_ops.apply_op(wf, delete, None)
-        wf = workflow_ops.apply_op(wf, write, None)  # target already gone
-        assert wf["nodes"] == []
-
-    @pytest.mark.parametrize("order", ["low_then_high", "high_then_low"])
-    def test_lww_converges_regardless_of_apply_order(self, order):
-        """Two concurrent writes of the same field converge on the
-        higher-stamped value in EITHER apply order (mirrors set_widget's LWW
-        register, docs/op-vocabulary-v1.md §3)."""
-        low = _op("a", "human:u1:tab_1", 0, 3, "title", "Alice's title")
-        high = _op("b", "human:u2:tab_1", 1, 3, "title", "Bob's title")
-        ops = [low, high] if order == "low_then_high" else [high, low]
-        wf = _base_workflow()
-        for op in ops:
-            wf = workflow_ops.apply_op(wf, op, None)
-        node = next(n for n in wf["nodes"] if n["id"] == 3)
-        assert node["title"] == "Bob's title"
-
-    def test_two_fields_of_one_node_do_not_contend(self):
-        """One register per (node, field): a title write and a flag write on
-        the same node claim different LWW targets, so neither drops the other
-        whatever order they replay in."""
-        title_op = _op("a", "human:u1:tab_1", 1, 3, "title", "T")
-        flag_op = _op("b", "human:u2:tab_1", 1, 3, "flags.collapsed", True)
-        assert workflow_ops._write_target(title_op) != workflow_ops._write_target(flag_op)
-        assert not workflow_ops.detect_conflict(title_op, flag_op)
-        for order in ([title_op, flag_op], [flag_op, title_op]):
-            wf = _base_workflow()
-            for op in order:
-                wf = workflow_ops.apply_op(wf, op, None)
-            node = next(n for n in wf["nodes"] if n["id"] == 3)
-            assert node["title"] == "T"
-            assert node["flags"]["collapsed"] is True
-
-    def test_write_target_is_its_own_namespace_not_the_widget_one(self):
-        """A field must not alias a same-named widget's LWW register."""
-        op = _op("a", "cli", 0, 3, "title", "X")
-        target = workflow_ops._write_target(op)
-        assert target[0] == "node_field"
-        widget_op = {"op": "set_widget", "node_id": 3, "widget": "title", "value": "X"}
-        assert target != workflow_ops._write_target(widget_op)
-
-    def test_apply_specs_batches_set_node_field(self):
-        wf = _base_workflow()
-        g = _graph()
-        wf, ops, _aliases = workflow_ops.apply_specs(
-            wf, g, [{"op": "set_node_field", "node": 3, "field": "title", "value": "Batched"}]
-        )
-        assert ops[0]["op"] == "set_node_field"
-        node = next(n for n in wf["nodes"] if n["id"] == 3)
-        assert node["title"] == "Batched"
-
-
-# ---------------------------------------------------------------------------
-# CLI surface: `comfy workflow set-node-field` — the emitting affordance a
-# human or the in-app agent uses; wiring this is what actually closes the
-# sync gap (workflow_ops alone is unreachable without it).
-# ---------------------------------------------------------------------------
-
-
 class TestSetNodeFieldCommand:
     @pytest.mark.parametrize(
         ("field", "raw", "expected"),
         [
-            ("title", "New Name", "New Name"),
+            ("title", "Renamed", "Renamed"),
             ("mode", "4", 4),
             ("flags.collapsed", "true", True),
             ("flags.pinned", "true", True),
         ],
     )
-    def test_writes_the_field_and_emits_op(self, tmp_path, capsys, field, raw, expected):
-        path = _write(tmp_path, _base_workflow())
-        env = _run(["set-node-field", str(path), "3", field, raw], capsys)
+    def test_writes_the_field_and_emits_a_replayable_op(self, tmp_path: Path, capsys, field, raw, expected):
+        wf = tmp_path / "wf_set_node_field.json"
+        wf.write_text(json.dumps(_populated()), encoding="utf-8")
+
+        env = _run(["set-node-field", str(wf), "1", field, raw], capsys)
+
         assert env["ok"] is True, env
         op = env["data"]["op"]
         assert op["op"] == "set_node_field"
-        assert op["node_id"] == 3
+        # Pin the TYPE, not just the stringified value: sibling commands
+        # (`_split_addr` for set-widget/connect, delete/delete-nodes) coerce a
+        # numeric node id to `int` before minting, and `set-node-field` must
+        # match — otherwise the same node id splits across two LWW registers
+        # for a non-normalizing consumer (`str(op["node_id"]) == "1"` would
+        # pass even if `op["node_id"]` were left as the raw string `"1"`).
+        assert op["node_id"] == 1
+        assert isinstance(op["node_id"], int)
         assert op["field"] == field
         assert op["value"] == expected
-        on_disk = json.loads(path.read_text())
-        node = next(n for n in on_disk["nodes"] if n["id"] == 3)
+        assert op["stamp"] == [op["base_version"], op["actor"]]
+
+        node = json.loads(wf.read_text(encoding="utf-8"))["nodes"][0]
         head, _, leaf = field.partition(".")
         assert (node[head][leaf] if leaf else node[head]) == expected
 
-    def test_clear_flag_resets_the_field_to_absent(self, tmp_path, capsys):
-        path = _write(tmp_path, _base_workflow(title="Custom"))
-        env = _run(["set-node-field", str(path), "3", "title", "--clear"], capsys)
+    def test_rejects_a_field_outside_the_allowlist(self, tmp_path: Path, capsys):
+        """`widgets_values` is `set_widget`'s register and `type` is node
+        identity; neither may be moved by a field write."""
+        wf = tmp_path / "wf_bad_field.json"
+        before = _populated()
+        wf.write_text(json.dumps(before), encoding="utf-8")
+
+        env = _run(["set-node-field", str(wf), "1", "widgets_values", "[]"], capsys)
+
+        assert env["ok"] is False
+        assert json.loads(wf.read_text(encoding="utf-8")) == before
+
+    def test_rejects_a_missing_node(self, tmp_path: Path, capsys):
+        wf = tmp_path / "wf_missing_node.json"
+        before = _populated()
+        wf.write_text(json.dumps(before), encoding="utf-8")
+
+        env = _run(["set-node-field", str(wf), "999", "title", "ghost"], capsys)
+
+        assert env["ok"] is False
+        assert json.loads(wf.read_text(encoding="utf-8")) == before
+
+    def test_clear_flag_clears_the_field(self, tmp_path: Path, capsys):
+        """`--clear` is the CLI's way to write `value: null` — the field
+        returns to absent the way workflow JSON round-trips it."""
+        wf = tmp_path / "wf_clear.json"
+        before = _populated()
+        before["nodes"][0]["flags"]["collapsed"] = True
+        wf.write_text(json.dumps(before), encoding="utf-8")
+
+        env = _run(["set-node-field", str(wf), "1", "flags.collapsed", "--clear"], capsys)
+
         assert env["ok"] is True, env
-        assert env["data"]["op"]["value"] is None
-        on_disk = json.loads(path.read_text())
-        node = next(n for n in on_disk["nodes"] if n["id"] == 3)
-        assert "title" not in node
+        op = env["data"]["op"]
+        assert op["value"] is None
+        node = json.loads(wf.read_text(encoding="utf-8"))["nodes"][0]
+        assert "collapsed" not in node["flags"]
 
-    def test_value_and_clear_together_is_rejected(self, tmp_path, capsys):
-        path = _write(tmp_path, _base_workflow())
-        env = _run(["set-node-field", str(path), "3", "title", "New Name", "--clear"], capsys)
-        assert env["ok"] is False
+    def test_rejects_neither_value_nor_clear(self, tmp_path: Path, capsys):
+        wf = tmp_path / "wf_neither.json"
+        before = _populated()
+        wf.write_text(json.dumps(before), encoding="utf-8")
 
-    def test_unknown_node_errors(self, tmp_path, capsys):
-        path = _write(tmp_path, _base_workflow())
-        env = _run(["set-node-field", str(path), "999", "title", "New Name"], capsys)
-        assert env["ok"] is False
+        env = _run(["set-node-field", str(wf), "1", "title"], capsys)
 
-    def test_field_outside_the_allowlist_errors(self, tmp_path, capsys):
-        path = _write(tmp_path, _base_workflow())
-        env = _run(["set-node-field", str(path), "3", "widgets_values", "[]"], capsys)
         assert env["ok"] is False
-        on_disk = json.loads(path.read_text())
-        node = next(n for n in on_disk["nodes"] if n["id"] == 3)
-        assert "widgets_values" in node
-        assert node["widgets_values"] == [0]
+        assert json.loads(wf.read_text(encoding="utf-8")) == before
 
-    def test_wrong_type_for_field_errors(self, tmp_path, capsys):
-        path = _write(tmp_path, _base_workflow())
-        env = _run(["set-node-field", str(path), "3", "mode", "not-a-number"], capsys)
-        assert env["ok"] is False
+    def test_rejects_both_value_and_clear(self, tmp_path: Path, capsys):
+        wf = tmp_path / "wf_both.json"
+        before = _populated()
+        wf.write_text(json.dumps(before), encoding="utf-8")
 
-    def test_negative_mode_errors(self, tmp_path, capsys):
-        path = _write(tmp_path, _base_workflow())
-        env = _run(["set-node-field", str(path), "3", "mode", "--", "-1"], capsys)
+        env = _run(["set-node-field", str(wf), "1", "title", "New Name", "--clear"], capsys)
+
         assert env["ok"] is False
-        on_disk = json.loads(path.read_text())
-        node = next(n for n in on_disk["nodes"] if n["id"] == 3)
-        assert "mode" not in node
+        assert json.loads(wf.read_text(encoding="utf-8")) == before
+
+
+class TestSetNodeFieldReplay:
+    def test_apply_op_replays_the_op_idempotently(self):
+        workflow = _populated()
+        _, op = workflow_ops.set_node_field(_populated(), "1", "title", "Renamed", actor="cli", base_version=1)
+
+        workflow_ops.apply_op(workflow, op, _graph())
+        assert workflow["nodes"][0]["title"] == "Renamed"
+
+        workflow_ops.apply_op(workflow, op, _graph())
+        assert workflow["_applied_ops"].count(op["op_id"]) == 1
+
+    def test_two_fields_of_one_node_do_not_contend(self):
+        """One register per (node, field): a title write and a flag write on
+        the same node claim different LWW targets, so neither drops the other
+        whatever order they replay in."""
+        title_op = workflow_ops.set_node_field(_populated(), "1", "title", "T", actor="a", base_version=1)[1]
+        flag_op = workflow_ops.set_node_field(_populated(), "1", "flags.collapsed", True, actor="b", base_version=1)[1]
+
+        assert workflow_ops._write_target(title_op) != workflow_ops._write_target(flag_op)
+        assert not workflow_ops.detect_conflict(title_op, flag_op)
+
+        for order in ([title_op, flag_op], [flag_op, title_op]):
+            workflow = _populated()
+            for op in order:
+                workflow_ops.apply_op(workflow, op, _graph())
+            node = workflow["nodes"][0]
+            assert node["title"] == "T"
+            assert node["flags"]["collapsed"] is True
+
+    def test_two_writers_of_one_field_resolve_by_stamp(self):
+        early = workflow_ops.set_node_field(_populated(), "1", "title", "early", actor="a", base_version=1)[1]
+        late = workflow_ops.set_node_field(_populated(), "1", "title", "late", actor="b", base_version=2)[1]
+
+        for order in ([early, late], [late, early]):
+            workflow = _populated()
+            for op in order:
+                workflow_ops.apply_op(workflow, op, _graph())
+            assert workflow["nodes"][0]["title"] == "late"
+
+
+class TestSetNodeFieldIsBatchable:
+    def test_rides_inside_a_batch(self):
+        # "node" is the canonical spec key (matches `set_widget`'s "node",
+        # `delete_node`'s "node" — every sibling branch in `apply_specs`).
+        workflow, ops, _aliases = workflow_ops.apply_specs(
+            _populated(),
+            _graph(),
+            [{"op": "set_node_field", "node": "1", "field": "title", "value": "batched"}],
+        )
+
+        assert [op["op"] for op in ops] == ["set_node_field"]
+        assert workflow["nodes"][0]["title"] == "batched"
+
+    def test_missing_node_key_is_the_standard_missing_field_error(self):
+        """`spec.get("node")` used to silently pass `None` through instead of
+        raising — and since node matching uses `str()`, `None` could
+        spuriously match a node whose id happens to be the string `"None"`.
+        A missing `node` must fail loudly with the same message every other
+        op kind gets for a missing required field, and must never reach the
+        node lookup at all."""
+        workflow = _populated()
+        workflow["nodes"].append(
+            {
+                "id": "None",
+                "type": "TinyLoader",
+                "pos": [100, 0],
+                "title": "Decoy",
+                "mode": 0,
+                "flags": {},
+                "inputs": [],
+                "outputs": [],
+                "widgets_values": ["a.safetensors"],
+            }
+        )
+        before = copy.deepcopy(workflow)
+
+        with pytest.raises(ValueError, match=r"spec #0 \(set_node_field\) is missing required field 'node'"):
+            workflow_ops.apply_specs(
+                workflow,
+                _graph(),
+                [{"op": "set_node_field", "field": "title", "value": "hijacked"}],
+            )
+
+        # Nothing applied: the decoy "None"-id node was never touched.
+        assert workflow == before
+
+    def test_undocumented_node_id_key_alone_is_rejected_not_silently_accepted(self):
+        """`node_id` was never the documented spec key; a spec carrying only
+        it must fail the same way a spec missing `node` entirely does, not be
+        quietly accepted as an alias for `node`."""
+        with pytest.raises(ValueError, match=r"spec #0 \(set_node_field\) is missing required field 'node'"):
+            workflow_ops.apply_specs(
+                _populated(),
+                _graph(),
+                [{"op": "set_node_field", "node_id": "1", "field": "title", "value": "batched"}],
+            )
+
+
+class TestSetNodeFieldValueValidationAtMint:
+    """``set_node_field`` allowlists the field NAME but, before this fix, never
+    validated the VALUE. A bogus ``mode`` (a string, an out-of-range int, a
+    bool, a container) would sail straight into the document and later break
+    ``workflow_to_api``'s exact ``mode in (_MODE_MUTED, _MODE_BYPASS)`` check
+    or make ``ls-nodes``/``print`` raise ``TypeError: unhashable type``."""
+
+    @pytest.mark.parametrize(
+        ("field", "bad_value"),
+        [
+            ("title", 123),
+            ("title", ["not", "a", "string"]),
+            ("mode", "bypass"),
+            ("mode", 99),
+            ("mode", True),  # bool is an int subclass but not a legal mode
+            ("mode", 2.0),
+            ("mode", [4]),
+            ("flags.collapsed", "true"),
+            ("flags.collapsed", 1),
+            ("flags.pinned", "yes"),
+            ("flags.pinned", 0),
+        ],
+    )
+    def test_rejects_a_malformed_value_at_mint_time(self, field, bad_value):
+        with pytest.raises(ValueError, match="malformed_op"):
+            workflow_ops.set_node_field(_populated(), "1", field, bad_value, actor="cli", base_version=0)
+        # Nothing mutated: mint-time validation runs before `apply_op`.
+        workflow = _populated()
+        with pytest.raises(ValueError):
+            workflow_ops.set_node_field(workflow, "1", field, bad_value, actor="cli", base_version=0)
+        assert workflow == _populated()
+
+    @pytest.mark.parametrize(
+        ("field", "good_value"),
+        [
+            ("title", "A fine title"),
+            ("title", None),
+            ("mode", 0),
+            ("mode", 4),
+            ("mode", None),
+            ("flags.collapsed", True),
+            ("flags.collapsed", False),
+            ("flags.collapsed", None),
+            ("flags.pinned", True),
+            ("flags.pinned", None),
+        ],
+    )
+    def test_accepts_every_legal_value_including_null(self, field, good_value):
+        workflow_ops.set_node_field(_populated(), "1", field, good_value, actor="cli", base_version=0)
+
+    def test_cli_command_rejects_a_malformed_mode(self, tmp_path: Path, capsys):
+        wf = tmp_path / "wf_bad_mode.json"
+        before = _populated()
+        wf.write_text(json.dumps(before), encoding="utf-8")
+
+        env = _run(["set-node-field", str(wf), "1", "mode", '"bypass"'], capsys)
+
+        assert env["ok"] is False, env
+        assert json.loads(wf.read_text(encoding="utf-8")) == before
+
+
+class TestSetNodeFieldValueValidationAtReplay:
+    """A peer-authored op that bypasses the CLI's mint-time check (or an old
+    replica replaying a stale op) must be rejected by ``apply_op`` too — the
+    replay path gets no less scrutiny than mint."""
+
+    @pytest.mark.parametrize(
+        ("field", "bad_value"),
+        [
+            ("mode", "bypass"),
+            ("mode", 99),
+            ("mode", True),
+            ("title", 123),
+            ("flags.collapsed", "yes"),
+        ],
+    )
+    def test_apply_op_rejects_a_malformed_value(self, field, bad_value):
+        workflow = _populated()
+        before = copy.deepcopy(workflow)
+        op = {
+            "op": "set_node_field",
+            "op_id": "deadbeef",
+            "actor": "peer",
+            "base_version": 0,
+            "stamp": [0, "peer"],
+            "node_id": 1,
+            "field": field,
+            "value": bad_value,
+        }
+
+        with pytest.raises(ValueError, match="malformed_op"):
+            workflow_ops.apply_op(workflow, op, _graph())
+
+        # No partial mutation: validation runs before the node is touched.
+        assert workflow["nodes"] == before["nodes"]
+
+
+class TestSetNodeFieldFlagsContainerRobustness:
+    """A node's ``flags`` is not schema-forbidden from being ``null`` or any
+    other non-dict shape. ``node.setdefault(head, {})`` assumed dict-shaped,
+    so a malformed ``flags`` raised a raw ``TypeError``/``AttributeError`` that
+    escaped the handler's ``ValueError``/``KeyError`` envelope wrapping and
+    corrupted replay."""
+
+    @pytest.mark.parametrize("malformed_flags", [None, "oops", 42, ["not", "a", "dict"]])
+    def test_write_coerces_a_non_dict_flags_container_instead_of_crashing(self, malformed_flags):
+        workflow = _populated()
+        workflow["nodes"][0]["flags"] = malformed_flags
+
+        workflow_ops.set_node_field(workflow, "1", "flags.collapsed", True, actor="cli", base_version=0)
+
+        assert workflow["nodes"][0]["flags"] == {"collapsed": True}
+
+    @pytest.mark.parametrize("malformed_flags", [None, "oops", 42, ["not", "a", "dict"]])
+    def test_null_delete_on_a_non_dict_flags_is_a_true_no_op(self, malformed_flags):
+        """A ``value: null`` delete on a node whose ``flags`` is absent or
+        malformed must not materialize an empty ``flags`` object — that would
+        leave replicas that did/didn't see the op divergent."""
+        workflow = _populated()
+        workflow["nodes"][0]["flags"] = malformed_flags
+
+        workflow_ops.set_node_field(workflow, "1", "flags.collapsed", None, actor="cli", base_version=0)
+
+        assert workflow["nodes"][0]["flags"] == malformed_flags
+
+    def test_null_delete_on_a_node_with_no_flags_key_never_materializes_one(self):
+        workflow = _populated()
+        del workflow["nodes"][0]["flags"]
+
+        workflow_ops.set_node_field(workflow, "1", "flags.pinned", None, actor="cli", base_version=0)
+
+        assert "flags" not in workflow["nodes"][0]
+
+    def test_replay_never_raises_typeerror_or_attributeerror(self):
+        """Whatever shape validation allows through must at worst raise
+        ``ValueError`` — never an uncaught ``TypeError``/``AttributeError``
+        that skips the handler's envelope wrapping."""
+        workflow = _populated()
+        workflow["nodes"][0]["flags"] = None
+        op = {
+            "op": "set_node_field",
+            "op_id": "abc123",
+            "actor": "peer",
+            "base_version": 0,
+            "stamp": [0, "peer"],
+            "node_id": 1,
+            "field": "flags.collapsed",
+            "value": None,
+        }
+        # Must not raise at all (a null-delete on a null flags is a no-op).
+        workflow_ops.apply_op(workflow, op, _graph())
+        assert workflow["nodes"][0]["flags"] is None
+
+
+class TestSetNodeFieldConflictEqualValueCarveOut:
+    """``set_node_field`` has the same LWW-register semantics as
+    ``set_widget``, so two actors independently writing the identical value
+    (e.g. both collapsing a node) must not be escalated to ask-to-merge."""
+
+    def test_two_writers_of_the_identical_value_do_not_conflict(self):
+        a = workflow_ops.set_node_field(_populated(), "1", "flags.collapsed", True, actor="a", base_version=1)[1]
+        b = workflow_ops.set_node_field(_populated(), "1", "flags.collapsed", True, actor="b", base_version=1)[1]
+
+        assert workflow_ops._write_target(a) == workflow_ops._write_target(b)
+        assert workflow_ops.detect_conflict(a, b) is False
+
+    def test_two_writers_of_different_values_still_conflict(self):
+        a = workflow_ops.set_node_field(_populated(), "1", "title", "Alice's title", actor="a", base_version=1)[1]
+        b = workflow_ops.set_node_field(_populated(), "1", "title", "Bob's title", actor="b", base_version=1)[1]
+
+        assert workflow_ops.detect_conflict(a, b) is True
+
+
+class TestSetNodeFieldDiscoveryRegistration:
+    """``comfy discover`` must advertise an ``output_schema`` for
+    ``set-node-field`` like every sibling structured-edit command."""
+
+    def test_registered_in_command_schemas(self):
+        from comfy_cli.discovery import COMMAND_SCHEMAS
+
+        assert COMMAND_SCHEMAS.get("comfy workflow set-node-field") == "workflow"
