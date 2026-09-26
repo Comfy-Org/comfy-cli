@@ -95,6 +95,7 @@ def test_promoted_address_writes_the_host_value(graph):
     assert "path" not in op
     assert op["promoted"]["value_index"] == 1
     assert op["promoted"]["host_widgets_values"] == expected
+    assert workflow_ops.apply_op(wf, op, graph) is wf
 
 
 def test_interior_address_of_a_promoted_widget_is_redirected_to_the_host(graph):
@@ -442,6 +443,7 @@ def test_legacy_primitive_write_carries_a_positional_payload(graph):
     assert op["promoted"] == {"value_index": 0, "instance_path": [str(legacy)], "host_widgets_values": [512, "fixed"]}
     replayed = workflow_ops.apply_op(copy.deepcopy(base), op, graph)
     assert _node(replayed, legacy)["widgets_values"] == [512, "fixed"]
+    assert workflow_ops.apply_op(wf, op, graph) is wf
 
 
 def test_later_connect_to_a_materialized_promoted_input_stays_on_the_declared_register(graph):
