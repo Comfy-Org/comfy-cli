@@ -970,10 +970,12 @@ def _set_widget_impl(
         inner_type = target.get("type", "")
         value, norm_note = _normalize_combo(graph, inner_type, inner_widget, value)
         cur = _engine._widgets_as_positional(target.get("widgets_values"), graph, inner_type)
-        order = graph.widget_order_for_node(inner_type, cur)
         old = None
-        if inner_widget in order:
-            i = order.index(inner_widget)
+        if graph.node(inner_type) is not None:
+            # Same resolution as a top-level node, so a sub-widget the current
+            # dynamic-combo option hides is refused here too instead of
+            # recording an op that writes nothing.
+            i = _widget_index(graph, inner_type, inner_widget, cur, node_id="/".join(str(s) for s in segments))
             old = cur[i] if i < len(cur) else None
         warnings = _validate_widget(graph, inner_type, inner_widget, value)  # raises on shape mismatch
         if norm_note:
@@ -997,7 +999,7 @@ def _set_widget_impl(
     node = _require(workflow, node_id)
     class_type = node.get("type", "")
     widgets = _engine._widgets_as_positional(node.get("widgets_values"), graph, class_type)
-    idx = _widget_index(graph, class_type, widget, widgets)  # raises on unknown widget name
+    idx = _widget_index(graph, class_type, widget, widgets, node_id=node.get("id"))  # raises on unknown name
     value, norm_note = _normalize_combo(graph, class_type, widget, value)
     old = widgets[idx] if idx < len(widgets) else None
     warnings = _validate_widget(graph, class_type, widget, value)  # raises on shape mismatch
@@ -2857,7 +2859,43 @@ def _build_node(node_id: int, class_type: str, m, graph, pos: list, size: list, 
     return node
 
 
-def _widget_index(graph, class_type: str, widget: str, widgets_values=None) -> int:
+def _other_option_widget_error(
+    graph, class_type: str, widget: str, order: list[str], widgets_values, node_id: Any = None
+) -> ValueError | None:
+    """The refusal for a dynamic-combo sub-widget the node's CURRENT option
+    lacks but another option reveals, or ``None`` when that isn't the case.
+
+    E.g. ``model.prompt_expansion_mode`` on MinimaxHailuo03* nodes, which
+    only the "MiniMax H3 Max"/"Max Turbo" options reveal. The plain "not found;
+    available: …" listed the current option's widgets and never named the
+    option to switch to, so a caller could only re-send the same write. Worded without
+    "not found" on purpose: the name is real, so the sibling-address
+    enrichment must not fire.
+    """
+    found = graph.dynamic_sub_widget_options(class_type, widget)
+    if found is None:
+        return None
+    selector, keys = found
+    if selector not in order:
+        # A nested selector the node's current outer option hides (`model.mode`
+        # under a `model` option without it). "Set model.mode first" would
+        # send the caller on a write that fails too, so keep the plain refusal.
+        return None
+    current = None
+    if widgets_values is not None:
+        idx = order.index(selector)
+        if idx < len(widgets_values):
+            current = widgets_values[idx]
+    options = " or ".join(repr(k) for k in keys)
+    addr = f"{node_id}.{selector}" if node_id is not None else selector
+    return ValueError(
+        f"widget {widget!r} on {class_type} exists only when {selector} is {options}; "
+        f"this node has {selector}={current!r}. Set `{addr}` to one of those options first "
+        f"(that rebuilds the {selector}.* widgets from their defaults), then set {widget!r}"
+    )
+
+
+def _widget_index(graph, class_type: str, widget: str, widgets_values=None, *, node_id: Any = None) -> int:
     # Node-aware: expand a dynamic combo's sub-widgets by this node's actual
     # selected key (from ``widgets_values``), not the schema's first key, so the
     # index stays aligned to ``widgets_values`` for the node's real selection.
@@ -2872,6 +2910,9 @@ def _widget_index(graph, class_type: str, widget: str, widgets_values=None) -> i
             class_type, widget, graph.editable_widget_names(class_type, widgets_values)
         )
     if widget not in order:
+        other = _other_option_widget_error(graph, class_type, widget, order, widgets_values, node_id)
+        if other is not None:
+            raise other
         avail = graph.editable_widget_names(class_type, widgets_values)
         raise ValueError(
             f"widget {widget!r} not found on {class_type}; "

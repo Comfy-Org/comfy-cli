@@ -637,6 +637,32 @@ lists what the cloud adds and which of the codes below cannot occur there.
 | `execution_error`         | A node raised during execution (server emitted `execution_error`)               | `node_id` (str), `class_type` (str), `title` (str), `exception_type` (str), `traceback` (str) | 1 |
 | `transient_auth`          | The `execution_error` cause was an API node's server-side session token expiring mid-execution — transient, so resubmitting the same workflow succeeds. Local credentials are fine; `comfy cloud login` does not help | Same fields as `execution_error` | 1 |
 
+### CLI-wide codes
+
+Two codes can end any command's `--json` stream, not only `comfy run`:
+
+| `code`           | Triggered when                                                                 | `details`                                                                                  | Exit |
+| ---------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ | ---- |
+| `usage_error`    | argv did not parse (unknown option or command, missing value); nothing ran     | `command` (str), `exit_code` (int); `option` and `did_you_mean` for a near-miss option     | 2 |
+| `internal_error` | The command crashed on an exception it did not handle (a comfy-cli bug)        | `exception` (str, the exception type), `command` (str), `traceback` (array of up to 3 `file:line:func` strings, innermost last) | 1 |
+
+`internal_error`'s `message` is `"<Type>: <text>"`, capped at 500 characters.
+URL query strings, bearer tokens, `key=value` token pairs and `user:pass@`
+userinfo are replaced with `***`. The full traceback still goes to stderr.
+Whether anything was written depends on where the command crashed, so re-read
+state before retrying.
+
+### Workflow-edit refusal fields
+
+`workflow set-widget` / `set-slot` / `ls-nodes` add these fields for agents:
+
+| Where | Field | Meaning |
+| ----- | ----- | ------- |
+| `unknown_enum_value` finding (the `set-widget` error's `details`, `validate` findings) | `best_match` (str, optional) | The ONE option sharing the rejected value's leading token (`'16:9 (Landscape)'` → `'16:9 (Widescreen)'`). It is also first in `did_you_mean`. It is never auto-applied, and is absent for filenames and ambiguous tokens |
+| `unknown_dynamic_sub_input` warning (`set-slot`) | `revealed_by` (array of str, optional) | The options of the dynamic combo that reveal the requested sub-widget (`model.prompt_expansion_mode` → `["MiniMax H3 Max", "MiniMax H3 Max Turbo"]`). Set the selector to one of them first |
+| `workflow ls-nodes` rows | `ui_only` (true, optional) | A frontend-only node (Reroute, Note, MarkdownNote, PrimitiveNode, GetNode, SetNode). It is readable on the canvas but cannot be added with `add-node` or shown with `nodes show` |
+| `workflow ls-nodes` rows | `subgraph` (true, optional) | A subgraph instance: its `type` is the definition uuid, not a node class |
+
 ### `exception_type` field
 
 Provided for diagnostic and observability purposes (e.g., metrics
@@ -719,6 +745,9 @@ should treat the run as failed when **both**:
   empty.
 
 Stderr may contain a Python traceback in these cases.
+
+An exception inside the CLI itself is not one of these. It ends the stream
+with an [`internal_error`](#cli-wide-codes) envelope.
 
 ## Examples
 

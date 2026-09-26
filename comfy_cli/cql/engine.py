@@ -420,6 +420,31 @@ class Port:
                     break
         return out[:limit]
 
+    def best_combo_match(self, value: Any) -> str | None:
+        """The ONE option sharing a rejected value's leading token, else ``None``.
+
+        ``'16:9 (Landscape)'`` against ``'16:9 (Widescreen)'``/``'9:16 (...)'``/…:
+        the ratio is the part that matters and exactly one option has it, so
+        that option is the likely intent. The caller NAMES it and never writes
+        it. A single-token value (a filename, a bare word) has no qualifier to
+        disagree on and gets ``None``, as does a token two options share and any
+        value with a file extension.
+        """
+        if self.type != "COMBO" or not self.enum_values:
+            return None
+        import re
+
+        text = str(value).strip()
+        # A filename ('flux dev.safetensors') sharing a leading word with
+        # another file is a different model, not a relabelled option.
+        if re.search(r"\.[A-Za-z][A-Za-z0-9]{0,11}$", text):
+            return None
+        token, _, rest = text.partition(" ")
+        if not token or not rest.strip():
+            return None
+        hits = [str(o) for o in self.enum_values if str(o).strip().partition(" ")[0] == token]
+        return hits[0] if len(hits) == 1 else None
+
     def validate_shape(self, value: Any) -> str | None:
         """Hard-reject on JSON-shape mismatch. Returns error message or None."""
         if self.type == "INT":
@@ -488,9 +513,16 @@ class Port:
                     "valid_options": list(self.enum_values),
                 }
                 suggestions = self.suggest_combo(value)
+                best = self.best_combo_match(value)
+                if best is not None:
+                    suggestions = [best, *(s for s in suggestions if s != best)]
+                    warning["best_match"] = best
                 if suggestions:
                     warning["did_you_mean"] = suggestions
                     warning["message"] += f" — closest: {', '.join(suggestions)}"
+                if best is not None:
+                    lead = str(value).strip().partition(" ")[0]
+                    warning["message"] += f" ({best!r} is the only option starting {lead!r})"
                 warnings.append(warning)
         elif self.type == "COMBO" and self.enum_declared:
             # The server declared this field's choices and shipped NONE of them:
@@ -1612,6 +1644,23 @@ class Graph:
             if not p.is_link and p.dynamic_options and _is_dynamic_combo_type(p.type):
                 describe(p, p.name, 0)
         return out
+
+    def dynamic_sub_widget_options(self, class_name: str, widget: str) -> tuple[str, list[str]] | None:
+        """``(selector, [option keys])`` when ``widget`` is a dynamic-combo
+        sub-widget that only SOME of the selector's options reveal, else ``None``.
+
+        ``MinimaxHailuo03TextToVideoNode`` + ``model.prompt_expansion_mode`` →
+        ``("model", ["MiniMax H3 Max", "MiniMax H3 Max Turbo"])``: the default
+        ``MiniMax H3`` has no such widget, so a write to it on a node still on
+        that option must say which option to select first. A widget every
+        option reveals (or none) returns ``None``.
+        """
+        for selector, spec in self.dynamic_combo_options(class_name).items():
+            options = spec.get("options") or {}
+            keys = [key for key, opt in options.items() if widget in (opt.get("widgets") or [])]
+            if keys and len(keys) < len(options):
+                return selector, keys
+        return None
 
     def widget_defaults(self, class_name: str) -> dict[str, Any]:
         """Default value per widget-order name — including dynamic-combo selectors
@@ -3889,7 +3938,9 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     try:
         widget_idx = order.index(input_name)
     except ValueError:
-        warning = _unknown_dynamic_sub_warning(m, input_name, order, widgets)
+        warning = _unknown_dynamic_sub_warning(
+            m, input_name, order, widgets, revealed_by=graph.dynamic_sub_widget_options(node_type, input_name)
+        )
         if warning is not None:
             return [warning]
         avail = _editable_widget_names(entries)
@@ -3925,20 +3976,39 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     return warnings
 
 
-def _unknown_dynamic_sub_warning(m: Morphism, input_name: str, order: list[str], widgets: list[Any]) -> dict | None:
+def _unknown_dynamic_sub_warning(
+    m: Morphism,
+    input_name: str,
+    order: list[str],
+    widgets: list[Any],
+    *,
+    revealed_by: tuple[str, list[str]] | None = None,
+) -> dict | None:
     """Warning dict for a ``<combo>.<sub>`` address not present under the
     combo's CURRENT selector, or ``None`` when ``input_name`` isn't a
-    dynamic-combo sub-address (caller falls through to the hard error)."""
+    dynamic-combo sub-address (caller falls through to the hard error).
+
+    ``revealed_by`` is :meth:`Graph.dynamic_sub_widget_options` for the
+    address: when another option of the combo has the widget, the warning
+    names those options instead of a bare ``<option>`` placeholder."""
     if "." not in input_name:
         return None
     base = input_name.split(".", 1)[0]
     base_port = next((p for p in m.inputs if p.name == base), None)
     if base_port is None or not _is_dynamic_combo_type(base_port.type) or base not in order:
         return None
+    # A nested selector (`model.mode` for `model.mode.refine`) is the one to
+    # name when the node's current outer option has it. Otherwise fall back to
+    # the outer combo with no option hint rather than point at a selector the
+    # node does not have.
+    if revealed_by is not None and revealed_by[0] in order:
+        base = revealed_by[0]
     base_idx = order.index(base)
     selector = widgets[base_idx] if base_idx < len(widgets) else None
     valid = [n for n in order if n.startswith(f"{base}.")]
-    return {
+    keys = revealed_by[1] if revealed_by is not None and revealed_by[0] == base else []
+    switch = " or ".join(repr(k) for k in keys) if keys else "<option>"
+    warning = {
         "code": "unknown_dynamic_sub_input",
         "field": input_name,
         "message": (
@@ -3949,9 +4019,12 @@ def _unknown_dynamic_sub_warning(m: Morphism, input_name: str, order: list[str],
             if valid
             else f"{base}={selector!r} has no widget sub-inputs"
         )
-        + f" — set {base}=<option> first to switch rosters",
+        + f" — set {base}={switch} first to switch rosters",
         "valid_addresses": valid,
     }
+    if keys:
+        warning["revealed_by"] = keys
+    return warning
 
 
 def _write_dynamic_combo_selector(

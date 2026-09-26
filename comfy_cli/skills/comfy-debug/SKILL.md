@@ -103,6 +103,15 @@ comfy launch                                        # then re-run the nodes comm
 comfy --json nodes ls --produces IMAGE --input /path/to/object_info.json
 ```
 
+### `internal_error`
+The command crashed on an exception it did not handle. This is a comfy-cli
+bug, not a bad input. `details.exception` names the type and
+`details.traceback` lists the innermost `file:line:func` frames. The full
+traceback is on stderr. Re-read the file or state before retrying, because the
+crash may have happened after a write. If the same call crashes again, take
+another route (e.g. `set-slot` instead of `set-widget`, or a different address
+form) and report the envelope as a bug. Do not retry it in a loop.
+
 ### `comfy generate` is partially machine-readable
 `comfy generate` is partially machine-readable: `generate <model> --json` and
 `generate resume <id> --json` print the raw API response as JSON;
