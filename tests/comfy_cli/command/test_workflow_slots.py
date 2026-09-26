@@ -1040,3 +1040,51 @@ class TestRoutingErrorEnvelope:
         path = _write_workflow(tmp_path, _direct_workflow())
         env = _run(["slots", str(path), "--input", str(oi)], capsys)
         assert env["ok"] is True, env
+
+
+class TestSlotsCorruptDefinitions:
+    """End-to-end: a corrupt ``definitions`` block must still yield an envelope.
+
+    Before the shape checks in ``_subgraph_defs_by_id`` a truthy wrong-typed
+    container exited ``comfy workflow slots`` on a rich traceback
+    (``AttributeError`` on ``definitions``, ``TypeError`` on ``subgraphs``)
+    with NOTHING on stdout — the JSON caller saw a hard crash instead of a
+    parseable result. ``slots_cmd``'s ``except (ValueError, KeyError)`` does
+    not catch either, and there is no catch-all above it.
+    """
+
+    @pytest.mark.parametrize(
+        "definitions",
+        [5, {"subgraphs": 5}, {"subgraphs": "abc"}, ["x"]],
+        ids=["non-dict-definitions", "non-list-subgraphs", "str-subgraphs", "list-definitions"],
+    )
+    def test_slots_degrades_to_an_empty_index(self, patched_graph, tmp_path, capsys, definitions):
+        path = _write_workflow(tmp_path, {"nodes": [], "links": [], "definitions": definitions})
+        captured, _err, result = _invoke(["slots", str(path)], capsys)
+        assert result.exception is None, f"crashed instead of degrading: {result.exception!r}"
+        assert result.exit_code == 0, captured
+        env = json.loads([ln for ln in captured.strip().splitlines() if ln.strip()][-1])
+        assert env["ok"] is True
+        assert env["data"]["count"] == 0
+        assert env["data"]["slots"] == []
+
+    def test_top_level_nodes_are_still_read_past_a_corrupt_definitions_block(self, patched_graph, tmp_path, capsys):
+        """Degrading is not the same as giving up: only the definitions block is
+        unreadable, so the top-level graph's slots must still come back."""
+        wf = dict(_direct_workflow(), definitions=5)
+        path = _write_workflow(tmp_path, wf)
+        env = _run(["slots", str(path)], capsys)
+        assert env["ok"] is True
+        assert env["data"]["count"] > 0
+        assert "6.text" in {s["address"] for s in env["data"]["slots"]}
+
+    def test_set_slot_reports_a_domain_error_instead_of_crashing(self, patched_graph, tmp_path, capsys):
+        """``set-slot`` reaches the same helper before any of its own guards, so
+        it crashed on the same input. It should now fail on the real problem —
+        the address doesn't resolve — through the normal error envelope."""
+        path = _write_workflow(tmp_path, {"nodes": [], "links": [], "definitions": {"subgraphs": 5}})
+        _captured, _err, result = _invoke(["set-slot", str(path), "3.seed=1"], capsys)
+        assert result.exception is None or isinstance(result.exception, SystemExit), repr(result.exception)
+        env = _run(["set-slot", str(path), "3.seed=1"], capsys)
+        assert env["ok"] is False
+        assert env["error"]["code"] == "workflow_slot_invalid"
