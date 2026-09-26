@@ -13,6 +13,7 @@ local-only.
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 import time
@@ -35,11 +36,13 @@ from comfy_cli.http import assert_safe_url as _assert_safe_url
 from comfy_cli.target import Target
 
 # Transient HTTP failures during polling should back off and retry, not abort.
-# 429 (rate limit) is retried for any method — the request was rejected, not
-# processed, so even a POST is safe to repeat. Transient 5xx is retried for
-# GET only, since a 5xx on a POST may have partially applied (double-submit).
+# Only idempotent requests are retried in-request, for 429 and transient 5xx
+# alike: neither status proves a POST had no effect, and repeating a submit
+# that did go through would queue a second job. A throttled POST surfaces its
+# 429 (with Retry-After) to the caller instead.
 _MAX_TRANSIENT_RETRIES = 4
 _RETRYABLE_5XX = {502, 503, 504}
+_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 # Poll-level resilience for wait_for_completion: a sustained 429 storm (or a
 # plain 500, which the in-request layer never retries) must not abort a wait
@@ -66,16 +69,36 @@ def _redact(text: str) -> str:
 
 
 def _parse_retry_after(headers: Any) -> float | None:
-    """Parse a ``Retry-After`` header (seconds form) to a float, else None."""
+    """Parse a ``Retry-After`` header to seconds, else None.
+
+    Both RFC 9110 forms: delta-seconds, or an HTTP-date (converted to the
+    seconds remaining from now; a date already past is 0). A non-finite or
+    negative delay is None: it would reach ``time.sleep`` (which raises on
+    it) and the JSON envelope (which would carry a bare NaN/Infinity).
+    """
     if headers is None:
         return None
     value = headers.get("Retry-After")
     if value is None:
         return None
     try:
-        return float(value)
+        seconds = float(value)
     except (TypeError, ValueError):
+        pass
+    else:
+        return seconds if math.isfinite(seconds) and seconds >= 0 else None
+    from datetime import datetime, timezone
+    from email.utils import parsedate_to_datetime
+
+    try:
+        when = parsedate_to_datetime(str(value))
+    except (TypeError, ValueError, IndexError):
         return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return float(max(0, round((when - datetime.now(timezone.utc)).total_seconds())))
 
 
 class HTTPError(Exception):
@@ -294,9 +317,8 @@ class Client:
                     timeout=timeout,
                     _retried=True,
                 )
-            # Transient: back off and retry. 429 for any method (rejected, not
-            # processed); 5xx for idempotent GETs only.
-            retryable = e.code == 429 or (e.code in _RETRYABLE_5XX and method == "GET")
+            # Transient: back off and retry, for idempotent requests only.
+            retryable = method.upper() in _IDEMPOTENT_METHODS and (e.code == 429 or e.code in _RETRYABLE_5XX)
             if retryable and _attempt < _MAX_TRANSIENT_RETRIES:
                 time.sleep(self._retry_delay(e, _attempt))
                 return self._request(

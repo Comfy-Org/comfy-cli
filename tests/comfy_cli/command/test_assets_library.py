@@ -116,3 +116,259 @@ class TestEnsure:
         assert env["ok"] is True
         assert env["data"] == {"id": "asset-1", "hash": "a" * 64, "created_new": True}
         assert calls[0]["url"].endswith("/api/assets/from-hash") and calls[0]["method"] == "POST"
+
+
+class TestRateLimited:
+    """`assets library ls` maps through `cloud_http`'s mapper, which must also
+    classify a 429 as throttling rather than a generic HTTP failure."""
+
+    def test_ls_429_is_cloud_rate_limited(self, cloud_target, monkeypatch, capsys):
+        err = urllib.error.HTTPError(
+            "https://cloud.example.com/api/assets", 429, "Too Many Requests", {"Retry-After": "7"}, io.BytesIO(b"")
+        )
+        _patch_urlopen(monkeypatch, err)
+        env = _run(["ls", "--where", "cloud"], capsys)
+        assert env["error"]["code"] == "cloud_rate_limited"
+        assert error_codes.is_registered("cloud_rate_limited")
+        assert env["error"]["details"]["retry_after"] == 7
+        assert env["error"]["details"]["status"] == 429
+
+    def test_ls_500_is_still_cloud_http_error(self, cloud_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, _http_error(500, b"boom"))
+        env = _run(["ls", "--where", "cloud"], capsys)
+        assert env["error"]["code"] == "cloud_http_error"
+
+
+_HEX = "ab" * 32
+
+
+class TestEnsureHashWithExtension:
+    """An agent passed the stored file name (`<hash>.png`) where the content hash
+    belongs and got `asset_not_found`. A `<64-hex>.<ext>` is sent as
+    the canonical `blake3:<hex>` wire hash — which the cloud matches against
+    every storage-key shape, including `<hex>.<ext>` — and only that shape."""
+
+    def test_hash_with_extension_is_sent_as_canonical_hash(self, cloud_target, monkeypatch, capsys):
+        calls = _patch_urlopen(monkeypatch, {"id": "asset-1", "hash": f"blake3:{_HEX}"})
+        env = _run(["ensure", "--hash", f"{_HEX}.png", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert json.loads(calls[0]["body"])["hash"] == f"blake3:{_HEX}"
+
+    def test_response_without_hash_reports_the_normalized_hash(self, cloud_target, monkeypatch, capsys):
+        # The success payload falls back to the hash that was SENT, not the raw
+        # `<hex>.<ext>` input, when the server omits `hash`.
+        _patch_urlopen(monkeypatch, {"id": "asset-1"})
+        env = _run(["ensure", "--hash", f"{_HEX}.png", "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["hash"] == f"blake3:{_HEX}"
+
+    def test_canonical_hash_with_extension_drops_the_extension(self, cloud_target, monkeypatch, capsys):
+        calls = _patch_urlopen(monkeypatch, {"id": "asset-1"})
+        _run(["ensure", "--hash", f"blake3:{_HEX}.mp4", "--where", "cloud"], capsys)
+        assert json.loads(calls[0]["body"])["hash"] == f"blake3:{_HEX}"
+
+    @pytest.mark.parametrize("value", [_HEX, f"blake3:{_HEX}"])
+    def test_bare_hash_is_sent_unchanged(self, cloud_target, monkeypatch, capsys, value):
+        calls = _patch_urlopen(monkeypatch, {"id": "asset-1", "hash": value})
+        env = _run(["ensure", "--hash", value, "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert json.loads(calls[0]["body"])["hash"] == value
+
+    @pytest.mark.parametrize("value", ["comfyorg_logo.png", f"{_HEX[:-1]}.png", "photo.final.jpg"])
+    def test_non_hash_name_with_a_dot_is_not_mangled(self, cloud_target, monkeypatch, capsys, value):
+        calls = _patch_urlopen(monkeypatch, {"id": "asset-1"})
+        _run(["ensure", "--hash", value, "--where", "cloud"], capsys)
+        assert json.loads(calls[0]["body"])["hash"] == value
+
+    def test_unknown_hash_with_extension_still_asset_not_found(self, cloud_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, _http_error(404))
+        env = _run(["ensure", "--hash", f"{_HEX}.png", "--where", "cloud"], capsys)
+        err = env["error"]
+        assert err["code"] == "asset_not_found"
+        # The message names what the caller passed, so they can recognise it.
+        assert f"{_HEX}.png" in err["message"]
+
+
+# Synthetic: an asset's real hash and the shapes a mangled copy of it takes.
+# A 4-char shared prefix is weak evidence (common by chance across a library
+# page), so it must NOT produce a suggestion; the strong forms must.
+_REAL = "0123456789abcdef" * 4
+_GARBLED = _REAL[:10] + "f" + _REAL[10:]  # one extra char mid-hash (65 chars)
+_DROPPED = _REAL[:30] + _REAL[31:]  # one char lost (63 chars)
+_TRUNCATED_TAIL = _REAL[:20] + "e" * 45  # first 20 chars kept, tail garbled (65 chars)
+_WEAK = _REAL[:4] + "e" * 61  # only 4 chars shared (65 chars)
+
+
+def _route_urlopen(monkeypatch: pytest.MonkeyPatch, *, ensure_outcome, library):
+    """from-hash → ``ensure_outcome``; the library listing → ``library`` (rows or an exception)."""
+    calls: list[str] = []
+
+    class _Resp:
+        status = 200
+
+        def __init__(self, payload):
+            self._raw = json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=None):
+            return self._raw
+
+    def _fake(req, timeout=None):
+        calls.append(req.full_url)
+        outcome = ensure_outcome if "/from-hash" in req.full_url else library
+        if isinstance(outcome, Exception):
+            raise outcome
+        return _Resp(outcome if "/from-hash" in req.full_url else {"assets": outcome})
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake)
+    return calls
+
+
+def _asset(hash_value: str, name: str) -> dict:
+    return {"id": f"id-{name}", "name": name, "hash": hash_value}
+
+
+class TestEnsureSuggestsNearHashes:
+    """When the hash is not found and looks mangled, suggest library assets it
+    is almost certainly a copy of, from ONE bounded listing. Evidence must be
+    strong: within one inserted/dropped/changed char of a stored hash, or a
+    shared prefix of >= 16 hex chars."""
+
+    @pytest.mark.parametrize("mangled", [_GARBLED, _DROPPED, _TRUNCATED_TAIL])
+    def test_mangled_hash_suggests_the_real_one(self, cloud_target, monkeypatch, capsys, mangled):
+        library = [
+            _asset("blake3:" + "ffff" + "0" * 60, "other.png"),
+            _asset(f"{_REAL}.png", "beach.png"),
+            _asset(_REAL[:4] + "1" * 60, "weak-4-char-prefix.png"),
+        ]
+        calls = _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=library)
+        env = _run(["ensure", "--hash", f"{mangled}.png", "--where", "cloud"], capsys)
+
+        err = env["error"]
+        assert err["code"] == "asset_not_found"
+        suggestions = err["details"]["suggestions"]
+        assert [s["hash"] for s in suggestions] == [f"{_REAL}.png"]
+        assert suggestions[0]["name"] == "beach.png"
+        assert f"did you mean {_REAL}.png (beach.png)?" in err["hint"]
+        assert "exactly" in err["hint"]
+        # Exactly one bounded listing, after the from-hash miss.
+        assert len(calls) == 2
+        assert "/api/assets?" in calls[1] and "limit=500" in calls[1]
+
+    def test_bare_uppercase_digest_suggests_its_lowercase_form(self, cloud_target, monkeypatch, capsys):
+        _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=[_asset(_REAL, "beach.png")])
+        env = _run(["ensure", "--hash", _REAL.upper(), "--where", "cloud"], capsys)
+        assert [s["hash"] for s in env["error"]["details"]["suggestions"]] == [_REAL]
+
+    def test_short_shared_prefix_is_not_evidence(self, cloud_target, monkeypatch, capsys):
+        library = [_asset(f"{_REAL}.png", "beach.png"), _asset(_REAL[:15] + "e" * 49, "fifteen.png")]
+        _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=library)
+        env = _run(["ensure", "--hash", _WEAK, "--where", "cloud"], capsys)
+
+        err = env["error"]
+        assert err["code"] == "asset_not_found"
+        assert "suggestions" not in err["details"]
+        assert "did you mean" not in err["hint"]
+
+    def test_suggestions_rank_by_longest_prefix_and_cap_at_three(self, cloud_target, monkeypatch, capsys):
+        wanted = "a" * 22 + "0" * 43  # 65 chars: mangled length
+        library = [_asset("a" * k + "b" * (64 - k), f"{k}.png") for k in (16, 18, 20, 17, 15)]
+        _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=library)
+        env = _run(["ensure", "--hash", wanted, "--where", "cloud"], capsys)
+
+        names = [s["name"] for s in env["error"]["details"]["suggestions"]]
+        assert names == ["20.png", "18.png", "17.png"]
+
+    def test_one_edit_match_outranks_a_long_prefix(self, cloud_target, monkeypatch, capsys):
+        library = [_asset(_REAL[:40] + "e" * 24, "long-prefix.png"), _asset(_REAL, "exact-but-one.png")]
+        _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=library)
+        env = _run(["ensure", "--hash", _DROPPED, "--where", "cloud"], capsys)
+
+        names = [s["name"] for s in env["error"]["details"]["suggestions"]]
+        assert names[0] == "exact-but-one.png"
+
+    @pytest.mark.parametrize("value", [_REAL, f"blake3:{_REAL}", f"{_REAL}.png", f"blake3:{_REAL}.png"])
+    def test_well_formed_digest_that_is_missing_makes_no_library_call(self, cloud_target, monkeypatch, capsys, value):
+        """A full lowercase 64-hex digest is not mangled; it simply is not in the
+        library. Listing would cost a request and could only guess."""
+        calls = _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=[_asset(_REAL, "x.png")])
+        env = _run(["ensure", "--hash", value, "--where", "cloud"], capsys)
+
+        assert env["error"]["code"] == "asset_not_found"
+        assert "suggestions" not in env["error"]["details"]
+        assert len(calls) == 1
+
+    def test_non_hex_name_makes_no_library_call(self, cloud_target, monkeypatch, capsys):
+        calls = _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=[_asset(_REAL, "x.png")])
+        env = _run(["ensure", "--hash", "comfyorg_logo.png", "--where", "cloud"], capsys)
+
+        assert env["error"]["code"] == "asset_not_found"
+        assert "suggestions" not in env["error"]["details"]
+        assert len(calls) == 1
+
+    def test_a_failed_listing_still_reports_asset_not_found(self, cloud_target, monkeypatch, capsys):
+        _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=_http_error(500))
+        env = _run(["ensure", "--hash", f"{_GARBLED}.png", "--where", "cloud"], capsys)
+
+        assert env["error"]["code"] == "asset_not_found"
+        assert "suggestions" not in env["error"]["details"]
+
+    def test_other_errors_make_no_library_call(self, cloud_target, monkeypatch, capsys):
+        calls = _route_urlopen(monkeypatch, ensure_outcome=_http_error(500), library=[_asset(_REAL, "x.png")])
+        env = _run(["ensure", "--hash", _GARBLED, "--where", "cloud"], capsys)
+
+        assert env["error"]["code"] == "cloud_http_error"
+        assert len(calls) == 1
+
+
+class TestLongExtensions:
+    """Model files carry extensions longer than image ones (`.safetensors` is 11)."""
+
+    def test_hash_with_safetensors_extension_is_canonicalized(self, cloud_target, monkeypatch, capsys):
+        calls = _patch_urlopen(monkeypatch, {"id": "asset-1"})
+        _run(["ensure", "--hash", f"{_HEX}.safetensors", "--where", "cloud"], capsys)
+        assert json.loads(calls[0]["body"])["hash"] == f"blake3:{_HEX}"
+
+    def test_library_hash_with_safetensors_extension_is_suggested(self, cloud_target, monkeypatch, capsys):
+        library = [_asset(f"{_REAL}.safetensors", "model.safetensors")]
+        _route_urlopen(monkeypatch, ensure_outcome=_http_error(404), library=library)
+        env = _run(["ensure", "--hash", f"{_GARBLED}.safetensors", "--where", "cloud"], capsys)
+        assert [s["name"] for s in env["error"]["details"]["suggestions"]] == ["model.safetensors"]
+
+
+class TestSuggestionRequestIsShortLived:
+    def test_listing_uses_a_short_timeout(self, cloud_target, monkeypatch, capsys):
+        """The listing only feeds an optional hint; a stalled one must not hold
+        the asset_not_found envelope for the default 30s request timeout."""
+        timeouts: dict[str, float | None] = {}
+
+        def _fake(req, timeout=None):
+            if "/from-hash" in req.full_url:
+                timeouts["ensure"] = timeout
+                raise _http_error(404)
+            timeouts["listing"] = timeout
+            raise TimeoutError("stalled")
+
+        monkeypatch.setattr("urllib.request.urlopen", _fake)
+        env = _run(["ensure", "--hash", _GARBLED, "--where", "cloud"], capsys)
+
+        assert env["error"]["code"] == "asset_not_found"
+        assert timeouts["listing"] is not None and timeouts["listing"] <= 5
+
+
+class TestUppercaseHex:
+    @pytest.mark.parametrize("value", [f"{_HEX.upper()}.png", f"blake3:{_HEX.upper()}.PNG"])
+    def test_uppercase_digest_with_extension_is_canonicalized_lowercase(self, cloud_target, monkeypatch, capsys, value):
+        calls = _patch_urlopen(monkeypatch, {"id": "asset-1"})
+        _run(["ensure", "--hash", value, "--where", "cloud"], capsys)
+        assert json.loads(calls[0]["body"])["hash"] == f"blake3:{_HEX}"
+
+    def test_bare_uppercase_digest_is_sent_unchanged(self, cloud_target, monkeypatch, capsys):
+        calls = _patch_urlopen(monkeypatch, {"id": "asset-1"})
+        _run(["ensure", "--hash", _HEX.upper(), "--where", "cloud"], capsys)
+        assert json.loads(calls[0]["body"])["hash"] == _HEX.upper()

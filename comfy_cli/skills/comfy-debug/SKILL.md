@@ -74,6 +74,9 @@ The server validated the workflow and rejected nodes. The full per-node error ma
 - `404` returning XML `<AuthenticationRequired>` → wrong path. Real ComfyUI endpoints on cloud live under `/api/*`; everything else hits the CDN catch-all.
 - `503` → check the Comfy Cloud dashboard or server logs for deployment health.
 
+### `cloud_rate_limited` (HTTP 429 from cloud)
+Throttling is not a verdict on the workflow, so do not edit it. Wait `details.retry_after` seconds (when present; otherwise a few seconds). A 429 does not by itself prove a submit had no effect, so before re-running `comfy run`, check `comfy jobs ls --where cloud` for the job. A 429 while `--wait` polls means the job was already submitted: follow it with `comfy jobs watch <prompt_id> --where cloud` instead of re-running.
+
 ### `cloud_timeout`
 `cloud_timeout` — the run went **silent** for `--timeout` seconds (default 120). `comfy run --timeout` is a per-event-silence deadline on both local and cloud: it resets whenever the job reports progress, so a workflow streaming progress can run indefinitely. Wall-clock limits exist only on `comfy jobs watch --max-wait` (default 600s, cloud). Recovery: re-run with a larger `--timeout`, or submit async and `comfy jobs watch <id>`.
 ```

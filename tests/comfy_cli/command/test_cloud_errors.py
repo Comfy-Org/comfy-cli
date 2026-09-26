@@ -120,3 +120,127 @@ def test_url_error_surfaces_network_hint():
     call = renderer.calls[0]
     assert call["code"] == "cloud_http_error"
     assert "comfy cloud whoami" in call["hint"]
+
+
+# --- 429: throttled, not rejected --------------------------------------------
+#
+# `comfy run` used to report a 429 as the generic `cloud_http_error` with a
+# hint to "check the workflow is valid" — sending the agent off to "fix" a valid
+# workflow. A 429 gets its own code and a retry hint, and carries the server's
+# Retry-After when it sent one.
+
+
+def _http_error_with_headers(code: int, headers: dict, body: bytes = b'{"error":"slow down"}'):
+    return urllib.error.HTTPError("https://cloud.example.com/x", code, "Too Many Requests", headers, io.BytesIO(body))
+
+
+def test_429_is_cloud_rate_limited_with_retry_after():
+    renderer = _FakeRenderer()
+    exit_exc = _handle(renderer, _http_error_with_headers(429, {"Retry-After": "30"}))
+
+    assert isinstance(exit_exc, typer.Exit)
+    call = renderer.calls[0]
+    assert call["code"] == "cloud_rate_limited"
+    assert call["details"]["status"] == 429
+    assert call["details"]["retry_after"] == 30
+    assert call["details"]["operation"] == "cancel"
+    assert call["details"]["prompt_id"] == "p1"
+    assert "slow down" in call["details"]["body"]
+    assert "retry" in call["hint"].lower()
+
+
+def test_429_without_retry_after_omits_it():
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error_with_headers(429, {}))
+
+    call = renderer.calls[0]
+    assert call["code"] == "cloud_rate_limited"
+    assert "retry_after" not in call["details"]
+
+
+@pytest.mark.parametrize("code", [400, 409, 500, 502])
+def test_other_statuses_stay_cloud_http_error(code: int):
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error_with_headers(code, {"Retry-After": "30"}))
+
+    call = renderer.calls[0]
+    assert call["code"] == "cloud_http_error"
+    assert call["details"]["status"] == code
+    assert "retry_after" not in call["details"]
+
+
+def test_429_http_date_retry_after_becomes_seconds():
+    """Retry-After may be an HTTP-date instead of delta-seconds (RFC 9110 §10.2.3)."""
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    when = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=120), usegmt=True)
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error_with_headers(429, {"Retry-After": when}))
+
+    retry_after = renderer.calls[0]["details"]["retry_after"]
+    assert 100 <= retry_after <= 121
+
+
+def test_429_http_date_in_the_past_is_zero():
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error_with_headers(429, {"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}))
+    assert renderer.calls[0]["details"]["retry_after"] == 0
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "-5"])
+def test_429_invalid_retry_after_is_dropped(value: str):
+    """A non-finite or negative delay must not reach the envelope: the renderer
+    would emit bare NaN/Infinity (not strict JSON), or a negative wait hint."""
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error_with_headers(429, {"Retry-After": value}))
+
+    call = renderer.calls[0]
+    assert call["code"] == "cloud_rate_limited"
+    assert "retry_after" not in call["details"]
+    assert value not in call["hint"]
+
+
+# --- 429 hint stays honest about what a 429 proves ---------------------------
+#
+# HTTP 429 says the server is throttling; it does not by itself prove the
+# request had no effect. The hint must not claim "not rejected" or tell the
+# caller to repeat a request unconditionally, since repeating a submit that did
+# go through would create a second job.
+
+
+def test_429_hint_does_not_claim_the_request_had_no_effect():
+    from comfy_cli.command._cloud_errors import rate_limited_error
+
+    err = rate_limited_error("save", 5.0, {})
+    hint = err["hint"].lower()
+    assert "not rejected" not in hint
+    assert "unchanged" not in hint
+    assert "5s" in hint
+    # A request that creates or changes something gets checked before a retry.
+    assert "check" in hint
+
+
+def test_429_hint_takes_a_caller_specific_next_step():
+    from comfy_cli.command._cloud_errors import rate_limited_error
+
+    err = rate_limited_error("job status", None, {"prompt_id": "p"}, next_step="the watcher keeps polling")
+    assert err["hint"].endswith("the watcher keeps polling")
+    assert "a few seconds" in err["hint"]
+    assert err["details"] == {"prompt_id": "p", "status": 429}
+
+
+def test_registry_scopes_cloud_rate_limited_to_cloud():
+    """Local `comfy run` reports a 429 from its own server as `client_error`
+    (`details.status` 429); `cloud_rate_limited` is the Cloud-only code, and the
+    registry says so, so a consumer does not expect it from a local target."""
+    from comfy_cli import error_codes
+
+    by_code = {c.code: c for c in error_codes.REGISTRY}
+    rate_limited = by_code["cloud_rate_limited"]
+    assert "Cloud only" in rate_limited.meaning
+    assert "client_error" in rate_limited.meaning
+    assert "429" in by_code["client_error"].meaning
+    hint = rate_limited.hint.lower()
+    assert "unchanged" not in hint
+    assert "comfy jobs ls" in hint
