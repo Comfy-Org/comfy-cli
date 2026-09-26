@@ -241,8 +241,14 @@ def _stale_input_slot_links(nodes: list[dict], links: list[list], qualify: Any =
     nodes_by_id = {str(n.get("id")): n for n in nodes}
     for link in links:
         link_id, tgt_id, tgt_slot = link[0], link[3], link[4]
-        inputs = nodes_by_id[str(tgt_id)].get("inputs")
-        if not isinstance(inputs, list) or 0 <= tgt_slot < len(inputs):
+        tgt_node = nodes_by_id.get(str(tgt_id))
+        if tgt_node is None or not _is_slot_index(tgt_slot):
+            continue
+        # A node that serialized no ``inputs`` list has no input slots at all.
+        inputs = tgt_node.get("inputs")
+        if not isinstance(inputs, list):
+            inputs = []
+        if 0 <= tgt_slot < len(inputs):
             continue
         holder = next(
             (
@@ -1302,8 +1308,12 @@ def _render_definition_block(
     if reasons:
         raise PrintUnsupported(reasons)
     first_instance = state.first_instance_by_def.get(def_id, def_id)
+    # Every link into an interior node, including one from the ``-10`` input
+    # proxy (which ``_validate`` does not see): a stale target slot is stale
+    # whatever feeds it.
+    into_interior = [[lid, oid, oslot, tid, tslot] for lid, (oid, oslot, tid, tslot) in all_links.items()]
     stale_warnings, stale_ids = _stale_input_slot_links(
-        interior_nodes, validate_links, lambda nid: f"{first_instance}/{nid}"
+        interior_nodes, into_interior, lambda nid: f"{first_instance}/{nid}"
     )
     state.warnings.extend(stale_warnings)
     all_links = {lid: link for lid, link in all_links.items() if lid not in stale_ids}

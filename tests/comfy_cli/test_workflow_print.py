@@ -1056,3 +1056,29 @@ def test_out_of_range_input_slot_inside_a_definition_is_qualified(sd15_graph):
         f"link 9999 targets input slot 42 on node 10/{tgt['id']}, which has {n_inputs} inputs; "
         "no input holds it, so it feeds nothing and was ignored"
     ) in res.warnings
+
+
+def test_out_of_range_input_slot_on_a_node_without_inputs_is_reported(sd15_graph):
+    wf = _stale_slot_workflow([7, 2, 0, 1, 0, "IMAGE"])
+    del wf["nodes"][0]["inputs"]
+    res = render_py(wf, sd15_graph)
+    assert [ln.rsplit("# ", 1)[1].split()[0] for ln in res.source.splitlines()] == ["1", "2"]
+    assert res.warnings == [
+        "link 7 targets input slot 0 on node 1, which has 0 inputs; no input holds it, so it feeds nothing and was ignored"
+    ]
+
+
+def test_out_of_range_input_slot_fed_by_the_definition_input_proxy_is_reported(sd15_graph):
+    wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
+    graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
+    sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
+    tgt = sg["nodes"][0]
+    sg["links"].append(
+        {"id": 9998, "origin_id": -10, "origin_slot": 0, "target_id": tgt["id"], "target_slot": 42, "type": "*"}
+    )
+    res = render_py(wf, graph)
+    n_inputs = len(tgt.get("inputs") or [])
+    assert (
+        f"link 9998 targets input slot 42 on node 10/{tgt['id']}, which has {n_inputs} inputs; "
+        "no input holds it, so it feeds nothing and was ignored"
+    ) in res.warnings
