@@ -977,3 +977,82 @@ def test_bypass_mode_on_missing_subgraph_definition(sd15_graph):
         'd33c1791_dfd2_4102_8540_aa63e4434cd2 = Subgraph["d33c1791-dfd2-4102-8540-aa63e4434cd2"]()'
         "  # 10 subgraph d33c1791-dfd2-4102-8540-aa63e4434cd2 definition missing mode=bypass"
     )
+
+
+# ---------------------------------------------------------------------------
+# A link whose target input slot the node no longer has (a stale link left
+# behind after the node's inputs changed: converted widgets, dynamic or
+# auto-grow inputs). The editor loads such a workflow — its link fixer keeps
+# the link only while an output still lists it and never wires it into an
+# input — so the printer renders everything else and reports the link.
+# ---------------------------------------------------------------------------
+
+
+def _stale_slot_workflow(extra_link):
+    return _mini(
+        [
+            _node(
+                1,
+                "EmptyLatentImage",
+                outputs=[{"name": "LATENT", "type": "LATENT", "links": [1]}],
+                widgets=[512, 512, 1],
+            ),
+            _node(
+                2,
+                "VAEDecode",
+                inputs=[{"name": "samples", "type": "LATENT", "link": 1}, {"name": "vae", "type": "VAE", "link": None}],
+                outputs=[{"name": "IMAGE", "type": "IMAGE", "links": []}],
+            ),
+        ],
+        [[1, 1, 0, 2, 0, "LATENT"], extra_link],
+    )
+
+
+def test_out_of_range_input_slot_renders_and_warns(sd15_graph):
+    res = render_py(_stale_slot_workflow([7, 1, 0, 2, 6, "LATENT"]), sd15_graph)
+    assert res.node_count == 2
+    assert "samples=empty_latent_image" in res.source
+    assert "vae=None" in res.source
+    assert res.warnings == [
+        "link 7 targets input slot 6 on node 2, which has 2 inputs; no input holds it, so it feeds nothing and was ignored"
+    ]
+
+
+def test_out_of_range_input_slot_adds_no_ordering_edge(sd15_graph):
+    # A stale link pointing BACK from 2 to 1 must not turn into a false cycle.
+    wf = _stale_slot_workflow([7, 2, 0, 1, 6, "IMAGE"])
+    res = render_py(wf, sd15_graph)
+    assert [ln.rsplit("# ", 1)[1].split()[0] for ln in res.source.splitlines()] == ["1", "2"]
+    assert res.warnings == [
+        "link 7 targets input slot 6 on node 1, which has 0 inputs; no input holds it, so it feeds nothing and was ignored"
+    ]
+
+
+def test_out_of_range_input_slot_held_by_an_input_renders_through_that_input(sd15_graph):
+    # The input side is what the node reads: an input that holds the link id is
+    # wired, whatever slot index the link row itself records.
+    wf = _stale_slot_workflow([7, 1, 0, 2, 6, "LATENT"])
+    wf["links"] = [[7, 1, 0, 2, 6, "LATENT"]]
+    wf["nodes"][1]["inputs"][0]["link"] = 7
+    res = render_py(wf, sd15_graph)
+    assert "samples=empty_latent_image" in res.source
+    assert res.warnings == [
+        "link 7 targets input slot 6 on node 2, which has 2 inputs; rendered through input 'samples', which holds it"
+    ]
+
+
+def test_out_of_range_input_slot_inside_a_definition_is_qualified(sd15_graph):
+    wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
+    graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
+    sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
+    # An extra interior link row nothing holds, aimed past the target's inputs.
+    src = next(n for n in sg["nodes"] if n.get("outputs"))
+    tgt = next(n for n in sg["nodes"] if n is not src)
+    bad = {"id": 9999, "origin_id": src["id"], "origin_slot": 0, "target_id": tgt["id"], "target_slot": 42, "type": "*"}
+    sg["links"].append(bad)
+    res = render_py(wf, graph)
+    n_inputs = len(tgt.get("inputs") or [])
+    assert (
+        f"link 9999 targets input slot 42 on node 10/{tgt['id']}, which has {n_inputs} inputs; "
+        "no input holds it, so it feeds nothing and was ignored"
+    ) in res.warnings
