@@ -352,10 +352,9 @@ def _types_compatible(link_type: Any, dst_type: Any) -> bool:
     Compatible when the two type sets INTERSECT, not when their raw strings are
     equal: comparing whole strings refused a ``FILE_3D_GLB`` output from an input
     declaring ``MESH,FILE_3D_GLB,...`` even though it explicitly accepts it.
-    Measured on prod agent traces (2026-07-23 → 07-28): ~23 connect/apply_ops
-    failures of that shape, each one a correct edit being refused — and the error
-    names the source type inside the accepted list, so the agent saw its own type
-    listed and retried the identical call.
+    Each such connect/apply_ops refusal was a correct edit being rejected — and
+    the error names the source type inside the accepted list, so a caller saw
+    its own type listed and retried the identical call.
 
     Intersection (not substring) matters: ``FILE_3D_GL`` must NOT satisfy an input
     accepting only ``FILE_3D_GLTF``/``FILE_3D_GLB``. An unknown type on either
@@ -422,10 +421,9 @@ def _rehint_discarded_batch(e: Exception, pre_batch_hint: str) -> ValueError:
 
     The hint is phrased as an instruction ("Use an id from ... never rebuild
     it"), so a model reasonably treats those ids as authoritative and addresses
-    them next. Measured on prod comfy-agent traces (2026-07-27): 16/16 of every
-    "node <id> not found in workflow" edit failure used an id an earlier FAILED
-    batch had advertised this way; one trace burned seven consecutive connects
-    on ids that never existed.
+    them next. A "node <id> not found in workflow" edit failure then follows,
+    on an id that only an earlier FAILED batch ever advertised; a caller could
+    spend several consecutive connects on ids that never existed.
 
     So: strip the mid-batch inventory, restate it from the graph as it actually
     stands, and say plainly that nothing was applied.
@@ -610,12 +608,12 @@ _POS_STRING_RE = re.compile(r"\s*\[?\s*([^,\[\]]+?)\s*,\s*([^,\[\]]+?)\s*\]?\s*"
 def _coerce_pos(pos: Any) -> Any:
     """Parse an ``"x,y"`` / ``"[x, y]"`` string position into two numbers.
 
-    Agents send ``"at": "40,90"`` as often as ``[40, 90]`` (prod comfy-agent
-    traces, 2026-09-23: every such batch was refused, then re-sent verbatim
-    with an array). The string has one reading, so it is parsed here — ints
-    stay ints so the frozen op matches the array spelling. Anything else
-    (other types, wrong arity, non-numbers) passes through untouched for the
-    caller's "two finite numbers" check to reject.
+    Agents send ``"at": "40,90"`` as often as ``[40, 90]``; refusing the string
+    only made them re-send the batch verbatim with an array. The string has one
+    reading, so it is parsed here — ints stay ints so the frozen op matches the
+    array spelling. Anything else (other types, wrong arity, non-numbers)
+    passes through untouched for the caller's "two finite numbers" check to
+    reject.
     """
     if not isinstance(pos, str):
         return pos
@@ -761,14 +759,13 @@ def _inserted_node_id(workflow: dict, node_id: Any) -> str | None:
 
     The doc host's ``insert_workflow`` remaps every template id, so a canvas
     built by ``get_template`` has node ``insert:<op>:root:node:57`` and no node
-    ``57``. Agents still address ``57`` (the id the template showed). Prod/stg
-    comfy-agent traces (2026-09-23) show 5 turns refused this way, and each
-    re-sent the suggested ``insert:`` address. Returns the remapped id only
-    when EXACTLY ONE top-level node is the remap of ``node_id``. With none,
-    or with two inserts of the same template, it returns ``None`` and the
-    caller's not-found error (which lists every candidate) stands. Consulted
-    only after the literal id failed to resolve, so a real node ``57`` always
-    wins.
+    ``57``. Agents still address ``57`` (the id the template showed); a refusal
+    only made them re-send the suggested ``insert:`` address. Returns the
+    remapped id only when EXACTLY ONE top-level node is the remap of
+    ``node_id``. With none, or with two inserts of the same template, it
+    returns ``None`` and the caller's not-found error (which lists every
+    candidate) stands. Consulted only after the literal id failed to resolve,
+    so a real node ``57`` always wins.
     """
     s = str(node_id)
     if not s.lstrip("-").isdigit():
@@ -837,10 +834,10 @@ def _bool_combo_option(port, value: Any) -> str | None:
 
     Some combos spell a toggle as the STRINGS ``'true'``/``'false'`` (e.g.
     MeshyTextToModelNode's ``should_remesh`` dynamic combo), and agents write
-    ``true`` for them. Stg trace c9552f9f (2026-09-23) shows the batch refused
-    and then re-sent as ``"true"``. The value is mapped ONLY when the options
-    are exactly that pair, case-insensitively. Any other option set keeps the
-    bool and its error.
+    ``true`` for them; refusing the batch only made the caller re-send it as
+    ``"true"``. The value is mapped ONLY when the options are exactly that
+    pair, case-insensitively. Any other option set keeps the bool and its
+    error.
     """
     if not isinstance(value, bool):
         return None
@@ -1164,10 +1161,9 @@ def _subgraph_boundary_error(workflow: dict, node_id: Any) -> ValueError | None:
     so connect never can. Before this guard, such an endpoint fell through to
     the generic "node 57/27 not found in workflow" + the top-level node
     inventory + "use an id from `comfy workflow slots`" — an instruction to
-    consult the exact tool that advertised the address. Measured on prod
-    comfy-agent traces (2026-08-05): one session burned SEVEN identical
-    connects on ``129/93.text`` and the turn died. Say what the boundary means
-    and which verb works instead.
+    consult the exact tool that advertised the address, so a caller could
+    repeat the identical connect on an address like ``129/93.text`` until it
+    gave up. Say what the boundary means and which verb works instead.
 
     Returns ``None`` when the endpoint is not an interior address (including
     when its head segment doesn't exist — the canonical not-found error is
@@ -2038,7 +2034,7 @@ def resolve_ref(ref: Any, aliases: dict[str, Any]) -> Any:
             return int(ref)
         head, dot, rest = ref.partition(".")
         if dot and head in aliases:
-            # `$kling.prompt` as a `node` (prod trace ce95cacf) — say what
+            # `$kling.prompt` as a `node` (alias plus input name) — say what
             # the field takes instead of "node kling.prompt not found".
             raise ValueError(
                 f"node {'$' + ref!r} is an alias plus an input name; `node` takes the alias alone "
@@ -2783,9 +2779,9 @@ def complete_save_format(workflow: dict) -> dict:
     We emitted ``{nodes, links, last_node_id}`` and omitted ``version`` and
     ``last_link_id``. The frontend's ``validateComfyWorkflow`` zod schema
     requires them, so every consumer had to patch the document before it could
-    be used — the cloud agent carried a whole module (`internal/draft/
-    normalize.go`) doing exactly this. Completing it at the source deletes that
-    for every current and future caller.
+    be used — a downstream consumer had to carry its own normalization step
+    doing exactly this. Completing it at the source deletes that for every
+    current and future caller.
 
     Only ABSENT keys are filled: a document that already declares a version or
     carries its own counters keeps them, so this never rewrites a producer's
@@ -2965,7 +2961,7 @@ def _resolve_output_slot(node: dict, graph, slot: Any) -> tuple[int, str]:
     # Still unmatched. When the node has exactly ONE output there is no
     # ambiguity to guess through — it's the only thing the caller could have
     # meant, even when the requested name is an outright rename rather than a
-    # case/separator variant (prod: LUMA_RAY32_KEYFRAME -> 'keyframes',
+    # case/separator variant (e.g. LUMA_RAY32_KEYFRAME -> 'keyframes',
     # ELEVENLABS_VOICE -> 'voice', IMAGE -> 'images'). Multi-output nodes keep
     # today's behavior: an unmatched name stays ambiguous and errors below.
     if len(outs) == 1:
@@ -3193,9 +3189,8 @@ def _linkable_widget_names(node: dict, graph) -> list[str]:
     combo's selector. The sub-widgets of the CURRENT selection (``model.prompt``
     on ByteDance2ReferenceNodeV2 / MinimaxHailuo03FirstLastFrameNode) are real
     widget-backed inputs in the frontend and can take a link. Before this,
-    every connect to one failed "input 'model.prompt' not found … inputs: []"
-    (5 nightly + 1 prod comfy-agent traces, 2026-09-23). An option that is not
-    selected contributes nothing, as in the frontend.
+    every connect to one failed "input 'model.prompt' not found … inputs: []".
+    An option that is not selected contributes nothing, as in the frontend.
     """
     from comfy_cli.cql import engine as _engine
 

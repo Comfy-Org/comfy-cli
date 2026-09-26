@@ -12,7 +12,7 @@ position against the schema's widget order. A non-empty dict is truthy, so the
 (or ``.extend()`` raises ``AttributeError`` when the write path needs to grow
 it).
 
-Prod: 38 failures. Surfaced to the agent as the useless message
+Surfaced to the caller as the useless message
 "Could not extract slots: 0" (``comfy_cli/command/workflow.py``'s
 ``except (ValueError, KeyError)`` renders ``str(e)``, and ``str(KeyError(0))``
 is just ``"0"``). Reproduced directly against the real failing fixture:

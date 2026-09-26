@@ -2,9 +2,9 @@
 
 Status: **FROZEN**. This document is the normative contract for the structured-edit
 op vocabulary in `comfy_cli/workflow_ops.py`: the op kinds, their argument shapes,
-their idempotency and conflict rules, and the batch protocol. Downstream repos
-(cloud `services/agent`, `harness`, the merge consumer) cite this document **by
-commit SHA**, not by branch.
+their idempotency and conflict rules, and the batch protocol. Downstream
+consumers (the cloud agent, its test harness, the merge consumer) cite this
+document **by commit SHA**, not by branch.
 
 Machine-readable projection: `workflow_ops.FROZEN_OPS`, `workflow_ops.DEFERRED_OPS`,
 `workflow_ops.BATCHABLE_OPS`. `tests/comfy_cli/test_op_vocabulary_contract.py`

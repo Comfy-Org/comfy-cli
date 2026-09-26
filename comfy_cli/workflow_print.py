@@ -40,7 +40,7 @@ Two rules keep the printed names the ones the editors take:
   instance address (``57.width``); the interior line keeps ``IN.width`` and
   the definition header says where that value lives.
 
-See the design: decisions D1-D13 (Obsidian, "workflow print (design, 2026-08-25)").
+See the ``workflow print`` design notes, decisions D1-D13.
 """
 
 from __future__ import annotations

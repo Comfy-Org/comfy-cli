@@ -363,7 +363,7 @@ def test_unsupported_model_raises_a_typed_error_carrying_the_supported_list():
 
 
 def test_cli_emit_unsupported_model_has_its_own_error_code(runner, tmp_path, monkeypatch):
-    """The prod payload: `generate_workflow flux-pro` → `emit_workflow_failed`
+    """`--emit-workflow` on `flux-pro` → `emit_workflow_failed`
     "--emit-workflow does not support model 'flux-pro'. Supported: …". The
     umbrella code also covers bad params and unwritable paths, so the agent
     could not tell "pick another model" from "fix your arguments". Now it is

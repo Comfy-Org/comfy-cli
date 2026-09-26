@@ -1,12 +1,12 @@
 """``generate --emit-ops``: the emitter expressed as the frozen op vocabulary.
 
 Why: ``--emit-workflow`` writes an API-format file, which the canvas and
-every edit tool refuse (``workflow_not_frontend_format`` — 48 refusals in one
-staging day), and which the CRDT write path cannot attribute (no ops). Instead
-of converting API→frontend after the fact — a second implementation of widget
-order and layout — the emitter mints the graph as add_node/set_widget/connect
-specs and lets ``workflow_ops.apply_specs`` materialize the frontend workflow,
-exactly the machinery every hand edit already uses. One answer, not two.
+every edit tool refuse (``workflow_not_frontend_format``), and which the CRDT
+write path cannot attribute (no ops). Instead of converting API→frontend after
+the fact — a second implementation of widget order and layout — the emitter
+mints the graph as add_node/set_widget/connect specs and lets
+``workflow_ops.apply_specs`` materialize the frontend workflow, exactly the
+machinery every hand edit already uses. One answer, not two.
 
 The round-trip test is the contract: lowering the materialized frontend
 workflow back to API format must reproduce the semantics of the API graph
@@ -497,11 +497,11 @@ def test_emitted_workflow_accepts_a_later_edit_stamped_below_its_base_version(tm
 
 
 def test_write_frontend_workflow_materializes_nano_banana_pro_from_the_nightly_input(tmp_path):
-    """Pin for an agent failure seen in telemetry: generate_workflow sent
-    these args and got `emit_workflow_failed` — "'gemini-3-pro-image-preview'
-    not in 1 known options for model — closest: gemini-2.5-flash-image" — because
-    emit built GeminiImageNode. #921 routes that model to GeminiImage2Node; this
-    replays the recorded input through the same frontend (canvas-ops) path."""
+    """Pin for an agent failure: a generate call with these args got
+    `emit_workflow_failed` — "'gemini-3-pro-image-preview' not in 1 known
+    options for model — closest: gemini-2.5-flash-image" — because emit built
+    GeminiImageNode. #921 routes that model to GeminiImage2Node; this replays
+    that input through the same frontend (canvas-ops) path."""
     wf, ops = emit.write_frontend_workflow(
         "nano-banana",
         {

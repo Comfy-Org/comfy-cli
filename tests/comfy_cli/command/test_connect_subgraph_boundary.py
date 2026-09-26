@@ -1,19 +1,18 @@
 """`workflow connect` must explain a subgraph boundary instead of "not found".
 
-Measured on prod comfy-agent traces (2026-08-05, session 0cc9d03b): the agent
-read `129/93.text` out of `comfy workflow slots` (which advertises interior
-subgraph addresses precisely so widgets can be slot-edited), then tried to wire
-a link into it:
+An agent can read `129/93.text` out of `comfy workflow slots` (which advertises
+interior subgraph addresses precisely so widgets can be slot-edited), then try
+to wire a link into it:
 
-  connect 1263680240999073.STRING -> 129/93.text
+  connect 12.STRING -> 129/93.text
   => "node 129/93 not found in workflow. Nodes in this workflow: ...
       Use an id from `comfy workflow slots` / `ls-nodes` — never rebuild it."
 
 The hint told it to consult the exact tool that advertised the address, so it
-retried the SAME call seven times over eleven minutes and the turn died. The
-truth: a link cannot cross a subgraph boundary — interior addresses are
-writable (set-widget) but not wirable, and `connect` must say that instead of
-"not found" + an inventory that fuels the retry loop.
+retried the SAME call until it gave up. The truth: a link cannot cross a
+subgraph boundary — interior addresses are writable (set-widget) but not
+wirable, and `connect` must say that instead of "not found" + an inventory
+that fuels the retry loop.
 """
 
 from __future__ import annotations
@@ -56,7 +55,7 @@ def _assert_boundary_error(env: dict) -> dict:
 
 class TestConnectInteriorAddress:
     def test_slash_interior_target_names_the_boundary(self, patched_graph, tmp_path, capsys):
-        """`57/27.text` — the exact shape of the prod failure (129/93.text)."""
+        """`57/27.text` — the same shape as ``129/93.text`` above."""
         env = _connect(tmp_path, capsys, "9.LATENT", "57/27.text")
         err = _assert_boundary_error(env)
         msg = err["message"]

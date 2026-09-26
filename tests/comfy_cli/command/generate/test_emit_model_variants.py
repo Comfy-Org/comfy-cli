@@ -1,6 +1,4 @@
-"""`--emit-workflow` flags that the agent's generate_workflow tripped on.
-
-Measured on stg-v2/nightly comfy-agent traces (2026-09-20..21):
+"""`--emit-workflow` flags an agent's generate call could trip on.
 
 * ``nano-banana --model gemini-3-pro-image-preview`` — the adapter offers that
   model, but emit always built ``GeminiImageNode``, whose ``model`` combo only
@@ -52,7 +50,7 @@ def test_flux_2_still_refuses_an_output_format_it_cannot_produce():
 
 
 def test_flux_2_nightly_input_with_png_output_format_emits():
-    """Pin for an agent failure seen in telemetry: these exact args were
+    """Pin for an agent failure: these exact args were
     refused with "does not map --output_format onto Flux2ImageNode" on a build
     that predated #921."""
     wf = emit.build_workflow(
@@ -65,11 +63,11 @@ def test_flux_2_nightly_input_with_png_output_format_emits():
 
 # ─── models with no node: point at the nearest one that has ───────────────
 #
-# Nightly 2026-09-22/23: generate_workflow asked for `flux-pro` (x2) and
-# `ideogram`. Neither has a partner node in the recorded catalog (the only
-# flux-pro-1.1 node is the Ultra variant; there is no Ideogram node), so they
-# stay unsupported. What the agent needs is the ONE alias to retry with: an
-# emittable model of the same output kind, the same partner's first.
+# A caller can ask `--emit-workflow` for `flux-pro` or `ideogram`. Neither
+# has a partner node in the recorded catalog (the only flux-pro-1.1 node is
+# the Ultra variant; there is no Ideogram node), so they stay unsupported.
+# What the agent needs is the ONE alias to retry with: an emittable model of
+# the same output kind, the same partner's first.
 
 
 def test_unsupported_flux_pro_suggests_image_models_same_partner_first():

@@ -394,7 +394,7 @@ def show_cmd(
         # prints that verbatim — so callers ask show for a "class" the catalog
         # can never have. `workflow add-node` already names this shape
         # (UnknownNodeType subgraph_id); show was left behind with the generic
-        # miss, and prod agents retried it verbatim. Say what the UUID is and
+        # miss, and callers retried it verbatim. Say what the UUID is and
         # which surface CAN inspect it. difflib against a UUID is pure noise.
         from comfy_cli.workflow_ops import _UUID_RE
 
@@ -630,10 +630,10 @@ def search_cmd(
         ],
     }
 
-    # --expand-top N: kill the search → show × N loop (measured on prod agent
-    # traces: the follow-up `show` args are overwhelmingly a verbatim copy of the
-    # hit name). The top-N returned rows are re-resolved through the SAME catalog
-    # path `nodes show` uses (graph.node → morphism_to_dict), so `expanded[i]` is
+    # --expand-top N: kill the search → show × N loop (the follow-up `show`
+    # args are almost always a verbatim copy of the hit name). The top-N
+    # returned rows are re-resolved through the SAME catalog path
+    # `nodes show` uses (graph.node → morphism_to_dict), so `expanded[i]` is
     # exactly the show payload plus a `class_type` key to join back on the row.
     # A per-hit miss degrades to a per-hit error entry — it never fails the
     # search, since the rows themselves are still perfectly good results.
