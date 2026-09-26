@@ -187,6 +187,10 @@ def test_an_authorization_header_is_masked_scheme_and_credential(monkeypatch, wo
             ("} status=401",),
         ),
         ("Authorization: Token tok123\nX-Request-Id: req-abc-789", ("X-Request-Id: req-abc-789",)),
+        (
+            json.dumps({"Authorization": 'Digest username="x", response="tok123"', "X-Request-Id": "req-abc-789"}),
+            ('"X-Request-Id": "req-abc-789"}',),
+        ),
     ],
 )
 def test_an_authorization_value_is_masked_once_and_what_follows_survives(
