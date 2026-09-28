@@ -587,6 +587,8 @@ class TestUppercaseHex:
         calls = _patch_urlopen(monkeypatch, {"id": "asset-1"})
         _run(["ensure", "--hash", _HEX.upper(), "--where", "cloud"], capsys)
         assert json.loads(calls[0]["body"])["hash"] == _HEX.upper()
+
+
 class TestHttpRequestRejectsEveryUnparseableBody:
     """`http_request`'s decode guard is keyed on the malformed body, not on which
     exception the parser happened to pick.
