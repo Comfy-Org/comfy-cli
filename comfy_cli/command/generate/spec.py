@@ -506,7 +506,7 @@ _OPENAI_IMAGE_MODELS: dict[str, str | None] = {
 }
 
 
-def _direct_route(alias: str, model_id: str) -> str:
+def _direct_route(alias: str, model_id: str, *, suggest_partner_node: bool = True) -> str:
     """The `comfy generate <alias> --model <id>` line, saying whether it can
     also `--emit-workflow`. A caller building a workflow runs `generate` with
     `--emit-workflow`, so a route that cannot emit must say so or the hint is a
@@ -516,7 +516,10 @@ def _direct_route(alias: str, model_id: str) -> str:
     route = f"`comfy generate {alias} --model {model_id} ...`"
     if emit.is_supported(alias):
         return f"{route} (also with --emit-workflow)"
-    return f"{route} runs it directly; that alias has no --emit-workflow, so use a partner node for a workflow"
+    suffix = "; that alias has no --emit-workflow"
+    if suggest_partner_node:
+        suffix += ", so use a partner node for a workflow"
+    return f"{route} runs it directly{suffix}"
 
 
 def _model_name_hint(name: str) -> str | None:
@@ -531,7 +534,7 @@ def _model_name_hint(name: str) -> str | None:
     lowered = name.strip().lower()
     if lowered in _OPENAI_IMAGE_MODELS:
         node = _OPENAI_IMAGE_MODELS[lowered]
-        direct = _direct_route("dalle", lowered)
+        direct = _direct_route("dalle", lowered, suggest_partner_node=node is not None)
         if node is None:
             return f"{lowered!r} is an OpenAI image model, not an alias. {direct}."
         return (
