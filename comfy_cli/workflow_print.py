@@ -191,11 +191,20 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
             seen_ids.add(nid)
 
     nodes_by_id = {str(n.get("id")): n for n in nodes}
+    seen_link_ids: set[str] = set()
+    reported_link_dupes: set[str] = set()
     for link in links:
         if not isinstance(link, list) or len(link) < 5:
             reasons.append(f"link malformed: {link!r}")
             continue
         link_id, src_id, src_slot, tgt_id, tgt_slot = link[0], link[1], link[2], link[3], link[4]
+        normalized_link_id = str(link_id)
+        if normalized_link_id in seen_link_ids:
+            if normalized_link_id not in reported_link_dupes:
+                reported_link_dupes.add(normalized_link_id)
+                reasons.append(f"duplicate link id {normalized_link_id}")
+        else:
+            seen_link_ids.add(normalized_link_id)
         src_node = nodes_by_id.get(str(src_id))
         if src_node is None:
             reasons.append(f"link {link_id} references missing node {src_id}")
