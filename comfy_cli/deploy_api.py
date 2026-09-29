@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from typing import Final
 
 from comfy_cli import credentials
+from comfy_cli.credentials import Credential
 from comfy_cli.deploy_api_errors import (
     DeployAPIError,
     assert_safe_deploy_url,
@@ -32,7 +33,7 @@ class DeployAuthError(DeployAPIError):
     code = "deploy_not_signed_in"
 
     def __init__(self) -> None:
-        super().__init__(self.code, "not signed in — run `comfy cloud login`")
+        super().__init__(self.code, "not signed in: run `comfy cloud login` or set COMFY_CLOUD_API_KEY")
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,13 +76,35 @@ def _validate_compute_config(compute_config: dict) -> None:
 
 
 class DeployClient:
-    def __init__(self, base_url: str | None, token: str):
+    def __init__(self, base_url: str | None, token: str | None = None, *, api_key: Credential | None = None):
         resolved_url = _resolved_base_url(base_url).rstrip("/")
         assert_safe_deploy_url(resolved_url, source=_base_url_source(base_url))
-        self.target = Target(kind="cloud", base_url=resolved_url, path_prefix="/v1", auth_token=token)
+        self.target = Target(
+            kind="cloud",
+            base_url=resolved_url,
+            path_prefix="/v1",
+            auth_token=token,
+            api_key=api_key.value if api_key is not None else None,
+        )
+        # What to replace once the server refuses this client's key.
+        self._refused_key_hint = credentials.refused_key_hint(api_key) if api_key is not None else None
         # Only a client built from the stored sign-in may swap its token; one
-        # handed a token directly keeps it and lets a 401 surface.
+        # handed a token or a key keeps it and lets a 401 surface.
         self._refreshes_on_401 = False
+
+    @classmethod
+    def from_credentials(cls, base_url: str | None = None) -> DeployClient:
+        """Build a client from the workspace API key when one is set, else from the sign-in."""
+        key = credentials.platform_api_key()
+        if key is None:
+            try:
+                return cls.from_session(base_url)
+            except DeployAuthError:
+                # A sign-in whose refresh failed is cleared, and a saved key may stand behind it.
+                key = credentials.platform_api_key()
+                if key is None:
+                    raise
+        return cls(base_url, api_key=key)
 
     @classmethod
     def from_session(cls, base_url: str | None = None) -> DeployClient:
@@ -103,7 +126,10 @@ class DeployClient:
         try:
             _, parsed = self._send(url, request)
         except urllib.error.HTTPError as error:
-            raise mapped_error(request.operation, error, url) from error
+            mapped = mapped_error(request.operation, error, url)
+            if error.code == 401 and self._refused_key_hint is not None:
+                mapped.hint = self._refused_key_hint
+            raise mapped from error
         except (TimeoutError, urllib.error.URLError) as error:
             raise transport_error(request.operation, error) from error
         return parsed if isinstance(parsed, dict) else {}

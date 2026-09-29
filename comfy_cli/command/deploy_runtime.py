@@ -6,11 +6,11 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, TypeVar
 
 from typing_extensions import assert_never
 
-from comfy_cli.builder_api import BuilderClient
+from comfy_cli.builder_api import BuilderClient, BuilderCredentialRefused
 from comfy_cli.command.build import DEFAULT_BUILDER_URL
 from comfy_cli.command.build_paths import BuildSpecNotFoundError, resolve_build_paths
 from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, read_build_spec
@@ -23,8 +23,10 @@ from comfy_cli.command.deploy_resolve import (
     resolve_release,
 )
 from comfy_cli.command.deploy_types import DeployUpClient, UpRequest, required_string, server_shape_error
-from comfy_cli.deploy_api import DeployClient
+from comfy_cli.deploy_api import DeployAPIError, DeployClient
 from comfy_cli.output.renderer import Renderer
+
+T = TypeVar("T")
 
 DEPLOY_POLL_SECONDS: Final = 2.0
 # Where a watch stops. `unhealthy` is here although the service can still move
@@ -39,16 +41,30 @@ class _BuilderReleaseAdapter:
     client: BuilderClient
 
     def get_release(self, release_id: str) -> JsonObject:
-        return self.client.get_release(release_id)
+        return _refusal_as_deploy_error(lambda: self.client.get_release(release_id))
 
     def list_releases(self, build_id: str) -> list[JsonObject]:
-        return self.client.list_releases(build_id)
+        return _refusal_as_deploy_error(lambda: self.client.list_releases(build_id))
+
+
+def _refusal_as_deploy_error(call: Callable[[], T]) -> T:
+    """Report the builder refusing this command's credential the way the deploy service would.
+
+    Every deploy command catches a builder ``HTTPError`` as a network failure, so
+    without this a revoked key reads as an unreachable service.
+    """
+    try:
+        return call()
+    except BuilderCredentialRefused as error:
+        raise DeployAPIError(
+            "deploy_not_signed_in", "the builder refused the credential (401)", status=401, hint=error.hint
+        ) from error
 
 
 def command_clients() -> tuple[BuilderReleaseClient, DeployUpClient]:
-    deploy = DeployClient.from_session()
+    deploy = DeployClient.from_credentials()
     builder_url = os.environ.get("COMFY_BUILDER_URL") or DEFAULT_BUILDER_URL
-    return _BuilderReleaseAdapter(BuilderClient.from_session(builder_url)), deploy
+    return _BuilderReleaseAdapter(BuilderClient.from_credentials(builder_url)), deploy
 
 
 def sleep(seconds: float) -> None:

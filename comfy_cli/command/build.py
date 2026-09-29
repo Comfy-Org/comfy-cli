@@ -2483,10 +2483,11 @@ def _status_drift(renderer, ctx, paths, stored: dict, *, no_scan: bool, comfy_ve
 def _builder_client(renderer, builder_url: str | None):
     """Build an authed BuilderClient, or emit a not-signed-in envelope + exit(1).
 
-    A caller that already holds a Cloud JWT — the Developer Platform agent service
-    forwarding the request's token, or CI — injects it via ``COMFY_BUILDER_TOKEN``
-    and skips the interactive OAuth session ``from_session`` uses. The env var wins
-    over a stored session so an explicit token always takes precedence.
+    A caller that already holds a Cloud JWT, such as the Developer Platform agent
+    service forwarding the request's token, injects it via ``COMFY_BUILDER_TOKEN``,
+    and that explicit token comes first. Otherwise ``from_credentials`` uses a
+    workspace API key from ``COMFY_CLOUD_API_KEY``, which a CI job sets, then the
+    stored sign-in.
     """
     from comfy_cli.builder_api import BuilderAuthError, BuilderClient
 
@@ -2495,7 +2496,7 @@ def _builder_client(renderer, builder_url: str | None):
     if token:
         return BuilderClient(base_url, token)
     try:
-        return BuilderClient.from_session(base_url)
+        return BuilderClient.from_credentials(base_url)
     except BuilderAuthError as e:
         renderer.error(code="build_not_signed_in", message=str(e))
         raise typer.Exit(code=1) from e
@@ -2653,19 +2654,16 @@ def _report_builder_error(
             body = (e.read(_BUILDER_ERROR_READ) or b"").decode("utf-8", "replace")
         except Exception:
             pass
-        # A 401 means the sign-in itself was refused, and the client has already
-        # tried a refresh, so the only way forward is signing in again.
+        # A 401 means the credential itself was refused, and a client built from the
+        # sign-in has already tried a refresh, so the credential has to change. The
+        # client knows which credential it sent, so it names the one to replace.
         if e.code == 401:
+            from comfy_cli.builder_api import BuilderCredentialRefused
+
             renderer.error(
                 code="build_not_signed_in",
-                message="the builder refused the sign-in token (401)",
-                # A token passed in through the environment is never refreshed, and
-                # signing in again would not replace it, so it has to be swapped.
-                hint=(
-                    "replace COMFY_BUILDER_TOKEN with a fresh Cloud JWT"
-                    if os.environ.get("COMFY_BUILDER_TOKEN")
-                    else "run `comfy cloud login` first"
-                ),
+                message="the builder refused the credential (401)",
+                hint=e.hint if isinstance(e, BuilderCredentialRefused) else "run `comfy cloud login` first",
             )
             return
         if e.code == 403 and "FEATURE_NOT_ENABLED" in body:

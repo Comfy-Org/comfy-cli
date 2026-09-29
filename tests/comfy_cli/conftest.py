@@ -36,6 +36,18 @@ def _reset_renderer_singleton():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_ambient_api_keys(monkeypatch):
+    """Clear the API keys a developer or CI shell may export.
+
+    ``comfy build`` and ``comfy deploy`` send ``COMFY_CLOUD_API_KEY`` ahead of any
+    sign-in, so a key left in the shell would turn every signed-out test into a
+    keyed one. A test that needs a key sets it itself.
+    """
+    monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
+    monkeypatch.delenv("COMFY_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_config_path(tmp_path, monkeypatch):
     """Redirect the CLI's config dir to a per-test tmp path.
 

@@ -69,10 +69,14 @@ blob      ls                                    (hidden; workspace private blobs
   release id instead. Once the spec exists it carries the Build id, so nothing
   after `init` needs an id from you. `--id` overrides it.
 - **`comfy which` names the install** when the user has not said where it is.
-- **Only sign in when told to.** Run `comfy cloud login` if a command answers
-  `build_not_signed_in`, and not before. Everything under `refs`, both importers
+- **Only sign in when told to.** On `build_not_signed_in`, do what its hint
+  says. Run `comfy cloud login` only when nobody is signed in or the sign-in
+  was refused, and not before. Everything under `refs`, both importers
   (`--from-snapshot`, `--from-workflow`), `validate --remote`, and every command
   that reaches the builder need it; a plain scan and a plain `validate` do not.
+  A CI job sets a workspace API key in `COMFY_CLOUD_API_KEY` instead, and that
+  key wins over a stored sign-in, so when the hint says that key was refused,
+  signing in cannot help: replace the key.
   On `build_not_enabled` the platform is in limited beta and this account is not
   enabled — stop and say so.
 
