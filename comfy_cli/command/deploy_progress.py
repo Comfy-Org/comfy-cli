@@ -280,6 +280,10 @@ class DeployWatchReporter:
         except OSError:
             self._muted = True
 
+    def unanswered(self) -> None:
+        """Say once per outage that the reads are failing: the live line stays up."""
+        self._say("The deploy API is not answering; retrying for about a minute.")
+
     def interrupted(self) -> None:
         """Say what Ctrl-C did not do: the deploy runs on the service's side."""
         self.close()

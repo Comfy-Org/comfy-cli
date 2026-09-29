@@ -474,6 +474,15 @@ returns. Ctrl-C during `--watch` exits 130 after printing that the deployment
 keeps coming up and the command that re-attaches, and in the JSON modes still
 writes the envelope for the last state it read.
 
+A watch rides out a deploy API that stops answering, as it does for a few
+seconds while a new version rolls out: a 5xx or a failed connection on its read
+is retried, backing off (2, 4, 8, then 15 seconds), for about a minute from the
+first failure, and the watch says once that it is retrying. A 4xx still ends the
+watch at once. If the API is still not answering when the window closes, the
+watch ends with the error code `deploy_watch_lost` and exit code **75**, never 1:
+only the watch ended, and the deployment may still be coming up. Its `hint`
+carries the command that re-attaches and `details.deployment_id` the deployment.
+
 ## Success envelope
 
 On `--wait` success, `data` carries:

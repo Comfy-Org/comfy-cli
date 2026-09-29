@@ -22,12 +22,14 @@ from comfy_cli.command.deploy_resolve import (
     resolve_deployment,
 )
 from comfy_cli.command.deploy_runtime import (
-    command_clients as _command_clients,
-)
-from comfy_cli.command.deploy_runtime import (
+    DeployWatchLostError,
+    exit_watch_lost,
     poll_deployment,
     render_spec_error,
     terminal_status_error,
+)
+from comfy_cli.command.deploy_runtime import (
+    command_clients as _command_clients,
 )
 from comfy_cli.command.deploy_runtime import (
     sleep as _sleep,
@@ -392,7 +394,7 @@ def run_status(path: str | None, *, deployment_id: str | None = None, watch: boo
             watched_id = required_string(target.deployment, "id")
             reporter = DeployWatchReporter(renderer, watched_id)
             try:
-                watched = poll_deployment(client, watched_id, _sleep, reporter.snapshot)
+                watched = poll_deployment(client, watched_id, _sleep, reporter.snapshot, reporter.unanswered)
             except KeyboardInterrupt:
                 # Watching is all this command does, so Ctrl-C stops the watching
                 # and nothing else: the deployment is the service's to bring up.
@@ -400,6 +402,9 @@ def run_status(path: str | None, *, deployment_id: str | None = None, watch: boo
                 if reporter.last is not None:
                     render_status(renderer, _interrupted_result(builder, replace(target, deployment=reporter.last)))
                 raise typer.Exit(code=130) from None
+            except DeployWatchLostError as error:
+                reporter.close()
+                exit_watch_lost(renderer, error)
             finally:
                 reporter.close()
             target = replace(target, deployment=watched)

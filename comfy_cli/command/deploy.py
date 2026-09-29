@@ -20,7 +20,9 @@ from comfy_cli.command.deploy_compute import prompt_gpu as _prompt_gpu
 from comfy_cli.command.deploy_compute import prompt_region as _prompt_region
 from comfy_cli.command.deploy_progress import DeployWatchReporter
 from comfy_cli.command.deploy_resolve import DeployResolveError
+from comfy_cli.command.deploy_runtime import DeployWatchLostError
 from comfy_cli.command.deploy_runtime import command_clients as _command_clients
+from comfy_cli.command.deploy_runtime import exit_watch_lost as _exit_watch_lost
 from comfy_cli.command.deploy_runtime import poll_deployment as _poll_deployment
 from comfy_cli.command.deploy_runtime import render_spec_error as _render_spec_error
 from comfy_cli.command.deploy_runtime import resolved_up_request as _resolved_up_request
@@ -288,7 +290,7 @@ def up_cmd(
             watched_id = _required_string(result.deployment, "id")
             reporter = DeployWatchReporter(renderer, watched_id)
             try:
-                watched = _poll_deployment(client, watched_id, _sleep, reporter.snapshot)
+                watched = _poll_deployment(client, watched_id, _sleep, reporter.snapshot, reporter.unanswered)
             except KeyboardInterrupt:
                 # The deploy runs on the service's side and never needed this
                 # process: say so, report where it had got to, and leave it be.
@@ -296,6 +298,9 @@ def up_cmd(
                 if reporter.last is not None:
                     _render_result(renderer, replace(result, deployment=reporter.last), watch=False)
                 raise typer.Exit(code=130) from None
+            except DeployWatchLostError as error:
+                reporter.close()
+                _exit_watch_lost(renderer, error)
             finally:
                 reporter.close()
             result = replace(result, deployment=watched)

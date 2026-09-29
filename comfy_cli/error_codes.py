@@ -1420,7 +1420,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_server_error",
-        "A deploy control-plane request failed in transport or returned an HTTP 5xx. Mutating requests are not retried because their outcome may be unknown.",
+        "A deploy control-plane request failed in transport or returned an HTTP 5xx. Mutating requests are not retried because their outcome may be unknown; a watch's reads are retried first (see `deploy_watch_lost`).",
         "check network access and COMFY_DEPLOY_URL; retry only after confirming the deployment state",
     ),
     ErrorCode(
@@ -1481,6 +1481,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "for `failed`, inspect `comfy deploy logs` and redeploy with `comfy deploy up`; for `stop_failed`, "
         "re-run `comfy deploy stop` -- it may still be billing; for `stopped`, `comfy deploy start`; for "
         "`unhealthy`, inspect `comfy deploy logs`, or `comfy deploy stop` to stop billing",
+    ),
+    ErrorCode(
+        "deploy_watch_lost",
+        "The deploy control plane left the reads of a watch (`comfy deploy up`, `comfy deploy status --watch`) "
+        "unanswered, with an HTTP 5xx or no response, for the whole retry window of about a minute. Only the watch "
+        "ended: the deployment's outcome is unknown and it may still be coming up. The exit code is 75, not 1, so a "
+        "script can tell this from a deployment that failed. `details.deployment_id` names the deployment.",
+        "re-attach with `comfy deploy status --deployment <id> --watch` once the deploy service answers again",
     ),
     ErrorCode(
         "deploy_delete_needs_confirm",
