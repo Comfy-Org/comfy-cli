@@ -277,14 +277,14 @@ def test_deploy_error_codes_are_the_exact_final_set() -> None:
         deploy_server_error deploy_idempotency_reuse deploy_workflow_format_ui
         deploy_workflow_asset_outside_root deploy_workflow_asset_marker_reserved
         deploy_insecure_url deploy_unrelated_deployment deploy_workflow_empty
-        deploy_workflow_not_api_format deploy_status_terminal deploy_workflow_too_large""".split()
+        deploy_workflow_not_api_format deploy_status_terminal deploy_workflow_too_large deploy_watch_lost""".split()
     )
 
     # When
     actual = {code for code in error_codes.all_codes() if code.startswith("deploy_")}
 
     # Then
-    assert len(actual) == 35
+    assert len(actual) == 36
     assert actual == expected
 
 

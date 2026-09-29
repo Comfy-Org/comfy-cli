@@ -74,6 +74,13 @@ history.
 
 ### Fixed
 
+- `comfy deploy up` and `comfy deploy status --watch` no longer end the watch on
+  one 503 or dropped connection from the deploy API, as happened each time it
+  rolled out a new version, for a deployment that went on to ready. The watch
+  retries a 5xx or a failed connection for about a minute, saying once that it is
+  retrying; a 4xx still ends it at once. If the API stays down it ends with
+  `deploy_watch_lost` and exit code 75, not 1, since the deployment may still be
+  coming up, and the hint names the command that re-attaches.
 - `comfy deploy run` refuses a workflow bigger than the 10 MB a deployment
   accepts before sending the job request, with `deploy_workflow_too_large`,
   whose message names the request's size and the limit

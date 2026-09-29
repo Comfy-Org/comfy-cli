@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app
 from comfy_cli.command.build_spec import JsonObject
+from comfy_cli.deploy_api_errors import DeployAPIError
 
 
 class RecordingDeploy(FakeDeploy):
@@ -590,6 +591,60 @@ def test_watch_stops_at_unhealthy_and_calls_it_recoverable(tmp_path, monkeypatch
     assert _json_envelope(result)["data"]["deployment"]["status"] == "unhealthy"
     assert client.get_calls == ["dep-status"]
     assert sleeps == []
+
+
+def test_watch_rides_out_a_brief_503_from_the_deploy_api(tmp_path, monkeypatch) -> None:
+    """The same rollout blip `up` rides out: a watch that ended on it exited 1
+    for a deployment that went on to ready."""
+
+    # Given a watch whose first two reads are refused with a 503
+    class Flaky(RecordingDeploy):
+        def get_deployment(self, deployment_id: str) -> JsonObject:
+            if len(self.get_calls) < 2:
+                self.get_calls.append(deployment_id)
+                raise DeployAPIError(
+                    "deploy_server_error",
+                    "Service Unavailable",
+                    status=503,
+                    details={"operation": "get", "status": 503},
+                )
+            return super().get_deployment(deployment_id)
+
+    client = Flaky([_status_deployment(status="provisioning")], get_statuses=["ready"])
+    sleeps: list[float] = []
+    _install_clients(monkeypatch, FakeBuilder(), client, sleeps)
+
+    # When
+    result = _invoke_json(write_spec(tmp_path), "--watch")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _json_envelope(result)["data"]["deployment"]["status"] == "ready"
+    assert result.stderr.count("deploy API is not answering") == 1
+    assert client.get_calls == ["dep-status"] * 3
+    assert sleeps == [2.0, 4.0]
+
+
+def test_a_watch_the_deploy_api_never_answers_ends_with_the_watch_lost_exit_code(tmp_path, monkeypatch) -> None:
+    # Given a watch whose reads are never answered
+    class Down(RecordingDeploy):
+        def get_deployment(self, deployment_id: str) -> JsonObject:
+            self.get_calls.append(deployment_id)
+            raise ConnectionResetError(54, "Connection reset by peer")
+
+    client = Down([_status_deployment(status="provisioning")])
+    sleeps: list[float] = []
+    _install_clients(monkeypatch, FakeBuilder(), client, sleeps)
+
+    # When
+    result = _invoke_json(write_spec(tmp_path), "--watch")
+
+    # Then
+    assert result.exit_code == 75, result.stderr
+    error = _json_envelope(result)["error"]
+    assert error["code"] == "deploy_watch_lost"
+    assert "comfy deploy status --deployment dep-status --watch" in error["hint"]
+    assert len(client.get_calls) == 7
 
 
 def test_watch_exits_promptly_on_stop_failed_with_retry_stop_hint(tmp_path, monkeypatch) -> None:

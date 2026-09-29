@@ -45,6 +45,7 @@ argument you pass.
 | `deploy_forbidden` | The workspace does not permit this | Confirm which workspace is signed in |
 | `deploy_not_signed_in` | No usable Cloud session or workspace API key, or the key was refused | Replace the key the hint names; otherwise `comfy cloud login` |
 | `deploy_server_error` | Control plane unavailable or 5xx | Re-read `status` before retrying, so a retry cannot double-create |
+| `deploy_watch_lost` | The watch's reads went unanswered for a minute (exit 75); the deployment may still be coming up | `comfy deploy status --deployment <id> --watch`; do not redeploy |
 | `deploy_delete_needs_confirm` | `delete` without `--yes` non-interactively | Confirm with the user, then pass `--yes` |
 
 ### Submitting a workflow

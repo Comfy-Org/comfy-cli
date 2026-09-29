@@ -4,6 +4,7 @@ import http.client
 import importlib
 import json
 import threading
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -16,8 +17,9 @@ from typer.testing import CliRunner
 
 from comfy_cli.caller import Caller
 from comfy_cli.cmdline import app
+from comfy_cli.command.build_spec import JsonObject
 from comfy_cli.deploy_api import DeployClient, _validate_compute_config
-from comfy_cli.deploy_api_errors import DeployAPIError
+from comfy_cli.deploy_api_errors import DeployAPIError, transport_error
 from comfy_cli.http import ResponseTooLarge
 
 
@@ -695,6 +697,136 @@ def test_up_on_a_deployment_already_unhealthy_does_not_wait_for_ever(tmp_path, m
     assert sleeps == []
     assert "Deployment dep-1 is unhealthy" in result.stdout + result.stderr
     assert client.start_calls == [] and client.update_calls == []
+
+
+def _unavailable() -> DeployAPIError:
+    # What the client raises for a 503 on the follow read, as a rolling deploy API sends it.
+    return DeployAPIError(
+        "deploy_server_error", "Service Unavailable", status=503, details={"operation": "get", "status": 503}
+    )
+
+
+class FlakyFollow(FakeDeploy):
+    """Answers the read that confirms the create, then fails the follow reads it is handed."""
+
+    def __init__(self, failures: list[Exception], **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.failures = failures
+        self.get_calls = 0
+
+    def get_deployment(self, deployment_id: str) -> JsonObject:
+        self.get_calls += 1
+        if self.get_calls > 1 and self.failures:
+            raise self.failures.pop(0)
+        return super().get_deployment(deployment_id)
+
+
+def _invoke_watched_up(tmp_path, monkeypatch, client: FakeDeploy, sleeps: list[float]):
+    module = _deploy()
+    monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
+    monkeypatch.setattr(module, "_sleep", sleeps.append)
+    return CliRunner().invoke(
+        app,
+        ["--json", "deploy", "up", str(write_spec(tmp_path)), "--gpu", "l4", "--region", "US-MO-2"],
+        env={"COLUMNS": "400"},
+    )
+
+
+def test_a_brief_503_on_the_follow_read_is_ridden_out_to_ready(tmp_path, monkeypatch) -> None:
+    """Every deploy API rollout answers 503 for a few seconds. A watch that ended
+    there exited 1, telling a script a deployment that went on to ready had failed."""
+    # Given a follow read that is refused twice, then answers
+    client = FlakyFollow([_unavailable(), _unavailable()], get_statuses=["queued", "ready"])
+    sleeps: list[float] = []
+
+    # When
+    result = _invoke_watched_up(tmp_path, monkeypatch, client, sleeps)
+
+    # Then the watch carries on to ready, and says once that it is retrying
+    assert result.exit_code == 0, result.stderr
+    envelope = _json_envelope(result)
+    assert envelope["ok"] is True
+    assert envelope["data"]["deployment"]["status"] == "ready"
+    assert result.stderr.count("deploy API is not answering") == 1
+    assert sleeps == [2.0, 4.0]
+    assert client.get_calls == 4
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _unavailable,
+        lambda: transport_error("get", urllib.error.URLError(ConnectionRefusedError(61, "Connection refused"))),
+        lambda: transport_error("get", TimeoutError("timed out")),
+        lambda: ConnectionResetError(54, "Connection reset by peer"),
+        lambda: http.client.RemoteDisconnected("Remote end closed connection without response"),
+    ],
+    ids=["503", "connection_refused", "read_timeout", "connection_reset", "remote_disconnected"],
+)
+def test_a_deploy_api_that_stays_down_ends_the_watch_with_its_own_exit_code(tmp_path, monkeypatch, failure) -> None:
+    """Past the retry window the deployment's outcome is unknown, not failed: the
+    exit code says so, and the hint says how to pick the watch up again."""
+    # Given a follow read that never answers
+    client = FlakyFollow([failure() for _ in range(20)], get_statuses=["queued"])
+    sleeps: list[float] = []
+
+    # When
+    result = _invoke_watched_up(tmp_path, monkeypatch, client, sleeps)
+
+    # Then
+    assert result.exit_code == 75, result.stderr
+    assert result.exit_code != 1
+    error = _json_envelope(result)["error"]
+    assert error["code"] == "deploy_watch_lost"
+    assert "may still be coming up" in error["message"]
+    assert error["hint"] == "run `comfy deploy status --deployment dep-1 --watch` to watch it again"
+    assert error["details"]["deployment_id"] == "dep-1"
+    assert result.stderr.count("deploy API is not answering") == 1
+    assert sleeps == [2.0, 4.0, 8.0, 15.0, 15.0, 15.0]
+    assert len(client.create_keys) == 1
+
+
+def test_a_4xx_on_the_follow_read_still_fails_at_once(tmp_path, monkeypatch) -> None:
+    # Given a follow read the service refuses outright
+    missing = DeployAPIError(
+        "deploy_not_found", "deployment not found", status=404, details={"operation": "get", "status": 404}
+    )
+    client = FlakyFollow([missing], get_statuses=["queued", "ready"])
+    sleeps: list[float] = []
+
+    # When
+    result = _invoke_watched_up(tmp_path, monkeypatch, client, sleeps)
+
+    # Then nothing is retried
+    assert result.exit_code == 1
+    assert _json_envelope(result)["error"]["code"] == "deploy_not_found"
+    assert "not answering" not in result.stderr
+    assert sleeps == []
+    assert client.get_calls == 2
+
+
+def test_the_retry_window_counts_time_spent_waiting_on_reads_that_time_out() -> None:
+    """A read that times out has already spent its timeout, so the window is
+    kept on the clock and not only on the sleeps between reads."""
+    from comfy_cli.command.deploy_runtime import DeployWatchLostError, poll_deployment
+
+    # Given reads that each take 30 seconds to time out
+    now = [0.0]
+    sleeps: list[float] = []
+
+    class TimingOut(FakeDeploy):
+        def get_deployment(self, deployment_id: str) -> JsonObject:
+            now[0] += 30.0
+            raise transport_error("get", TimeoutError("timed out"))
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    # When / Then the watch gives up about a minute after the first failure
+    with pytest.raises(DeployWatchLostError):
+        poll_deployment(TimingOut(), "dep-1", sleep, clock=lambda: now[0])
+    assert sleeps == [2.0, 4.0]
 
 
 _GIB = 1024**3
