@@ -557,8 +557,14 @@ def _model_name_hint(name: str) -> str | None:
         schema = next((c.get("schema") for c in content.values() if isinstance(c, dict) and c.get("schema")), None)
         if not schema:
             continue
-        prop = _find_property(_resolve(raw, schema), "model")
-        values = _extract_enum(prop) if prop else None
+        try:
+            resolved = _resolve(raw, schema)
+            if not isinstance(resolved, dict):
+                continue
+            prop = _find_property(resolved, "model")
+            values = _extract_enum(prop) if prop else None
+        except (KeyError, TypeError, SpecError):
+            continue
         matched = [v for v in values or [] if v.lower().startswith(lowered)]
         if matched:
             hits.append((str(path)[len(PROXY_PREFIX) :], matched))
