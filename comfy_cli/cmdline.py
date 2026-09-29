@@ -145,16 +145,17 @@ def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | Non
     and the exit code stays 1. Pretty mode is left exactly as it was.
     """
     try:
+        active_ctx = click.get_current_context(silent=True) or ctx
         renderer = get_renderer()
         if not renderer.is_json():
             # The root callback installs the renderer, so a crash in it (or
             # before it) still sees the pretty default. The root flags did
             # parse, so decide the mode from them. No version lookup: that
             # lookup is one of the things that can have crashed.
-            renderer = Renderer.resolve(command=_command_path(ctx), **_output_flags(ctx))
+            renderer = Renderer.resolve(command=_command_path(active_ctx), **_output_flags(ctx))
         if not renderer.is_json() or renderer._envelope_emitted:
             return
-        command = getattr(renderer, "command", None) or _command_path(ctx)
+        command = _command_path(active_ctx) or getattr(renderer, "command", None) or ""
         renderer.error(
             code="internal_error",
             message=_internal_error_message(error),
