@@ -1080,5 +1080,5 @@ def test_out_of_range_input_slot_fed_by_the_definition_input_proxy_is_reported(s
     n_inputs = len(tgt.get("inputs") or [])
     assert (
         f"link 9998 targets input slot 42 on node 10/{tgt['id']}, which has {n_inputs} inputs; "
-        "no input holds it, so it feeds nothing and was ignored"
+        "the subgraph input proxy routes by target slot, so it was ignored"
     ) in res.warnings
