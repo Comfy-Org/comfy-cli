@@ -428,6 +428,48 @@ def test_the_resolved_credential_is_carried_into_the_submission(
     assert job_client.requests[0].partner_credential == credential
 
 
+@pytest.mark.parametrize(
+    ("partner_env", "partner_key"),
+    [(None, "comfyui-team"), ("comfyui-partner-billing", "comfyui-partner-billing")],
+    ids=["workspace-key", "explicit-partner-key-kept"],
+)
+def test_a_key_is_sent_to_the_endpoint_and_to_partner_nodes_in_place_of_a_sign_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, partner_env: str | None, partner_key: str
+) -> None:
+    """Given a control-plane client holding a workspace API key, When a workflow runs,
+    Then the deployment's endpoint and its partner nodes both receive that key.
+
+    platform-gateway reads a key only as a Bearer value, and the job runs in the
+    key's workspace, so a sign-in's token must not reach partner nodes beside it.
+    """
+    # Given
+    workflow = write_partner_workflow(tmp_path / "workflow.json")
+    job_client = FakeJobClient(job())
+    control = FakeControl("https://dep-id.run.comfy.app")
+    control.target = Target(kind="cloud", base_url="https://control.test", path_prefix="/v1", api_key="comfyui-team")
+    install_run(monkeypatch, control, job_client)
+    endpoint_credentials: list[str] = []
+    monkeypatch.setattr(
+        deploy_run, "DeployJobClient", lambda _origin, credential: endpoint_credentials.append(credential) or job_client
+    )
+    # The sign-in is never consulted, so its refresh never runs.
+    monkeypatch.setattr(deploy_run, "resolve_partner_credential", lambda: pytest.fail("sign-in consulted"))
+    if partner_env is None:
+        monkeypatch.delenv("COMFY_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("COMFY_API_KEY", partner_env)
+
+    # When
+    result = invoke(workflow, "--deployment", "dep-id", "--no-wait")
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    assert (endpoint_credentials, job_client.requests[0].partner_credential) == (
+        ["comfyui-team"],
+        ("api_key_comfy_org", partner_key),
+    )
+
+
 # --- a workflow over the size limit ---------------------------------------------
 
 

@@ -15,8 +15,20 @@ history.
 
 ## [Unreleased]
 
+### Added
+
+- `comfy build` and `comfy deploy` run with only a workspace API key, so a CI
+  job needs no sign-in: set `COMFY_CLOUD_API_KEY` and each command sends the key
+  in `X-API-Key`, and `comfy deploy run` sends it to the deployment and, unless
+  `COMFY_API_KEY` names a partner key, to its partner nodes. A key saved with
+  `comfy cloud set-key` is used only when nobody is signed in.
+
 ### Changed
 
+- `comfy build` and `comfy deploy` send `COMFY_CLOUD_API_KEY`, when it is set, in
+  place of a stored sign-in, so a signed-in shell that exports it builds and
+  deploys in the key's workspace. `comfy cloud` commands still prefer the sign-in,
+  and a Cloud JWT in `COMFY_BUILDER_TOKEN` still comes first for `comfy build`.
 - `comfy deploy status` prints a deployment's workers as ready, busy and
   starting, the same words on every GPU provider, in place of RunPod's own six
   states. An idle scale-to-zero deployment no longer reads as throttled. The

@@ -43,7 +43,7 @@ argument you pass.
 | `deploy_conflict` | The deployment's state rejects the operation | Let it settle, re-read `status` |
 | `deploy_not_found` | No deployment with that id | `comfy deploy ls --workspace` |
 | `deploy_forbidden` | The workspace does not permit this | Confirm which workspace is signed in |
-| `deploy_not_signed_in` | No usable Cloud session | `comfy cloud login` |
+| `deploy_not_signed_in` | No usable Cloud session or workspace API key, or the key was refused | Replace the key the hint names; otherwise `comfy cloud login` |
 | `deploy_server_error` | Control plane unavailable or 5xx | Re-read `status` before retrying, so a retry cannot double-create |
 | `deploy_delete_needs_confirm` | `delete` without `--yes` non-interactively | Confirm with the user, then pass `--yes` |
 

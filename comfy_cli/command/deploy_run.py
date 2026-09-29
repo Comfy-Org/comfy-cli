@@ -31,7 +31,7 @@ from comfy_cli.command.deploy_workflow import (
     resolve_asset_roots,
 )
 from comfy_cli.command.run.loader import WorkflowLoadError
-from comfy_cli.credentials import resolve_partner_credential
+from comfy_cli.credentials import keyed_partner_credential, resolve_partner_credential
 from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.deploy_assets import DeployAssetClient
 from comfy_cli.deploy_download import (
@@ -182,7 +182,6 @@ def run_deploy(ctx: typer.Context, request: DeployRunRequest) -> None:
             Path(workflow_file),
             asset_roots=resolve_asset_roots(request.path, extra_roots=request.asset_roots),
         )
-        partner_credential = resolve_partner_credential()
         builder, candidate = _command_clients()
         if not isinstance(candidate, RunControlClient):
             raise server_shape_error("the deploy client cannot resolve deployment jobs")
@@ -198,15 +197,20 @@ def run_deploy(ctx: typer.Context, request: DeployRunRequest) -> None:
         endpoint_value = deployment.get("endpointUrl")
         endpoint_url = endpoint_value if isinstance(endpoint_value, str) else None
         endpoint_origin = validate_endpoint_origin(deployment_id, endpoint_url)
-        cloud_token = candidate.target.auth_token
-        if not isinstance(cloud_token, str) or not cloud_token:
-            raise DeployAPIError("deploy_not_signed_in", "the control-plane session has no Cloud JWT")
-        data_target = Target(kind="cloud", base_url=endpoint_origin, path_prefix="/api/v2", auth_token=cloud_token)
+        # platform-gateway reads a workspace API key only as a Bearer value, so a
+        # control-plane client holding a key hands the endpoint that key. The job
+        # then runs in the key's workspace, so partner nodes take the key as well.
+        api_key = candidate.target.api_key
+        partner_credential = keyed_partner_credential(api_key) if api_key else resolve_partner_credential()
+        data_credential = api_key or candidate.target.auth_token
+        if not isinstance(data_credential, str) or not data_credential:
+            raise DeployAPIError("deploy_not_signed_in", "the control-plane client holds no credential")
+        data_target = Target(kind="cloud", base_url=endpoint_origin, path_prefix="/api/v2", auth_token=data_credential)
         assets = resolve_assets(
             plan,
-            AssetResolveContext(DeployAssetClient(endpoint_origin, cloud_token), renderer, not request.no_upload),
+            AssetResolveContext(DeployAssetClient(endpoint_origin, data_credential), renderer, not request.no_upload),
         )
-        submitted = DeployJobClient(endpoint_origin, cloud_token).submit_job(
+        submitted = DeployJobClient(endpoint_origin, data_credential).submit_job(
             JobSubmitRequest(assets.workflow, str(uuid.uuid4()), deployment_id, partner_credential),
             candidate,
         )
@@ -228,7 +232,7 @@ def run_deploy(ctx: typer.Context, request: DeployRunRequest) -> None:
         )
         _terminal_result(watched.job)
         outputs = download_job_outputs(
-            OutputDownloadRequest(tuple(watched.outputs), endpoint_origin, cloud_token, request.output_dir),
+            OutputDownloadRequest(tuple(watched.outputs), endpoint_origin, data_credential, request.output_dir),
             renderer,
         )
         _emit_result(renderer, _RunResult(deployment_id, endpoint_origin, watched.job, assets, outputs))

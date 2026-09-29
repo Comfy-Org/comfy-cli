@@ -7,8 +7,9 @@ description: "Run a Comfy Build release as a serverless deployment with comfy-cl
 
 The commands here are the `comfy deploy` group from
 [comfy-cli](https://github.com/Comfy-Org/comfy-cli). Everything in it needs
-`comfy cloud login`; a command answers `deploy_not_signed_in` when there is no
-usable session.
+`comfy cloud login`, or a workspace API key in `COMFY_CLOUD_API_KEY`, which a CI
+job uses in place of a sign-in and which wins over a stored sign-in; a command
+answers `deploy_not_signed_in` when it has neither, or when the key is refused.
 
 **Deploying spends money continuously, not once.** Building does not: it is capped
 by counts — how many builds and releases a workspace holds — and metered by nothing,
