@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import functools
 import http.client
 import importlib
 import json
+import ssl
 import threading
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
@@ -707,9 +709,12 @@ def _unavailable() -> DeployAPIError:
 
 
 class FlakyFollow(FakeDeploy):
-    """Answers the read that confirms the create, then fails the follow reads it is handed."""
+    """Answers the read that confirms the create, then fails the follow reads it is handed.
 
-    def __init__(self, failures: list[Exception], **kwargs) -> None:
+    A ``None`` among the failures is a follow read that is answered.
+    """
+
+    def __init__(self, failures: list[Exception | None], **kwargs) -> None:
         super().__init__(**kwargs)
         self.failures = failures
         self.get_calls = 0
@@ -717,17 +722,19 @@ class FlakyFollow(FakeDeploy):
     def get_deployment(self, deployment_id: str) -> JsonObject:
         self.get_calls += 1
         if self.get_calls > 1 and self.failures:
-            raise self.failures.pop(0)
+            failure = self.failures.pop(0)
+            if failure is not None:
+                raise failure
         return super().get_deployment(deployment_id)
 
 
-def _invoke_watched_up(tmp_path, monkeypatch, client: FakeDeploy, sleeps: list[float]):
+def _invoke_watched_up(tmp_path, monkeypatch, client: FakeDeploy, sleeps: list[float], *, output: str = "--json"):
     module = _deploy()
     monkeypatch.setattr(module, "_command_clients", lambda: (FakeBuilder(), client))
     monkeypatch.setattr(module, "_sleep", sleeps.append)
     return CliRunner().invoke(
         app,
-        ["--json", "deploy", "up", str(write_spec(tmp_path)), "--gpu", "l4", "--region", "US-MO-2"],
+        [output, "deploy", "up", str(write_spec(tmp_path)), "--gpu", "l4", "--region", "US-MO-2"],
         env={"COLUMNS": "400"},
     )
 
@@ -760,8 +767,10 @@ def test_a_brief_503_on_the_follow_read_is_ridden_out_to_ready(tmp_path, monkeyp
         lambda: transport_error("get", TimeoutError("timed out")),
         lambda: ConnectionResetError(54, "Connection reset by peer"),
         lambda: http.client.RemoteDisconnected("Remote end closed connection without response"),
+        # Not a ConnectionError: the body was cut short, and `http.client` says so in its own family.
+        lambda: http.client.IncompleteRead(b'{"id": "dep-1"', 64),
     ],
-    ids=["503", "connection_refused", "read_timeout", "connection_reset", "remote_disconnected"],
+    ids=["503", "connection_refused", "read_timeout", "connection_reset", "remote_disconnected", "incomplete_read"],
 )
 def test_a_deploy_api_that_stays_down_ends_the_watch_with_its_own_exit_code(tmp_path, monkeypatch, failure) -> None:
     """Past the retry window the deployment's outcome is unknown, not failed: the
@@ -803,6 +812,143 @@ def test_a_4xx_on_the_follow_read_still_fails_at_once(tmp_path, monkeypatch) -> 
     assert "not answering" not in result.stderr
     assert sleeps == []
     assert client.get_calls == 2
+
+
+def test_a_second_outage_in_one_watch_is_announced_and_backed_off_afresh(tmp_path, monkeypatch) -> None:
+    """A read that is answered ends the outage, so the next one is new: it is
+    announced again and gets the whole retry schedule, not what was left of the first."""
+    # Given two outages with an answered read between them
+    client = FlakyFollow(
+        [_unavailable(), None, _unavailable(), _unavailable()], get_statuses=["queued", "queued", "ready"]
+    )
+    sleeps: list[float] = []
+
+    # When
+    result = _invoke_watched_up(tmp_path, monkeypatch, client, sleeps)
+
+    # Then the second outage starts again from 2 seconds
+    assert result.exit_code == 0, result.stderr
+    assert _json_envelope(result)["data"]["deployment"]["status"] == "ready"
+    assert result.stderr.count("deploy API is not answering") == 2
+    assert sleeps == [2.0, 2.0, 2.0, 4.0]
+    assert client.get_calls == 6
+
+
+def test_a_tls_failure_on_the_follow_read_is_not_retried(tmp_path, monkeypatch) -> None:
+    """A certificate this machine does not trust is still untrusted a minute
+    later. It has no status, like a dropped connection, but a code of its own."""
+    # Given a follow read the client refuses for its certificate
+    untrusted = transport_error(
+        "get",
+        urllib.error.URLError(
+            ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+        ),
+    )
+    assert untrusted.code == "tls_verify_failed" and untrusted.status is None
+    client = FlakyFollow([untrusted], get_statuses=["queued", "ready"])
+    sleeps: list[float] = []
+
+    # When
+    result = _invoke_watched_up(tmp_path, monkeypatch, client, sleeps)
+
+    # Then it fails at once with its own code
+    assert result.exit_code == 1
+    assert _json_envelope(result)["error"]["code"] == "tls_verify_failed"
+    assert "not answering" not in result.stderr
+    assert sleeps == []
+    assert client.get_calls == 2
+
+
+def test_giving_up_takes_the_live_line_down_before_the_error_prints(tmp_path, monkeypatch) -> None:
+    """On a terminal the live line is redrawn in place, and an error printed
+    while it is up lands under a spinner that is still turning."""
+    # Given a watch that draws its line, then never hears back. CliRunner's
+    # stream is not a terminal, so the reporter records its line, not draws it.
+    module = _deploy()
+    events: list[str] = []
+
+    class Reporter(module.DeployWatchReporter):
+        def snapshot(self, deployment: JsonObject) -> None:
+            events.append("line drawn")
+
+        def close(self) -> None:
+            events.append("line closed")
+            super().close()
+
+    exit_watch_lost = module._exit_watch_lost
+
+    def recorded_exit_watch_lost(renderer, error):
+        events.append("error printed")
+        exit_watch_lost(renderer, error)
+
+    monkeypatch.setattr(module, "DeployWatchReporter", Reporter)
+    monkeypatch.setattr(module, "_exit_watch_lost", recorded_exit_watch_lost)
+    client = FlakyFollow([None] + [_unavailable() for _ in range(20)], get_statuses=["queued", "queued"])
+    sleeps: list[float] = []
+
+    # When
+    result = _invoke_watched_up(tmp_path, monkeypatch, client, sleeps, output="--no-json")
+
+    # Then
+    assert result.exit_code == 75, result.output
+    assert "may still be coming up" in result.output
+    printed = events.index("error printed")
+    assert "line drawn" in events[:printed]
+    assert events[printed - 1] == "line closed"
+
+
+def test_a_503_whose_body_stalls_past_the_timeout_is_retried_like_any_503(monkeypatch) -> None:
+    """The status line came, so the service did answer 503; reading its body then
+    timing out used to escape the retry as a bare TimeoutError and exit 1."""
+    from comfy_cli import deploy_api
+    from comfy_cli import http as comfy_http
+    from comfy_cli.command.deploy_runtime import poll_deployment
+
+    # Given a deploy API whose first read sends 503 headers and then stalls the body
+    reads: list[str] = []
+    stalled = threading.Event()
+
+    class StalledThenReady(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            reads.append(self.path)
+            if len(reads) == 1:
+                self.send_response(503)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", "100")
+                self.end_headers()
+                self.wfile.flush()
+                stalled.wait(5)
+                return
+            body = json.dumps({"id": "dep-1", "status": "ready"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    monkeypatch.setattr(deploy_api, "request_json", functools.partial(comfy_http.request_json, timeout=0.5))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), StalledThenReady)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    sleeps: list[float] = []
+    notices: list[None] = []
+    try:
+        client = DeployClient(f"http://127.0.0.1:{server.server_address[1]}", "token")
+
+        # When
+        snapshot = poll_deployment(client, "dep-1", sleeps.append, on_unanswered=lambda: notices.append(None))
+    finally:
+        stalled.set()
+        server.shutdown()
+        server.server_close()
+
+    # Then
+    assert snapshot["status"] == "ready"
+    assert len(reads) == 2
+    assert sleeps == [2.0]
+    assert len(notices) == 1
 
 
 def test_the_retry_window_counts_time_spent_waiting_on_reads_that_time_out() -> None:

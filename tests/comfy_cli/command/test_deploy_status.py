@@ -647,6 +647,52 @@ def test_a_watch_the_deploy_api_never_answers_ends_with_the_watch_lost_exit_code
     assert len(client.get_calls) == 7
 
 
+def test_a_watch_that_gives_up_takes_the_live_line_down_before_the_error_prints(tmp_path, monkeypatch) -> None:
+    """An error printed while the live line is up lands under a spinner that is still turning."""
+    # Given a watch that draws its line, then never hears back. CliRunner's
+    # stream is not a terminal, so the reporter records its line, not draws it.
+    module = importlib.import_module("comfy_cli.command.deploy_status")
+    events: list[str] = []
+
+    class Reporter(module.DeployWatchReporter):
+        def snapshot(self, deployment: JsonObject) -> None:
+            events.append("line drawn")
+
+        def close(self) -> None:
+            events.append("line closed")
+            super().close()
+
+    exit_watch_lost = module.exit_watch_lost
+
+    def recorded_exit_watch_lost(renderer, error):
+        events.append("error printed")
+        exit_watch_lost(renderer, error)
+
+    class DownAfterOneRead(RecordingDeploy):
+        def get_deployment(self, deployment_id: str) -> JsonObject:
+            if self.get_calls:
+                self.get_calls.append(deployment_id)
+                raise ConnectionResetError(54, "Connection reset by peer")
+            return super().get_deployment(deployment_id)
+
+    monkeypatch.setattr(module, "DeployWatchReporter", Reporter)
+    monkeypatch.setattr(module, "exit_watch_lost", recorded_exit_watch_lost)
+    client = DownAfterOneRead([_status_deployment(status="provisioning")])
+    _install_clients(monkeypatch, FakeBuilder(), client, [])
+
+    # When
+    result = CliRunner().invoke(
+        app, ["--no-json", "deploy", "status", str(write_spec(tmp_path)), "--watch"], env={"COLUMNS": "400"}
+    )
+
+    # Then
+    assert result.exit_code == 75, result.output
+    assert "may still be coming up" in result.output
+    printed = events.index("error printed")
+    assert "line drawn" in events[:printed]
+    assert events[printed - 1] == "line closed"
+
+
 def test_watch_exits_promptly_on_stop_failed_with_retry_stop_hint(tmp_path, monkeypatch) -> None:
     # Given
     client = RecordingDeploy([_status_deployment(status="stopping")], get_statuses=["stop_failed", "ready"])
