@@ -561,7 +561,11 @@ def _model_name_hint(name: str) -> str | None:
             resolved = _resolve(raw, schema)
             if not isinstance(resolved, dict):
                 continue
-            prop = _find_property(resolved, "model")
+            prop = None
+            for field in ("model", "model_name", "model_id"):
+                prop = _find_property(resolved, field)
+                if prop:
+                    break
             values = _extract_enum(prop) if prop else None
         except (KeyError, TypeError, SpecError):
             continue
