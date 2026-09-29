@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 from typing import Final
@@ -165,7 +166,14 @@ _CONTEXTUAL_ERRORS: Final = {
 
 
 def _error_body(error: urllib.error.HTTPError, url: str) -> tuple[str | None, str | None]:
-    raw = read_capped(error, url, max_bytes=_MAX_JSON)
+    # The status line has already come, so a body that stalls or is cut off
+    # maps by that status alone rather than escaping as a bare transport error:
+    # a 404 must not pass for a service that is down. `ResponseTooLarge` is
+    # neither, and still propagates.
+    try:
+        raw = read_capped(error, url, max_bytes=_MAX_JSON)
+    except (OSError, http.client.HTTPException):
+        return None, None
     if not raw:
         return None, None
     try:

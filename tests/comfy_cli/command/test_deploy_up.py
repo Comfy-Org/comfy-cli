@@ -951,6 +951,67 @@ def test_a_503_whose_body_stalls_past_the_timeout_is_retried_like_any_503(monkey
     assert len(notices) == 1
 
 
+def test_a_404_whose_body_stalls_past_the_timeout_still_fails_at_once(tmp_path, monkeypatch) -> None:
+    """The status line said 404, so a body that then stalls must not turn the
+    refusal into "the API is down": that retried for a minute and exited 75."""
+    from comfy_cli import deploy_api
+    from comfy_cli import http as comfy_http
+
+    # Given a deploy API that answers every follow read with 404 headers and then stalls the body
+    reads: list[str] = []
+    stalled = threading.Event()
+
+    class StalledNotFound(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            reads.append(self.path)
+            body = json.dumps({"error": "not_found", "message": "deployment dep-1 not found"}).encode()
+            self.send_response(404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body) + 100))
+            self.end_headers()
+            self.wfile.write(body[:5])
+            self.wfile.flush()
+            stalled.wait(5)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    monkeypatch.setattr(deploy_api, "request_json", functools.partial(comfy_http.request_json, timeout=0.5))
+    server = ThreadingHTTPServer(("127.0.0.1", 0), StalledNotFound)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    real = DeployClient(f"http://127.0.0.1:{server.server_address[1]}", "token")
+
+    class FollowsOverTheWire(FakeDeploy):
+        """Answers the read that confirms the create in memory; the follow reads go to the server."""
+
+        def __init__(self) -> None:
+            super().__init__(get_statuses=["queued"])
+            self.get_calls = 0
+
+        def get_deployment(self, deployment_id: str) -> JsonObject:
+            self.get_calls += 1
+            if self.get_calls == 1:
+                return super().get_deployment(deployment_id)
+            return real.get_deployment(deployment_id)
+
+    sleeps: list[float] = []
+    try:
+        # When
+        result = _invoke_watched_up(tmp_path, monkeypatch, FollowsOverTheWire(), sleeps)
+    finally:
+        stalled.set()
+        server.shutdown()
+        server.server_close()
+
+    # Then it fails with the 404's own code, and nothing is retried
+    assert result.exit_code == 1, result.stderr
+    error = _json_envelope(result)["error"]
+    assert error["code"] == "deploy_not_found"
+    assert "not answering" not in result.stderr
+    assert sleeps == []
+    assert len(reads) == 1
+
+
 def test_the_retry_window_counts_time_spent_waiting_on_reads_that_time_out() -> None:
     """A read that times out has already spent its timeout, so the window is
     kept on the clock and not only on the sleeps between reads."""

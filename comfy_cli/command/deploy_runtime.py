@@ -162,9 +162,9 @@ def poll_deployment(
     while True:
         try:
             snapshot = client.get_deployment(deployment_id)
-        # The client maps a timeout on the request itself, but one while it reads
-        # an error body (a 503 whose body stalls) escapes it as a bare TimeoutError.
-        except (DeployAPIError, ConnectionError, TimeoutError, http.client.HTTPException) as error:
+        # The client maps a timeout, but a connection dropped before the status
+        # line or partway through a 200's body escapes it unmapped.
+        except (DeployAPIError, ConnectionError, http.client.HTTPException) as error:
             if not _unanswered(error):
                 raise
             if failures == 0:
