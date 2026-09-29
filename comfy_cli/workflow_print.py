@@ -259,6 +259,14 @@ def _stale_input_slot_links(nodes: list[dict], links: list[list], qualify: Any =
     warnings: list[str] = []
     ignored: set[str] = set()
     nodes_by_id = {str(n.get("id")): n for n in nodes}
+    input_holders_by_node: dict[str, dict[str, dict]] = {}
+    for node in nodes:
+        inputs = node.get("inputs")
+        input_holders_by_node[str(node.get("id"))] = {
+            str(inp["link"]): inp
+            for inp in (inputs if isinstance(inputs, list) else [])
+            if isinstance(inp, dict) and inp.get("link") is not None
+        }
     for link in links:
         link_id, src_id, tgt_id, tgt_slot = link[0], link[1], link[3], link[4]
         tgt_node = nodes_by_id.get(str(tgt_id))
@@ -270,14 +278,7 @@ def _stale_input_slot_links(nodes: list[dict], links: list[list], qualify: Any =
             inputs = []
         if 0 <= tgt_slot < len(inputs):
             continue
-        holder = next(
-            (
-                inp
-                for inp in inputs
-                if isinstance(inp, dict) and inp.get("link") is not None and str(inp["link"]) == str(link_id)
-            ),
-            None,
-        )
+        holder = input_holders_by_node[str(tgt_id)].get(str(link_id))
         where = (
             f"link {link_id} targets input slot {tgt_slot} on node {qualify(tgt_id)}, which has {len(inputs)} inputs"
         )
