@@ -440,7 +440,12 @@ class Port:
         token, _, rest = text.partition(" ")
         if not token or not rest.strip():
             return None
-        hits = [str(o) for o in self.enum_values if str(o).strip().partition(" ")[0] == token]
+        hits = [
+            str(o)
+            for o in self.enum_values
+            if str(o).strip().partition(" ")[0] == token
+            and not re.search(r"\.[A-Za-z][A-Za-z0-9]{0,11}$", str(o).strip())
+        ]
         return hits[0] if len(hits) == 1 else None
 
     def validate_shape(self, value: Any) -> str | None:
