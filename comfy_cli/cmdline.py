@@ -199,12 +199,14 @@ _SECRET_PATTERNS = (
     ),
     (
         re.compile(
-            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password)"
-            r"[\"']?\s*[:=]\s*[\"']?)(?!Bearer\b)[^\s&\"',;]+",
+            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|session|sig|signature)"
+            r"[\"']?\s*[:=]\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^&;\r\n]+)",
             re.IGNORECASE,
         ),
-        r"\1***",
+        lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
     ),
+    (re.compile(r"(\\[\"'](?:proxy-)?authorization\\[\"']\s*[:=]\s*)[^\r\n]+", re.IGNORECASE), r"\1***"),
+    (re.compile(r"((?:set-)?cookie\s*:\s*)[^\r\n]+", re.IGNORECASE), r"\1***"),
     (re.compile(r"(://)[^\s/@'\"]+@"), r"\1***@"),
 )
 
