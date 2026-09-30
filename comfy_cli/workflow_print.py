@@ -287,11 +287,11 @@ def _stale_input_slot_links(nodes: list[dict], links: list[list], qualify: Any =
         where = (
             f"link {link_id} targets input slot {tgt_slot} on node {qualify(tgt_id)}, which has {len(inputs)} inputs"
         )
-        if str(src_id) == _PROXY_IN:
+        if holder is not None:
+            warnings.append(f"{where}; rendered through input {str(holder.get('name') or '')!r}, which holds it")
+        elif str(src_id) == _PROXY_IN:
             ignored.add(str(link_id))
             warnings.append(f"{where}; the subgraph input proxy routes by target slot, so it was ignored")
-        elif holder is not None:
-            warnings.append(f"{where}; rendered through input {str(holder.get('name') or '')!r}, which holds it")
         else:
             ignored.add(str(link_id))
             warnings.append(f"{where}; no input holds it, so it feeds nothing and was ignored")
