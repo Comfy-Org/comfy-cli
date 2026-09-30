@@ -191,11 +191,20 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
             seen_ids.add(nid)
 
     nodes_by_id = {str(n.get("id")): n for n in nodes}
+    seen_link_ids: set[str] = set()
+    reported_link_dupes: set[str] = set()
     for link in links:
         if not isinstance(link, list) or len(link) < 5:
             reasons.append(f"link malformed: {link!r}")
             continue
         link_id, src_id, src_slot, tgt_id, tgt_slot = link[0], link[1], link[2], link[3], link[4]
+        normalized_link_id = str(link_id)
+        if normalized_link_id in seen_link_ids:
+            if normalized_link_id not in reported_link_dupes:
+                reported_link_dupes.add(normalized_link_id)
+                reasons.append(f"duplicate link id {normalized_link_id}")
+        else:
+            seen_link_ids.add(normalized_link_id)
         src_node = nodes_by_id.get(str(src_id))
         if src_node is None:
             reasons.append(f"link {link_id} references missing node {src_id}")
@@ -210,6 +219,9 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
         if not _is_slot_index(src_slot) or not _is_slot_index(tgt_slot):
             reasons.append(f"link {link_id} has a non-integer slot")
             continue
+        if src_slot < 0:
+            reasons.append(f"link {link_id} references negative output slot {src_slot} on node {src_id}")
+            continue
         outputs = src_node.get("outputs")
         if isinstance(outputs, list) and not (0 <= src_slot < len(outputs)):
             reasons.append(f"link {link_id} references out-of-range output slot {src_slot} on node {src_id}")
@@ -217,7 +229,9 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
     return reasons
 
 
-def _stale_input_slot_links(nodes: list[dict], links: list[list], qualify: Any = str) -> tuple[list[str], set[str]]:
+def _stale_input_slot_links(
+    nodes: list[dict], links: list[list], qualify: Any = str, proxy_input_id: str | None = None
+) -> tuple[list[str], set[str]]:
     """Links whose target input slot the node does not have, as
     ``(warnings, ignored_link_ids)``. Run only after ``_validate`` passed, so
     every link row is well-formed and both endpoints exist.
@@ -239,8 +253,16 @@ def _stale_input_slot_links(nodes: list[dict], links: list[list], qualify: Any =
     warnings: list[str] = []
     ignored: set[str] = set()
     nodes_by_id = {str(n.get("id")): n for n in nodes}
+    input_holders_by_node: dict[str, dict[str, dict]] = {}
+    for node in nodes:
+        inputs = node.get("inputs")
+        holders: dict[str, dict] = {}
+        for inp in inputs if isinstance(inputs, list) else []:
+            if isinstance(inp, dict) and inp.get("link") is not None:
+                holders.setdefault(str(inp["link"]), inp)
+        input_holders_by_node[str(node.get("id"))] = holders
     for link in links:
-        link_id, tgt_id, tgt_slot = link[0], link[3], link[4]
+        link_id, src_id, tgt_id, tgt_slot = link[0], link[1], link[3], link[4]
         tgt_node = nodes_by_id.get(str(tgt_id))
         if tgt_node is None or not _is_slot_index(tgt_slot):
             continue
@@ -250,19 +272,15 @@ def _stale_input_slot_links(nodes: list[dict], links: list[list], qualify: Any =
             inputs = []
         if 0 <= tgt_slot < len(inputs):
             continue
-        holder = next(
-            (
-                inp
-                for inp in inputs
-                if isinstance(inp, dict) and inp.get("link") is not None and str(inp["link"]) == str(link_id)
-            ),
-            None,
-        )
+        holder = input_holders_by_node[str(tgt_id)].get(str(link_id))
         where = (
             f"link {link_id} targets input slot {tgt_slot} on node {qualify(tgt_id)}, which has {len(inputs)} inputs"
         )
         if holder is not None:
             warnings.append(f"{where}; rendered through input {str(holder.get('name') or '')!r}, which holds it")
+        elif proxy_input_id is not None and str(src_id) == proxy_input_id:
+            ignored.add(str(link_id))
+            warnings.append(f"{where}; the subgraph input proxy routes by target slot, so it was ignored")
         else:
             ignored.add(str(link_id))
             warnings.append(f"{where}; no input holds it, so it feeds nothing and was ignored")
@@ -1133,6 +1151,8 @@ def _def_links(sg_def: dict) -> dict[str, tuple]:
         lid = link.get("id")
         if lid is None:
             continue
+        if str(lid) in out:
+            raise PrintUnsupported([f"duplicate link id {lid} in subgraph definition"])
         out[str(lid)] = (link.get("origin_id"), link.get("origin_slot"), link.get("target_id"), link.get("target_slot"))
     return out
 
@@ -1313,7 +1333,7 @@ def _render_definition_block(
     # whatever feeds it.
     into_interior = [[lid, oid, oslot, tid, tslot] for lid, (oid, oslot, tid, tslot) in all_links.items()]
     stale_warnings, stale_ids = _stale_input_slot_links(
-        interior_nodes, into_interior, lambda nid: f"{first_instance}/{nid}"
+        interior_nodes, into_interior, lambda nid: f"{first_instance}/{nid}", _PROXY_IN
     )
     state.warnings.extend(stale_warnings)
     all_links = {lid: link for lid, link in all_links.items() if lid not in stale_ids}
