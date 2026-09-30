@@ -242,7 +242,9 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
     return reasons
 
 
-def _stale_input_slot_links(nodes: list[dict], links: list[list], qualify: Any = str) -> tuple[list[str], set[str]]:
+def _stale_input_slot_links(
+    nodes: list[dict], links: list[list], qualify: Any = str, proxy_input_id: str | None = None
+) -> tuple[list[str], set[str]]:
     """Links whose target input slot the node does not have, as
     ``(warnings, ignored_link_ids)``. Run only after ``_validate`` passed, so
     every link row is well-formed and both endpoints exist.
@@ -289,7 +291,7 @@ def _stale_input_slot_links(nodes: list[dict], links: list[list], qualify: Any =
         )
         if holder is not None:
             warnings.append(f"{where}; rendered through input {str(holder.get('name') or '')!r}, which holds it")
-        elif str(src_id) == _PROXY_IN:
+        elif proxy_input_id is not None and str(src_id) == proxy_input_id:
             ignored.add(str(link_id))
             warnings.append(f"{where}; the subgraph input proxy routes by target slot, so it was ignored")
         else:
@@ -1342,7 +1344,7 @@ def _render_definition_block(
     # whatever feeds it.
     into_interior = [[lid, oid, oslot, tid, tslot] for lid, (oid, oslot, tid, tslot) in all_links.items()]
     stale_warnings, stale_ids = _stale_input_slot_links(
-        interior_nodes, into_interior, lambda nid: f"{first_instance}/{nid}"
+        interior_nodes, into_interior, lambda nid: f"{first_instance}/{nid}", _PROXY_IN
     )
     state.warnings.extend(stale_warnings)
     all_links = {lid: link for lid, link in all_links.items() if lid not in stale_ids}
