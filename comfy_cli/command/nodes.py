@@ -403,15 +403,11 @@ def show_cmd(
         # them. Checking before `add-node` must get the same answer add-node
         # gives, not a generic miss with difflib noise.
         if name.strip() in UI_ONLY_NODE_TYPES:
-            is_note = name.strip() in {"Note", "MarkdownNote"}
             renderer.error(
                 code="node_not_found",
                 message=f"{UnknownNodeType(name.strip(), ui_only=True)} — the node catalog has no schema for it.",
                 hint=(
-                    "insert a workflow template containing the note with "
-                    "`comfy workflow insert-workflow <file> <template>`"
-                    if is_note
-                    else "pick a real node class from `comfy nodes search <text>`; a UI-only node on an existing "
+                    "pick a real node class from `comfy nodes search <text>`; a UI-only node on an existing "
                     "canvas is only read (print/ls-nodes), never added"
                 ),
                 details={"requested": name, "ui_only": True},
