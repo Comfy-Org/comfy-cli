@@ -1164,6 +1164,8 @@ def _def_links(sg_def: dict) -> dict[str, tuple]:
         lid = link.get("id")
         if lid is None:
             continue
+        if str(lid) in out:
+            raise PrintUnsupported([f"duplicate link id {lid} in subgraph definition"])
         out[str(lid)] = (link.get("origin_id"), link.get("origin_slot"), link.get("target_id"), link.get("target_slot"))
     return out
 
