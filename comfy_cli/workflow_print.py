@@ -219,6 +219,9 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
         if not _is_slot_index(src_slot) or not _is_slot_index(tgt_slot):
             reasons.append(f"link {link_id} has a non-integer slot")
             continue
+        if src_slot < 0:
+            reasons.append(f"link {link_id} references negative output slot {src_slot} on node {src_id}")
+            continue
         outputs = src_node.get("outputs")
         if isinstance(outputs, list) and not (0 <= src_slot < len(outputs)):
             reasons.append(f"link {link_id} references out-of-range output slot {src_slot} on node {src_id}")
