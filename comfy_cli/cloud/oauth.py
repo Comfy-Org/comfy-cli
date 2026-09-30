@@ -570,6 +570,7 @@ def refresh_tokens(
     refresh_token: str,
     resource: str | None = None,
     scopes: tuple[str, ...] | None = None,
+    timeout: float = _HTTP_TIMEOUT_S,
 ) -> TokenSet:
     body = {
         "grant_type": "refresh_token",
@@ -581,7 +582,7 @@ def refresh_tokens(
     if scopes:
         body["scope"] = " ".join(scopes)
     try:
-        resp = _post_form(f"{base_url}/oauth/token", body)
+        resp = _post_form(f"{base_url}/oauth/token", body, timeout=timeout)
     except _HTTPFail as e:
         raise OAuthRefreshError(
             f"refresh failed: {e}",
@@ -591,12 +592,28 @@ def refresh_tokens(
     return _token_set_from_response(resp)
 
 
+# Bounded in-lock retry of a *transient* refresh failure. The server may have
+# rotated the token before the response was lost (timeout / reset / 5xx); a
+# replay of that token is answered with a fresh successor only while it is
+# inside the server's reuse-grace window, and kills the whole family outside
+# it. So re-send it now, while we still hold the lock, rather than leaving the
+# consumed token on disk for the next command (or the reactive 401 path) to
+# replay minutes later.
+_REFRESH_RETRY_DELAYS_S = (2.0, 4.0, 8.0)
+# Wall-clock cap on the retry phase (sleeps + retry POSTs), measured from the
+# first failure. Each retry POST's timeout is clamped to what is left, so the
+# cap holds even when every attempt times out.
+_REFRESH_RETRY_BUDGET_S = 40.0
+# Don't start a retry POST with less than this left — it could not complete.
+_REFRESH_RETRY_MIN_ATTEMPT_S = 5.0
+
 # Upper bound on how long a waiter blocks for the refresh lock. The holder
-# only keeps it for one token POST (``_HTTP_TIMEOUT_S`` = 30s), so this leaves
-# headroom for that round-trip plus the read-modify-write. If it's ever
-# exceeded (a wedged peer) we fall back to whatever is persisted rather than
-# racing an in-flight refresh.
-_REFRESH_LOCK_TIMEOUT_S = 45.0
+# keeps it for one token POST (``_HTTP_TIMEOUT_S`` = 30s) plus, on a transient
+# failure, the retry phase (``_REFRESH_RETRY_BUDGET_S`` = 40s), so this leaves
+# headroom for that plus the read-modify-write. If it's ever exceeded (a wedged
+# peer) we fall back to whatever is persisted rather than racing an in-flight
+# refresh.
+_REFRESH_LOCK_TIMEOUT_S = 90.0
 
 # OAuth2 token-endpoint error codes that mean the refresh-token *family* is
 # truly dead — only a fresh ``comfy cloud login`` can recover, so we clear the
@@ -630,6 +647,51 @@ def _is_fatal_token_error(exc: OAuthRefreshError) -> bool:
     if "reuse" in blob:
         return True
     return any(code in blob for code in _FATAL_TOKEN_ERROR_CODES)
+
+
+def _is_transient_refresh_error(exc: OAuthRefreshError) -> bool:
+    """True when a refresh failure is worth re-sending the *same* refresh token.
+
+    Transient = no HTTP response at all (status 0: connect/read timeout, reset,
+    DNS), 408, 429, or any 5xx. A terminal token error (``invalid_grant`` /
+    ``invalid_token`` / reuse) is never transient, whatever its status; other
+    4xx (``invalid_client``, ``invalid_request``, ...) won't change on a retry.
+    """
+    if _is_fatal_token_error(exc):
+        return False
+    status = exc.details.get("status")
+    if not isinstance(status, int):
+        return False
+    return status in (0, 408, 429) or status >= 500
+
+
+def _refresh_with_retry(**kwargs) -> TokenSet:
+    """``refresh_tokens`` with a bounded retry on transient failures.
+
+    Must be called while holding the refresh lock: it re-sends the same refresh
+    token, which is only safe because no peer can spend it concurrently. Raises
+    the last ``OAuthRefreshError`` once retries are exhausted (or immediately
+    for a non-transient one).
+    """
+    try:
+        return refresh_tokens(**kwargs)
+    except OAuthRefreshError as e:
+        if not _is_transient_refresh_error(e):
+            raise
+        last_error = e
+    deadline = time.monotonic() + _REFRESH_RETRY_BUDGET_S
+    for delay in _REFRESH_RETRY_DELAYS_S:
+        if deadline - time.monotonic() - delay < _REFRESH_RETRY_MIN_ATTEMPT_S:
+            break
+        time.sleep(delay)
+        remaining = deadline - time.monotonic()
+        try:
+            return refresh_tokens(**kwargs, timeout=min(_HTTP_TIMEOUT_S, remaining))
+        except OAuthRefreshError as e:
+            if not _is_transient_refresh_error(e):
+                raise
+            last_error = e
+    raise last_error
 
 
 # The reason from the most recent fatal refresh, stashed per-thread so the
@@ -777,7 +839,7 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
     from comfy_cli.cloud import CLIENT_ID, get_resource_url
 
     try:
-        new_tokens = refresh_tokens(
+        new_tokens = _refresh_with_retry(
             base_url=session.base_url,
             client_id=session.client_id or CLIENT_ID,
             refresh_token=session.refresh_token,
@@ -805,7 +867,9 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
             if allow_clear:
                 auth_store.clear_cloud_session()
             return None
-        return session  # transient (network) — keep the stale session
+        # Transient (network / 5xx) even after the in-lock retries, or a
+        # non-fatal 4xx — keep the stale session.
+        return session
     except Exception:  # noqa: BLE001 — any other error is best-effort
         return session
 
@@ -857,7 +921,7 @@ def _post_json(url: str, body: dict) -> dict:
     return _send_and_parse(req)
 
 
-def _post_form(url: str, body: dict) -> dict:
+def _post_form(url: str, body: dict, *, timeout: float = _HTTP_TIMEOUT_S) -> dict:
     data = urllib.parse.urlencode(body).encode("ascii")
     req = urllib.request.Request(
         url,
@@ -868,7 +932,7 @@ def _post_form(url: str, body: dict) -> dict:
             "Accept": "application/json",
         },
     )
-    return _send_and_parse(req)
+    return _send_and_parse(req, timeout=timeout)
 
 
 def _assert_https_or_loopback(url: str) -> None:
@@ -888,10 +952,10 @@ def _assert_https_or_loopback(url: str) -> None:
 _OAUTH_OPENER = build_http_only_opener(NoRedirectHandler())
 
 
-def _send_and_parse(req: urllib.request.Request) -> dict:
+def _send_and_parse(req: urllib.request.Request, *, timeout: float = _HTTP_TIMEOUT_S) -> dict:
     _assert_https_or_loopback(req.full_url)
     try:
-        with _OAUTH_OPENER.open(req, timeout=_HTTP_TIMEOUT_S) as resp:
+        with _OAUTH_OPENER.open(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace") or "{}"
             return json.loads(raw)
     except HTTPError as e:
@@ -899,5 +963,11 @@ def _send_and_parse(req: urllib.request.Request) -> dict:
         raise _HTTPFail(e.code, body) from None
     except URLError as e:
         raise _HTTPFail(0, str(e)) from None
+    except OSError as e:
+        # A read timeout / reset *after* the request was sent (urllib only
+        # wraps connect-phase errors in URLError). This is exactly the "server
+        # rotated the token but the response was lost" case, so surface it as a
+        # no-response failure the refresh retry can see.
+        raise _HTTPFail(0, f"{type(e).__name__}: {e}") from None
     except json.JSONDecodeError as e:
         raise _HTTPFail(200, f"non-JSON response body: {e}") from None

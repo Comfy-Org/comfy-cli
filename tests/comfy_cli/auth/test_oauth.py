@@ -190,7 +190,7 @@ def test_exchange_code_returns_token_set(monkeypatch: pytest.MonkeyPatch):
 def test_refresh_tokens_calls_token_endpoint(monkeypatch: pytest.MonkeyPatch):
     seen = {}
 
-    def fake_post_form(url, body):
+    def fake_post_form(url, body, **kw):
         seen["url"] = url
         seen["body"] = body
         return {"access_token": "NEW_AT", "refresh_token": "NEW_RT", "token_type": "Bearer", "expires_in": 60}
@@ -231,7 +231,7 @@ def test_exchange_code_sends_resource_indicator(monkeypatch: pytest.MonkeyPatch)
 def test_refresh_tokens_sends_resource_indicator(monkeypatch: pytest.MonkeyPatch):
     seen = {}
 
-    def fake(url, body):
+    def fake(url, body, **kw):
         seen["body"] = body
         return {"access_token": "AT", "refresh_token": "RT", "token_type": "Bearer", "expires_in": 60}
 
@@ -880,9 +880,192 @@ class TestConcurrentRefresh:
             raise oauth.OAuthRefreshError("refresh failed: <urlopen error>", details={"status": 0, "body": ""})
 
         monkeypatch.setattr(oauth, "refresh_tokens", boom)
+        monkeypatch.setattr(oauth.time, "sleep", lambda s: None)
         result = oauth.ensure_fresh_session()
         assert result is not None and result.refresh_token == "RT0"  # session preserved
         assert auth_store.get_cloud_session() is not None
+
+    # ---- in-lock retry of a transient refresh failure --------------------
+    # A lost response (timeout / reset / 5xx) may arrive after the server has
+    # already rotated the token. Re-sending it inside the server's reuse-grace
+    # window yields a successor; leaving it for the next command to replay
+    # (usually outside the window) kills the family. These drive the real
+    # ``refresh_tokens`` with ``_post_form`` mocked.
+
+    @staticmethod
+    def _record_sleeps(monkeypatch) -> list[float]:
+        sleeps: list[float] = []
+        monkeypatch.setattr(oauth.time, "sleep", sleeps.append)
+        return sleeps
+
+    def test_transient_failure_then_success_rotates_and_persists(self, persisted, monkeypatch):
+        self._persist_expired(refresh_token="RT0")
+        sleeps = self._record_sleeps(monkeypatch)
+        sent: list[str] = []
+
+        def fake_post_form(url, body, **kw):
+            sent.append(body["refresh_token"])
+            if len(sent) == 1:
+                raise oauth._HTTPFail(0, "TimeoutError: The read operation timed out")
+            return {"access_token": "NEW", "refresh_token": "RT1", "token_type": "Bearer", "expires_in": 3600}
+
+        monkeypatch.setattr(oauth, "_post_form", fake_post_form)
+        result = oauth.ensure_fresh_session()
+
+        assert sent == ["RT0", "RT0"]  # the same token re-sent, inside the lock
+        assert result is not None and result.access_token == "NEW"
+        stored = auth_store.get_cloud_session()
+        assert stored.refresh_token == "RT1" and stored.access_token == "NEW"
+        assert sleeps == [2.0]
+        assert sum(sleeps) < oauth._REFRESH_RETRY_BUDGET_S
+
+    def test_5xx_exhausts_retries_and_keeps_stale_session(self, persisted, monkeypatch):
+        self._persist_expired(refresh_token="RT0")
+        sleeps = self._record_sleeps(monkeypatch)
+        sent: list[str] = []
+
+        def fake_post_form(url, body, **kw):
+            sent.append(body["refresh_token"])
+            raise oauth._HTTPFail(503, "Service Unavailable")
+
+        monkeypatch.setattr(oauth, "_post_form", fake_post_form)
+        result = oauth.ensure_fresh_session()
+
+        assert len(sent) == 4  # 1 + 3 retries
+        assert sleeps == [2.0, 4.0, 8.0]
+        assert sum(sleeps) < oauth._REFRESH_RETRY_BUDGET_S
+        assert result is not None and result.refresh_token == "RT0"  # stale, not cleared
+        stored = auth_store.get_cloud_session()
+        assert stored is not None and stored.refresh_token == "RT0"
+
+    def test_invalid_grant_is_not_retried_and_clears(self, persisted, monkeypatch):
+        self._persist_expired(refresh_token="RT0")
+        sleeps = self._record_sleeps(monkeypatch)
+        sent: list[str] = []
+
+        def fake_post_form(url, body, **kw):
+            sent.append(body["refresh_token"])
+            raise oauth._HTTPFail(400, '{"error":"invalid_grant","error_description":"refresh token reuse detected"}')
+
+        monkeypatch.setattr(oauth, "_post_form", fake_post_form)
+        assert oauth.ensure_fresh_session(allow_clear=True) is None
+        assert sent == ["RT0"]
+        assert sleeps == []
+        assert auth_store.get_cloud_session() is None
+
+    def test_terminal_error_during_retry_stops_and_clears(self, persisted, monkeypatch):
+        self._persist_expired(refresh_token="RT0")
+        self._record_sleeps(monkeypatch)
+        responses = [
+            oauth._HTTPFail(502, "Bad Gateway"),
+            oauth._HTTPFail(400, '{"error":"invalid_grant"}'),
+        ]
+        sent: list[str] = []
+
+        def fake_post_form(url, body, **kw):
+            sent.append(body["refresh_token"])
+            raise responses[len(sent) - 1]
+
+        monkeypatch.setattr(oauth, "_post_form", fake_post_form)
+        assert oauth.ensure_fresh_session() is None
+        assert len(sent) == 2
+        assert auth_store.get_cloud_session() is None
+
+    def test_non_fatal_4xx_is_not_retried(self, persisted, monkeypatch):
+        self._persist_expired(refresh_token="RT0")
+        sleeps = self._record_sleeps(monkeypatch)
+        sent: list[str] = []
+
+        def fake_post_form(url, body, **kw):
+            sent.append(body["refresh_token"])
+            raise oauth._HTTPFail(401, '{"error":"invalid_client"}')
+
+        monkeypatch.setattr(oauth, "_post_form", fake_post_form)
+        result = oauth.ensure_fresh_session()
+        assert sent == ["RT0"] and sleeps == []
+        assert result is not None and result.refresh_token == "RT0"
+
+    def test_retry_phase_respects_wall_clock_budget(self, persisted, monkeypatch):
+        """Every attempt times out: retries stop once the 40s budget can't fit
+        another attempt, and each retry POST's timeout is clamped to what is left."""
+        self._persist_expired(refresh_token="RT0")
+        clock = [1000.0]
+        monkeypatch.setattr(oauth.time, "monotonic", lambda: clock[0])
+
+        def fake_sleep(s):
+            clock[0] += s
+
+        monkeypatch.setattr(oauth.time, "sleep", fake_sleep)
+        timeouts: list[float] = []
+
+        def fake_post_form(url, body, *, timeout=oauth._HTTP_TIMEOUT_S):
+            timeouts.append(timeout)
+            clock[0] += timeout  # the POST burns its whole timeout
+            raise oauth._HTTPFail(0, "TimeoutError: timed out")
+
+        monkeypatch.setattr(oauth, "_post_form", fake_post_form)
+        start = clock[0]
+        result = oauth.ensure_fresh_session()
+
+        assert result is not None and result.refresh_token == "RT0"
+        assert timeouts[0] == oauth._HTTP_TIMEOUT_S
+        # first failure lands at start+30; the retry phase must end within 40s of it
+        assert clock[0] - (start + oauth._HTTP_TIMEOUT_S) <= oauth._REFRESH_RETRY_BUDGET_S
+        assert len(timeouts) >= 2  # at least one retry fit
+
+    def test_is_transient_refresh_error_classification(self):
+        def err(status, body=""):
+            return oauth.OAuthRefreshError("refresh failed", details={"status": status, "body": body})
+
+        for status in (0, 408, 429, 500, 502, 503, 504):
+            assert oauth._is_transient_refresh_error(err(status)) is True, status
+        for status in (400, 401, 403, 404):
+            assert oauth._is_transient_refresh_error(err(status)) is False, status
+        assert oauth._is_transient_refresh_error(err(500, '{"error":"invalid_grant"}')) is False
+        assert oauth._is_transient_refresh_error(oauth.OAuthRefreshError("x", details={})) is False
+
+    def test_lock_timeout_returns_pre_lock_session(self, persisted, monkeypatch):
+        import contextlib
+
+        from comfy_cli import locking
+
+        self._persist_expired(refresh_token="RT0")
+        called: list[int] = []
+        monkeypatch.setattr(oauth, "refresh_tokens", lambda **kw: called.append(1))
+
+        real_lock = locking.file_lock
+        seen_timeouts: list[float] = []
+
+        @contextlib.contextmanager
+        def timed_out_lock(path, timeout=None):
+            if timeout is None:  # the store's own reads — let them through
+                with real_lock(path):
+                    yield
+                return
+            seen_timeouts.append(timeout)
+            raise TimeoutError("lock busy")
+
+        monkeypatch.setattr(locking, "file_lock", timed_out_lock)
+        result = oauth.ensure_fresh_session()
+        assert result is not None and result.refresh_token == "RT0"
+        assert called == []
+        assert seen_timeouts == [oauth._REFRESH_LOCK_TIMEOUT_S]
+
+    def test_lock_timeout_covers_holder_retry_budget(self):
+        assert oauth._REFRESH_LOCK_TIMEOUT_S >= oauth._HTTP_TIMEOUT_S + oauth._REFRESH_RETRY_BUDGET_S
+
+    def test_read_timeout_maps_to_no_response_failure(self, monkeypatch):
+        """urllib wraps connect errors in URLError but a read timeout after the
+        request was sent surfaces as a bare TimeoutError — it must still map to
+        status 0 so the refresh retry sees it."""
+
+        def raise_timeout(req, timeout=None):
+            raise TimeoutError("The read operation timed out")
+
+        monkeypatch.setattr(oauth._OAUTH_OPENER, "open", raise_timeout)
+        with pytest.raises(oauth._HTTPFail) as exc:
+            oauth._post_form("https://c/oauth/token", {"grant_type": "refresh_token"})
+        assert exc.value.status == 0
 
     def test_successful_refresh_never_repersists_spent_token(self, persisted, monkeypatch):
         """Rotating server: once a refresh SUCCEEDS the token we sent is spent.
