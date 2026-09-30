@@ -15,6 +15,10 @@ history.
 
 ## [Unreleased]
 
+## [1.22.0] - 2026-09-30
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.22.0) · 15 commits since v1.21.0. Breaking changes are marked **Breaking** under Changed.
+
 ### Added
 
 - `comfy build` and `comfy deploy` run with only a workspace API key, so a CI
@@ -22,13 +26,46 @@ history.
   in `X-API-Key`, and `comfy deploy run` sends it to the deployment and, unless
   `COMFY_API_KEY` names a partner key, to its partner nodes. A key saved with
   `comfy cloud set-key` is used only when nobody is signed in.
+- `comfy workflow set-node-field FILE NODE_ID FIELD VALUE` (or `--clear`) writes
+  or clears one durable node field — `title`, `mode`, `flags.collapsed` or
+  `flags.pinned` — emitting a `set_node_field` op with one LWW register per
+  `(node, field)`, so it never clobbers a concurrent widget write on the same
+  node the way an `add_node` upsert would. **Proposed, pending ratification**:
+  `set_node_field` is a candidate addition to `docs/op-vocabulary-v1.md` (§1.8 /
+  amendment v1.6), mirroring comfy-multi-player#235's merged CRDT op of the
+  same name (superseding this project's earlier, title-only `set_title`
+  proposal, which never shipped in a release).
 
 ### Changed
 
-- `comfy build` and `comfy deploy` send `COMFY_CLOUD_API_KEY`, when it is set, in
+- **Breaking:** `comfy build` and `comfy deploy` send `COMFY_CLOUD_API_KEY`, when it is set, in
   place of a stored sign-in, so a signed-in shell that exports it builds and
   deploys in the key's workspace. `comfy cloud` commands still prefer the sign-in,
   and a Cloud JWT in `COMFY_BUILDER_TOKEN` still comes first for `comfy build`.
+- **Breaking:** a definition the builder refuses now arrives as `build_definition_invalid`, its
+  reasons one per line and in `details.invalid` when the builder lists them (else
+  its message), instead of `build_builder_error`
+  with the code as the message, the reasons in `details.body` and a hint to
+  re-run the cut. A file the definition names that never reached the builder
+  (`blob:<id>`, a model's file or a node's zip) gets a hint to delete that
+  `blobId` and push again, pointing an entry that had only the `blobId` at the
+  file (`source: local`, `localPath`) or another source it can take (a model's
+  `sourceUri`, a node's `registryVersion` or `repository`) first. A `--target`
+  the cut refuses (`targets[<n>]`, a repeated or unbuildable os/gpu pair) says the
+  builder refused the release, not the definition, and points at the `--target`
+  values and `comfy build refs build-targets`; a refusal of several kinds names
+  each fix. Under `push --release` a refused `models[<n>]` also names its model,
+  in the message and as `model` in `details.invalid`. A list too long for the
+  message stops on a whole line and ends `... and N more`, pointing at `--json`
+  (or `details.invalid`, which holds every one).
+- **Breaking:** a 429 from Cloud to `comfy run`, `comfy jobs`, `comfy workflow` or
+  `comfy assets library` now arrives as `cloud_rate_limited` instead of
+  `cloud_http_error`, and the CLI no longer retries a request that is not a read,
+  such as a job submit, on a 429, so it fails at once.
+- **Breaking:** a deploy watch that loses the deploy API ends with
+  `deploy_watch_lost` and exit code 75 instead of `deploy_server_error` and exit
+  1, since the deployment may still be coming up; the hint names the command
+  that re-attaches.
 - `comfy deploy status` prints a deployment's workers as ready, busy and
   starting, the same words on every GPU provider, in place of RunPod's own six
   states. An idle scale-to-zero deployment no longer reads as throttled. The
@@ -46,22 +83,6 @@ history.
   read or named no folder), the command prints a line saying so, and its `--json`
   payload carries `folder_case_checked: false` (`true` when the case was checked;
   absent for a spec with no models).
-- A definition the builder refuses now arrives as `build_definition_invalid`, its
-  reasons one per line and in `details.invalid` when the builder lists them (else
-  its message), instead of `build_builder_error`
-  with the code as the message, the reasons in `details.body` and a hint to
-  re-run the cut. A file the definition names that never reached the builder
-  (`blob:<id>`, a model's file or a node's zip) gets a hint to delete that
-  `blobId` and push again, pointing an entry that had only the `blobId` at the
-  file (`source: local`, `localPath`) or another source it can take (a model's
-  `sourceUri`, a node's `registryVersion` or `repository`) first. A `--target`
-  the cut refuses (`targets[<n>]`, a repeated or unbuildable os/gpu pair) says the
-  builder refused the release, not the definition, and points at the `--target`
-  values and `comfy build refs build-targets`; a refusal of several kinds names
-  each fix. Under `push --release` a refused `models[<n>]` also names its model,
-  in the message and as `model` in `details.invalid`. A list too long for the
-  message stops on a whole line and ends `... and N more`, pointing at `--json`
-  (or `details.invalid`, which holds every one).
 - The local model rules trim a value as the builder does (Go's
   `strings.TrimSpace`, which keeps `\x1c`-`\x1f`), so a `sha256` or `filename`
   holding one is refused locally as the builder would refuse it. A refused entry
@@ -78,9 +99,7 @@ history.
   one 503 or dropped connection from the deploy API, as happened each time it
   rolled out a new version, for a deployment that went on to ready. The watch
   retries a 5xx or a failed connection for about a minute, saying once that it is
-  retrying; a 4xx still ends it at once. If the API stays down it ends with
-  `deploy_watch_lost` and exit code 75, not 1, since the deployment may still be
-  coming up, and the hint names the command that re-attaches.
+  retrying; a 4xx still ends it at once.
 - `comfy deploy run` refuses a workflow bigger than the 10 MB a deployment
   accepts before sending the job request, with `deploy_workflow_too_large`,
   whose message names the request's size and the limit
@@ -93,6 +112,16 @@ history.
 - `deploy_job_submit_unknown` no longer says the API has no job list. It says
   the CLI cannot look the job up, and `details.idempotency_key` carries the key
   the submission used.
+- `comfy assets library ensure` accepts a hash written as a file name,
+  `<hex>.<ext>`, by sending it as `blake3:<hex>`, and a mangled hash it cannot
+  find names up to three stored hashes it may be a copy of.
+- `comfy generate` names the model to retry with when it refuses a workflow's
+  model (`emit_workflow_unsupported_model`).
+- `comfy workflow add-node Note` and a widget edit on a Note point at
+  `comfy workflow insert-workflow` instead of ending with no next step.
+- Converting a workflow to an API prompt reserves a seed's companion slot only
+  where the ComfyUI frontend adds one, so widget values line up with the
+  frontend's.
 
 ## [1.21.0] - 2026-09-24
 
@@ -123,19 +152,6 @@ history.
   download, from the deploy service's estimate. Under `--json` it is `estimate`
   in the output. A service that gives no estimate, or has it switched off,
   changes nothing and prints nothing.
-- `comfy workflow set-node-field FILE NODE_ID FIELD VALUE` (or `--clear`) writes
-  or clears one durable node field — `title`, `mode`, `flags.collapsed` or
-  `flags.pinned` — emitting a `set_node_field` op with one LWW register per
-  `(node, field)`, so it never clobbers a concurrent widget write on the same
-  node the way an `add_node` upsert would. **Proposed, pending ratification**:
-  `set_node_field` is a candidate addition to `docs/op-vocabulary-v1.md` (§1.8 /
-  amendment v1.6), mirroring comfy-multi-player#235's merged CRDT op of the
-  same name (superseding this project's earlier, title-only `set_title`
-  proposal, which never shipped in a release).
-
-- `comfy build push` prints every warning a save returns, and `--release` cuts no
-  release while one says a deployment could not download a model link
-  (`build_release_held`); `--release-despite-warnings` cuts anyway.
 - `comfy build release delete RELEASE` deletes the named release, freeing the slot
   it held against the workspace's release limit. It confirms first (`--yes` skips
   the prompt, `build_release_delete_needs_confirm` refuses a caller that cannot
@@ -727,7 +743,8 @@ from the terminal. Additive and backward-compatible for interactive use.
 [releases page](https://github.com/Comfy-Org/comfy-cli/releases) with
 auto-generated pull-request lists.
 
-[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.21.0...HEAD
+[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.22.0...HEAD
+[1.22.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.21.0...v1.22.0
 [1.21.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.20.0...v1.21.0
 [1.20.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.19.0...v1.20.0
 [1.19.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.18.0...v1.19.0
