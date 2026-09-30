@@ -145,16 +145,17 @@ def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | Non
     and the exit code stays 1. Pretty mode is left exactly as it was.
     """
     try:
+        active_ctx = click.get_current_context(silent=True) or ctx
         renderer = get_renderer()
         if not renderer.is_json():
             # The root callback installs the renderer, so a crash in it (or
             # before it) still sees the pretty default. The root flags did
             # parse, so decide the mode from them. No version lookup: that
             # lookup is one of the things that can have crashed.
-            renderer = Renderer.resolve(command=_command_path(ctx), **_output_flags(ctx))
+            renderer = Renderer.resolve(command=_command_path(active_ctx), **_output_flags(ctx))
         if not renderer.is_json() or renderer._envelope_emitted:
             return
-        command = getattr(renderer, "command", None) or _command_path(ctx)
+        command = getattr(renderer, "command", None) or _command_path(active_ctx) or ""
         renderer.error(
             code="internal_error",
             message=_internal_error_message(error),
@@ -199,11 +200,26 @@ _SECRET_PATTERNS = (
     ),
     (
         re.compile(
-            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password)"
-            r"[\"']?\s*[:=]\s*[\"']?)(?!Bearer\b)[^\s&\"',;]+",
+            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|session(?:[_-]?(?:id|key))?|sid|sig|signature)"
+            r"[\"']?\s*[:=]\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\s&\"',;]+)",
             re.IGNORECASE,
         ),
-        r"\1***",
+        lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
+    ),
+    (
+        re.compile(
+            r"(\\[\"'](?:(?:proxy-)?authorization|api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password)"
+            r"\\[\"']\s*[:=]\s*\\[\"'])(.*?)(\\[\"'](?=\s*(?:,|[}\]])))",
+            re.IGNORECASE,
+        ),
+        r"\1***\3",
+    ),
+    (
+        re.compile(
+            r"((?:set-)?cookie[\"']?\s*:\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n]+)",
+            re.IGNORECASE,
+        ),
+        lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
     ),
     (re.compile(r"(://)[^\s/@'\"]+@"), r"\1***@"),
 )

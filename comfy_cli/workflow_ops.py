@@ -2805,11 +2805,14 @@ def _other_option_widget_error(
         # under a `model` option without it). "Set model.mode first" would
         # send the caller on a write that fails too, so keep the plain refusal.
         return None
-    current = None
+    absent = object()
+    current: Any = absent
     if widgets_values is not None:
         idx = order.index(selector)
         if idx < len(widgets_values):
             current = widgets_values[idx]
+    if current is absent:
+        current = graph.widget_defaults(class_type).get(selector)
     options = " or ".join(repr(k) for k in keys)
     addr = f"{node_id}.{selector}" if node_id is not None else selector
     return ValueError(
