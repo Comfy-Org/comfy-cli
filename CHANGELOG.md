@@ -15,6 +15,16 @@ history.
 
 ## [Unreleased]
 
+### Fixed
+
+- A cloud submit the account's plan does not allow (the server's HTTP 429 with a
+  typed body: free generations used up, subscription required, a partner node or
+  model that needs a paid plan) is now `cloud_payment_required`, carrying the
+  server's message in `message` and its refusal type in `details.reason`,
+  instead of `cloud_rate_limited`, whose "wait, then retry" hint could never
+  succeed. A full queue (`QUEUE_LIMIT`) and a temporarily unavailable free tier
+  stay `cloud_rate_limited`.
+
 ## [1.22.0] - 2026-09-30
 
 [Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.22.0) · 15 commits since v1.21.0. Breaking changes are marked **Breaking** under Changed.

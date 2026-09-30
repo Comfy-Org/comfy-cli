@@ -244,3 +244,77 @@ def test_registry_scopes_cloud_rate_limited_to_cloud():
     hint = rate_limited.hint.lower()
     assert "unchanged" not in hint
     assert "comfy jobs ls" in hint
+
+
+# A 429 from the cloud submit endpoint is not always throttling: the server also
+# answers 429 when the account's plan does not allow the run, with a typed body
+# ({"error": {"type": ..., "message": ...}}). Reporting that as
+# `cloud_rate_limited` ("wait, then retry") sends an agent into retries that can
+# never succeed; it gets its own non-retryable code carrying the server's message.
+
+
+def _emit_submit_429(body: str):
+    from comfy_cli.command._cloud_errors import emit_status_error
+
+    renderer = _FakeRenderer()
+    emit_status_error(
+        renderer,
+        status=429,
+        retry_after=None,
+        operation="submit",
+        message="Cloud server rejected the workflow (HTTP 429): Too Many Requests",
+        hint="check the workflow is valid",
+        details={"status": 429, "body": body},
+        rate_limited_next_step="check `comfy jobs ls --where cloud` for this job before re-running",
+    )
+    return renderer.calls[0]
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        "FREE_TIER_EXHAUSTED",
+        "FREE_TIER_NOT_ALLOWED",
+        "PAYMENT_REQUIRED",
+        "CLOUD_SUBSCRIPTION_REQUIRED",
+        "PARTNER_NODE_PAYMENT_REQUIRED",
+        "MODEL_PAYMENT_REQUIRED",
+    ],
+)
+def test_429_plan_refusal_is_cloud_payment_required(error_type: str):
+    server_message = "A cloud subscription is required to queue workflows."
+    call = _emit_submit_429(f'{{"error":{{"type":"{error_type}","message":"{server_message}"}}}}')
+
+    assert call["code"] == "cloud_payment_required"
+    assert server_message in call["message"]
+    assert call["details"]["reason"] == error_type
+    assert call["details"]["status"] == 429
+    assert server_message in call["details"]["body"]
+    hint = call["hint"].lower()
+    assert "retry" in hint and "not" in hint, "the hint must say retrying will not help"
+    assert "comfy jobs ls" not in hint, "a refused submit queued nothing, so there is no job to look for"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"error":{"type":"QUEUE_LIMIT","message":"Maximum queued jobs limit reached (10 jobs in this workspace)"}}',
+        '{"error":{"type":"FREE_TIER_UNAVAILABLE","message":"Free-tier is temporarily unavailable. Please try again shortly."}}',
+        '{"error":"slow down"}',
+        "not json at all",
+        "",
+    ],
+)
+def test_other_429_bodies_stay_cloud_rate_limited(body: str):
+    call = _emit_submit_429(body)
+    assert call["code"] == "cloud_rate_limited"
+    assert "comfy jobs ls" in call["hint"]
+
+
+def test_registry_lists_cloud_payment_required():
+    from comfy_cli import error_codes
+
+    by_code = {c.code: c for c in error_codes.REGISTRY}
+    entry = by_code["cloud_payment_required"]
+    assert "429" in entry.meaning
+    assert "retry" in entry.hint.lower()

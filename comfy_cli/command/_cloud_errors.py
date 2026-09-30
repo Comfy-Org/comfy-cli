@@ -20,6 +20,7 @@ with their own vocabulary.
 
 from __future__ import annotations
 
+import json
 import urllib.error
 
 import typer
@@ -68,6 +69,51 @@ _DEFAULT_RATE_LIMITED_NEXT_STEP = (
 )
 
 
+# The cloud submit endpoint also answers 429 when the account's plan does not
+# allow the run, with a typed JSON body ({"error": {"type": ..., "message":
+# ...}}). That is a refusal, not throttling: waiting and retrying cannot change
+# it. QUEUE_LIMIT (the workspace's queue is full) and FREE_TIER_UNAVAILABLE
+# (temporarily off) are genuinely transient and stay ``cloud_rate_limited``.
+_PLAN_REFUSAL_TYPES = frozenset(
+    {
+        "FREE_TIER_EXHAUSTED",
+        "FREE_TIER_NOT_ALLOWED",
+        "PAYMENT_REQUIRED",
+        "CLOUD_SUBSCRIPTION_REQUIRED",
+        "PARTNER_NODE_PAYMENT_REQUIRED",
+        "MODEL_PAYMENT_REQUIRED",
+    }
+)
+
+
+def _plan_refusal(details: dict) -> tuple[str, str] | None:
+    """``(type, server message)`` when a 429 body is a plan refusal, else ``None``."""
+    body = details.get("body")
+    if not isinstance(body, str) or not body.strip():
+        return None
+    try:
+        err = json.loads(body).get("error")
+    except (ValueError, AttributeError):
+        return None
+    if not isinstance(err, dict) or err.get("type") not in _PLAN_REFUSAL_TYPES:
+        return None
+    message = err.get("message")
+    return err["type"], message if isinstance(message, str) and message else "the account's plan does not allow this"
+
+
+def payment_required_error(operation: str, reason: str, server_message: str, details: dict) -> dict:
+    """The ``cloud_payment_required`` envelope fields for a plan refusal the server sent as 429."""
+    return {
+        "code": "cloud_payment_required",
+        "message": f"Comfy Cloud refused the {operation} (HTTP 429, {reason}): {server_message}",
+        "hint": (
+            "this is not throttling, so retrying will not help and nothing was queued: tell the user the "
+            "server's message; running this needs a plan that allows it"
+        ),
+        "details": {**details, "status": 429, "reason": reason},
+    }
+
+
 def emit_status_error(
     renderer,
     *,
@@ -81,7 +127,10 @@ def emit_status_error(
 ) -> None:
     """Emit the envelope for a cloud HTTP status that has no caller-specific code.
 
-    A 429 is throttling, which says nothing about whether the request is valid,
+    A 429 whose body is a plan refusal (``_PLAN_REFUSAL_TYPES``) is not
+    throttling: it gets the non-retryable ``cloud_payment_required`` with the
+    server's message. Any other 429 is throttling, which says nothing about
+    whether the request is valid,
     so the generic ``cloud_http_error`` (whose callers' hints say "check the
     workflow is valid", "check `details.body`") would send an agent off to
     rewrite a request that may be fine. It gets ``cloud_rate_limited`` and a
@@ -94,6 +143,10 @@ def emit_status_error(
     """
     if status != 429:
         renderer.error(code="cloud_http_error", message=message, hint=hint, details=details)
+        return
+    refusal = _plan_refusal(details)
+    if refusal is not None:
+        renderer.error(**payment_required_error(operation, *refusal, details))
         return
     renderer.error(**rate_limited_error(operation, retry_after, details, next_step=rate_limited_next_step))
 
