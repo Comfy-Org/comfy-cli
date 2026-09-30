@@ -206,7 +206,14 @@ _SECRET_PATTERNS = (
         ),
         lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
     ),
-    (re.compile(r"(\\[\"'](?:proxy-)?authorization\\[\"']\s*[:=]\s*)[^\r\n]+", re.IGNORECASE), r"\1***"),
+    (
+        re.compile(
+            r"(\\[\"'](?:(?:proxy-)?authorization|api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password)"
+            r"\\[\"']\s*[:=]\s*\\[\"'])(.*?)(\\[\"'](?=\s*(?:,|[}\]])))",
+            re.IGNORECASE,
+        ),
+        r"\1***\3",
+    ),
     (
         re.compile(
             r"((?:set-)?cookie[\"']?\s*:\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n]+)",
