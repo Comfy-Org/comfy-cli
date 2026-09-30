@@ -95,7 +95,9 @@ def _plan_refusal(details: dict) -> tuple[str, str] | None:
         err = json.loads(body).get("error")
     except (ValueError, AttributeError):
         return None
-    if not isinstance(err, dict) or err.get("type") not in _PLAN_REFUSAL_TYPES:
+    # A malformed body must fall back to cloud_rate_limited, not raise: an
+    # unhashable `type` ([] or {}) cannot be tested for set membership.
+    if not isinstance(err, dict) or not isinstance(err.get("type"), str) or err["type"] not in _PLAN_REFUSAL_TYPES:
         return None
     message = err.get("message")
     return err["type"], message if isinstance(message, str) and message else "the account's plan does not allow this"
