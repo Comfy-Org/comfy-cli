@@ -174,8 +174,6 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
     for n in nodes:
         t = n.get("type")
         extra = n.get("extra")
-        if "inputs" in n and n.get("inputs") is not None and not isinstance(n.get("inputs"), list):
-            reasons.append(f"node {n.get('id')} has a non-list inputs value")
         is_legacy_group = (isinstance(t, str) and (t.startswith("workflow>") or t.startswith("workflow/"))) or (
             isinstance(extra, dict) and extra.get("groupNodes")
         )
