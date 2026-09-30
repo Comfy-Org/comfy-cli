@@ -155,7 +155,7 @@ def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | Non
             renderer = Renderer.resolve(command=_command_path(active_ctx), **_output_flags(ctx))
         if not renderer.is_json() or renderer._envelope_emitted:
             return
-        command = _command_path(active_ctx) or getattr(renderer, "command", None) or ""
+        command = getattr(renderer, "command", None) or _command_path(active_ctx) or ""
         renderer.error(
             code="internal_error",
             message=_internal_error_message(error),
