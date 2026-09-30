@@ -565,11 +565,12 @@ def _model_name_hint(name: str) -> str | None:
             if not isinstance(resolved, dict):
                 continue
             prop = None
+            values = None
             for field in ("model", "model_name", "model_id"):
                 prop = _find_property(resolved, field)
-                if prop:
+                values = _extract_enum(prop) if prop else None
+                if values:
                     break
-            values = _extract_enum(prop) if prop else None
         except (KeyError, TypeError, SpecError):
             continue
         matched = [v for v in values or [] if v.lower().startswith(lowered)]
