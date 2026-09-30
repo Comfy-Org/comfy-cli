@@ -697,7 +697,7 @@ def ls_nodes_cmd(
         if isinstance(node_type, str):
             if node_type in workflow_ops.UI_ONLY_NODE_TYPES:
                 row["ui_only"] = True
-            elif node_type in subgraph_ids:
+            elif node_type in subgraph_ids or workflow_ops._UUID_RE.match(node_type):
                 row["subgraph"] = True
         rows.append(row)
     payload = {"workflow": str(p), "count": len(rows), "nodes": rows}
