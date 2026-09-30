@@ -256,11 +256,11 @@ def _stale_input_slot_links(
     input_holders_by_node: dict[str, dict[str, dict]] = {}
     for node in nodes:
         inputs = node.get("inputs")
-        input_holders_by_node[str(node.get("id"))] = {
-            str(inp["link"]): inp
-            for inp in (inputs if isinstance(inputs, list) else [])
-            if isinstance(inp, dict) and inp.get("link") is not None
-        }
+        holders: dict[str, dict] = {}
+        for inp in inputs if isinstance(inputs, list) else []:
+            if isinstance(inp, dict) and inp.get("link") is not None:
+                holders.setdefault(str(inp["link"]), inp)
+        input_holders_by_node[str(node.get("id"))] = holders
     for link in links:
         link_id, src_id, tgt_id, tgt_slot = link[0], link[1], link[3], link[4]
         tgt_node = nodes_by_id.get(str(tgt_id))
