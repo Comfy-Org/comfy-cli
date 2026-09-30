@@ -193,11 +193,6 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
             seen_ids.add(nid)
 
     nodes_by_id = {str(n.get("id")): n for n in nodes}
-    holder_nodes: dict[str, set[str]] = {}
-    for node in nodes:
-        for inp in node.get("inputs") if isinstance(node.get("inputs"), list) else []:
-            if isinstance(inp, dict) and inp.get("link") is not None:
-                holder_nodes.setdefault(str(inp["link"]), set()).add(str(node.get("id")))
     seen_link_ids: set[str] = set()
     reported_link_dupes: set[str] = set()
     for link in links:
@@ -219,12 +214,6 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
         tgt_node = nodes_by_id.get(str(tgt_id))
         if tgt_node is None:
             reasons.append(f"link {link_id} references missing node {tgt_id}")
-            continue
-        other_holders = holder_nodes.get(str(link_id), set()) - {str(tgt_id)}
-        if other_holders:
-            reasons.append(
-                f"link {link_id} targets node {tgt_id} but is held by input on node(s) {', '.join(sorted(other_holders))}"
-            )
             continue
         # Slots index into outputs/inputs below and into widgets_values later;
         # a None or "0" would raise a TypeError deep in the render instead of
