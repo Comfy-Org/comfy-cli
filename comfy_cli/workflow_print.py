@@ -243,7 +243,7 @@ def _normalise_node_inputs(nodes: list[dict], warnings: list[str], qualify: Any 
 
 def _stale_input_slot_links(
     nodes: list[dict], links: list[list], qualify: Any = str, proxy_input_id: str | None = None
-) -> tuple[list[str], set[str]]:
+) -> tuple[list[str], set[str], dict[str, tuple[Any, int]]]:
     """Links whose target input slot the node does not have, as
     ``(warnings, ignored_link_ids)``. Run only after ``_validate`` passed, so
     every link row is well-formed and both endpoints exist.
@@ -264,14 +264,17 @@ def _stale_input_slot_links(
     """
     warnings: list[str] = []
     ignored: set[str] = set()
+    retargeted: dict[str, tuple[Any, int]] = {}
     nodes_by_id = {str(n.get("id")): n for n in nodes}
     input_holders_by_node: dict[str, dict[str, dict]] = {}
+    holders_by_link: dict[str, list[tuple[Any, int, dict]]] = {}
     for node in nodes:
         inputs = node.get("inputs")
         holders: dict[str, dict] = {}
-        for inp in inputs if isinstance(inputs, list) else []:
+        for slot, inp in enumerate(inputs if isinstance(inputs, list) else []):
             if isinstance(inp, dict) and inp.get("link") is not None:
                 holders.setdefault(str(inp["link"]), inp)
+                holders_by_link.setdefault(str(inp["link"]), []).append((node.get("id"), slot, inp))
         input_holders_by_node[str(node.get("id"))] = holders
     for link in links:
         link_id, src_id, tgt_id, tgt_slot = link[0], link[1], link[3], link[4]
@@ -285,18 +288,26 @@ def _stale_input_slot_links(
         if 0 <= tgt_slot < len(inputs):
             continue
         holder = input_holders_by_node[str(tgt_id)].get(str(link_id))
+        holder_location = next(iter(holders_by_link.get(str(link_id), [])), None)
         where = (
             f"link {link_id} targets input slot {tgt_slot} on node {qualify(tgt_id)}, which has {len(inputs)} inputs"
         )
         if holder is not None:
             warnings.append(f"{where}; rendered through input {str(holder.get('name') or '')!r}, which holds it")
+        elif holder_location is not None:
+            holder_id, holder_slot, holder = holder_location
+            retargeted[str(link_id)] = (holder_id, holder_slot)
+            warnings.append(
+                f"{where}; rendered through input {str(holder.get('name') or '')!r} on node {qualify(holder_id)}, "
+                "which holds it"
+            )
         elif proxy_input_id is not None and str(src_id) == proxy_input_id:
             ignored.add(str(link_id))
             warnings.append(f"{where}; the subgraph input proxy routes by target slot, so it was ignored")
         else:
             ignored.add(str(link_id))
             warnings.append(f"{where}; no input holds it, so it feeds nothing and was ignored")
-    return warnings, ignored
+    return warnings, ignored, retargeted
 
 
 def _toposort(printable: list[dict], link_map: dict[str, tuple]) -> list[dict]:
@@ -1376,11 +1387,14 @@ def _render_definition_block(
     # proxy (which ``_validate`` does not see): a stale target slot is stale
     # whatever feeds it.
     into_interior = [[lid, oid, oslot, tid, tslot] for lid, (oid, oslot, tid, tslot) in all_links.items()]
-    stale_warnings, stale_ids = _stale_input_slot_links(
+    stale_warnings, stale_ids, retargeted = _stale_input_slot_links(
         interior_nodes, into_interior, lambda nid: f"{first_instance}/{nid}", _PROXY_IN
     )
     state.warnings.extend(stale_warnings)
     all_links = {lid: link for lid, link in all_links.items() if lid not in stale_ids}
+    all_links = {
+        lid: (oid, oslot, *retargeted.get(lid, (tid, tslot))) for lid, (oid, oslot, tid, tslot) in all_links.items()
+    }
 
     printable = [n for n in interior_nodes if n.get("type") not in _UI_ONLY]
     notes = [n for n in interior_nodes if n.get("type") in _NOTE_TYPES]
@@ -1490,7 +1504,7 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
     reasons = _validate(nodes, links)
     if reasons:
         raise PrintUnsupported(reasons)
-    stale_warnings, stale_ids = _stale_input_slot_links(nodes, links)
+    stale_warnings, stale_ids, retargeted = _stale_input_slot_links(nodes, links)
     warnings.extend(stale_warnings)
 
     link_map: dict[str, tuple] = {}
@@ -1498,7 +1512,8 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         link_id, src_id, src_slot, tgt_id, tgt_slot = link[0], link[1], link[2], link[3], link[4]
         if str(link_id) in stale_ids:
             continue
-        link_map[str(link_id)] = (src_id, src_slot, tgt_id, tgt_slot)
+        effective_target_id, effective_target_slot = retargeted.get(str(link_id), (tgt_id, tgt_slot))
+        link_map[str(link_id)] = (src_id, src_slot, effective_target_id, effective_target_slot)
 
     printable = [n for n in nodes if n.get("type") not in _UI_ONLY]
     notes = [n for n in nodes if n.get("type") in _NOTE_TYPES]
