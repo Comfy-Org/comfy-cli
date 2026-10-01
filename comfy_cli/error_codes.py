@@ -333,6 +333,15 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "check `comfy jobs ls --where cloud` so a job that did go through is not queued twice",
     ),
     ErrorCode(
+        "cloud_payment_required",
+        "Comfy Cloud only: the cloud refused the request because the account's plan does not allow it "
+        "(HTTP 402, or a legacy HTTP 429 with a plan-refusal type: free generations used up, subscription "
+        "required, a partner node or model that needs a paid plan). Not throttling and not a problem with "
+        "the workflow; nothing was queued. `details.status` is the HTTP status, `details.reason` the "
+        "server's refusal type when it sent one, and `details.body` its message.",
+        "do not retry or edit the workflow: tell the user the server's message; running it needs a plan that allows it",
+    ),
+    ErrorCode(
         "cloud_billing_unavailable",
         "`comfy cloud status` could not read `/api/billing/status`, so there is no tier or "
         "subscription state to report. Distinct from `cloud_unauthorized` (a rejected "

@@ -13,13 +13,14 @@ The 404 branch is deliberately caller-parameterized: ``workflow`` surfaces
 own message/hint. Everything else — the bounded body read, the
 401/403 → ``cloud_unauthorized`` branch, the 429 → ``cloud_rate_limited``
 branch, the generic ``cloud_http_error``, and the ``URLError``/``OSError``
-network hint — is shared. :func:`emit_status_error` is the 429-vs-generic split
+network hint — is shared. :func:`emit_status_error` is the 402/429-vs-generic split
 on its own, for callers (``run``, ``cloud_http``) that map the other statuses
 with their own vocabulary.
 """
 
 from __future__ import annotations
 
+import json
 import urllib.error
 
 import typer
@@ -68,6 +69,71 @@ _DEFAULT_RATE_LIMITED_NEXT_STEP = (
 )
 
 
+# A plan refusal (free generations used up, subscription required, a partner
+# node or model that needs a paid plan) is HTTP 402 with a typed JSON body
+# ({"error": {"type": ..., "message": ...}}). Waiting and retrying cannot change
+# it, so it is ``cloud_payment_required``, never ``cloud_rate_limited``.
+#
+# Legacy: the cloud submit endpoint used to send these refusals as 429, telling
+# them apart from throttling only by ``error.type``. Until every deployment
+# sends 402, a 429 whose type is listed here is still a refusal. QUEUE_LIMIT
+# (the workspace's queue is full) and FREE_TIER_UNAVAILABLE (temporarily off)
+# are genuine backpressure and stay ``cloud_rate_limited``. Delete this set and
+# the 429 branch in ``emit_status_error`` once the server no longer sends them.
+_LEGACY_429_PLAN_REFUSAL_TYPES = frozenset(
+    {
+        "FREE_TIER_EXHAUSTED",
+        "FREE_TIER_NOT_ALLOWED",
+        "PAYMENT_REQUIRED",
+        "CLOUD_SUBSCRIPTION_REQUIRED",
+        "PARTNER_NODE_PAYMENT_REQUIRED",
+        "MODEL_PAYMENT_REQUIRED",
+    }
+)
+
+
+def _typed_error(details: dict) -> tuple[str | None, str | None]:
+    """``(error.type, error.message)`` from a JSON error body; ``None`` for whatever is missing or malformed."""
+    body = details.get("body")
+    if not isinstance(body, str) or not body.strip():
+        return None, None
+    try:
+        err = json.loads(body).get("error")
+    except (ValueError, AttributeError):
+        return None, None
+    if not isinstance(err, dict):
+        return None, None
+    # A malformed body must degrade, not raise: an unhashable `type` ([] or {})
+    # cannot be tested for set membership.
+    type_ = err.get("type")
+    message = err.get("message")
+    return (
+        type_ if isinstance(type_, str) and type_ else None,
+        message if isinstance(message, str) and message else None,
+    )
+
+
+def payment_required_error(
+    operation: str, status: int, reason: str | None, server_message: str | None, details: dict
+) -> dict:
+    """The ``cloud_payment_required`` envelope fields for a plan refusal (402, or a legacy typed 429)."""
+    label = f"HTTP {status}, {reason}" if reason else f"HTTP {status}"
+    out_details = {**details, "status": status}
+    if reason:
+        out_details["reason"] = reason
+    return {
+        "code": "cloud_payment_required",
+        "message": (
+            f"Comfy Cloud refused the {operation} ({label}): {server_message or 'the account plan does not allow this'}"
+        ),
+        "hint": (
+            "this is not throttling, so retrying will not help and nothing was queued: tell the user the "
+            "server's message; running this needs a plan that allows it"
+        ),
+        "details": out_details,
+    }
+
+
 def emit_status_error(
     renderer,
     *,
@@ -81,8 +147,11 @@ def emit_status_error(
 ) -> None:
     """Emit the envelope for a cloud HTTP status that has no caller-specific code.
 
-    A 429 is throttling, which says nothing about whether the request is valid,
-    so the generic ``cloud_http_error`` (whose callers' hints say "check the
+    A 402 is a plan refusal: it gets the non-retryable
+    ``cloud_payment_required`` with the server's message and ``error.type``. So
+    does a 429 whose type is a legacy plan refusal
+    (``_LEGACY_429_PLAN_REFUSAL_TYPES``). Any other 429 is throttling, which
+    says nothing about whether the request is valid, so the generic ``cloud_http_error`` (whose callers' hints say "check the
     workflow is valid", "check `details.body`") would send an agent off to
     rewrite a request that may be fine. It gets ``cloud_rate_limited`` and a
     wait-then-next-step hint instead, with the server's ``Retry-After`` in
@@ -92,8 +161,15 @@ def emit_status_error(
     more (``run``'s submit: check the job list before re-running; its poll: the
     job exists, so follow it rather than re-running).
     """
+    if status == 402:
+        renderer.error(**payment_required_error(operation, 402, *_typed_error(details), details))
+        return
     if status != 429:
         renderer.error(code="cloud_http_error", message=message, hint=hint, details=details)
+        return
+    reason, server_message = _typed_error(details)
+    if reason in _LEGACY_429_PLAN_REFUSAL_TYPES:
+        renderer.error(**payment_required_error(operation, 429, reason, server_message, details))
         return
     renderer.error(**rate_limited_error(operation, retry_after, details, next_step=rate_limited_next_step))
 

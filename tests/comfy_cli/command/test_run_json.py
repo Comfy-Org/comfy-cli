@@ -2445,6 +2445,41 @@ class TestCloudRateLimited:
         assert err["code"] == "cloud_rate_limited"
         assert "retry_after" not in err["details"]
 
+    def test_submit_429_plan_refusal_is_cloud_payment_required(self, monkeypatch, workflow_file, capsys):
+        """The cloud answers a submit the account's plan does not allow with a
+        429 and a typed body. That is a refusal, not throttling: the envelope
+        says so and carries the server's message, and does not send the caller
+        to wait, retry, or look for a job that was never queued."""
+        from comfy_cli.comfy_client import HTTPError
+
+        body = '{"error":{"message":"You\'ve used all your free generations. Upgrade to keep creating.","type":"FREE_TIER_EXHAUSTED"}}'
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit_exc=HTTPError(429, "Too Many Requests", body)))
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        assert exit_code == 1
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_payment_required"
+        assert "used all your free generations" in err["message"]
+        assert err["details"]["reason"] == "FREE_TIER_EXHAUSTED"
+        assert "comfy jobs ls" not in err["hint"]
+        assert "retry" in err["hint"].lower()
+
+    def test_submit_402_is_cloud_payment_required(self, monkeypatch, workflow_file, capsys):
+        """The cloud's plan refusal on submit is a 402 with a typed body."""
+        from comfy_cli.comfy_client import HTTPError
+
+        body = '{"error":{"message":"A cloud subscription is required to queue workflows.","type":"CLOUD_SUBSCRIPTION_REQUIRED"}}'
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit_exc=HTTPError(402, "Payment Required", body)))
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        assert exit_code == 1
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_payment_required"
+        assert "subscription is required" in err["message"]
+        assert err["details"]["reason"] == "CLOUD_SUBSCRIPTION_REQUIRED"
+        assert err["details"]["status"] == 402
+        assert "comfy jobs ls" not in err["hint"]
+
     @pytest.mark.parametrize("status", [400, 500, 503])
     def test_submit_other_statuses_keep_cloud_http_error(self, monkeypatch, workflow_file, capsys, status):
         from comfy_cli.comfy_client import HTTPError

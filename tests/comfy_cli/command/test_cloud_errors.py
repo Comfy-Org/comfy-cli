@@ -244,3 +244,104 @@ def test_registry_scopes_cloud_rate_limited_to_cloud():
     hint = rate_limited.hint.lower()
     assert "unchanged" not in hint
     assert "comfy jobs ls" in hint
+
+
+# A plan refusal (the account's plan does not allow the run) is HTTP 402 with a
+# typed body ({"error": {"type": ..., "message": ...}}). The cloud submit
+# endpoint used to send the same refusals as 429, told apart from throttling
+# only by the type. Reporting either as `cloud_rate_limited` ("wait, then
+# retry") sends an agent into retries that can never succeed; both get their own
+# non-retryable code carrying the server's message.
+
+
+def _emit_submit(body: str, status: int = 429):
+    from comfy_cli.command._cloud_errors import emit_status_error
+
+    renderer = _FakeRenderer()
+    emit_status_error(
+        renderer,
+        status=status,
+        retry_after=None,
+        operation="submit",
+        message=f"Cloud server rejected the workflow (HTTP {status}): Too Many Requests",
+        hint="check the workflow is valid",
+        details={"status": status, "body": body},
+        rate_limited_next_step="check `comfy jobs ls --where cloud` for this job before re-running",
+    )
+    return renderer.calls[0]
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        "FREE_TIER_EXHAUSTED",
+        "FREE_TIER_NOT_ALLOWED",
+        "PAYMENT_REQUIRED",
+        "CLOUD_SUBSCRIPTION_REQUIRED",
+        "PARTNER_NODE_PAYMENT_REQUIRED",
+        "MODEL_PAYMENT_REQUIRED",
+    ],
+)
+def test_429_plan_refusal_is_cloud_payment_required(error_type: str):
+    server_message = "A cloud subscription is required to queue workflows."
+    call = _emit_submit(f'{{"error":{{"type":"{error_type}","message":"{server_message}"}}}}')
+
+    assert call["code"] == "cloud_payment_required"
+    assert server_message in call["message"]
+    assert call["details"]["reason"] == error_type
+    assert call["details"]["status"] == 429
+    assert server_message in call["details"]["body"]
+    hint = call["hint"].lower()
+    assert "retry" in hint and "not" in hint, "the hint must say retrying will not help"
+    assert "comfy jobs ls" not in hint, "a refused submit queued nothing, so there is no job to look for"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"error":{"type":"QUEUE_LIMIT","message":"Maximum queued jobs limit reached (10 jobs in this workspace)"}}',
+        '{"error":{"type":"FREE_TIER_UNAVAILABLE","message":"Free-tier is temporarily unavailable. Please try again shortly."}}',
+        '{"error":"slow down"}',
+        '{"error":{"type":[]}}',
+        '{"error":{"type":{"nested":"CLOUD_SUBSCRIPTION_REQUIRED"}}}',
+        '["error"]',
+        "not json at all",
+        "",
+    ],
+)
+def test_other_429_bodies_stay_cloud_rate_limited(body: str):
+    call = _emit_submit(body)
+    assert call["code"] == "cloud_rate_limited"
+    assert "comfy jobs ls" in call["hint"]
+
+
+@pytest.mark.parametrize("error_type", ["FREE_TIER_EXHAUSTED", "CLOUD_SUBSCRIPTION_REQUIRED", "SOME_FUTURE_TYPE"])
+def test_402_is_cloud_payment_required_whatever_the_type(error_type: str):
+    server_message = "You've used all your free generations. Upgrade to keep creating."
+    call = _emit_submit(f'{{"error":{{"type":"{error_type}","message":"{server_message}"}}}}', status=402)
+
+    assert call["code"] == "cloud_payment_required"
+    assert server_message in call["message"]
+    assert "HTTP 402" in call["message"]
+    assert call["details"]["status"] == 402
+    assert call["details"]["reason"] == error_type
+    assert "comfy jobs ls" not in call["hint"]
+
+
+@pytest.mark.parametrize("body", ["", "not json at all", '{"error":"no credits"}', '{"error":{"type":[]}}'])
+def test_402_without_a_typed_body_is_still_cloud_payment_required(body: str):
+    call = _emit_submit(body, status=402)
+
+    assert call["code"] == "cloud_payment_required"
+    assert call["details"]["status"] == 402
+    assert "reason" not in call["details"]
+    assert "HTTP 402" in call["message"]
+
+
+def test_registry_lists_cloud_payment_required():
+    from comfy_cli import error_codes
+
+    by_code = {c.code: c for c in error_codes.REGISTRY}
+    entry = by_code["cloud_payment_required"]
+    assert "429" in entry.meaning
+    assert "retry" in entry.hint.lower()
