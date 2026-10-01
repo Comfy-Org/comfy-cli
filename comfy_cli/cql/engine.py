@@ -125,7 +125,9 @@ def enum_option_fields(options: list, closest: list | None = None) -> dict[str, 
     return out
 
 
-def enum_listing_hint(field: str, options: list, suggestions: list, class_type: str | None = None) -> str:
+def enum_listing_hint(
+    field: str, options: list, suggestions: list, class_type: str | None = None, *, listing: str = "choices"
+) -> str:
     """The hint of an enum finding. A short list is named whole; a long one
     is pointed at — the closest options are already in ``suggestions`` — with
     the way to filter the rest instead of dumping it."""
@@ -133,9 +135,9 @@ def enum_listing_hint(field: str, options: list, suggestions: list, class_type: 
     if n <= ENUM_INLINE_MAX or _FULL_ENUM_OPTIONS.get():
         return f"valid options: {', '.join(str(v) for v in options)}"
     target = class_type or "<class>"
-    query = f'inputs.#(name=="{field}").choices.#(%"*<text>*")#'
+    query = f'inputs.#(name=="{field}").{listing}.#(%"*<text>*")#'
     return (
-        f"pick one of `suggestions` (the closest of {n} options); to search all {n}, filter them with "
+        f"pick one of `suggestions` ({len(suggestions)} of {n} options); to search all {n}, filter them with "
         f"`comfy nodes show {target} --select '{query}'`, or re-run validate with --full-options"
     )
 
@@ -2906,7 +2908,7 @@ def _check_dynamic_combo_input(
             # couldn't be read instead of dangling an empty enumeration.
             hint = (
                 f"set {name!r} to one of its options — "
-                + enum_listing_hint(name, keys, keys[:ENUM_SUGGEST_MAX], class_type)
+                + enum_listing_hint(name, keys, keys[:ENUM_SUGGEST_MAX], class_type, listing="selection_keys")
                 if keys
                 else f"{name!r} is required, but its option schema didn't parse — check object_info for this node"
             )
@@ -2973,7 +2975,11 @@ def _check_dynamic_combo_input(
                     f"cannot be resolved, so this node fails at execution"
                 ),
                 "hint": enum_listing_hint(
-                    name, keys, _closest_options(selected, keys) or keys[:ENUM_SUGGEST_MAX], class_type
+                    name,
+                    keys,
+                    _closest_options(selected, keys) or keys[:ENUM_SUGGEST_MAX],
+                    class_type,
+                    listing="selection_keys",
                 ),
                 **enum_option_fields(keys, _closest_options(selected, keys)),
             }
