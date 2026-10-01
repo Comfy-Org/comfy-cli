@@ -159,6 +159,23 @@ def _is_slot_index(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _dedupe_identical_links(links: list[Any]) -> list[Any]:
+    """Drop byte-for-byte-equivalent link rows while retaining conflicting duplicates."""
+    seen: dict[str, tuple[tuple[type, str], ...]] = {}
+    out: list[Any] = []
+    for link in links:
+        if not isinstance(link, list) or not link:
+            out.append(link)
+            continue
+        link_id = str(link[0])
+        typed_row = tuple((type(value), repr(value)) for value in link)
+        if seen.get(link_id) == typed_row:
+            continue
+        seen.setdefault(link_id, typed_row)
+        out.append(link)
+    return out
+
+
 def _validate(nodes: list[dict], links: list[list]) -> list[str]:
     """Structural checks that must hold before any ordering/printing work starts.
     Collects every problem found (rather than stopping at the first) so the
@@ -1561,7 +1578,7 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
     if len(nodes) != len(raw_nodes):
         warnings.append(f"workflow: ignoring {len(raw_nodes) - len(nodes)} non-object node entries")
 
-    links = workflow.get("links") or []
+    links = _dedupe_identical_links(workflow.get("links") or [])
 
     definitions = workflow.get("definitions")
     promoted_workflow = workflow
