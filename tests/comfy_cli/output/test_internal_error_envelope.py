@@ -256,7 +256,7 @@ def test_internal_error_scrubber_preserves_ordinary_identifier_diagnostics():
 
 
 def test_internal_error_scrubber_marks_truncated_messages():
-    message = "x" * 480 + " https://alice:password@example.com/" + "y" * 100
+    message = "x" * 380 + " https://alice:password@example.com/" + "y" * 200
     scrubbed = _internal_error_message(RuntimeError(message))
     assert "password" not in scrubbed
     assert scrubbed.endswith("…")
