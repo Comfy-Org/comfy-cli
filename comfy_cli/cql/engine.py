@@ -1676,8 +1676,9 @@ class Graph:
                     key = option.get("key")
                     if key is None:
                         continue
+                    sub_ports = _dynamic_combo_sub_ports(port.dynamic_options, key, entry.name)
                     options[str(key)] = {
-                        "widgets": [p.name for p in _dynamic_combo_sub_ports(port.dynamic_options, key, entry.name)]
+                        "widgets": [sub_port.name for sub_port in sub_ports if not sub_port.is_link]
                     }
                 combos[entry.name] = {"options": options}
         for selector, spec in combos.items():
