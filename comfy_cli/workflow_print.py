@@ -216,7 +216,7 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
             continue
         link_id, src_id, src_slot, tgt_id, tgt_slot = link[0], link[1], link[2], link[3], link[4]
         if link_id is None:
-            reasons.append("link has null id")
+            reasons.append(f"link has null id: {link!r}")
             continue
         normalized_link_id = str(link_id)
         if normalized_link_id in seen_links:
@@ -1244,7 +1244,7 @@ def _promoted_header_line(def_id: str, sg_def: dict, state: _State) -> str | Non
     )
 
 
-def _def_links(sg_def: dict, duplicate_ids: list[str]) -> dict[str, tuple]:
+def _def_links(sg_def: dict, link_errors: list[str]) -> dict[str, tuple]:
     """Normalise a definition's dict-shaped links into the array-tuple form
     used everywhere else: ``{str(link_id): (origin_id, origin_slot, target_id, target_slot)}``."""
     out: dict[str, tuple] = {}
@@ -1253,10 +1253,12 @@ def _def_links(sg_def: dict, duplicate_ids: list[str]) -> dict[str, tuple]:
             continue
         lid = link.get("id")
         if lid is None:
+            link_errors.append(f"link has null id: {link!r}")
             continue
         row = (link.get("origin_id"), link.get("origin_slot"), link.get("target_id"), link.get("target_slot"))
-        if str(lid) in out and out[str(lid)] != row and str(lid) not in duplicate_ids:
-            duplicate_ids.append(str(lid))
+        duplicate_error = f"duplicate link id {lid}"
+        if str(lid) in out and out[str(lid)] != row and duplicate_error not in link_errors:
+            link_errors.append(duplicate_error)
         out[str(lid)] = row
     return out
 
@@ -1426,8 +1428,8 @@ def _render_definition_block(
         lambda nid: f"{first_instance}/{nid}",
     )
     interior_nodes = _normalise_node_outputs(interior_nodes, state.warnings, lambda nid: f"{first_instance}/{nid}")
-    duplicate_link_ids: list[str] = []
-    all_links = _def_links(sg_def, duplicate_link_ids)
+    link_errors: list[str] = []
+    all_links = _def_links(sg_def, link_errors)
 
     validate_links: list[list] = []
     boundary_reasons: list[str] = []
@@ -1459,7 +1461,7 @@ def _render_definition_block(
             continue
         validate_links.append([lid, oid, oslot, tid, tslot])
 
-    reasons = [f"subgraph {def_id}: duplicate link id {lid}" for lid in duplicate_link_ids]
+    reasons = [f"subgraph {def_id}: {error}" for error in link_errors]
     reasons.extend(boundary_reasons)
     reasons.extend(_validate(interior_nodes, validate_links))
     if reasons:
