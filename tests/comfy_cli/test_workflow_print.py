@@ -1114,7 +1114,7 @@ def test_definition_inputs_are_normalized_before_promoted_lookup(sd15_graph):
     wf = _mini([_node(10, subgraph_id)], [])
     wf["definitions"] = {"subgraphs": [definition]}
     res = render_py(wf, sd15_graph)
-    assert "node 22222222-3333-4444-5555-666666666666/7 has non-list inputs; treated as empty" in res.warnings
+    assert "node 10/7 has non-list inputs; treated as empty" in res.warnings
 
 
 def test_link_row_is_retargeted_to_the_input_that_holds_it(sd15_graph):
