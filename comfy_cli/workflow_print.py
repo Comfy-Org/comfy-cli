@@ -232,25 +232,27 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
     return reasons
 
 
-def _normalise_node_inputs(nodes: list[dict], warnings: list[str], qualify: Any = str) -> list[dict]:
+def _normalise_node_inputs(nodes: list[dict], warnings: list[str] | None, qualify: Any = str) -> list[dict]:
     """Treat malformed input containers as empty without mutating the workflow."""
     normalised: list[dict] = []
     for node in nodes:
         inputs = node.get("inputs")
         if inputs is not None and not isinstance(inputs, list):
-            warnings.append(f"node {qualify(node.get('id'))} has non-list inputs; treated as empty")
+            if warnings is not None:
+                warnings.append(f"node {qualify(node.get('id'))} has non-list inputs; treated as empty")
             node = {**node, "inputs": []}
         normalised.append(node)
     return normalised
 
 
-def _normalise_node_outputs(nodes: list[dict], warnings: list[str], qualify: Any = str) -> list[dict]:
+def _normalise_node_outputs(nodes: list[dict], warnings: list[str] | None, qualify: Any = str) -> list[dict]:
     """Treat malformed output containers as empty without mutating the workflow."""
     normalised: list[dict] = []
     for node in nodes:
         outputs = node.get("outputs")
         if outputs is not None and not isinstance(outputs, list):
-            warnings.append(f"node {qualify(node.get('id'))} has non-list outputs; treated as empty")
+            if warnings is not None:
+                warnings.append(f"node {qualify(node.get('id'))} has non-list outputs; treated as empty")
             node = {**node, "outputs": []}
         normalised.append(node)
     return normalised
@@ -1571,12 +1573,9 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
                 raw_interior = []
             interior = _normalise_node_inputs(
                 [node for node in raw_interior if isinstance(node, dict)],
-                warnings,
-                lambda node_id, sg_id=subgraph.get("id"): f"{sg_id}/{node_id}",
+                None,
             )
-            interior = _normalise_node_outputs(
-                interior, warnings, lambda node_id, sg_id=subgraph.get("id"): f"{sg_id}/{node_id}"
-            )
+            interior = _normalise_node_outputs(interior, None)
             normalised_subgraphs.append({**subgraph, "nodes": interior})
         subgraphs = normalised_subgraphs
         definitions = {**definitions, "subgraphs": subgraphs}
