@@ -212,7 +212,7 @@ _SECRET_PATTERNS = (
     ),
     (
         re.compile(
-            rf"(\\[\"'](?:{_SECRET_KEY_PATTERN})"
+            rf"(\\[\"'](?:{_SECRET_KEY_PATTERN})[\w-]*"
             r"\\[\"']\s*[:=]\s*\\[\"'])(.*?)(\\[\"']|$)",
             re.IGNORECASE,
         ),
