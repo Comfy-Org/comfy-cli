@@ -178,6 +178,10 @@ def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | Non
 #: (scheme and credential together), `key=value` / `key: value` token pairs,
 #: and `user:pass@` userinfo.
 _INTERNAL_ERROR_MESSAGE_CAP = 500
+_SECRET_KEY_PATTERN = (
+    r"(?:proxy-)?authorization|api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|"
+    r"session(?:[_-]?(?:id|key))?|sid|sig|signature|(?:set-)?cookie"
+)
 _SECRET_PATTERNS = (
     (re.compile(r"(https?://[^\s?#'\"]+)\?[^\s'\"]*", re.IGNORECASE), r"\1?***"),
     (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]+", re.IGNORECASE), r"\1***"),
@@ -208,7 +212,7 @@ _SECRET_PATTERNS = (
     ),
     (
         re.compile(
-            r"(\\[\"'](?:(?:proxy-)?authorization|api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password)"
+            rf"(\\[\"'](?:{_SECRET_KEY_PATTERN})"
             r"\\[\"']\s*[:=]\s*\\[\"'])(.*?)(\\[\"'](?=\s*(?:,|[}\]])))",
             re.IGNORECASE,
         ),
