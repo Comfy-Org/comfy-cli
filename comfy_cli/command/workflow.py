@@ -1591,6 +1591,7 @@ def validate_api_workflow(
     port: int | None = None,
     input_path: str | None = None,
     command: str = "workflow validate",
+    full_options: bool = False,
 ) -> None:
     """Validate an API-format workflow without submitting it.
 
@@ -1764,7 +1765,10 @@ def validate_api_workflow(
         wf_data = converted
         converted_from_ui = True
 
-    result = graph.validate_workflow(wf_data)
+    from comfy_cli.cql.engine import full_enum_options
+
+    with full_enum_options(full_options):
+        result = graph.validate_workflow(wf_data)
 
     # When the caller handed us a CANVAS graph, they have never seen the
     # flattened ids the lowering mints for subgraph interiors (`57:3`) — their
@@ -1881,7 +1885,8 @@ def _invalid_workflow_error(result: dict[str, Any]) -> dict[str, Any] | None:
     for error in errors[:5]:
         line = f"node {error.get('node_id') or '?'}: {error.get('message', '')}"
         suggestions = error.get("suggestions") or []
-        if suggestions:
+        # An enum message already names its closest options ("— closest: …").
+        if suggestions and "closest:" not in line:
             line += f" (did you mean: {', '.join(str(s) for s in suggestions)}?)"
         hint_parts.append(line)
     # The code is a registered catch-all raised for every verdict, so it alone
@@ -1958,9 +1963,23 @@ def validate_cmd(
         str | None,
         typer.Option("--input", show_default=False, help="Path to a saved object_info JSON (offline mode)."),
     ] = None,
+    full_options: Annotated[
+        bool,
+        typer.Option(
+            "--full-options",
+            help="List every option of a rejected enum value as `valid_options`. By default an error names the "
+            "closest options and `option_count`, and carries the whole list only when it is short.",
+        ),
+    ] = False,
 ):
     validate_api_workflow(
-        workflow, where=where, host=host, port=port, input_path=input_path, command="workflow validate"
+        workflow,
+        where=where,
+        host=host,
+        port=port,
+        input_path=input_path,
+        command="workflow validate",
+        full_options=full_options,
     )
 
 

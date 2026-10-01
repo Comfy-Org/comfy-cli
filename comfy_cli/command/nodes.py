@@ -156,6 +156,48 @@ def _category_matches(category: str | None, pat: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+#: A combo input's ``choices`` longer than this are capped in ``nodes show`` /
+#: ``nodes search --expand-top``. A loader's choices are every installed file
+#: (600+ LoRAs on cloud, ~31KB in one show), and a caller wiring the node
+#: needs one of them, by a name it usually already has.
+CHOICES_INLINE_MAX = 20
+
+
+def _cap_choices(payload: dict[str, Any]) -> dict[str, Any]:
+    """Cap every long ``choices`` list in a show payload (recursing into
+    dynamic-combo sub-inputs) to its first :data:`CHOICES_INLINE_MAX` entries,
+    with ``choices_total`` and ``choices_truncated``. Adds a top-level
+    ``choices_note`` naming how to read or filter the full list, once."""
+    capped: list[str] = []
+
+    def walk(inputs: Any) -> None:
+        if not isinstance(inputs, list):
+            return
+        for entry in inputs:
+            if not isinstance(entry, dict):
+                continue
+            choices = entry.get("choices")
+            if isinstance(choices, list) and len(choices) > CHOICES_INLINE_MAX:
+                entry["choices_total"] = len(choices)
+                entry["choices"] = choices[:CHOICES_INLINE_MAX]
+                entry["choices_truncated"] = True
+                capped.append(str(entry.get("name")))
+            for option in entry.get("dynamic_options") or []:
+                if isinstance(option, dict):
+                    walk(option.get("inputs"))
+
+    walk(payload.get("inputs"))
+    if capped:
+        name = payload.get("name") or "<class>"
+        first = capped[0]
+        payload["choices_note"] = (
+            f"{', '.join(capped)}: only the first {CHOICES_INLINE_MAX} choices are listed (see choices_total). "
+            f"Check or find one with `comfy nodes show {name} --select "
+            f'\'inputs.#(name=="{first}").choices.#(%"*<text>*")#\'`; --all-choices lists every choice.'
+        )
+    return payload
+
+
 @app.command(
     "ls",
     help="List node classes. Filter via --produces/--accepts/--category/--pack/--label or boolean flags.",
@@ -374,9 +416,18 @@ def show_cmd(
         typer.Option(
             "--select",
             show_default=False,
-            help="Project the payload: dot path (inputs.0.name), wildcard (inputs.#.name), comma multi-select.",
+            help="Project the payload: dot path (inputs.0.name), wildcard (inputs.#.name), comma multi-select, "
+            'row query (inputs.#(name=="ckpt_name").choices). Projects the full schema, every choice included.',
         ),
     ] = None,
+    all_choices: Annotated[
+        bool,
+        typer.Option(
+            "--all-choices",
+            help=f"List every choice of a combo input. By default a list longer than {CHOICES_INLINE_MAX} is cut "
+            "to its first entries, with `choices_total`.",
+        ),
+    ] = False,
 ):
     renderer = get_renderer()
     _stale: dict = {}
@@ -457,6 +508,8 @@ def show_cmd(
         from comfy_cli.selector import emit_selected
 
         return emit_selected(renderer, payload, select, command="nodes show")
+    if not all_choices:
+        _cap_choices(payload)
 
     if renderer.is_pretty():
         from rich.table import Table
@@ -528,6 +581,14 @@ def search_cmd(
             ),
         ),
     ] = 0,
+    all_choices: Annotated[
+        bool,
+        typer.Option(
+            "--all-choices",
+            help=f"With --expand-top: list every choice of a combo input (default: the first {CHOICES_INLINE_MAX}, "
+            "with `choices_total`).",
+        ),
+    ] = False,
     include_deprecated: IncludeDeprecatedOpt = False,
     input_path: Annotated[
         str | None,
@@ -667,7 +728,8 @@ def search_cmd(
                     }
                 )
                 continue
-            expanded.append({"class_type": m.id, **graph.morphism_to_dict(resolved)})
+            schema = graph.morphism_to_dict(resolved)
+            expanded.append({"class_type": m.id, **(schema if all_choices else _cap_choices(schema))})
         payload["expanded"] = expanded
 
     if _stale:

@@ -1,0 +1,65 @@
+{
+  "_comment": "Language-neutral conformance corpus for the --select grammar (comfy_cli/selector.py). Each case is (expr) over `data` -> (matched, result). The cloud agent's Go twin (services/agent/internal/loop/selector.go) replays a verbatim copy of this file, so the two implementations cannot drift. Run by tests/comfy_cli/test_selector_conformance.py.",
+  "version": 2,
+  "data": {
+    "rows": [
+      {"name": "a", "tags": ["x", "y"]},
+      {"name": "b", "tags": []},
+      {"nameless": 1}
+    ],
+    "count": 3,
+    "meta": {"k": "v"},
+    "slots": [
+      {"address": "5.seed", "instance_id": 5, "node_type": "KSampler", "current_value": 1},
+      {"address": "5.steps", "instance_id": 5, "node_type": "KSampler", "current_value": 20},
+      {"address": "70/2011.text", "instance_id": "70/2011", "node_type": "CLIPTextEncode", "current_value": ""},
+      {"address": "70/2012.text", "instance_id": "70/2012", "node_type": "CLIPTextEncode", "current_value": "a cat, 4k"},
+      {"address": "9.text", "instance_id": 9, "node_type": "CLIPTextEncode", "current_value": "a.b,c"}
+    ],
+    "inputs": [
+      {"name": "lora_name", "choices": ["MoXinV1.safetensors", "add_detail.safetensors", "moxin_v2.safetensors"]},
+      {"name": "strength_model", "choices": []}
+    ]
+  },
+  "cases": [
+    {"expr": "rows.#.name", "matched": true, "result": ["a", "b"]},
+    {"expr": "rows.0.name", "matched": true, "result": "a"},
+    {"expr": "rows.#.tags.#", "matched": true, "result": [["x", "y"], []]},
+    {"expr": "count,rows.#.name", "matched": true, "result": {"count": 3, "rows.#.name": ["a", "b"]}},
+    {"expr": "nope", "matched": false},
+    {"expr": "rows.#.zzz", "matched": false},
+    {"expr": "", "matched": false},
+    {"expr": "rows..name", "matched": false},
+    {"expr": "meta.k", "matched": true, "result": "v"},
+    {"expr": "rows.2.nameless", "matched": true, "result": 1},
+    {"expr": "count,nope", "matched": true, "result": {"count": 3}},
+    {"expr": "#", "matched": false},
+    {"expr": "rows.#.tags", "matched": true, "result": [["x", "y"], []]},
+
+    {"expr": "slots.#(node_type==\"KSampler\")#.address", "matched": true, "result": ["5.seed", "5.steps"]},
+    {"expr": "slots.#(node_type==\"KSampler\").address", "matched": true, "result": "5.seed"},
+    {"expr": "slots.#(node_type==\"Nope\")#", "matched": true, "result": []},
+    {"expr": "slots.#(node_type==\"Nope\")#.address", "matched": true, "result": []},
+    {"expr": "slots.#(node_type==\"Nope\").address", "matched": false},
+    {"expr": "slots.#(current_value==\"\")#.address", "matched": true, "result": ["70/2011.text"]},
+    {"expr": "slots.#(instance_id==\"70/2011\").current_value", "matched": true, "result": ""},
+    {"expr": "slots.#(instance_id==5)#.address", "matched": true, "result": ["5.seed", "5.steps"]},
+    {"expr": "slots.#(instance_id==\"5\")#.address", "matched": true, "result": ["5.seed", "5.steps"]},
+    {"expr": "slots.#(instance_id!=5)#.address", "matched": true, "result": ["70/2011.text", "70/2012.text", "9.text"]},
+    {"expr": "slots.#(current_value>=20)#.address", "matched": true, "result": ["5.steps"]},
+    {"expr": "slots.#(current_value<20)#.address", "matched": true, "result": ["5.seed"]},
+    {"expr": "slots.#(address%\"70/*\")#.current_value", "matched": true, "result": ["", "a cat, 4k"]},
+    {"expr": "slots.#(address!%\"70/*\")#.address", "matched": true, "result": ["5.seed", "5.steps", "9.text"]},
+    {"expr": "slots.#(current_value==\"a.b,c\").address", "matched": true, "result": "9.text"},
+    {"expr": "slots.#(node_type==\"KSampler\")#.address,count", "matched": true, "result": {"slots.#(node_type==\"KSampler\")#.address": ["5.seed", "5.steps"], "count": 3}},
+    {"expr": "inputs.#(name==\"lora_name\").choices.#(%\"*o?in*\")#", "matched": true, "result": ["MoXinV1.safetensors", "moxin_v2.safetensors"]},
+    {"expr": "inputs.#(name==\"lora_name\").choices.#(==\"add_detail.safetensors\")", "matched": true, "result": "add_detail.safetensors"},
+    {"expr": "inputs.#(name==\"lora_name\").choices.#(%\"MoXin?1*\")#", "matched": true, "result": ["MoXinV1.safetensors"]},
+    {"expr": "rows.#(tags)#.name", "matched": true, "result": ["a", "b"]},
+    {"expr": "rows.#(nameless==1)", "matched": true, "result": {"nameless": 1}},
+    {"expr": "meta.#(k==\"v\")", "matched": false},
+    {"expr": "slots.#(node_type==\"KSampler\"", "matched": false},
+    {"expr": "slots.#(node_type=~\"K\")#", "matched": false},
+    {"expr": "slots.#()#", "matched": false}
+  ]
+}

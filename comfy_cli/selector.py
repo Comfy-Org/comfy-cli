@@ -3,8 +3,8 @@
 This module is the single selector implementation for the CLI (V1-011 / C4):
 the four heaviest read commands (``templates ls``, ``nodes show``,
 ``workflow slots``, ``generate list``) accept ``--select <expr>`` and project
-their JSON payload through it. No second dialect will ever be added — keep the
-grammar exactly this small.
+their JSON payload through it. No second dialect will ever be added — the
+grammar is gjson's path syntax, kept to the subset below.
 
 Grammar (gjson-style dot paths):
 
@@ -20,9 +20,23 @@ Grammar (gjson-style dot paths):
   - **multi-select** — ``name,inputs`` splits on commas and returns an object
     keyed by each sub-expression that matched. It is a miss only when every
     part misses.
+  - **row query** (gjson's) — ``items.#(<cond>)#`` keeps the array elements
+    that satisfy ``<cond>`` (the rest of the path maps over them, like ``#``);
+    ``items.#(<cond>)`` is the FIRST such element (the rest of the path walks
+    it). ``<cond>`` is ``<key> <op> <value>``, ``<op> <value>`` for an array of
+    scalars, or a bare ``<key>`` (the element has it, non-null). ``<key>`` is
+    a dot path inside the element; ``<op>`` is one of ``==`` ``!=`` ``<``
+    ``<=`` ``>`` ``>=`` ``%`` (glob match, ``*`` and ``?``) ``!%``; ``<value>``
+    is a ``"double-quoted"`` string (``\\"`` escapes a quote), a number,
+    ``true``, ``false`` or ``null``. ``==``/``!=`` compare a number and a
+    string by their text (``instance_id=="5"`` matches ``5``); the order
+    operators compare two numbers or two strings, never a mix. Zero matching
+    elements is an answer, not a miss: ``#(…)#`` returns ``[]``; ``#(…)`` with
+    no match is a miss. Dots and commas inside a row query are its own
+    (``#(value=="a.b,c")``).
 
-There is no escaping: keys containing ``.``, ``,`` or ``#`` cannot be
-addressed. Malformed expressions (empty, empty segment, empty part) are
+Outside a row query there is no escaping: keys containing ``.``, ``,`` or
+``#`` cannot be addressed. Malformed expressions (empty, empty segment, empty part) are
 reported as a miss, never an error — the CLI fails open (see
 ``selected_payload``): the command still succeeds and returns a bounded key
 inventory of the full payload plus a ``select_no_match`` advisory so the
@@ -53,7 +67,10 @@ def select(data: Any, expr: str) -> tuple[Any, bool]:
     """
     if not isinstance(expr, str) or not expr.strip():
         return None, False
-    parts = [p.strip() for p in expr.split(",")]
+    parts = _split_top(expr, ",")
+    if parts is None:
+        return None, False
+    parts = [p.strip() for p in parts]
     if len(parts) > 1:
         out: dict[str, Any] = {}
         for part in parts:
@@ -66,19 +83,184 @@ def select(data: Any, expr: str) -> tuple[Any, bool]:
     return _select_one(data, parts[0])
 
 
+def _split_top(text: str, sep: str) -> list[str] | None:
+    """Split ``text`` on ``sep`` outside any ``#(...)`` row query and outside
+    quoted strings in one. ``None`` for an unbalanced query or quote."""
+    parts: list[str] = []
+    depth = 0
+    in_str = False
+    start = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if in_str:
+            if ch == "\\":
+                i += 1
+            elif ch == '"':
+                in_str = False
+        elif ch == '"' and depth:
+            in_str = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif ch == sep and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+        i += 1
+    if depth or in_str:
+        return None
+    parts.append(text[start:])
+    return parts
+
+
 def _select_one(data: Any, path: str) -> tuple[Any, bool]:
     if not path:
         return None, False
-    segments = path.split(".")
-    if any(seg == "" for seg in segments):
+    segments = _split_top(path, ".")
+    if segments is None or any(seg == "" for seg in segments):
         return None, False
     return _walk(data, segments)
+
+
+_QUERY_OPS = ("==", "!=", "<=", ">=", "!%", "<", ">", "%")
+
+
+def _parse_query(seg: str) -> tuple[tuple[list[str], str | None, Any], bool] | None:
+    """Parse a ``#(<cond>)`` / ``#(<cond>)#`` segment to
+    ``((key_path, op, value), all_matches)``; ``None`` when ``seg`` is not a
+    well-formed row query."""
+    if not seg.startswith("#("):
+        return None
+    if seg.endswith(")#"):
+        body, every = seg[2:-2], True
+    elif seg.endswith(")"):
+        body, every = seg[2:-1], False
+    else:
+        return None
+    # The operator is the first one outside a quoted value: values are always
+    # quoted when they are strings, so a key never contains a quote.
+    quote = body.find('"')
+    head = body if quote < 0 else body[:quote]
+    op_at, op = -1, None
+    for candidate in _QUERY_OPS:
+        at = head.find(candidate)
+        if at >= 0 and (op_at < 0 or at < op_at or (at == op_at and len(candidate) > len(op))):
+            op_at, op = at, candidate
+    if op is None:
+        key = body.strip()
+        if not key or '"' in key:
+            return None
+        path = key.split(".")
+        return ((path, None, None), every) if all(path) else None
+    key = body[:op_at].strip()
+    raw = body[op_at + len(op) :].strip()
+    path = key.split(".") if key else []
+    if not all(path):
+        return None
+    ok, value = _parse_value(raw)
+    if not ok:
+        return None
+    if op in ("%", "!%") and not isinstance(value, str):
+        return None
+    return (path, op, value), every
+
+
+def _parse_value(raw: str) -> tuple[bool, Any]:
+    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return False, None
+        return isinstance(value, str), value
+    if raw in ("true", "false", "null"):
+        return True, {"true": True, "false": False, "null": None}[raw]
+    try:
+        number = json.loads(raw)
+    except ValueError:
+        return False, None
+    if isinstance(number, int | float) and not isinstance(number, bool):
+        return True, number
+    return False, None
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _glob(pattern: str, text: str) -> bool:
+    """gjson's match: ``*`` any run, ``?`` one character, everything else literal."""
+    import re
+
+    regex = "".join(".*" if c == "*" else "." if c == "?" else re.escape(c) for c in pattern)
+    return re.fullmatch(regex, text, flags=re.DOTALL) is not None
+
+
+def _text(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _satisfies(element: Any, cond: tuple[list[str], str | None, Any]) -> bool:
+    path, op, want = cond
+    got: Any = element
+    for key in path:
+        if not isinstance(got, Mapping) or key not in got:
+            return False
+        got = got[key]
+    if op is None:
+        return got is not None
+    if op in ("%", "!%"):
+        if not isinstance(got, str):
+            return False
+        return _glob(want, got) is (op == "%")
+    if op in ("==", "!="):
+        if _is_number(got) and _is_number(want):
+            equal = got == want
+        elif isinstance(got, Mapping | list) or isinstance(want, Mapping | list):
+            equal = False
+        elif got is None or want is None or isinstance(got, bool) or isinstance(want, bool):
+            equal = type(got) is type(want) and got == want
+        else:
+            equal = _text(got) == _text(want)
+        return equal is (op == "==")
+    if _is_number(got) and _is_number(want):
+        a, b = got, want
+    elif isinstance(got, str) and isinstance(want, str):
+        a, b = got, want
+    else:
+        return False
+    return {"<": a < b, "<=": a <= b, ">": a > b, ">=": a >= b}[op]
 
 
 def _walk(current: Any, segments: list[str]) -> tuple[Any, bool]:
     if not segments:
         return current, True
     seg, rest = segments[0], segments[1:]
+    if seg.startswith("#("):
+        parsed = _parse_query(seg)
+        if parsed is None or not isinstance(current, list):
+            return None, False
+        cond, every = parsed
+        if not every:
+            for element in current:
+                if _satisfies(element, cond):
+                    return _walk(element, rest)
+            return None, False
+        kept = [element for element in current if _satisfies(element, cond)]
+        if not rest:
+            return kept, True
+        out = []
+        for element in kept:
+            result, matched = _walk(element, rest)
+            if matched:
+                out.append(result)
+        return out, True
     if seg == WILDCARD:
         if not isinstance(current, list):
             return None, False
