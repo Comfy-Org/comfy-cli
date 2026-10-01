@@ -145,17 +145,19 @@ def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | Non
     and the exit code stays 1. Pretty mode is left exactly as it was.
     """
     try:
-        active_ctx = click.get_current_context(silent=True) or ctx
+        context_command = _command_path(ctx)
+        if not context_command and ctx is not None and ctx.invoked_subcommand:
+            context_command = str(ctx.invoked_subcommand)
         renderer = get_renderer()
         if not renderer.is_json():
             # The root callback installs the renderer, so a crash in it (or
             # before it) still sees the pretty default. The root flags did
             # parse, so decide the mode from them. No version lookup: that
             # lookup is one of the things that can have crashed.
-            renderer = Renderer.resolve(command=_command_path(active_ctx), **_output_flags(ctx))
+            renderer = Renderer.resolve(command=context_command, **_output_flags(ctx))
         if not renderer.is_json() or renderer._envelope_emitted:
             return
-        command = getattr(renderer, "command", None) or _command_path(active_ctx) or ""
+        command = getattr(renderer, "command", None) or context_command or ""
         renderer.error(
             code="internal_error",
             message=_internal_error_message(error),
@@ -178,6 +180,11 @@ def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | Non
 #: (scheme and credential together), `key=value` / `key: value` token pairs,
 #: and `user:pass@` userinfo.
 _INTERNAL_ERROR_MESSAGE_CAP = 500
+_INTERNAL_ERROR_SCRUB_INPUT_CAP = _INTERNAL_ERROR_MESSAGE_CAP * 8
+_SECRET_KEY_PATTERN = (
+    r"(?:proxy-)?authorization|api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|"
+    r"session(?:[_-]?(?:id|key))?|sid|sig|signature|(?:set-)?cookie"
+)
 _SECRET_PATTERNS = (
     (re.compile(r"(https?://[^\s?#'\"]+)\?[^\s'\"]*", re.IGNORECASE), r"\1?***"),
     (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]+", re.IGNORECASE), r"\1***"),
@@ -199,37 +206,54 @@ _SECRET_PATTERNS = (
         lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
     ),
     (
+        # The Bearer scrubber above preserves the scheme; do not remask it as an unquoted token value.
         re.compile(
-            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|session(?:[_-]?(?:id|key))?|sid|sig|signature)"
-            r"[\"']?\s*[:=]\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\s&\"',;]+)",
+            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|session(?:[_-]?(?:id|key))?|sid|sig|signature)(?:[_-][\w-]+)?"
+            r"[\"']?\s*[:=]\s*)(?:[^\\\s&\"',;]{0,32}((?:\\)?[\"'])(?:(?!\2)(?:\\.|[^\r\n]))*\2?|(?!Bearer\s)(?:\\(?![\"'])|[^\\\s&\"',;])+)",
             re.IGNORECASE,
         ),
         lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
     ),
     (
         re.compile(
-            r"(\\[\"'](?:(?:proxy-)?authorization|api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password)"
-            r"\\[\"']\s*[:=]\s*\\[\"'])(.*?)(\\[\"'](?=\s*(?:,|[}\]])))",
+            rf"(\\[\"'](?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})(?:[_-][\w-]+)?"
+            r"\\[\"']\s*[:=]\s*\\[\"'])((?:\\\\.|\\(?![\"'])|[^\\])*?)(\\[\"']|[\r\n]|$)",
             re.IGNORECASE,
         ),
         r"\1***\3",
     ),
     (
         re.compile(
-            r"((?:set-)?cookie[\"']?\s*:\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n]+)",
+            rf"(\\[\"'](?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})(?:[_-][\w-]+)?"
+            r"\\[\"']\s*[:=]\s*)(?!\\[\"'])(?:\\(?![\"'])|[^\s,}])+",
+            re.IGNORECASE,
+        ),
+        r"\1***",
+    ),
+    (
+        re.compile(
+            r"((?:set-)?cookie[\"']?\s*:\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n,]+)",
             re.IGNORECASE,
         ),
         lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
     ),
-    (re.compile(r"(://)[^\s/@'\"]+@"), r"\1***@"),
+    (re.compile(r"(://)[^\s/'\"?#,]+@"), r"\1***@"),
 )
 
 
 def _internal_error_message(error: BaseException) -> str:
-    text = f"{type(error).__name__}: {error}"
+    try:
+        detail = str(error)
+    except Exception:
+        detail = "unprintable exception"
+    raw_text = f"{type(error).__name__}: {detail}"
+    scrub_input_truncated = len(raw_text) > _INTERNAL_ERROR_SCRUB_INPUT_CAP
+    text = raw_text[:_INTERNAL_ERROR_SCRUB_INPUT_CAP]
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
     if len(text) > _INTERNAL_ERROR_MESSAGE_CAP:
+        text = text[: _INTERNAL_ERROR_MESSAGE_CAP - 1] + "…"
+    elif scrub_input_truncated:
         text = text[: _INTERNAL_ERROR_MESSAGE_CAP - 1] + "…"
     return text
 

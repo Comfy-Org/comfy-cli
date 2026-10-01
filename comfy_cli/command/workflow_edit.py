@@ -666,11 +666,13 @@ def ls_nodes_cmd(
     p, workflow = _load_workflow_or_fail(renderer, file)
     definitions = workflow.get("definitions")
     subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else []
-    subgraph_ids = {
-        str(definition.get("id"))
-        for definition in (subgraphs if isinstance(subgraphs, list) else [])
-        if isinstance(definition, dict) and definition.get("id") is not None
-    }
+    subgraph_ids: set[str] = set()
+    for definition in subgraphs if isinstance(subgraphs, list) else []:
+        if not isinstance(definition, dict):
+            continue
+        definition_id = definition.get("id")
+        if isinstance(definition_id, str) and definition_id:
+            subgraph_ids.add(definition_id)
     rows = []
     for n in workflow.get("nodes") or []:
         if not isinstance(n, dict):

@@ -20,7 +20,7 @@ import typer
 from typer.testing import CliRunner
 
 from comfy_cli import workflow_ops
-from comfy_cli.cmdline import app
+from comfy_cli.cmdline import _internal_error_message, app
 
 
 def _boom(*_a, **_kw):
@@ -229,3 +229,55 @@ def test_a_crash_in_the_root_callback_still_emits_the_envelope(monkeypatch, work
     assert envelope["ok"] is False
     assert envelope["error"]["code"] == "internal_error", envelope
     assert envelope["error"]["details"]["exception"] == "OSError", envelope
+
+
+@pytest.mark.parametrize(
+    ("message", "secret", "kept"),
+    [
+        ('body={\\"session_id\\": \\"abc123\\", \\"Cookie\\": \\"sid=xyz\\"}', "abc123", "Cookie"),
+        ('body={"api_key_comfy_org":"sk-LIVE"}', "sk-LIVE", "body="),
+        ("X-API-Key: sk-LIVE", "sk-LIVE", "X-API-Key:"),
+        ('body={\\"api_key_comfy_org\\": \\"sk-LIVE\\"}', "sk-LIVE", "body="),
+        ('api_key=\\"sk-LIVE\\" request=req-1', "sk-LIVE", "request=req-1"),
+        ('api_key="ab\\"cd-LEAK" request=req-1', "cd-LEAK", "request=req-1"),
+        ("headers={'cookie': None, 'x-request-id': 'req-abc'}", "None", "x-request-id"),
+        ("Cookie: sid=a; remember_me=LONGTOKEN", "LONGTOKEN", "Cookie:"),
+        ('Cookie: pref="x"; auth=LEAK', "LEAK", "Cookie:"),
+        ("headers={'token': b'sk-LIVE'}", "sk-LIVE", "headers="),
+        ("params={'api_key': ['sk-LIVE']}", "sk-LIVE", "params="),
+        ("token=Bearer-sk-LIVE request=req-1", "sk-LIVE", "request=req-1"),
+        ('body={\\"x-api-key\\": 123456789}', "123456789", "body="),
+        ('body={\\"password\\": \\"a\\nb\\"}', "a\\nb", "body="),
+        (r"password=C:\Users\bob", r"Users\bob", "password="),
+        ("GET https://alice:p@ssword@example.com/x failed", "p@ssword", "example.com/x"),
+    ],
+)
+def test_internal_error_scrubber_handles_reviewed_secret_shapes(message, secret, kept):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert secret not in scrubbed
+    assert kept in scrubbed
+
+
+def test_internal_error_scrubber_handles_unprintable_exception():
+    class UnprintableError(Exception):
+        def __str__(self):
+            raise RuntimeError("cannot stringify")
+
+    assert _internal_error_message(UnprintableError()) == "UnprintableError: unprintable exception"
+
+
+def test_internal_error_scrubber_does_not_treat_query_at_as_userinfo():
+    message = "amqp://host?opt=user@example.com"
+    assert message in _internal_error_message(RuntimeError(message))
+
+
+def test_internal_error_scrubber_preserves_ordinary_identifier_diagnostics():
+    message = "sigma=0.8 max_tokens=100 sidecar=on signal: 9"
+    assert message in _internal_error_message(RuntimeError(message))
+
+
+def test_internal_error_scrubber_marks_truncated_messages():
+    message = "x" * 380 + " https://alice:password@example.com/" + "y" * 200
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "password" not in scrubbed
+    assert scrubbed.endswith("…")

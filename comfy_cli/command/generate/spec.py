@@ -556,7 +556,12 @@ def _model_name_hint(name: str) -> str | None:
         op = node.get("post")
         if not isinstance(op, dict):
             continue
-        content = (op.get("requestBody") or {}).get("content") or {}
+        request_body = op.get("requestBody") or {}
+        if not isinstance(request_body, dict):
+            continue
+        content = request_body.get("content") or {}
+        if not isinstance(content, dict):
+            continue
         schema = next((c.get("schema") for c in content.values() if isinstance(c, dict) and c.get("schema")), None)
         if not schema:
             continue
