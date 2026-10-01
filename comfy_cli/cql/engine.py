@@ -1648,7 +1648,9 @@ class Graph:
                 describe(p, p.name, 0)
         return out
 
-    def dynamic_sub_widget_options(self, class_name: str, widget: str) -> tuple[str, list[str]] | None:
+    def dynamic_sub_widget_options(
+        self, class_name: str, widget: str, widgets_values: list[Any] | None = None
+    ) -> tuple[str, list[str]] | None:
         """``(selector, [option keys])`` when ``widget`` is a dynamic-combo
         sub-widget that only SOME of the selector's options reveal, else ``None``.
 
@@ -1658,7 +1660,27 @@ class Graph:
         that option must say which option to select first. A widget every
         option reveals (or none) returns ``None``.
         """
-        for selector, spec in self.dynamic_combo_options(class_name).items():
+        m = self._nodes.get(class_name)
+        if m is None:
+            return None
+        if widgets_values is None:
+            combos = self.dynamic_combo_options(class_name)
+        else:
+            combos = {}
+            for entry in _expand_widget_entries(m, widgets_values):
+                port = entry.port
+                if port is None or not port.dynamic_options or not _is_dynamic_combo_type(port.type):
+                    continue
+                options: dict[str, Any] = {}
+                for option in port.dynamic_options:
+                    key = option.get("key")
+                    if key is None:
+                        continue
+                    options[str(key)] = {
+                        "widgets": [p.name for p in _dynamic_combo_sub_ports(port.dynamic_options, key, entry.name)]
+                    }
+                combos[entry.name] = {"options": options}
+        for selector, spec in combos.items():
             options = spec.get("options") or {}
             keys = [key for key, opt in options.items() if widget in (opt.get("widgets") or [])]
             if keys and len(keys) < len(options):
@@ -3940,7 +3962,11 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         widget_idx = order.index(input_name)
     except ValueError:
         warning = _unknown_dynamic_sub_warning(
-            m, input_name, order, widgets, revealed_by=graph.dynamic_sub_widget_options(node_type, input_name)
+            m,
+            input_name,
+            order,
+            widgets,
+            revealed_by=graph.dynamic_sub_widget_options(node_type, input_name, widgets),
         )
         if warning is not None:
             return [warning]

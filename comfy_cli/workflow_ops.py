@@ -2796,7 +2796,7 @@ def _other_option_widget_error(
     "not found" on purpose: the name is real, so the sibling-address
     enrichment must not fire.
     """
-    found = graph.dynamic_sub_widget_options(class_type, widget)
+    found = graph.dynamic_sub_widget_options(class_type, widget, widgets_values)
     if found is None:
         return None
     selector, keys = found
