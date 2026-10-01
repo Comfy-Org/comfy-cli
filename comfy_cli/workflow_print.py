@@ -159,6 +159,10 @@ def _is_slot_index(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _typed_row(values: Any) -> tuple[tuple[type, str], ...]:
+    return tuple((type(value), repr(value)) for value in values)
+
+
 def _dedupe_identical_links(links: list[Any]) -> list[Any]:
     """Drop byte-for-byte-equivalent link rows while retaining conflicting duplicates."""
     seen: dict[str, tuple[tuple[type, str], ...]] = {}
@@ -168,7 +172,7 @@ def _dedupe_identical_links(links: list[Any]) -> list[Any]:
             out.append(link)
             continue
         link_id = str(link[0])
-        typed_row = tuple((type(value), repr(value)) for value in link)
+        typed_row = _typed_row(link)
         if seen.get(link_id) == typed_row:
             continue
         seen.setdefault(link_id, typed_row)
@@ -220,7 +224,7 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
             continue
         normalized_link_id = str(link_id)
         if normalized_link_id in seen_links:
-            if link != seen_links[normalized_link_id] and normalized_link_id not in reported_link_dupes:
+            if _typed_row(link) != _typed_row(seen_links[normalized_link_id]) and normalized_link_id not in reported_link_dupes:
                 reported_link_dupes.add(normalized_link_id)
                 reasons.append(f"duplicate link id {normalized_link_id}")
         else:
@@ -1263,7 +1267,7 @@ def _def_links(sg_def: dict, link_errors: list[str]) -> dict[str, tuple]:
             continue
         row = (link.get("origin_id"), link.get("origin_slot"), link.get("target_id"), link.get("target_slot"))
         duplicate_error = f"duplicate link id {lid}"
-        if str(lid) in out and out[str(lid)] != row and duplicate_error not in link_errors:
+        if str(lid) in out and _typed_row(out[str(lid)]) != _typed_row(row) and duplicate_error not in link_errors:
             link_errors.append(duplicate_error)
         out[str(lid)] = row
     return out
