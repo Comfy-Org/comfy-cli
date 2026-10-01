@@ -205,7 +205,7 @@ _SECRET_PATTERNS = (
     (
         re.compile(
             r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|session(?:[_-]?(?:id|key))?|sid|sig|signature)[\w-]*"
-            r"[\"']?\s*[:=]\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\s&\"',;]+)",
+            r"[\"']?\s*[:=]\s*)(?:((?:\\)?[\"'])(?:(?!\2)[^\r\n])*\2?|(?!Bearer\b)[^\s&\"',;]+)",
             re.IGNORECASE,
         ),
         lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
