@@ -229,7 +229,10 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
             continue
         normalized_link_id = str(link_id)
         if normalized_link_id in seen_links:
-            if _typed_row(link) != _typed_row(seen_links[normalized_link_id]) and normalized_link_id not in reported_link_dupes:
+            if (
+                _typed_row(link) != _typed_row(seen_links[normalized_link_id])
+                and normalized_link_id not in reported_link_dupes
+            ):
                 reported_link_dupes.add(normalized_link_id)
                 reasons.append(f"duplicate link id {normalized_link_id}")
         else:
@@ -286,6 +289,30 @@ def _normalise_node_outputs(nodes: list[dict], warnings: list[str] | None, quali
             node = {**node, "outputs": [], _NONLIST_OUTPUTS: True}
         normalised.append(node)
     return normalised
+
+
+def _retarget_definition_links(subgraph: dict) -> dict:
+    """Keep promotion discovery aligned with the holder-based render route."""
+    holders: dict[str, tuple[Any, int]] = {}
+    for node in subgraph.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        for slot, inp in enumerate(node.get("inputs") or []):
+            if isinstance(inp, dict) and inp.get("link") is not None:
+                holders.setdefault(str(inp["link"]), (node.get("id"), slot))
+    links: list[Any] = []
+    changed = False
+    for link in subgraph.get("links") or []:
+        if not isinstance(link, dict) or str(link.get("origin_id")) != _PROXY_IN:
+            links.append(link)
+            continue
+        holder = holders.get(str(link.get("id")))
+        if holder is None or (str(link.get("target_id")) == str(holder[0]) and link.get("target_slot") == holder[1]):
+            links.append(link)
+            continue
+        links.append({**link, "target_id": holder[0], "target_slot": holder[1]})
+        changed = True
+    return {**subgraph, "links": links} if changed else subgraph
 
 
 def _stale_input_slot_links(
@@ -1633,7 +1660,7 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
                 None,
             )
             interior = _normalise_node_outputs(interior, None)
-            normalised_subgraphs.append({**subgraph, "nodes": interior})
+            normalised_subgraphs.append(_retarget_definition_links({**subgraph, "nodes": interior}))
         subgraphs = normalised_subgraphs
         definitions = {**definitions, "subgraphs": subgraphs}
         promoted_workflow = {**workflow, "definitions": definitions}
