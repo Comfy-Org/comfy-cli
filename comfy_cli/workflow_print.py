@@ -1596,7 +1596,11 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
     if len(nodes) != len(raw_nodes):
         warnings.append(f"workflow: ignoring {len(raw_nodes) - len(nodes)} non-object node entries")
 
-    links = _dedupe_identical_links(workflow.get("links") or [])
+    raw_links = workflow.get("links") or []
+    if not isinstance(raw_links, list):
+        warnings.append("workflow: ignoring non-list links block")
+        raw_links = []
+    links = _dedupe_identical_links(raw_links)
 
     definitions = workflow.get("definitions")
     promoted_workflow = workflow
@@ -1606,6 +1610,11 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         # cql.promoted indexes the same block; hand it the sanitized view.
         promoted_workflow = {**workflow, "definitions": None}
     subgraphs = definitions.get("subgraphs") if definitions else None
+    if subgraphs is not None and not isinstance(subgraphs, list):
+        warnings.append("workflow: ignoring non-list subgraphs block")
+        subgraphs = []
+        definitions = {**definitions, "subgraphs": subgraphs}
+        promoted_workflow = {**workflow, "definitions": definitions}
     if isinstance(subgraphs, list):
         normalised_subgraphs: list[Any] = []
         for subgraph in subgraphs:
