@@ -231,7 +231,6 @@ def test_print_renders_a_stale_input_slot_link_and_reports_it(tmp_path, capsys):
     assert d["node_count"] == 2
     assert "samples=empty_latent_image" in d["source"]
     assert d["warnings"] == [
-        "link 7 targets input slot 6 on node 2, which has 2 inputs; no input holds it, so it feeds nothing and was "
-        "ignored. It was wired from node 1 output 0 — if that value was meant for node 2, re-wire it with "
-        "`connect 1.0 2.<input>` rather than retyping the value"
+        "link 7 targets input slot 6 on node 2, which has 2 inputs; a leftover row — input 'samples' already gets "
+        "that value from node 1 output 0 through another link, so nothing needs re-wiring"
     ]

@@ -298,8 +298,15 @@ def _stale_input_slot_links(nodes: list[dict], links: list[list], qualify: Any =
         )
         if holder is not None:
             warnings.append(f"{where}; rendered through input {str(holder.get('name') or '')!r}, which holds it")
+            continue
+        ignored.add(str(link_id))
+        rewired = _input_fed_from(inputs, links, link[1], link[2], link_id)
+        if rewired is not None:
+            warnings.append(
+                f"{where}; a leftover row — input {rewired!r} already gets that value from node "
+                f"{qualify(link[1])} output {link[2]} through another link, so nothing needs re-wiring"
+            )
         else:
-            ignored.add(str(link_id))
             src = link[1]
             source = "the subgraph input" if str(src) == _PROXY_IN else f"node {qualify(src)} output {link[2]}"
             fixed = f"{qualify(src)}.{link[2]}" if str(src) != _PROXY_IN else None
@@ -313,6 +320,20 @@ def _stale_input_slot_links(nodes: list[dict], links: list[list], qualify: Any =
                 )
             )
     return warnings, ignored
+
+
+def _input_fed_from(inputs: list, links: list[list], src_id: Any, src_slot: Any, except_id: Any) -> str | None:
+    """The name of an input in ``inputs`` that a link OTHER than ``except_id``
+    feeds from ``src_id``/``src_slot`` — a stale row whose value was already
+    re-wired — else ``None``."""
+    by_id = {str(lk[0]): lk for lk in links if isinstance(lk, list) and len(lk) >= 5}
+    for inp in inputs:
+        if not isinstance(inp, dict) or inp.get("link") is None or str(inp["link"]) == str(except_id):
+            continue
+        row = by_id.get(str(inp["link"]))
+        if row is not None and str(row[1]) == str(src_id) and row[2] == src_slot:
+            return str(inp.get("name") or "")
+    return None
 
 
 def _toposort(printable: list[dict], link_map: dict[str, tuple]) -> list[dict]:

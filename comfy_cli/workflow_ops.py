@@ -1205,7 +1205,8 @@ def _subgraph_boundary_error(workflow: dict, node_id: Any) -> ValueError | None:
         )
     return ValueError(
         f"node {canonical} is inside subgraph {segments[0]} ({str(sg.get('name') or '?')!r}) — a link cannot cross "
-        f"the subgraph boundary, so connect cannot reach it. Interior widgets ARE settable: "
+        f"the subgraph boundary, so connect cannot reach it from outside. Two nodes inside the same subgraph CAN be "
+        f"wired (`connect {segments[0]}/<a>.<output> {segments[0]}/<b>.<input>`). Interior widgets ARE settable: "
         f"`comfy workflow set-widget <file> {canonical}.<widget> <value>`. To wire a live link, connect to one of "
         f"the instance's own slots (see `comfy workflow slots`), or promote the input in the ComfyUI editor first."
     )
@@ -1359,6 +1360,9 @@ def _connect_impl(
     actor: str = "cli",
     base_version: int = 0,
 ) -> tuple[dict, dict]:
+    interior = _interior_link_scope(workflow, from_node, to_node)
+    if interior is not None:
+        return _connect_interior(workflow, graph, interior, from_slot, to_slot, actor=actor, base_version=base_version)
     for endpoint in (from_node, to_node):
         boundary = _subgraph_boundary_error(workflow, endpoint)
         if boundary is not None:
@@ -1398,6 +1402,199 @@ def _connect_impl(
     if grow is not None:
         op["grow"] = grow  # autogrow: apply appends this input slot, then wires it
     return apply_op(workflow, op, graph), op
+
+
+def _interior_link_scope(workflow: dict, from_node: Any, to_node: Any) -> dict | None:
+    """The definition both endpoints of a connect live in, when they are two
+    interior nodes of ONE subgraph instance (``70/2005`` -> ``70/2011``).
+
+    Returns ``{"path", "definition", "src", "dst"}`` — ``path`` is the
+    instance path (``["70"]``, or ``["70", "5"]`` nested) — or ``None`` when
+    the endpoints are not both interior to the same instance, so the caller's
+    top-level and boundary handling applies unchanged. Such a link crosses no
+    boundary: it lives in the definition's own ``links``.
+
+    Raises when the definition is shared by more than one instance: a link
+    written into a shared definition rewires every instance at once, which the
+    doc host refuses (``rejectSharedInteriorDefinition``), so the CLI refuses
+    it the same way rather than minting an op no replica will apply.
+    """
+    from comfy_cli.cql import engine as _engine
+
+    ends = []
+    for endpoint in (from_node, to_node):
+        text = str(endpoint)
+        if _find_by_str(workflow, text) is not None:
+            return None  # a literal top-level node id
+        if _engine._SUBGRAPH_PATH_SEP in text:
+            segments = _engine.split_node_path(workflow, text)
+        elif ":" in text:
+            segments = text.split(":")
+        else:
+            return None
+        if len(segments) < 2:
+            return None
+        ends.append(segments)
+    (src_path, dst_path) = ends
+    if src_path[:-1] != dst_path[:-1]:
+        return None
+    path = src_path[:-1]
+    try:
+        host = _navigate_subgraph_path(workflow, path)
+    except ValueError:
+        return None
+    defs_by_id = _engine._subgraph_defs_by_id(workflow)
+    definition = defs_by_id.get(str(host.get("type", "")))
+    if definition is None:
+        return None
+    nodes = {str(n.get("id")): n for n in definition.get("nodes") or [] if isinstance(n, dict)}
+    src, dst = nodes.get(str(src_path[-1])), nodes.get(str(dst_path[-1]))
+    if src is None or dst is None:
+        return None  # the boundary error names what the definition holds
+    instances = _definition_instance_count(workflow, str(definition.get("id")))
+    if instances > 1:
+        raise ValueError(
+            f"subgraph {'/'.join(path)} shares its definition {definition.get('id')} with "
+            f"{instances} instances, so a link inside it would rewire all {instances} at once — "
+            "connect refuses that; edit a single-instance copy (unpack or duplicate the subgraph in the editor)"
+        )
+    return {"path": [str(seg) for seg in path], "definition": definition, "src": src, "dst": dst}
+
+
+def _definition_instance_count(workflow: dict, def_id: str) -> int:
+    """How many nodes, top level or inside any definition, instantiate ``def_id``."""
+    from comfy_cli.cql import engine as _engine
+
+    count = sum(1 for n in workflow.get("nodes") or [] if isinstance(n, dict) and str(n.get("type")) == def_id)
+    for sg in _engine._subgraph_defs_by_id(workflow).values():
+        count += sum(1 for n in sg.get("nodes") or [] if isinstance(n, dict) and str(n.get("type")) == def_id)
+    return count
+
+
+def _connect_interior(
+    workflow: dict, graph, scope: dict, from_slot: Any, to_slot: Any, *, actor: str, base_version: int
+) -> tuple[dict, dict]:
+    """Wire two interior nodes of one single-instance definition. Concrete
+    slots only: the doc host's interior connect has no grow form, so a widget
+    that is not already listed as an input is refused with the reason."""
+    src, dst = scope["src"], scope["dst"]
+    out_idx, link_type = _resolve_output_slot(src, graph, from_slot)
+    in_idx, grow = _resolve_input_target(dst, graph, to_slot, link_type)
+    if grow is not None or in_idx is None:
+        raise ValueError(
+            f"input {to_slot!r} of interior node {'/'.join(scope['path'])}/{dst.get('id')} is not an input slot "
+            "the node lists; inside a subgraph connect can only wire an existing input"
+        )
+    dst_type = (dst.get("inputs") or [])[in_idx].get("type")
+    if not _types_compatible(link_type, dst_type):
+        raise ValueError(
+            f"type mismatch: {link_type} output of node {'/'.join(scope['path'])}/{src.get('id')} cannot connect "
+            f"to {dst_type} input {(dst.get('inputs') or [])[in_idx].get('name')!r} of node "
+            f"{'/'.join(scope['path'])}/{dst.get('id')}"
+        )
+    op = _new_op(
+        "connect",
+        actor,
+        base_version,
+        path=list(scope["path"]),
+        link_id=mint_id(),
+        from_node=src.get("id"),
+        from_slot=out_idx,
+        to_node=dst.get("id"),
+        to_slot=in_idx,
+        link_type=link_type,
+    )
+    return apply_op(workflow, op, graph), op
+
+
+def _apply_interior_connect(workflow: dict, op: dict) -> None:
+    """Apply a ``connect`` carrying an instance ``path``: the link lives in the
+    instance's definition. Same totality and LWW register as the top-level
+    concrete branch, scoped to the definition (comfy-multi-player
+    ``applyInteriorConnect``)."""
+    from comfy_cli.cql import engine as _engine
+
+    try:
+        host = _navigate_subgraph_path(workflow, [str(seg) for seg in op["path"]])
+    except ValueError:
+        return  # instance concurrently deleted => delete wins
+    definition = _engine._subgraph_defs_by_id(workflow).get(str(host.get("type", "")))
+    if definition is None:
+        return
+    nodes = {str(n.get("id")): n for n in definition.get("nodes") or [] if isinstance(n, dict)}
+    dst = nodes.get(str(op["to_node"]))
+    if dst is None:
+        return
+    to_idx = op["to_slot"]
+    ins = dst.get("inputs")
+    if (
+        not isinstance(ins, list)
+        or not isinstance(to_idx, int)
+        or isinstance(to_idx, bool)
+        or not 0 <= to_idx < len(ins)
+        or not isinstance(ins[to_idx], dict)
+    ):
+        return
+    if not _lww_gate(workflow, op):
+        return
+    _lww_commit(workflow, op)
+    if not isinstance(definition.get("links"), list):
+        definition["links"] = []
+    prev = ins[to_idx].get("link")
+    if prev is not None and prev != op["link_id"]:
+        _remove_interior_link(definition, prev)
+    links = definition["links"]  # read after the removal, which rebuilds the list
+    src = nodes.get(str(op["from_node"]))
+    outs = (src or {}).get("outputs")
+    from_slot = op["from_slot"]
+    if (
+        src is None
+        or not isinstance(outs, list)
+        or not isinstance(from_slot, int)
+        or isinstance(from_slot, bool)
+        or not 0 <= from_slot < len(outs)
+        or not isinstance(outs[from_slot], dict)
+    ):
+        return
+    if not any(_interior_link_id(lk) == op["link_id"] for lk in links):
+        links.append(
+            {
+                "id": op["link_id"],
+                "origin_id": op["from_node"],
+                "origin_slot": from_slot,
+                "target_id": op["to_node"],
+                "target_slot": to_idx,
+                "type": op["link_type"],
+            }
+        )
+    ins[to_idx]["link"] = op["link_id"]
+    if outs[from_slot].get("links") is None:
+        outs[from_slot]["links"] = []
+    if op["link_id"] not in outs[from_slot]["links"]:
+        outs[from_slot]["links"].append(op["link_id"])
+
+
+def _interior_link_id(link: Any) -> Any:
+    """A definition link's id, whichever shape it is stored in (object or the
+    top-level array form some exports use)."""
+    if isinstance(link, dict):
+        return link.get("id")
+    if isinstance(link, list) and link:
+        return link[0]
+    return None
+
+
+def _remove_interior_link(definition: dict, link_id: Any) -> None:
+    definition["links"] = [lk for lk in definition.get("links") or [] if _interior_link_id(lk) != link_id]
+    for n in definition.get("nodes") or []:
+        if not isinstance(n, dict):
+            continue
+        for inp in n.get("inputs") or []:
+            if isinstance(inp, dict) and inp.get("link") == link_id:
+                inp["link"] = None
+        for out in n.get("outputs") or []:
+            if isinstance(out, dict) and link_id in (out.get("links") or []):
+                out["links"] = [lid for lid in out["links"] if lid != link_id]
 
 
 def clear(workflow: dict, *, actor: str = "cli", base_version: int = 0) -> tuple[dict, dict]:
@@ -2384,6 +2581,9 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
     # order. Resolve the destination before mutating anything; if it is gone the
     # target slot does not exist and never will (ids are never reused), so there
     # is no register to claim and delete simply wins.
+    if op.get("path"):
+        _apply_interior_connect(workflow, op)
+        return
     dst = _find_by_str(workflow, op["to_node"])
     if dst is None:
         return
@@ -2664,6 +2864,11 @@ def _write_target(op: dict) -> tuple:
             # under a dynamic combo (``model.reference_images.image_1``) must
             # not share a target with its sibling (``model.reference_videos``).
             return ("input", str(op["to_node"]), "grow", _autogrow_base(str(grow["name"])))
+        if op.get("path"):
+            # An interior input is its own register, scoped by the instance path
+            # (comfy-multi-player ``writeTarget``): ``2011`` inside 70 is not a
+            # top-level node 2011.
+            return ("input", tuple(str(seg) for seg in op["path"]), str(op["to_node"]), op["to_slot"])
         return ("input", str(op["to_node"]), op["to_slot"])
     return (kind,)
 

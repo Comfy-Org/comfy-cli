@@ -1051,9 +1051,10 @@ def test_out_of_range_input_slot_renders_and_warns(sd15_graph):
     assert "samples=empty_latent_image" in res.source
     assert "vae=None" in res.source
     assert res.warnings == [
-        "link 7 targets input slot 6 on node 2, which has 2 inputs; no input holds it, so it feeds nothing and was "
-        "ignored. It was wired from node 1 output 0 — if that value was meant for node 2, re-wire it with "
-        "`connect 1.0 2.<input>` rather than retyping the value"
+        # Link 1 already carries node 1's LATENT into `samples`: the stale row is
+        # a duplicate of a live link, so nothing is sent to be re-wired.
+        "link 7 targets input slot 6 on node 2, which has 2 inputs; a leftover row — input 'samples' already gets "
+        "that value from node 1 output 0 through another link, so nothing needs re-wiring"
     ]
 
 
@@ -1119,7 +1120,7 @@ def test_out_of_range_input_slot_fed_by_the_definition_input_proxy_is_reported(s
     sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
     tgt = sg["nodes"][0]
     sg["links"].append(
-        {"id": 9998, "origin_id": -10, "origin_slot": 0, "target_id": tgt["id"], "target_slot": 42, "type": "*"}
+        {"id": 9998, "origin_id": -10, "origin_slot": 99, "target_id": tgt["id"], "target_slot": 42, "type": "*"}
     )
     res = render_py(wf, graph)
     n_inputs = len(tgt.get("inputs") or [])
