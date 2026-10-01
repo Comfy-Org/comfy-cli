@@ -242,7 +242,11 @@ _SECRET_PATTERNS = (
 
 
 def _internal_error_message(error: BaseException) -> str:
-    raw_text = f"{type(error).__name__}: {error}"
+    try:
+        detail = str(error)
+    except Exception:
+        detail = "unprintable exception"
+    raw_text = f"{type(error).__name__}: {detail}"
     scrub_input_truncated = len(raw_text) > _INTERNAL_ERROR_SCRUB_INPUT_CAP
     text = raw_text[:_INTERNAL_ERROR_SCRUB_INPUT_CAP]
     for pattern, repl in _SECRET_PATTERNS:
