@@ -164,6 +164,10 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
     Collects every problem found (rather than stopping at the first) so the
     caller's ``PrintUnsupported`` can report them all at once.
 
+    A broken LINK is not one of them: it is rendered, marked, and reported
+    (see ``_broken_links`` and ``_stale_input_slot_links``) — one bad link row
+    used to hide the whole graph, the shape a caller most needs to read.
+
     A subgraph instance whose definition is missing is deliberately NOT a
     refusal here (at any depth): it's printed opaquely instead — see
     ``_render_missing_subgraph_line`` and D11 in the task brief (amended).
@@ -190,31 +194,62 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
         else:
             seen_ids.add(nid)
 
+    return reasons
+
+
+def _broken_links(nodes: list[dict], links: list[Any], qualify: Any = str) -> tuple[list[str], dict[str, str], list]:
+    """Link rows that cannot carry a value, as ``(warnings, broken, rest)``.
+
+    ``broken`` maps a link id to the short reason the consuming input's line
+    is marked with; ``rest`` is every other row (well-formed, both endpoints
+    present), for the stale-input check and the link map. A broken link is
+    rendered as ``None`` on the input that holds it, marked ``BROKEN`` on that
+    node's line, and reported with the edit that repairs it — never a refusal
+    of the whole print.
+
+    Broken means: a malformed row, an endpoint node that does not exist, a
+    non-integer slot, or an output slot the source node does not have.
+    """
+    warnings: list[str] = []
+    broken: dict[str, str] = {}
+    rest: list = []
     nodes_by_id = {str(n.get("id")): n for n in nodes}
+
+    def holder_of(link_id: Any, tgt: dict | None) -> str | None:
+        for inp in (tgt or {}).get("inputs") or []:
+            if isinstance(inp, dict) and inp.get("link") is not None and str(inp["link"]) == str(link_id):
+                return str(inp.get("name") or "")
+        return None
+
     for link in links:
         if not isinstance(link, list) or len(link) < 5:
-            reasons.append(f"link malformed: {link!r}")
+            warnings.append(f"ignoring malformed link row {link!r}")
             continue
         link_id, src_id, src_slot, tgt_id, tgt_slot = link[0], link[1], link[2], link[3], link[4]
         src_node = nodes_by_id.get(str(src_id))
-        if src_node is None:
-            reasons.append(f"link {link_id} references missing node {src_id}")
-            continue
         tgt_node = nodes_by_id.get(str(tgt_id))
         if tgt_node is None:
-            reasons.append(f"link {link_id} references missing node {tgt_id}")
+            warnings.append(f"link {link_id} targets missing node {qualify(tgt_id)}; it feeds nothing and was ignored")
             continue
-        # Slots index into outputs/inputs below and into widgets_values later;
-        # a None or "0" would raise a TypeError deep in the render instead of
-        # being reported here with every other structural problem.
-        if not _is_slot_index(src_slot) or not _is_slot_index(tgt_slot):
-            reasons.append(f"link {link_id} has a non-integer slot")
+        why = None
+        if src_node is None:
+            why = f"its source node {src_id} does not exist"
+        elif not _is_slot_index(src_slot) or not _is_slot_index(tgt_slot):
+            why = "it has a non-integer slot"
+        else:
+            outputs = src_node.get("outputs")
+            if isinstance(outputs, list) and not (0 <= src_slot < len(outputs)):
+                why = f"node {src_id} has no output slot {src_slot} (it has {len(outputs)})"
+        if why is None:
+            rest.append(link)
             continue
-        outputs = src_node.get("outputs")
-        if isinstance(outputs, list) and not (0 <= src_slot < len(outputs)):
-            reasons.append(f"link {link_id} references out-of-range output slot {src_slot} on node {src_id}")
-        # An out-of-range INPUT slot is not a refusal: see _stale_input_slot_links.
-    return reasons
+        broken[str(link_id)] = why
+        name = holder_of(link_id, tgt_node)
+        into = f"input {name!r} of node {qualify(tgt_id)}" if name is not None else f"node {qualify(tgt_id)}"
+        source = f"{qualify(src_id)}.<output>" if src_node is not None else "<source>.<output>"
+        fix = f"`connect {source} {qualify(tgt_id)}.{name}`" if name else "`connect` to the input it was meant for"
+        warnings.append(f"BROKEN link {link_id} into {into}: {why}; printed as None — re-wire it with {fix}")
+    return warnings, broken, rest
 
 
 def _stale_input_slot_links(nodes: list[dict], links: list[list], qualify: Any = str) -> tuple[list[str], set[str]]:
@@ -265,7 +300,18 @@ def _stale_input_slot_links(nodes: list[dict], links: list[list], qualify: Any =
             warnings.append(f"{where}; rendered through input {str(holder.get('name') or '')!r}, which holds it")
         else:
             ignored.add(str(link_id))
-            warnings.append(f"{where}; no input holds it, so it feeds nothing and was ignored")
+            src = link[1]
+            source = "the subgraph input" if str(src) == _PROXY_IN else f"node {qualify(src)} output {link[2]}"
+            fixed = f"{qualify(src)}.{link[2]}" if str(src) != _PROXY_IN else None
+            warnings.append(
+                f"{where}; no input holds it, so it feeds nothing and was ignored. It was wired from {source} — "
+                + (
+                    f"if that value was meant for node {qualify(tgt_id)}, re-wire it with "
+                    f"`connect {fixed} {qualify(tgt_id)}.<input>` rather than retyping the value"
+                    if fixed
+                    else "re-wire it to the input it was meant for"
+                )
+            )
     return warnings, ignored
 
 
@@ -571,6 +617,9 @@ class _RenderCtx:
     # level). A nested subgraph instance registers against it so its own
     # address can later be expanded through every instance of THIS definition.
     owner_def: str | None = None
+    # Link id -> why it carries no value (see ``_broken_links``): the input
+    # holding it prints ``None`` and the line is marked ``BROKEN``.
+    broken_links: dict[str, str] = field(default_factory=dict)
 
     def proxy_in_name(self, slot: Any) -> str:
         name = self.proxy_in_names.get(slot)
@@ -773,6 +822,8 @@ def _build_args(
             continue
         link = ctx.link_map.get(str(link_id))
         if link is None:
+            if str(link_id) in ctx.broken_links:
+                annotations.append(f" {name} BROKEN link {link_id}: {ctx.broken_links[str(link_id)]}")
             continue
         src_id, src_slot, _tgt_id, _tgt_slot = link
         outcome = _resolve_source(
@@ -814,6 +865,8 @@ def _build_args(
             continue
         link = ctx.link_map.get(str(link_id))
         if link is None:
+            if str(link_id) in ctx.broken_links:
+                annotations.append(f" {name} BROKEN link {link_id}: {ctx.broken_links[str(link_id)]}")
             _place_arg(name, "None", args, extra)
             continue
         src_id, src_slot, _tgt_id, _tgt_slot = link
@@ -1308,6 +1361,11 @@ def _render_definition_block(
     if reasons:
         raise PrintUnsupported(reasons)
     first_instance = state.first_instance_by_def.get(def_id, def_id)
+    broken_warnings, broken, _rest = _broken_links(
+        interior_nodes, validate_links, lambda nid: f"{first_instance}/{nid}"
+    )
+    state.warnings.extend(broken_warnings)
+    all_links = {lid: link for lid, link in all_links.items() if lid not in broken}
     # Every link into an interior node, including one from the ``-10`` input
     # proxy (which ``_validate`` does not see): a stale target slot is stale
     # whatever feeds it.
@@ -1350,6 +1408,7 @@ def _render_definition_block(
         proxy_in_names=proxy_in_names,
         addr_prefix=first_instance,
         owner_def=def_id,
+        broken_links=broken,
     )
 
     lines = _render_nodes(order, ctx, graph, state.defs_by_id, binding_by_id, state, depth + 1)
@@ -1426,6 +1485,8 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
     reasons = _validate(nodes, links)
     if reasons:
         raise PrintUnsupported(reasons)
+    broken_warnings, broken, links = _broken_links(nodes, links)
+    warnings.extend(broken_warnings)
     stale_warnings, stale_ids = _stale_input_slot_links(nodes, links)
     warnings.extend(stale_warnings)
 
@@ -1463,6 +1524,7 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         reroute_sources=reroute_sources,
         set_sources=set_sources,
         get_vars=get_vars,
+        broken_links=broken,
     )
 
     skipped: list[dict] = []

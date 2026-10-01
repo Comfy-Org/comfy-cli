@@ -173,10 +173,9 @@ def test_print_unsupported_lists_reasons(tmp_path, capsys):
     }
     env = _run(["print", str(_write_workflow(tmp_path, wf)), "--input", str(SD15_OI)], capsys, expect_ok=False)
     assert env["error"]["code"] == "workflow_print_unsupported"
-    assert env["error"]["details"]["reasons"] == [
-        "node 1 is a legacy group node (workflow>Grp)",
-        "link 7 references missing node 99",
-    ]
+    # A broken link is rendered and marked, never a refusal; the legacy group
+    # node still is.
+    assert env["error"]["details"]["reasons"] == ["node 1 is a legacy group node (workflow>Grp)"]
 
 
 def test_print_rejects_unknown_format(capsys):
@@ -232,5 +231,7 @@ def test_print_renders_a_stale_input_slot_link_and_reports_it(tmp_path, capsys):
     assert d["node_count"] == 2
     assert "samples=empty_latent_image" in d["source"]
     assert d["warnings"] == [
-        "link 7 targets input slot 6 on node 2, which has 2 inputs; no input holds it, so it feeds nothing and was ignored"
+        "link 7 targets input slot 6 on node 2, which has 2 inputs; no input holds it, so it feeds nothing and was "
+        "ignored. It was wired from node 1 output 0 — if that value was meant for node 2, re-wire it with "
+        "`connect 1.0 2.<input>` rather than retyping the value"
     ]
