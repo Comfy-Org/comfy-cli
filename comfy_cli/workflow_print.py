@@ -246,7 +246,7 @@ def _normalise_node_inputs(nodes: list[dict], warnings: list[str], qualify: Any 
 
 def _stale_input_slot_links(
     nodes: list[dict], links: list[list], qualify: Any = str, proxy_input_id: str | None = None
-) -> tuple[list[str], set[str], dict[str, tuple[Any, int]]]:
+) -> tuple[list[str], set[str], dict[str, tuple[Any, int]], dict[str, list[tuple[Any, int]]]]:
     """Links whose target input slot the node does not have, as
     ``(warnings, ignored_link_ids)``. Run only after ``_validate`` passed, so
     every link row is well-formed and both endpoints exist.
@@ -279,6 +279,10 @@ def _stale_input_slot_links(
                 holders.setdefault(str(inp["link"]), inp)
                 holders_by_link.setdefault(str(inp["link"]), []).append((node.get("id"), slot, inp))
         input_holders_by_node[str(node.get("id"))] = holders
+    dependency_targets = {
+        link_id: [(node_id, slot) for node_id, slot, _input in holders]
+        for link_id, holders in holders_by_link.items()
+    }
     for link in links:
         link_id, src_id, tgt_id, tgt_slot = link[0], link[1], link[3], link[4]
         tgt_node = nodes_by_id.get(str(tgt_id))
@@ -296,7 +300,11 @@ def _stale_input_slot_links(
                 and str(declared_input.get("link")) == str(link_id)
             ):
                 continue
-            holder_location = next(iter(holders_by_link.get(str(link_id), [])), None)
+            locations = holders_by_link.get(str(link_id), [])
+            holder_location = next(
+                (location for location in locations if str(location[0]) == str(tgt_id)),
+                next(iter(locations), None),
+            )
             where = f"link {link_id} targets input slot {tgt_slot} on node {qualify(tgt_id)}, but that input does not hold it"
             if holder_location is not None:
                 holder_id, holder_slot, holder = holder_location
@@ -310,7 +318,11 @@ def _stale_input_slot_links(
                 warnings.append(f"{where}; no input holds it, so it feeds nothing and was ignored")
             continue
         holder = input_holders_by_node[str(tgt_id)].get(str(link_id))
-        holder_location = next(iter(holders_by_link.get(str(link_id), [])), None)
+        locations = holders_by_link.get(str(link_id), [])
+        holder_location = next(
+            (location for location in locations if str(location[0]) == str(tgt_id)),
+            next(iter(locations), None),
+        )
         where = (
             f"link {link_id} targets input slot {tgt_slot} on node {qualify(tgt_id)}, which has {len(inputs)} inputs"
         )
@@ -329,7 +341,7 @@ def _stale_input_slot_links(
         else:
             ignored.add(str(link_id))
             warnings.append(f"{where}; no input holds it, so it feeds nothing and was ignored")
-    return warnings, ignored, retargeted
+    return warnings, ignored, retargeted, dependency_targets
 
 
 def _toposort(printable: list[dict], link_map: dict[str, tuple]) -> list[dict]:
@@ -1415,7 +1427,7 @@ def _render_definition_block(
     # proxy (which ``_validate`` does not see): a stale target slot is stale
     # whatever feeds it.
     into_interior = [[lid, oid, oslot, tid, tslot] for lid, (oid, oslot, tid, tslot) in all_links.items()]
-    stale_warnings, stale_ids, retargeted = _stale_input_slot_links(
+    stale_warnings, stale_ids, retargeted, dependency_targets = _stale_input_slot_links(
         interior_nodes, into_interior, lambda nid: f"{first_instance}/{nid}", _PROXY_IN
     )
     state.warnings.extend(stale_warnings)
@@ -1435,7 +1447,17 @@ def _render_definition_block(
     # edge instead of silently dropping the ordering constraint (item 1).
     reroute_sources = _collect_reroute_sources(interior_nodes, all_links)
     set_sources, get_vars = _collect_get_set(interior_nodes, all_links)
-    toposort_links = _splice_link_map(all_links, nodes_by_id, reroute_sources, set_sources, get_vars, _PROXY_IN)
+    dependency_links = dict(all_links)
+    for lid, targets in dependency_targets.items():
+        source = all_links.get(lid)
+        if source is None:
+            continue
+        oid, oslot, _tid, _tslot = source
+        for index, (tid, tslot) in enumerate(targets):
+            dependency_links[f"{lid}@holder:{index}"] = (oid, oslot, tid, tslot)
+    toposort_links = _splice_link_map(
+        dependency_links, nodes_by_id, reroute_sources, set_sources, get_vars, _PROXY_IN
+    )
     order = _toposort(printable, toposort_links)
 
     proxy_in_names = {i: inp.get("name") for i, inp in enumerate(sg_def.get("inputs") or []) if isinstance(inp, dict)}
@@ -1548,7 +1570,7 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
     reasons = _validate(nodes, links)
     if reasons:
         raise PrintUnsupported(reasons)
-    stale_warnings, stale_ids, retargeted = _stale_input_slot_links(nodes, links)
+    stale_warnings, stale_ids, retargeted, dependency_targets = _stale_input_slot_links(nodes, links)
     warnings.extend(stale_warnings)
 
     link_map: dict[str, tuple] = {}
@@ -1569,7 +1591,15 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
     # Collected BEFORE toposort — see _render_definition_block and item 1.
     reroute_sources = _collect_reroute_sources(nodes, link_map)
     set_sources, get_vars = _collect_get_set(nodes, link_map)
-    toposort_links = _splice_link_map(link_map, nodes_by_id, reroute_sources, set_sources, get_vars, None)
+    dependency_links = dict(link_map)
+    for lid, targets in dependency_targets.items():
+        source = link_map.get(lid)
+        if source is None:
+            continue
+        src_id, src_slot, _tgt_id, _tgt_slot = source
+        for index, (tgt_id, tgt_slot) in enumerate(targets):
+            dependency_links[f"{lid}@holder:{index}"] = (src_id, src_slot, tgt_id, tgt_slot)
+    toposort_links = _splice_link_map(dependency_links, nodes_by_id, reroute_sources, set_sources, get_vars, None)
     order = _toposort(printable, toposort_links)
 
     # binding_name is called once per node, in topological order, so the
