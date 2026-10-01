@@ -205,7 +205,7 @@ _SECRET_PATTERNS = (
     (
         # The Bearer scrubber above preserves the scheme; do not remask it as an unquoted token value.
         re.compile(
-            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|session(?:[_-]?(?:id|key))?|sid|sig|signature)[\w-]*"
+            r"((?<![\w-])(?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|session(?:[_-]?(?:id|key))?|sid|sig|signature)(?:[_-][\w-]+)?"
             r"[\"']?\s*[:=]\s*)(?:((?:\\)?[\"'])(?:(?!\2)(?:\\.|[^\r\n]))*\2?|(?!Bearer\b)[^\\\s&\"',;]+)",
             re.IGNORECASE,
         ),
@@ -213,7 +213,7 @@ _SECRET_PATTERNS = (
     ),
     (
         re.compile(
-            rf"(\\[\"'](?:{_SECRET_KEY_PATTERN})[\w-]*"
+            rf"(\\[\"'](?:{_SECRET_KEY_PATTERN})(?:[_-][\w-]+)?"
             r"\\[\"']\s*[:=]\s*\\[\"'])(.*?)(\\[\"']|[\r\n]|$)",
             re.IGNORECASE,
         ),
