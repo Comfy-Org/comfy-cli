@@ -1082,3 +1082,89 @@ def test_out_of_range_input_slot_fed_by_the_definition_input_proxy_is_reported(s
         f"link 9998 targets input slot 42 on node 10/{tgt['id']}, which has {n_inputs} inputs; "
         "the subgraph input proxy routes by target slot, so it was ignored"
     ) in res.warnings
+
+
+def test_non_list_inputs_are_treated_as_empty_with_warning(sd15_graph):
+    node = _node(1, "EmptyLatentImage", widgets=[512, 512, 1])
+    node["inputs"] = 5
+    wf = _mini([node], [])
+    res = render_py(wf, sd15_graph)
+    assert res.node_count == 1
+    assert res.warnings == ["node 1 has non-list inputs; treated as empty"]
+
+
+def test_null_link_id_is_rejected_before_link_map_collapse(sd15_graph):
+    wf = _stale_slot_workflow([None, 1, 0, 2, 1, "LATENT"])
+    with pytest.raises(PrintUnsupported, match="link has null id"):
+        render_py(wf, sd15_graph)
+
+
+def test_definition_inputs_are_normalized_before_promoted_lookup(sd15_graph):
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    interior = _node(7, "VAEDecode")
+    interior["inputs"] = 5
+    definition = {
+        "id": subgraph_id,
+        "name": "Malformed inputs",
+        "inputs": [{"name": "samples", "type": "LATENT"}],
+        "outputs": [],
+        "nodes": [interior],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    wf = _mini([_node(10, subgraph_id)], [])
+    wf["definitions"] = {"subgraphs": [definition]}
+    res = render_py(wf, sd15_graph)
+    assert "node 10/7 has non-list inputs; treated as empty" in res.warnings
+
+
+def test_link_row_is_retargeted_to_the_input_that_holds_it(sd15_graph):
+    wf = _stale_slot_workflow([7, 1, 0, 2, 6, "LATENT"])
+    wf["links"] = [[7, 1, 0, 2, 6, "LATENT"]]
+    wf["nodes"].append(
+        _node(
+            3,
+            "VAEDecode",
+            inputs=[{"name": "samples", "type": "LATENT", "link": 7}, {"name": "vae", "type": "VAE", "link": None}],
+        )
+    )
+    res = render_py(wf, sd15_graph)
+    assert "samples=empty_latent_image" in next(line for line in res.source.splitlines() if "# 3" in line)
+    assert "rendered through input 'samples' on node 3" in res.warnings[0]
+
+
+def test_in_range_link_row_follows_the_actual_holder(sd15_graph):
+    wf = _stale_slot_workflow([7, 1, 0, 2, 0, "LATENT"])
+    wf["links"] = [[7, 1, 0, 2, 0, "LATENT"]]
+    wf["nodes"][1]["inputs"][0]["link"] = None
+    wf["nodes"].append(
+        _node(
+            3,
+            "VAEDecode",
+            inputs=[{"name": "samples", "type": "LATENT", "link": 7}, {"name": "vae", "type": "VAE", "link": None}],
+        )
+    )
+    res = render_py(wf, sd15_graph)
+    assert "samples=empty_latent_image" in next(line for line in res.source.splitlines() if "# 3" in line)
+    assert "but that input does not hold it" in res.warnings[0]
+
+
+def test_malformed_graph_containers_are_reported_not_crashed():
+    wf = {"nodes": [], "links": 5, "definitions": {"subgraphs": 5}}
+    res = render_py(wf, None)
+    assert "workflow: ignoring non-list links block" in res.warnings
+    assert "workflow: ignoring non-list subgraphs block" in res.warnings
+
+
+def test_workflow_fields_cannot_spoof_normalisation_markers():
+    node = _node(1, "Example")
+    node["_workflow_print_nonlist_inputs"] = True
+    node["_workflow_print_nonlist_outputs"] = True
+    res = render_py(_mini([node], []), None)
+    assert not [warning for warning in res.warnings if "non-list" in warning]
+
+
+def test_typed_duplicate_link_rows_are_rejected():
+    wf = _mini([_node(1, "Source"), _node(2, "Target", inputs=[{"name": "x", "link": 7}])], [])
+    wf["links"] = [[7, 1, 0, 2, 0], [7, True, 0, 2, 0]]
+    with pytest.raises(PrintUnsupported, match="duplicate link id 7"):
+        render_py(wf, None)
