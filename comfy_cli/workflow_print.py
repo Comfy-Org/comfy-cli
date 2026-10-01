@@ -163,6 +163,10 @@ def _typed_row(values: Any) -> tuple[tuple[type, str], ...]:
     return tuple((type(value), repr(value)) for value in values)
 
 
+_NONLIST_INPUTS = object()
+_NONLIST_OUTPUTS = object()
+
+
 def _dedupe_identical_links(links: list[Any]) -> list[Any]:
     """Drop byte-for-byte-equivalent link rows while retaining conflicting duplicates."""
     seen: dict[str, tuple[tuple[type, str], ...]] = {}
@@ -258,12 +262,12 @@ def _normalise_node_inputs(nodes: list[dict], warnings: list[str] | None, qualif
     normalised: list[dict] = []
     for node in nodes:
         inputs = node.get("inputs")
-        if node.get("_workflow_print_nonlist_inputs") and warnings is not None:
+        if node.get(_NONLIST_INPUTS) and warnings is not None:
             warnings.append(f"node {qualify(node.get('id'))} has non-list inputs; treated as empty")
         if inputs is not None and not isinstance(inputs, list):
             if warnings is not None:
                 warnings.append(f"node {qualify(node.get('id'))} has non-list inputs; treated as empty")
-            node = {**node, "inputs": [], "_workflow_print_nonlist_inputs": True}
+            node = {**node, "inputs": [], _NONLIST_INPUTS: True}
         normalised.append(node)
     return normalised
 
@@ -273,12 +277,12 @@ def _normalise_node_outputs(nodes: list[dict], warnings: list[str] | None, quali
     normalised: list[dict] = []
     for node in nodes:
         outputs = node.get("outputs")
-        if node.get("_workflow_print_nonlist_outputs") and warnings is not None:
+        if node.get(_NONLIST_OUTPUTS) and warnings is not None:
             warnings.append(f"node {qualify(node.get('id'))} has non-list outputs; treated as empty")
         if outputs is not None and not isinstance(outputs, list):
             if warnings is not None:
                 warnings.append(f"node {qualify(node.get('id'))} has non-list outputs; treated as empty")
-            node = {**node, "outputs": [], "_workflow_print_nonlist_outputs": True}
+            node = {**node, "outputs": [], _NONLIST_OUTPUTS: True}
         normalised.append(node)
     return normalised
 
