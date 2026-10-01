@@ -1093,6 +1093,30 @@ def test_non_list_inputs_are_treated_as_empty_with_warning(sd15_graph):
     assert res.warnings == ["node 1 has non-list inputs; treated as empty"]
 
 
+def test_null_link_id_is_rejected_before_link_map_collapse(sd15_graph):
+    wf = _stale_slot_workflow([None, 1, 0, 2, 1, "LATENT"])
+    with pytest.raises(PrintUnsupported, match="link has null id"):
+        render_py(wf, sd15_graph)
+
+
+def test_definition_inputs_are_normalized_before_promoted_lookup(sd15_graph):
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    interior = _node(7, "VAEDecode")
+    interior["inputs"] = 5
+    definition = {
+        "id": subgraph_id,
+        "name": "Malformed inputs",
+        "inputs": [{"name": "samples", "type": "LATENT"}],
+        "outputs": [],
+        "nodes": [interior],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    wf = _mini([_node(10, subgraph_id)], [])
+    wf["definitions"] = {"subgraphs": [definition]}
+    res = render_py(wf, sd15_graph)
+    assert "node 22222222-3333-4444-5555-666666666666/7 has non-list inputs; treated as empty" in res.warnings
+
+
 def test_link_row_is_retargeted_to_the_input_that_holds_it(sd15_graph):
     wf = _stale_slot_workflow([7, 1, 0, 2, 6, "LATENT"])
     wf["links"] = [[7, 1, 0, 2, 6, "LATENT"]]
