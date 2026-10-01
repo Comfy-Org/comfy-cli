@@ -1372,12 +1372,10 @@ def _render_definition_block(
 
     validate_links: list[list] = []
     boundary_reasons: list[str] = []
-    definition_inputs = sg_def.get("inputs") if isinstance(sg_def.get("inputs"), list) else []
-    definition_outputs = sg_def.get("outputs") if isinstance(sg_def.get("outputs"), list) else []
     interior_by_id = {str(node.get("id")): node for node in interior_nodes}
     for lid, (oid, oslot, tid, tslot) in all_links.items():
         if str(oid) == _PROXY_IN:
-            if not _is_slot_index(oslot) or not (0 <= oslot < len(definition_inputs)):
+            if not _is_slot_index(oslot) or oslot < 0:
                 boundary_reasons.append(f"subgraph {def_id}: link {lid} has invalid input-boundary slot {oslot!r}")
             target = interior_by_id.get(str(tid))
             target_inputs = target.get("inputs") if target is not None else None
@@ -1387,15 +1385,10 @@ def _render_definition_block(
                 boundary_reasons.append(f"subgraph {def_id}: link {lid} has negative target slot {tslot}")
             continue
         if str(tid) == _PROXY_OUT:
-            if not _is_slot_index(tslot) or not (0 <= tslot < len(definition_outputs)):
+            if not _is_slot_index(tslot) or tslot < 0:
                 boundary_reasons.append(f"subgraph {def_id}: link {lid} has invalid output-boundary slot {tslot!r}")
             source = interior_by_id.get(str(oid))
-            source_outputs = source.get("outputs") if source is not None else None
-            if (
-                not _is_slot_index(oslot)
-                or not isinstance(source_outputs, list)
-                or not (0 <= oslot < len(source_outputs))
-            ):
+            if not _is_slot_index(oslot) or oslot < 0:
                 boundary_reasons.append(f"subgraph {def_id}: link {lid} has invalid source slot {oslot!r}")
             continue
         validate_links.append([lid, oid, oslot, tid, tslot])
