@@ -286,6 +286,21 @@ def _stale_input_slot_links(
         if not isinstance(inputs, list):
             inputs = []
         if 0 <= tgt_slot < len(inputs):
+            declared_input = inputs[tgt_slot]
+            if isinstance(declared_input, dict) and str(declared_input.get("link")) == str(link_id):
+                continue
+            holder_location = next(iter(holders_by_link.get(str(link_id), [])), None)
+            where = f"link {link_id} targets input slot {tgt_slot} on node {qualify(tgt_id)}, but that input does not hold it"
+            if holder_location is not None:
+                holder_id, holder_slot, holder = holder_location
+                retargeted[str(link_id)] = (holder_id, holder_slot)
+                warnings.append(
+                    f"{where}; rendered through input {str(holder.get('name') or '')!r} on node {qualify(holder_id)}, "
+                    "which holds it"
+                )
+            else:
+                ignored.add(str(link_id))
+                warnings.append(f"{where}; no input holds it, so it feeds nothing and was ignored")
             continue
         holder = input_holders_by_node[str(tgt_id)].get(str(link_id))
         holder_location = next(iter(holders_by_link.get(str(link_id), [])), None)
