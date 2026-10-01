@@ -1186,7 +1186,7 @@ def _promoted_header_line(def_id: str, sg_def: dict, state: _State) -> str | Non
     )
 
 
-def _def_links(sg_def: dict, duplicate_ids: list[str] | None = None) -> dict[str, tuple]:
+def _def_links(sg_def: dict, duplicate_ids: list[str]) -> dict[str, tuple]:
     """Normalise a definition's dict-shaped links into the array-tuple form
     used everywhere else: ``{str(link_id): (origin_id, origin_slot, target_id, target_slot)}``."""
     out: dict[str, tuple] = {}
@@ -1197,7 +1197,7 @@ def _def_links(sg_def: dict, duplicate_ids: list[str] | None = None) -> dict[str
         if lid is None:
             continue
         row = (link.get("origin_id"), link.get("origin_slot"), link.get("target_id"), link.get("target_slot"))
-        if str(lid) in out and out[str(lid)] != row and duplicate_ids is not None and str(lid) not in duplicate_ids:
+        if str(lid) in out and out[str(lid)] != row and str(lid) not in duplicate_ids:
             duplicate_ids.append(str(lid))
         out[str(lid)] = row
     return out
