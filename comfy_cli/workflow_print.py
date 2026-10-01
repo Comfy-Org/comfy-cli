@@ -1494,7 +1494,7 @@ def _render_definition_block(
             continue
         oid, oslot, _tid, _tslot = source
         for index, (tid, tslot) in enumerate(targets):
-            dependency_links[f"{lid}@holder:{index}"] = (oid, oslot, tid, tslot)
+            dependency_links[("holder", lid, index)] = (oid, oslot, tid, tslot)
     toposort_links = _splice_link_map(dependency_links, nodes_by_id, reroute_sources, set_sources, get_vars, _PROXY_IN)
     order = _toposort(printable, toposort_links)
 
@@ -1639,7 +1639,7 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
             continue
         src_id, src_slot, _tgt_id, _tgt_slot = source
         for index, (tgt_id, tgt_slot) in enumerate(targets):
-            dependency_links[f"{lid}@holder:{index}"] = (src_id, src_slot, tgt_id, tgt_slot)
+            dependency_links[("holder", lid, index)] = (src_id, src_slot, tgt_id, tgt_slot)
     toposort_links = _splice_link_map(dependency_links, nodes_by_id, reroute_sources, set_sources, get_vars, None)
     order = _toposort(printable, toposort_links)
 
