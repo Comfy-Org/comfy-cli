@@ -213,10 +213,60 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
         outputs = src_node.get("outputs")
         if isinstance(outputs, list) and not (0 <= src_slot < len(outputs)):
             reasons.append(f"link {link_id} references out-of-range output slot {src_slot} on node {src_id}")
-        inputs = tgt_node.get("inputs")
-        if isinstance(inputs, list) and not (0 <= tgt_slot < len(inputs)):
-            reasons.append(f"link {link_id} references out-of-range input slot {tgt_slot} on node {tgt_id}")
+        # An out-of-range INPUT slot is not a refusal: see _stale_input_slot_links.
     return reasons
+
+
+def _stale_input_slot_links(nodes: list[dict], links: list[list], qualify: Any = str) -> tuple[list[str], set[str]]:
+    """Links whose target input slot the node does not have, as
+    ``(warnings, ignored_link_ids)``. Run only after ``_validate`` passed, so
+    every link row is well-formed and both endpoints exist.
+
+    This is a stale link, usually left behind when a node's inputs changed
+    after it was wired (a widget converted back from an input, dynamic or
+    auto-grow inputs shrinking). It does not make the rest of the workflow
+    unprintable, and the editor loads it: its link fixer keeps such a row only
+    while an output still lists it and never wires it into an input. What a
+    node reads is its own ``inputs[].link``, which is also what this printer
+    renders from. So:
+
+    * an input on the target that holds the link id is still wired through
+      that input — the edge prints as usual, and the warning says so;
+    * otherwise the link feeds nothing: it is ignored (no edge, no ordering
+      constraint, which could otherwise report a cycle that isn't there) and
+      reported.
+    """
+    warnings: list[str] = []
+    ignored: set[str] = set()
+    nodes_by_id = {str(n.get("id")): n for n in nodes}
+    for link in links:
+        link_id, tgt_id, tgt_slot = link[0], link[3], link[4]
+        tgt_node = nodes_by_id.get(str(tgt_id))
+        if tgt_node is None or not _is_slot_index(tgt_slot):
+            continue
+        # A node that serialized no ``inputs`` list has no input slots at all.
+        inputs = tgt_node.get("inputs")
+        if not isinstance(inputs, list):
+            inputs = []
+        if 0 <= tgt_slot < len(inputs):
+            continue
+        holder = next(
+            (
+                inp
+                for inp in inputs
+                if isinstance(inp, dict) and inp.get("link") is not None and str(inp["link"]) == str(link_id)
+            ),
+            None,
+        )
+        where = (
+            f"link {link_id} targets input slot {tgt_slot} on node {qualify(tgt_id)}, which has {len(inputs)} inputs"
+        )
+        if holder is not None:
+            warnings.append(f"{where}; rendered through input {str(holder.get('name') or '')!r}, which holds it")
+        else:
+            ignored.add(str(link_id))
+            warnings.append(f"{where}; no input holds it, so it feeds nothing and was ignored")
+    return warnings, ignored
 
 
 def _toposort(printable: list[dict], link_map: dict[str, tuple]) -> list[dict]:
@@ -1257,6 +1307,16 @@ def _render_definition_block(
     reasons = _validate(interior_nodes, validate_links)
     if reasons:
         raise PrintUnsupported(reasons)
+    first_instance = state.first_instance_by_def.get(def_id, def_id)
+    # Every link into an interior node, including one from the ``-10`` input
+    # proxy (which ``_validate`` does not see): a stale target slot is stale
+    # whatever feeds it.
+    into_interior = [[lid, oid, oslot, tid, tslot] for lid, (oid, oslot, tid, tslot) in all_links.items()]
+    stale_warnings, stale_ids = _stale_input_slot_links(
+        interior_nodes, into_interior, lambda nid: f"{first_instance}/{nid}"
+    )
+    state.warnings.extend(stale_warnings)
+    all_links = {lid: link for lid, link in all_links.items() if lid not in stale_ids}
 
     printable = [n for n in interior_nodes if n.get("type") not in _UI_ONLY]
     notes = [n for n in interior_nodes if n.get("type") in _NOTE_TYPES]
@@ -1276,7 +1336,6 @@ def _render_definition_block(
     proxy_out_names = {i: o.get("name") for i, o in enumerate(sg_def.get("outputs") or []) if isinstance(o, dict)}
 
     binding_by_id = _build_bindings(order, state.defs_by_id)
-    first_instance = state.first_instance_by_def.get(def_id, def_id)
 
     ctx = _RenderCtx(
         graph=graph,
@@ -1367,10 +1426,14 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
     reasons = _validate(nodes, links)
     if reasons:
         raise PrintUnsupported(reasons)
+    stale_warnings, stale_ids = _stale_input_slot_links(nodes, links)
+    warnings.extend(stale_warnings)
 
     link_map: dict[str, tuple] = {}
     for link in links:
         link_id, src_id, src_slot, tgt_id, tgt_slot = link[0], link[1], link[2], link[3], link[4]
+        if str(link_id) in stale_ids:
+            continue
         link_map[str(link_id)] = (src_id, src_slot, tgt_id, tgt_slot)
 
     printable = [n for n in nodes if n.get("type") not in _UI_ONLY]
