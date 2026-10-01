@@ -237,7 +237,7 @@ _SECRET_PATTERNS = (
         ),
         lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
     ),
-    (re.compile(r"(://)[^\s/'\"]+@"), r"\1***@"),
+    (re.compile(r"(://)[^\s/'\"?#,]+@"), r"\1***@"),
 )
 
 
