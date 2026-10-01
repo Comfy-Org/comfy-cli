@@ -1391,7 +1391,12 @@ def _render_definition_block(
             if not _is_slot_index(tslot) or tslot < 0:
                 boundary_reasons.append(f"subgraph {def_id}: link {lid} has invalid output-boundary slot {tslot!r}")
             source = interior_by_id.get(str(oid))
-            if not _is_slot_index(oslot) or oslot < 0:
+            if source is None:
+                boundary_ignored.add(str(lid))
+                state.warnings.append(
+                    f"subgraph {def_id}: output link {lid} references missing interior node {oid}; it was ignored"
+                )
+            elif not _is_slot_index(oslot) or oslot < 0:
                 boundary_reasons.append(f"subgraph {def_id}: link {lid} has invalid source slot {oslot!r}")
             continue
         validate_links.append([lid, oid, oslot, tid, tslot])
