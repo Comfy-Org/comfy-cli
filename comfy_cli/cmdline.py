@@ -230,7 +230,7 @@ _SECRET_PATTERNS = (
 
 
 def _internal_error_message(error: BaseException) -> str:
-    text = f"{type(error).__name__}: {error}"
+    text = f"{type(error).__name__}: {error}"[:_INTERNAL_ERROR_MESSAGE_CAP]
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
     if len(text) > _INTERNAL_ERROR_MESSAGE_CAP:
