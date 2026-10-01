@@ -213,3 +213,16 @@ def test_print_before_and_after_the_rewire():
     (leftover,) = [w for w in after.warnings if "link 9001" in w]
     assert "nothing needs re-wiring" in leftover and "'text'" in leftover
     assert "text=string_source" in after.source
+
+
+def test_replacing_a_boundary_link_drops_it_from_the_boundary_input():
+    wf = _workflow()
+    sg = _sg(wf)
+    sg["inputs"] = [{"id": "in-1", "name": "prompt", "type": "STRING", "linkIds": [8001, 8002]}]
+    sg["links"].append(
+        {"id": 8001, "origin_id": -10, "origin_slot": 0, "target_id": 2011, "target_slot": 1, "type": "STRING"}
+    )
+    _node(wf, 2011)["inputs"][1]["link"] = 8001
+    out, op = workflow_ops.connect(wf, _graph(), "70/2005", "STRING", "70/2011", "text")
+    assert _sg(out)["inputs"][0]["linkIds"] == [8002]
+    assert 8001 not in [lk["id"] for lk in _sg(out)["links"]]

@@ -85,7 +85,8 @@ def select(data: Any, expr: str) -> tuple[Any, bool]:
 
 def _split_top(text: str, sep: str) -> list[str] | None:
     """Split ``text`` on ``sep`` outside any ``#(...)`` row query and outside
-    quoted strings in one. ``None`` for an unbalanced query or quote."""
+    quoted strings in one. ``None`` for an unclosed query or quote. A paren
+    that does not open (or sit inside) a row query is part of a key."""
     parts: list[str] = []
     depth = 0
     in_str = False
@@ -100,12 +101,12 @@ def _split_top(text: str, sep: str) -> list[str] | None:
                 in_str = False
         elif ch == '"' and depth:
             in_str = True
-        elif ch == "(":
+        elif ch == "(" and (depth or (i > 0 and text[i - 1] == WILDCARD)):
+            # Only `#(` opens a row query; outside one a paren is an ordinary
+            # key character, as it was before row queries existed.
             depth += 1
-        elif ch == ")":
+        elif ch == ")" and depth:
             depth -= 1
-            if depth < 0:
-                return None
         elif ch == sep and depth == 0:
             parts.append(text[start:i])
             start = i + 1

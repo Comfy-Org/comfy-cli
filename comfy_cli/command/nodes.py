@@ -169,8 +169,9 @@ def _cap_choices(payload: dict[str, Any]) -> dict[str, Any]:
     with ``choices_total`` and ``choices_truncated``. Adds a top-level
     ``choices_note`` naming how to read or filter the full list, once."""
     capped: list[str] = []
+    top_level: list[str] = []
 
-    def walk(inputs: Any) -> None:
+    def walk(inputs: Any, nested: bool = False) -> None:
         if not isinstance(inputs, list):
             return
         for entry in inputs:
@@ -182,19 +183,24 @@ def _cap_choices(payload: dict[str, Any]) -> dict[str, Any]:
                 entry["choices"] = choices[:CHOICES_INLINE_MAX]
                 entry["choices_truncated"] = True
                 capped.append(str(entry.get("name")))
+                if not nested:
+                    top_level.append(str(entry.get("name")))
             for option in entry.get("dynamic_options") or []:
                 if isinstance(option, dict):
-                    walk(option.get("inputs"))
+                    walk(option.get("inputs"), nested=True)
 
     walk(payload.get("inputs"))
     if capped:
         name = payload.get("name") or "<class>"
-        first = capped[0]
-        payload["choices_note"] = (
-            f"{', '.join(capped)}: only the first {CHOICES_INLINE_MAX} choices are listed (see choices_total). "
-            f"Check or find one with `comfy nodes show {name} --select "
-            f'\'inputs.#(name=="{first}").choices.#(%"*<text>*")#\'`; --all-choices lists every choice.'
-        )
+        note = f"{', '.join(capped)}: only the first {CHOICES_INLINE_MAX} choices are listed (see choices_total). "
+        if top_level:
+            # A nested (dynamic-combo) input is not under top-level `inputs`,
+            # so only a top-level one gets the filter query.
+            note += (
+                f"Check or find one with `comfy nodes show {name} --select "
+                f'\'inputs.#(name=="{top_level[0]}").choices.#(%"*<text>*")#\'`; '
+            )
+        payload["choices_note"] = note + "--all-choices lists every choice."
     return payload
 
 

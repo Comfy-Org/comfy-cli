@@ -96,6 +96,18 @@ def _scope_findings(nodes: list, links: Any, prefix: str | None) -> tuple[list[d
                 }
             )
             continue
+        if not _is_slot(tgt_slot) or not (src_is_proxy or _is_slot(src_slot)):
+            errors.append(
+                {
+                    "node_id": addr(tgt_id),
+                    "field": field,
+                    "code": "link_slot_out_of_range",
+                    "message": f"link {link_id} into node {addr(tgt_id)} has a non-integer slot — the input "
+                    "receives nothing",
+                    "hint": f"re-wire it: `connect {addr(src_id)}.<output> {addr(tgt_id)}.{field or '<input>'}`",
+                }
+            )
+            continue
         outputs = (src or {}).get("outputs")
         if not src_is_proxy and isinstance(outputs, list) and _is_slot(src_slot) and not 0 <= src_slot < len(outputs):
             names = ", ".join(
@@ -114,7 +126,7 @@ def _scope_findings(nodes: list, links: Any, prefix: str | None) -> tuple[list[d
             )
             continue
         inputs = [i for i in tgt.get("inputs") or [] if isinstance(i, dict)]
-        if not _is_slot(tgt_slot) or 0 <= tgt_slot < len(tgt.get("inputs") or []) or held is not None:
+        if 0 <= tgt_slot < len(tgt.get("inputs") or []) or held is not None:
             continue
         # The row aims past the target's inputs and no input holds it: the
         # value it was drawn to carry reaches nothing.

@@ -1586,6 +1586,10 @@ def _interior_link_id(link: Any) -> Any:
 
 def _remove_interior_link(definition: dict, link_id: Any) -> None:
     definition["links"] = [lk for lk in definition.get("links") or [] if _interior_link_id(lk) != link_id]
+    # A replaced link from the input proxy is also listed on its boundary input.
+    for boundary in definition.get("inputs") or []:
+        if isinstance(boundary, dict) and isinstance(boundary.get("linkIds"), list):
+            boundary["linkIds"] = [lid for lid in boundary["linkIds"] if lid != link_id]
     for n in definition.get("nodes") or []:
         if not isinstance(n, dict):
             continue

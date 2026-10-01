@@ -127,3 +127,11 @@ def test_a_row_with_no_empty_input_to_take_it_is_only_a_warning():
     node["inputs"] = [i for i in node["inputs"] if i["name"] != "text"]
     errors, warnings = broken_link_findings(json.loads(json.dumps(wf)))
     assert errors == [] and len(warnings) == 1
+
+
+def test_a_non_integer_slot_is_an_error_like_print_marks_it(tmp_path, capsys):
+    wf = _canvas([7, 1, None, 2, 0, "STRING"])
+    wf["nodes"][1]["inputs"][0]["link"] = 7
+    env = _validate(tmp_path, capsys, wf)
+    (err,) = [e for e in env["data"]["errors"] if e["code"] == "link_slot_out_of_range"]
+    assert "non-integer slot" in err["message"]

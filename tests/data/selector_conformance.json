@@ -9,6 +9,8 @@
     ],
     "count": 3,
     "meta": {"k": "v"},
+    "a(b": 1,
+    "c)d": {"e": 2},
     "slots": [
       {"address": "5.seed", "instance_id": 5, "node_type": "KSampler", "current_value": 1},
       {"address": "5.steps", "instance_id": 5, "node_type": "KSampler", "current_value": 20},
@@ -60,6 +62,10 @@
     {"expr": "meta.#(k==\"v\")", "matched": false},
     {"expr": "slots.#(node_type==\"KSampler\"", "matched": false},
     {"expr": "slots.#(node_type=~\"K\")#", "matched": false},
-    {"expr": "slots.#()#", "matched": false}
+    {"expr": "slots.#()#", "matched": false},
+    {"expr": "a(b", "matched": true, "result": 1},
+    {"expr": "c)d.e", "matched": true, "result": 2},
+    {"expr": "a(b,count", "matched": true, "result": {"a(b": 1, "count": 3}},
+    {"expr": "meta.k(x", "matched": false}
   ]
 }

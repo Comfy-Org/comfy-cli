@@ -134,6 +134,13 @@ def enum_listing_hint(
     n = len(options)
     if n <= ENUM_INLINE_MAX or _FULL_ENUM_OPTIONS.get():
         return f"valid options: {', '.join(str(v) for v in options)}"
+    if "." in field:
+        # A dotted name is a dynamic-combo sub-input: it sits under
+        # `dynamic_options[].inputs`, not top-level `inputs`.
+        return (
+            f"pick one of `suggestions` ({len(suggestions)} of {n} options); re-run validate with "
+            f"--full-options to list all {n}"
+        )
     target = class_type or "<class>"
     query = f'inputs.#(name=="{field}").{listing}.#(%"*<text>*")#'
     return (

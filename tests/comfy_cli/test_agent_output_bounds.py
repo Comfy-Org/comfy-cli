@@ -155,3 +155,27 @@ class TestNodesShowChoices:
         entry = data["expanded"][0]
         assert entry["inputs"][0]["choices_total"] == len(FILES)
         assert len(entry["inputs"][0]["choices"]) == nodes_cmd.CHOICES_INLINE_MAX
+
+
+def test_a_nested_enum_hint_does_not_point_at_top_level_inputs():
+    from comfy_cli.cql.engine import enum_listing_hint
+
+    hint = enum_listing_hint("model.style", FILES, FILES[:5], "Foo")
+    assert "--full-options" in hint and "inputs.#(" not in hint
+
+
+def test_a_nested_capped_choice_list_only_advertises_all_choices():
+    payload = {
+        "name": "Foo",
+        "inputs": [
+            {
+                "name": "model",
+                "choices": [],
+                "dynamic_options": [{"keys": ["a"], "inputs": [{"name": "model.ckpt", "choices": FILES}]}],
+            }
+        ],
+    }
+    nodes_cmd._cap_choices(payload)
+    sub = payload["inputs"][0]["dynamic_options"][0]["inputs"][0]
+    assert sub["choices_total"] == len(FILES)
+    assert "--select" not in payload["choices_note"] and "--all-choices" in payload["choices_note"]
