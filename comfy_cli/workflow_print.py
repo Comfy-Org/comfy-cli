@@ -229,6 +229,18 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
     return reasons
 
 
+def _normalise_node_inputs(nodes: list[dict], warnings: list[str], qualify: Any = str) -> list[dict]:
+    """Treat malformed input containers as empty without mutating the workflow."""
+    normalised: list[dict] = []
+    for node in nodes:
+        inputs = node.get("inputs")
+        if inputs is not None and not isinstance(inputs, list):
+            warnings.append(f"node {qualify(node.get('id'))} has non-list inputs; treated as empty")
+            node = {**node, "inputs": []}
+        normalised.append(node)
+    return normalised
+
+
 def _stale_input_slot_links(
     nodes: list[dict], links: list[list], qualify: Any = str, proxy_input_id: str | None = None
 ) -> tuple[list[str], set[str]]:
@@ -1315,7 +1327,12 @@ def _render_definition_block(
     queue without bound — depth only grows with genuinely distinct nesting
     levels, and capping it would misfire on legitimate deep nesting instead of
     catching anything a cycle could cause."""
-    interior_nodes = [n for n in sg_def.get("nodes") or [] if isinstance(n, dict)]
+    first_instance = state.first_instance_by_def.get(def_id, def_id)
+    interior_nodes = _normalise_node_inputs(
+        [n for n in sg_def.get("nodes") or [] if isinstance(n, dict)],
+        state.warnings,
+        lambda nid: f"{first_instance}/{nid}",
+    )
     all_links = _def_links(sg_def)
 
     validate_links: list[list] = []
@@ -1327,7 +1344,6 @@ def _render_definition_block(
     reasons = _validate(interior_nodes, validate_links)
     if reasons:
         raise PrintUnsupported(reasons)
-    first_instance = state.first_instance_by_def.get(def_id, def_id)
     # Every link into an interior node, including one from the ``-10`` input
     # proxy (which ``_validate`` does not see): a stale target slot is stale
     # whatever feeds it.
@@ -1427,7 +1443,7 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
     warnings: list[str] = []
 
     raw_nodes = workflow.get("nodes") or []
-    nodes = [n for n in raw_nodes if isinstance(n, dict)]
+    nodes = _normalise_node_inputs([n for n in raw_nodes if isinstance(n, dict)], warnings)
     if len(nodes) != len(raw_nodes):
         warnings.append(f"workflow: ignoring {len(raw_nodes) - len(nodes)} non-object node entries")
 
