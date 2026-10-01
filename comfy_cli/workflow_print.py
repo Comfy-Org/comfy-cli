@@ -244,6 +244,18 @@ def _normalise_node_inputs(nodes: list[dict], warnings: list[str], qualify: Any 
     return normalised
 
 
+def _normalise_node_outputs(nodes: list[dict], warnings: list[str], qualify: Any = str) -> list[dict]:
+    """Treat malformed output containers as empty without mutating the workflow."""
+    normalised: list[dict] = []
+    for node in nodes:
+        outputs = node.get("outputs")
+        if outputs is not None and not isinstance(outputs, list):
+            warnings.append(f"node {qualify(node.get('id'))} has non-list outputs; treated as empty")
+            node = {**node, "outputs": []}
+        normalised.append(node)
+    return normalised
+
+
 def _stale_input_slot_links(
     nodes: list[dict], links: list[list], qualify: Any = str, proxy_input_id: str | None = None
 ) -> tuple[list[str], set[str], dict[str, tuple[Any, int]], dict[str, list[tuple[Any, int]]]]:
@@ -1378,6 +1390,7 @@ def _render_definition_block(
         state.warnings,
         lambda nid: f"{first_instance}/{nid}",
     )
+    interior_nodes = _normalise_node_outputs(interior_nodes, state.warnings, lambda nid: f"{first_instance}/{nid}")
     duplicate_link_ids: list[str] = []
     all_links = _def_links(sg_def, duplicate_link_ids)
 
@@ -1533,6 +1546,7 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
 
     raw_nodes = workflow.get("nodes") or []
     nodes = _normalise_node_inputs([n for n in raw_nodes if isinstance(n, dict)], warnings)
+    nodes = _normalise_node_outputs(nodes, warnings)
     if len(nodes) != len(raw_nodes):
         warnings.append(f"workflow: ignoring {len(raw_nodes) - len(nodes)} non-object node entries")
 
@@ -1557,6 +1571,9 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
                 [node for node in raw_interior if isinstance(node, dict)],
                 warnings,
                 lambda node_id, sg_id=subgraph.get("id"): f"{sg_id}/{node_id}",
+            )
+            interior = _normalise_node_outputs(
+                interior, warnings, lambda node_id, sg_id=subgraph.get("id"): f"{sg_id}/{node_id}"
             )
             normalised_subgraphs.append({**subgraph, "nodes": interior})
         subgraphs = normalised_subgraphs
