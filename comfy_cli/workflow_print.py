@@ -198,12 +198,15 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
             reasons.append(f"link malformed: {link!r}")
             continue
         link_id, src_id, src_slot, tgt_id, tgt_slot = link[0], link[1], link[2], link[3], link[4]
+        if link_id is None:
+            reasons.append("link has null id")
+            continue
         normalized_link_id = str(link_id)
-        if link_id is not None and normalized_link_id in seen_links:
+        if normalized_link_id in seen_links:
             if link != seen_links[normalized_link_id] and normalized_link_id not in reported_link_dupes:
                 reported_link_dupes.add(normalized_link_id)
                 reasons.append(f"duplicate link id {normalized_link_id}")
-        elif link_id is not None:
+        else:
             seen_links[normalized_link_id] = link
         src_node = nodes_by_id.get(str(src_id))
         if src_node is None:
