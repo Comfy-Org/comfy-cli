@@ -290,7 +290,11 @@ def _stale_input_slot_links(
             inputs = []
         if 0 <= tgt_slot < len(inputs):
             declared_input = inputs[tgt_slot]
-            if isinstance(declared_input, dict) and str(declared_input.get("link")) == str(link_id):
+            if (
+                isinstance(declared_input, dict)
+                and declared_input.get("link") is not None
+                and str(declared_input.get("link")) == str(link_id)
+            ):
                 continue
             holder_location = next(iter(holders_by_link.get(str(link_id), [])), None)
             where = f"link {link_id} targets input slot {tgt_slot} on node {qualify(tgt_id)}, but that input does not hold it"
