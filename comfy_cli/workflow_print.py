@@ -1153,7 +1153,7 @@ def _promoted_header_line(def_id: str, sg_def: dict, state: _State) -> str | Non
     )
 
 
-def _def_links(sg_def: dict) -> dict[str, tuple]:
+def _def_links(sg_def: dict, duplicate_ids: list[str] | None = None) -> dict[str, tuple]:
     """Normalise a definition's dict-shaped links into the array-tuple form
     used everywhere else: ``{str(link_id): (origin_id, origin_slot, target_id, target_slot)}``."""
     out: dict[str, tuple] = {}
@@ -1163,8 +1163,8 @@ def _def_links(sg_def: dict) -> dict[str, tuple]:
         lid = link.get("id")
         if lid is None:
             continue
-        if str(lid) in out:
-            raise PrintUnsupported([f"duplicate link id {lid} in subgraph definition"])
+        if str(lid) in out and duplicate_ids is not None and str(lid) not in duplicate_ids:
+            duplicate_ids.append(str(lid))
         out[str(lid)] = (link.get("origin_id"), link.get("origin_slot"), link.get("target_id"), link.get("target_slot"))
     return out
 
@@ -1333,7 +1333,8 @@ def _render_definition_block(
         state.warnings,
         lambda nid: f"{first_instance}/{nid}",
     )
-    all_links = _def_links(sg_def)
+    duplicate_link_ids: list[str] = []
+    all_links = _def_links(sg_def, duplicate_link_ids)
 
     validate_links: list[list] = []
     for lid, (oid, oslot, tid, tslot) in all_links.items():
@@ -1341,7 +1342,8 @@ def _render_definition_block(
             continue
         validate_links.append([lid, oid, oslot, tid, tslot])
 
-    reasons = _validate(interior_nodes, validate_links)
+    reasons = [f"subgraph {def_id}: duplicate link id {lid}" for lid in duplicate_link_ids]
+    reasons.extend(_validate(interior_nodes, validate_links))
     if reasons:
         raise PrintUnsupported(reasons)
     # Every link into an interior node, including one from the ``-10`` input
