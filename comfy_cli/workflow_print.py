@@ -1372,17 +1372,20 @@ def _render_definition_block(
 
     validate_links: list[list] = []
     boundary_reasons: list[str] = []
+    boundary_ignored: set[str] = set()
     interior_by_id = {str(node.get("id")): node for node in interior_nodes}
     for lid, (oid, oslot, tid, tslot) in all_links.items():
         if str(oid) == _PROXY_IN:
             if not _is_slot_index(oslot) or oslot < 0:
                 boundary_reasons.append(f"subgraph {def_id}: link {lid} has invalid input-boundary slot {oslot!r}")
             target = interior_by_id.get(str(tid))
-            target_inputs = target.get("inputs") if target is not None else None
-            if not _is_slot_index(tslot):
+            if target is None:
+                boundary_ignored.add(str(lid))
+                state.warnings.append(
+                    f"subgraph {def_id}: link {lid} targets missing interior node {tid}; it was ignored"
+                )
+            elif not _is_slot_index(tslot):
                 boundary_reasons.append(f"subgraph {def_id}: link {lid} has a non-integer target slot")
-            elif isinstance(target_inputs, list) and tslot < 0:
-                boundary_reasons.append(f"subgraph {def_id}: link {lid} has negative target slot {tslot}")
             continue
         if str(tid) == _PROXY_OUT:
             if not _is_slot_index(tslot) or tslot < 0:
@@ -1398,6 +1401,7 @@ def _render_definition_block(
     reasons.extend(_validate(interior_nodes, validate_links))
     if reasons:
         raise PrintUnsupported(reasons)
+    all_links = {lid: link for lid, link in all_links.items() if lid not in boundary_ignored}
     # Every link into an interior node, including one from the ``-10`` input
     # proxy (which ``_validate`` does not see): a stale target slot is stale
     # whatever feeds it.
