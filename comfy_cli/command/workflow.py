@@ -1731,6 +1731,8 @@ def validate_api_workflow(
     # The converter reuses the object_info the graph was already built from
     # (`graph.object_info`), so offline `--input` works and no second fetch happens.
     converted_from_ui = False
+    link_errors: list[dict] = []
+    link_warnings: list[dict] = []
     if is_ui_workflow(wf_data):
         if renderer.is_pretty():
             rprint("[yellow]Detected UI-format workflow, converting to API format...[/yellow]")
@@ -1762,6 +1764,11 @@ def validate_api_workflow(
             )
             raise typer.Exit(code=1)
         editable_ids = _editable_node_ids(wf_data)
+        from comfy_cli.link_integrity import broken_link_findings
+
+        # The lowering reads each input's own `link` and never a row's slots,
+        # so a broken row disappears in it; judge the canvas before it does.
+        link_errors, link_warnings = broken_link_findings(wf_data)
         wf_data = converted
         converted_from_ui = True
 
@@ -1783,6 +1790,11 @@ def validate_api_workflow(
             if editable != nid:
                 issue["api_node_id"] = nid
                 issue["node_id"] = editable
+    if link_errors or link_warnings:
+        result["errors"].extend(link_errors)
+        result["warnings"].extend(link_warnings)
+        if link_errors:
+            result["valid"] = False
 
     # Preview credit spend: partner-API (paid) nodes spend Comfy credits when the
     # workflow is run. This is the same detection `comfy run` uses (authoritative

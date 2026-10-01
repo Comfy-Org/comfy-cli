@@ -630,6 +630,20 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     # --- workflow editor -----------------------------------------------------
     ErrorCode(
+        "link_slot_out_of_range",
+        "A `workflow validate` finding: a link row of a canvas workflow reads an output slot its source node "
+        "does not have, or targets an input slot its node does not have while an input that could take the "
+        "value sits empty. The UI→API lowering drops such a row, so the value it was drawn to carry reaches "
+        "nothing. `node_id` addresses the target (`70/2011` inside a subgraph).",
+        "re-wire it with the `connect` the hint names (it works between two nodes inside one subgraph too) — "
+        "don't retype the value the link was meant to carry",
+    ),
+    ErrorCode(
+        "link_source_missing",
+        "A `workflow validate` finding: an input is wired from a node that does not exist, so it receives nothing.",
+        "wire the input from a real node with `comfy workflow connect`",
+    ),
+    ErrorCode(
         "workflow_not_frontend_format",
         "Workflow editing requires the UI export (with `nodes[]` / `links[]`); "
         "got API-format. Auto-convert isn't wired yet.",
