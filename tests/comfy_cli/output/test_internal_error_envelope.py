@@ -20,7 +20,7 @@ import typer
 from typer.testing import CliRunner
 
 from comfy_cli import workflow_ops
-from comfy_cli.cmdline import app
+from comfy_cli.cmdline import _internal_error_message, app
 
 
 def _boom(*_a, **_kw):
@@ -229,3 +229,19 @@ def test_a_crash_in_the_root_callback_still_emits_the_envelope(monkeypatch, work
     assert envelope["ok"] is False
     assert envelope["error"]["code"] == "internal_error", envelope
     assert envelope["error"]["details"]["exception"] == "OSError", envelope
+
+
+@pytest.mark.parametrize(
+    ("message", "secret", "kept"),
+    [
+        ('body={\\"session_id\\": \\"abc123\\", \\"Cookie\\": \\"sid=xyz\\"}', "abc123", "Cookie"),
+        ('body={"api_key_comfy_org":"sk-LIVE"}', "sk-LIVE", "body="),
+        ('api_key=\\"sk-LIVE\\" request=req-1', "sk-LIVE", "request=req-1"),
+        ("headers={'cookie': None, 'x-request-id': 'req-abc'}", "None", "x-request-id"),
+        ("GET https://alice:p@ssword@example.com/x failed", "p@ssword", "example.com/x"),
+    ],
+)
+def test_internal_error_scrubber_handles_reviewed_secret_shapes(message, secret, kept):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert secret not in scrubbed
+    assert kept in scrubbed
