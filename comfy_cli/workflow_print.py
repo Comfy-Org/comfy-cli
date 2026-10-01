@@ -1567,6 +1567,8 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
                 normalised_subgraphs.append(subgraph)
                 continue
             raw_interior = subgraph.get("nodes") or []
+            if not isinstance(raw_interior, list):
+                raw_interior = []
             interior = _normalise_node_inputs(
                 [node for node in raw_interior if isinstance(node, dict)],
                 warnings,
