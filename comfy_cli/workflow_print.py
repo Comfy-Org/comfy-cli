@@ -1375,29 +1375,33 @@ def _render_definition_block(
     boundary_ignored: set[str] = set()
     interior_by_id = {str(node.get("id")): node for node in interior_nodes}
     for lid, (oid, oslot, tid, tslot) in all_links.items():
-        if str(oid) == _PROXY_IN:
+        from_input_proxy = str(oid) == _PROXY_IN
+        to_output_proxy = str(tid) == _PROXY_OUT
+        if from_input_proxy:
             if not _is_slot_index(oslot) or oslot < 0:
                 boundary_reasons.append(f"subgraph {def_id}: link {lid} has invalid input-boundary slot {oslot!r}")
-            target = interior_by_id.get(str(tid))
-            if target is None:
-                boundary_ignored.add(str(lid))
-                state.warnings.append(
-                    f"subgraph {def_id}: link {lid} targets missing interior node {tid}; it was ignored"
-                )
-            elif not _is_slot_index(tslot):
-                boundary_reasons.append(f"subgraph {def_id}: link {lid} has a non-integer target slot")
-            continue
-        if str(tid) == _PROXY_OUT:
+            if not to_output_proxy:
+                target = interior_by_id.get(str(tid))
+                if target is None:
+                    boundary_ignored.add(str(lid))
+                    state.warnings.append(
+                        f"subgraph {def_id}: link {lid} targets missing interior node {tid}; it was ignored"
+                    )
+                elif not _is_slot_index(tslot):
+                    boundary_reasons.append(f"subgraph {def_id}: link {lid} has a non-integer target slot")
+        if to_output_proxy:
             if not _is_slot_index(tslot) or tslot < 0:
                 boundary_reasons.append(f"subgraph {def_id}: link {lid} has invalid output-boundary slot {tslot!r}")
-            source = interior_by_id.get(str(oid))
-            if source is None:
-                boundary_ignored.add(str(lid))
-                state.warnings.append(
-                    f"subgraph {def_id}: output link {lid} references missing interior node {oid}; it was ignored"
-                )
-            elif not _is_slot_index(oslot) or oslot < 0:
-                boundary_reasons.append(f"subgraph {def_id}: link {lid} has invalid source slot {oslot!r}")
+            if not from_input_proxy:
+                source = interior_by_id.get(str(oid))
+                if source is None:
+                    boundary_ignored.add(str(lid))
+                    state.warnings.append(
+                        f"subgraph {def_id}: output link {lid} references missing interior node {oid}; it was ignored"
+                    )
+                elif not _is_slot_index(oslot) or oslot < 0:
+                    boundary_reasons.append(f"subgraph {def_id}: link {lid} has invalid source slot {oslot!r}")
+        if from_input_proxy or to_output_proxy:
             continue
         validate_links.append([lid, oid, oslot, tid, tslot])
 
