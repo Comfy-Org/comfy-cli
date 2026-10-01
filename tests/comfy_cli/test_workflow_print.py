@@ -1082,3 +1082,43 @@ def test_out_of_range_input_slot_fed_by_the_definition_input_proxy_is_reported(s
         f"link 9998 targets input slot 42 on node 10/{tgt['id']}, which has {n_inputs} inputs; "
         "the subgraph input proxy routes by target slot, so it was ignored"
     ) in res.warnings
+
+
+def test_non_list_inputs_are_treated_as_empty_with_warning(sd15_graph):
+    node = _node(1, "EmptyLatentImage", widgets=[512, 512, 1])
+    node["inputs"] = 5
+    wf = _mini([node], [])
+    res = render_py(wf, sd15_graph)
+    assert res.node_count == 1
+    assert res.warnings == ["node 1 has non-list inputs; treated as empty"]
+
+
+def test_link_row_is_retargeted_to_the_input_that_holds_it(sd15_graph):
+    wf = _stale_slot_workflow([7, 1, 0, 2, 6, "LATENT"])
+    wf["links"] = [[7, 1, 0, 2, 6, "LATENT"]]
+    wf["nodes"].append(
+        _node(
+            3,
+            "VAEDecode",
+            inputs=[{"name": "samples", "type": "LATENT", "link": 7}, {"name": "vae", "type": "VAE", "link": None}],
+        )
+    )
+    res = render_py(wf, sd15_graph)
+    assert "samples=empty_latent_image" in next(line for line in res.source.splitlines() if "# 3" in line)
+    assert "rendered through input 'samples' on node 3" in res.warnings[0]
+
+
+def test_in_range_link_row_follows_the_actual_holder(sd15_graph):
+    wf = _stale_slot_workflow([7, 1, 0, 2, 0, "LATENT"])
+    wf["links"] = [[7, 1, 0, 2, 0, "LATENT"]]
+    wf["nodes"][1]["inputs"][0]["link"] = None
+    wf["nodes"].append(
+        _node(
+            3,
+            "VAEDecode",
+            inputs=[{"name": "samples", "type": "LATENT", "link": 7}, {"name": "vae", "type": "VAE", "link": None}],
+        )
+    )
+    res = render_py(wf, sd15_graph)
+    assert "samples=empty_latent_image" in next(line for line in res.source.splitlines() if "# 3" in line)
+    assert "but that input does not hold it" in res.warnings[0]
