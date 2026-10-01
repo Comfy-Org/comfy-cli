@@ -299,7 +299,21 @@ def _stale_input_slot_links(
     for link in links:
         link_id, src_id, tgt_id, tgt_slot = link[0], link[1], link[3], link[4]
         tgt_node = nodes_by_id.get(str(tgt_id))
-        if tgt_node is None or not _is_slot_index(tgt_slot):
+        if tgt_node is None:
+            locations = holders_by_link.get(str(link_id), [])
+            holder_location = next(iter(locations), None)
+            if holder_location is not None:
+                holder_id, holder_slot, holder = holder_location
+                retargeted[str(link_id)] = (holder_id, holder_slot)
+                warnings.append(
+                    f"link {link_id} targets missing node {qualify(tgt_id)}; rendered through input "
+                    f"{str(holder.get('name') or '')!r} on node {qualify(holder_id)}, which holds it"
+                )
+            else:
+                ignored.add(str(link_id))
+                warnings.append(f"link {link_id} targets missing node {qualify(tgt_id)}; it was ignored")
+            continue
+        if not _is_slot_index(tgt_slot):
             continue
         # A node that serialized no ``inputs`` list has no input slots at all.
         inputs = tgt_node.get("inputs")
@@ -1408,12 +1422,7 @@ def _render_definition_block(
                 boundary_reasons.append(f"subgraph {def_id}: link {lid} has invalid input-boundary slot {oslot!r}")
             if not to_output_proxy:
                 target = interior_by_id.get(str(tid))
-                if target is None:
-                    boundary_ignored.add(str(lid))
-                    state.warnings.append(
-                        f"subgraph {def_id}: link {lid} targets missing interior node {tid}; it was ignored"
-                    )
-                elif not _is_slot_index(tslot):
+                if target is not None and not _is_slot_index(tslot):
                     boundary_reasons.append(f"subgraph {def_id}: link {lid} has a non-integer target slot")
         if to_output_proxy:
             if not _is_slot_index(tslot) or tslot < 0:
