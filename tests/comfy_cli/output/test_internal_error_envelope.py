@@ -244,6 +244,10 @@ def test_a_crash_in_the_root_callback_still_emits_the_envelope(monkeypatch, work
         ("Cookie: sid=a; remember_me=LONGTOKEN", "LONGTOKEN", "Cookie:"),
         ('Cookie: pref="x"; auth=LEAK', "LEAK", "Cookie:"),
         ("headers={'token': b'sk-LIVE'}", "sk-LIVE", "headers="),
+        ("params={'api_key': ['sk-LIVE']}", "sk-LIVE", "params="),
+        ("token=Bearer-sk-LIVE request=req-1", "sk-LIVE", "request=req-1"),
+        ('body={\\"x-api-key\\": 123456789}', "123456789", "body="),
+        ('body={\\"password\\": \\"a\\nb\\"}', "a\\nb", "body="),
         (r"password=C:\Users\bob", r"Users\bob", "password="),
         ("GET https://alice:p@ssword@example.com/x failed", "p@ssword", "example.com/x"),
     ],
@@ -252,6 +256,19 @@ def test_internal_error_scrubber_handles_reviewed_secret_shapes(message, secret,
     scrubbed = _internal_error_message(RuntimeError(message))
     assert secret not in scrubbed
     assert kept in scrubbed
+
+
+def test_internal_error_scrubber_handles_unprintable_exception():
+    class UnprintableError(Exception):
+        def __str__(self):
+            raise RuntimeError("cannot stringify")
+
+    assert _internal_error_message(UnprintableError()) == "UnprintableError: unprintable exception"
+
+
+def test_internal_error_scrubber_does_not_treat_query_at_as_userinfo():
+    message = "amqp://host?opt=user@example.com"
+    assert message in _internal_error_message(RuntimeError(message))
 
 
 def test_internal_error_scrubber_preserves_ordinary_identifier_diagnostics():
