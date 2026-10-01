@@ -226,7 +226,7 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
             reasons.append(f"link {link_id} references negative output slot {src_slot} on node {src_id}")
             continue
         outputs = src_node.get("outputs")
-        if not isinstance(outputs, list) or src_slot >= len(outputs):
+        if isinstance(outputs, list) and src_slot >= len(outputs):
             reasons.append(f"link {link_id} references out-of-range output slot {src_slot} on node {src_id}")
         # An out-of-range INPUT slot is not a refusal: see _stale_input_slot_links.
     return reasons
