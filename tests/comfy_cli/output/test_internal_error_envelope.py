@@ -236,11 +236,15 @@ def test_a_crash_in_the_root_callback_still_emits_the_envelope(monkeypatch, work
     [
         ('body={\\"session_id\\": \\"abc123\\", \\"Cookie\\": \\"sid=xyz\\"}', "abc123", "Cookie"),
         ('body={"api_key_comfy_org":"sk-LIVE"}', "sk-LIVE", "body="),
+        ("X-API-Key: sk-LIVE", "sk-LIVE", "X-API-Key:"),
         ('body={\\"api_key_comfy_org\\": \\"sk-LIVE\\"}', "sk-LIVE", "body="),
         ('api_key=\\"sk-LIVE\\" request=req-1', "sk-LIVE", "request=req-1"),
         ('api_key="ab\\"cd-LEAK" request=req-1', "cd-LEAK", "request=req-1"),
         ("headers={'cookie': None, 'x-request-id': 'req-abc'}", "None", "x-request-id"),
         ("Cookie: sid=a; remember_me=LONGTOKEN", "LONGTOKEN", "Cookie:"),
+        ('Cookie: pref="x"; auth=LEAK', "LEAK", "Cookie:"),
+        ("headers={'token': b'sk-LIVE'}", "sk-LIVE", "headers="),
+        (r"password=C:\Users\bob", r"Users\bob", "password="),
         ("GET https://alice:p@ssword@example.com/x failed", "p@ssword", "example.com/x"),
     ],
 )
