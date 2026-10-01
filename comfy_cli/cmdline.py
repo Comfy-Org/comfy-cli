@@ -232,10 +232,13 @@ _SECRET_PATTERNS = (
 
 def _internal_error_message(error: BaseException) -> str:
     raw_text = f"{type(error).__name__}: {error}"
+    scrub_input_truncated = len(raw_text) > _INTERNAL_ERROR_SCRUB_INPUT_CAP
     text = raw_text[:_INTERNAL_ERROR_SCRUB_INPUT_CAP]
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
-    if len(raw_text) > _INTERNAL_ERROR_MESSAGE_CAP or len(text) > _INTERNAL_ERROR_MESSAGE_CAP:
+    if len(text) > _INTERNAL_ERROR_MESSAGE_CAP:
+        text = text[: _INTERNAL_ERROR_MESSAGE_CAP - 1] + "…"
+    elif scrub_input_truncated:
         text = text[: _INTERNAL_ERROR_MESSAGE_CAP - 1] + "…"
     return text
 
