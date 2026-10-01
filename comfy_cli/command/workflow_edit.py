@@ -667,17 +667,12 @@ def ls_nodes_cmd(
     definitions = workflow.get("definitions")
     subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else []
     subgraph_ids: set[str] = set()
-    subgraph_names: dict[str, int] = {}
     for definition in subgraphs if isinstance(subgraphs, list) else []:
         if not isinstance(definition, dict):
             continue
         definition_id = definition.get("id")
         if isinstance(definition_id, str) and definition_id:
             subgraph_ids.add(definition_id)
-        name = definition.get("name")
-        if isinstance(name, str) and name:
-            subgraph_names[name] = subgraph_names.get(name, 0) + 1
-    subgraph_ids.update(name for name, count in subgraph_names.items() if count == 1)
     rows = []
     for n in workflow.get("nodes") or []:
         if not isinstance(n, dict):
