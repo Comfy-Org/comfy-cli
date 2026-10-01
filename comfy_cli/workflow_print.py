@@ -280,8 +280,7 @@ def _stale_input_slot_links(
                 holders_by_link.setdefault(str(inp["link"]), []).append((node.get("id"), slot, inp))
         input_holders_by_node[str(node.get("id"))] = holders
     dependency_targets = {
-        link_id: [(node_id, slot) for node_id, slot, _input in holders]
-        for link_id, holders in holders_by_link.items()
+        link_id: [(node_id, slot) for node_id, slot, _input in holders] for link_id, holders in holders_by_link.items()
     }
     for link in links:
         link_id, src_id, tgt_id, tgt_slot = link[0], link[1], link[3], link[4]
@@ -1455,9 +1454,7 @@ def _render_definition_block(
         oid, oslot, _tid, _tslot = source
         for index, (tid, tslot) in enumerate(targets):
             dependency_links[f"{lid}@holder:{index}"] = (oid, oslot, tid, tslot)
-    toposort_links = _splice_link_map(
-        dependency_links, nodes_by_id, reroute_sources, set_sources, get_vars, _PROXY_IN
-    )
+    toposort_links = _splice_link_map(dependency_links, nodes_by_id, reroute_sources, set_sources, get_vars, _PROXY_IN)
     order = _toposort(printable, toposort_links)
 
     proxy_in_names = {i: inp.get("name") for i, inp in enumerate(sg_def.get("inputs") or []) if isinstance(inp, dict)}
