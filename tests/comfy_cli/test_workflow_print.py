@@ -1146,3 +1146,25 @@ def test_in_range_link_row_follows_the_actual_holder(sd15_graph):
     res = render_py(wf, sd15_graph)
     assert "samples=empty_latent_image" in next(line for line in res.source.splitlines() if "# 3" in line)
     assert "but that input does not hold it" in res.warnings[0]
+
+
+def test_malformed_graph_containers_are_reported_not_crashed():
+    wf = {"nodes": [], "links": 5, "definitions": {"subgraphs": 5}}
+    res = render_py(wf, None)
+    assert "workflow: ignoring non-list links block" in res.warnings
+    assert "workflow: ignoring non-list subgraphs block" in res.warnings
+
+
+def test_workflow_fields_cannot_spoof_normalisation_markers():
+    node = _node(1, "Example")
+    node["_workflow_print_nonlist_inputs"] = True
+    node["_workflow_print_nonlist_outputs"] = True
+    res = render_py(_mini([node], []), None)
+    assert not [warning for warning in res.warnings if "non-list" in warning]
+
+
+def test_typed_duplicate_link_rows_are_rejected():
+    wf = _mini([_node(1, "Source"), _node(2, "Target", inputs=[{"name": "x", "link": 7}])], [])
+    wf["links"] = [[7, 1, 0, 2, 0], [7, True, 0, 2, 0]]
+    with pytest.raises(PrintUnsupported, match="duplicate link id 7"):
+        render_py(wf, None)
