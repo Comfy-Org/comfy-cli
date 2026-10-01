@@ -60,10 +60,18 @@ def _emit_edit_error(renderer, e: ValueError, *, hint: str) -> None:
     """
     if isinstance(e, workflow_ops.FatalFindingError):
         f = e.finding
+        if f.get("best_match") is not None:
+            # One option shares the rejected value's leading token (the ratio
+            # in '16:9 (Landscape)'): lead with it rather than a flat list.
+            finding_hint = f"use {f['best_match']!r} — the only option with the same leading token"
+        elif f.get("did_you_mean"):
+            finding_hint = f"did you mean: {', '.join(str(v) for v in f['did_you_mean'])}?"
+        else:
+            finding_hint = hint
         renderer.error(
             code=f.get("code", "workflow_edit_invalid"),
             message=f.get("message", str(e)),
-            hint=(f"did you mean: {', '.join(str(v) for v in f['did_you_mean'])}?" if f.get("did_you_mean") else hint),
+            hint=finding_hint,
             details={k: v for k, v in f.items() if k != "message"},
         )
         return
@@ -683,6 +691,17 @@ def ls_nodes_cmd(
         # Emitted only when set, so a normal node stays a single clean row.
         if (label := _MODE_LABELS.get(n.get("mode"))) is not None:
             row["mode"] = label
+        # A row's `type` reads like an addable class. Two kinds are not: a
+        # frontend-only node (Reroute/Note/PrimitiveNode/...) and a subgraph
+        # instance, whose `type` is its definition uuid. Both stay listed (the
+        # graph must still be understood); the flag says `add-node` / `nodes
+        # show` cannot take that type. Only set when true, like `mode`.
+        node_type = n.get("type")
+        if isinstance(node_type, str):
+            if node_type in workflow_ops.UI_ONLY_NODE_TYPES:
+                row["ui_only"] = True
+            elif workflow_ops._UUID_RE.match(node_type):
+                row["subgraph"] = True
         rows.append(row)
     payload = {"workflow": str(p), "count": len(rows), "nodes": rows}
     if renderer.is_pretty():
