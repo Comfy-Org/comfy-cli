@@ -323,7 +323,7 @@ def _stale_input_slot_links(
     }
     for link in links:
         link_id, src_id, tgt_id, tgt_slot = link[0], link[1], link[3], link[4]
-        if str(tgt_id) == _PROXY_OUT:
+        if proxy_input_id is not None and str(tgt_id) == _PROXY_OUT:
             continue
         tgt_node = nodes_by_id.get(str(tgt_id))
         if tgt_node is None:
