@@ -177,6 +177,7 @@ def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | Non
 #: (scheme and credential together), `key=value` / `key: value` token pairs,
 #: and `user:pass@` userinfo.
 _INTERNAL_ERROR_MESSAGE_CAP = 500
+_INTERNAL_ERROR_SCRUB_INPUT_CAP = _INTERNAL_ERROR_MESSAGE_CAP * 8
 _SECRET_KEY_PATTERN = (
     r"(?:proxy-)?authorization|api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|"
     r"session(?:[_-]?(?:id|key))?|sid|sig|signature|(?:set-)?cookie"
@@ -230,10 +231,11 @@ _SECRET_PATTERNS = (
 
 
 def _internal_error_message(error: BaseException) -> str:
-    text = f"{type(error).__name__}: {error}"[:_INTERNAL_ERROR_MESSAGE_CAP]
+    raw_text = f"{type(error).__name__}: {error}"
+    text = raw_text[:_INTERNAL_ERROR_SCRUB_INPUT_CAP]
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
-    if len(text) > _INTERNAL_ERROR_MESSAGE_CAP:
+    if len(raw_text) > _INTERNAL_ERROR_MESSAGE_CAP or len(text) > _INTERNAL_ERROR_MESSAGE_CAP:
         text = text[: _INTERNAL_ERROR_MESSAGE_CAP - 1] + "…"
     return text
 
