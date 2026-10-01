@@ -334,10 +334,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "cloud_payment_required",
-        "Comfy Cloud only: the cloud refused the submit because the account's plan does not allow the run "
-        "(HTTP 429 with a typed body: free generations used up, subscription required, a partner node or "
-        "model that needs a paid plan). Not throttling and not a problem with the workflow; nothing was "
-        "queued. `details.reason` is the server's refusal type and `details.body` its message.",
+        "Comfy Cloud only: the cloud refused the request because the account's plan does not allow it "
+        "(HTTP 402, or a legacy HTTP 429 with a plan-refusal type: free generations used up, subscription "
+        "required, a partner node or model that needs a paid plan). Not throttling and not a problem with "
+        "the workflow; nothing was queued. `details.status` is the HTTP status, `details.reason` the "
+        "server's refusal type when it sent one, and `details.body` its message.",
         "do not retry or edit the workflow: tell the user the server's message; running it needs a plan that allows it",
     ),
     ErrorCode(

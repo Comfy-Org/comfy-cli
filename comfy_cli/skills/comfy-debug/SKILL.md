@@ -77,7 +77,7 @@ The server validated the workflow and rejected nodes. The full per-node error ma
 ### `cloud_rate_limited` (HTTP 429 from cloud)
 Throttling is not a verdict on the workflow, so do not edit it. Wait `details.retry_after` seconds (when present; otherwise a few seconds). A 429 does not by itself prove a submit had no effect, so before re-running `comfy run`, check `comfy jobs ls --where cloud` for the job. A 429 while `--wait` polls means the job was already submitted: follow it with `comfy jobs watch <prompt_id> --where cloud` instead of re-running.
 
-### `cloud_payment_required` (HTTP 429 refusal from cloud)
+### `cloud_payment_required` (HTTP 402 refusal from cloud)
 The cloud refused the submit because the account's plan does not allow the run: free generations used up, a subscription required, or a partner node or model that needs a paid plan (`details.reason`). It is not throttling and not a problem with the workflow, and nothing was queued. Do not retry or edit the workflow: tell the user the server's message (`message`, `details.body`).
 
 ### `cloud_timeout`

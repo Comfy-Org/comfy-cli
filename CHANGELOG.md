@@ -17,13 +17,14 @@ history.
 
 ### Fixed
 
-- A cloud submit the account's plan does not allow (the server's HTTP 429 with a
-  typed body: free generations used up, subscription required, a partner node or
-  model that needs a paid plan) is now `cloud_payment_required`, carrying the
-  server's message in `message` and its refusal type in `details.reason`,
-  instead of `cloud_rate_limited`, whose "wait, then retry" hint could never
-  succeed. A full queue (`QUEUE_LIMIT`) and a temporarily unavailable free tier
-  stay `cloud_rate_limited`.
+- A cloud request the account's plan does not allow (free generations used up,
+  subscription required, a partner node or model that needs a paid plan) is now
+  `cloud_payment_required`, carrying the server's message in `message` and its
+  refusal type in `details.reason`. An HTTP 402 was `cloud_http_error`, whose
+  hint said to check the workflow; the same refusal sent as a typed HTTP 429
+  (how the cloud sends it today) was `cloud_rate_limited`, whose "wait, then
+  retry" hint could never succeed. A full queue (`QUEUE_LIMIT`) and a
+  temporarily unavailable free tier stay `cloud_rate_limited`.
 
 ## [1.22.0] - 2026-09-30
 
