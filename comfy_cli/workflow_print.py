@@ -357,6 +357,8 @@ def _stale_input_slot_links(
                     f"{where}; rendered through input {str(holder.get('name') or '')!r} on node {qualify(holder_id)}, "
                     "which holds it"
                 )
+            elif proxy_input_id is not None and str(src_id) == proxy_input_id:
+                warnings.append(f"{where}; the subgraph input proxy routes by target slot")
             else:
                 ignored.add(str(link_id))
                 warnings.append(f"{where}; no input holds it, so it feeds nothing and was ignored")
