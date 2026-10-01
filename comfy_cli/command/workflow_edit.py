@@ -672,7 +672,7 @@ def ls_nodes_cmd(
         if not isinstance(definition, dict):
             continue
         definition_id = definition.get("id")
-        if isinstance(definition_id, str) and workflow_ops._UUID_RE.fullmatch(definition_id):
+        if isinstance(definition_id, str) and definition_id:
             subgraph_ids.add(definition_id)
         name = definition.get("name")
         if isinstance(name, str) and name:
