@@ -254,10 +254,12 @@ def _normalise_node_inputs(nodes: list[dict], warnings: list[str] | None, qualif
     normalised: list[dict] = []
     for node in nodes:
         inputs = node.get("inputs")
+        if node.get("_workflow_print_nonlist_inputs") and warnings is not None:
+            warnings.append(f"node {qualify(node.get('id'))} has non-list inputs; treated as empty")
         if inputs is not None and not isinstance(inputs, list):
             if warnings is not None:
                 warnings.append(f"node {qualify(node.get('id'))} has non-list inputs; treated as empty")
-            node = {**node, "inputs": []}
+            node = {**node, "inputs": [], "_workflow_print_nonlist_inputs": True}
         normalised.append(node)
     return normalised
 
@@ -267,10 +269,12 @@ def _normalise_node_outputs(nodes: list[dict], warnings: list[str] | None, quali
     normalised: list[dict] = []
     for node in nodes:
         outputs = node.get("outputs")
+        if node.get("_workflow_print_nonlist_outputs") and warnings is not None:
+            warnings.append(f"node {qualify(node.get('id'))} has non-list outputs; treated as empty")
         if outputs is not None and not isinstance(outputs, list):
             if warnings is not None:
                 warnings.append(f"node {qualify(node.get('id'))} has non-list outputs; treated as empty")
-            node = {**node, "outputs": []}
+            node = {**node, "outputs": [], "_workflow_print_nonlist_outputs": True}
         normalised.append(node)
     return normalised
 
