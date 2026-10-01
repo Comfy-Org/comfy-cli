@@ -221,7 +221,7 @@ _SECRET_PATTERNS = (
     ),
     (
         re.compile(
-            r"((?:set-)?cookie[\"']?\s*:\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n\"',]+)",
+            r"((?:set-)?cookie[\"']?\s*:\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n,]+)",
             re.IGNORECASE,
         ),
         lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
