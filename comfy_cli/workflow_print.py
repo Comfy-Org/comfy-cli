@@ -165,6 +165,7 @@ def _typed_row(values: Any) -> tuple[tuple[type, str], ...]:
 
 _NONLIST_INPUTS = object()
 _NONLIST_OUTPUTS = object()
+_NONLIST_NODES = object()
 
 
 def _dedupe_identical_links(links: list[Any]) -> list[Any]:
@@ -1436,6 +1437,8 @@ def _render_definition_block(
     levels, and capping it would misfire on legitimate deep nesting instead of
     catching anything a cycle could cause."""
     first_instance = state.first_instance_by_def.get(def_id, def_id)
+    if sg_def.get(_NONLIST_NODES):
+        state.warnings.append(f"subgraph {def_id}: non-list nodes treated as empty")
     interior_nodes = _normalise_node_inputs(
         [n for n in sg_def.get("nodes") or [] if isinstance(n, dict)],
         state.warnings,
@@ -1624,6 +1627,7 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
             raw_interior = subgraph.get("nodes") or []
             if not isinstance(raw_interior, list):
                 raw_interior = []
+                subgraph = {**subgraph, _NONLIST_NODES: True}
             interior = _normalise_node_inputs(
                 [node for node in raw_interior if isinstance(node, dict)],
                 None,
