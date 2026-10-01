@@ -236,8 +236,11 @@ def test_a_crash_in_the_root_callback_still_emits_the_envelope(monkeypatch, work
     [
         ('body={\\"session_id\\": \\"abc123\\", \\"Cookie\\": \\"sid=xyz\\"}', "abc123", "Cookie"),
         ('body={"api_key_comfy_org":"sk-LIVE"}', "sk-LIVE", "body="),
+        ('body={\\"api_key_comfy_org\\": \\"sk-LIVE\\"}', "sk-LIVE", "body="),
         ('api_key=\\"sk-LIVE\\" request=req-1', "sk-LIVE", "request=req-1"),
+        ('api_key="ab\\"cd-LEAK" request=req-1', "cd-LEAK", "request=req-1"),
         ("headers={'cookie': None, 'x-request-id': 'req-abc'}", "None", "x-request-id"),
+        ("Cookie: sid=a; remember_me=LONGTOKEN", "LONGTOKEN", "Cookie:"),
         ("GET https://alice:p@ssword@example.com/x failed", "p@ssword", "example.com/x"),
     ],
 )
@@ -245,3 +248,15 @@ def test_internal_error_scrubber_handles_reviewed_secret_shapes(message, secret,
     scrubbed = _internal_error_message(RuntimeError(message))
     assert secret not in scrubbed
     assert kept in scrubbed
+
+
+def test_internal_error_scrubber_preserves_ordinary_identifier_diagnostics():
+    message = "sigma=0.8 max_tokens=100 sidecar=on signal: 9"
+    assert message in _internal_error_message(RuntimeError(message))
+
+
+def test_internal_error_scrubber_marks_truncated_messages():
+    message = "x" * 480 + " https://alice:password@example.com/" + "y" * 100
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "password" not in scrubbed
+    assert scrubbed.endswith("…")
