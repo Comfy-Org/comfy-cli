@@ -1677,9 +1677,10 @@ class Graph:
                     if key is None:
                         continue
                     sub_ports = _dynamic_combo_sub_ports(port.dynamic_options, key, entry.name)
-                    options[str(key)] = {
-                        "widgets": [sub_port.name for sub_port in sub_ports if not sub_port.is_link]
-                    }
+                    widgets = [sub_port.name for sub_port in sub_ports if not sub_port.is_link]
+                    if any(_has_control_after_generate_slot(sub_port) for sub_port in sub_ports if not sub_port.is_link):
+                        widgets.append("control_after_generate")
+                    options[str(key)] = {"widgets": widgets}
                 combos[entry.name] = {"options": options}
         for selector, spec in combos.items():
             options = spec.get("options") or {}
