@@ -1521,6 +1521,22 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         # cql.promoted indexes the same block; hand it the sanitized view.
         promoted_workflow = {**workflow, "definitions": None}
     subgraphs = definitions.get("subgraphs") if definitions else None
+    if isinstance(subgraphs, list):
+        normalised_subgraphs: list[Any] = []
+        for subgraph in subgraphs:
+            if not isinstance(subgraph, dict):
+                normalised_subgraphs.append(subgraph)
+                continue
+            raw_interior = subgraph.get("nodes") or []
+            interior = _normalise_node_inputs(
+                [node for node in raw_interior if isinstance(node, dict)],
+                warnings,
+                lambda node_id, sg_id=subgraph.get("id"): f"{sg_id}/{node_id}",
+            )
+            normalised_subgraphs.append({**subgraph, "nodes": interior})
+        subgraphs = normalised_subgraphs
+        definitions = {**definitions, "subgraphs": subgraphs}
+        promoted_workflow = {**workflow, "definitions": definitions}
     defs_by_id = {sg.get("id"): sg for sg in (subgraphs or []) if isinstance(sg, dict) and sg.get("id")}
 
     reasons = _validate(nodes, links)
