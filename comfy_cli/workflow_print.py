@@ -191,7 +191,7 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
             seen_ids.add(nid)
 
     nodes_by_id = {str(n.get("id")): n for n in nodes}
-    seen_link_ids: set[str] = set()
+    seen_links: dict[str, list] = {}
     reported_link_dupes: set[str] = set()
     for link in links:
         if not isinstance(link, list) or len(link) < 5:
@@ -199,12 +199,12 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
             continue
         link_id, src_id, src_slot, tgt_id, tgt_slot = link[0], link[1], link[2], link[3], link[4]
         normalized_link_id = str(link_id)
-        if normalized_link_id in seen_link_ids:
-            if normalized_link_id not in reported_link_dupes:
+        if link_id is not None and normalized_link_id in seen_links:
+            if link != seen_links[normalized_link_id] and normalized_link_id not in reported_link_dupes:
                 reported_link_dupes.add(normalized_link_id)
                 reasons.append(f"duplicate link id {normalized_link_id}")
-        else:
-            seen_link_ids.add(normalized_link_id)
+        elif link_id is not None:
+            seen_links[normalized_link_id] = link
         src_node = nodes_by_id.get(str(src_id))
         if src_node is None:
             reasons.append(f"link {link_id} references missing node {src_id}")
@@ -1163,9 +1163,10 @@ def _def_links(sg_def: dict, duplicate_ids: list[str] | None = None) -> dict[str
         lid = link.get("id")
         if lid is None:
             continue
-        if str(lid) in out and duplicate_ids is not None and str(lid) not in duplicate_ids:
+        row = (link.get("origin_id"), link.get("origin_slot"), link.get("target_id"), link.get("target_slot"))
+        if str(lid) in out and out[str(lid)] != row and duplicate_ids is not None and str(lid) not in duplicate_ids:
             duplicate_ids.append(str(lid))
-        out[str(lid)] = (link.get("origin_id"), link.get("origin_slot"), link.get("target_id"), link.get("target_slot"))
+        out[str(lid)] = row
     return out
 
 
