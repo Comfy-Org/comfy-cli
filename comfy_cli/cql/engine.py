@@ -409,10 +409,14 @@ class Port:
             return []
         import difflib
 
+        from comfy_cli.model_variants import precision_sibling
+
         opts = [str(e) for e in self.enum_values]
         base = str(value).rsplit("/", 1)[-1]
         bases = [o.rsplit("/", 1)[-1] for o in opts]
-        out: list[str] = []
+        # The same model in another precision outranks any spelling neighbour.
+        sibling = precision_sibling(value, opts)
+        out: list[str] = [sibling] if sibling is not None else []
         for g in difflib.get_close_matches(base, bases, n=limit, cutoff=0.5):
             for o in opts:
                 if o.rsplit("/", 1)[-1] == g and o not in out:
@@ -445,6 +449,17 @@ class Port:
         hits = [str(o) for o in self.enum_values if str(o).strip().partition(" ")[0] == token]
         return hits[0] if len(hits) == 1 else None
 
+    def _note_precision_sibling(self, warning: dict, value: Any) -> None:
+        """Name the option that is ``value`` in another precision, when there
+        is exactly one: an unavailable ``*_int8_convrot`` file whose ``*_fp16``
+        build is installed is a one-edit fix, not a model choice."""
+        from comfy_cli.model_variants import precision_sibling
+
+        sibling = precision_sibling(value, list(self.enum_values or []))
+        if sibling is not None:
+            warning["precision_sibling"] = sibling
+            warning["message"] += f" ({sibling!r} is the same model in another precision: set it)"
+
     def validate_shape(self, value: Any) -> str | None:
         """Hard-reject on JSON-shape mismatch. Returns error message or None."""
         if self.type == "INT":
@@ -472,6 +487,17 @@ class Port:
             if isinstance(value, bool) or not isinstance(value, str | int | float):
                 return f"{self.name}: expected COMBO (string or number), got {type(value).__name__}"
         elif self.type == "BOOLEAN":
+            if isinstance(value, str) and value.strip().lower() == "true":
+                # The server coerces with bool(), so the string "True" runs as
+                # true; some schemas default to it (DrawViTPose.draw_head).
+                return None
+            if isinstance(value, str):
+                return (
+                    f"{self.name}: expected BOOLEAN, got str {value!r} — the server reads any non-empty "
+                    "string as true; set it to false"
+                    if value.strip().lower() == "false"
+                    else f"{self.name}: expected BOOLEAN, got str {value!r}"
+                )
             if not isinstance(value, bool):
                 return f"{self.name}: expected BOOLEAN, got {type(value).__name__}"
         return None
@@ -523,6 +549,7 @@ class Port:
                 if best is not None:
                     lead = str(value).strip().partition(" ")[0]
                     warning["message"] += f" ({best!r} is the only option starting {lead!r})"
+                self._note_precision_sibling(warning, value)
                 warnings.append(warning)
         elif self.type == "COMBO" and self.enum_declared:
             # The server declared this field's choices and shipped NONE of them:
@@ -1192,6 +1219,7 @@ class Graph:
             if not isinstance(raw, dict):
                 continue
             m = _parse_morphism(node_id, raw)
+            _unconstrain_frontend_combos(m)
             g._nodes[m.id] = m
             # A deprecated class stays addressable by name (show, validate,
             # edits on a graph that already holds it) but is never a
@@ -2495,6 +2523,20 @@ def _output_reachable_node_ids(workflow: dict[str, Any], graph: Graph) -> set[st
                 reachable.add(src_id)
                 stack.append(src_id)
     return reachable
+
+
+#: COMBO inputs whose options the FRONTEND defines (the node's own widgets), so
+#: object_info declares an empty list the server never checks against:
+#: ``CustomCombo.validate_inputs`` returns True for any choice.
+_FRONTEND_DEFINED_COMBOS = {"CustomCombo": frozenset({"choice"})}
+
+
+def _unconstrain_frontend_combos(m: Morphism) -> None:
+    """Leave a frontend-defined COMBO unconstrained, like a port whose options
+    object_info does not declare at all (no ``no_options_available``)."""
+    names = _FRONTEND_DEFINED_COMBOS.get(m.id)
+    if names:
+        m.inputs = [replace(p, enum_values=[], enum_declared=False) if p.name in names else p for p in m.inputs]
 
 
 def _validate_catalog_value(

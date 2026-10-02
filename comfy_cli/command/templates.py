@@ -832,6 +832,40 @@ def _workflow_node_count(workflow: Any) -> int | None:
     return len(workflow)
 
 
+def _resolve_template_models(wf: Any, input_path: str | None) -> dict[str, Any]:
+    """Check a fetched template's model files against an OFFLINE catalog.
+
+    Only with ``--input`` or ``COMFY_OBJECT_INFO_FILE``: a plain fetch stays
+    one network read. A file the catalog lacks becomes its unique
+    same-model, other-precision sibling (``model_substitutions``); one with no
+    such sibling is reported with its closest options (``unavailable_models``)
+    so the caller knows before ``validate`` does. A catalog that fails to load
+    is reported, never fatal: the fetch itself succeeded.
+    """
+    if not isinstance(wf, dict) or not (input_path or os.environ.get("COMFY_OBJECT_INFO_FILE")):
+        return {}
+    from comfy_cli.cql.engine import Graph
+    from comfy_cli.cql.loader import resilient_load_object_info
+    from comfy_cli.model_variants import resolve_workflow_models
+
+    try:
+        graph = Graph.from_object_info(resilient_load_object_info(input_path=input_path))
+    except Exception as e:  # noqa: BLE001 — a missing catalog only skips the check
+        return {"model_check_skipped": f"could not load object_info: {e}"}
+    subs, unavailable = resolve_workflow_models(wf, graph)
+    notes: dict[str, Any] = {}
+    if subs:
+        notes["model_substitutions"] = subs
+    if unavailable:
+        notes["unavailable_models"] = unavailable
+        notes["unavailable_models_hint"] = (
+            "these model files are not installed here and no other precision of them is, so this template will "
+            "fail validate as fetched; `did_you_mean` names the closest installed files, but a different file is "
+            "a different model: pick another template, or tell the user which model is missing"
+        )
+    return notes
+
+
 def _fetch_template_workflow(name: str, *, timeout: float = 15.0) -> bytes:
     """Pull a single template's workflow JSON from the canonical GitHub raw URL."""
     url = _TEMPLATE_WORKFLOW_URL.format(name=urllib.parse.quote(name, safe=""))
@@ -881,6 +915,17 @@ def fetch_cmd(
     base_version: Annotated[
         int, typer.Option("--base-version", help="Draft version the emitted ops are stamped against.")
     ] = 0,
+    input_path: Annotated[
+        str | None,
+        typer.Option(
+            "--input",
+            show_default=False,
+            help=(
+                "object_info JSON to check the template's model files against (default: COMFY_OBJECT_INFO_FILE). "
+                "A file the server lacks is swapped for the one same-model file in another precision, if there is one."
+            ),
+        ),
+    ] = None,
 ):
     renderer = get_renderer()
 
@@ -960,6 +1005,10 @@ def fetch_cmd(
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             previous = {}
 
+    model_notes = _resolve_template_models(wf, input_path)
+    if model_notes.get("model_substitutions"):
+        body = json.dumps(wf, ensure_ascii=False, indent=2).encode("utf-8")
+
     if out:
         out_path = Path(out).expanduser()
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -983,6 +1032,7 @@ def fetch_cmd(
         "out": target_repr,
         "bytes": len(body),
         "node_count": _workflow_node_count(wf),
+        **model_notes,
     }
     if not out:
         # No file was written, so the JSON envelope is the only place the caller
