@@ -32,12 +32,17 @@ def _find_portable_python(workspace_path: str) -> str | None:
     The embedded interpreter is a plain ``python.exe`` directly inside the
     directory, not a venv, so ``_get_python_binary`` does not apply here.
 
+    The path is normalised first: ``os.path.dirname`` strips a trailing
+    separator, so without it ``<root>/ComfyUI/`` would report *itself* as its
+    own parent and the sibling probe below would be skipped.
+
     Returns ``None`` when the layout is absent, so callers fall back to their
     existing resolution order unchanged.
     """
-    bases = [workspace_path]
-    parent = os.path.dirname(workspace_path)
-    if parent and parent != workspace_path:
+    workspace_root = os.path.normpath(workspace_path)
+    bases = [workspace_root]
+    parent = os.path.dirname(workspace_root)
+    if parent and parent != workspace_root:
         bases.append(parent)
 
     for base in bases:

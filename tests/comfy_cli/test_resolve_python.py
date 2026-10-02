@@ -195,6 +195,20 @@ class TestResolveWorkspacePython:
             result = resolve_workspace_python(str(workspace))
         assert result == str(embedded)
 
+    def test_portable_python_embeded_found_with_trailing_separator(self, tmp_path):
+        # A workspace path carrying a trailing separator must still find the
+        # sibling python_embeded (os.path.dirname would otherwise report the
+        # workspace as its own parent). os.sep keeps this valid on POSIX and
+        # Windows alike, which matters because pytest runs on ubuntu-latest.
+        portable_root = tmp_path / "ComfyUI_windows_portable"
+        workspace = portable_root / "ComfyUI"
+        workspace.mkdir(parents=True)
+        embedded = _make_fake_python(portable_root / "python_embeded", name="python.exe")
+
+        with _clean_env():
+            result = resolve_workspace_python(str(workspace) + os.sep)
+        assert result == str(embedded)
+
     def test_portable_python_embeded_inside_workspace_root(self, tmp_path):
         # The workspace may also be the portable root itself, with python_embeded inside.
         portable_root = tmp_path / "ComfyUI_windows_portable"
