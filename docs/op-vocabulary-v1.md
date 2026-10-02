@@ -243,13 +243,23 @@ workflow JSON round-trips it. Minted op fields beyond the envelope:
   one, since none of the four writable fields is a catalogued widget name or
   carries a `widget_order` position. One register per field means a `title`
   write and a `flags.collapsed` write on the same node never contend, and
-  neither contends with a `set_widget` write on that node. See §3 and §1.8.1
-  below.
-* Invalid: `field` outside the closed set, or a `value` that doesn't match
-  that field's type (and isn't `null`), is rejected at mint time; a missing
-  node is rejected at mint time (mirrors `set_widget`'s not-found handling),
-  and at replay a since-deleted target is a no-op (delete wins), same as
-  every other write.
+  neither contends with a `set_widget` write on that node. Two writers of the
+  IDENTICAL value to the same `(node, field)` target are not escalated by
+  `detect_conflict` — the equal-value carve-out `set_widget` already had is
+  extended to `set_node_field`, since both are plain LWW registers. See §3
+  and §1.8.1 below.
+* Invalid: `field` outside the closed set is rejected at mint time; a
+  non-`null` `value` that doesn't match that field's type (`title` a string,
+  `mode` a non-boolean int in `{0, 1, 2, 3, 4}`, `flags.collapsed` /
+  `flags.pinned` a boolean) is rejected as `malformed_op` at BOTH mint time
+  and replay (`_validate_node_field_value`) — a peer-authored or replayed op
+  that skipped the CLI's own check gets no less scrutiny than a freshly
+  minted one. A missing node is rejected at mint time (mirrors `set_widget`'s
+  not-found handling), and at replay a since-deleted target is a no-op
+  (delete wins), same as every other write. A `null`-delete against a node
+  whose `flags` container is missing or not an object is also a true no-op —
+  it never materializes an empty `flags: {}`, which would otherwise make
+  replicas that did/didn't see the op diverge.
 * No catalog is required to mint or apply this op.
 * Why the field list is closed: everything outside it either has an op of
   its own (`widgets_values` is `set_widget`'s; `inputs`/`outputs` belong to
@@ -316,22 +326,23 @@ for its target. Higher `base_version` wins; ties break by `actor`, then by the
 unique `op_id` — so no two distinct ops ever compare equal, the order is total,
 and the surviving value is independent of apply order.
 
-Gated targets: the `set_widget` rows, the connect-embedded `inputcount` bump
-(8.4), and — since amendment v1.2 — a concrete `connect`'s
-`("input", to_node, to_slot)`. **Node ids in a target are compared as strings**
-(v1.2): ids are legitimately either JSON type, and comparing them raw gave `7`
-and `"7"` two registers for one node.
+Gated targets: the `set_widget` rows, `set_node_field`'s
+`("node_field", node_id, field)` register (§1.8, amendment v1.6), the
+connect-embedded `inputcount` bump (8.4), and — since amendment v1.2 — a
+concrete `connect`'s `("input", to_node, to_slot)`. **Node ids in a target are
+compared as strings** (v1.2): ids are legitimately either JSON type, and
+comparing them raw gave `7` and `"7"` two registers for one node.
 
 | Scenario | Ruling | Where in code |
 |----------|--------|---------------|
-| update vs update (same widget) | LWW on `stamp` with `op_id` tiebreak; loser dropped | `_lww_gate` / `_stamp_key` |
+| update vs update (same widget, or same node field) | LWW on `stamp` with `op_id` tiebreak; loser dropped. Two writes of the identical value are not escalated by `detect_conflict` (§1.3, §1.8) | `_lww_gate` / `_stamp_key`, `detect_conflict` |
 | **concurrent `connect` to the same concrete input** | LWW on `stamp` with `op_id` tiebreak, target `("input", to_node, to_slot)`; the loser is dropped whole (no link tuple, no out-link entry) and the winner retires the prior occupant. Amendment v1.2 — previously **undefined** and decided by arrival order | `_apply_connect` (concrete branch) / `_lww_gate` |
 | update vs delete | **delete wins**: `set_widget` to a deleted node is a no-op; a `connect` whose destination is gone is a no-op; a `connect` whose SOURCE is gone still claims its input register and leaves that input empty (v1.2 — otherwise the incumbent's survival depends on when the delete arrives); replay never raises on a since-removed target | `_apply_set_widget` (missing node → return), `_apply_connect` (missing endpoint → return) |
 | concurrent moves | no `move` op exists in v1 — positions are decided once at `add_node` mint time and frozen into the op; live position editing is frontend view state, out of scope until the FE stable-ID reconciliation (section 6) | `add_node` / `layout.cascade_pos` |
 | edges referencing deleted nodes | the connect no-ops (delete wins); a delete removes incident links and scrubs every dangling input/output reference, so no dangling edge survives either order | `_apply_connect`, `_apply_delete_node` |
 | duplicate entity creation | impossible by construction across writers (random 53-bit `mint_id`, no shared counter); a replayed `add_node` whose `node_id` already exists is a no-op; a re-sent op is dropped by `op_id` | `mint_id`, `_apply_add_node` |
 | concurrent autogrow connects to one base | both survive: each grows a fresh slot keyed by `grow_id`; their display order is the one sequence decision a leaderless writer cannot make and is surfaced by `detect_conflict` for the merge consumer | `_apply_connect` (grow path), `detect_conflict` |
-| invalid / inapplicable ops | explicit per kind — unknown kind: **reject** (`apply_op` raises); malformed op (missing required field): **reject**; well-formed op whose target node is gone: **no-op** (delete wins); `set_widget` naming a widget the live schema does not have: **reject**; `clear`/`reset_doc` inside a batch: **reject** with `workflow_clear_not_batchable` / `unknown op`. Rejection is never silent | `apply_op`, `apply_specs`, `_widget_index` |
+| invalid / inapplicable ops | explicit per kind — unknown kind: **reject** (`apply_op` raises); malformed op (missing required field): **reject**; well-formed op whose target node is gone: **no-op** (delete wins); `set_widget` naming a widget the live schema does not have: **reject**; `set_node_field` naming a field outside `WRITABLE_NODE_FIELDS`, or a value of the wrong shape for its field: **reject** with `malformed_op` (§1.8, at both mint and replay); `clear`/`reset_doc` inside a batch: **reject** with `workflow_clear_not_batchable` / `unknown op`. Rejection is never silent | `apply_op`, `apply_specs`, `_widget_index`, `_validate_node_field_value` |
 
 ## 4. Partial batches: abort-remainder
 
@@ -1017,6 +1028,54 @@ disagreement.
   `set-widget`'s CLI shape.
 * No change to any existing kind's semantics, to `DEFERRED_OPS`, or to
   §§2–8.8 beyond the new §1.8 addition and this section.
+
+### Hardening — 2026-09-23, adversarial review
+
+Independent adversarial review (rather than testing against a live consumer)
+found the kind landed without three things a real freeze needs, plus two
+apply-time robustness bugs, both since fixed and folded into §1.8 above:
+
+* **Value validation was missing entirely.** The op validated the field NAME
+  against `WRITABLE_NODE_FIELDS` but never the VALUE, at mint time or replay —
+  unlike `add_node`, which has always enforced `_VALID_NODE_MODES` for `mode`.
+  A bogus `mode` (a string, `99`, a bool, a container) could reach the document
+  and break `workflow_to_api`'s exact `mode in (_MODE_MUTED, _MODE_BYPASS)`
+  check, or make `ls-nodes`/`print` raise `TypeError: unhashable type`.
+  `_validate_node_field_value` now runs at both mint (`set_node_field`) and
+  replay (`_apply_set_node_field`).
+* **The equal-value carve-out excluded it.** `detect_conflict` skips
+  escalating two independent writes of the IDENTICAL value for `set_widget`
+  (so two actors setting the same value don't get an unnecessary ask-to-merge)
+  but gated that carve-out on both ops being `set_widget`. `set_node_field` is
+  the same kind of plain LWW register — the carve-out now covers both.
+* **§3's gated-target list didn't mention it.** `_write_target` already
+  returned `("node_field", node_id, field)` for the kind, but §3's prose only
+  named the `set_widget` rows and the connect-embedded registers; it now lists
+  `set_node_field` explicitly.
+* `node.setdefault(head, {})` in `_apply_set_node_field` assumed an existing
+  `flags` was dict-shaped, but the schema does not forbid `flags: null` or any
+  other shape — that node raised a raw `TypeError`/`AttributeError` that
+  escaped the handler's `ValueError`/`KeyError` envelope wrapping and corrupted
+  replay on any replica holding such a document. It now coerces a non-dict
+  container to `{}` only when there is a real (non-null) write to make.
+* The container was created, and hence the node mutated, BEFORE `op["value"]`
+  was read — a missing `value` raised `KeyError` after the mutation had
+  already happened, and rollback only undoes LWW stamps, not that partial
+  mutation, leaving a stray empty `flags: {}` behind. `_apply_set_node_field`
+  now reads and validates every required op field before any mutation, and a
+  null-delete against an absent or malformed container is a true no-op: it
+  never creates `flags` at all.
+* `set-node-field` is now registered in `discovery.COMMAND_SCHEMAS` like every
+  sibling structured-edit command, so `comfy discover` advertises its
+  `output_schema`.
+* The batch-spec dispatch now reads `spec["node"]`, not
+  `spec.get("node", spec.get("node_id"))`: `node` is the documented, canonical
+  key (matching `set_widget`'s `node`); `node_id` was never documented and is
+  no longer accepted. A missing `node` now raises the same `spec #i
+  (set_node_field) is missing required field 'node'` every sibling branch
+  raises, instead of silently resolving to `None` — which, since node matching
+  is by `str()`, could spuriously match a node whose id happens to be the
+  string `"None"`.
 
 ### What is explicitly NOT done here
 
