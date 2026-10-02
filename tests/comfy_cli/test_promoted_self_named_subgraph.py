@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
+import threading
 from typing import Any
 
 from comfy_cli.cql import promoted
@@ -92,9 +93,28 @@ def _run_bounded(fn, seconds: float = 10.0):
     """Run ``fn`` in a child process; fail (instead of hanging the suite) if it
     has not returned within ``seconds``, and kill the child so a regressed
     walk cannot keep burning CPU for the rest of the run. ``fn``'s result must
-    be picklable — the tests return plain summaries."""
-    methods = mp.get_all_start_methods()
-    ctx = mp.get_context("fork" if "fork" in methods else "spawn")
+    be picklable — the tests return plain summaries.
+
+    Without ``fork`` (Windows) the closures cannot reach a spawned child, so the
+    call runs on a daemon thread instead: still bounded, just not killable."""
+    if "fork" not in mp.get_all_start_methods():
+        box: dict[str, Any] = {}
+
+        def run():
+            try:
+                box["value"] = fn()
+            except BaseException as e:  # pragma: no cover - surfaced below
+                box["error"] = e
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(seconds)
+        assert not t.is_alive(), f"did not finish within {seconds}s (self-recursive subgraph walk)"
+        if "error" in box:
+            raise box["error"]
+        return box["value"]
+
+    ctx = mp.get_context("fork")
     queue = ctx.Queue()
 
     def target():
