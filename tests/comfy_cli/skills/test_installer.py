@@ -941,3 +941,142 @@ def test_description_is_read_from_frontmatter_only():
         "Example config:\n\n```yaml\ndescription: an example, not this skill\n```\n"
     )
     assert frontmatter_description(with_example) == "The real one."
+
+
+# ---------------------------------------------------------------------------
+# Security: a path cannot take over a name the CLI ships
+# ---------------------------------------------------------------------------
+
+
+def _install_cli(monkeypatch, cwd: Path, *args: str):
+    """Run `comfy skills <args>` from `cwd` with the JSON renderer; return (result, last envelope)."""
+    monkeypatch.chdir(cwd)
+    _force_json_renderer()
+    try:
+        result = CliRunner().invoke(app, list(args))
+    finally:
+        reset_renderer_for_testing()
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    return result, json.loads(lines[-1]) if lines else None
+
+
+def _write_skill(path: Path, name: str, body: str = "Not the shipped skill.") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nname: {name}\ndescription: d.\n---\n{body}\n", encoding="utf-8")
+
+
+def _project(tmp_path: Path) -> Path:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "AGENTS.md").write_text("# mine\n", encoding="utf-8")
+    return root
+
+
+def _agent_files(root: Path) -> dict[str, str]:
+    return {
+        str(p.relative_to(root)): p.read_text(encoding="utf-8")
+        for p in sorted(root.rglob("*"))
+        if p.is_file() and p.name != "skills-manifest.json"
+    }
+
+
+@pytest.mark.parametrize(
+    ("layout", "name"),
+    [
+        ("notcomfy/SKILL.md", "comfy"),  # a file in a folder of another name
+        ("comfy", "comfy"),  # a folder carrying the shipped name
+        ("pins/SKILL.md", "comfy-build-pins"),  # a reference skill's name
+        ("evil/SKILL.md", "Comfy"),  # one folder with `comfy` on macOS and Windows
+    ],
+)
+def test_install_refuses_a_path_declaring_a_shipped_name(monkeypatch, tmp_path: Path, layout: str, name: str):
+    root = _project(tmp_path)
+    token = tmp_path / "src" / layout
+    _write_skill(token / "SKILL.md" if not layout.endswith(".md") else token, name)
+    before = _agent_files(root)
+
+    result, envelope = _install_cli(monkeypatch, root, "install", "--scope", "project", "--skill", str(token))
+
+    assert result.exit_code == 1, result.output
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "skill_invalid"
+    assert repr(name) in envelope["error"]["message"]
+    assert "comfy skills show" in envelope["error"]["hint"]
+    assert _agent_files(root) == before
+
+
+def test_install_api_refuses_a_path_declaring_a_shipped_name(tmp_path: Path):
+    """The library entry point holds the same line as the command."""
+    md = tmp_path / "notcomfy" / "SKILL.md"
+    _write_skill(md, "comfy")
+    with pytest.raises(ValueError, match="'comfy'"):
+        install(scope="project", project_root=tmp_path, skills=[str(md)], targets=["claude-code"])
+    assert not (tmp_path / ".claude").exists()
+
+
+def test_validate_refuses_a_path_declaring_a_shipped_name(monkeypatch, tmp_path: Path):
+    md = tmp_path / "notcomfy" / "SKILL.md"
+    _write_skill(md, "comfy")
+    result, envelope = _install_cli(monkeypatch, tmp_path, "validate", str(md))
+    assert result.exit_code == 1, result.output
+    assert envelope["error"]["code"] == "skill_invalid"
+    assert "comfy skills show" in envelope["error"]["hint"]
+
+
+def test_install_accepts_the_shipped_reference_skill_by_its_installed_path(monkeypatch, tmp_path: Path):
+    import comfy_cli.skills as skills_pkg
+
+    root = _project(tmp_path)
+    shipped = Path(skills_pkg.__file__).parent / "comfy-build-pins"
+    result, envelope = _install_cli(
+        monkeypatch, root, "install", "--scope", "project", "--target", "claude-code", "--skill", str(shipped)
+    )
+    assert result.exit_code == 0, result.output
+    installed = root / ".claude" / "skills" / "comfy-build-pins" / "SKILL.md"
+    assert installed.read_text(encoding="utf-8") == skill_content("comfy-build-pins")
+    # ...and so does the copy that install just wrote, passed back by its own folder.
+    result, _ = _install_cli(
+        monkeypatch, root, "install", "--scope", "project", "--target", "cursor", "--skill", str(installed.parent)
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_install_accepts_an_unedited_copy_of_a_shipped_skill_with_crlf(monkeypatch, tmp_path: Path):
+    root = _project(tmp_path)
+    copy = tmp_path / "src" / "comfy" / "SKILL.md"
+    copy.parent.mkdir(parents=True)
+    copy.write_bytes(skill_content("comfy").replace("\n", "\r\n").encode("utf-8"))
+    result, _ = _install_cli(
+        monkeypatch, root, "install", "--scope", "project", "--target", "claude-code", "--skill", str(copy)
+    )
+    assert result.exit_code == 0, result.output
+    assert (root / ".claude" / "skills" / "comfy" / "SKILL.md").exists()
+
+
+def test_install_accepts_an_own_name_by_folder_and_by_file(monkeypatch, tmp_path: Path):
+    root = _project(tmp_path)
+    folder = tmp_path / "src" / "my-skill"
+    _write_skill(folder / "SKILL.md", "my-skill")
+    loose = tmp_path / "loose" / "SKILL.md"
+    _write_skill(loose, "my-other-skill")
+    for token in (folder, loose):
+        result, _ = _install_cli(
+            monkeypatch, root, "install", "--scope", "project", "--target", "claude-code", "--skill", str(token)
+        )
+        assert result.exit_code == 0, result.output
+    assert (root / ".claude" / "skills" / "my-skill" / "SKILL.md").exists()
+    assert (root / ".claude" / "skills" / "my-other-skill" / "SKILL.md").exists()
+
+
+def test_uninstall_by_path_still_removes_an_edited_shipped_skill(monkeypatch, tmp_path: Path):
+    root = _project(tmp_path)
+    install(scope="project", project_root=root, skills=["comfy"])
+    installed = root / ".claude" / "skills" / "comfy"
+    _write_skill(installed / "SKILL.md", "comfy", body="Edited by the user.")
+
+    result, _ = _install_cli(monkeypatch, root, "uninstall", "--scope", "project", "--skill", str(installed))
+
+    assert result.exit_code == 0, result.output
+    assert not (installed / "SKILL.md").exists()
+    assert not (root / ".cursor" / "rules" / "comfy.mdc").exists()
+    assert "comfy" not in (root / "AGENTS.md").read_text(encoding="utf-8").split("# mine", 1)[1]

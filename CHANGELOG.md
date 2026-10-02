@@ -25,6 +25,16 @@ history.
   (how the cloud sends it today) was `cloud_rate_limited`, whose "wait, then
   retry" hint could never succeed. A full queue (`QUEUE_LIMIT`) and a
   temporarily unavailable free tier stay `cloud_rate_limited`.
+- `comfy skills install --skill <path>` and `comfy skills validate` refuse a
+  skill whose frontmatter `name:` is one the CLI ships (`skill_invalid`),
+  whether the path is a `SKILL.md` file or a folder carrying that name. Such a
+  path used to overwrite the shipped skill, `comfy` included, in Claude Code,
+  Cursor and `AGENTS.md`; a capitalised `Comfy` did the same on macOS and
+  Windows. An unedited copy of this release's shipped text still installs by
+  path, and `comfy skills uninstall --skill <path>` is unchanged. Where a path
+  install already replaced a shipped skill, a plain `comfy skills install`
+  writes the shipped Claude Code and Cursor files back; a `Comfy` block such
+  an install added to `AGENTS.md` stays until removed by hand.
 
 ## [1.22.0] - 2026-09-30
 
