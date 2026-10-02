@@ -15,6 +15,7 @@ import hashlib as _hashlib
 import json
 import logging
 import math
+import shlex
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -141,11 +142,14 @@ def enum_listing_hint(
             f"pick one of `suggestions` ({len(suggestions)} of {n} options); re-run validate with "
             f"--full-options to list all {n}"
         )
-    target = class_type or "<class>"
-    query = f'inputs.#(name=="{field}").{listing}.#(%"*<text>*")#'
+    target = shlex.quote(class_type) if class_type else "<class>"
+    # Catalog names are untrusted text: encode the field as a selector string
+    # literal and shell-quote both arguments, so the copyable command neither
+    # breaks the selector nor runs anything a node pack put in a name.
+    query = shlex.quote(f'inputs.#(name=={json.dumps(field)}).{listing}.#(%"*<text>*")#')
     return (
         f"pick one of `suggestions` ({len(suggestions)} of {n} options); to search all {n}, filter them with "
-        f"`comfy nodes show {target} --select '{query}'`, or re-run validate with --full-options"
+        f"`comfy nodes show {target} --select {query}`, or re-run validate with --full-options"
     )
 
 

@@ -261,7 +261,11 @@ def _walk(current: Any, segments: list[str]) -> tuple[Any, bool]:
             result, matched = _walk(element, rest)
             if matched:
                 out.append(result)
-        return out, True
+        # Like `#`: zero kept elements is an answer, but a remainder that
+        # matches none of the kept ones is a miss.
+        if out or not kept:
+            return out, True
+        return None, False
     if seg == WILDCARD:
         if not isinstance(current, list):
             return None, False

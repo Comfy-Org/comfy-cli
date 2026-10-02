@@ -179,3 +179,34 @@ def test_a_nested_capped_choice_list_only_advertises_all_choices():
     sub = payload["inputs"][0]["dynamic_options"][0]["inputs"][0]
     assert sub["choices_total"] == len(FILES)
     assert "--select" not in payload["choices_note"] and "--all-choices" in payload["choices_note"]
+
+
+def test_the_enum_filter_hint_quotes_names_from_the_catalog():
+    import shlex
+
+    from comfy_cli.cql.engine import enum_listing_hint
+    from comfy_cli.selector import select
+
+    field = 'we"ird'
+    hint = enum_listing_hint(field, FILES, FILES[:5], "Bad'; touch x #")
+    cmd = next(span for span in hint.split("`") if span.startswith("comfy "))
+    argv = shlex.split(cmd)
+    assert argv[:3] == ["comfy", "nodes", "show"] and argv[3] == "Bad'; touch x #"
+    query = argv[argv.index("--select") + 1].replace("<text>", "")
+    _, matched = select({"inputs": [{"name": field, "choices": ["a"]}]}, query)
+    assert matched
+
+
+def test_the_choices_note_quotes_names_from_the_catalog():
+    import shlex
+
+    from comfy_cli.selector import select
+
+    payload = {"name": "Bad'; touch x #", "inputs": [{"name": 'we"ird', "choices": FILES}]}
+    nodes_cmd._cap_choices(payload)
+    cmd = payload["choices_note"].split("`")[1]
+    argv = shlex.split(cmd)
+    assert argv[3] == "Bad'; touch x #"
+    query = argv[argv.index("--select") + 1].replace("<text>", "")
+    _, matched = select({"inputs": [{"name": 'we"ird', "choices": ["a"]}]}, query)
+    assert matched

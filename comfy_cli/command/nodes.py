@@ -20,6 +20,8 @@ Backed by the pure-Python CQL engine (``comfy_cli.cql.engine.Graph``).
 from __future__ import annotations
 
 import difflib
+import json
+import shlex
 from typing import Annotated, Any
 
 import typer
@@ -191,15 +193,13 @@ def _cap_choices(payload: dict[str, Any]) -> dict[str, Any]:
 
     walk(payload.get("inputs"))
     if capped:
-        name = payload.get("name") or "<class>"
+        name = shlex.quote(str(payload["name"])) if payload.get("name") else "<class>"
         note = f"{', '.join(capped)}: only the first {CHOICES_INLINE_MAX} choices are listed (see choices_total). "
         if top_level:
             # A nested (dynamic-combo) input is not under top-level `inputs`,
             # so only a top-level one gets the filter query.
-            note += (
-                f"Check or find one with `comfy nodes show {name} --select "
-                f'\'inputs.#(name=="{top_level[0]}").choices.#(%"*<text>*")#\'`; '
-            )
+            query = shlex.quote(f'inputs.#(name=={json.dumps(top_level[0])}).choices.#(%"*<text>*")#')
+            note += f"Check or find one with `comfy nodes show {name} --select {query}`; "
         payload["choices_note"] = note + "--all-choices lists every choice."
     return payload
 
