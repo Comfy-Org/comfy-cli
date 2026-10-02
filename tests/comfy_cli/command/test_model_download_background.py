@@ -2318,6 +2318,406 @@ class TestForegroundClaimsItsDestination:
         assert len(writes) <= 4
 
 
+class TestForegroundAtomicDestinationClaim:
+    """The `O_EXCL` claim file on the *foreground* path.
+
+    The record-is-the-claim guard the foreground path used to rely on alone is
+    check-then-act: `_claim_foreground` writes, `_enforce_claim` re-scans. A
+    competitor whose record lands after that re-scan is invisible to it, and even
+    a competitor it *does* see is only refused when `_claim_order` ranks the
+    competitor first — `started_at` is second-resolution and the tie-break is a
+    random 12-hex id, so a foreground run that ties on the second and draws the
+    lower id sails through while the competitor already holds the claim. Both
+    transfers then write one destination. File creation with `O_CREAT | O_EXCL`
+    has no such window.
+    """
+
+    DEST = ("models/loras", "m.safetensors")
+
+    def _dest(self, workspace) -> Path:
+        return workspace / self.DEST[0] / self.DEST[1]
+
+    def _download(self, **kwargs):
+        models.download(
+            None,
+            url="https://example.com/m.safetensors",
+            relative_path=self.DEST[0],
+            filename=self.DEST[1],
+            **kwargs,
+        )
+
+    def _transfer(self, monkeypatch, fn=None):
+        calls: list = []
+
+        def download_file(*args, **kwargs):
+            calls.append((args, kwargs))
+            if fn is not None:
+                return fn(*args, **kwargs)
+            return None
+
+        monkeypatch.setattr(models, "download_file", download_file)
+        return calls
+
+    def _plant_in_the_window(self, workspace, monkeypatch, competitor) -> None:
+        """Land `competitor`'s record *and* its claim right after our own record
+        write — i.e. after `download`'s pre-flight scan, and before the
+        `_enforce_claim` re-scan that is supposed to be the foreground guard.
+
+        This is the interleaving the advisory guard cannot arbitrate: the
+        pre-flight scan ran too early to see the competitor at all, and the
+        re-scan sees it but ranks us first.
+        """
+        real_write = download_state.write
+        planted: list = []
+
+        def write_then_race(ws, state):
+            path = real_write(ws, state)
+            if not planted:
+                planted.append(True)
+                real_write(workspace, competitor)
+                claim = download_state.claim_path(workspace, models._dest_key(self._dest(workspace)))
+                assert download_state.acquire_claim(claim, download_id=competitor.id, dest=str(self._dest(workspace)))
+            return path
+
+        monkeypatch.setattr(download_state, "write", write_then_race)
+
+    # -- the hole this closes -------------------------------------------------
+
+    def test_a_foreground_competitor_that_holds_the_claim_wins(self, workspace, monkeypatch, json_renderer):
+        """Foreground-vs-foreground, at the interleaving that double-downloaded.
+
+        The rival's record ties with ours on the second and its id sorts *after*
+        ours, so `_claim_order` crowns us and `_enforce_claim` lets us straight
+        through — exactly as it did before this change, when the transfer then
+        started on top of the rival's. The claim it already holds is what refuses
+        us now.
+        """
+        dest = self._dest(workspace)
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        monkeypatch.setattr(download_state, "_now_iso", lambda: stamp)
+        monkeypatch.setattr(download_state, "new_id", lambda: "aaaaaaaaaaaa")
+        rival = _state(id="zzzzzzzzzzzz", dest=str(dest), status="downloading", pid=1234, kind="foreground")
+        rival.started_at = stamp
+        self._plant_in_the_window(workspace, monkeypatch, rival)
+        calls = self._transfer(monkeypatch)
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            with pytest.raises(typer.Exit) as exc:
+                self._download()
+
+        assert exc.value.exit_code == 1
+        env = json_renderer()
+        assert env["error"]["code"] == "model_download_in_flight"
+        assert env["error"]["details"]["download_id"] == rival.id
+        assert env["error"]["details"]["kind"] == "foreground"
+        # No bytes moved, our record came back off disk (a withdrawn claim left
+        # behind would refuse every later run at this destination), and the
+        # rival's claim is untouched.
+        assert calls == []
+        assert [s.id for s in download_state.list_all(workspace)] == [rival.id]
+        assert _claim_owner(workspace) == rival.id
+        # The advisory order would have crowned us — proof the claim decided.
+        ours = download_state.DownloadState(id="aaaaaaaaaaaa", url="u", dest=str(dest), started_at=stamp)
+        assert models._claim_order(ours) < models._claim_order(rival)
+
+    def test_a_foreground_run_landing_after_a_background_submits_scan_is_refused(
+        self, workspace, monkeypatch, json_renderer
+    ):
+        """The cross-kind direction named on the ticket.
+
+        A `--background` submit already holds the claim; our foreground record
+        lands after its re-scan, ties on the second, and draws the lower id. The
+        old code's `_enforce_claim` therefore passed us and the background worker
+        and this process both wrote the destination.
+        """
+        dest = self._dest(workspace)
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        monkeypatch.setattr(download_state, "_now_iso", lambda: stamp)
+        monkeypatch.setattr(download_state, "new_id", lambda: "aaaaaaaaaaaa")
+        worker = _state(id="zzzzzzzzzzzz", dest=str(dest), status="downloading", pid=1234)
+        worker.started_at = stamp
+        self._plant_in_the_window(workspace, monkeypatch, worker)
+        calls = self._transfer(monkeypatch)
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            with pytest.raises(typer.Exit) as exc:
+                self._download()
+
+        assert exc.value.exit_code == 1
+        env = json_renderer()
+        assert env["error"]["code"] == "model_download_in_flight"
+        assert env["error"]["details"]["download_id"] == worker.id
+        assert env["error"]["details"]["kind"] == "background"
+        assert calls == []
+        assert [s.id for s in download_state.list_all(workspace)] == [worker.id]
+        assert _claim_owner(workspace) == worker.id
+
+    @pytest.mark.parametrize("iteration", range(3))
+    def test_twelve_simultaneous_foreground_runs_accept_exactly_one(
+        self, workspace, monkeypatch, json_renderer, iteration
+    ):
+        """The acceptance criterion for the foreground race, run for real.
+
+        Twelve threads into one destination with the transfer stubbed out — the
+        foreground mirror of `TestAtomicDestinationClaim`'s twelve-submit test,
+        and repeated for the same reason: the failure this closes is
+        probabilistic (5 of 36 iterations double-accepted against the advisory
+        guard alone; 0 of 36 with the claim), so a single green pass would prove
+        very little. In-process the window is narrow — the record writes
+        serialize under the GIL — so the two deterministic tests above are the
+        real pins and this one is the end-to-end acceptance run.
+
+        Every accepted run holds its claim until all twelve have resolved, so a
+        refusal can never be a merely *sequential* run that arrived after the
+        winner released — which the CLI allows, and
+        `test_the_released_destination_is_downloadable_again` pins.
+        """
+        dest = workspace / self.DEST[0] / f"race-{iteration}.safetensors"
+        start = threading.Barrier(12)
+        resolved = threading.Barrier(12)
+
+        def wait_resolved() -> None:
+            try:
+                resolved.wait(timeout=30)
+            except threading.BrokenBarrierError:
+                pass
+
+        monkeypatch.setattr(models, "download_file", lambda *a, **kw: wait_resolved())
+
+        accepted: list[str] = []
+        refused: list[str] = []
+        errors: list[BaseException] = []
+
+        def run() -> None:
+            start.wait()
+            try:
+                models.download(
+                    None,
+                    url="https://example.com/m.safetensors",
+                    relative_path=self.DEST[0],
+                    filename=dest.name,
+                )
+            except typer.Exit as exit_:
+                # One envelope per renderer instance, so the refusal is read off
+                # the exception rather than off stdout, as in the submit race.
+                refused.append(f"{exit_.exit_code}:{getattr(exit_, 'comfy_error_message', '')}")
+                wait_resolved()
+            except BaseException as e:  # noqa: BLE001 - reported, not swallowed
+                errors.append(e)
+                wait_resolved()
+            else:
+                accepted.append("ok")
+
+        threads = [threading.Thread(target=run) for _ in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+
+        assert errors == []
+        assert not any(t.is_alive() for t in threads)
+        assert len(accepted) == 1, f"{len(accepted)} foreground runs were accepted"
+        assert len(refused) == 11
+        assert all(message.startswith("1:") and str(dest) in message for message in refused), refused
+
+        # The winner released on its way out, and every loser withdrew: one
+        # terminal record for this destination and no claim left behind.
+        mine = [s for s in download_state.list_all(workspace) if s.dest == str(dest)]
+        assert [s.status for s in mine] == ["completed"]
+        assert _claim_files(workspace) == []
+
+    def test_a_stale_claim_is_cleared_and_the_download_proceeds(self, workspace, monkeypatch, json_renderer):
+        """A claim outliving the download it points at must not wedge the
+        destination: it is unlinked and the create retried exactly once."""
+        dest = self._dest(workspace)
+        orphan = download_state.claim_path(workspace, models._dest_key(dest))
+        assert download_state.acquire_claim(orphan, download_id="deadbeefcafe", dest=str(dest))
+        # No `prune` stub needed, unlike the `--background` equivalent: the
+        # foreground path never prunes, so `prune`'s claim sweep is not what
+        # clears this one — `_acquire_dest_claim`'s collision handling is.
+        attempts: list = []
+        real_acquire = download_state.acquire_claim
+
+        def counting_acquire(path, *, download_id, dest):
+            attempts.append(download_id)
+            return real_acquire(path, download_id=download_id, dest=dest)
+
+        monkeypatch.setattr(download_state, "acquire_claim", counting_acquire)
+        calls = self._transfer(monkeypatch)
+
+        self._download()
+
+        # Collided once with the corpse, cleared it, and won on the retry.
+        assert len(attempts) == 2
+        assert len(calls) == 1
+        (record,) = download_state.list_all(workspace)
+        assert record.status == "completed"
+
+    # -- release --------------------------------------------------------------
+
+    def _held_during_transfer(self, workspace, monkeypatch, raising=None) -> list:
+        """Record who owns the claim while the bytes are moving.
+
+        Asserting only that the claim is *gone* afterwards would pass just as
+        well if it had never been taken, so every release test below pins both
+        halves: held during the transfer, released after it.
+        """
+        held: list = []
+
+        def observe(url, dest, headers, **kwargs):
+            held.append(_claim_owner(workspace))
+            if raising is not None:
+                raise raising
+
+        self._transfer(monkeypatch, observe)
+        return held
+
+    def test_a_completed_transfer_releases_the_claim(self, workspace, monkeypatch, capsys):
+        held = self._held_during_transfer(workspace, monkeypatch)
+
+        self._download()
+
+        (record,) = download_state.list_all(workspace)
+        assert held == [record.id]
+        assert _claim_files(workspace) == []
+        assert record.status == "completed"
+
+    def test_a_failed_transfer_releases_the_claim(self, workspace, monkeypatch, json_renderer):
+        held = self._held_during_transfer(workspace, monkeypatch, DownloadException("connection reset by peer"))
+
+        with pytest.raises(typer.Exit):
+            self._download()
+
+        assert json_renderer()["error"]["code"] == "download_failed"
+        (record,) = download_state.list_all(workspace)
+        assert held == [record.id]
+        assert _claim_files(workspace) == []
+        assert record.status == "failed"
+
+    def test_a_keyboard_interrupt_releases_the_claim(self, workspace, monkeypatch, capsys):
+        """Ctrl-C is the documented way out of a foreground download, so it is
+        the path most likely to strand a claim — and a stranded claim refuses
+        every later run at that destination until something sweeps it."""
+        held = self._held_during_transfer(workspace, monkeypatch, KeyboardInterrupt())
+
+        with pytest.raises(KeyboardInterrupt):
+            self._download()
+
+        (record,) = download_state.list_all(workspace)
+        assert held == [record.id]
+        assert _claim_files(workspace) == []
+        assert record.status == "failed"
+
+    def test_the_released_destination_is_downloadable_again(self, workspace, monkeypatch, capsys):
+        """The end-to-end consequence of releasing: back-to-back runs at one
+        destination, each taking and dropping the claim."""
+        held = self._held_during_transfer(workspace, monkeypatch)
+
+        self._download()
+        self._download()
+
+        assert len(held) == 2 and len(set(held)) == 2 and None not in held
+        assert _claim_files(workspace) == []
+
+    def test_the_claim_is_released_only_after_the_terminal_status_lands(self, workspace, monkeypatch, capsys):
+        """Order matters the other way round too. A competitor that takes the
+        claim the instant we drop it re-scans for records, and our still-
+        `downloading` one would rank earlier than theirs — so they would withdraw
+        against a run that is already over."""
+        seen: list = []
+        real_release = download_state.release_claim
+
+        def release_claim(path, *, owner_id):
+            seen.append([s.status for s in download_state.list_all(workspace)])
+            return real_release(path, owner_id=owner_id)
+
+        monkeypatch.setattr(download_state, "release_claim", release_claim)
+        self._transfer(monkeypatch)
+
+        self._download()
+
+        assert seen == [["completed"]]
+
+    def test_a_claim_that_is_no_longer_ours_is_left_alone(self, workspace, monkeypatch, capsys):
+        """`release_claim` is unconditional in the `finally` because it is
+        conditional inside: a successor that already took over this destination
+        must keep its claim."""
+        dest = self._dest(workspace)
+
+        def take_it_over(*args, **kwargs):
+            claim = download_state.claim_path(workspace, models._dest_key(dest))
+            claim.unlink()
+            assert download_state.acquire_claim(claim, download_id="ffffffffffff", dest=str(dest))
+
+        self._transfer(monkeypatch, take_it_over)
+
+        self._download()
+
+        assert _claim_owner(workspace) == "ffffffffffff"
+
+    # -- degradation ----------------------------------------------------------
+
+    def test_an_unusable_claims_directory_still_downloads(self, workspace, monkeypatch, capsys):
+        """Bookkeeping must not turn a working download into an error. With
+        something squatting where `claims/` should be, the foreground path
+        degrades to the advisory guard — the behavior that shipped before this."""
+        squatter = download_state.state_dir(workspace) / download_state.CLAIMS_DIRNAME
+        squatter.write_text("not a directory", encoding="utf-8")
+        calls = self._transfer(monkeypatch)
+
+        self._download()
+
+        assert len(calls) == 1
+        (record,) = download_state.list_all(workspace)
+        assert record.status == "completed"
+
+    def test_an_unusable_claims_directory_keeps_the_advisory_guard(self, workspace, monkeypatch, json_renderer):
+        """...and the guard it degrades to still refuses an earlier live rival."""
+        squatter = download_state.state_dir(workspace) / download_state.CLAIMS_DIRNAME
+        squatter.write_text("not a directory", encoding="utf-8")
+        rival = _state(dest=str(self._dest(workspace)), status="downloading", pid=1234)
+        rival.started_at = "2000-01-01T00:00:00+00:00"
+        real_write = download_state.write
+        planted: list = []
+
+        def write_then_race(ws, state):
+            path = real_write(ws, state)
+            if not planted:
+                planted.append(real_write(workspace, rival))
+            return path
+
+        monkeypatch.setattr(download_state, "write", write_then_race)
+        monkeypatch.setattr(models, "download_file", MagicMock(side_effect=AssertionError("a transfer started")))
+
+        with patch("comfy_cli.utils.is_running", return_value=True):
+            with pytest.raises(typer.Exit):
+                self._download()
+
+        assert json_renderer()["error"]["details"]["download_id"] == rival.id
+
+    def test_a_record_we_could_not_write_claims_nothing(self, workspace, monkeypatch, capsys):
+        """`claim is None` skips the claim file deliberately: it would point at a
+        record that does not exist, which reads stale to the next run and is
+        swept — so taking one buys nothing and costs a round of cleanup."""
+        monkeypatch.setattr(download_state, "write", MagicMock(side_effect=OSError("read-only file system")))
+        calls = self._transfer(monkeypatch)
+
+        self._download()
+
+        assert len(calls) == 1
+        assert _claim_files(workspace) == []
+
+    def test_an_unverifiable_pid_claims_nothing(self, workspace, monkeypatch, capsys):
+        """Same skip for the other `claim is None` cause."""
+        monkeypatch.setattr(download_state, "process_create_time", lambda pid: None)
+        calls = self._transfer(monkeypatch)
+
+        self._download()
+
+        assert len(calls) == 1
+        assert _claim_files(workspace) == []
+
+
 class TestSubmitEnvelope:
     def _submit(self, workspace, monkeypatch, **kwargs):
         monkeypatch.setattr(models, "_spawn_download_worker", lambda state_file, log_file: 31337)
