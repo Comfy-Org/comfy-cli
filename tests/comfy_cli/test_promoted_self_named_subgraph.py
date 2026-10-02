@@ -16,7 +16,7 @@ definition whose type equals that definition's name is the real node class.
 from __future__ import annotations
 
 import json
-import threading
+import multiprocessing as mp
 from typing import Any
 
 from comfy_cli.cql import promoted
@@ -89,23 +89,30 @@ def _workflow() -> dict[str, Any]:
 
 
 def _run_bounded(fn, seconds: float = 10.0):
-    """Run ``fn`` on a daemon thread; fail (instead of hanging the suite) if it
-    has not returned within ``seconds``."""
-    box: dict[str, Any] = {}
+    """Run ``fn`` in a child process; fail (instead of hanging the suite) if it
+    has not returned within ``seconds``, and kill the child so a regressed
+    walk cannot keep burning CPU for the rest of the run. ``fn``'s result must
+    be picklable — the tests return plain summaries."""
+    methods = mp.get_all_start_methods()
+    ctx = mp.get_context("fork" if "fork" in methods else "spawn")
+    queue = ctx.Queue()
 
     def target():
         try:
-            box["value"] = fn()
+            queue.put(("value", fn()))
         except BaseException as e:  # pragma: no cover - surfaced below
-            box["error"] = e
+            queue.put(("error", repr(e)))
 
-    t = threading.Thread(target=target, daemon=True)
-    t.start()
-    t.join(seconds)
-    assert not t.is_alive(), f"did not finish within {seconds}s (self-recursive subgraph walk)"
-    if "error" in box:
-        raise box["error"]
-    return box["value"]
+    proc = ctx.Process(target=target, daemon=True)
+    proc.start()
+    proc.join(seconds)
+    if proc.is_alive():
+        proc.kill()
+        proc.join()
+        raise AssertionError(f"did not finish within {seconds}s (self-recursive subgraph walk)")
+    kind, value = queue.get(timeout=5)
+    assert kind == "value", value
+    return value
 
 
 def test_defs_by_id_skips_name_fallback_shadowing_own_interior_node():
@@ -124,9 +131,13 @@ def test_defs_by_id_keeps_name_fallback_for_name_typed_instances():
 def test_promoted_inputs_terminates_and_resolves_interior_widgets():
     wf = _workflow()
     defs = promoted.defs_by_id(wf)
-    pis = _run_bounded(lambda: promoted.promoted_inputs(wf["definitions"]["subgraphs"][0], defs))
-    assert [p.source_widget for p in pis] == [f"w{i}" for i in range(N_INPUTS)]
-    assert all(p.is_widget and not p.nested for p in pis)
+    pis = _run_bounded(
+        lambda: [
+            (p.source_widget, p.is_widget, p.nested)
+            for p in promoted.promoted_inputs(wf["definitions"]["subgraphs"][0], defs)
+        ]
+    )
+    assert pis == [(f"w{i}", True, False) for i in range(N_INPUTS)]
 
 
 def test_promoted_inputs_cycle_guard_without_name_fallback():
@@ -135,12 +146,12 @@ def test_promoted_inputs_cycle_guard_without_name_fallback():
     wf = _workflow()
     sg = wf["definitions"]["subgraphs"][0]
     defs = {SG_ID: sg, "Wrapped": sg}
-    pis = _run_bounded(lambda: promoted.promoted_inputs(sg, defs))
-    assert len(pis) == N_INPUTS
+    count = _run_bounded(lambda: len(promoted.promoted_inputs(sg, defs)))
+    assert count == N_INPUTS
 
 
 def test_workflow_print_self_named_subgraph_finishes():
     graph = Graph.from_object_info(json.loads(json.dumps(_object_info())))
-    res = _run_bounded(lambda: render_py(_workflow(), graph))
-    assert res.node_count >= 1
-    assert "Wrapped(" in res.source
+    node_count, source = _run_bounded(lambda: (lambda r: (r.node_count, r.source))(render_py(_workflow(), graph)))
+    assert node_count >= 1
+    assert "Wrapped(" in source
