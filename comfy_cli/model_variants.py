@@ -175,16 +175,29 @@ def _rename_promoted(workflow: dict, renamed: dict[str, dict[tuple[str, str], tu
 
     Only the host slot the frontend binds to the swapped interior widget
     (``PromotedInput.value_index``) changes, and only while it still holds the
-    old filename; another promoted widget holding the same text is left alone."""
+    old filename; another promoted widget holding the same text is left alone.
+    A rewritten slot on an instance that itself sits inside a definition is a
+    swap of that definition too, so a widget promoted through nested subgraphs
+    is followed out to the outermost host."""
     from comfy_cli.cql.promoted import defs_by_id, promoted_inputs
 
     defs = defs_by_id(workflow)
-    for node, _sg in _workflow_nodes(workflow):
-        sg_id = str(node.get("type", ""))
-        swaps, wv = renamed.get(sg_id), node.get("widgets_values")
-        if not swaps or not isinstance(wv, list) or sg_id not in defs:
-            continue
-        for pi in promoted_inputs(defs[sg_id], defs):
-            swap = swaps.get((str(pi.source_node), str(pi.source_widget))) if pi.is_widget and not pi.nested else None
-            if swap and pi.value_index < len(wv) and wv[pi.value_index] == swap[0]:
-                wv[pi.value_index] = swap[1]
+    for _ in range(16):  # nesting depth bound, as the engine's promotion walk
+        grown = False
+        for node, sg_loc in _workflow_nodes(workflow):
+            sg_id = str(node.get("type", ""))
+            swaps, wv = renamed.get(sg_id), node.get("widgets_values")
+            if not swaps or not isinstance(wv, list) or sg_id not in defs:
+                continue
+            for pi in promoted_inputs(defs[sg_id], defs):
+                if not pi.is_widget:
+                    continue
+                key = (str(pi.source_node), f"promoted:{pi.source_input}" if pi.nested else str(pi.source_widget))
+                swap = swaps.get(key)
+                if swap and pi.value_index < len(wv) and wv[pi.value_index] == swap[0]:
+                    wv[pi.value_index] = swap[1]
+                    if sg_loc is not None:
+                        renamed.setdefault(sg_loc, {})[(str(node.get("id")), f"promoted:{pi.name}")] = swap
+                        grown = True
+        if not grown:
+            return

@@ -191,6 +191,30 @@ class TestResolveWorkflowModels:
         resolve_workflow_models(wf, graph)
         assert wf["nodes"][-1]["widgets_values"] == [missing]
 
+    def test_follows_a_widget_promoted_through_nested_subgraphs(self, graph):
+        missing = "minimax_h3_video_vae_int8_convrot.safetensors"
+        wf = _template()
+        wf["nodes"] = [{"id": 200, "type": "sg-outer", "widgets_values": [missing]}]
+        wf["definitions"]["subgraphs"].append(
+            {
+                "id": "sg-outer",
+                "inputs": [{"name": "vae", "type": "COMBO", "linkIds": [300]}],
+                "links": [{"id": 300, "origin_id": -10, "origin_slot": 0, "target_id": 50, "target_slot": 0}],
+                "nodes": [
+                    {
+                        "id": 50,
+                        "type": "sg-1",
+                        "inputs": [{"name": "vae_name", "type": "COMBO", "widget": {"name": "vae_name"}, "link": 300}],
+                        "widgets_values": [missing, missing],
+                    }
+                ],
+            }
+        )
+        resolve_workflow_models(wf, graph)
+        inner_instance = wf["definitions"]["subgraphs"][1]["nodes"][0]
+        assert inner_instance["widgets_values"] == ["minimax_h3_video_vae_fp16.safetensors", missing]
+        assert wf["nodes"][0]["widgets_values"] == ["minimax_h3_video_vae_fp16.safetensors"]
+
     def test_installed_files_are_untouched(self, graph):
         wf = _template()
         wf["definitions"]["subgraphs"][0]["nodes"][1]["widgets_values"] = ["ae.safetensors"]
