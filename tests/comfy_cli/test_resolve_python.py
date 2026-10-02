@@ -183,6 +183,67 @@ class TestResolveWorkspacePython:
             result = resolve_workspace_python(str(workspace))
         assert result == sys.executable
 
+    def test_portable_python_embeded_beside_workspace(self, tmp_path):
+        # Official Windows portable layout: the workspace is <root>/ComfyUI and
+        # the embedded interpreter sits beside it.
+        portable_root = tmp_path / "ComfyUI_windows_portable"
+        workspace = portable_root / "ComfyUI"
+        workspace.mkdir(parents=True)
+        embedded = _make_fake_python(portable_root / "python_embeded", name="python.exe")
+
+        with _clean_env():
+            result = resolve_workspace_python(str(workspace))
+        assert result == str(embedded)
+
+    def test_portable_python_embeded_inside_workspace_root(self, tmp_path):
+        # The workspace may also be the portable root itself, with python_embeded inside.
+        portable_root = tmp_path / "ComfyUI_windows_portable"
+        embedded = _make_fake_python(portable_root / "python_embeded", name="python.exe")
+
+        with _clean_env():
+            result = resolve_workspace_python(str(portable_root))
+        assert result == str(embedded)
+
+    def test_portable_python_embeded_preferred_over_workspace_venv(self, tmp_path):
+        portable_root = tmp_path / "ComfyUI_windows_portable"
+        workspace = portable_root / "ComfyUI"
+        _make_fake_python(workspace / ".venv")
+        embedded = _make_fake_python(portable_root / "python_embeded", name="python.exe")
+
+        with _clean_env():
+            result = resolve_workspace_python(str(workspace))
+        assert result == str(embedded)
+
+    def test_virtual_env_preferred_over_portable_python(self, tmp_path):
+        venv_dir = tmp_path / "user_venv"
+        venv_python = _make_fake_python(venv_dir)
+        portable_root = tmp_path / "ComfyUI_windows_portable"
+        workspace = portable_root / "ComfyUI"
+        workspace.mkdir(parents=True)
+        _make_fake_python(portable_root / "python_embeded", name="python.exe")
+
+        with _clean_env(VIRTUAL_ENV=str(venv_dir)):
+            result = resolve_workspace_python(str(workspace))
+        assert result == str(venv_python)
+
+    def test_portable_python_embeded_dir_without_python_falls_to_venv(self, tmp_path):
+        portable_root = tmp_path / "ComfyUI_windows_portable"
+        workspace = portable_root / "ComfyUI"
+        (portable_root / "python_embeded").mkdir(parents=True)
+        venv_python = _make_fake_python(workspace / ".venv")
+
+        with _clean_env():
+            result = resolve_workspace_python(str(workspace))
+        assert result == str(venv_python)
+
+    def test_no_portable_python_falls_back_to_sys_executable(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        with _clean_env():
+            result = resolve_workspace_python(str(workspace))
+        assert result == sys.executable
+
     def test_fallback_to_sys_executable(self, tmp_path):
         with _clean_env():
             result = resolve_workspace_python(str(tmp_path))
@@ -302,6 +363,27 @@ class TestEnsureWorkspacePython:
         assert ".venv" in result
         r = subprocess.run([result, "-c", "print('ok')"], capture_output=True, text=True)
         assert r.returncode == 0
+
+    def test_portable_python_embeded_used_without_creating_venv(self, tmp_path):
+        portable_root = tmp_path / "ComfyUI_windows_portable"
+        workspace = portable_root / "ComfyUI"
+        workspace.mkdir(parents=True)
+        embedded = _make_fake_python(portable_root / "python_embeded", name="python.exe")
+
+        with _clean_env():
+            result = ensure_workspace_python(str(workspace))
+        assert result == str(embedded)
+        assert not (workspace / ".venv").exists()
+
+    def test_portable_python_embeded_dir_without_python_falls_to_venv(self, tmp_path):
+        portable_root = tmp_path / "ComfyUI_windows_portable"
+        workspace = portable_root / "ComfyUI"
+        (portable_root / "python_embeded").mkdir(parents=True)
+        venv_python = _make_fake_python(workspace / ".venv")
+
+        with _clean_env():
+            result = ensure_workspace_python(str(workspace))
+        assert result == str(venv_python)
 
     def test_existing_dot_venv_reused(self, tmp_path):
         workspace = tmp_path / "workspace"

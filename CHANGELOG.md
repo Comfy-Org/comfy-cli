@@ -35,6 +35,14 @@ history.
   install already replaced a shipped skill, a plain `comfy skills install`
   writes the shipped Claude Code and Cursor files back; a `Comfy` block such
   an install added to `AGENTS.md` stays until removed by hand.
+- A workspace that is the official Windows portable build now runs with the
+  portable's own `python_embeded\python.exe` rather than the system Python
+  comfy-cli itself is installed in. Interpreter resolution probes
+  `python_embeded` inside the workspace and beside it — where the portable
+  archive puts it, next to `ComfyUI` — so `comfy launch` and `comfy node` stop
+  failing on imports the system Python lacks, and `comfy install` no longer
+  creates a venv beside the portable tree. When `python_embeded` is absent the
+  previous resolution order is unchanged.
 
 ## [1.22.0] - 2026-09-30
 
