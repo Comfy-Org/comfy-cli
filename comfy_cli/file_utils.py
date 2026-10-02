@@ -516,10 +516,19 @@ def _cleanup_partial(filepath: pathlib.Path) -> None:
 
 
 # The httpx downloader streams into a sibling of the destination named
-# ``<dest name>.<mkstemp token>.part`` and renames it onto the destination only
-# once the last byte has landed. The suffix is public in the sense that a killed
-# transfer leaves one on disk, so `download-cancel` has to be able to find it —
-# hence `partial_paths_for` below rather than an ad-hoc glob at the call site.
+# ``<dest name>.<mkstemp token>.part`` (or ``<dest name>.<tag>.<mkstemp token>.part``
+# when a ``part_tag`` is passed) and renames it onto the destination only once the
+# last byte has landed. The suffix is public in the sense that a killed transfer
+# leaves one on disk, so `download-cancel` has to be able to find it — hence
+# `partial_paths_for` below rather than an ad-hoc glob at the call site.
+#
+# The optional ``<tag>`` segment scopes a temp to one download so a cancel of A
+# cannot reach into a *sibling* download B streaming to the same destination: two
+# background workers can legitimately target one path (the submit-time guard is
+# only ``local_filepath.exists()``), and without the tag `download-cancel <A>`
+# unlinks B's live temp, whose closing ``os.replace`` then dies with a
+# non-retriable ``FileNotFoundError``. Callers pass the download id as the tag;
+# foreground/untagged callers keep the shorter shape.
 _PART_SUFFIX = ".part"
 # ``tempfile.mkstemp`` fills the middle with exactly 8 characters from this
 # alphabet (``tempfile._RandomNameSequence``). Matching its shape — not just the
@@ -540,33 +549,90 @@ _NAME_MAX = 255
 _PART_STEM_MAX = _NAME_MAX - len(".") - _MKSTEMP_TOKEN_LEN - len(_PART_SUFFIX)
 
 
-def _part_prefix(name: str) -> str:
+def _part_prefix(name: str, tag: str | None = None) -> str:
     """The mkstemp ``prefix`` used for ``name``'s ``.part`` siblings.
 
-    Normally just ``name + "."``. A destination name too long to also carry the
-    token and suffix is truncated to fit — on a *byte* basis, since NAME_MAX
+    Untagged (``tag is None``) this is just ``name + "."``. With a ``tag`` it is
+    ``<name>.<tag>.``, which scopes the temp to one download so a cancel of a
+    sibling transfer to the same destination cannot claim it. A destination name
+    too long to also carry the token and suffix (and, when tagged, the tag and
+    its own separator) is truncated to fit — on a *byte* basis, since NAME_MAX
     counts bytes, but on a character boundary so the result stays valid UTF-8.
     The trailing ``"."`` is appended after the cut, so the prefix always ends in
     the separator :func:`partial_paths_for` slices on.
 
-    Two destination names agreeing for that many bytes then share a temp
-    namespace, which only affects which temps :func:`cleanup_partials` claims —
-    a far smaller problem than being unable to name a temp at all.
+    The tagged shape reserves the tag, an extra separator, the token and the
+    suffix (228 bytes of stem for a 12-char id vs. the untagged 241), so for a
+    long name the tagged and untagged prefixes truncate the stem to *different*
+    lengths and neither is a prefix-extension of the other.
+
+    The "shared temp namespace" caveat only ever bites the untagged/foreground
+    shape now, plus the residual case of two names colliding *within* the legacy
+    (untagged) truncated stem: two destination names agreeing for that many bytes
+    share the untagged namespace, which only affects which temps
+    :func:`cleanup_partials` claims — a far smaller problem than being unable to
+    name a temp at all. A tag makes even that collision id-scoped.
     """
+    if tag is None:
+        stem_max = _PART_STEM_MAX
+    else:
+        # ``<stem>.<tag>.<8 token>.part`` — the tag, its trailing separator, the
+        # token and the suffix all come out of NAME_MAX before the stem does.
+        stem_max = (
+            _NAME_MAX
+            - len(".")
+            - len(tag.encode("utf-8", "surrogatepass"))
+            - len(".")
+            - _MKSTEMP_TOKEN_LEN
+            - len(_PART_SUFFIX)
+        )
     encoded = name.encode("utf-8", "surrogatepass")
-    if len(encoded) > _PART_STEM_MAX:
-        name = encoded[:_PART_STEM_MAX].decode("utf-8", "ignore")
-    return name + "."
+    if len(encoded) > stem_max:
+        name = encoded[:stem_max].decode("utf-8", "ignore")
+    if tag is None:
+        return name + "."
+    return f"{name}.{tag}."
 
 
-def partial_paths_for(local_filepath: pathlib.Path) -> list[pathlib.Path]:
+def partial_paths_for(local_filepath: pathlib.Path, tag: str | None = None) -> list[pathlib.Path]:
     """Every ``.part`` sibling this module would have created for ``local_filepath``.
 
     A transfer killed uncleanly (SIGKILL, OOM, power loss) never gets to run its
     own cleanup, so its ``.part`` file outlives it. This is how the cancel path
     finds those bytes; nothing else on disk is ever matched.
+
+    ``tag=None`` matches only the untagged shape ``<name>.<8 token>.part`` — the
+    behaviour before download ids scoped temps, and what foreground transfers
+    still produce.
+
+    With a ``tag`` the result is the **union** of two shapes:
+
+    * the tag's own temps, ``<name>.<tag>.<8 token>.part`` — the ones a worker
+      running this code writes; matching only these is what makes a tag-scoped
+      cancel skip a *sibling* download's live temp; and
+    * the legacy untagged shape ``<name>.<8 token>.part`` — included so a ``.part``
+      left by a foreground transfer or a pre-change binary is still reclaimed.
+
+    The two prefixes are computed independently (they truncate the stem to
+    different lengths for a long name, so one is not a prefix-extension of the
+    other) and the shapes never cross-match: under the untagged prefix a tagged
+    temp's "token" slice is ``<tag>.<8>`` — too long and it contains a ``.``, so
+    the length/charset check below rejects it; under the tagged prefix an untagged
+    temp is too short to even start with ``<name>.<tag>.``.
+
+    **Known residual:** the legacy-inclusion arm means a tag-scoped sweep can
+    still unlink a *foreground* (untagged) transfer's live temp, or one written by
+    a pre-change binary, that shares this destination. That exposure is strictly
+    narrower than the un-tagged behaviour it replaces and disappears once no
+    untagged producers remain; the companion destination-reservation change
+    removes the same-destination precondition entirely.
     """
-    prefix = _part_prefix(local_filepath.name)
+    prefixes = [_part_prefix(local_filepath.name)]
+    if tag is not None:
+        # Tagged prefix first so the tag's own temps are the primary match; the
+        # untagged prefix is the legacy-inclusion fallback.
+        prefixes.insert(0, _part_prefix(local_filepath.name, tag))
+
     try:
         entries = list(local_filepath.parent.iterdir())
     except OSError:
@@ -575,23 +641,28 @@ def partial_paths_for(local_filepath: pathlib.Path) -> list[pathlib.Path]:
     matches = []
     for entry in entries:
         name = entry.name
-        if not name.startswith(prefix) or not name.endswith(_PART_SUFFIX):
+        if not name.endswith(_PART_SUFFIX):
             continue
-        token = name[len(prefix) : -len(_PART_SUFFIX)]
-        if len(token) != _MKSTEMP_TOKEN_LEN or not set(token) <= _MKSTEMP_TOKEN_CHARS:
-            continue
-        matches.append(entry)
+        for prefix in prefixes:
+            if not name.startswith(prefix):
+                continue
+            token = name[len(prefix) : -len(_PART_SUFFIX)]
+            if len(token) != _MKSTEMP_TOKEN_LEN or not set(token) <= _MKSTEMP_TOKEN_CHARS:
+                continue
+            matches.append(entry)
+            break
     return sorted(matches)
 
 
-def cleanup_partials(local_filepath: pathlib.Path) -> int:
+def cleanup_partials(local_filepath: pathlib.Path, tag: str | None = None) -> int:
     """Best-effort removal of every ``.part`` sibling; returns how many went away.
 
     Used by `download-cancel`, which promises to reclaim the disk a dead worker
-    was using. The destination itself is never touched here.
+    was using. The destination itself is never touched here. See
+    :func:`partial_paths_for` for what ``tag`` matches (and its known residual).
     """
     removed = 0
-    for partial in partial_paths_for(local_filepath):
+    for partial in partial_paths_for(local_filepath, tag):
         try:
             partial.unlink()
         except OSError:
@@ -730,6 +801,7 @@ def _download_file_httpx(
     *,
     state: dict | None = None,
     progress_callback: ProgressCallback | None = None,
+    part_tag: str | None = None,
 ) -> None:
     """Download a file using httpx streaming. Raises on HTTP or network errors.
 
@@ -791,7 +863,7 @@ def _download_file_httpx(
         # pre-planted symlink can't redirect the write (CWE-377).
         fd, tmp_name = tempfile.mkstemp(
             dir=str(local_filepath.parent),
-            prefix=_part_prefix(local_filepath.name),
+            prefix=_part_prefix(local_filepath.name, part_tag),
             suffix=_PART_SUFFIX,
         )
         try:
@@ -844,8 +916,16 @@ def download_file(
     headers: dict | None = None,
     downloader: str = "httpx",
     progress_callback: ProgressCallback | None = None,
+    part_tag: str | None = None,
 ):
     """Helper function to download a file.
+
+    ``part_tag`` (optional) scopes the httpx ``.part`` temp to one download —
+    ``<dest>.<tag>.<token>.part`` instead of ``<dest>.<token>.part`` — so a
+    concurrent ``download-cancel`` of a *sibling* transfer to the same
+    destination cannot sweep away this transfer's live temp (see
+    :func:`partial_paths_for`). Callers pass their download id. The aria2 branch
+    ignores it: aria2 writes to the destination directly, with no ``.part``.
 
     ``progress_callback`` (optional) is invoked with ``(completed_bytes,
     total_bytes)`` as the transfer advances; ``total_bytes`` is None until the
@@ -883,7 +963,14 @@ def download_file(
         state["file_opened"] = False
         state["part_path"] = None
         try:
-            _download_file_httpx(url, local_filepath, headers, state=state, progress_callback=progress_callback)
+            _download_file_httpx(
+                url,
+                local_filepath,
+                headers,
+                state=state,
+                progress_callback=progress_callback,
+                part_tag=part_tag,
+            )
             return
         except _retriable_exceptions() as exc:
             last_exc = exc

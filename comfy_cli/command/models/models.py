@@ -1048,6 +1048,11 @@ def _download_worker(
                 _worker_headers(state),
                 downloader=state.downloader,
                 progress_callback=on_progress,
+                # Tag the `.part` temp with this download's id so a cancel of a
+                # sibling download targeting the same destination can't unlink the
+                # temp this worker is streaming into. `state.id` is 12 lowercase
+                # hex (validated filename-safe before any path was built).
+                part_tag=state.id,
             )
         except DownloadCancelled:
             state.status = "cancelled"
@@ -1750,7 +1755,9 @@ def download_cancel(
         # find the temp it is streaming into deleted underneath it.
         reclaimed = 0
         if state.status != "completed" and not download_state.worker_alive(state):
-            reclaimed = cleanup_partials(pathlib.Path(state.dest))
+            # Scope the sweep to this download's tagged temps (plus the legacy
+            # untagged shape) so it can't reclaim a sibling download's live temp.
+            reclaimed = cleanup_partials(pathlib.Path(state.dest), tag=state.id)
             if reclaimed:
                 state.completed_bytes = 0
                 with contextlib.suppress(OSError, ValueError):
@@ -1845,8 +1852,10 @@ def download_cancel(
             # onto the destination once the transfer completes, so a worker killed
             # mid-flight leaves its gigabytes *there*, not at `dest`. Without this
             # sweep the cancel would report success and reclaim nothing — the exact
-            # hand-cleanup this command exists to spare the user.
-            if cleanup_partials(partial):
+            # hand-cleanup this command exists to spare the user. Scope it to this
+            # download's id so a sibling download to the same destination keeps its
+            # own live temp.
+            if cleanup_partials(partial, tag=state.id):
                 removed = True
         state.status = "cancelled"
         state.error = None if stopped else "worker may still be running; partial file left in place"
