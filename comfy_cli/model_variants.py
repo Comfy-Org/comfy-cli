@@ -115,7 +115,9 @@ def resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dic
     """
     subs: list[dict] = []
     unavailable: list[dict] = []
-    renamed: dict[str, str] = {}
+    # Per subgraph definition: the filenames swapped inside it. An instance of
+    # that definition may carry the same value as a promoted widget.
+    renamed: dict[str, dict[str, str]] = {}
     for node, sg_id in _workflow_nodes(workflow):
         for key, port, field, value in _model_widgets(node, graph):
             if value in {str(o) for o in port.enum_values}:
@@ -138,7 +140,9 @@ def resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dic
                 )
                 continue
             node["widgets_values"][key] = sibling
-            renamed[value] = sibling
+            _rename_download(node, value, sibling)
+            if sg_id is not None:
+                renamed.setdefault(sg_id, {})[value] = sibling
             subs.append(
                 {
                     "code": "normalized_value",
@@ -149,17 +153,22 @@ def resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dic
                     "the same model in another precision",
                 }
             )
-    if renamed:
-        for node, _sg in _workflow_nodes(workflow):
-            wv = node.get("widgets_values")
-            if isinstance(wv, list) and graph.node(str(node.get("type", ""))) is None:
-                # A subgraph instance: a promoted model widget keeps its value here.
-                node["widgets_values"] = [renamed.get(v, v) if isinstance(v, str) else v for v in wv]
-            props = node.get("properties")
-            for entry in (props.get("models") if isinstance(props, dict) else None) or []:
-                if isinstance(entry, dict) and entry.get("name") in renamed:
-                    entry["name"] = renamed[entry["name"]]
-                    # The download URL and hash describe the file that was replaced.
-                    entry.pop("url", None)
-                    entry.pop("hash", None)
+    for node, _sg in _workflow_nodes(workflow):
+        names = renamed.get(str(node.get("type", "")))
+        wv = node.get("widgets_values")
+        if names and isinstance(wv, list):
+            # An instance of a definition we changed: its promoted copy of the value.
+            node["widgets_values"] = [names.get(v, v) if isinstance(v, str) else v for v in wv]
     return subs, unavailable
+
+
+def _rename_download(node: dict, old: str, new: str) -> None:
+    """Point the node's ``properties.models`` entry for ``old`` at ``new``.
+
+    The download URL and hash describe the replaced file, so they go."""
+    props = node.get("properties")
+    for entry in (props.get("models") if isinstance(props, dict) else None) or []:
+        if isinstance(entry, dict) and entry.get("name") == old:
+            entry["name"] = new
+            entry.pop("url", None)
+            entry.pop("hash", None)

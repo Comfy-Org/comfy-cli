@@ -159,6 +159,13 @@ class TestResolveWorkflowModels:
             ("model_unavailable", 3, "trellis_2_shape_vae_bf16.safetensors")
         ]
 
+    def test_only_instances_of_the_changed_definition_follow(self, graph):
+        wf = _template()
+        missing = "minimax_h3_video_vae_int8_convrot.safetensors"
+        wf["nodes"].append({"id": 7, "type": "sg-other", "widgets_values": [missing]})
+        resolve_workflow_models(wf, graph)
+        assert wf["nodes"][-1]["widgets_values"] == [missing]
+
     def test_installed_files_are_untouched(self, graph):
         wf = _template()
         wf["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"] = ["ae.safetensors"]
