@@ -57,6 +57,7 @@ def _object_info() -> dict[str, Any]:
         "SaveAny": node({"vae": ["VAE"], "flag": ["BOOLEAN", {"default": "True"}]}, [], output_node=True),
         "CustomCombo": node({"choice": ["COMBO", {"multiselect": False, "options": []}]}, ["STRING", "INT"]),
         "TakeString": node({"text": ["STRING", {"forceInput": True}]}, [], output_node=True),
+        "Prompt": node({"text": ["STRING", {"multiline": True}]}, ["STRING"]),
     }
 
 
@@ -100,7 +101,8 @@ def _template() -> dict[str, Any]:
     return {
         "id": "tpl",
         "nodes": [
-            {"id": 105, "type": "sg-1", "inputs": [], "outputs": [], "widgets_values": [missing]},
+            # Promoted: [vae_name, text]. The text widget happens to hold the same string.
+            {"id": 105, "type": "sg-1", "inputs": [], "outputs": [], "widgets_values": [missing, missing]},
             {"id": 3, "type": "VAELoader", "outputs": [], "widgets_values": ["trellis_2_shape_vae_bf16.safetensors"]},
         ],
         "links": [],
@@ -108,10 +110,28 @@ def _template() -> dict[str, Any]:
             "subgraphs": [
                 {
                     "id": "sg-1",
+                    "inputs": [
+                        {"name": "vae_name", "type": "COMBO", "linkIds": [223]},
+                        {"name": "text", "type": "STRING", "linkIds": [224]},
+                    ],
+                    "links": [
+                        {"id": 223, "origin_id": -10, "origin_slot": 0, "target_id": 11, "target_slot": 0},
+                        {"id": 224, "origin_id": -10, "origin_slot": 1, "target_id": 12, "target_slot": 0},
+                    ],
                     "nodes": [
+                        {
+                            "id": 12,
+                            "type": "Prompt",
+                            "inputs": [{"name": "text", "type": "STRING", "widget": {"name": "text"}, "link": 224}],
+                            "outputs": [],
+                            "widgets_values": ["a prompt"],
+                        },
                         {
                             "id": 11,
                             "type": "VAELoader",
+                            "inputs": [
+                                {"name": "vae_name", "type": "COMBO", "widget": {"name": "vae_name"}, "link": 223}
+                            ],
                             "outputs": [],
                             "widgets_values": [missing],
                             "properties": {
@@ -123,7 +143,7 @@ def _template() -> dict[str, Any]:
                                     }
                                 ]
                             },
-                        }
+                        },
                     ],
                 }
             ]
@@ -136,9 +156,14 @@ class TestResolveWorkflowModels:
         wf = _template()
         subs, unavailable = resolve_workflow_models(wf, graph)
 
-        interior = wf["definitions"]["subgraphs"][0]["nodes"][0]
+        interior = wf["definitions"]["subgraphs"][0]["nodes"][1]
         assert interior["widgets_values"] == ["minimax_h3_video_vae_fp16.safetensors"]
-        assert wf["nodes"][0]["widgets_values"] == ["minimax_h3_video_vae_fp16.safetensors"]
+        # Only the promoted slot bound to the swapped widget follows; the text
+        # widget holding the same string is not a model selector.
+        assert wf["nodes"][0]["widgets_values"] == [
+            "minimax_h3_video_vae_fp16.safetensors",
+            "minimax_h3_video_vae_int8_convrot.safetensors",
+        ]
         assert interior["properties"]["models"] == [
             {"name": "minimax_h3_video_vae_fp16.safetensors", "directory": "vae"}
         ]
@@ -168,7 +193,7 @@ class TestResolveWorkflowModels:
 
     def test_installed_files_are_untouched(self, graph):
         wf = _template()
-        wf["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"] = ["ae.safetensors"]
+        wf["definitions"]["subgraphs"][0]["nodes"][1]["widgets_values"] = ["ae.safetensors"]
         wf["nodes"] = []
         before = copy.deepcopy(wf)
         assert resolve_workflow_models(wf, graph) == ([], [])
@@ -223,7 +248,7 @@ class TestTemplatesFetch:
 
         assert env["ok"] is True, env
         written = json.loads(out.read_text())
-        assert written["definitions"]["subgraphs"][0]["nodes"][0]["widgets_values"] == [
+        assert written["definitions"]["subgraphs"][0]["nodes"][1]["widgets_values"] == [
             "minimax_h3_video_vae_fp16.safetensors"
         ]
         data = env["data"]

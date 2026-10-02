@@ -115,9 +115,9 @@ def resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dic
     """
     subs: list[dict] = []
     unavailable: list[dict] = []
-    # Per subgraph definition: the filenames swapped inside it. An instance of
-    # that definition may carry the same value as a promoted widget.
-    renamed: dict[str, dict[str, str]] = {}
+    # Per subgraph definition: (interior node id, widget) -> (old, new). An
+    # instance of that definition may carry the value as a promoted widget.
+    renamed: dict[str, dict[tuple[str, str], tuple[str, str]]] = {}
     for node, sg_id in _workflow_nodes(workflow):
         for key, port, field, value in _model_widgets(node, graph):
             if value in {str(o) for o in port.enum_values}:
@@ -142,7 +142,7 @@ def resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dic
             node["widgets_values"][key] = sibling
             _rename_download(node, value, sibling)
             if sg_id is not None:
-                renamed.setdefault(sg_id, {})[value] = sibling
+                renamed.setdefault(sg_id, {})[(str(node.get("id")), field)] = (value, sibling)
             subs.append(
                 {
                     "code": "normalized_value",
@@ -153,12 +153,8 @@ def resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dic
                     "the same model in another precision",
                 }
             )
-    for node, _sg in _workflow_nodes(workflow):
-        names = renamed.get(str(node.get("type", "")))
-        wv = node.get("widgets_values")
-        if names and isinstance(wv, list):
-            # An instance of a definition we changed: its promoted copy of the value.
-            node["widgets_values"] = [names.get(v, v) if isinstance(v, str) else v for v in wv]
+    if renamed:
+        _rename_promoted(workflow, renamed)
     return subs, unavailable
 
 
@@ -172,3 +168,23 @@ def _rename_download(node: dict, old: str, new: str) -> None:
             entry["name"] = new
             entry.pop("url", None)
             entry.pop("hash", None)
+
+
+def _rename_promoted(workflow: dict, renamed: dict[str, dict[tuple[str, str], tuple[str, str]]]) -> None:
+    """Follow a swap onto each instance's promoted copy of that exact widget.
+
+    Only the host slot the frontend binds to the swapped interior widget
+    (``PromotedInput.value_index``) changes, and only while it still holds the
+    old filename; another promoted widget holding the same text is left alone."""
+    from comfy_cli.cql.promoted import defs_by_id, promoted_inputs
+
+    defs = defs_by_id(workflow)
+    for node, _sg in _workflow_nodes(workflow):
+        sg_id = str(node.get("type", ""))
+        swaps, wv = renamed.get(sg_id), node.get("widgets_values")
+        if not swaps or not isinstance(wv, list) or sg_id not in defs:
+            continue
+        for pi in promoted_inputs(defs[sg_id], defs):
+            swap = swaps.get((str(pi.source_node), str(pi.source_widget))) if pi.is_widget and not pi.nested else None
+            if swap and pi.value_index < len(wv) and wv[pi.value_index] == swap[0]:
+                wv[pi.value_index] = swap[1]
