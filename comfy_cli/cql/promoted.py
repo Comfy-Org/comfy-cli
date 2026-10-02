@@ -80,12 +80,20 @@ def defs_by_id(workflow: dict) -> dict[str, dict]:
     return _subgraph_defs_by_id(workflow)
 
 
-def promoted_inputs(sg: dict, defs: dict[str, dict], depth: int = 0) -> list[PromotedInput]:
+def promoted_inputs(
+    sg: dict, defs: dict[str, dict], depth: int = 0, _stack: tuple[int, ...] = ()
+) -> list[PromotedInput]:
     """Every declared input of definition ``sg`` in declaration order, with the
     host value slot each widget-backed one owns — the frontend's own rule
     (``SubgraphNode._resolveInputWidget``): walk the input's ``linkIds`` in
     order and take the first boundary link whose interior target is a
-    widget-backed input, or a nested instance's promoted widget input."""
+    widget-backed input, or a nested instance's promoted widget input.
+
+    ``_stack`` holds the definitions already being walked: a target that
+    resolves to one of them is a cycle (a definition cannot contain itself),
+    so it is treated as the plain node it must be rather than recursed into —
+    recursing fans out once per linked input per level and never finishes."""
+    _stack = (*_stack, id(sg))
     inner = {str(n.get("id")): n for n in sg.get("nodes") or [] if isinstance(n, dict)}
     # Only hashable ids can be looked up; a malformed (list/dict) id is skipped
     # rather than crashing conversion of the whole workflow.
@@ -120,12 +128,14 @@ def promoted_inputs(sg: dict, defs: dict[str, dict], depth: int = 0) -> list[Pro
             if not isinstance(entry, dict):
                 continue
             inner_def = defs.get(str(target.get("type", "")))
+            if inner_def is not None and id(inner_def) in _stack:
+                inner_def = None
             if inner_def is not None:
                 # The target is itself a subgraph instance: its input entry
                 # carries a widget marker when promoted, but the concrete
                 # widget lives deeper — resolve through its own promotion.
                 if depth < _MAX_NESTED_PROMOTION_DEPTH:
-                    inner_by_name = {p.name: p for p in promoted_inputs(inner_def, defs, depth + 1)}
+                    inner_by_name = {p.name: p for p in promoted_inputs(inner_def, defs, depth + 1, _stack)}
                     inner_pi = inner_by_name.get(str(entry.get("name")))
                     if inner_pi is not None and inner_pi.is_widget:
                         source = (str(target.get("id")), str(entry.get("name")), None, True)
@@ -1525,9 +1535,12 @@ def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) 
     return _boundary_targets(sg, inp, defs, 0)
 
 
-def _boundary_targets(sg: dict, inp: dict, defs: dict[str, dict], depth: int) -> list[tuple[list[str], str]]:
+def _boundary_targets(
+    sg: dict, inp: dict, defs: dict[str, dict], depth: int, _stack: tuple[int, ...] = ()
+) -> list[tuple[list[str], str]]:
     if depth > _MAX_NESTED_PROMOTION_DEPTH:
         return []
+    _stack = (*_stack, id(sg))
     links = {x.get("id"): x for x in sg.get("links") or [] if isinstance(x, dict)}
     out: list[tuple[list[str], str]] = []
     for link_id in inp.get("linkIds") or []:
@@ -1542,6 +1555,8 @@ def _boundary_targets(sg: dict, inp: dict, defs: dict[str, dict], depth: int) ->
             continue
         tid = str(target.get("id"))
         inner_def = defs.get(str(target.get("type", "")))
+        if inner_def is not None and id(inner_def) in _stack:
+            inner_def = None  # a cycle: the target is the plain node, see promoted_inputs
         if inner_def is not None:
             inner_inp = next(
                 (
@@ -1552,7 +1567,9 @@ def _boundary_targets(sg: dict, inp: dict, defs: dict[str, dict], depth: int) ->
                 None,
             )
             if inner_inp is not None:
-                out.extend(([tid, *path], w) for path, w in _boundary_targets(inner_def, inner_inp, defs, depth + 1))
+                out.extend(
+                    ([tid, *path], w) for path, w in _boundary_targets(inner_def, inner_inp, defs, depth + 1, _stack)
+                )
             continue
         marker = entry.get("widget")
         if marker:

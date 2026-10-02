@@ -500,6 +500,42 @@ class Port:
                     break
         return out[:limit]
 
+    def _numeric_combo_member(self, value: Any) -> bool:
+        """Whether a numeric ``value`` equals a numeric option BY NUMBER.
+
+        The string comparison above misses ``1`` against a float option
+        ``1.0``: a frontend-saved workflow writes ``1.0`` as ``1`` (JavaScript
+        has one number type), and the server's own membership test is Python
+        ``1 in [..., 1.0, ...]`` — true. Booleans never count as numbers here.
+        """
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return False
+        return any(
+            not isinstance(o, bool) and isinstance(o, int | float) and o == value for o in self.enum_values or []
+        )
+
+    def ratio_combo_match(self, value: Any) -> str | None:
+        """The ONE option carrying the same ``W:H`` ratio as ``value``, else ``None``.
+
+        For an aspect-ratio combo the ratio IS the value and the parenthetical
+        is a display label: ``'16:9 (Landscape)'`` and a bare ``'16:9'`` both
+        mean ``'16:9 (Widescreen)'`` when that is the only option starting
+        ``16:9``. Unlike :meth:`best_combo_match` (any leading word, a hint
+        only), this is narrow enough for the edit path to WRITE: the token must
+        be a numeric ratio and exactly one option must share it.
+        """
+        if self.type != "COMBO" or not self.enum_values or self.is_upload_backed:
+            return None
+        import re
+
+        token = str(value).strip().partition(" ")[0]
+        if not re.fullmatch(r"\d+(?:\.\d+)?:\d+(?:\.\d+)?", token):
+            return None
+        hits = [o for o in self.enum_values if isinstance(o, str) and o.strip().partition(" ")[0] == token]
+        if len(hits) != 1 or hits[0] == value:
+            return None
+        return hits[0]
+
     def best_combo_match(self, value: Any) -> str | None:
         """The ONE option sharing a rejected value's leading token, else ``None``.
 
@@ -585,7 +621,7 @@ class Port:
             if isinstance(value, float) and value.is_integer():
                 candidates.add(str(int(value)))
             enum_str = {str(e) for e in self.enum_values}
-            if not (candidates & enum_str):
+            if not (candidates & enum_str) and not self._numeric_combo_member(value):
                 suggestions = self.suggest_combo(value, limit=ENUM_SUGGEST_MAX)
                 best = self.best_combo_match(value)
                 if best is not None:
@@ -3430,9 +3466,21 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
             name_counts[name] = name_counts.get(name, 0) + 1
             name_first.setdefault(name, sg)
     for name, count in name_counts.items():
-        if count == 1 and name not in by_id:
+        if count == 1 and name not in by_id and not _def_contains_type(name_first[name], name):
             by_id[name] = name_first[name]
     return by_id
+
+
+def _def_contains_type(sg: dict, type_name: str) -> bool:
+    """Whether definition ``sg`` has an interior node typed ``type_name``.
+
+    A definition cannot contain an instance of itself, so such a node is the
+    real node class the subgraph wraps (gallery templates name a subgraph after
+    the core node inside it, e.g. ``WanMoveTrackToVideo``). Registering the
+    name fallback there would resolve that node to its own definition, and every
+    nested-promotion walk would recurse into itself.
+    """
+    return any(isinstance(n, dict) and n.get("type") == type_name for n in sg.get("nodes") or [])
 
 
 def _widgets_as_list(widgets_values: Any) -> list[Any]:

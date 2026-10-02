@@ -1,7 +1,11 @@
 """`set-widget` leads an unknown_enum_value refusal with its best_match.
 
 See tests/comfy_cli/cql/test_combo_best_match.py for the motivating case
-('16:9 (Landscape)' vs '16:9 (Widescreen)' on ResolutionSelector).
+('16:9 (Landscape)' vs '16:9 (Widescreen)' on ResolutionSelector). A ``W:H``
+ratio label is now WRITTEN as the one option with that ratio
+(tests/comfy_cli/cql/test_combo_numeric_and_ratio.py); any other leading word
+is still only named, never applied — this test pins that with a non-ratio
+label.
 """
 
 from __future__ import annotations
@@ -17,12 +21,10 @@ from comfy_cli import workflow_ops
 from comfy_cli.command import workflow_edit
 from comfy_cli.cql.engine import Graph
 
-RATIOS = [
-    "1:1 (Square)",
-    "4:3 (Standard)",
-    "9:16 (Portrait Widescreen)",
-    "16:9 (Widescreen)",
-    "21:9 (Ultrawide)",
+QUALITIES = [
+    "draft (fast)",
+    "standard (balanced)",
+    "high (slow)",
 ]
 
 
@@ -30,8 +32,8 @@ def test_set_widget_refusal_leads_with_the_best_match(tmp_path, capsys, monkeypa
     graph = Graph.from_object_info(
         {
             "ResolutionSelector": {
-                "input": {"required": {"aspect_ratio": [RATIOS, {}]}},
-                "input_order": {"required": ["aspect_ratio"]},
+                "input": {"required": {"quality": [QUALITIES, {}]}},
+                "input_order": {"required": ["quality"]},
                 "output": ["INT", "INT"],
                 "output_name": ["width", "height"],
                 "category": "utils",
@@ -49,10 +51,10 @@ def test_set_widget_refusal_leads_with_the_best_match(tmp_path, capsys, monkeypa
     before = path.read_text()
 
     monkeypatch.setattr(workflow_edit, "_get_graph", lambda *a, **kw: graph)
-    env = _run(["set-widget", str(path), f"{op['node_id']}.aspect_ratio", "16:9 (Landscape)"], capsys)
+    env = _run(["set-widget", str(path), f"{op['node_id']}.quality", "high (best)"], capsys)
     assert env["ok"] is False
     err = env["error"]
     assert err["code"] == "unknown_enum_value"
-    assert err["details"]["best_match"] == "16:9 (Widescreen)", err
-    assert err["hint"].startswith("use '16:9 (Widescreen)'"), err
+    assert err["details"]["best_match"] == "high (slow)", err
+    assert err["hint"].startswith("use 'high (slow)'"), err
     assert path.read_text() == before, "never auto-apply the guess"
