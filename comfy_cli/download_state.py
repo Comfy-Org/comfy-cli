@@ -68,6 +68,7 @@ change further; agents can stop polling.
 from __future__ import annotations
 
 import contextlib
+import errno
 import hashlib
 import json
 import os
@@ -80,6 +81,11 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 STATE_SCHEMA = "download-state/1"
 
@@ -182,17 +188,86 @@ def request_cancel(path: Path) -> bool:
 # dir rather than next to the user's model files: a claim is our bookkeeping,
 # not something a user should find in `models/loras`, and `list_all` globs
 # `*.json` at the top level so the subdirectory stays invisible to every verb.
+#
+# **Ownership of a destination is HELD, not derived.** The process performing a
+# transfer holds an exclusive OS lock (`flock` on POSIX, `msvcrt.locking` on
+# Windows) on that destination's claim file for the whole transfer, and the lock
+# — not the payload, and not the record the payload points at — is what proves
+# the destination is taken. That inverts the previous design, in which ownership
+# was re-derived on every access by resolving the payload's `download_id` to a
+# state record and asking whether that record looked live. Deriving left three
+# windows that holding closes:
+#
+# * a read-then-unlink race in the old conditional `release_claim`: the claim
+#   could change hands between the compare and the unlink;
+# * a record that reads terminal while its worker is demonstrably still running
+#   (`download-cancel` writes `cancelled` even when `stop_worker` fails), and a
+#   transient read failure on the record, both of which made a live claim look
+#   stale;
+# * a stale-clear that had to be retried, because clearing and re-creating were
+#   two separate steps another submitter could interleave with.
+#
+# A SIGKILLed holder needs no sweeper and no grace wait: the kernel drops its
+# lock when the process dies, so the next submitter acquires immediately.
+#
+# The payload is still written — the `download_id` it names is how a submitter
+# words its refusal, and how a freshly spawned worker checks that the
+# destination it was handed is still its own — but it is only ever rewritten
+# **in place on the locked descriptor**. A temp-file-plus-rename publish would
+# swap the inode the lock lives on, which is exactly the thing the lock cannot
+# survive.
+#
+# Claim files are never unlinked on release. One is ~100 bytes keyed by the
+# hash of a destination, so the directory is bounded by the number of distinct
+# destinations a workspace has ever downloaded to, and leaving them in place
+# sidesteps the unlink-under-lock pitfall entirely (an unlink makes every fd
+# already opened on that path a lock on an orphan inode). :func:`prune` still
+# removes the ones it can both lock and prove dead, on POSIX only.
+#
+# **Network filesystems are best effort.** `flock` over NFS/SMB is advisory at
+# best and may be a local-only lock, so two machines sharing a mount can still
+# both win. That is no worse than the pid-based liveness this replaces, which
+# was meaningless across machines to begin with; cross-machine correctness is
+# out of scope here, exactly as it was before.
 CLAIMS_DIRNAME = "claims"
 
-# Private staging suffix for `acquire_claim`'s write-then-link publish. Never
-# matched by the `*.claim` readers; leftovers (a SIGKILL between write and link)
-# are swept by `prune` once they are old enough to be provably dead.
+# Legacy staging suffix. The previous implementation published a claim by
+# writing a private `.claim.<pid>.<id>.tmp` sibling and hard-linking it into
+# place; nothing writes these any more, but a workspace last touched by that
+# version can still hold one, so :func:`prune` keeps sweeping them.
 CLAIM_TMP_SUFFIX = ".tmp"
 
-# How old a `.claim.*.tmp` staging file must be before `prune` treats it as a
-# crashed acquire's leftover rather than an acquire in progress. An acquire
-# holds its temp file for milliseconds; an hour is comfortably conservative.
+# How old such a leftover must be before `prune` treats it as a crashed
+# acquire's residue rather than an acquire in progress.
 CLAIM_TMP_MAX_AGE_S = 60 * 60
+
+# How many times :func:`lock_claim` re-opens after its re-stat guard rejects the
+# file it just locked. A rejection means the claim was unlinked or replaced
+# between our `open` and our lock, so the lock we hold is on an orphan inode and
+# decides nothing. Bounded rather than unbounded: only a concurrent `prune`
+# unlinks claims at all, so more than a couple of rounds means something else is
+# churning the path and refusing is the safe direction.
+CLAIM_LOCK_RESTAT_ATTEMPTS = 3
+
+# Poll interval for `lock_claim`'s bounded blocking wait. The lock is only ever
+# held across a ~100 byte read/rewrite by anyone who is not transferring, so the
+# wait is short and a tight poll costs nothing.
+CLAIM_LOCK_POLL_S = 0.02
+
+# What a lock attempt raises when the lock is simply held elsewhere, as opposed
+# to the filesystem being unable to lock at all. POSIX `flock` reports
+# EWOULDBLOCK/EAGAIN; Windows `msvcrt.locking` reports EACCES for `LK_NBLCK` and
+# EDEADLOCK when a blocking `LK_LOCK` gives up. Everything else (ENOLCK,
+# ENOTSUP/EOPNOTSUPP on a filesystem with no locking) propagates, because it
+# means no lock was taken and the caller has to degrade rather than conclude
+# somebody else owns the destination.
+_LOCK_CONTENDED_ERRNOS = frozenset(
+    getattr(errno, name) for name in ("EACCES", "EAGAIN", "EWOULDBLOCK", "EDEADLK", "EDEADLOCK") if hasattr(errno, name)
+)
+
+# `os.open` needs O_BINARY on Windows or the descriptor does newline translation
+# on a payload we byte-count. A no-op everywhere else.
+_O_BINARY = getattr(os, "O_BINARY", 0)
 
 
 def claims_dir(workspace: Path) -> Path:
@@ -229,124 +304,237 @@ def claim_marker_for(state_file: Path, dest_key: str) -> Path:
 
     The worker is handed ``--state <file>`` and never re-resolves a workspace
     (same reason as :func:`cancel_marker_for`), so it derives the claim from the
-    state file's own directory. Creates nothing - the worker only ever releases.
+    state file's own directory. Creates nothing - the worker locks what is there.
     """
     return Path(state_file).parent / CLAIMS_DIRNAME / claim_filename(dest_key)
 
 
-def acquire_claim(path: Path, *, download_id: str, dest: str) -> bool:
-    """Atomically create the claim at ``path``. False when it already exists.
+def _parse_claim_payload(raw: bytes | str) -> dict[str, Any] | None:
+    """The claim payload in ``raw``, or None for every shape we cannot resolve.
 
-    The payload is written to a private sibling first and *published* with
-    ``os.link``, which fails ``EEXIST`` exactly like ``O_CREAT | O_EXCL`` does —
-    so file creation is still the atomic decider (exactly one of any number of
-    simultaneous submitters gets True, with no check-then-act window), but the
-    claim is never visible at ``path`` until its payload is complete. Creating
-    the file at ``path`` directly and writing into it afterwards would open a
-    window in which a colliding submitter reads an empty claim, calls it stale,
-    and unlinks a live winner. It also means a failed payload write (``ENOSPC``,
-    ``EIO``) publishes nothing: the temp file is removed and the ``OSError``
-    propagates with no orphan claim left at ``path``.
-
-    The temp name carries the pid and the download id, both unique to this
-    acquire, so concurrent submitters never collide on it; a leftover from a
-    SIGKILL mid-acquire is swept by :func:`prune`.
-
-    **Atomic publication depends on hard-link support.** ``os.link`` is the
-    thing that makes exactly one submitter win, and a filesystem without hard
-    links (exFAT, FAT32, some network and container mounts) fails it with
-    ``OSError`` — ``ENOTSUP``/``EOPNOTSUPP``/``EPERM``, or ``ERROR_NOT_SUPPORTED``
-    on Windows — rather than ``EEXIST``. That error is *not* a collision and is
-    not reported as one: it propagates, and no atomic lock was taken. The caller
-    is expected to degrade to its advisory guard and to say so
-    (:func:`comfy_cli.command.models.models._acquire_dest_claim`), because the
-    advisory guard re-scans rather than arbitrates — concurrent submitters can
-    race again on such a filesystem.
-
-    The payload records the ``download_id`` that owns the claim (the pointer a
-    later submitter follows to decide whether the claim is still live), the
-    destination for a human reading the directory, and when it was taken. No
-    url: a presigned url is a credential-shaped thing and the claim does not
-    need one.
-
-    Raises ``OSError`` for anything other than the collision - the caller
-    decides whether that is fatal.
-    """
-    payload = json.dumps(
-        {"download_id": download_id, "dest": str(dest), "created_at": _now_iso()},
-        indent=2,
-    ).encode("utf-8")
-    path = Path(path)
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.{download_id}{CLAIM_TMP_SUFFIX}")
-    fd = os.open(str(tmp), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, STATE_FILE_MODE)
-    try:
-        try:
-            view = memoryview(payload)
-            while view:
-                view = view[os.write(fd, view) :]
-        finally:
-            os.close(fd)
-        if sys.platform != "win32":
-            # `os.open`'s mode is masked by the umask, exactly as `write_path`'s
-            # is. Fixed up before the link, so the published claim never appears
-            # with a looser mode.
-            with contextlib.suppress(OSError):
-                tmp.chmod(STATE_FILE_MODE)
-        try:
-            os.link(str(tmp), str(path))
-        except FileExistsError:
-            return False
-        return True
-    finally:
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-
-
-def read_claim(path: Path) -> str | None:
-    """The ``download_id`` recorded in the claim at ``path``, or None.
-
-    None for every unreadable shape - absent, truncated mid-write, corrupt, or
-    carrying an id that could not name a state file. The caller treats all of
-    them as *stale*, which is the safe direction: a claim nobody can resolve
-    would otherwise wedge its destination forever, and the record it points at
-    (not the claim) is what actually proves a download is live.
+    None for absent, empty, truncated mid-rewrite, corrupt, or carrying an id
+    that could not name a state file. Every one of those is treated as *stale*
+    by the caller, which is the safe direction now for a different reason than
+    it used to be: the lock, not the payload, is what proves a destination is
+    taken, so a payload nobody can read costs nothing but the id in an error
+    message. A live holder is still refused on the strength of its lock.
     """
     try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        payload = json.loads(text)
+    except (UnicodeDecodeError, ValueError):
         return None
     if not isinstance(payload, dict):
         return None
     download_id = payload.get("download_id")
     if not isinstance(download_id, str) or not _SAFE_ID.match(download_id):
         return None
-    return download_id
+    return payload
 
 
-def release_claim(path: Path, *, owner_id: str | None) -> bool:
-    """Drop the claim at ``path``, but only if ``owner_id`` still holds it.
+def read_claim(path: Path) -> str | None:
+    """The ``download_id`` recorded in the claim at ``path``, read *unlocked*.
 
-    The ownership check is what keeps a finishing worker from unlinking a claim
-    that is no longer its own: once our record goes terminal our claim reads
-    stale, so a competing submitter may clear it and create *its* own in the
-    window before we get here, and an unconditional unlink would delete a live
-    claim. Never raises - releasing is bookkeeping.
+    Advisory only, and there is exactly one legitimate caller: a submitter that
+    could not take the lock and wants to name the holder in its refusal. It
+    cannot be used to decide ownership — the payload it reads may be a rewrite
+    in progress (the holder rewrites in place, so there is no atomic publish any
+    more), and on Windows a locked byte range makes the read fail outright. Both
+    come back None, which only costs the id in a message.
 
-    ``owner_id`` may be None, and the None case is load-bearing: an unreadable
-    claim makes :func:`read_claim` return None, so passing that None back here
-    means "unlink the claim nobody can read" — which is how a corrupt claim
-    file gets cleared instead of wedging its destination. Since claims are
-    published atomically (see :func:`acquire_claim`), an unreadable claim is
-    corrupt, not mid-write.
+    Ownership questions go through :func:`lock_claim` and
+    :meth:`ClaimLock.read_payload`, which read the same bytes under the lock.
     """
-    path = Path(path)
-    if read_claim(path) != owner_id:
-        return False
     try:
-        path.unlink(missing_ok=True)
+        raw = Path(path).read_bytes()
+    except OSError:
+        return None
+    payload = _parse_claim_payload(raw)
+    return payload["download_id"] if payload is not None else None
+
+
+class ClaimLock:
+    """An exclusive OS lock held on one destination's claim file.
+
+    Held for as long as the holder owns the destination — for a worker, the
+    whole transfer. Dropped by :meth:`release`, and by the kernel if the holder
+    dies, which is what makes a SIGKILLed worker cost the next submitter nothing.
+
+    The payload is read and rewritten **in place on the locked descriptor**.
+    Never temp-file-plus-rename: a rename swaps the inode, and the lock lives on
+    the inode, so the holder would be left guarding a file nobody can see.
+    """
+
+    def __init__(self, path: Path, fd: int) -> None:
+        self._path = Path(path)
+        self._fd: int | None = fd
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    @property
+    def held(self) -> bool:
+        return self._fd is not None
+
+    def _descriptor(self) -> int:
+        if self._fd is None:
+            raise ValueError("this claim lock has already been released")
+        return self._fd
+
+    def read_payload(self) -> dict[str, Any] | None:
+        """The claim payload, read under the lock. None when unreadable.
+
+        Tolerant in exactly the way :func:`_parse_claim_payload` is, plus the
+        read itself: a claim file we hold the lock on but cannot read tells us
+        nothing about who owns the destination, and the lock has already
+        answered that question.
+        """
+        fd = self._descriptor()
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            chunks: list[bytes] = []
+            while True:
+                block = os.read(fd, 65536)
+                if not block:
+                    break
+                chunks.append(block)
+        except OSError:
+            return None
+        return _parse_claim_payload(b"".join(chunks))
+
+    def write_payload(self, download_id: str, dest: str) -> None:
+        """Rewrite the payload in place. Raises ``OSError`` if it could not be.
+
+        Same shape the claim has always carried, and still no url: a resolved
+        download url can be presigned, and a claim needs an id and a path.
+        """
+        fd = self._descriptor()
+        body = json.dumps(
+            {"download_id": download_id, "dest": str(dest), "created_at": _now_iso()},
+            indent=2,
+        ).encode("utf-8")
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        view = memoryview(body)
+        while view:
+            view = view[os.write(fd, view) :]
+
+    def clear_payload(self) -> None:
+        """Blank the payload, leaving the (lockable) file in place.
+
+        An empty claim parses as no payload at all, which every reader treats as
+        stale. Used where the old code unlinked: a submit whose worker never
+        started has nothing to hand the destination to.
+        """
+        os.ftruncate(self._descriptor(), 0)
+
+    def release(self) -> None:
+        """Close the descriptor, which drops the lock. Idempotent.
+
+        Deliberately **not** an unlink. Unlinking a claim while holding its lock
+        leaves every descriptor already opened on that path guarding an orphan
+        inode, so two submitters could each hold a "lock" on a different inode
+        for one destination. Bounded growth is the cheaper problem, and
+        :func:`prune` bounds it.
+        """
+        fd, self._fd = self._fd, None
+        if fd is None:
+            return
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+    def __enter__(self) -> ClaimLock:
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        self.release()
+        return False
+
+
+def _lock_fd_nb(fd: int) -> bool:
+    """Take the exclusive lock on ``fd`` without blocking. False when held.
+
+    Raises ``OSError`` for anything that is not contention — a filesystem with
+    no locking is a degradation the caller has to handle, not a competitor.
+    """
+    try:
+        if sys.platform == "win32":
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        if e.errno in _LOCK_CONTENDED_ERRNOS:
+            return False
+        raise
+    return True
+
+
+def _is_same_file(fd: int, path: Path) -> bool:
+    """True while ``fd`` still names the file at ``path``."""
+    try:
+        here = os.fstat(fd)
+        there = os.stat(path)
     except OSError:
         return False
-    return True
+    return (here.st_dev, here.st_ino) == (there.st_dev, there.st_ino)
+
+
+def lock_claim(path: Path, *, blocking_timeout: float = 0.0) -> ClaimLock | None:
+    """Take the exclusive lock on the claim at ``path``, or None if it is held.
+
+    ``O_CREAT`` without ``O_EXCL``: the claim file is a lock target that outlives
+    every holder, so it usually already exists and creating it decides nothing.
+    What decides is the lock.
+
+    ``blocking_timeout`` bounds a non-blocking retry loop rather than issuing a
+    blocking lock, so the wait can never outlive the caller's patience. Zero (the
+    default) is a single attempt — the submit path wants an immediate answer,
+    because a lock that is held *is* the answer. A freshly spawned worker passes
+    a few seconds, because a competitor may hold the lock for the moment it takes
+    to inspect the payload.
+
+    **The re-stat guard.** Between our ``open`` and our lock, the file we opened
+    can be unlinked (only :func:`prune` does this, and only on POSIX) and a
+    different one created at the same path. We would then hold a real lock on an
+    orphan inode while another process holds a real lock on the live one. So
+    after locking, ``fstat`` the descriptor against ``stat`` of the path: a
+    different (st_dev, st_ino) — or a path that is gone — means we lost the race,
+    so close and retry, up to :data:`CLAIM_LOCK_RESTAT_ATTEMPTS` times. Windows
+    skips the guard (inode identity there is not reliable) and pays for it by
+    never unlinking a claim file at all, which removes the race instead.
+
+    Raises ``OSError`` when the claim cannot be opened or the filesystem cannot
+    lock. That is not a collision and must not be reported as one: the caller
+    degrades to its advisory guard and says so.
+    """
+    path = Path(path)
+    deadline = time.monotonic() + max(0.0, float(blocking_timeout))
+    for _ in range(CLAIM_LOCK_RESTAT_ATTEMPTS):
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR | _O_BINARY, STATE_FILE_MODE)
+        keep = False
+        try:
+            if sys.platform != "win32":
+                # `os.open`'s mode is masked by the umask, exactly as
+                # `write_path`'s is, and the file may predate this code.
+                with contextlib.suppress(OSError):
+                    os.fchmod(fd, STATE_FILE_MODE)
+            while not _lock_fd_nb(fd):
+                if time.monotonic() >= deadline:
+                    return None
+                time.sleep(CLAIM_LOCK_POLL_S)
+            if sys.platform == "win32" or _is_same_file(fd, path):
+                keep = True
+                return ClaimLock(path, fd)
+        finally:
+            if not keep:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+    # Every attempt raced a concurrent unlink. Reporting "held" rather than
+    # "acquired" is the safe direction: the caller refuses instead of letting a
+    # second transfer into a destination whose ownership we could not settle.
+    return None
 
 
 @dataclass
@@ -628,20 +816,31 @@ def _remove_record(path: Path) -> bool:
 
 
 def _sweep_claims(workspace: Path) -> None:
-    """Drop claims that no longer point at a live download, and dead temp files.
+    """Drop claim files nothing owns any more, and legacy temp leftovers.
 
-    The liveness rule is the same one the submit path applies before clearing a
-    stale claim: a claim stays while its ``download_id`` resolves to a record
-    that is active after :func:`reconcile`, or whose worker process is still
-    provably alive (a terminal status does not prove the process is gone — a
-    cancelled worker may still be mid-write for a moment). The unlink goes
-    through :func:`release_claim` with the id we judged stale, so a claim that
-    changes hands between the read and the unlink is left alone.
+    A claim file is never unlinked on release (see :class:`ClaimLock`), so this
+    is the only thing that bounds ``claims/`` below "every destination this
+    workspace ever downloaded to". It is a nicety, not a correctness step: a
+    left-behind claim costs ~100 bytes and refuses nobody, because ownership is
+    the *lock*, which no longer exists once its holder is gone.
 
-    Temp files are :func:`acquire_claim`'s private staging names; one only
-    survives a SIGKILL inside the milliseconds between write and publish, so
-    anything older than :data:`CLAIM_TMP_MAX_AGE_S` is a crashed acquire's
-    leftover. Best effort throughout, like the rest of :func:`prune`.
+    Two conditions, both required, and the lock has to be held for the unlink:
+
+    * we can take the lock — so no transfer owns the destination right now; and
+    * the payload does not name a download that is still live. That second check
+      is what keeps the sweep out of the **spawn gap**: between a submit's
+      release and its worker's lock nobody holds the claim, and unlinking it
+      there would make the worker come up, find an empty payload, and refuse the
+      destination it was just handed.
+
+    POSIX only. On Windows a claim file is never unlinked at all — inode
+    identity is unreliable there, so :func:`lock_claim` cannot run its re-stat
+    guard, and without that guard an unlink is how two holders end up locking
+    two different inodes for one destination.
+
+    Temp files are the previous implementation's private staging names, kept
+    only so a workspace upgraded from it does not carry them forever. Best
+    effort throughout, like the rest of :func:`prune`.
     """
     base = Path(workspace) / STATE_DIRNAME / CLAIMS_DIRNAME
     try:
@@ -657,14 +856,25 @@ def _sweep_claims(workspace: Path) -> None:
                 if path.stat().st_mtime < tmp_cutoff:
                     path.unlink()
             continue
-        if not path.name.endswith(".claim"):
+        if not path.name.endswith(".claim") or sys.platform == "win32":
             continue
-        download_id = read_claim(path)
-        if download_id is not None:
-            record = read(workspace, download_id)
-            if record is not None and (reconcile(record).status in ACTIVE_STATUSES or worker_alive(record)):
-                continue
-        release_claim(path, owner_id=download_id)
+        try:
+            lock = lock_claim(path)
+        except OSError:
+            continue
+        if lock is None:
+            continue
+        try:
+            payload = lock.read_payload()
+            download_id = payload["download_id"] if payload is not None else None
+            if download_id is not None:
+                record = read(workspace, download_id)
+                if record is not None and (reconcile(record).status in ACTIVE_STATUSES or worker_alive(record)):
+                    continue
+            with contextlib.suppress(OSError):
+                path.unlink()
+        finally:
+            lock.release()
 
 
 def prune(workspace: Path) -> int:
@@ -689,13 +899,12 @@ def prune(workspace: Path) -> int:
     An in-flight record (``starting``/``downloading``) is never touched at any
     age, and never counts toward — or is evicted by — the cap.
 
-    Also sweeps ``claims/`` (see :func:`_sweep_claims`): a claim is normally
-    released by its own worker, and a stranded one only self-clears on the next
-    submit *to the same destination*, so claims for destinations never
-    re-submitted would otherwise accumulate for the life of the workspace —
-    the same unbounded growth the record rules above exist to prevent. Swept
-    claims do not count toward the returned total, which stays "records
-    removed".
+    Also sweeps ``claims/`` (see :func:`_sweep_claims`): a claim file is never
+    unlinked on release — the lock lives on its inode — so without this the
+    directory would grow to one small file per destination the workspace has
+    ever downloaded to, the same unbounded growth the record rules above exist
+    to prevent. Swept claims do not count toward the returned total, which stays
+    "records removed".
 
     Every step is best effort, exactly like :func:`write_path`'s OSError
     handling: a read-only state directory, a permissions problem, or a file a
