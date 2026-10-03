@@ -226,3 +226,59 @@ def test_replacing_a_boundary_link_drops_it_from_the_boundary_input():
     out, op = workflow_ops.connect(wf, _graph(), "70/2005", "STRING", "70/2011", "text")
     assert _sg(out)["inputs"][0]["linkIds"] == [8002]
     assert 8001 not in [lk["id"] for lk in _sg(out)["links"]]
+
+
+OUTER = "5a1c362b-0000-4000-8000-0000000000aa"
+
+
+def _nested_workflow(outer_instances: int) -> dict:
+    """``outer_instances`` top-level instances of OUTER, whose definition holds
+    ONE instance (node 300) of the inner definition SG. Each OUTER instance
+    therefore carries its own live SG instance, all sharing SG's one body."""
+    wf = _workflow(instances=0)
+    wf["nodes"] = [
+        {"id": 80 + i, "type": OUTER, "pos": [0, 0], "inputs": [], "outputs": []} for i in range(outer_instances)
+    ]
+    wf["definitions"]["subgraphs"].append(
+        {
+            "id": OUTER,
+            "name": "Outer",
+            "inputs": [],
+            "outputs": [],
+            "nodes": [{"id": 300, "type": SG, "pos": [0, 0], "inputs": [], "outputs": []}],
+            "links": [],
+        }
+    )
+    return wf
+
+
+def test_a_definition_shared_through_its_ancestor_is_refused(tmp_path, capsys):
+    # Two OUTER instances each hold one SG instance: SG has 2 live instances,
+    # though its body appears once in OUTER's definition. Wiring inside it
+    # would rewire both, so connect must refuse as for a flat shared def.
+    path = _write(tmp_path, _nested_workflow(outer_instances=2))
+    before = path.read_text()
+    env = _run(["connect", str(path), "80/300/2005.STRING", "80/300/2011.text"], capsys)
+    assert env["ok"] is False, env
+    assert "2 instances" in env["error"]["message"]
+    assert path.read_text() == before
+
+
+def test_a_nested_single_instance_definition_is_wired(tmp_path, capsys):
+    path = _write(tmp_path, _nested_workflow(outer_instances=1))
+    env = _run(["connect", str(path), "80/300/2005.STRING", "80/300/2011.text"], capsys)
+    assert env["ok"] is True, env
+    assert env["data"]["op"]["path"] == ["80", "300"]
+
+
+def test_instance_count_multiplies_through_ancestors():
+    assert workflow_ops._definition_instance_count(_nested_workflow(3), SG) == 3
+    assert workflow_ops._definition_instance_count(_nested_workflow(3), OUTER) == 3
+
+
+def test_instance_count_terminates_on_a_self_instantiating_definition():
+    wf = _workflow(instances=1)
+    _sg(wf)["nodes"].append({"id": 2099, "type": SG, "pos": [0, 0], "inputs": [], "outputs": []})
+    # A definition that names itself cannot be expanded; it must not hang and
+    # must report it as shared (more than one live instance).
+    assert workflow_ops._definition_instance_count(wf, SG) > 1

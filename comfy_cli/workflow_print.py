@@ -233,7 +233,7 @@ def _broken_links(nodes: list[dict], links: list[Any], qualify: Any = str) -> tu
             continue
         why = None
         if src_node is None:
-            why = f"its source node {src_id} does not exist"
+            why = f"its source node {qualify(src_id)} does not exist"
         elif not _is_slot_index(src_slot) or not _is_slot_index(tgt_slot):
             why = "it has a non-integer slot"
         else:

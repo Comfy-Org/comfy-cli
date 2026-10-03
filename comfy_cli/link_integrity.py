@@ -129,7 +129,11 @@ def _scope_findings(nodes: list, links: Any, prefix: str | None) -> tuple[list[d
         if 0 <= tgt_slot < len(tgt.get("inputs") or []) or held is not None:
             continue
         # The row aims past the target's inputs and no input holds it: the
-        # value it was drawn to carry reaches nothing.
+        # value it was drawn to carry reaches nothing, unless a sibling link
+        # from the same source+slot (a real node or the subgraph input proxy)
+        # already carries it, which makes this a leftover row.
+        if fed_from(tgt, src_id, src_slot, link_id) is not None:
+            continue
         if src_is_proxy:
             source_ref = None
             source_type = link_type
@@ -137,9 +141,6 @@ def _scope_findings(nodes: list, links: Any, prefix: str | None) -> tuple[list[d
             source_ref = f"{addr(src_id)}.{src_slot}"
             out = outputs[src_slot] if isinstance(outputs, list) and _is_slot(src_slot) else {}
             source_type = (out or {}).get("type") or link_type
-            already = fed_from(tgt, src_id, src_slot, link_id)
-            if already is not None:
-                continue  # a leftover row: that value already reaches input `already`
         candidates = [
             str(i.get("name"))
             for i in inputs

@@ -1462,13 +1462,56 @@ def _interior_link_scope(workflow: dict, from_node: Any, to_node: Any) -> dict |
 
 
 def _definition_instance_count(workflow: dict, def_id: str) -> int:
-    """How many nodes, top level or inside any definition, instantiate ``def_id``."""
+    """How many live instances of definition ``def_id`` the workflow holds.
+
+    An instance inside another definition's body is live once per live
+    instance of that enclosing definition, so a body's occurrences are
+    multiplied by the enclosing definition's own count (two top-level ``O``
+    whose body holds one ``I`` is two live ``I``). Each definition is counted
+    once even though the index also keys it by name. A definition that
+    instantiates itself, directly or through others, cannot be expanded; it
+    counts as shared (2) so callers refuse to rewrite it.
+    """
     from comfy_cli.cql import engine as _engine
 
-    count = sum(1 for n in workflow.get("nodes") or [] if isinstance(n, dict) and str(n.get("type")) == def_id)
-    for sg in _engine._subgraph_defs_by_id(workflow).values():
-        count += sum(1 for n in sg.get("nodes") or [] if isinstance(n, dict) and str(n.get("type")) == def_id)
-    return count
+    by_key = _engine._subgraph_defs_by_id(workflow)
+    defs = list({id(sg): sg for sg in by_key.values()}.values())
+
+    def occurrences(nodes: Any, target: dict) -> int:
+        return sum(1 for n in nodes or [] if isinstance(n, dict) and by_key.get(str(n.get("type", ""))) is target)
+
+    memo: dict[int, int] = {}
+    in_progress: set[int] = set()
+
+    def count(target: dict) -> int:
+        key = id(target)
+        if key in memo:
+            return memo[key]
+        if key in in_progress:
+            raise _CyclicDefinition
+        in_progress.add(key)
+        try:
+            total = occurrences(workflow.get("nodes"), target)
+            for sg in defs:
+                n = occurrences(sg.get("nodes"), target)
+                if n:
+                    total += n * count(sg)
+        finally:
+            in_progress.discard(key)
+        memo[key] = total
+        return total
+
+    target = by_key.get(str(def_id))
+    if target is None:
+        return 0
+    try:
+        return count(target)
+    except _CyclicDefinition:
+        return 2
+
+
+class _CyclicDefinition(Exception):
+    """A subgraph definition instantiates itself, so its instances cannot be counted."""
 
 
 def _connect_interior(
