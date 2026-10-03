@@ -869,6 +869,10 @@ def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[A
     if canon is None:
         canon = port.canonical_combo(value)
         what = "model"
+    if canon is None:
+        # '16:9 (Landscape)' / '16:9' → the only option with ratio 16:9.
+        canon = port.ratio_combo_match(value)
+        what = "option with the same ratio"
     if canon is None or canon == value:
         return value, None
     return canon, {
