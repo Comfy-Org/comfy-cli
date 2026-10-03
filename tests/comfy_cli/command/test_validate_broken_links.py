@@ -1,9 +1,8 @@
 """validate reports broken link rows instead of lowering them away.
 
-Prod trace f8d27ae4: three links of a SAM3 subgraph targeted input slot 6 on
-nodes with inputs 0-5. The UI→API lowering reads each input's own ``link``
-and never a row's slots, so the rows vanished, validate said 0 errors, and
-the agent typed the prompts in by hand instead of re-wiring them.
+Links of a subgraph that target input slot 6 on nodes with inputs 0-5 must
+be reported. The UI→API lowering reads each input's own ``link`` and never a
+row's slots, so such rows used to vanish and validate said 0 errors.
 """
 
 from __future__ import annotations
