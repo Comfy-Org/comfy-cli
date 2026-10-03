@@ -779,6 +779,48 @@ def _inserted_node_id(workflow: dict, node_id: Any) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
+# A numeric node id or interior path (``57``, ``57/27``) is never a
+# print_workflow binding name, so it skips the render a binding lookup costs.
+_NUMERIC_ADDRESS_RE = re.compile(r"-?\d+(?:/-?\d+)*")
+
+
+def _template_ids(workflow: dict, graph, *node_ids: Any) -> tuple:
+    """Each of ``node_ids`` as given when a node carries it, else the one
+    inserted node it is the template id of (:func:`_inserted_node_id`), else
+    the node its print_workflow binding name stands for
+    (:func:`_binding_address`), else as given.
+
+    set_widget already falls back to both; connect, delete_node and
+    set_node_field did not, so ``24.IMAGE`` failed "node 24 not found" on a
+    canvas whose node list showed ``insert:…:root:node:24``, and a binding
+    name worked for set_widget but not for the other three. The literal ids
+    are checked with ONE pass over the node list for every endpoint."""
+    present: dict[str, Any] = {}
+    for n in workflow.get("nodes") or []:
+        if isinstance(n, dict) and isinstance(n.get("id"), (int, str)) and not isinstance(n.get("id"), bool):
+            present.setdefault(str(n["id"]), n["id"])
+    out = []
+    for node_id in node_ids:
+        # Compared as strings, the way _find_by_str resolves them, so 24 and
+        # "24" both name a real node "24" before any template id is tried.
+        # The node's own id is returned so the strict lookups downstream match.
+        if isinstance(node_id, (int, str)) and not isinstance(node_id, bool) and str(node_id) in present:
+            out.append(present[str(node_id)])
+            continue
+        resolved = _inserted_node_id(workflow, node_id)
+        if resolved is None and isinstance(node_id, str):
+            s = node_id.strip()
+            if s and not _NUMERIC_ADDRESS_RE.fullmatch(s) and not s.startswith("insert:"):
+                resolved = _binding_address(workflow, graph, node_id)
+        out.append(node_id if resolved is None else resolved)
+    return tuple(out)
+
+
+def _template_id(workflow: dict, node_id: Any, graph=None) -> Any:
+    """:func:`_template_ids` for one node."""
+    return _template_ids(workflow, graph, node_id)[0]
+
+
 def _binding_address(workflow: dict, graph, node_id: Any) -> Any:
     """The node address a ``print_workflow`` binding key stands for, or ``None``.
 
@@ -813,6 +855,15 @@ def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[A
     port = next((p for p in m.inputs if p.name == widget), None)
     if port is None:
         return value, None
+    text = _string_widget_text(port, value)
+    if text is not None:
+        return text, {
+            "code": "normalized_value",
+            "field": widget,
+            "message": f"{widget} is a STRING widget; wrote {value!r} as the text {text!r}",
+            "from": value,
+            "to": text,
+        }
     canon = _bool_combo_option(port, value)
     what = "option"
     if canon is None:
@@ -827,6 +878,24 @@ def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[A
         "from": str(value),
         "to": canon,
     }
+
+
+def _string_widget_text(port, value: Any) -> str | None:
+    """The text a non-string value means on a STRING widget, else ``None``.
+
+    A set-widget value is parsed as JSON, so ``800`` (a ComfyMathExpression
+    ``expression``) arrives as an int and ``{"positive": [...]}`` (a points
+    editor's ``points_store``) as a dict, and the write was refused as a type
+    mismatch. A STRING widget can only hold text, so the caller meant the text.
+    Booleans stay refused: ``true`` for a text field is a wrong field, not a
+    spelling."""
+    if port.type != "STRING" or port.is_link or isinstance(value, str | bool) or value is None:
+        return None
+    if isinstance(value, int | float):
+        return str(value)
+    if isinstance(value, dict | list):
+        return json.dumps(value, ensure_ascii=False)
+    return None
 
 
 def _bool_combo_option(port, value: Any) -> str | None:
@@ -1205,7 +1274,8 @@ def _subgraph_boundary_error(workflow: dict, node_id: Any) -> ValueError | None:
         )
     return ValueError(
         f"node {canonical} is inside subgraph {segments[0]} ({str(sg.get('name') or '?')!r}) — a link cannot cross "
-        f"the subgraph boundary, so connect cannot reach it. Interior widgets ARE settable: "
+        f"the subgraph boundary, so connect cannot reach it from outside. Two nodes inside the same subgraph CAN be "
+        f"wired (`connect {segments[0]}/<a>.<output> {segments[0]}/<b>.<input>`). Interior widgets ARE settable: "
         f"`comfy workflow set-widget <file> {canonical}.<widget> <value>`. To wire a live link, connect to one of "
         f"the instance's own slots (see `comfy workflow slots`), or promote the input in the ComfyUI editor first."
     )
@@ -1322,6 +1392,7 @@ def set_node_field(
         raise ValueError(
             f"invalid node mode {value!r}; valid: 0 (always), 1 (on-event), 2 (mute), 3 (on-trigger), 4 (bypass)"
         )
+    node_id = _template_id(workflow, node_id)
     _require(workflow, node_id)
     op = _new_op("set_node_field", actor, base_version, node_id=node_id, field=field, value=value)
     return apply_op(workflow, op, None), op
@@ -1340,6 +1411,7 @@ def connect(
 ) -> tuple[dict, dict]:
     """Wire two nodes, enriching a not-found endpoint error with the list of
     node ids that exist (see :func:`_enrich_resolution_error`)."""
+    from_node, to_node = _template_ids(workflow, graph, from_node, to_node)
     try:
         return _connect_impl(
             workflow, graph, from_node, from_slot, to_node, to_slot, actor=actor, base_version=base_version
@@ -1359,6 +1431,9 @@ def _connect_impl(
     actor: str = "cli",
     base_version: int = 0,
 ) -> tuple[dict, dict]:
+    interior = _interior_link_scope(workflow, from_node, to_node)
+    if interior is not None:
+        return _connect_interior(workflow, graph, interior, from_slot, to_slot, actor=actor, base_version=base_version)
     for endpoint in (from_node, to_node):
         boundary = _subgraph_boundary_error(workflow, endpoint)
         if boundary is not None:
@@ -1398,6 +1473,246 @@ def _connect_impl(
     if grow is not None:
         op["grow"] = grow  # autogrow: apply appends this input slot, then wires it
     return apply_op(workflow, op, graph), op
+
+
+def _interior_link_scope(workflow: dict, from_node: Any, to_node: Any) -> dict | None:
+    """The definition both endpoints of a connect live in, when they are two
+    interior nodes of ONE subgraph instance (``70/2005`` -> ``70/2011``).
+
+    Returns ``{"path", "definition", "src", "dst"}`` — ``path`` is the
+    instance path (``["70"]``, or ``["70", "5"]`` nested) — or ``None`` when
+    the endpoints are not both interior to the same instance, so the caller's
+    top-level and boundary handling applies unchanged. Such a link crosses no
+    boundary: it lives in the definition's own ``links``.
+
+    Raises when the definition is shared by more than one instance: a link
+    written into a shared definition rewires every instance at once, which the
+    doc host refuses (``rejectSharedInteriorDefinition``), so the CLI refuses
+    it the same way rather than minting an op no replica will apply.
+    """
+    from comfy_cli.cql import engine as _engine
+
+    ends = []
+    for endpoint in (from_node, to_node):
+        text = str(endpoint)
+        if _find_by_str(workflow, text) is not None:
+            return None  # a literal top-level node id
+        if _engine._SUBGRAPH_PATH_SEP in text:
+            segments = _engine.split_node_path(workflow, text)
+        elif ":" in text:
+            segments = text.split(":")
+        else:
+            return None
+        if len(segments) < 2:
+            return None
+        ends.append(segments)
+    (src_path, dst_path) = ends
+    if src_path[:-1] != dst_path[:-1]:
+        return None
+    path = src_path[:-1]
+    try:
+        host = _navigate_subgraph_path(workflow, path)
+    except ValueError:
+        return None
+    defs_by_id = _engine._subgraph_defs_by_id(workflow)
+    definition = defs_by_id.get(str(host.get("type", "")))
+    if definition is None:
+        return None
+    nodes = {str(n.get("id")): n for n in definition.get("nodes") or [] if isinstance(n, dict)}
+    src, dst = nodes.get(str(src_path[-1])), nodes.get(str(dst_path[-1]))
+    if src is None or dst is None:
+        return None  # the boundary error names what the definition holds
+    instances = _definition_instance_count(workflow, str(definition.get("id")))
+    if instances > 1:
+        raise ValueError(
+            f"subgraph {'/'.join(path)} shares its definition {definition.get('id')} with "
+            f"{instances} instances, so a link inside it would rewire all {instances} at once — "
+            "connect refuses that; edit a single-instance copy (unpack or duplicate the subgraph in the editor)"
+        )
+    return {"path": [str(seg) for seg in path], "definition": definition, "src": src, "dst": dst}
+
+
+def _definition_instance_count(workflow: dict, def_id: str) -> int:
+    """How many live instances of definition ``def_id`` the workflow holds.
+
+    An instance inside another definition's body is live once per live
+    instance of that enclosing definition, so a body's occurrences are
+    multiplied by the enclosing definition's own count (two top-level ``O``
+    whose body holds one ``I`` is two live ``I``). Each definition is counted
+    once even though the index also keys it by name. A definition that
+    instantiates itself, directly or through others, cannot be expanded; it
+    counts as shared (2) so callers refuse to rewrite it.
+    """
+    from comfy_cli.cql import engine as _engine
+
+    by_key = _engine._subgraph_defs_by_id(workflow)
+    defs = list({id(sg): sg for sg in by_key.values()}.values())
+
+    def occurrences(nodes: Any, target: dict) -> int:
+        return sum(1 for n in nodes or [] if isinstance(n, dict) and by_key.get(str(n.get("type", ""))) is target)
+
+    memo: dict[int, int] = {}
+    in_progress: set[int] = set()
+
+    def count(target: dict) -> int:
+        key = id(target)
+        if key in memo:
+            return memo[key]
+        if key in in_progress:
+            raise _CyclicDefinition
+        in_progress.add(key)
+        try:
+            total = occurrences(workflow.get("nodes"), target)
+            for sg in defs:
+                n = occurrences(sg.get("nodes"), target)
+                if n:
+                    total += n * count(sg)
+        finally:
+            in_progress.discard(key)
+        memo[key] = total
+        return total
+
+    target = by_key.get(str(def_id))
+    if target is None:
+        return 0
+    try:
+        return count(target)
+    except _CyclicDefinition:
+        return 2
+
+
+class _CyclicDefinition(Exception):
+    """A subgraph definition instantiates itself, so its instances cannot be counted."""
+
+
+def _connect_interior(
+    workflow: dict, graph, scope: dict, from_slot: Any, to_slot: Any, *, actor: str, base_version: int
+) -> tuple[dict, dict]:
+    """Wire two interior nodes of one single-instance definition. Concrete
+    slots only: the doc host's interior connect has no grow form, so a widget
+    that is not already listed as an input is refused with the reason."""
+    src, dst = scope["src"], scope["dst"]
+    out_idx, link_type = _resolve_output_slot(src, graph, from_slot)
+    in_idx, grow = _resolve_input_target(dst, graph, to_slot, link_type)
+    if grow is not None or in_idx is None:
+        raise ValueError(
+            f"input {to_slot!r} of interior node {'/'.join(scope['path'])}/{dst.get('id')} is not an input slot "
+            "the node lists; inside a subgraph connect can only wire an existing input"
+        )
+    dst_type = (dst.get("inputs") or [])[in_idx].get("type")
+    if not _types_compatible(link_type, dst_type):
+        raise ValueError(
+            f"type mismatch: {link_type} output of node {'/'.join(scope['path'])}/{src.get('id')} cannot connect "
+            f"to {dst_type} input {(dst.get('inputs') or [])[in_idx].get('name')!r} of node "
+            f"{'/'.join(scope['path'])}/{dst.get('id')}"
+        )
+    op = _new_op(
+        "connect",
+        actor,
+        base_version,
+        path=list(scope["path"]),
+        link_id=mint_id(),
+        from_node=src.get("id"),
+        from_slot=out_idx,
+        to_node=dst.get("id"),
+        to_slot=in_idx,
+        link_type=link_type,
+    )
+    return apply_op(workflow, op, graph), op
+
+
+def _apply_interior_connect(workflow: dict, op: dict) -> None:
+    """Apply a ``connect`` carrying an instance ``path``: the link lives in the
+    instance's definition. Same totality and LWW register as the top-level
+    concrete branch, scoped to the definition (comfy-multi-player
+    ``applyInteriorConnect``)."""
+    from comfy_cli.cql import engine as _engine
+
+    try:
+        host = _navigate_subgraph_path(workflow, [str(seg) for seg in op["path"]])
+    except ValueError:
+        return  # instance concurrently deleted => delete wins
+    definition = _engine._subgraph_defs_by_id(workflow).get(str(host.get("type", "")))
+    if definition is None:
+        return
+    nodes = {str(n.get("id")): n for n in definition.get("nodes") or [] if isinstance(n, dict)}
+    dst = nodes.get(str(op["to_node"]))
+    if dst is None:
+        return
+    to_idx = op["to_slot"]
+    ins = dst.get("inputs")
+    if (
+        not isinstance(ins, list)
+        or not isinstance(to_idx, int)
+        or isinstance(to_idx, bool)
+        or not 0 <= to_idx < len(ins)
+        or not isinstance(ins[to_idx], dict)
+    ):
+        return
+    if not _lww_gate(workflow, op):
+        return
+    _lww_commit(workflow, op)
+    if not isinstance(definition.get("links"), list):
+        definition["links"] = []
+    prev = ins[to_idx].get("link")
+    if prev is not None and prev != op["link_id"]:
+        _remove_interior_link(definition, prev)
+    links = definition["links"]  # read after the removal, which rebuilds the list
+    src = nodes.get(str(op["from_node"]))
+    outs = (src or {}).get("outputs")
+    from_slot = op["from_slot"]
+    if (
+        src is None
+        or not isinstance(outs, list)
+        or not isinstance(from_slot, int)
+        or isinstance(from_slot, bool)
+        or not 0 <= from_slot < len(outs)
+        or not isinstance(outs[from_slot], dict)
+    ):
+        return
+    if not any(_interior_link_id(lk) == op["link_id"] for lk in links):
+        links.append(
+            {
+                "id": op["link_id"],
+                "origin_id": op["from_node"],
+                "origin_slot": from_slot,
+                "target_id": op["to_node"],
+                "target_slot": to_idx,
+                "type": op["link_type"],
+            }
+        )
+    ins[to_idx]["link"] = op["link_id"]
+    if outs[from_slot].get("links") is None:
+        outs[from_slot]["links"] = []
+    if op["link_id"] not in outs[from_slot]["links"]:
+        outs[from_slot]["links"].append(op["link_id"])
+
+
+def _interior_link_id(link: Any) -> Any:
+    """A definition link's id, whichever shape it is stored in (object or the
+    top-level array form some exports use)."""
+    if isinstance(link, dict):
+        return link.get("id")
+    if isinstance(link, list) and link:
+        return link[0]
+    return None
+
+
+def _remove_interior_link(definition: dict, link_id: Any) -> None:
+    definition["links"] = [lk for lk in definition.get("links") or [] if _interior_link_id(lk) != link_id]
+    # A replaced link from the input proxy is also listed on its boundary input.
+    for boundary in definition.get("inputs") or []:
+        if isinstance(boundary, dict) and isinstance(boundary.get("linkIds"), list):
+            boundary["linkIds"] = [lid for lid in boundary["linkIds"] if lid != link_id]
+    for n in definition.get("nodes") or []:
+        if not isinstance(n, dict):
+            continue
+        for inp in n.get("inputs") or []:
+            if isinstance(inp, dict) and inp.get("link") == link_id:
+                inp["link"] = None
+        for out in n.get("outputs") or []:
+            if isinstance(out, dict) and link_id in (out.get("links") or []):
+                out["links"] = [lid for lid in out["links"] if lid != link_id]
 
 
 def clear(workflow: dict, *, actor: str = "cli", base_version: int = 0) -> tuple[dict, dict]:
@@ -1652,6 +1967,7 @@ def delete_node(
 ) -> tuple[dict, dict]:
     """Delete a node, enriching a not-found error with the list of node ids that
     exist (see :func:`_enrich_resolution_error`)."""
+    node_id = _template_id(workflow, node_id, graph)
     try:
         return _delete_node_impl(workflow, graph, node_id, actor=actor, base_version=base_version)
     except ValueError as e:
@@ -2384,6 +2700,9 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
     # order. Resolve the destination before mutating anything; if it is gone the
     # target slot does not exist and never will (ids are never reused), so there
     # is no register to claim and delete simply wins.
+    if op.get("path"):
+        _apply_interior_connect(workflow, op)
+        return
     dst = _find_by_str(workflow, op["to_node"])
     if dst is None:
         return
@@ -2664,6 +2983,11 @@ def _write_target(op: dict) -> tuple:
             # under a dynamic combo (``model.reference_images.image_1``) must
             # not share a target with its sibling (``model.reference_videos``).
             return ("input", str(op["to_node"]), "grow", _autogrow_base(str(grow["name"])))
+        if op.get("path"):
+            # An interior input is its own register, scoped by the instance path
+            # (comfy-multi-player ``writeTarget``): ``2011`` inside 70 is not a
+            # top-level node 2011.
+            return ("input", tuple(str(seg) for seg in op["path"]), str(op["to_node"]), op["to_slot"])
         return ("input", str(op["to_node"]), op["to_slot"])
     return (kind,)
 
@@ -2914,11 +3238,35 @@ def _widget_index(graph, class_type: str, widget: str, widgets_values=None, *, n
         if other is not None:
             raise other
         avail = graph.editable_widget_names(class_type, widgets_values)
+        socket = _link_input_note(graph, class_type, widget)
         raise ValueError(
             f"widget {widget!r} not found on {class_type}; "
-            f"available widgets: {', '.join(avail) if avail else '(none — all inputs are links)'}"
+            f"available widgets: {', '.join(avail) if avail else '(none — all inputs are links)'}{socket}"
         )
     return order.index(widget)
+
+
+#: A node that outputs a constant of the type, for a value a socket needs.
+_PRIMITIVE_SOURCE = {
+    "BOOLEAN": "PrimitiveBoolean",
+    "INT": "PrimitiveInt",
+    "FLOAT": "PrimitiveFloat",
+    "STRING": "PrimitiveString",
+}
+
+
+def _link_input_note(graph, class_type: str, widget: str) -> str:
+    """Why a value write to a LINK input fails and what to do instead, or ``""``.
+
+    ``Image Input Switch.boolean`` is declared ``forceInput``: the frontend
+    shows a socket, never a widget, so the value has to come from a node."""
+    m = graph.node(class_type)
+    port = next((p for p in m.inputs if p.name == widget and p.is_link), None) if m is not None else None
+    if port is None:
+        return ""
+    source = _PRIMITIVE_SOURCE.get(port.type)
+    via = f" (add_node {source}, set its value, connect it)" if source and graph.node(source) is not None else ""
+    return f". {widget!r} is an input socket ({port.type}), not a widget: connect a {port.type} output to it{via}"
 
 
 class FatalFindingError(ValueError):
@@ -3130,7 +3478,23 @@ def _resolve_input_target(
                 return resolved
             template = _autogrow_template(graph, node, base)
             return None, _plan_autogrow(ins, base, elem_type, template)
+        name = ins[idx].get("name")
+        if graph is not None and isinstance(name, str) and "." in name:
+            # An existing dynamic-combo link sub-input (by name or index) is
+            # the same name-keyed register its first connect's grow claimed;
+            # a concrete ``to_slot`` would claim a different one. A stale
+            # entry whose option is no longer selected stays concrete.
+            try:
+                resolved = _resolve_dynamic_link_input(node, graph, name, elem_type)
+            except _DynamicLinkTypeMismatch:
+                raise
+            except ValueError:
+                resolved = None
+            if resolved is not None:
+                return resolved
         return idx, None
+    except _DynamicLinkTypeMismatch:
+        raise
     except ValueError:
         pass
     # Dotted autogrow key (images.image0) or a base that has no concrete slot yet.
@@ -3170,6 +3534,9 @@ def _resolve_input_target(
         return None, {"name": slot, "type": elem_type or "*", "widget": slot}
     if graph is not None and isinstance(slot, str):
         resolved = _resolve_schema_autogrow(node, graph, slot, elem_type)
+        if resolved is not None:
+            return resolved
+        resolved = _resolve_dynamic_link_input(node, graph, slot, elem_type)
         if resolved is not None:
             return resolved
     # Bare autogrow ELEMENT name (`image1` for base `images`) — the guess agents
@@ -3221,6 +3588,67 @@ def _resolve_input_target(
             )
     names = [i.get("name") for i in ins]
     raise ValueError(f"input {slot!r} not found on node {node.get('id')}; inputs: {names}")
+
+
+class _DynamicLinkTypeMismatch(ValueError):
+    """The selected option declares a sub-input whose type the source does not
+    match. Unlike a stale (unselected) sub-input, this must not fall back to
+    the saved concrete slot, whose type may have drifted."""
+
+
+def _resolve_dynamic_link_input(
+    node: dict, graph, slot: str, elem_type: str | None
+) -> tuple[int | None, dict | None] | None:
+    """A LINK sub-input of a dynamic combo's selected option (``speech.audio``
+    once ``HeyGenTalkingPhotoNode.speech`` is ``audio``), or ``None``.
+
+    The frontend shows such a socket only while its option is selected, and
+    the API carries it as the flat dotted key. It is never in the node's saved
+    ``inputs`` until something connects to it, so a connect grows it. An
+    option that is not selected gets the selector value to set instead of
+    "input not found".
+    """
+    from comfy_cli.cql import engine as _engine
+
+    selector, dot, _sub = slot.partition(".")
+    node_type = str(node.get("type", ""))
+    m = graph.node(node_type)
+    port = next((p for p in m.inputs if p.name == selector), None) if m is not None and dot else None
+    if port is None or not port.dynamic_options or not _engine._is_dynamic_combo_type(port.type):
+        return None
+    values = _engine._widgets_as_positional(node.get("widgets_values"), graph, node_type)
+    order = graph.widget_order_for_node(node_type, values)
+    current = values[order.index(selector)] if selector in order and order.index(selector) < len(values) else None
+
+    def link_sub(key: Any):
+        subs = _engine._dynamic_combo_sub_ports(port.dynamic_options, key, selector)
+        return next((p for p in subs if p.name == slot and p.is_link), None)
+
+    hit = link_sub(current)
+    if hit is None:
+        keys = [o.get("key") for o in port.dynamic_options if link_sub(o.get("key")) is not None]
+        if not keys:
+            return None
+        raise ValueError(
+            f"input {slot!r} on node {node.get('id')} exists only while {selector!r} is one of {keys} "
+            f"(it is {current!r}) — set_widget {selector}={keys[0]!r} first, then connect"
+        )
+    if elem_type and not _types_compatible(elem_type, hit.type):
+        raise _DynamicLinkTypeMismatch(
+            f"type mismatch: {elem_type} output cannot connect to {hit.type} input {slot!r} of node {node.get('id')}"
+        )
+    # ONE register keyed by the sub-input's full name, not an autogrow family:
+    # the socket either exists under exactly this name or not at all, so two
+    # concurrent connects that both grow it must contend for it (LWW) rather
+    # than collision-rename the loser into a phantom ``speech.speech0``. The
+    # ``promoted`` marker is the wire shape both appliers already key that way
+    # (comfy-cli ``_write_target``; comfy-multi-player ``writeTarget`` /
+    # ``claimPromotedInput``), so the replicas converge with no doc-host change.
+    # Emitted EVEN WHEN the socket already exists: a reconnect addressed by
+    # concrete index would claim ``("input", node, idx)`` instead, a different
+    # register from a concurrent first connect's grow, and the occupant would
+    # depend on apply order. Both appliers reuse the existing entry by name.
+    return None, {"name": slot, "type": hit.type, "promoted": True}
 
 
 def _linkable_widget_names(node: dict, graph) -> list[str]:

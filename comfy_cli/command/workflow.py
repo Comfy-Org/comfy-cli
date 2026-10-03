@@ -1591,6 +1591,7 @@ def validate_api_workflow(
     port: int | None = None,
     input_path: str | None = None,
     command: str = "workflow validate",
+    full_options: bool = False,
 ) -> None:
     """Validate an API-format workflow without submitting it.
 
@@ -1730,6 +1731,8 @@ def validate_api_workflow(
     # The converter reuses the object_info the graph was already built from
     # (`graph.object_info`), so offline `--input` works and no second fetch happens.
     converted_from_ui = False
+    link_errors: list[dict] = []
+    link_warnings: list[dict] = []
     if is_ui_workflow(wf_data):
         if renderer.is_pretty():
             rprint("[yellow]Detected UI-format workflow, converting to API format...[/yellow]")
@@ -1761,10 +1764,18 @@ def validate_api_workflow(
             )
             raise typer.Exit(code=1)
         editable_ids = _editable_node_ids(wf_data)
+        from comfy_cli.link_integrity import broken_link_findings
+
+        # The lowering reads each input's own `link` and never a row's slots,
+        # so a broken row disappears in it; judge the canvas before it does.
+        link_errors, link_warnings = broken_link_findings(wf_data)
         wf_data = converted
         converted_from_ui = True
 
-    result = graph.validate_workflow(wf_data)
+    from comfy_cli.cql.engine import full_enum_options
+
+    with full_enum_options(full_options):
+        result = graph.validate_workflow(wf_data)
 
     # When the caller handed us a CANVAS graph, they have never seen the
     # flattened ids the lowering mints for subgraph interiors (`57:3`) — their
@@ -1779,6 +1790,11 @@ def validate_api_workflow(
             if editable != nid:
                 issue["api_node_id"] = nid
                 issue["node_id"] = editable
+    if link_errors or link_warnings:
+        result["errors"].extend(link_errors)
+        result["warnings"].extend(link_warnings)
+        if link_errors:
+            result["valid"] = False
 
     # Preview credit spend: partner-API (paid) nodes spend Comfy credits when the
     # workflow is run. This is the same detection `comfy run` uses (authoritative
@@ -1881,7 +1897,8 @@ def _invalid_workflow_error(result: dict[str, Any]) -> dict[str, Any] | None:
     for error in errors[:5]:
         line = f"node {error.get('node_id') or '?'}: {error.get('message', '')}"
         suggestions = error.get("suggestions") or []
-        if suggestions:
+        # An enum message already names its closest options ("— closest: …").
+        if suggestions and "closest:" not in line:
             line += f" (did you mean: {', '.join(str(s) for s in suggestions)}?)"
         hint_parts.append(line)
     # The code is a registered catch-all raised for every verdict, so it alone
@@ -1958,9 +1975,23 @@ def validate_cmd(
         str | None,
         typer.Option("--input", show_default=False, help="Path to a saved object_info JSON (offline mode)."),
     ] = None,
+    full_options: Annotated[
+        bool,
+        typer.Option(
+            "--full-options",
+            help="List every option of a rejected enum value as `valid_options`. By default an error names the "
+            "closest options and `option_count`, and carries the whole list only when it is short.",
+        ),
+    ] = False,
 ):
     validate_api_workflow(
-        workflow, where=where, host=host, port=port, input_path=input_path, command="workflow validate"
+        workflow,
+        where=where,
+        host=host,
+        port=port,
+        input_path=input_path,
+        command="workflow validate",
+        full_options=full_options,
     )
 
 
