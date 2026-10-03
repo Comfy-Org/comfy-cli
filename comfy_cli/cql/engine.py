@@ -448,10 +448,10 @@ class Port:
             return None
         import re
 
-        token = str(value).strip().partition(" ")[0]
+        token = _leading_token(value)
         if not re.fullmatch(r"\d+(?:\.\d+)?:\d+(?:\.\d+)?", token):
             return None
-        hits = [o for o in self.enum_values if isinstance(o, str) and o.strip().partition(" ")[0] == token]
+        hits = [o for o in self.enum_values if isinstance(o, str) and _leading_token(o) == token]
         if len(hits) != 1 or hits[0] == value:
             return None
         return hits[0]
@@ -478,7 +478,7 @@ class Port:
         token, _, rest = text.partition(" ")
         if not token or not rest.strip():
             return None
-        hits = [str(o) for o in self.enum_values if str(o).strip().partition(" ")[0] == token]
+        hits = [str(o) for o in self.enum_values if _leading_token(o) == token]
         return hits[0] if len(hits) == 1 else None
 
     def validate_shape(self, value: Any) -> str | None:
@@ -557,7 +557,7 @@ class Port:
                     warning["did_you_mean"] = suggestions
                     warning["message"] += f" — closest: {', '.join(suggestions)}"
                 if best is not None:
-                    lead = str(value).strip().partition(" ")[0]
+                    lead = _leading_token(value)
                     warning["message"] += f" ({best!r} is the only option starting {lead!r})"
                 warnings.append(warning)
         elif self.type == "COMBO" and self.enum_declared:
@@ -3378,22 +3378,51 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
         if isinstance(name, str) and name:
             name_counts[name] = name_counts.get(name, 0) + 1
             name_first.setdefault(name, sg)
+    ids_only = dict(by_id)
     for name, count in name_counts.items():
-        if count == 1 and name not in by_id and not _def_contains_type(name_first[name], name):
+        if count == 1 and name not in by_id and not _def_contains_type(name_first[name], name, ids_only):
             by_id[name] = name_first[name]
     return by_id
 
 
-def _def_contains_type(sg: dict, type_name: str) -> bool:
-    """Whether definition ``sg`` has an interior node typed ``type_name``.
+def _leading_token(value: Any) -> str:
+    """A combo value's first space-separated token: the ``16:9`` of
+    ``'16:9 (Widescreen)'``, the part the combo-match rules compare."""
+    return str(value).strip().partition(" ")[0]
 
-    A definition cannot contain an instance of itself, so such a node is the
-    real node class the subgraph wraps (gallery templates name a subgraph after
-    the core node inside it, e.g. ``WanMoveTrackToVideo``). Registering the
-    name fallback there would resolve that node to its own definition, and every
-    nested-promotion walk would recurse into itself.
+
+def _def_contains_type(sg: dict, type_name: str, by_id: dict[str, dict]) -> bool:
+    """Whether definition ``sg`` holds a node typed ``type_name`` at any depth.
+
+    The walk descends into nested instances by definition id (``by_id`` holds
+    only id keys at this point), each definition once, so a cycle terminates.
+
+    A definition cannot contain an instance of itself, so such a node is a real
+    node class (gallery templates name a subgraph after the core node inside
+    it, e.g. ``WanMoveTrackToVideo``). Registering the name fallback would
+    resolve that node to its own definition and every nested-promotion walk
+    would recurse into itself. It also shows the name is a node class in this
+    workflow, so a bare type of that name anywhere is ambiguous between the
+    class and an old-style name-typed instance; the index leaves ambiguous
+    names unregistered, as it does for two definitions sharing a name.
     """
-    return any(isinstance(n, dict) and n.get("type") == type_name for n in sg.get("nodes") or [])
+    seen: set[int] = set()
+    stack = [sg]
+    while stack:
+        cur = stack.pop()
+        if id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        for n in cur.get("nodes") or []:
+            if not isinstance(n, dict):
+                continue
+            node_type = n.get("type")
+            if node_type == type_name:
+                return True
+            nested = by_id.get(str(node_type)) if isinstance(node_type, str) else None
+            if nested is not None:
+                stack.append(nested)
+    return False
 
 
 def _widgets_as_list(widgets_values: Any) -> list[Any]:

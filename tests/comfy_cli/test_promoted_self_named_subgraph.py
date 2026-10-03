@@ -175,3 +175,50 @@ def test_workflow_print_self_named_subgraph_finishes():
     node_count, source = _run_bounded(lambda: (lambda r: (r.node_count, r.source))(render_py(_workflow(), graph)))
     assert node_count >= 1
     assert "Wrapped(" in source
+
+
+INNER_ID = "0ad975d5-0000-4000-8000-000000000002"
+
+
+def _nested_self_named_workflow() -> dict[str, Any]:
+    """The class ``Wrapped`` appears two levels down: the outer definition
+    named ``Wrapped`` holds an instance (by id) of INNER, whose body holds the
+    ``Wrapped`` class node. The name is a node class in this workflow either
+    way, so it must not become a fallback key for the outer definition."""
+    wf = _workflow()
+    outer = wf["definitions"]["subgraphs"][0]
+    inner = json.loads(json.dumps(outer))
+    inner["id"] = INNER_ID
+    inner["name"] = "Inner group"
+    outer["nodes"] = [{"id": 1, "type": INNER_ID, "inputs": [], "outputs": [], "widgets_values": []}]
+    outer["links"] = []
+    outer["inputs"] = []
+    wf["definitions"]["subgraphs"].append(inner)
+    return wf
+
+
+def test_defs_by_id_skips_a_name_its_definition_holds_as_a_class_at_any_depth():
+    defs = _subgraph_defs_by_id(_nested_self_named_workflow())
+    assert "Wrapped" not in defs, "the class two levels down makes the bare name ambiguous"
+    assert defs["Inner group"]["id"] == INNER_ID, "an unrelated name keeps its fallback"
+
+
+def test_defs_by_id_containment_walk_terminates_on_a_cycle():
+    wf = _nested_self_named_workflow()
+    inner = wf["definitions"]["subgraphs"][1]
+    inner["nodes"].append({"id": 9, "type": SG_ID, "inputs": [], "outputs": []})  # INNER holds OUTER: a cycle
+    defs = _run_bounded(lambda: sorted(_subgraph_defs_by_id(wf)))
+    assert "Wrapped" not in defs
+
+
+def test_a_class_named_like_a_definition_elsewhere_keeps_the_fallback_off():
+    """Christian's case, pinned as the intended rule: a definition named
+    ``Resize`` that holds a ``Resize`` class node proves ``Resize`` is a node
+    class in this workflow, so a bare ``Resize`` type elsewhere is ambiguous
+    (class or old-style instance). The index refuses ambiguous names (as it
+    does for two definitions sharing a name), and id-typed instances, which
+    every current save writes, are unaffected."""
+    wf = _workflow()
+    defs = _subgraph_defs_by_id(wf)
+    assert "Wrapped" not in defs
+    assert defs[SG_ID] is wf["definitions"]["subgraphs"][0]

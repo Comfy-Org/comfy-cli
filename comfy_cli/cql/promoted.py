@@ -80,6 +80,17 @@ def defs_by_id(workflow: dict) -> dict[str, dict]:
     return _subgraph_defs_by_id(workflow)
 
 
+def _nested_definition(target: dict, defs: dict[str, dict], stack: tuple[int, ...]) -> dict | None:
+    """The definition interior node ``target`` instantiates, or ``None`` for a
+    plain node. A definition already on ``stack`` (being walked) is a cycle —
+    a definition cannot contain itself — so the target is the plain node it
+    must be rather than an instance to recurse into."""
+    inner_def = defs.get(str(target.get("type", "")))
+    if inner_def is None or id(inner_def) in stack:
+        return None
+    return inner_def
+
+
 def promoted_inputs(
     sg: dict, defs: dict[str, dict], depth: int = 0, _stack: tuple[int, ...] = ()
 ) -> list[PromotedInput]:
@@ -127,9 +138,7 @@ def promoted_inputs(
             entry = target_inputs[slot] if isinstance(slot, int) and 0 <= slot < len(target_inputs) else None
             if not isinstance(entry, dict):
                 continue
-            inner_def = defs.get(str(target.get("type", "")))
-            if inner_def is not None and id(inner_def) in _stack:
-                inner_def = None
+            inner_def = _nested_definition(target, defs, _stack)
             if inner_def is not None:
                 # The target is itself a subgraph instance: its input entry
                 # carries a widget marker when promoted, but the concrete
@@ -1554,9 +1563,7 @@ def _boundary_targets(
         if not isinstance(entry, dict):
             continue
         tid = str(target.get("id"))
-        inner_def = defs.get(str(target.get("type", "")))
-        if inner_def is not None and id(inner_def) in _stack:
-            inner_def = None  # a cycle: the target is the plain node, see promoted_inputs
+        inner_def = _nested_definition(target, defs, _stack)
         if inner_def is not None:
             inner_inp = next(
                 (
