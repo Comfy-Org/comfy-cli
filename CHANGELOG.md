@@ -17,6 +17,14 @@ history.
 
 ### Fixed
 
+- `connect`, `delete-node` and `set-node-field` accept a template node id
+  (`24`) on a canvas whose ids were remapped by `insert_workflow`
+  (`insert:…:root:node:24`), as `set-widget` already did.
+- `connect` reaches a dynamic combo's link sub-input (`speech.audio` once
+  `speech` is `audio`); with another option selected it names the value to set.
+- A number or JSON value written to a STRING widget is written as its text,
+  with a `normalized_value` warning. A value written to a link-only input
+  (`forceInput`) says to connect a source and names a primitive node for it.
 - A cloud request the account's plan does not allow (free generations used up,
   subscription required, a partner node or model that needs a paid plan) is now
   `cloud_payment_required`, carrying the server's message in `message` and its
