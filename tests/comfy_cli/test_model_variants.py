@@ -93,6 +93,46 @@ class TestPrecisionSibling:
         assert precision_key("readme.txt") is None
 
 
+class TestPrecisionTokensAreTags:
+    """Christian's review of #966: a word that only MODIFIES a precision
+    ("scaled", "convrot", an fp8 format) is not a precision tag on its own,
+    and a tag that leads the name is the model's name, not its precision."""
+
+    @pytest.mark.parametrize(
+        ("value", "options"),
+        [
+            ("realesrgan_x4_scaled.pth", ["realesrgan_x4.pth"]),  # a lone modifier is part of the name
+            ("nvfp4_block.safetensors", ["block.safetensors"]),  # a leading tag is the name
+            ("upscaler_convrot.safetensors", ["upscaler.safetensors"]),
+            ("model_e4m3fn.safetensors", ["model.safetensors"]),
+        ],
+    )
+    def test_a_modifier_or_a_leading_tag_is_not_a_precision(self, value, options):
+        assert precision_sibling(value, options) is None
+
+    def test_modifiers_still_drop_beside_a_precision(self):
+        assert precision_key("wan_fp8_e4m3fn_scaled.safetensors") == ("wan", "safetensors")
+        assert precision_key("vae_int8_convrot.safetensors") == ("vae", "safetensors")
+        assert precision_key("realesrgan_x4_scaled.pth") == ("realesrgan_x4_scaled", "pth")
+
+
+class TestGgufQuantTags:
+    def test_one_gguf_quant_is_a_sibling_of_another(self):
+        opts = ["wan2.2_t2v_14b-Q8_0.gguf", "flux1-dev-Q4_K_S.gguf"]
+        assert precision_sibling("wan2.2_t2v_14b-Q4_K_M.gguf", opts) == "wan2.2_t2v_14b-Q8_0.gguf"
+
+    @pytest.mark.parametrize(
+        "name",
+        ["m-Q4_0.gguf", "m-q4_1.gguf", "m-Q5_K_M.gguf", "m-Q6_K.gguf", "m-Q3_K_L.gguf", "m-IQ4_XS.gguf", "m-F16.gguf"],
+    )
+    def test_quant_tags_drop_on_a_gguf(self, name):
+        assert precision_key(name) == ("m", "gguf")
+
+    def test_a_quant_tag_is_not_a_precision_outside_a_gguf(self):
+        assert precision_sibling("m-Q8_0.safetensors", ["m.safetensors"]) is None
+        assert precision_sibling("m-Q8_0.gguf", ["m-fp16.safetensors"]) is None
+
+
 def _template() -> dict[str, Any]:
     """A MiniMax-H3-shaped template: the VAE loader sits inside a subgraph
     definition, the instance carries a promoted copy of the value, and the

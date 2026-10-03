@@ -7,9 +7,11 @@ the same weights in another precision (``minimax_h3_video_vae_fp16.safetensors``
 Without help, every load of such a template fails ``validate`` and an agent
 spends a round finding the variant by hand.
 
-The match is deliberately strict: only the tokens in :data:`_PRECISION_TOKEN`
-are ignored, they must stand alone between separators, the extension must
-agree, and exactly ONE option may match. Anything else (a different model, a
+The match is deliberately strict: only a run of precision words that holds a
+real precision tag (:data:`_PRECISION_CORE`, or a GGUF quantization on a
+``.gguf``) and follows the model's name is ignored; a qualifier such as
+``scaled`` counts only inside such a run. The extension must agree, and exactly
+ONE option may match. Anything else (a different model, a
 different size, two candidate precisions) is not a match.
 """
 
@@ -18,13 +20,21 @@ from __future__ import annotations
 import re
 from typing import Any
 
-#: Precision / quantization tags. Each must be a whole ``_``/``-``/``.``
-#: separated token: ``foo_int8_convrot`` drops both, ``fooINT8CONVROT`` drops
-#: nothing.
-_PRECISION_TOKEN = re.compile(
-    r"(?<![a-z0-9])(?:int4|int8|fp4|fp8|fp16|fp32|bf16|nvfp4|mxfp4|e4m3fn|e4m3fnuz|e5m2|scaled|convrot)(?![a-z0-9])",
-    re.IGNORECASE,
+#: Precision tags: a token that, on its own, names a numeric format.
+_PRECISION_CORE = frozenset({"int4", "int8", "fp4", "fp8", "fp16", "fp32", "bf16", "nvfp4", "mxfp4"})
+
+#: Words that only QUALIFY a precision (``fp8_e4m3fn_scaled``, ``int8_convrot``).
+#: They are dropped only inside a run that also holds a precision tag; alone
+#: they are part of the model's name (``realesrgan_x4_scaled``).
+_PRECISION_MODIFIER = frozenset({"e4m3fn", "e4m3fnuz", "e5m2", "scaled", "convrot"})
+
+#: GGUF quantization tags (``Q4_K_M``, ``Q8_0``, ``IQ4_XS``, ``F16``). They span
+#: separators, so they are matched on the stem before it is split, and only on
+#: a ``.gguf`` file: elsewhere the same letters are not a quantization.
+_GGUF_QUANT = re.compile(
+    r"(?<![a-z0-9])(?:iq[1-4]_(?:xxs|xs|s|m|nl)|iq[1-4]|q[2-8]_k(?:_[sml])?|q[4-8]_[01]|f16|f32|bf16)(?![a-z0-9])"
 )
+_QUANT_MARK = "\x00"
 
 #: File extensions a model loader option carries.
 MODEL_FILE = re.compile(r"\.(safetensors|sft|ckpt|pt|pth|bin|gguf|onnx)$", re.IGNORECASE)
@@ -41,11 +51,34 @@ def precision_key(name: str) -> tuple[str, str] | None:
     m = MODEL_FILE.search(base)
     if m is None:
         return None
-    stem = base[: m.start()].lower()
-    stripped = re.sub(r"[_\-.]+", "_", _PRECISION_TOKEN.sub("", stem)).strip("_")
+    stem, ext = base[: m.start()].lower(), m.group(1).lower()
+    if ext == "gguf":
+        stem = _GGUF_QUANT.sub(_QUANT_MARK, stem)
+    tokens = [t for t in re.split(r"[_\-.]+", stem) if t]
+    keep = [True] * len(tokens)
+    i = 0
+    while i < len(tokens):
+        j = i
+        while j < len(tokens) and _is_precision_part(tokens[j]):
+            j += 1
+        # A run of precision words is a tag only if it holds a precision (not
+        # just modifiers) and follows the model's name (a leading run IS the
+        # name: ``nvfp4_block``).
+        if j > i and i > 0 and any(_is_precision(t) for t in tokens[i:j]):
+            keep[i:j] = [False] * (j - i)
+        i = max(j, i + 1)
+    stripped = "_".join(t for t, k in zip(tokens, keep, strict=True) if k)
     if not stripped:
         return None
-    return stripped, m.group(1).lower()
+    return stripped, ext
+
+
+def _is_precision(token: str) -> bool:
+    return token in _PRECISION_CORE or token == _QUANT_MARK
+
+
+def _is_precision_part(token: str) -> bool:
+    return _is_precision(token) or token in _PRECISION_MODIFIER
 
 
 def precision_sibling(value: Any, options: list[Any]) -> str | None:

@@ -2527,7 +2527,10 @@ def _output_reachable_node_ids(workflow: dict[str, Any], graph: Graph) -> set[st
 
 #: COMBO inputs whose options the FRONTEND defines (the node's own widgets), so
 #: object_info declares an empty list the server never checks against:
-#: ``CustomCombo.validate_inputs`` returns True for any choice.
+#: ``CustomCombo.validate_inputs`` returns True for any choice. A known-narrow
+#: allowlist: object_info carries no structural signal separating "the frontend
+#: fills this combo" from "no files installed", so another node with the same
+#: pattern still reports no_options_available until it is added here.
 _FRONTEND_DEFINED_COMBOS = {"CustomCombo": frozenset({"choice"})}
 
 
