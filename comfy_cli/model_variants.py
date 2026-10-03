@@ -34,6 +34,9 @@ _PRECISION_MODIFIER = frozenset({"e4m3fn", "e4m3fnuz", "e5m2", "scaled", "convro
 _GGUF_QUANT = re.compile(
     r"(?<![a-z0-9])(?:iq[1-4]_(?:xxs|xs|s|m|nl)|iq[1-4]|q[2-8]_k(?:_[sml])?|q[4-8]_[01]|f16|f32|bf16)(?![a-z0-9])"
 )
+#: A matched quant becomes ONE token: this prefix, then the tag with its
+#: separators swapped out, so a leading tag that stays in the name keeps its
+#: identity (``q4_k_m_block`` is not ``q8_0_block``).
 _QUANT_MARK = "\x00"
 
 #: File extensions a model loader option carries.
@@ -53,7 +56,7 @@ def precision_key(name: str) -> tuple[str, str] | None:
         return None
     stem, ext = base[: m.start()].lower(), m.group(1).lower()
     if ext == "gguf":
-        stem = _GGUF_QUANT.sub(_QUANT_MARK, stem)
+        stem = _GGUF_QUANT.sub(lambda q: _QUANT_MARK + re.sub(r"[_\-.]", "\x01", q.group()), stem)
     tokens = [t for t in re.split(r"[_\-.]+", stem) if t]
     keep = [True] * len(tokens)
     i = 0
@@ -74,7 +77,7 @@ def precision_key(name: str) -> tuple[str, str] | None:
 
 
 def _is_precision(token: str) -> bool:
-    return token in _PRECISION_CORE or token == _QUANT_MARK
+    return token in _PRECISION_CORE or token.startswith(_QUANT_MARK)
 
 
 def _is_precision_part(token: str) -> bool:

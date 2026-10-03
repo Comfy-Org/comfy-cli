@@ -128,6 +128,10 @@ class TestGgufQuantTags:
     def test_quant_tags_drop_on_a_gguf(self, name):
         assert precision_key(name) == ("m", "gguf")
 
+    def test_a_leading_quant_tag_is_the_name_and_keeps_its_identity(self):
+        assert precision_key("Q4_K_M_block.gguf") != precision_key("Q8_0_block.gguf")
+        assert precision_sibling("Q4_K_M_block.gguf", ["Q8_0_block.gguf"]) is None
+
     def test_a_quant_tag_is_not_a_precision_outside_a_gguf(self):
         assert precision_sibling("m-Q8_0.safetensors", ["m.safetensors"]) is None
         assert precision_sibling("m-Q8_0.gguf", ["m-fp16.safetensors"]) is None
