@@ -795,14 +795,17 @@ def _template_ids(workflow: dict, graph, *node_ids: Any) -> tuple:
     canvas whose node list showed ``insert:…:root:node:24``, and a binding
     name worked for set_widget but not for the other three. The literal ids
     are checked with ONE pass over the node list for every endpoint."""
-    present = set()
+    present: dict[str, Any] = {}
     for n in workflow.get("nodes") or []:
         if isinstance(n, dict) and isinstance(n.get("id"), (int, str)) and not isinstance(n.get("id"), bool):
-            present.add(n["id"])
+            present.setdefault(str(n["id"]), n["id"])
     out = []
     for node_id in node_ids:
-        if isinstance(node_id, (int, str)) and not isinstance(node_id, bool) and node_id in present:
-            out.append(node_id)
+        # Compared as strings, the way _find_by_str resolves them, so 24 and
+        # "24" both name a real node "24" before any template id is tried.
+        # The node's own id is returned so the strict lookups downstream match.
+        if isinstance(node_id, (int, str)) and not isinstance(node_id, bool) and str(node_id) in present:
+            out.append(present[str(node_id)])
             continue
         resolved = _inserted_node_id(workflow, node_id)
         if resolved is None and isinstance(node_id, str):

@@ -1,19 +1,16 @@
-"""Edit refusals production agents hit on writes the graph could express.
-
-From two days of cloud agent traffic (set_widget / apply_ops / connect
-``workflow_edit_invalid``):
+"""Edit-contract cases for writes the graph can express but the ops refused.
 
 * ``connect 24.IMAGE`` on a canvas built by ``get_template`` failed "node 24
   not found" while the refusal itself listed ``insert:…:root:node:24``.
   set_widget already resolved such a template id; connect, delete_node and
-  set_node_field did not (21 calls).
+  set_node_field did not.
 * ``connect … → <heygen>.speech.audio`` after ``set_widget speech=audio``
   failed "input 'speech.audio' not found … inputs: ['image']": a dynamic
-  combo's LINK sub-input was not connectable (23 calls).
+  combo's LINK sub-input was not connectable.
 * ``set_widget <math>.expression = 800`` failed "expected STRING, got int":
-  the value is parsed as JSON before the write (7 calls).
+  the value is parsed as JSON before the write.
 * ``set_widget <switch>.boolean`` on ``Image Input Switch`` (a ``forceInput``
-  socket) said only "available widgets: (none — all inputs are links)" (9).
+  socket) said only "available widgets: (none — all inputs are links)".
 """
 
 from __future__ import annotations
@@ -136,6 +133,23 @@ class TestTemplateIds:
         _, op = workflow_ops.connect(wf, graph, 16, "IMAGE", 9, "images")
         assert op["to_node"] == 9
 
+    def test_a_real_string_id_wins_over_an_int_address(self, graph):
+        """Ids compare as strings, so ``9`` names a real node ``"9"`` before
+        the ``insert:…:root:node:9`` template id is tried."""
+        wf = _canvas()
+        wf["nodes"].append(
+            {
+                "id": "9",
+                "type": "SaveImage",
+                "inputs": [{"name": "images", "type": "IMAGE", "link": None}],
+                "outputs": [],
+                "widgets_values": [],
+            }
+        )
+        _, op = workflow_ops.connect(wf, graph, 16, "IMAGE", 9, "images")
+        assert op["to_node"] == "9"
+        assert workflow_ops._template_id(wf, 9) == "9"
+
 
 class TestBindingNames:
     """print_workflow names every node (``load_image``); set_widget already
@@ -203,7 +217,7 @@ class TestDynamicComboLinkInput:
 
 
 def test_concurrent_connects_into_one_dynamic_link_input_converge(graph):
-    """Christian's repro on #967: two actors each connect a different AUDIO
+    """Concurrent AB/BA repro: two actors each connect a different AUDIO
     source into ``speech.audio`` before either replica has grown the socket.
     The sub-input is ONE register keyed by its name (like a promoted subgraph
     input, which comfy-multi-player keys the same way), so both apply orders
