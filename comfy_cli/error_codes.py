@@ -708,6 +708,14 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "see the warning's `from`/`to`; pass an exact option to avoid the fuzzy match",
     ),
     ErrorCode(
+        "model_unavailable",
+        "Warning (not fatal): `templates fetch` checked the template against an offline catalog and a model "
+        "file it names is not installed, with no single same-model file in another precision to use instead. "
+        "Listed under `data.unavailable_models` with the closest installed options.",
+        "pick another template, or tell the user which model is missing; a `did_you_mean` option is a "
+        "different model, not a drop-in",
+    ),
+    ErrorCode(
         "ui_only_node_skipped",
         "Warning (not fatal): `workflow capture` skipped a UI-only node (Note/MarkdownNote/"
         "Reroute/GetNode/SetNode/PrimitiveNode) — those never reach the API and `apply` "
