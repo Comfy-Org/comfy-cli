@@ -1,4 +1,4 @@
-"""Two COMBO false refusals seen on the production agent.
+"""Two COMBO edits that used to be refused although the value is valid.
 
 1. **Numeric options compare by number.** A float combo (``scale_factor`` with
    options ``0.25, 0.5, 1.0, 2.0, 4.0``) rejected the value ``1``: membership
