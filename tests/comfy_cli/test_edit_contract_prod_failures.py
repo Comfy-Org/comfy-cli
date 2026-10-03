@@ -224,6 +224,34 @@ def test_concurrent_connects_into_one_dynamic_link_input_converge(graph):
         assert len(wf["links"]) == 1
 
 
+def test_a_reconnect_and_a_concurrent_grow_share_one_register(graph):
+    """CodeRabbit on #967: once the socket exists a reconnect must claim the
+    SAME register a concurrent first connect's grow claims. Actor A grows
+    ``speech.audio``; B (having seen A) re-wires it; C (not having seen A)
+    grows it too. Every causally ordered interleaving (A before B) must end
+    with one slot holding the same link."""
+    base, audio_a, talk = _talking(graph, "audio")
+    base, op = workflow_ops.add_node(base, graph, "LoadAudio")
+    audio_b = op["node_id"]
+    base, op = workflow_ops.add_node(base, graph, "LoadAudio")
+    audio_c = op["node_id"]
+    after_a, op_a = workflow_ops.connect(
+        copy.deepcopy(base), graph, audio_a, "AUDIO", talk, "speech.audio", actor="actor-a"
+    )
+    _, op_b = workflow_ops.connect(after_a, graph, audio_b, "AUDIO", talk, "speech.audio", actor="actor-b")
+    _, op_c = workflow_ops.connect(copy.deepcopy(base), graph, audio_c, "AUDIO", talk, "speech.audio", actor="actor-c")
+
+    results = []
+    for order in ([op_a, op_b, op_c], [op_a, op_c, op_b], [op_c, op_a, op_b]):
+        wf = copy.deepcopy(base)
+        for o in order:
+            wf = workflow_ops.apply_op(wf, o, graph)
+        node = next(n for n in wf["nodes"] if n["id"] == talk)
+        assert [i["name"] for i in node["inputs"] if str(i.get("name", "")).startswith("speech")] == ["speech.audio"]
+        results.append(workflow_ops.canonical(wf))
+    assert results[0] == results[1] == results[2]
+
+
 class TestStringWidgetValues:
     @pytest.mark.parametrize(
         ("value", "text"),

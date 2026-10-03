@@ -3223,6 +3223,18 @@ def _resolve_input_target(
                 return resolved
             template = _autogrow_template(graph, node, base)
             return None, _plan_autogrow(ins, base, elem_type, template)
+        name = ins[idx].get("name")
+        if graph is not None and isinstance(name, str) and "." in name:
+            # An existing dynamic-combo link sub-input (by name or index) is
+            # the same name-keyed register its first connect's grow claimed;
+            # a concrete ``to_slot`` would claim a different one. A stale
+            # entry whose option is no longer selected stays concrete.
+            try:
+                resolved = _resolve_dynamic_link_input(node, graph, name, elem_type)
+            except ValueError:
+                resolved = None
+            if resolved is not None:
+                return resolved
         return idx, None
     except ValueError:
         pass
@@ -3360,8 +3372,6 @@ def _resolve_dynamic_link_input(
         raise ValueError(
             f"type mismatch: {elem_type} output cannot connect to {hit.type} input {slot!r} of node {node.get('id')}"
         )
-    ins = node.get("inputs") or []
-    idx = next((k for k, i in enumerate(ins) if i.get("name") == slot), None)
     # ONE register keyed by the sub-input's full name, not an autogrow family:
     # the socket either exists under exactly this name or not at all, so two
     # concurrent connects that both grow it must contend for it (LWW) rather
@@ -3369,7 +3379,11 @@ def _resolve_dynamic_link_input(
     # ``promoted`` marker is the wire shape both appliers already key that way
     # (comfy-cli ``_write_target``; comfy-multi-player ``writeTarget`` /
     # ``claimPromotedInput``), so the replicas converge with no doc-host change.
-    return (idx, None) if idx is not None else (None, {"name": slot, "type": hit.type, "promoted": True})
+    # Emitted EVEN WHEN the socket already exists: a reconnect addressed by
+    # concrete index would claim ``("input", node, idx)`` instead, a different
+    # register from a concurrent first connect's grow, and the occupant would
+    # depend on apply order. Both appliers reuse the existing entry by name.
+    return None, {"name": slot, "type": hit.type, "promoted": True}
 
 
 def _linkable_widget_names(node: dict, graph) -> list[str]:
