@@ -222,3 +222,26 @@ def test_a_class_named_like_a_definition_elsewhere_keeps_the_fallback_off():
     defs = _subgraph_defs_by_id(wf)
     assert "Wrapped" not in defs
     assert defs[SG_ID] is wf["definitions"]["subgraphs"][0]
+
+
+def test_a_legacy_nested_instance_typed_by_name_keeps_the_fallback_on():
+    """Why only the definition's OWN interior turns the fallback off: inside a
+    sibling definition, a node typed like another definition's name is how an
+    old save wrote a NESTED instance of it (Outer holds an ``Inner``-typed
+    node). Treating that as proof of a class would stop legacy nested
+    subgraphs from resolving. A definition cannot hold an instance of itself,
+    so only there does a node of its own name prove a node class."""
+    inner = "11111111-0000-4000-8000-000000000001"
+    outer = "22222222-0000-4000-8000-000000000002"
+    wf = {
+        "nodes": [{"id": 5, "type": outer}],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {"id": inner, "name": "Inner", "nodes": [{"id": 1, "type": "KSampler"}]},
+                {"id": outer, "name": "Outer", "nodes": [{"id": 2, "type": "Inner"}]},
+            ]
+        },
+    }
+    defs = _subgraph_defs_by_id(wf)
+    assert defs["Inner"] is wf["definitions"]["subgraphs"][0]
