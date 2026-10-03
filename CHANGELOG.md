@@ -40,8 +40,8 @@ history.
 - An `unknown_enum_value` finding (validate, set-widget, edit batches) names the
   closest options in `suggestions` (at most 5) with `option_count`, and carries
   `valid_options` only when the list has 12 options or fewer. It used to carry
-  the whole folder listing twice; one validate in production came to ~340K
-  tokens.
+  the whole folder listing twice, which made findings on large model folders
+  very large.
 - `comfy nodes show` and `nodes search --expand-top` cut a combo input's
   `choices` longer than 20 to the first 20, with `choices_total`,
   `choices_truncated` and a `choices_note` naming the `--select` that filters
