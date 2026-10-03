@@ -215,6 +215,17 @@ class TestDynamicComboLinkInput:
         with pytest.raises(ValueError, match="type mismatch"):
             workflow_ops.connect(wf, graph, op["node_id"], "IMAGE", talk, "speech.audio")
 
+    def test_an_existing_socket_still_checks_the_declared_type(self, graph):
+        """A grown ``speech.audio`` whose saved type drifted to IMAGE must not
+        let an IMAGE source through: the selected option declares AUDIO."""
+        wf, audio, talk = _talking(graph, "audio")
+        wf, _ = workflow_ops.connect(wf, graph, audio, "AUDIO", talk, "speech.audio")
+        node = next(n for n in wf["nodes"] if n["id"] == talk)
+        next(i for i in node["inputs"] if i["name"] == "speech.audio")["type"] = "IMAGE"
+        wf, op = workflow_ops.add_node(wf, graph, "LoadImage")
+        with pytest.raises(ValueError, match="type mismatch"):
+            workflow_ops.connect(wf, graph, op["node_id"], "IMAGE", talk, "speech.audio")
+
 
 def test_concurrent_connects_into_one_dynamic_link_input_converge(graph):
     """Concurrent AB/BA repro: two actors each connect a different AUDIO

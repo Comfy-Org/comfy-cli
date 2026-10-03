@@ -3234,11 +3234,15 @@ def _resolve_input_target(
             # entry whose option is no longer selected stays concrete.
             try:
                 resolved = _resolve_dynamic_link_input(node, graph, name, elem_type)
+            except _DynamicLinkTypeMismatch:
+                raise
             except ValueError:
                 resolved = None
             if resolved is not None:
                 return resolved
         return idx, None
+    except _DynamicLinkTypeMismatch:
+        raise
     except ValueError:
         pass
     # Dotted autogrow key (images.image0) or a base that has no concrete slot yet.
@@ -3334,6 +3338,12 @@ def _resolve_input_target(
     raise ValueError(f"input {slot!r} not found on node {node.get('id')}; inputs: {names}")
 
 
+class _DynamicLinkTypeMismatch(ValueError):
+    """The selected option declares a sub-input whose type the source does not
+    match. Unlike a stale (unselected) sub-input, this must not fall back to
+    the saved concrete slot, whose type may have drifted."""
+
+
 def _resolve_dynamic_link_input(
     node: dict, graph, slot: str, elem_type: str | None
 ) -> tuple[int | None, dict | None] | None:
@@ -3372,7 +3382,7 @@ def _resolve_dynamic_link_input(
             f"(it is {current!r}) — set_widget {selector}={keys[0]!r} first, then connect"
         )
     if elem_type and not _types_compatible(elem_type, hit.type):
-        raise ValueError(
+        raise _DynamicLinkTypeMismatch(
             f"type mismatch: {elem_type} output cannot connect to {hit.type} input {slot!r} of node {node.get('id')}"
         )
     # ONE register keyed by the sub-input's full name, not an autogrow family:
