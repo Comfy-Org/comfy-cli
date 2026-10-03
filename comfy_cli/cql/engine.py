@@ -15,10 +15,14 @@ import hashlib as _hashlib
 import json
 import logging
 import math
+import shlex
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -73,6 +77,82 @@ LOAD_3D_BUTTON_VALUES = frozenset(value for _name, value in _LOAD_3D_BUTTON_SLOT
 # and stays writable, while the injected button/player/viewport slots (these
 # two plus the ``PREVIEW_3D`` ``image`` of ``_PREVIEW_3D_CLASSES``) are refused
 # by every write surface — see ``_WidgetEntry.frontend_injected``.
+# ---------------------------------------------------------------------------
+# Enum option listings on findings
+# ---------------------------------------------------------------------------
+#
+# An enum finding used to carry the WHOLE option list, twice (``suggestions``
+# and ``valid_options``). On a model loader that is every installed file: one
+# validate of a graph with eleven bad filenames over a 377-file folder came to
+# ~340K tokens in production. The closest few options and the count are what a
+# caller acts on; the full list stays one explicit request away.
+
+#: An option list this short is cheap and is carried whole as ``valid_options``.
+ENUM_INLINE_MAX = 12
+#: How many closest options a finding names.
+ENUM_SUGGEST_MAX = 5
+
+_FULL_ENUM_OPTIONS: ContextVar[bool] = ContextVar("comfy_full_enum_options", default=False)
+
+
+@contextmanager
+def full_enum_options(enabled: bool = True) -> Iterator[None]:
+    """Within this block, findings carry every option as ``valid_options``
+    whatever the list's length (``validate --full-options``)."""
+    token = _FULL_ENUM_OPTIONS.set(enabled)
+    try:
+        yield
+    finally:
+        _FULL_ENUM_OPTIONS.reset(token)
+
+
+def enum_option_fields(options: list, closest: list | None = None) -> dict[str, Any]:
+    """The option-listing fields of one enum finding.
+
+    ``suggestions`` is the ``closest`` matches (or, with none, the first
+    options), at most :data:`ENUM_SUGGEST_MAX`; ``option_count`` is the whole
+    list's length. ``valid_options`` is the full, typed list only when it is
+    short (:data:`ENUM_INLINE_MAX`) or the caller asked for it
+    (:func:`full_enum_options`); otherwise ``options_omitted`` says how many
+    options the finding does not name.
+    """
+    opts = list(options)
+    suggestions = list(closest or [])[:ENUM_SUGGEST_MAX] or opts[:ENUM_SUGGEST_MAX]
+    out: dict[str, Any] = {"suggestions": suggestions, "option_count": len(opts)}
+    if len(opts) <= ENUM_INLINE_MAX or _FULL_ENUM_OPTIONS.get():
+        out["valid_options"] = opts
+    else:
+        out["options_omitted"] = len(opts) - len(suggestions)
+    return out
+
+
+def enum_listing_hint(
+    field: str, options: list, suggestions: list, class_type: str | None = None, *, listing: str = "choices"
+) -> str:
+    """The hint of an enum finding. A short list is named whole; a long one
+    is pointed at — the closest options are already in ``suggestions`` — with
+    the way to filter the rest instead of dumping it."""
+    n = len(options)
+    if n <= ENUM_INLINE_MAX or _FULL_ENUM_OPTIONS.get():
+        return f"valid options: {', '.join(str(v) for v in options)}"
+    if "." in field:
+        # A dotted name is a dynamic-combo sub-input: it sits under
+        # `dynamic_options[].inputs`, not top-level `inputs`.
+        return (
+            f"pick one of `suggestions` ({len(suggestions)} of {n} options); re-run validate with "
+            f"--full-options to list all {n}"
+        )
+    target = shlex.quote(class_type) if class_type else "<class>"
+    # Catalog names are untrusted text: encode the field as a selector string
+    # literal and shell-quote both arguments, so the copyable command neither
+    # breaks the selector nor runs anything a node pack put in a name.
+    query = shlex.quote(f'inputs.#(name=={json.dumps(field)}).{listing}.#(%"*<text>*")#')
+    return (
+        f"pick one of `suggestions` ({len(suggestions)} of {n} options); to search all {n}, filter them with "
+        f"`comfy nodes show {target} --select {query}`, or re-run validate with --full-options"
+    )
+
+
 FRONTEND_MARKER_SLOTS = frozenset({"control_after_generate", "upload", "audioUI"})
 
 # ``Comfy.AudioWidget`` appends an ``audioUI`` player to exactly these classes.
@@ -506,17 +586,22 @@ class Port:
                 candidates.add(str(int(value)))
             enum_str = {str(e) for e in self.enum_values}
             if not (candidates & enum_str):
+                suggestions = self.suggest_combo(value, limit=ENUM_SUGGEST_MAX)
+                best = self.best_combo_match(value)
+                if best is not None:
+                    suggestions = [best, *(s for s in suggestions if s != best)][:ENUM_SUGGEST_MAX]
+                listing = enum_option_fields(self.enum_values, suggestions)
                 warning = {
                     "code": "unknown_enum_value",
                     "field": self.name,
                     "message": f"{value!r} not in {len(self.enum_values)} known options for {self.name}",
-                    "valid_options": list(self.enum_values),
+                    "option_count": listing["option_count"],
                 }
-                suggestions = self.suggest_combo(value)
-                best = self.best_combo_match(value)
                 if best is not None:
-                    suggestions = [best, *(s for s in suggestions if s != best)]
                     warning["best_match"] = best
+                for key in ("suggestions", "valid_options", "options_omitted"):
+                    if key in listing:
+                        warning[key] = listing[key]
                 if suggestions:
                     warning["did_you_mean"] = suggestions
                     warning["message"] += f" — closest: {', '.join(suggestions)}"
@@ -2497,6 +2582,12 @@ def _output_reachable_node_ids(workflow: dict[str, Any], graph: Graph) -> set[st
     return reachable
 
 
+def _closest_options(value: Any, options: list) -> list:
+    """Up to :data:`ENUM_SUGGEST_MAX` options closest to ``value`` by name."""
+    by_str = {str(o): o for o in options}
+    return [by_str[m] for m in difflib.get_close_matches(str(value), list(by_str), n=ENUM_SUGGEST_MAX, cutoff=0.5)]
+
+
 def _validate_catalog_value(
     node_id: str, class_type: str, input_name: str, port: Port, value: Any, *, range_is_error: bool = True
 ) -> tuple[list[dict], list[dict]]:
@@ -2514,23 +2605,17 @@ def _validate_catalog_value(
     warnings: list[dict] = []
     for w in port.validate_catalog(value):
         if w["code"] == "unknown_enum_value":
-            top = port.enum_values[:8]
+            # The closest options and the count, not the whole list (see
+            # enum_option_fields): a short list is still carried whole.
+            listing = enum_option_fields(port.enum_values, w.get("did_you_mean"))
             errors.append(
                 {
                     "node_id": node_id,
                     "field": input_name,
                     "code": "unknown_enum_value",
                     "message": w["message"],
-                    "hint": f"valid options include: {', '.join(str(v) for v in top)}"
-                    + (
-                        f" (and {len(port.enum_values) - 8} more — see valid_options)"
-                        if len(port.enum_values) > 8
-                        else ""
-                    ),
-                    "suggestions": port.enum_values[:20],
-                    # full, typed list — never truncated, so the agent
-                    # can pick a real value instead of guessing.
-                    "valid_options": list(port.enum_values),
+                    "hint": enum_listing_hint(input_name, port.enum_values, listing["suggestions"], class_type),
+                    **listing,
                 }
             )
         elif w["code"] == "no_options_available":
@@ -2833,9 +2918,8 @@ def _check_dynamic_combo_input(
             # the colon is self-refuting — say plainly that the schema
             # couldn't be read instead of dangling an empty enumeration.
             hint = (
-                f"set {name!r} to one of its options: "
-                + ", ".join(str(k) for k in keys[:8])
-                + (f" (and {len(keys) - 8} more — see valid_options)" if len(keys) > 8 else "")
+                f"set {name!r} to one of its options — "
+                + enum_listing_hint(name, keys, keys[:ENUM_SUGGEST_MAX], class_type, listing="selection_keys")
                 if keys
                 else f"{name!r} is required, but its option schema didn't parse — check object_info for this node"
             )
@@ -2849,8 +2933,7 @@ def _check_dynamic_combo_input(
                         f"which option's sub-inputs apply, so this node fails at execution"
                     ),
                     "hint": hint,
-                    "suggestions": keys[:20],
-                    "valid_options": keys,
+                    **enum_option_fields(keys),
                 }
             )
             return errors, warnings, set(), {f"{name}."}
@@ -2902,10 +2985,14 @@ def _check_dynamic_combo_input(
                     f"{selected!r} not in {len(keys)} known options for {name} — its sub-inputs "
                     f"cannot be resolved, so this node fails at execution"
                 ),
-                "hint": f"valid options: {', '.join(str(k) for k in keys[:8])}"
-                + (f" (and {len(keys) - 8} more — see valid_options)" if len(keys) > 8 else ""),
-                "suggestions": keys[:20],
-                "valid_options": keys,
+                "hint": enum_listing_hint(
+                    name,
+                    keys,
+                    _closest_options(selected, keys) or keys[:ENUM_SUGGEST_MAX],
+                    class_type,
+                    listing="selection_keys",
+                ),
+                **enum_option_fields(keys, _closest_options(selected, keys)),
             }
         )
         return errors, warnings, set(), {f"{name}."}

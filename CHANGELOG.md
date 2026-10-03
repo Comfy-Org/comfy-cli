@@ -15,6 +15,42 @@ history.
 
 ## [Unreleased]
 
+### Added
+
+- `--select` takes gjson row queries: `items.#(<cond>)#` keeps the elements
+  that match and `items.#(<cond>)` is the first one, with `==` `!=` `<` `<=`
+  `>` `>=` `%` (glob) `!%` against a quoted string, number, `true`, `false` or
+  `null` (e.g. `slots.#(node_type=="CLIPTextEncode")#.address`,
+  `inputs.#(name=="lora_name").choices.#(%"*detail*")#`). The corpus in
+  `tests/data/selector_conformance.json` pins the grammar for other
+  implementations.
+- `comfy workflow connect` wires two nodes inside the same subgraph
+  (`connect 70/2005.0 70/2011.text`) and emits a `connect` op carrying the
+  instance `path`. A link that crosses the subgraph boundary is still refused,
+  and so is a link inside a definition shared by several instances.
+- `comfy workflow validate` reports broken link rows of a canvas workflow as
+  `link_slot_out_of_range` / `link_source_missing` errors, each with the
+  `connect` that repairs it. The UI→API lowering used to drop such a row and
+  validate said the graph was valid.
+- `comfy workflow validate --full-options` and `comfy nodes show --all-choices`
+  (also on `nodes search --expand-top`) list a long option list in full.
+
+### Changed
+
+- An `unknown_enum_value` finding (validate, set-widget, edit batches) names the
+  closest options in `suggestions` (at most 5) with `option_count`, and carries
+  `valid_options` only when the list has 12 options or fewer. It used to carry
+  the whole folder listing twice; one validate in production came to ~340K
+  tokens.
+- `comfy nodes show` and `nodes search --expand-top` cut a combo input's
+  `choices` longer than 20 to the first 20, with `choices_total`,
+  `choices_truncated` and a `choices_note` naming the `--select` that filters
+  the full list. `--select` still projects the full schema.
+- `comfy workflow print` renders a graph with broken links instead of refusing
+  it: the input prints `None`, the line is marked `BROKEN`, and a warning names
+  the `connect` that repairs it. A stale row whose value already reaches the
+  node through another link is reported as a leftover.
+
 ### Fixed
 
 - A cloud request the account's plan does not allow (free generations used up,
