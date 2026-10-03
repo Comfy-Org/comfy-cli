@@ -262,7 +262,7 @@ def test_cycle_is_refused(sd15_graph):
     assert e.value.reasons == ["link cycle among nodes 1, 2"]
 
 
-def test_dangling_link_is_refused(sd15_graph):
+def test_dangling_link_renders_marked_instead_of_refusing(sd15_graph):
     wf = _mini(
         [
             _node(
@@ -273,9 +273,47 @@ def test_dangling_link_is_refused(sd15_graph):
         ],
         [[1, 99, 0, 2, 0, "LATENT"]],
     )
-    with pytest.raises(PrintUnsupported) as e:
-        render_py(wf, sd15_graph)
-    assert e.value.reasons == ["link 1 references missing node 99"]
+    res = render_py(wf, sd15_graph)
+    assert (
+        "VAEDecode(samples=None, vae=None)  # 2 samples BROKEN link 1: its source node 99 does not exist" in res.source
+    )
+    assert res.warnings == [
+        "BROKEN link 1 into input 'samples' of node 2: its source node 99 does not exist; printed as None — "
+        "re-wire it with `connect <source>.<output> 2.samples`"
+    ]
+
+
+def test_out_of_range_output_slot_renders_marked_instead_of_refusing(sd15_graph):
+    """The eff-oob-edit shape: three link rows from an output slot their
+    source does not have used to refuse the whole print."""
+    wf = _stale_slot_workflow([1, 1, 0, 2, 0, "LATENT"])
+    wf["links"] = [[1, 1, 3, 2, 0, "LATENT"]]
+    res = render_py(wf, sd15_graph)
+    assert res.node_count == 2
+    assert (
+        "VAEDecode(samples=None, vae=None)  # 2 samples BROKEN link 1: node 1 has no output slot 3 (it has 1)"
+        in res.source
+    )
+    assert res.warnings == [
+        "BROKEN link 1 into input 'samples' of node 2: node 1 has no output slot 3 (it has 1); printed as None — "
+        "re-wire it with `connect 1.<output> 2.samples`"
+    ]
+
+
+def test_out_of_range_output_slot_inside_a_definition_is_marked_and_qualified(sd15_graph):
+    wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
+    graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
+    sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
+    link = next(
+        lk for lk in sg["links"] if str(lk["origin_id"]) not in ("-10", "-20") and str(lk["target_id"]) != "-20"
+    )
+    link["origin_slot"] = 9
+    res = render_py(wf, graph)
+    assert any(
+        w.startswith(f"BROKEN link {link['id']} into input ") and f"of node 10/{link['target_id']}:" in w
+        for w in res.warnings
+    ), res.warnings
+    assert f"BROKEN link {link['id']}: node {link['origin_id']} has no output slot 9" in res.source
 
 
 def test_legacy_group_node_is_refused(sd15_graph):
@@ -730,7 +768,7 @@ def test_non_identifier_proxy_names_use_subscripts(sd15_graph):
 
 
 @pytest.mark.parametrize("slot", [None, "0"])
-def test_non_integer_link_slot_is_refused_not_raised(sd15_graph, slot):
+def test_non_integer_link_slot_renders_marked_not_raised(sd15_graph, slot):
     wf = _mini(
         [
             _node(
@@ -744,9 +782,8 @@ def test_non_integer_link_slot_is_refused_not_raised(sd15_graph, slot):
         ],
         [[7, 1, slot, 2, 0, "LATENT"]],
     )
-    with pytest.raises(PrintUnsupported) as e:
-        render_py(wf, sd15_graph)
-    assert e.value.reasons == ["link 7 has a non-integer slot"]
+    res = render_py(wf, sd15_graph)
+    assert "samples BROKEN link 7: it has a non-integer slot" in res.source
 
 
 def test_malformed_input_entry_is_skipped_with_warning(sd15_graph):
@@ -1014,7 +1051,10 @@ def test_out_of_range_input_slot_renders_and_warns(sd15_graph):
     assert "samples=empty_latent_image" in res.source
     assert "vae=None" in res.source
     assert res.warnings == [
-        "link 7 targets input slot 6 on node 2, which has 2 inputs; no input holds it, so it feeds nothing and was ignored"
+        # Link 1 already carries node 1's LATENT into `samples`: the stale row is
+        # a duplicate of a live link, so nothing is sent to be re-wired.
+        "link 7 targets input slot 6 on node 2, which has 2 inputs; a leftover row — input 'samples' already gets "
+        "that value from node 1 output 0 through another link, so nothing needs re-wiring"
     ]
 
 
@@ -1024,7 +1064,9 @@ def test_out_of_range_input_slot_adds_no_ordering_edge(sd15_graph):
     res = render_py(wf, sd15_graph)
     assert [ln.rsplit("# ", 1)[1].split()[0] for ln in res.source.splitlines()] == ["1", "2"]
     assert res.warnings == [
-        "link 7 targets input slot 6 on node 1, which has 0 inputs; no input holds it, so it feeds nothing and was ignored"
+        "link 7 targets input slot 6 on node 1, which has 0 inputs; no input holds it, so it feeds nothing and was "
+        "ignored. It was wired from node 2 output 0 — if that value was meant for node 1, re-wire it with "
+        "`connect 2.0 1.<input>` rather than retyping the value"
     ]
 
 
@@ -1054,7 +1096,9 @@ def test_out_of_range_input_slot_inside_a_definition_is_qualified(sd15_graph):
     n_inputs = len(tgt.get("inputs") or [])
     assert (
         f"link 9999 targets input slot 42 on node 10/{tgt['id']}, which has {n_inputs} inputs; "
-        "no input holds it, so it feeds nothing and was ignored"
+        f"no input holds it, so it feeds nothing and was ignored. It was wired from node 10/{src['id']} output 0 — "
+        f"if that value was meant for node 10/{tgt['id']}, re-wire it with `connect 10/{src['id']}.0 "
+        f"10/{tgt['id']}.<input>` rather than retyping the value"
     ) in res.warnings
 
 
@@ -1064,7 +1108,9 @@ def test_out_of_range_input_slot_on_a_node_without_inputs_is_reported(sd15_graph
     res = render_py(wf, sd15_graph)
     assert [ln.rsplit("# ", 1)[1].split()[0] for ln in res.source.splitlines()] == ["1", "2"]
     assert res.warnings == [
-        "link 7 targets input slot 0 on node 1, which has 0 inputs; no input holds it, so it feeds nothing and was ignored"
+        "link 7 targets input slot 0 on node 1, which has 0 inputs; no input holds it, so it feeds nothing and was "
+        "ignored. It was wired from node 2 output 0 — if that value was meant for node 1, re-wire it with "
+        "`connect 2.0 1.<input>` rather than retyping the value"
     ]
 
 
@@ -1074,11 +1120,12 @@ def test_out_of_range_input_slot_fed_by_the_definition_input_proxy_is_reported(s
     sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
     tgt = sg["nodes"][0]
     sg["links"].append(
-        {"id": 9998, "origin_id": -10, "origin_slot": 0, "target_id": tgt["id"], "target_slot": 42, "type": "*"}
+        {"id": 9998, "origin_id": -10, "origin_slot": 99, "target_id": tgt["id"], "target_slot": 42, "type": "*"}
     )
     res = render_py(wf, graph)
     n_inputs = len(tgt.get("inputs") or [])
     assert (
         f"link 9998 targets input slot 42 on node 10/{tgt['id']}, which has {n_inputs} inputs; "
-        "no input holds it, so it feeds nothing and was ignored"
+        "no input holds it, so it feeds nothing and was ignored. It was wired from the subgraph input — "
+        "re-wire it to the input it was meant for"
     ) in res.warnings

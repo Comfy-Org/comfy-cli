@@ -3404,7 +3404,8 @@ class TestDynamicComboInputs:
 
     def test_required_missing_hint_truncates_many_selection_keys(self):
         """A dynamic combo with hundreds of options must not dump them all
-        into the required_input_missing hint — first 8, then a count."""
+        into the required_input_missing error — the first few, a count, and
+        the query that lists the rest."""
         options = [{"key": f"ckpt-{i:03d}", "inputs": {"required": {}, "optional": {}}} for i in range(30)]
         info = {
             "Loader": {
@@ -3421,9 +3422,12 @@ class TestDynamicComboInputs:
         result = g.validate_workflow({"1": {"class_type": "Loader", "inputs": {}}})
         err = next(e for e in result["errors"] if e["code"] == "required_input_missing")
         hint = err["hint"]
-        assert "ckpt-007" in hint
-        assert "ckpt-008" not in hint
-        assert "and 22 more" in hint
+        assert err["suggestions"] == ["ckpt-000", "ckpt-001", "ckpt-002", "ckpt-003", "ckpt-004"]
+        assert err["option_count"] == 30
+        assert "valid_options" not in err
+        assert "ckpt-005" not in json.dumps(err)
+        assert "of 30 options" in hint
+        assert 'inputs.#(name=="model").selection_keys' in hint
 
     def test_stale_sub_key_warning_survives_on_unreachable_node(self):
         """dyn_errors/dyn_warnings used to be bundled into one reachability
