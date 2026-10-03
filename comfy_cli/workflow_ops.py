@@ -779,6 +779,48 @@ def _inserted_node_id(workflow: dict, node_id: Any) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
+# A numeric node id or interior path (``57``, ``57/27``) is never a
+# print_workflow binding name, so it skips the render a binding lookup costs.
+_NUMERIC_ADDRESS_RE = re.compile(r"-?\d+(?:/-?\d+)*")
+
+
+def _template_ids(workflow: dict, graph, *node_ids: Any) -> tuple:
+    """Each of ``node_ids`` as given when a node carries it, else the one
+    inserted node it is the template id of (:func:`_inserted_node_id`), else
+    the node its print_workflow binding name stands for
+    (:func:`_binding_address`), else as given.
+
+    set_widget already falls back to both; connect, delete_node and
+    set_node_field did not, so ``24.IMAGE`` failed "node 24 not found" on a
+    canvas whose node list showed ``insert:…:root:node:24``, and a binding
+    name worked for set_widget but not for the other three. The literal ids
+    are checked with ONE pass over the node list for every endpoint."""
+    present: dict[str, Any] = {}
+    for n in workflow.get("nodes") or []:
+        if isinstance(n, dict) and isinstance(n.get("id"), (int, str)) and not isinstance(n.get("id"), bool):
+            present.setdefault(str(n["id"]), n["id"])
+    out = []
+    for node_id in node_ids:
+        # Compared as strings, the way _find_by_str resolves them, so 24 and
+        # "24" both name a real node "24" before any template id is tried.
+        # The node's own id is returned so the strict lookups downstream match.
+        if isinstance(node_id, (int, str)) and not isinstance(node_id, bool) and str(node_id) in present:
+            out.append(present[str(node_id)])
+            continue
+        resolved = _inserted_node_id(workflow, node_id)
+        if resolved is None and isinstance(node_id, str):
+            s = node_id.strip()
+            if s and not _NUMERIC_ADDRESS_RE.fullmatch(s) and not s.startswith("insert:"):
+                resolved = _binding_address(workflow, graph, node_id)
+        out.append(node_id if resolved is None else resolved)
+    return tuple(out)
+
+
+def _template_id(workflow: dict, node_id: Any, graph=None) -> Any:
+    """:func:`_template_ids` for one node."""
+    return _template_ids(workflow, graph, node_id)[0]
+
+
 def _binding_address(workflow: dict, graph, node_id: Any) -> Any:
     """The node address a ``print_workflow`` binding key stands for, or ``None``.
 
@@ -813,6 +855,15 @@ def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[A
     port = next((p for p in m.inputs if p.name == widget), None)
     if port is None:
         return value, None
+    text = _string_widget_text(port, value)
+    if text is not None:
+        return text, {
+            "code": "normalized_value",
+            "field": widget,
+            "message": f"{widget} is a STRING widget; wrote {value!r} as the text {text!r}",
+            "from": value,
+            "to": text,
+        }
     canon = _bool_combo_option(port, value)
     what = "option"
     if canon is None:
@@ -827,6 +878,24 @@ def _normalize_combo(graph, class_type: str, widget: str, value: Any) -> tuple[A
         "from": str(value),
         "to": canon,
     }
+
+
+def _string_widget_text(port, value: Any) -> str | None:
+    """The text a non-string value means on a STRING widget, else ``None``.
+
+    A set-widget value is parsed as JSON, so ``800`` (a ComfyMathExpression
+    ``expression``) arrives as an int and ``{"positive": [...]}`` (a points
+    editor's ``points_store``) as a dict, and the write was refused as a type
+    mismatch. A STRING widget can only hold text, so the caller meant the text.
+    Booleans stay refused: ``true`` for a text field is a wrong field, not a
+    spelling."""
+    if port.type != "STRING" or port.is_link or isinstance(value, str | bool) or value is None:
+        return None
+    if isinstance(value, int | float):
+        return str(value)
+    if isinstance(value, dict | list):
+        return json.dumps(value, ensure_ascii=False)
+    return None
 
 
 def _bool_combo_option(port, value: Any) -> str | None:
@@ -1323,6 +1392,7 @@ def set_node_field(
         raise ValueError(
             f"invalid node mode {value!r}; valid: 0 (always), 1 (on-event), 2 (mute), 3 (on-trigger), 4 (bypass)"
         )
+    node_id = _template_id(workflow, node_id)
     _require(workflow, node_id)
     op = _new_op("set_node_field", actor, base_version, node_id=node_id, field=field, value=value)
     return apply_op(workflow, op, None), op
@@ -1341,6 +1411,7 @@ def connect(
 ) -> tuple[dict, dict]:
     """Wire two nodes, enriching a not-found endpoint error with the list of
     node ids that exist (see :func:`_enrich_resolution_error`)."""
+    from_node, to_node = _template_ids(workflow, graph, from_node, to_node)
     try:
         return _connect_impl(
             workflow, graph, from_node, from_slot, to_node, to_slot, actor=actor, base_version=base_version
@@ -1896,6 +1967,7 @@ def delete_node(
 ) -> tuple[dict, dict]:
     """Delete a node, enriching a not-found error with the list of node ids that
     exist (see :func:`_enrich_resolution_error`)."""
+    node_id = _template_id(workflow, node_id, graph)
     try:
         return _delete_node_impl(workflow, graph, node_id, actor=actor, base_version=base_version)
     except ValueError as e:
@@ -3166,11 +3238,35 @@ def _widget_index(graph, class_type: str, widget: str, widgets_values=None, *, n
         if other is not None:
             raise other
         avail = graph.editable_widget_names(class_type, widgets_values)
+        socket = _link_input_note(graph, class_type, widget)
         raise ValueError(
             f"widget {widget!r} not found on {class_type}; "
-            f"available widgets: {', '.join(avail) if avail else '(none — all inputs are links)'}"
+            f"available widgets: {', '.join(avail) if avail else '(none — all inputs are links)'}{socket}"
         )
     return order.index(widget)
+
+
+#: A node that outputs a constant of the type, for a value a socket needs.
+_PRIMITIVE_SOURCE = {
+    "BOOLEAN": "PrimitiveBoolean",
+    "INT": "PrimitiveInt",
+    "FLOAT": "PrimitiveFloat",
+    "STRING": "PrimitiveString",
+}
+
+
+def _link_input_note(graph, class_type: str, widget: str) -> str:
+    """Why a value write to a LINK input fails and what to do instead, or ``""``.
+
+    ``Image Input Switch.boolean`` is declared ``forceInput``: the frontend
+    shows a socket, never a widget, so the value has to come from a node."""
+    m = graph.node(class_type)
+    port = next((p for p in m.inputs if p.name == widget and p.is_link), None) if m is not None else None
+    if port is None:
+        return ""
+    source = _PRIMITIVE_SOURCE.get(port.type)
+    via = f" (add_node {source}, set its value, connect it)" if source and graph.node(source) is not None else ""
+    return f". {widget!r} is an input socket ({port.type}), not a widget: connect a {port.type} output to it{via}"
 
 
 class FatalFindingError(ValueError):
@@ -3382,7 +3478,23 @@ def _resolve_input_target(
                 return resolved
             template = _autogrow_template(graph, node, base)
             return None, _plan_autogrow(ins, base, elem_type, template)
+        name = ins[idx].get("name")
+        if graph is not None and isinstance(name, str) and "." in name:
+            # An existing dynamic-combo link sub-input (by name or index) is
+            # the same name-keyed register its first connect's grow claimed;
+            # a concrete ``to_slot`` would claim a different one. A stale
+            # entry whose option is no longer selected stays concrete.
+            try:
+                resolved = _resolve_dynamic_link_input(node, graph, name, elem_type)
+            except _DynamicLinkTypeMismatch:
+                raise
+            except ValueError:
+                resolved = None
+            if resolved is not None:
+                return resolved
         return idx, None
+    except _DynamicLinkTypeMismatch:
+        raise
     except ValueError:
         pass
     # Dotted autogrow key (images.image0) or a base that has no concrete slot yet.
@@ -3422,6 +3534,9 @@ def _resolve_input_target(
         return None, {"name": slot, "type": elem_type or "*", "widget": slot}
     if graph is not None and isinstance(slot, str):
         resolved = _resolve_schema_autogrow(node, graph, slot, elem_type)
+        if resolved is not None:
+            return resolved
+        resolved = _resolve_dynamic_link_input(node, graph, slot, elem_type)
         if resolved is not None:
             return resolved
     # Bare autogrow ELEMENT name (`image1` for base `images`) — the guess agents
@@ -3473,6 +3588,67 @@ def _resolve_input_target(
             )
     names = [i.get("name") for i in ins]
     raise ValueError(f"input {slot!r} not found on node {node.get('id')}; inputs: {names}")
+
+
+class _DynamicLinkTypeMismatch(ValueError):
+    """The selected option declares a sub-input whose type the source does not
+    match. Unlike a stale (unselected) sub-input, this must not fall back to
+    the saved concrete slot, whose type may have drifted."""
+
+
+def _resolve_dynamic_link_input(
+    node: dict, graph, slot: str, elem_type: str | None
+) -> tuple[int | None, dict | None] | None:
+    """A LINK sub-input of a dynamic combo's selected option (``speech.audio``
+    once ``HeyGenTalkingPhotoNode.speech`` is ``audio``), or ``None``.
+
+    The frontend shows such a socket only while its option is selected, and
+    the API carries it as the flat dotted key. It is never in the node's saved
+    ``inputs`` until something connects to it, so a connect grows it. An
+    option that is not selected gets the selector value to set instead of
+    "input not found".
+    """
+    from comfy_cli.cql import engine as _engine
+
+    selector, dot, _sub = slot.partition(".")
+    node_type = str(node.get("type", ""))
+    m = graph.node(node_type)
+    port = next((p for p in m.inputs if p.name == selector), None) if m is not None and dot else None
+    if port is None or not port.dynamic_options or not _engine._is_dynamic_combo_type(port.type):
+        return None
+    values = _engine._widgets_as_positional(node.get("widgets_values"), graph, node_type)
+    order = graph.widget_order_for_node(node_type, values)
+    current = values[order.index(selector)] if selector in order and order.index(selector) < len(values) else None
+
+    def link_sub(key: Any):
+        subs = _engine._dynamic_combo_sub_ports(port.dynamic_options, key, selector)
+        return next((p for p in subs if p.name == slot and p.is_link), None)
+
+    hit = link_sub(current)
+    if hit is None:
+        keys = [o.get("key") for o in port.dynamic_options if link_sub(o.get("key")) is not None]
+        if not keys:
+            return None
+        raise ValueError(
+            f"input {slot!r} on node {node.get('id')} exists only while {selector!r} is one of {keys} "
+            f"(it is {current!r}) — set_widget {selector}={keys[0]!r} first, then connect"
+        )
+    if elem_type and not _types_compatible(elem_type, hit.type):
+        raise _DynamicLinkTypeMismatch(
+            f"type mismatch: {elem_type} output cannot connect to {hit.type} input {slot!r} of node {node.get('id')}"
+        )
+    # ONE register keyed by the sub-input's full name, not an autogrow family:
+    # the socket either exists under exactly this name or not at all, so two
+    # concurrent connects that both grow it must contend for it (LWW) rather
+    # than collision-rename the loser into a phantom ``speech.speech0``. The
+    # ``promoted`` marker is the wire shape both appliers already key that way
+    # (comfy-cli ``_write_target``; comfy-multi-player ``writeTarget`` /
+    # ``claimPromotedInput``), so the replicas converge with no doc-host change.
+    # Emitted EVEN WHEN the socket already exists: a reconnect addressed by
+    # concrete index would claim ``("input", node, idx)`` instead, a different
+    # register from a concurrent first connect's grow, and the occupant would
+    # depend on apply order. Both appliers reuse the existing entry by name.
+    return None, {"name": slot, "type": hit.type, "promoted": True}
 
 
 def _linkable_widget_names(node: dict, graph) -> list[str]:
