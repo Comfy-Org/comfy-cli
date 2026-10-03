@@ -911,3 +911,172 @@ class TestShow:
         env = _run(["show", "anything.safetensors", "--where", "local"], capsys)
         assert env["ok"] is False
         assert env["error"]["code"] == "models_show_local_unsupported"
+
+
+# ---------------------------------------------------------------------------
+# --host/--port routing (BE-5788) — mirrors `comfy upload` (BE-5662)
+# ---------------------------------------------------------------------------
+
+
+class TestHostPortRouting:
+    """``comfy models <verb> --host/--port`` aims a LOCAL query at a specific
+    ComfyUI, closing the gap where these four verbs could only reach the
+    process-wide ``COMFY_LOCAL_URL`` (or the 127.0.0.1:8188 default). The URL
+    the request actually hits is asserted end-to-end through the *real*
+    ``resolve_target`` — no fixture pins it — so the precedence (explicit flag >
+    ``COMFY_LOCAL_URL`` > default), resolved independently for host and port, is
+    exercised, not mocked.
+    """
+
+    def test_host_and_port_reach_the_resolved_url(self, monkeypatch, capsys):
+        monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+        _patch_urlopen(monkeypatch, {"10.0.0.5:9999/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local", "--host", "10.0.0.5", "--port", "9999"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == "http://10.0.0.5:9999/models"
+
+    def test_no_flags_keeps_the_loopback_default(self, monkeypatch, capsys):
+        # Acceptance: no flags -> behavior identical to today.
+        monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+        _patch_urlopen(monkeypatch, {"127.0.0.1:8188/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == "http://127.0.0.1:8188/models"
+
+    def test_no_flags_still_honors_comfy_local_url(self, monkeypatch, capsys):
+        monkeypatch.setenv("COMFY_LOCAL_URL", "http://192.168.1.50:7777")
+        _patch_urlopen(monkeypatch, {"192.168.1.50:7777/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == "http://192.168.1.50:7777/models"
+
+    def test_flags_beat_comfy_local_url(self, monkeypatch, capsys):
+        monkeypatch.setenv("COMFY_LOCAL_URL", "http://192.168.1.50:7777")
+        _patch_urlopen(monkeypatch, {"10.0.0.5:9999/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local", "--host", "10.0.0.5", "--port", "9999"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == "http://10.0.0.5:9999/models"
+
+    def test_host_only_flag_keeps_the_env_port(self, monkeypatch, capsys):
+        # host and port resolve independently, so --host alone must not drop the
+        # env var's port back to the 8188 default.
+        monkeypatch.setenv("COMFY_LOCAL_URL", "http://192.168.1.50:7777")
+        _patch_urlopen(monkeypatch, {"10.0.0.5:7777/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local", "--host", "10.0.0.5"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == "http://10.0.0.5:7777/models"
+
+    def test_ipv6_host_is_bracketed_in_the_url(self, monkeypatch, capsys):
+        monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+        _patch_urlopen(monkeypatch, {"[::1]:8189/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local", "--host", "::1", "--port", "8189"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == "http://[::1]:8189/models"
+
+    def test_search_threads_host_port_to_resolve_target(self, monkeypatch, capsys):
+        # The other verbs route through the same helper; assert `search` in
+        # particular hands the pair to `resolve_target`.
+        from comfy_cli.target import Target
+
+        seen: dict[str, Any] = {}
+
+        def fake_resolve_target(**kwargs):
+            seen.update(kwargs)
+            return Target(
+                kind="local",
+                base_url="http://10.0.0.5:9999",
+                path_prefix="",
+                history_path="history",
+                host="10.0.0.5",
+                port=9999,
+            )
+
+        monkeypatch.setattr("comfy_cli.target.resolve_target", fake_resolve_target)
+        _patch_urlopen(monkeypatch, {"10.0.0.5:9999/models/loras": _LOCAL_FILES_BY_FOLDER["loras"]})
+        env = _run(
+            ["search", "--text", "ltx", "--type", "lora", "--where", "local", "--host", "10.0.0.5", "--port", "9999"],
+            capsys,
+        )
+        assert env["ok"] is True, env
+        assert seen["host"] == "10.0.0.5"
+        assert seen["port"] == 9999
+        assert seen["where"] == "local"
+
+
+class TestHostPortCloudRejection:
+    """``--host``/``--port`` name a LOCAL server, so pairing them with an
+    effective cloud target is a structured usage error rather than a silently
+    ignored flag — the comfy-mcp root cause this ticket fixes."""
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["list-folders", "--where", "cloud", "--host", "10.0.0.5"],
+            ["list-folders", "--where", "cloud", "--port", "9999"],
+            ["list-folder", "loras", "--where", "cloud", "--host", "10.0.0.5"],
+            ["search", "--where", "cloud", "--host", "10.0.0.5", "--port", "9999"],
+            ["show", "flux1-dev.safetensors", "--where", "cloud", "--port", "9999"],
+        ],
+    )
+    def test_host_or_port_with_cloud_where_flag_is_rejected(self, args, monkeypatch, capsys):
+        # urlopen must never be reached: the rejection fires before routing.
+        _patch_urlopen(monkeypatch, {})
+        env = _run(args, capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "host_flag_cloud"
+
+    def test_cloud_where_env_is_rejected_and_names_the_source(self, monkeypatch, capsys):
+        # COMFY_WHERE is how a top-level `comfy --where cloud` arrives, so the
+        # guard keys off the RESOLVED target, not the flag.
+        monkeypatch.setenv("COMFY_WHERE", "cloud")
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["search", "--host", "10.0.0.5"], capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "host_flag_cloud"
+        assert "COMFY_WHERE" in env["error"]["message"]
+        assert env["error"]["details"]["where_source"] == "env"
+
+
+class TestHostPortUsageErrors:
+    """A bad ``--host``/``--port`` is a usage error (exit 2), validated the same
+    way ``comfy upload`` validates its flags, before any request is made."""
+
+    @pytest.fixture
+    def runner(self):
+        return CliRunner()
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "evil/host",
+            "user@evil",
+            "host?x",
+            "host#x",
+            "host\rname",
+            "host\nname",
+            "",
+            "   ",
+            "a%0d%0aX-Injected:%201",
+            "host%2fpath",
+            "127.0.0.1:8188",
+            "localhost:8188",
+        ],
+    )
+    def test_invalid_host_is_a_usage_error(self, runner, bad):
+        # typer.BadParameter -> click UsageError -> exit code 2.
+        result = runner.invoke(search_cmd.app, ["list-folders", "--where", "local", "--host", bad])
+        assert result.exit_code == 2, result.output
+
+    @pytest.mark.parametrize("bad", ["0", "65536", "-1"])
+    def test_out_of_range_port_is_a_usage_error(self, runner, bad):
+        result = runner.invoke(search_cmd.app, ["list-folders", "--where", "local", "--port", bad])
+        assert result.exit_code == 2, result.output
+
+    @pytest.mark.parametrize("good", ["::1", "[::1]", "fe80::1"])
+    def test_ipv6_literal_host_is_accepted(self, good, monkeypatch, capsys):
+        monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+        bracketed = good if good.startswith("[") else f"[{good}]"
+        _patch_urlopen(monkeypatch, {f"{bracketed}:8188/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local", "--host", good], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == f"http://{bracketed}:8188/models"
