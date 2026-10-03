@@ -4,15 +4,17 @@ server has that differs from it ONLY in its precision or quantization tag.
 Gallery templates name a specific build of a model
 (``minimax_h3_video_vae_int8_convrot.safetensors``) and a server often carries
 the same weights in another precision (``minimax_h3_video_vae_fp16.safetensors``).
-Without help, every load of such a template fails ``validate`` and an agent
-spends a round finding the variant by hand.
+Without help, every load of such a template fails ``validate`` and the caller
+has to find the variant by hand.
 
-The match is deliberately strict: only a run of precision words that holds a
-real precision tag (:data:`_PRECISION_CORE`, or a GGUF quantization on a
-``.gguf``) and follows the model's name is ignored; a qualifier such as
-``scaled`` counts only inside such a run. The extension must agree, and exactly
-ONE option may match. Anything else (a different model, a
-different size, two candidate precisions) is not a match.
+The match is deliberately strict. Only the precision run that ENDS the stem is
+ignored: it must start with a real precision tag (:data:`_PRECISION_CORE`, or a
+GGUF quantization on a ``.gguf``), may continue with qualifiers such as
+``scaled``, and must follow the model's name. Everything else must agree
+exactly: the directory, the rest of the stem (case and separators included),
+and the extension. The two precision tags must differ, and exactly ONE option
+may match. Anything else (a different model, a different size, another
+folder, two candidate precisions) is not a match.
 """
 
 from __future__ import annotations
@@ -24,64 +26,65 @@ from typing import Any
 _PRECISION_CORE = frozenset({"int4", "int8", "fp4", "fp8", "fp16", "fp32", "bf16", "nvfp4", "mxfp4"})
 
 #: Words that only QUALIFY a precision (``fp8_e4m3fn_scaled``, ``int8_convrot``).
-#: They are dropped only inside a run that also holds a precision tag; alone
-#: they are part of the model's name (``realesrgan_x4_scaled``).
+#: They are dropped only after a precision tag in the stem's final run; alone
+#: (or before the tag) they are part of the model's name (``realesrgan_x4_scaled``).
 _PRECISION_MODIFIER = frozenset({"e4m3fn", "e4m3fnuz", "e5m2", "scaled", "convrot"})
 
-#: GGUF quantization tags (``Q4_K_M``, ``Q8_0``, ``IQ4_XS``, ``F16``). They span
-#: separators, so they are matched on the stem before it is split, and only on
-#: a ``.gguf`` file: elsewhere the same letters are not a quantization.
-_GGUF_QUANT = re.compile(
-    r"(?<![a-z0-9])(?:iq[1-4]_(?:xxs|xs|s|m|nl)|iq[1-4]|q[2-8]_k(?:_[sml])?|q[4-8]_[01]|f16|f32|bf16)(?![a-z0-9])"
+#: A GGUF quantization tag (``Q4_K_M``, ``Q8_0``, ``IQ4_XS``, ``F16``) at the
+#: end of a lowercased stem. It spans separators, so it is matched whole, and
+#: only on a ``.gguf`` file: elsewhere the same letters are not a quantization.
+_GGUF_TAIL = re.compile(
+    r"(?:^|[_\-.])(?P<tok>iq[1-4]_(?:xxs|xs|s|m|nl)|iq[1-4]|q[2-8]_k(?:_[sml])?|q[4-8]_[01]|f16|f32|bf16)$"
 )
-#: A matched quant becomes ONE token: this prefix, then the tag with its
-#: separators swapped out, so a leading tag that stays in the name keeps its
-#: identity (``q4_k_m_block`` is not ``q8_0_block``).
-_QUANT_MARK = "\x00"
+#: The last separator-delimited word of a stem.
+_WORD_TAIL = re.compile(r"(?:^|[_\-.])(?P<tok>[^_\-.]+)$")
 
 #: File extensions a model loader option carries.
 MODEL_FILE = re.compile(r"\.(safetensors|sft|ckpt|pt|pth|bin|gguf|onnx)$", re.IGNORECASE)
 
 
-def _basename(name: str) -> str:
-    return name.replace("\\", "/").rsplit("/", 1)[-1]
+def _parse(name: str) -> tuple[tuple[str, str, str], tuple[str, ...]] | None:
+    """``((directory, name, extension), precision tag)`` for a model filename.
 
-
-def precision_key(name: str) -> tuple[str, str] | None:
-    """``(stem without precision tags, extension)`` for a model filename, or
-    ``None`` when ``name`` is not a model file or nothing is left of its stem."""
-    base = _basename(name)
+    The tag is the stem's trailing precision run (lowercased, ``()`` when there
+    is none); ``name`` is the stem before it, verbatim. ``None`` when ``name``
+    is not a model file."""
+    path = name.replace("\\", "/")
+    directory, _, base = path.rpartition("/")
     m = MODEL_FILE.search(base)
-    if m is None:
+    if m is None or m.start() == 0:
         return None
-    stem, ext = base[: m.start()].lower(), m.group(1).lower()
-    if ext == "gguf":
-        stem = _GGUF_QUANT.sub(lambda q: _QUANT_MARK + re.sub(r"[_\-.]", "\x01", q.group()), stem)
-    tokens = [t for t in re.split(r"[_\-.]+", stem) if t]
-    keep = [True] * len(tokens)
-    i = 0
-    while i < len(tokens):
-        j = i
-        while j < len(tokens) and _is_precision_part(tokens[j]):
-            j += 1
-        # A run of precision words is a tag only if it holds a precision (not
-        # just modifiers) and follows the model's name (a leading run IS the
-        # name: ``nvfp4_block``).
-        if j > i and i > 0 and any(_is_precision(t) for t in tokens[i:j]):
-            keep[i:j] = [False] * (j - i)
-        i = max(j, i + 1)
-    stripped = "_".join(t for t, k in zip(tokens, keep, strict=True) if k)
-    if not stripped:
-        return None
-    return stripped, ext
+    stem, ext = base[: m.start()], m.group(1).lower()
+    low = stem.lower()
+    # Peel words off the end while they are precision parts, newest first.
+    run: list[tuple[int, str, bool]] = []  # (start incl. separator, token, is a precision tag)
+    end = len(low)
+    while end > 0:
+        q = _GGUF_TAIL.search(low, 0, end) if ext == "gguf" else None
+        if q is not None:
+            run.append((q.start(), q.group("tok").replace("-", "_").replace(".", "_"), True))
+            end = q.start()
+            continue
+        w = _WORD_TAIL.search(low, 0, end)
+        if w is None or w.group("tok") not in _PRECISION_CORE | _PRECISION_MODIFIER:
+            break
+        run.append((w.start(), w.group("tok"), w.group("tok") in _PRECISION_CORE))
+        end = w.start()
+    run.reverse()
+    # The tag starts at the run's first real precision; a qualifier before it
+    # belongs to the name. A run that is the whole stem IS the name (``fp16``).
+    first = next((i for i, (_, _, core) in enumerate(run) if core), None)
+    if first is None or run[first][0] == 0:
+        return (directory, stem, ext), ()
+    return (directory, stem[: run[first][0]], ext), tuple(t for _, t, _ in run[first:])
 
 
-def _is_precision(token: str) -> bool:
-    return token in _PRECISION_CORE or token.startswith(_QUANT_MARK)
-
-
-def _is_precision_part(token: str) -> bool:
-    return _is_precision(token) or token in _PRECISION_MODIFIER
+def precision_key(name: str) -> tuple[str, str, str] | None:
+    """``(directory, stem without its trailing precision tag, extension)`` for
+    a model filename, or ``None`` when ``name`` is not a model file. Two files
+    with the same key and different tags are the same model in two precisions."""
+    parsed = _parse(name)
+    return parsed[0] if parsed else None
 
 
 def precision_sibling(value: Any, options: list[Any]) -> str | None:
@@ -89,17 +92,24 @@ def precision_sibling(value: Any, options: list[Any]) -> str | None:
 
     ``None`` too when ``value`` is already an option, is not a model filename,
     or two or more options would match (which precision to pick is then a
-    choice, not a correction).
+    choice, not a correction). An option must sit in the same directory and
+    carry a DIFFERENT precision tag: a name that differs only in case or
+    separators is another file, not another precision.
     """
     if not isinstance(value, str):
         return None
     strs = [o for o in options if isinstance(o, str)]
     if value in strs:
         return None
-    key = precision_key(value)
-    if key is None:
+    parsed = _parse(value)
+    if parsed is None:
         return None
-    hits = {o for o in strs if precision_key(o) == key}
+    key, tag = parsed
+    hits = set()
+    for o in strs:
+        p = _parse(o)
+        if p is not None and p[0] == key and p[1] != tag:
+            hits.add(o)
     return hits.pop() if len(hits) == 1 else None
 
 

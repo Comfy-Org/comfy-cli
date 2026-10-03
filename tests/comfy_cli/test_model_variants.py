@@ -1,9 +1,9 @@
 """Template model files the server lacks, and two validate false positives.
 
-Production (2 days, cloud agent): 495 turns failed ``validate`` because the
-MiniMax H3 templates name ``minimax_h3_video_vae_int8_convrot.safetensors``
-while the server carries ``minimax_h3_video_vae_fp16.safetensors``. The agent
-then spent ~2.5 calls per turn swapping the variant in by hand.
+A template can name a model build the server does not carry: the MiniMax H3
+templates name ``minimax_h3_video_vae_int8_convrot.safetensors`` while a server
+may carry ``minimax_h3_video_vae_fp16.safetensors``. Without help, ``validate``
+fails on the template and the caller must find the variant by hand.
 
 * ``templates fetch`` with an offline catalog swaps a missing file for its ONE
   same-model, other-precision sibling and reports the swap; a file with no such
@@ -88,13 +88,13 @@ class TestPrecisionSibling:
         assert precision_sibling(value, VAES) is None
 
     def test_key_drops_only_whole_precision_tokens(self):
-        assert precision_key("wan2.2_t2v_14B_fp8_e4m3fn_scaled.safetensors") == ("wan2_2_t2v_14b", "safetensors")
-        assert precision_key("pruned_int8.safetensors") == ("pruned", "safetensors")
+        assert precision_key("wan2.2_t2v_14B_fp8_e4m3fn_scaled.safetensors") == ("", "wan2.2_t2v_14B", "safetensors")
+        assert precision_key("pruned_int8.safetensors") == ("", "pruned", "safetensors")
         assert precision_key("readme.txt") is None
 
 
 class TestPrecisionTokensAreTags:
-    """Christian's review of #966: a word that only MODIFIES a precision
+    """A word that only MODIFIES a precision
     ("scaled", "convrot", an fp8 format) is not a precision tag on its own,
     and a tag that leads the name is the model's name, not its precision."""
 
@@ -111,9 +111,9 @@ class TestPrecisionTokensAreTags:
         assert precision_sibling(value, options) is None
 
     def test_modifiers_still_drop_beside_a_precision(self):
-        assert precision_key("wan_fp8_e4m3fn_scaled.safetensors") == ("wan", "safetensors")
-        assert precision_key("vae_int8_convrot.safetensors") == ("vae", "safetensors")
-        assert precision_key("realesrgan_x4_scaled.pth") == ("realesrgan_x4_scaled", "pth")
+        assert precision_key("wan_fp8_e4m3fn_scaled.safetensors") == ("", "wan", "safetensors")
+        assert precision_key("vae_int8_convrot.safetensors") == ("", "vae", "safetensors")
+        assert precision_key("realesrgan_x4_scaled.pth") == ("", "realesrgan_x4_scaled", "pth")
 
 
 class TestGgufQuantTags:
@@ -126,7 +126,7 @@ class TestGgufQuantTags:
         ["m-Q4_0.gguf", "m-q4_1.gguf", "m-Q5_K_M.gguf", "m-Q6_K.gguf", "m-Q3_K_L.gguf", "m-IQ4_XS.gguf", "m-F16.gguf"],
     )
     def test_quant_tags_drop_on_a_gguf(self, name):
-        assert precision_key(name) == ("m", "gguf")
+        assert precision_key(name) == ("", "m", "gguf")
 
     def test_a_leading_quant_tag_is_the_name_and_keeps_its_identity(self):
         assert precision_key("Q4_K_M_block.gguf") != precision_key("Q8_0_block.gguf")
@@ -135,6 +135,68 @@ class TestGgufQuantTags:
     def test_a_quant_tag_is_not_a_precision_outside_a_gguf(self):
         assert precision_sibling("m-Q8_0.safetensors", ["m.safetensors"]) is None
         assert precision_sibling("m-Q8_0.gguf", ["m-fp16.safetensors"]) is None
+
+
+class TestSiblingIsTheSameFileInAnotherPrecision:
+    """A sibling sits in the same folder, differs only in the stem's TRAILING
+    precision run, and really differs in precision."""
+
+    @pytest.mark.parametrize(
+        ("value", "options"),
+        [
+            # another folder is another model, whatever the stem says
+            ("SDXL/lightning_fp16.safetensors", ["SD15/lightning.safetensors"]),
+            ("wan/lightx2v_lora_fp8.safetensors", ["hunyuan/lightx2v_lora.safetensors"]),
+            ("SDXL/lightning_fp16.safetensors", ["sdxl/lightning.safetensors"]),
+            ("lightning_fp16.safetensors", ["SDXL/lightning.safetensors"]),
+            ("SDXL/lightning_fp16.safetensors", ["lightning.safetensors"]),
+            # a precision word inside the name is not the build's precision
+            ("flux_fp8_e4m3fn_lora.safetensors", ["flux_lora.safetensors"]),
+            ("model_fp16_lora_fp8.safetensors", ["model_lora.safetensors"]),
+            ("realesrgan_x4_scaled_fp16.pth", ["realesrgan_x4.pth"]),
+            # a different spelling is a different file, not another precision
+            ("flux1-dev.safetensors", ["flux1_dev.safetensors"]),
+            ("sd_xl_base_1.0.safetensors", ["sd_xl_base_1_0.safetensors"]),
+            ("Flux1-Dev.safetensors", ["flux1-dev.safetensors"]),
+            ("flux1-dev-fp8.safetensors", ["flux1_dev_fp16.safetensors"]),
+            ("flux1-dev-fp8.safetensors", ["flux1-dev_fp8.safetensors"]),
+            ("m-Q4_K_M.gguf", ["m-q4_k_m.gguf"]),
+        ],
+    )
+    def test_not_a_sibling(self, value, options):
+        assert precision_sibling(value, options) is None
+
+    @pytest.mark.parametrize(
+        ("value", "options", "expected"),
+        [
+            (
+                "SDXL/lightning_fp16.safetensors",
+                ["SD15/lightning.safetensors", "SDXL/lightning.safetensors"],
+                "SDXL/lightning.safetensors",
+            ),
+            ("SDXL\\lightning_fp16.safetensors", ["SDXL/lightning.safetensors"], "SDXL/lightning.safetensors"),
+            (
+                "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+                ["umt5_xxl_fp16.safetensors"],
+                "umt5_xxl_fp16.safetensors",
+            ),
+            (
+                "umt5_xxl_fp16.safetensors",
+                ["umt5_xxl_fp8_e4m3fn_scaled.safetensors"],
+                "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+            ),
+            ("flux1-dev-fp8.safetensors", ["flux1-dev.safetensors"], "flux1-dev.safetensors"),
+            ("flux1-dev.safetensors", ["flux1-dev-fp8.safetensors"], "flux1-dev-fp8.safetensors"),
+            ("flux1-dev-Q4_K_M.gguf", ["flux1-dev-Q8_0.gguf"], "flux1-dev-Q8_0.gguf"),
+            ("wan2.1-t2v-14b-Q8_0.gguf", ["wan2.1-t2v-14b-Q4_K_M.gguf"], "wan2.1-t2v-14b-Q4_K_M.gguf"),
+            ("realesrgan_x4_scaled_fp16.pth", ["realesrgan_x4_scaled.pth"], "realesrgan_x4_scaled.pth"),
+        ],
+    )
+    def test_sibling(self, value, options, expected):
+        assert precision_sibling(value, options) == expected
+
+    def test_directory_is_part_of_the_key(self):
+        assert precision_key("SDXL\\lightning_fp16.safetensors") == ("SDXL", "lightning", "safetensors")
 
 
 def _template() -> dict[str, Any]:
