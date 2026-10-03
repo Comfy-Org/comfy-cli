@@ -79,6 +79,23 @@ history.
   install already replaced a shipped skill, a plain `comfy skills install`
   writes the shipped Claude Code and Cursor files back; a `Comfy` block such
   an install added to `AGENTS.md` stays until removed by hand.
+- `workflow print`, `slots`, `validate` and the edit commands no longer hang on
+  a subgraph whose definition is named after the node class it wraps (gallery
+  templates `video_wanmove_480p`, `video_wanmove_480p_hallucination` and
+  `templates_rob_wan_ati_motion_control` wrap `WanMoveTrackToVideo` in a
+  subgraph of that name). The definition-name fallback resolved the interior
+  node to its own definition, and the nested-promotion walk recursed into it,
+  fanning out to its depth cap; it now treats that node as the class it is, and
+  the walk stops at any definition already on its stack.
+- `validate` and `set-widget` accept a number for a float COMBO option it
+  equals: `1` for `scale_factor`'s `1.0`. A frontend-saved workflow writes
+  `1.0` as `1`, and the server compares numerically, so this was refused as
+  `unknown_enum_value` although it runs.
+- `set-widget` (and `apply` set_widget ops) write an aspect-ratio option whose
+  `W:H` ratio the value names when exactly one option has it: `'16:9 (Landscape)'`
+  or `'16:9'` becomes `'16:9 (Widescreen)'`, with a `normalized_value` warning.
+  The ratio is the value and the parenthetical a label; any other value keeps
+  the `unknown_enum_value` refusal and its `best_match` hint.
 
 ## [1.22.0] - 2026-09-30
 
