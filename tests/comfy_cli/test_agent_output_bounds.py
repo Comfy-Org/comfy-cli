@@ -96,6 +96,16 @@ class TestValidateEnumErrors:
         assert finding["option_count"] == len(FILES)
         assert finding["did_you_mean"][0] == "model_007_v1.safetensors"
 
+    def test_the_edit_finding_names_the_options_its_omitted_count_excludes(self):
+        # A value close to nothing still gets the first options as
+        # `suggestions`; the finding must carry them, or `options_omitted`
+        # counts options it never named.
+        port = Graph.from_object_info(_object_info()).node("CheckpointLoaderSimple").inputs[0]
+        (finding,) = port.validate_catalog("zzzz-nothing-like-it.bin")
+        assert "valid_options" not in finding
+        assert finding["suggestions"], "the omitted count must sit beside the options it excludes"
+        assert len(finding["suggestions"]) + finding["options_omitted"] == finding["option_count"]
+
 
 @pytest.fixture(autouse=True)
 def _renderer():

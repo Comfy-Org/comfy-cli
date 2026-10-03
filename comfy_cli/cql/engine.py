@@ -599,7 +599,7 @@ class Port:
                 }
                 if best is not None:
                     warning["best_match"] = best
-                for key in ("valid_options", "options_omitted"):
+                for key in ("suggestions", "valid_options", "options_omitted"):
                     if key in listing:
                         warning[key] = listing[key]
                 if suggestions:
