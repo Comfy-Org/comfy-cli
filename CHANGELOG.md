@@ -17,6 +17,16 @@ history.
 
 ### Fixed
 
+- `templates fetch` checks the template's model files when an offline catalog
+  is set (`--input` or `COMFY_OBJECT_INFO_FILE`). A file the server lacks is
+  replaced by the one installed file that is the same model in another
+  precision (`*_int8_convrot` → `*_fp16`) and reported under
+  `data.model_substitutions`; a file with no such variant is left as is and
+  reported under `data.unavailable_models` with its closest options.
+- `validate` names that same-model variant on an `unknown_enum_value` model
+  finding. A `CustomCombo` choice (options the frontend defines) is no longer
+  `no_options_available`, and a BOOLEAN saved as the string `"True"` (which
+  the server reads as true) is no longer a shape error.
 - A cloud request the account's plan does not allow (free generations used up,
   subscription required, a partner node or model that needs a paid plan) is now
   `cloud_payment_required`, carrying the server's message in `message` and its
