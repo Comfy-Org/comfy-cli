@@ -668,7 +668,9 @@ def execute(
         if renderer.is_pretty():
             pprint(
                 f"[bold red]Error: WebSocket timed out after {timeout}s waiting for server response.[/bold red]\n"
-                "[yellow]For long-running workflows, increase the timeout: comfy run --workflow <file> --timeout 300[/yellow]"
+                "[yellow]For long-running workflows, increase the timeout: comfy run --workflow <file> --timeout 300[/yellow]\n"
+                "[yellow]If the machine slept mid-run, the job may still be running — check "
+                "`comfy jobs status <id>`. Keep long local batches awake with `caffeinate`.[/yellow]"
             )
         details = {"timeout": timeout}
         prompt_id = _submitted_prompt_id(execution)
@@ -677,7 +679,7 @@ def execute(
         renderer.error(
             code="ws_timeout",
             message=f"WebSocket timed out after {timeout}s waiting for server response.",
-            hint="re-run with a larger --timeout (e.g. --timeout 300)",
+            hint="re-run with a larger --timeout (e.g. --timeout 300); if the machine slept, check `comfy jobs status <id>`",
             details=details,
         )
         raise typer.Exit(code=1)
