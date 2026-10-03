@@ -18,6 +18,8 @@ From two days of cloud agent traffic (set_widget / apply_ops / connect
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 from comfy_cli import workflow_ops
@@ -135,6 +137,32 @@ class TestTemplateIds:
         assert op["to_node"] == 9
 
 
+class TestBindingNames:
+    """print_workflow names every node (``load_image``); set_widget already
+    accepts that name as the node part of an address. connect, delete_node and
+    set_node_field must too, or the same address works for one op and fails
+    "not found" for the next."""
+
+    def test_connect_by_binding_names(self, graph):
+        wf, op = workflow_ops.connect(_canvas(), graph, "load_image", "IMAGE", "save_image", "images")
+        assert op["from_node"].endswith(":root:node:16") and op["to_node"].endswith(":root:node:9")
+        assert wf["nodes"][1]["inputs"][0]["link"] == op["link_id"]
+
+    def test_set_node_field_by_binding_name(self, graph):
+        wf, op = workflow_ops.set_node_field(_canvas(), "load_image", "title", "Reference")
+        assert op["node_id"].endswith(":root:node:16")
+        assert wf["nodes"][0]["title"] == "Reference"
+
+    def test_delete_node_by_binding_name(self, graph):
+        wf, op = workflow_ops.delete_node(_canvas(), graph, "save_image")
+        assert op["node_id"].endswith(":root:node:9")
+        assert [n["id"][-2:] for n in wf["nodes"]] == ["16"]
+
+    def test_an_unknown_name_still_lists_the_nodes(self, graph):
+        with pytest.raises(ValueError, match="Nodes in this workflow"):
+            workflow_ops.connect(_canvas(), graph, "no_such_node", "IMAGE", "save_image", "images")
+
+
 def _talking(graph, speech: str) -> tuple[dict, int, int]:
     wf = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0, "version": 0.4}
     wf, op = workflow_ops.add_node(wf, graph, "LoadAudio")
@@ -172,6 +200,28 @@ class TestDynamicComboLinkInput:
         wf, op = workflow_ops.add_node(wf, graph, "LoadImage")
         with pytest.raises(ValueError, match="type mismatch"):
             workflow_ops.connect(wf, graph, op["node_id"], "IMAGE", talk, "speech.audio")
+
+
+def test_concurrent_connects_into_one_dynamic_link_input_converge(graph):
+    """Christian's repro on #967: two actors each connect a different AUDIO
+    source into ``speech.audio`` before either replica has grown the socket.
+    The sub-input is ONE register keyed by its name (like a promoted subgraph
+    input, which comfy-multi-player keys the same way), so both apply orders
+    must end with the same occupant and no collision-renamed phantom slot."""
+    base, audio_a, talk = _talking(graph, "audio")
+    base, op = workflow_ops.add_node(base, graph, "LoadAudio")
+    audio_b = op["node_id"]
+    _, op_a = workflow_ops.connect(copy.deepcopy(base), graph, audio_a, "AUDIO", talk, "speech.audio", actor="actor-a")
+    _, op_b = workflow_ops.connect(copy.deepcopy(base), graph, audio_b, "AUDIO", talk, "speech.audio", actor="actor-b")
+
+    ab = workflow_ops.apply_op(workflow_ops.apply_op(copy.deepcopy(base), op_a, graph), op_b, graph)
+    ba = workflow_ops.apply_op(workflow_ops.apply_op(copy.deepcopy(base), op_b, graph), op_a, graph)
+    assert workflow_ops.canonical(ab) == workflow_ops.canonical(ba)
+    for wf in (ab, ba):
+        node = next(n for n in wf["nodes"] if n["id"] == talk)
+        speech = [i["name"] for i in node["inputs"] if str(i.get("name", "")).startswith("speech")]
+        assert speech == ["speech.audio"], speech
+        assert len(wf["links"]) == 1
 
 
 class TestStringWidgetValues:

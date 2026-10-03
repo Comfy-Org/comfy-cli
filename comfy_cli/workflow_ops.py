@@ -779,17 +779,43 @@ def _inserted_node_id(workflow: dict, node_id: Any) -> str | None:
     return matches[0] if len(matches) == 1 else None
 
 
-def _template_id(workflow: dict, node_id: Any) -> Any:
-    """``node_id`` as given when a node carries it, else the one inserted node
-    it is the template id of (:func:`_inserted_node_id`), else ``node_id``.
+# A numeric node id or interior path (``57``, ``57/27``) is never a
+# print_workflow binding name, so it skips the render a binding lookup costs.
+_NUMERIC_ADDRESS_RE = re.compile(r"-?\d+(?:/-?\d+)*")
 
-    set_widget already falls back this way; connect, delete_node and
+
+def _template_ids(workflow: dict, graph, *node_ids: Any) -> tuple:
+    """Each of ``node_ids`` as given when a node carries it, else the one
+    inserted node it is the template id of (:func:`_inserted_node_id`), else
+    the node its print_workflow binding name stands for
+    (:func:`_binding_address`), else as given.
+
+    set_widget already falls back to both; connect, delete_node and
     set_node_field did not, so ``24.IMAGE`` failed "node 24 not found" on a
-    canvas whose node list showed ``insert:…:root:node:24``."""
-    if _find(workflow, node_id) is not None:
-        return node_id
-    inserted = _inserted_node_id(workflow, node_id)
-    return node_id if inserted is None else inserted
+    canvas whose node list showed ``insert:…:root:node:24``, and a binding
+    name worked for set_widget but not for the other three. The literal ids
+    are checked with ONE pass over the node list for every endpoint."""
+    present = set()
+    for n in workflow.get("nodes") or []:
+        if isinstance(n, dict) and isinstance(n.get("id"), (int, str)) and not isinstance(n.get("id"), bool):
+            present.add(n["id"])
+    out = []
+    for node_id in node_ids:
+        if isinstance(node_id, (int, str)) and not isinstance(node_id, bool) and node_id in present:
+            out.append(node_id)
+            continue
+        resolved = _inserted_node_id(workflow, node_id)
+        if resolved is None and isinstance(node_id, str):
+            s = node_id.strip()
+            if s and not _NUMERIC_ADDRESS_RE.fullmatch(s) and not s.startswith("insert:"):
+                resolved = _binding_address(workflow, graph, node_id)
+        out.append(node_id if resolved is None else resolved)
+    return tuple(out)
+
+
+def _template_id(workflow: dict, node_id: Any, graph=None) -> Any:
+    """:func:`_template_ids` for one node."""
+    return _template_ids(workflow, graph, node_id)[0]
 
 
 def _binding_address(workflow: dict, graph, node_id: Any) -> Any:
@@ -1381,7 +1407,7 @@ def connect(
 ) -> tuple[dict, dict]:
     """Wire two nodes, enriching a not-found endpoint error with the list of
     node ids that exist (see :func:`_enrich_resolution_error`)."""
-    from_node, to_node = _template_id(workflow, from_node), _template_id(workflow, to_node)
+    from_node, to_node = _template_ids(workflow, graph, from_node, to_node)
     try:
         return _connect_impl(
             workflow, graph, from_node, from_slot, to_node, to_slot, actor=actor, base_version=base_version
@@ -1694,7 +1720,7 @@ def delete_node(
 ) -> tuple[dict, dict]:
     """Delete a node, enriching a not-found error with the list of node ids that
     exist (see :func:`_enrich_resolution_error`)."""
-    node_id = _template_id(workflow, node_id)
+    node_id = _template_id(workflow, node_id, graph)
     try:
         return _delete_node_impl(workflow, graph, node_id, actor=actor, base_version=base_version)
     except ValueError as e:
@@ -3336,7 +3362,14 @@ def _resolve_dynamic_link_input(
         )
     ins = node.get("inputs") or []
     idx = next((k for k, i in enumerate(ins) if i.get("name") == slot), None)
-    return (idx, None) if idx is not None else (None, {"name": slot, "type": hit.type})
+    # ONE register keyed by the sub-input's full name, not an autogrow family:
+    # the socket either exists under exactly this name or not at all, so two
+    # concurrent connects that both grow it must contend for it (LWW) rather
+    # than collision-rename the loser into a phantom ``speech.speech0``. The
+    # ``promoted`` marker is the wire shape both appliers already key that way
+    # (comfy-cli ``_write_target``; comfy-multi-player ``writeTarget`` /
+    # ``claimPromotedInput``), so the replicas converge with no doc-host change.
+    return (idx, None) if idx is not None else (None, {"name": slot, "type": hit.type, "promoted": True})
 
 
 def _linkable_widget_names(node: dict, graph) -> list[str]:
