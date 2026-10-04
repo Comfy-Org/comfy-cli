@@ -293,6 +293,38 @@ class TestWatchDoesNotStealTheSocket:
         assert env["error"]["code"] == "client_id_rejected"
         assert env["error"]["details"]["reason"] == "borrowed"
 
+    def test_watch_polls_borrowed_run_without_opening_a_socket(self, monkeypatch):
+        snapshots = iter(
+            [
+                {"prompt_id": "p", "status": "running", "outputs": []},
+                {"prompt_id": "p", "status": "completed", "outputs": ["result.png"]},
+            ]
+        )
+        monkeypatch.setattr(jobs, "_server_or_error", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(jobs, "_snapshot", lambda *_: next(snapshots))
+        monkeypatch.setattr(jobs, "_history_completed_nodes", lambda *_: {"1"})
+        monkeypatch.setattr(jobs, "_WITHHELD_WATCH_POLL_S", 0)
+        monkeypatch.setattr(jobs_state, "read", lambda _: None)
+        monkeypatch.setattr(
+            jobs,
+            "_submitted_extra_data",
+            lambda *_: {"client_id": BORROWED, jobs_state.BORROWED_CLIENT_ID_KEY: True},
+        )
+
+        def fail_if_constructed(*_args, **_kwargs):
+            raise AssertionError("borrowed watch constructed a WebSocket")
+
+        monkeypatch.setattr(jobs, "WebSocket", fail_if_constructed)
+        result = CliRunner().invoke(jobs.app, ["watch", "p", "--where", "local"])
+
+        assert result.exit_code == 0, result.output
+        env = _envelope(result.output)
+        assert env["data"]["status"] == "completed"
+        assert env["data"]["outputs"] == ["result.png"]
+        assert env["data"]["completed_nodes"] == ["1"]
+        assert env["data"]["client_id"] is None
+        assert env["data"]["attached"] is False
+
     def test_an_unmarked_server_record_still_resolves(self, monkeypatch):
         monkeypatch.setattr(jobs_state, "read", lambda _: None)
         monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: {"client_id": "cli-minted"})

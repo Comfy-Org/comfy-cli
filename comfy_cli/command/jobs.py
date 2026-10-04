@@ -2278,25 +2278,23 @@ def watch_cmd(
         )
         raise typer.Exit(code=1)
 
-    ws = WebSocket()
-    ws_client_id = attached_client_id or str(uuid.uuid4())
-    try:
-        ws.connect(f"ws://{h}:{p}/ws?clientId={urllib.parse.quote(ws_client_id, safe='')}")
-    except (WebSocketException, ConnectionError, OSError) as e:
-        renderer.error(
-            code="ws_disconnected",
-            message=f"Could not open WebSocket: {e}",
-            hint="check the server is reachable; try `comfy jobs status` instead",
-        )
-        raise typer.Exit(code=1)
-
     token = cancellation.get_token()
-    token.on_cancel(lambda: _safe_close_ws(ws))
-
-    # A withheld watch holds a fresh-id socket the server will never address, so
-    # /history is the only thing that can move it. Reconcile on the poll cadence
-    # rather than sitting out the full silence budget first.
-    ws.settimeout(min(timeout, _WITHHELD_WATCH_POLL_S) if withheld else timeout)
+    ws = None
+    ws_client_id = None
+    if not withheld:
+        ws = WebSocket()
+        ws_client_id = attached_client_id or str(uuid.uuid4())
+        try:
+            ws.connect(f"ws://{h}:{p}/ws?clientId={urllib.parse.quote(ws_client_id, safe='')}")
+        except (WebSocketException, ConnectionError, OSError) as e:
+            renderer.error(
+                code="ws_disconnected",
+                message=f"Could not open WebSocket: {e}",
+                hint="check the server is reachable; try `comfy jobs status` instead",
+            )
+            raise typer.Exit(code=1)
+        token.on_cancel(lambda: _safe_close_ws(ws))
+        ws.settimeout(timeout)
 
     state = _WatchState(renderer=renderer, prompt_id=prompt_id, host=h, port=p)
     saw_any_event = False
@@ -2319,9 +2317,31 @@ def watch_cmd(
 
     try:
         while True:
-            try:
-                raw = ws.recv()
-            except WebSocketTimeoutException:
+            raw = None
+            poll_now = withheld
+            if withheld:
+                if token.wait(_WITHHELD_WATCH_POLL_S):
+                    state.end_reason = "cancelled"
+                    break
+            else:
+                try:
+                    raw = ws.recv()
+                except WebSocketTimeoutException:
+                    poll_now = True
+                except (WebSocketException, ConnectionError, OSError) as e:
+                    # Cancellation closes the socket out from under recv(). Check
+                    # the token before classifying as "server disconnected".
+                    if token.is_set():
+                        state.end_reason = "cancelled"
+                        break
+                    renderer.error(
+                        code="ws_disconnected",
+                        message=f"Lost connection while watching {prompt_id}: {e}",
+                        hint="re-run `comfy jobs status` to check final state",
+                    )
+                    raise typer.Exit(code=1) from e
+
+            if poll_now:
                 # If the job moved to completed between recvs, exit cleanly.
                 snap = _snapshot(h, p, prompt_id)
                 if snap and snap["status"] in {"completed", "error", "cancelled"}:
@@ -2348,18 +2368,6 @@ def watch_cmd(
                 else:
                     missing_deadline = None
                 continue
-            except (WebSocketException, ConnectionError, OSError) as e:
-                # Cancellation closes the socket out from under recv(). Check
-                # the token before classifying as "server disconnected".
-                if token.is_set():
-                    state.end_reason = "cancelled"
-                    break
-                renderer.error(
-                    code="ws_disconnected",
-                    message=f"Lost connection while watching {prompt_id}: {e}",
-                    hint="re-run `comfy jobs status` to check final state",
-                )
-                raise typer.Exit(code=1) from e
             if not isinstance(raw, str):
                 continue
             try:
@@ -2380,7 +2388,8 @@ def watch_cmd(
                 if state.terminal:
                     break
     finally:
-        _safe_close_ws(ws)
+        if ws is not None:
+            _safe_close_ws(ws)
 
     elapsed = time.time() - start
     final_status = state.end_reason or ("completed" if state.completed_nodes else "unknown")
