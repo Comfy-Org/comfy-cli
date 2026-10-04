@@ -365,8 +365,8 @@ class TestPhrasedQueries:
         assert knowledge._stem("3d") == "3d"
         assert knowledge._stem("musical") != knowledge._stem("music")
         assert knowledge._tokens("generating an image") == knowledge._tokens("generate an image")
-        assert knowledge._query_tokens("lip sync") >= {"lip", "sync", "lipsync"}
-        assert "lipsync" not in knowledge._query_tokens("lip or sync")
+        assert set(knowledge._query_counts("lip sync")) >= {"lip", "sync", "lipsync"}
+        assert "lipsync" not in knowledge._query_counts("lip or sync")
 
 
 class TestScalarGuards:
@@ -1136,7 +1136,7 @@ class TestRepeatedWordKeys:
 
     def test_pair_joins_are_not_counted_twice(self):
         assert knowledge._query_counts("lip sync")["lipsync"] == 1
-        assert knowledge._query_tokens("lip sync") >= {"lip", "sync", "lipsync"}
+        assert set(knowledge._query_counts("lip sync")) >= {"lip", "sync", "lipsync"}
 
     @pytest.mark.parametrize(
         ("query", "expected"),
@@ -1146,12 +1146,15 @@ class TestRepeatedWordKeys:
             ("a video of a cat", None),
             ("replace a person in a video with a character", None),
             ("swap the person in this video for my character", None),
+            ("replace the person in this video with a character from another video", None),
+            ("make a video of a video game character", None),
             # The keys that are actually worded still resolve.
             ("video edit", "video-edit"),
             ("editing this video", "video-edit"),
             ("video to video", "video-edit"),
             ("extend this video", "video-edit"),
             ("upscale this video", "upscale"),
+            ("upscale this video to a 4k video", "upscale"),
             ("image to video", "image-to-video"),
             ("text to video", "text-to-video"),
         ],

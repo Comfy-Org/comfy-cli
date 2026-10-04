@@ -121,7 +121,7 @@ class Bundle:
     # so an intent phrase reaches the row its own wording names. A multiset, not a set,
     # so a key that repeats a word is not fully matched by one of it. See
     # :func:`_resolve_tokens`.
-    capability_tokens: tuple[tuple[Counter[str], str, str], ...] = ()
+    capability_tokens: tuple[tuple[tuple[tuple[str, int], ...], str, str], ...] = ()
     capability_context: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
@@ -253,11 +253,6 @@ def _query_counts(s: str) -> Counter[str]:
     counts = _counts(s)
     counts.update(frozenset(_stem(a + b) for a, b in zip(words, words[1:])) - set(counts))
     return counts
-
-
-def _query_tokens(s: str) -> frozenset[str]:
-    """:func:`_query_counts` without the counts, for callers that only test membership."""
-    return frozenset(_query_counts(s))
 
 
 def _normalized_map(keys: dict[str, str], *, ids: Collection[str] = ()) -> dict[str, str]:
@@ -598,13 +593,13 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
                 capability_keys.setdefault(alias, cid)
 
     capability_tokens = tuple(
-        (counts, _normalize(key), cid)
+        (tuple(sorted(counts.items())), _normalize(key), cid)
         for key, cid in capability_keys.items()
         if (counts := _counts(key)) and not _short_key(key)
     )
     key_words: dict[str, set[str]] = defaultdict(set)
-    for counts, _, cid in capability_tokens:
-        key_words[cid] |= set(counts)
+    for count_items, _, cid in capability_tokens:
+        key_words[cid] |= {word for word, _ in count_items}
     capability_context = {
         cid: _tokens(_CONTEXT_END.split(desc, maxsplit=1)[0]) - key_words[cid]
         for cid, cap in capabilities.items()
@@ -677,10 +672,9 @@ def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
     out literally in the query wins ("text to image" over ``text-in-image``),
     then the one whose description the query echoes.
 
-    Words are counted, not set-deduplicated, on both sides: a key written
-    "Video to Video" is two words and one "video" leaves it half matched, so a
-    generic noun a key happens to repeat cannot make that capability a
-    catch-all for every query carrying the noun once.
+    Repeated words in a key count only when that key is literally present in the
+    query. Otherwise each query word contributes at most once, so a phrase that
+    happens to repeat a generic noun cannot satisfy a repeated-word alias.
 
     Ambiguity resolves to nothing rather than to a guess, matching
     :func:`_normalized_map`: a tie between two capabilities is not an answer.
@@ -691,15 +685,21 @@ def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
     words = frozenset(counts)
     literal = _normalize(query)
     scored: dict[str, tuple[float, int, int, int]] = {}
-    for key_counts, key_norm, cid in bundle.capability_tokens:
-        hit = sum((key_counts & counts).values())
+    for count_items, key_norm, cid in bundle.capability_tokens:
+        key_counts = Counter(dict(count_items))
+        literal_hit = key_norm in literal
+        query_counts = counts if literal_hit else Counter(words)
+        overlap = key_counts & query_counts
+        hit = sum(overlap.values())
         if not hit:
             continue
         context = len(bundle.capability_context.get(cid, frozenset()) & words)
         missing = sum(key_counts.values()) - hit
         if missing and context <= missing:
             continue
-        score = (hit / (hit + missing), hit, len(key_norm) if key_norm in literal else 0, context)
+        # Distinct overlap breaks ties: repeating one generic word must not tie a
+        # specialist key that matched two different words.
+        score = (hit / (hit + missing), len(overlap), len(key_norm) if literal_hit else 0, context)
         if score > scored.get(cid, (0.0, 0, 0, 0)):
             scored[cid] = score
     if not scored:
