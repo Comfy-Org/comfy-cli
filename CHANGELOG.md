@@ -41,8 +41,10 @@ history.
   canvas light up. Local only, and refused with `client_id_rejected` alongside
   `--wait` or `--where cloud`: ComfyUI evicts whatever socket already holds an
   incoming clientId, so this invocation must not attach as the borrowed one.
-  `comfy jobs watch` declines to re-attach to such a run for the same reason
-  and polls status instead.
+  Such a run is marked both in its job state file and in the submitted
+  `extra_data`, so `comfy jobs watch` declines to re-attach to it — from any
+  machine, including one that cannot see the submitter's state file — and
+  polls status instead.
 
 ### Changed
 

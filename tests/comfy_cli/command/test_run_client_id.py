@@ -22,6 +22,7 @@ import typer
 
 from comfy_cli import jobs_state
 from comfy_cli.cmdline import run as run_command
+from comfy_cli.command import jobs
 from comfy_cli.command.jobs import _client_id_withheld, _resolve_watch_client_id
 from comfy_cli.command.run import WorkflowExecution, execute
 from comfy_cli.output import Renderer, set_renderer
@@ -160,7 +161,37 @@ class TestTelemetryDoesNotLeakTheSocketID:
         assert "client_id" in props, "the key must survive so flag usage stays measurable"
 
 
+class TestBorrowedMarkerRidesThePrompt:
+    # The state file is NOT a shared channel: the in-app agent runs the CLI
+    # under a sandboxed HOME it deletes at turn end, so the user's own
+    # `jobs watch` can never see the state file of the very runs that borrow an
+    # id. The marker has to travel on the prompt or the guard is inert for
+    # every run it exists to protect.
+    @pytest.mark.parametrize("borrowed", [True, False])
+    def test_marker_is_submitted_with_the_prompt(self, simple_workflow, borrowed):
+        ex = WorkflowExecution(
+            simple_workflow,
+            "127.0.0.1",
+            8188,
+            False,
+            None,
+            False,
+            30,
+            client_id=BORROWED if borrowed else None,
+        )
+        with patch("comfy_cli.command.run.execution.no_redirect_urlopen") as mock_open:
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
+            ex.queue()
+        extra = json.loads(mock_open.call_args[0][0].data.decode())["extra_data"]
+        assert extra.get(jobs_state.BORROWED_CLIENT_ID_KEY) is (True if borrowed else None)
+
+
 class TestWatchDoesNotStealTheSocket:
+    @pytest.fixture(autouse=True)
+    def no_server(self, monkeypatch):
+        """Default: the server knows nothing. Tests that care override it."""
+        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: None)
+
     def test_borrowed_record_resolves_to_no_client_id(self, monkeypatch):
         state = jobs_state.new(
             prompt_id="p",
@@ -189,11 +220,8 @@ class TestWatchDoesNotStealTheSocket:
     # Both reasons `_resolve_watch_client_id` answers None want OPPOSITE advice:
     # an unresolvable id is worth passing --client-id for, a withheld one must
     # never be, because doing so performs the eviction the guard exists to stop.
-    @pytest.mark.parametrize(
-        ("borrowed", "expected"),
-        [(True, True), (False, False)],
-    )
-    def test_withheld_is_distinguishable_from_unresolvable(self, monkeypatch, borrowed, expected):
+    @pytest.mark.parametrize("borrowed", [True, False])
+    def test_withheld_is_distinguishable_from_unresolvable(self, monkeypatch, borrowed):
         state = jobs_state.new(
             prompt_id="p",
             client_id=BORROWED,
@@ -202,8 +230,26 @@ class TestWatchDoesNotStealTheSocket:
             client_id_borrowed=borrowed,
         )
         monkeypatch.setattr(jobs_state, "read", lambda _: state)
-        assert _client_id_withheld("p") is expected
+        assert _client_id_withheld("127.0.0.1", 8188, "p") is borrowed
 
     def test_no_state_file_is_not_withheld(self, monkeypatch):
         monkeypatch.setattr(jobs_state, "read", lambda _: None)
-        assert _client_id_withheld("p") is False
+        assert _client_id_withheld("127.0.0.1", 8188, "p") is False
+
+    # The case the state-file-only guard missed entirely: a watcher that cannot
+    # see the submitting run's state still has to refuse the id.
+    def test_server_marker_is_honoured_without_a_state_file(self, monkeypatch):
+        monkeypatch.setattr(jobs_state, "read", lambda _: None)
+        monkeypatch.setattr(
+            jobs,
+            "_submitted_extra_data",
+            lambda *_: {"client_id": BORROWED, jobs_state.BORROWED_CLIENT_ID_KEY: True},
+        )
+        assert _resolve_watch_client_id("127.0.0.1", 8188, "p") is None
+        assert _client_id_withheld("127.0.0.1", 8188, "p") is True
+
+    def test_an_unmarked_server_record_still_resolves(self, monkeypatch):
+        monkeypatch.setattr(jobs_state, "read", lambda _: None)
+        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: {"client_id": "cli-minted"})
+        assert _resolve_watch_client_id("127.0.0.1", 8188, "p") == "cli-minted"
+        assert _client_id_withheld("127.0.0.1", 8188, "p") is False

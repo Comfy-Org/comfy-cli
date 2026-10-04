@@ -57,6 +57,17 @@ from comfy_cli.utils import get_os
 
 TERMINAL_STATUSES = frozenset({"completed", "error", "cancelled"})
 
+# The ``extra_data`` key ``comfy run --client-id`` stamps on a submitted prompt
+# to say its client_id was BORROWED from a live client rather than minted for
+# the run. It rides the prompt because the state file below is not a shared
+# channel: the submitter and a later watcher are routinely different processes
+# under different config roots (the in-app agent runs the CLI under a sandboxed
+# HOME it deletes at turn end), and re-attaching to a borrowed id silently
+# strands the client it was borrowed from. ComfyUI preserves unknown extra_data
+# keys and serves the slot back from /queue and /history, so every watcher can
+# read it.
+BORROWED_CLIENT_ID_KEY = "comfy_client_id_borrowed"
+
 # Cloud's /api/jobs status enum (ingest ``toFilterStatus``: pending,
 # in_progress, completed, failed, cancelled) -> the CLI's published jobs
 # vocabulary (``comfy_cli/schemas/jobs.json``). Legacy raw-jobstate spellings

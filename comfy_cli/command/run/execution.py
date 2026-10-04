@@ -36,7 +36,7 @@ import typer
 from rich.progress import BarColumn, Progress, TimeElapsedColumn
 from rich.table import Column, Table
 
-from comfy_cli import execution_errors
+from comfy_cli import execution_errors, jobs_state
 from comfy_cli.caller import usage_source
 from comfy_cli.command.run.loader import _MAX_BODY_PREVIEW, _node_errors_to_list
 from comfy_cli.http import no_redirect_urlopen
@@ -214,6 +214,8 @@ class WorkflowExecution:
         # and, via the caller-derived value, human-driven CLI runs apart from
         # agent-driven ones. `self.extra_data` still overwrites it below.
         data["extra_data"] = {"comfy_usage_source": usage_source()}
+        if self.borrowed_client_id:
+            data["extra_data"][jobs_state.BORROWED_CLIENT_ID_KEY] = True
         if self.extra_data:
             data["extra_data"].update(self.extra_data)
         elif self.api_key:

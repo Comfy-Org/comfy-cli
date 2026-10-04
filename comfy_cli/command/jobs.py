@@ -1861,7 +1861,22 @@ def _client_id_from_extra_data(extra: Any) -> str | None:
     return None
 
 
-def _client_id_withheld(prompt_id: str) -> bool:
+def _borrowed_from_extra_data(extra: Any) -> bool:
+    """Read ``comfy run --client-id``'s marker back off a queue/history entry.
+
+    The marker rides ``extra_data`` rather than only our own state file because
+    the submitter and the watcher are routinely different processes with
+    different config roots — the in-app agent runs the CLI under a sandboxed
+    ``HOME`` it deletes at turn end, so the user's own `jobs watch` can never
+    see that run's state file. ComfyUI preserves unknown ``extra_data`` keys
+    (only the two credential keys are stripped) and exposes the slot through
+    both ``/queue`` and ``/history``, so this is the one signal every watcher
+    can read.
+    """
+    return isinstance(extra, dict) and extra.get(jobs_state.BORROWED_CLIENT_ID_KEY) is True
+
+
+def _client_id_withheld(host: str, port: int, prompt_id: str) -> bool:
     """True if this prompt's client_id is one we deliberately refuse to attach
     as — a run submitted with ``comfy run --client-id``.
 
@@ -1869,20 +1884,46 @@ def _client_id_withheld(prompt_id: str) -> bool:
     want opposite advice: an unresolvable id is worth passing ``--client-id``
     for, a withheld one must never be.
     """
-    from comfy_cli import jobs_state
-
     try:
         job = jobs_state.read(prompt_id)
     except (ValueError, OSError):
-        return False
-    return job is not None and job.client_id_borrowed
+        job = None
+    if job is not None and job.client_id_borrowed:
+        return True
+    return _borrowed_from_extra_data(_submitted_extra_data(host, port, prompt_id))
 
 
 # How long a withheld watch waits on its (deliberately eventless) socket before
-# reconciling against /history. The ordinary `--timeout` is a silence budget for
-# a socket that SHOULD be receiving events; here nothing will ever arrive, so it
-# would just be dead air before the first status read.
+# reconciling. The ordinary `--timeout` is a silence budget for a socket that
+# SHOULD be receiving events; here nothing ever will, so it would be dead air.
+# This raises the reconcile cadence for the whole watch, not just the first
+# read, which is affordable against a loopback/LAN ComfyUI.
 _WITHHELD_WATCH_POLL_S = 2.0
+
+
+def _submitted_extra_data(host: str, port: int, prompt_id: str) -> Any:
+    """This prompt's ``extra_data`` as the SERVER has it: from ``/queue`` while
+    it is pending or running, then ``/history`` once it has finished."""
+    try:
+        q = _http_get_json(f"http://{host}:{port}/queue")
+    except RuntimeError:
+        q = {}
+    if isinstance(q, dict):
+        for key in ("queue_running", "queue_pending"):
+            for entry in q.get(key) or []:
+                # entry layout: number, prompt_id, prompt, extra_data, outputs_to_execute
+                if isinstance(entry, list) and len(entry) > 3 and entry[1] == prompt_id:
+                    return entry[3]
+
+    try:
+        h = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
+    except RuntimeError:
+        return None
+    body = h.get(prompt_id) if isinstance(h, dict) else None
+    prompt = body.get("prompt") if isinstance(body, dict) else None
+    if isinstance(prompt, list) and len(prompt) > 3:
+        return prompt[3]
+    return None
 
 
 def _resolve_watch_client_id(host: str, port: int, prompt_id: str) -> str | None:
@@ -1906,17 +1947,11 @@ def _resolve_watch_client_id(host: str, port: int, prompt_id: str) -> str | None
 
     A run submitted via ``comfy run --client-id`` is the one case where that
     caveat is a certainty rather than a risk: the recorded id belongs to a live
-    client that is being fed on purpose. Those resolve to None so the watch
-    polls status instead of taking the client's socket away.
-
-    That guard reaches only as far as our own state file. Steps 2 and 3 read the
-    id back out of the SERVER, which records no borrowed marker, so a watch that
-    cannot see the submitting run's state — another machine, another config
-    root, a cleared state dir — still resolves a borrowed id and attaches as it.
-    Closing that needs a server-side signal ComfyUI does not currently emit.
+    client that is being fed on purpose. Those resolve to None — at every step,
+    because ``run`` stamps the marker into the submitted ``extra_data`` as well
+    as the state file — so the watch polls status instead of displacing a tab
+    that would then receive nothing until the page is reloaded.
     """
-    from comfy_cli import jobs_state
-
     try:
         job = jobs_state.read(prompt_id)
     except (ValueError, OSError):  # unsafe prompt_id / unreadable state dir
@@ -1926,28 +1961,10 @@ def _resolve_watch_client_id(host: str, port: int, prompt_id: str) -> str | None
     if job is not None and isinstance(job.client_id, str) and job.client_id.strip():
         return job.client_id
 
-    try:
-        q = _http_get_json(f"http://{host}:{port}/queue")
-    except RuntimeError:
-        q = {}
-    if isinstance(q, dict):
-        for key in ("queue_running", "queue_pending"):
-            for entry in q.get(key) or []:
-                # entry layout: number, prompt_id, prompt, extra_data, outputs_to_execute
-                if isinstance(entry, list) and len(entry) > 3 and entry[1] == prompt_id:
-                    cid = _client_id_from_extra_data(entry[3])
-                    if cid:
-                        return cid
-
-    try:
-        h = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
-    except RuntimeError:
+    extra = _submitted_extra_data(host, port, prompt_id)
+    if _borrowed_from_extra_data(extra):
         return None
-    body = h.get(prompt_id) if isinstance(h, dict) else None
-    prompt = body.get("prompt") if isinstance(body, dict) else None
-    if isinstance(prompt, list) and len(prompt) > 3:
-        return _client_id_from_extra_data(prompt[3])
-    return None
+    return _client_id_from_extra_data(extra)
 
 
 def _history_completed_nodes(host: str, port: int, prompt_id: str) -> set[str]:
@@ -2252,7 +2269,7 @@ def watch_cmd(
     token = cancellation.get_token()
     token.on_cancel(lambda: _safe_close_ws(ws))
 
-    withheld = attached_client_id is None and _client_id_withheld(prompt_id)
+    withheld = attached_client_id is None and _client_id_withheld(h, p, prompt_id)
     # A withheld watch holds a fresh-id socket the server will never address, so
     # /history is the only thing that can move it. Reconcile on the poll cadence
     # rather than sitting out the full silence budget first.
