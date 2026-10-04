@@ -29,7 +29,11 @@ A local ComfyUI server does **not** broadcast execution events: it addresses
 state file `comfy run` wrote, else `/queue`, else `/history` — and reconnects
 under it; the terminal envelope reports which id it used (`data.client_id`) and
 whether it was the real submitter (`data.attached`). Use `--client-id` to force a
-specific one. Both keys are present on *every* `jobs watch` terminal envelope: a
+specific one — but NOT on a run submitted by `comfy run --client-id`: that id
+belongs to a live client being fed on purpose, resolution withholds it
+deliberately (`attached: false` with the id recoverable from `/queue`), and
+forcing it takes that client off its own socket until it reconnects. Both
+`data.client_id` and `data.attached` are present on *every* terminal envelope: a
 watch of an already-finished prompt short-circuits without opening a socket, and
 reports `client_id: null` / `attached: false`. Reconnecting under an existing id
 is ComfyUI's own session-resume path, so a submitter that is *still* holding that

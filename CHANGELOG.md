@@ -39,7 +39,8 @@ history.
   events — node highlights, progress, outputs — to that client. This is what
   lets a tool run a workflow on a user's behalf and still have the user's open
   canvas light up. Local only, and refused with `client_id_rejected` alongside
-  `--wait` or `--where cloud`: ComfyUI evicts whatever socket already holds an
+  `--wait` or an effective `cloud` target (the flag, `COMFY_WHERE`, or a saved
+  default): ComfyUI evicts whatever socket already holds an
   incoming clientId, so this invocation must not attach as the borrowed one.
   Such a run is marked both in its job state file and in the submitted
   `extra_data`, so `comfy jobs watch` declines to re-attach to it — from any
