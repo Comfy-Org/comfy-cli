@@ -1861,6 +1861,30 @@ def _client_id_from_extra_data(extra: Any) -> str | None:
     return None
 
 
+def _client_id_withheld(prompt_id: str) -> bool:
+    """True if this prompt's client_id is one we deliberately refuse to attach
+    as — a run submitted with ``comfy run --client-id``.
+
+    Distinguishes the two ways ``_resolve_watch_client_id`` returns None, which
+    want opposite advice: an unresolvable id is worth passing ``--client-id``
+    for, a withheld one must never be.
+    """
+    from comfy_cli import jobs_state
+
+    try:
+        job = jobs_state.read(prompt_id)
+    except (ValueError, OSError):
+        return False
+    return job is not None and job.client_id_borrowed
+
+
+# How long a withheld watch waits on its (deliberately eventless) socket before
+# reconciling against /history. The ordinary `--timeout` is a silence budget for
+# a socket that SHOULD be receiving events; here nothing will ever arrive, so it
+# would just be dead air before the first status read.
+_WITHHELD_WATCH_POLL_S = 2.0
+
+
 def _resolve_watch_client_id(host: str, port: int, prompt_id: str) -> str | None:
     """Find the ``client_id`` this prompt was submitted with, or None.
 
@@ -1883,7 +1907,13 @@ def _resolve_watch_client_id(host: str, port: int, prompt_id: str) -> str | None
     A run submitted via ``comfy run --client-id`` is the one case where that
     caveat is a certainty rather than a risk: the recorded id belongs to a live
     client that is being fed on purpose. Those resolve to None so the watch
-    degrades to ``/history`` rather than taking the client's socket away.
+    polls status instead of taking the client's socket away.
+
+    That guard reaches only as far as our own state file. Steps 2 and 3 read the
+    id back out of the SERVER, which records no borrowed marker, so a watch that
+    cannot see the submitting run's state — another machine, another config
+    root, a cleared state dir — still resolves a borrowed id and attaches as it.
+    Closing that needs a server-side signal ComfyUI does not currently emit.
     """
     from comfy_cli import jobs_state
 
@@ -2222,7 +2252,11 @@ def watch_cmd(
     token = cancellation.get_token()
     token.on_cancel(lambda: _safe_close_ws(ws))
 
-    ws.settimeout(timeout)
+    withheld = attached_client_id is None and _client_id_withheld(prompt_id)
+    # A withheld watch holds a fresh-id socket the server will never address, so
+    # /history is the only thing that can move it. Reconcile on the poll cadence
+    # rather than sitting out the full silence budget first.
+    ws.settimeout(min(timeout, _WITHHELD_WATCH_POLL_S) if withheld else timeout)
 
     state = _WatchState(renderer=renderer, prompt_id=prompt_id, host=h, port=p)
     saw_any_event = False
@@ -2231,7 +2265,13 @@ def watch_cmd(
 
     if renderer.is_pretty():
         renderer.console().print(f"[bold]Watching prompt[/bold] {prompt_id} on {h}:{p}   [dim](Ctrl-C to stop)[/dim]")
-        if attached_client_id is None:
+        if withheld:
+            renderer.console().print(
+                "[yellow]![/yellow] [dim]this run was submitted for another client (comfy run "
+                "--client-id), which is still receiving its live events; attaching as it would cut "
+                "it off, so this watch polls status instead[/dim]"
+            )
+        elif attached_client_id is None:
             renderer.console().print(
                 "[yellow]![/yellow] [dim]could not resolve the submitting client_id — the server "
                 "may not send live events for this prompt; pass --client-id if you know it[/dim]"

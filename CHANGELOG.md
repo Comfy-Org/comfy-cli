@@ -34,6 +34,15 @@ history.
   validate said the graph was valid.
 - `comfy workflow validate --full-options` and `comfy nodes show --all-choices`
   (also on `nodes search --expand-top`) list a long option list in full.
+- `comfy run --client-id <id>` submits as an already-connected WebSocket client
+  instead of a freshly minted one, so ComfyUI addresses the run's execution
+  events — node highlights, progress, outputs — to that client. This is what
+  lets a tool run a workflow on a user's behalf and still have the user's open
+  canvas light up. Local only, and refused with `client_id_rejected` alongside
+  `--wait` or `--where cloud`: ComfyUI evicts whatever socket already holds an
+  incoming clientId, so this invocation must not attach as the borrowed one.
+  `comfy jobs watch` declines to re-attach to such a run for the same reason
+  and polls status instead.
 
 ### Changed
 

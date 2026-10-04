@@ -22,7 +22,7 @@ import typer
 
 from comfy_cli import jobs_state
 from comfy_cli.cmdline import run as run_command
-from comfy_cli.command.jobs import _resolve_watch_client_id
+from comfy_cli.command.jobs import _client_id_withheld, _resolve_watch_client_id
 from comfy_cli.command.run import WorkflowExecution, execute
 from comfy_cli.output import Renderer, set_renderer
 from comfy_cli.output.renderer import OutputMode, reset_renderer_for_testing
@@ -149,6 +149,17 @@ class TestCliRejections:
         assert env["error"]["details"]["reason"] == reason
 
 
+class TestTelemetryDoesNotLeakTheSocketID:
+    # A clientId is capability-bearing in ComfyUI's model: knowing it is enough
+    # to receive another client's execution events and to evict its socket.
+    def test_client_id_is_redacted_but_still_counted(self):
+        from comfy_cli import tracking
+
+        props = tracking.filter_command_kwargs({"client_id": BORROWED, "wait": False})
+        assert BORROWED not in str(props)
+        assert "client_id" in props, "the key must survive so flag usage stays measurable"
+
+
 class TestWatchDoesNotStealTheSocket:
     def test_borrowed_record_resolves_to_no_client_id(self, monkeypatch):
         state = jobs_state.new(
@@ -174,3 +185,25 @@ class TestWatchDoesNotStealTheSocket:
         )
         monkeypatch.setattr(jobs_state, "read", lambda _: state)
         assert _resolve_watch_client_id("127.0.0.1", 8188, "p") == "cli-minted"
+
+    # Both reasons `_resolve_watch_client_id` answers None want OPPOSITE advice:
+    # an unresolvable id is worth passing --client-id for, a withheld one must
+    # never be, because doing so performs the eviction the guard exists to stop.
+    @pytest.mark.parametrize(
+        ("borrowed", "expected"),
+        [(True, True), (False, False)],
+    )
+    def test_withheld_is_distinguishable_from_unresolvable(self, monkeypatch, borrowed, expected):
+        state = jobs_state.new(
+            prompt_id="p",
+            client_id=BORROWED,
+            workflow="w.json",
+            where="local",
+            client_id_borrowed=borrowed,
+        )
+        monkeypatch.setattr(jobs_state, "read", lambda _: state)
+        assert _client_id_withheld("p") is expected
+
+    def test_no_state_file_is_not_withheld(self, monkeypatch):
+        monkeypatch.setattr(jobs_state, "read", lambda _: None)
+        assert _client_id_withheld("p") is False
