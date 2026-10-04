@@ -309,13 +309,20 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "client_id_rejected",
-        "`--client-id` was combined with something it cannot serve. The flag submits the prompt as an "
-        "ALREADY-CONNECTED client (normally a browser tab) so ComfyUI addresses the run's execution "
-        "events to that client instead of this invocation. It is therefore local-only, and this "
-        "invocation cannot also watch the run: ComfyUI's `/ws` handler evicts any socket already "
-        "registered under an incoming clientId, so opening one here would silence the very client the "
-        "flag exists to feed. `details.reason` is `wait` or `cloud`.",
-        "drop `--client-id` to watch the run from the CLI, or drop `--wait` and poll `comfy jobs status`",
+        "`--client-id` was combined with something it cannot serve. The flag names an "
+        "ALREADY-CONNECTED client (normally a browser tab) so ComfyUI addresses a run's execution "
+        "events to that client rather than to the invocation that submitted it. ComfyUI's `/ws` "
+        "handler evicts any socket already registered under an incoming clientId, so nothing may "
+        "attach as a borrowed id without silencing the very client the flag exists to feed. "
+        "Raised by two commands, and `details.reason` says which case: on `comfy run`, `empty` (the "
+        "flag was passed with a blank value), `cloud` (local-only — cloud fans execution events out "
+        "per user/workspace regardless of submitter) and `wait` (`--wait` would watch a socket this "
+        "run's events are deliberately not sent to); on `comfy jobs watch`, `borrowed` (the prompt is "
+        "marked as having borrowed a live client's id, so it is poll-only and no override is "
+        "honoured). Refused before anything is submitted or any socket is opened.",
+        "pass a non-empty id, or drop the conflicting flag: `--client-id` cannot be combined with "
+        "`--wait` or a cloud target, and `comfy jobs watch` on a borrowed run takes no `--client-id` "
+        "at all — poll it with `comfy jobs status`",
     ),
     ErrorCode(
         "host_flag_cloud",
