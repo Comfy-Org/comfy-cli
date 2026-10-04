@@ -215,6 +215,7 @@ def execute(
     print_prompt: bool = False,
     preloaded: tuple[dict, str, bool, bool] | None = None,
     allow_spend: bool = False,
+    client_id: str | None = None,
 ):
     # `0.0.0.0` is a wildcard bind, not a connect address. macOS / Windows
     # clients can't reach it; on Linux it happens to resolve to a loopback.
@@ -437,6 +438,7 @@ def execute(
         local_paths,
         timeout,
         extra_data=extra_data,
+        client_id=client_id,
     )
     # Wire SIGINT → close the WebSocket so the loop exits promptly.
     token = cancellation.get_token()
@@ -498,6 +500,7 @@ def execute(
                 where="local",
                 host=host,
                 port=port,
+                client_id_borrowed=execution.borrowed_client_id,
             )
             wait_state.item_map = (compose_meta or {}).get("items")
             wait_state.status = "running"
@@ -581,6 +584,7 @@ def execute(
                 where="local",
                 host=host,
                 port=port,
+                client_id_borrowed=execution.borrowed_client_id,
             )
             state.item_map = (compose_meta or {}).get("items")
             state_file = jobs_state.write(state)

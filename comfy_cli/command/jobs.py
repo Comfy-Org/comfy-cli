@@ -1879,6 +1879,11 @@ def _resolve_watch_client_id(host: str, port: int, prompt_id: str) -> str | None
     still holding that socket (a browser tab, a blocking ``comfy run``) stops
     receiving events until it reconnects; pass ``--client-id`` to override the
     resolution when that matters.
+
+    A run submitted via ``comfy run --client-id`` is the one case where that
+    caveat is a certainty rather than a risk: the recorded id belongs to a live
+    client that is being fed on purpose. Those resolve to None so the watch
+    degrades to ``/history`` rather than taking the client's socket away.
     """
     from comfy_cli import jobs_state
 
@@ -1886,6 +1891,8 @@ def _resolve_watch_client_id(host: str, port: int, prompt_id: str) -> str | None
         job = jobs_state.read(prompt_id)
     except (ValueError, OSError):  # unsafe prompt_id / unreadable state dir
         job = None
+    if job is not None and job.client_id_borrowed:
+        return None
     if job is not None and isinstance(job.client_id, str) and job.client_id.strip():
         return job.client_id
 

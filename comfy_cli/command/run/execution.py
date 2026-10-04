@@ -128,12 +128,17 @@ class WorkflowExecution:
         *,
         extra_data: dict | None = None,
         api_key: str | None = None,
+        client_id: str | None = None,
     ):
         self.workflow = workflow
         self.host = host
         self.port = port
         self.verbose = verbose
-        self.client_id = str(uuid.uuid4())
+        # ComfyUI's /ws handler pops any socket already registered under an
+        # incoming clientId, so opening one with a BORROWED id would evict the
+        # client we are submitting on behalf of. Callers gate on this flag.
+        self.borrowed_client_id = bool(client_id)
+        self.client_id = client_id or str(uuid.uuid4())
         self.outputs: list = []
         # Node-keyed companion to the flat `outputs` URLs — one
         # {"node_id", "url", "filename", "type"} entry per recorded URL, in
@@ -177,6 +182,11 @@ class WorkflowExecution:
         self.last_error: dict | None = None
 
     def connect(self):
+        if self.borrowed_client_id:
+            raise RuntimeError(
+                f"refusing to open a websocket as borrowed clientId {self.client_id!r}: "
+                "it would evict the client this run submits on behalf of"
+            )
         # Resolve via the package namespace so tests can patch
         # ``comfy_cli.command.run.WebSocket`` and have it take effect here.
         from comfy_cli.command import run as _run_pkg

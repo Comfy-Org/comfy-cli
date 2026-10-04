@@ -308,6 +308,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "background server is bad — clear it with `comfy stop`",
     ),
     ErrorCode(
+        "client_id_rejected",
+        "`--client-id` was combined with something it cannot serve. The flag submits the prompt as an "
+        "ALREADY-CONNECTED client (normally a browser tab) so ComfyUI addresses the run's execution "
+        "events to that client instead of this invocation. It is therefore local-only, and this "
+        "invocation cannot also watch the run: ComfyUI's `/ws` handler evicts any socket already "
+        "registered under an incoming clientId, so opening one here would silence the very client the "
+        "flag exists to feed. `details.reason` is `wait` or `cloud`.",
+        "drop `--client-id` to watch the run from the CLI, or drop `--wait` and poll `comfy jobs status`",
+    ),
+    ErrorCode(
         "host_flag_cloud",
         "`--host`/`--port` were combined with an effective `cloud` target. They address a local "
         "ComfyUI only; the cloud address comes from the signed-in account. `details` carries the "
