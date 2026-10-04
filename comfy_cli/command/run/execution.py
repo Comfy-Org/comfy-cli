@@ -214,12 +214,14 @@ class WorkflowExecution:
         # and, via the caller-derived value, human-driven CLI runs apart from
         # agent-driven ones. `self.extra_data` still overwrites it below.
         data["extra_data"] = {"comfy_usage_source": usage_source()}
-        if self.borrowed_client_id:
-            data["extra_data"][jobs_state.BORROWED_CLIENT_ID_KEY] = True
         if self.extra_data:
             data["extra_data"].update(self.extra_data)
         elif self.api_key:
             data["extra_data"]["api_key_comfy_org"] = self.api_key
+        # This is a safety property, not caller metadata: keep it authoritative
+        # even if a future extra_data caller happens to use the same key.
+        if self.borrowed_client_id:
+            data["extra_data"][jobs_state.BORROWED_CLIENT_ID_KEY] = True
         req = request.Request(f"http://{self.host}:{self.port}/prompt", json.dumps(data).encode("utf-8"))
         req.add_header("Comfy-Usage-Source", "comfy-cli")
         try:

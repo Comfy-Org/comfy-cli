@@ -23,7 +23,7 @@ import typer
 from comfy_cli import jobs_state
 from comfy_cli.cmdline import run as run_command
 from comfy_cli.command import jobs
-from comfy_cli.command.jobs import _client_id_withheld, _resolve_watch_client_id
+from comfy_cli.command.jobs import _client_id_withheld, _resolve_watch_client_id, _select_watch_client_id
 from comfy_cli.command.run import WorkflowExecution, execute
 from comfy_cli.output import Renderer, set_renderer
 from comfy_cli.output.renderer import OutputMode, reset_renderer_for_testing
@@ -111,6 +111,7 @@ class TestExecuteRecordsBorrowedId:
             patch("comfy_cli.command.run._tail_state_file"),
             patch("comfy_cli.jobs_state.write", side_effect=capture),
             patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch("comfy_cli.command.run.WebSocket") as mock_ws,
         ):
             mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "p"}).encode()
             execute(
@@ -126,6 +127,10 @@ class TestExecuteRecordsBorrowedId:
         state = written[0]
         assert state.client_id == BORROWED
         assert state.client_id_borrowed is True
+        body = json.loads(mock_open.call_args[0][0].data.decode())
+        assert body["client_id"] == BORROWED
+        assert body["extra_data"][jobs_state.BORROWED_CLIENT_ID_KEY] is True
+        mock_ws.assert_not_called()
         assert _envelope(capsys.readouterr().out)["data"]["client_id"] == BORROWED
 
 
@@ -135,6 +140,7 @@ class TestCliRejections:
         [
             ({"wait": True, "where": "local"}, "wait"),
             ({"wait": False, "where": "cloud"}, "cloud"),
+            ({"wait": False, "where": "local", "client_id": "   "}, "empty"),
         ],
     )
     def test_conflicting_flags_are_refused(self, workflow_file, capsys, kwargs, reason):
@@ -142,7 +148,7 @@ class TestCliRejections:
             patch("comfy_cli.cmdline.tracking", MagicMock()),
             pytest.raises(typer.Exit) as exc,
         ):
-            run_command(workflow=workflow_file, client_id=BORROWED, **kwargs)
+            run_command(workflow=workflow_file, client_id=kwargs.pop("client_id", BORROWED), **kwargs)
         assert exc.value.exit_code == 1
         env = _envelope(capsys.readouterr().out)
         assert env["ok"] is False
@@ -247,6 +253,16 @@ class TestWatchDoesNotStealTheSocket:
         )
         assert _resolve_watch_client_id("127.0.0.1", 8188, "p") is None
         assert _client_id_withheld("127.0.0.1", 8188, "p") is True
+
+    def test_explicit_override_cannot_bypass_borrowed_marker(self, monkeypatch):
+        monkeypatch.setattr(jobs_state, "read", lambda _: None)
+        monkeypatch.setattr(
+            jobs,
+            "_submitted_extra_data",
+            lambda *_: {"client_id": BORROWED, jobs_state.BORROWED_CLIENT_ID_KEY: True},
+        )
+        with pytest.raises(ValueError, match="poll-only"):
+            _select_watch_client_id("127.0.0.1", 8188, "p", BORROWED)
 
     def test_an_unmarked_server_record_still_resolves(self, monkeypatch):
         monkeypatch.setattr(jobs_state, "read", lambda _: None)

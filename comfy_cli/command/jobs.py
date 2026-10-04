@@ -1967,6 +1967,20 @@ def _resolve_watch_client_id(host: str, port: int, prompt_id: str) -> str | None
     return _client_id_from_extra_data(extra)
 
 
+def _select_watch_client_id(host: str, port: int, prompt_id: str, requested: str | None) -> tuple[str | None, bool]:
+    """Select a safe socket identity and report whether the submitter was withheld.
+
+    An explicit override must not bypass the borrowed-client marker. A marked
+    prompt exists specifically to feed another live socket; attaching under any
+    requested identity would defeat the safe poll-only behavior and can evict
+    that live client when the caller supplies its id.
+    """
+    withheld = _client_id_withheld(host, port, prompt_id)
+    if withheld and requested:
+        raise ValueError("a borrowed-client run is poll-only")
+    return requested or _resolve_watch_client_id(host, port, prompt_id), withheld
+
+
 def _history_completed_nodes(host: str, port: int, prompt_id: str) -> set[str]:
     """Nodes the server itself records as having run, straight from ``/history``.
 
@@ -2251,10 +2265,20 @@ def watch_cmd(
         _emit_terminal(renderer, snap, command="jobs watch")
         return
 
-    ws = WebSocket()
     # Re-attach as the submitting session, otherwise the server addresses every
     # execution event to a socket we are not holding and this watch sees nothing.
-    attached_client_id = client_id or _resolve_watch_client_id(h, p, prompt_id)
+    try:
+        attached_client_id, withheld = _select_watch_client_id(h, p, prompt_id, client_id)
+    except ValueError:
+        renderer.error(
+            code="client_id_rejected",
+            message="This run borrowed another client's live socket and can only be watched by polling",
+            hint="drop --client-id; comfy jobs watch will poll this run safely",
+            details={"reason": "borrowed"},
+        )
+        raise typer.Exit(code=1)
+
+    ws = WebSocket()
     ws_client_id = attached_client_id or str(uuid.uuid4())
     try:
         ws.connect(f"ws://{h}:{p}/ws?clientId={urllib.parse.quote(ws_client_id, safe='')}")
@@ -2269,7 +2293,6 @@ def watch_cmd(
     token = cancellation.get_token()
     token.on_cancel(lambda: _safe_close_ws(ws))
 
-    withheld = attached_client_id is None and _client_id_withheld(h, p, prompt_id)
     # A withheld watch holds a fresh-id socket the server will never address, so
     # /history is the only thing that can move it. Reconcile on the poll cadence
     # rather than sitting out the full silence budget first.

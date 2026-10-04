@@ -1265,7 +1265,15 @@ def run(
         # `where` kwarg is None then). Rides on the execution_success/_error events.
         _track_props["target"] = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
 
-        client_id = (client_id or "").strip() or None
+        if client_id is not None and not client_id.strip():
+            renderer.error(
+                code="client_id_rejected",
+                message="--client-id must not be empty",
+                hint="pass the connected browser client's id, or omit --client-id",
+                details={"reason": "empty"},
+            )
+            raise typer.Exit(code=1)
+        client_id = client_id.strip() if client_id is not None else None
         if client_id:
             rejection = None
             if decision.target is where_module.WhereTarget.CLOUD:
