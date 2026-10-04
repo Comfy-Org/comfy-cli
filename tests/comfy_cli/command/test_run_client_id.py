@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import typer
+from typer.testing import CliRunner
 
 from comfy_cli import jobs_state
 from comfy_cli.cmdline import run as run_command
@@ -263,6 +264,34 @@ class TestWatchDoesNotStealTheSocket:
         )
         with pytest.raises(ValueError, match="poll-only"):
             _select_watch_client_id("127.0.0.1", 8188, "p", BORROWED)
+
+    def test_watch_rejects_explicit_override_before_opening_a_socket(self, monkeypatch):
+        monkeypatch.setattr(jobs, "_server_or_error", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(
+            jobs,
+            "_snapshot",
+            lambda *_: {"prompt_id": "p", "status": "running", "outputs": []},
+        )
+        monkeypatch.setattr(jobs_state, "read", lambda _: None)
+        monkeypatch.setattr(
+            jobs,
+            "_submitted_extra_data",
+            lambda *_: {"client_id": BORROWED, jobs_state.BORROWED_CLIENT_ID_KEY: True},
+        )
+
+        def fail_if_constructed(*_args, **_kwargs):
+            raise AssertionError("borrowed watch constructed a WebSocket")
+
+        monkeypatch.setattr(jobs, "WebSocket", fail_if_constructed)
+        result = CliRunner().invoke(
+            jobs.app,
+            ["watch", "p", "--where", "local", "--client-id", BORROWED],
+        )
+
+        assert result.exit_code == 1, result.output
+        env = _envelope(result.output)
+        assert env["error"]["code"] == "client_id_rejected"
+        assert env["error"]["details"]["reason"] == "borrowed"
 
     def test_an_unmarked_server_record_still_resolves(self, monkeypatch):
         monkeypatch.setattr(jobs_state, "read", lambda _: None)
