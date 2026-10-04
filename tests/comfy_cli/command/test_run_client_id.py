@@ -325,6 +325,42 @@ class TestWatchDoesNotStealTheSocket:
         assert env["data"]["client_id"] is None
         assert env["data"]["attached"] is False
 
+    def test_borrowed_poll_preserves_a_failed_runs_error(self, monkeypatch):
+        snapshots = iter(
+            [
+                {"prompt_id": "p", "status": "running", "outputs": []},
+                {
+                    "prompt_id": "p",
+                    "status": "error",
+                    "outputs": [],
+                    "error": {"exception_message": "node 5 exploded", "node_id": "5"},
+                },
+            ]
+        )
+        monkeypatch.setattr(jobs, "_server_or_error", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(jobs, "_snapshot", lambda *_: next(snapshots))
+        monkeypatch.setattr(jobs, "_history_completed_nodes", lambda *_: set())
+        monkeypatch.setattr(jobs, "_WITHHELD_WATCH_POLL_S", 0)
+        monkeypatch.setattr(jobs_state, "read", lambda _: None)
+        monkeypatch.setattr(
+            jobs,
+            "_submitted_extra_data",
+            lambda *_: {"client_id": BORROWED, jobs_state.BORROWED_CLIENT_ID_KEY: True},
+        )
+        monkeypatch.setattr(
+            jobs,
+            "WebSocket",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("borrowed watch constructed a WebSocket")),
+        )
+
+        result = CliRunner().invoke(jobs.app, ["watch", "p", "--where", "local"])
+
+        assert result.exit_code == 1, result.output
+        env = _envelope(result.output)
+        assert env["error"]["code"] == "execution_error"
+        assert env["error"]["message"] == "node 5 exploded"
+        assert "error" not in env["error"]["details"]
+
     def test_an_unmarked_server_record_still_resolves(self, monkeypatch):
         monkeypatch.setattr(jobs_state, "read", lambda _: None)
         monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: {"client_id": "cli-minted"})

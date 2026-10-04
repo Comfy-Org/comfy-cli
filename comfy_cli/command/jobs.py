@@ -2424,7 +2424,10 @@ def watch_cmd(
         "attached": attached_client_id is not None,
     }
     if state.end_details is not None:
-        payload["details"] = state.end_details if isinstance(state.end_details, dict) else {"raw": state.end_details}
+        details = dict(state.end_details) if isinstance(state.end_details, dict) else {"raw": state.end_details}
+        if final_status == "error" and isinstance(details.get("error"), dict):
+            payload["execution_error"] = details.pop("error")
+        payload["details"] = details
     if not saw_any_event and final_status == "unknown":
         payload["hint"] = "watch returned without events; the prompt may already have completed"
     _emit_terminal(renderer, payload, command="jobs watch")
