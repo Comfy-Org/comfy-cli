@@ -1974,11 +1974,24 @@ def _select_watch_client_id(host: str, port: int, prompt_id: str, requested: str
     prompt exists specifically to feed another live socket; attaching under any
     requested identity would defeat the safe poll-only behavior and can evict
     that live client when the caller supplies its id.
+
+    Read the state file and server record once each. Looking up the marker and
+    client id in separate requests leaves a queue-to-history transition between
+    them where an explicit borrowed id can be accepted after the marker vanishes
+    from the first endpoint but before it appears in the second.
     """
-    withheld = _client_id_withheld(host, port, prompt_id)
+    try:
+        job = jobs_state.read(prompt_id)
+    except (ValueError, OSError):
+        job = None
+    extra = _submitted_extra_data(host, port, prompt_id)
+    withheld = bool(job is not None and job.client_id_borrowed) or _borrowed_from_extra_data(extra)
     if withheld and requested:
         raise ValueError("a borrowed-client run is poll-only")
-    return requested or _resolve_watch_client_id(host, port, prompt_id), withheld
+    if withheld:
+        return None, True
+    recorded = job.client_id if job is not None and isinstance(job.client_id, str) and job.client_id.strip() else None
+    return requested or recorded or _client_id_from_extra_data(extra), False
 
 
 def _history_completed_nodes(host: str, port: int, prompt_id: str) -> set[str]:

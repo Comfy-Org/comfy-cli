@@ -265,6 +265,22 @@ class TestWatchDoesNotStealTheSocket:
         with pytest.raises(ValueError, match="poll-only"):
             _select_watch_client_id("127.0.0.1", 8188, "p", BORROWED)
 
+    def test_selection_reads_server_marker_once(self, monkeypatch):
+        monkeypatch.setattr(jobs_state, "read", lambda _: None)
+        reads = 0
+
+        def server_extra(*_args):
+            nonlocal reads
+            reads += 1
+            if reads > 1:
+                raise AssertionError("selection split marker and client-id reads")
+            return {"client_id": BORROWED, jobs_state.BORROWED_CLIENT_ID_KEY: True}
+
+        monkeypatch.setattr(jobs, "_submitted_extra_data", server_extra)
+        with pytest.raises(ValueError, match="poll-only"):
+            _select_watch_client_id("127.0.0.1", 8188, "p", BORROWED)
+        assert reads == 1
+
     def test_watch_rejects_explicit_override_before_opening_a_socket(self, monkeypatch):
         monkeypatch.setattr(jobs, "_server_or_error", lambda *_args, **_kwargs: True)
         monkeypatch.setattr(
