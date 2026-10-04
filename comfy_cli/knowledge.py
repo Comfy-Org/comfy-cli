@@ -23,7 +23,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -117,9 +117,11 @@ class Bundle:
     # exact path decides it; a real id always keeps its own key.
     normalized_aliases: dict[str, str] = field(default_factory=dict)
     normalized_capabilities: dict[str, str] = field(default_factory=dict)
-    # (word set, normalized key, capability id) for every capability id and alias,
-    # so an intent phrase reaches the row its own wording names. See :func:`_resolve_tokens`.
-    capability_tokens: tuple[tuple[frozenset[str], str, str], ...] = ()
+    # (word multiset, normalized key, capability id) for every capability id and alias,
+    # so an intent phrase reaches the row its own wording names. A multiset, not a set,
+    # so a key that repeats a word is not fully matched by one of it. See
+    # :func:`_resolve_tokens`.
+    capability_tokens: tuple[tuple[Counter[str], str, str], ...] = ()
     capability_context: dict[str, frozenset[str]] = field(default_factory=dict)
 
 
@@ -224,16 +226,38 @@ def _tokens(s: str) -> frozenset[str]:
     return frozenset(w for w in map(_stem, _split(s)) if w not in _FILLER_STEMS)
 
 
+def _counts(s: str) -> Counter[str]:
+    """:func:`_tokens` as a multiset, so a key that says a word twice needs it twice.
+
+    A set collapses "Video to Video" to ``{video}``, which makes the key a full
+    match for any query carrying the bare word - and a full match skips the
+    description test in :func:`_resolve_tokens` entirely, so one generic noun
+    turns its capability into a catch-all.
+    """
+    return Counter(w for w in map(_stem, _split(s)) if w not in _FILLER_STEMS)
+
+
 def _short_key(key: str) -> bool:
     """A one-word key (filler aside) under MIN_SINGLE_TOKEN_CHARS never matches on wording."""
     raw = {w for w in _split(key) if _stem(w) not in _FILLER_STEMS}
     return len(raw) == 1 and len(next(iter(raw))) < MIN_SINGLE_TOKEN_CHARS
 
 
-def _query_tokens(s: str) -> frozenset[str]:
-    """:func:`_tokens` plus each adjacent pair joined, so "lip sync" reaches the key ``lipsync``."""
+def _query_counts(s: str) -> Counter[str]:
+    """:func:`_counts` plus each adjacent pair joined, so "lip sync" reaches the key ``lipsync``.
+
+    The pair joins are single-counted: they are spelling aids, not words the
+    caller wrote twice.
+    """
     words = _split(s)
-    return _tokens(s) | frozenset(_stem(a + b) for a, b in zip(words, words[1:]))
+    counts = _counts(s)
+    counts.update(frozenset(_stem(a + b) for a, b in zip(words, words[1:])) - set(counts))
+    return counts
+
+
+def _query_tokens(s: str) -> frozenset[str]:
+    """:func:`_query_counts` without the counts, for callers that only test membership."""
+    return frozenset(_query_counts(s))
 
 
 def _normalized_map(keys: dict[str, str], *, ids: Collection[str] = ()) -> dict[str, str]:
@@ -574,13 +598,13 @@ def _index(data: dict, manifest: dict | None, *, source: str, stale: bool, path:
                 capability_keys.setdefault(alias, cid)
 
     capability_tokens = tuple(
-        (words, _normalize(key), cid)
+        (counts, _normalize(key), cid)
         for key, cid in capability_keys.items()
-        if (words := _tokens(key)) and not _short_key(key)
+        if (counts := _counts(key)) and not _short_key(key)
     )
     key_words: dict[str, set[str]] = defaultdict(set)
-    for words, _, cid in capability_tokens:
-        key_words[cid] |= words
+    for counts, _, cid in capability_tokens:
+        key_words[cid] |= set(counts)
     capability_context = {
         cid: _tokens(_CONTEXT_END.split(desc, maxsplit=1)[0]) - key_words[cid]
         for cid, cap in capabilities.items()
@@ -653,23 +677,29 @@ def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
     out literally in the query wins ("text to image" over ``text-in-image``),
     then the one whose description the query echoes.
 
+    Words are counted, not set-deduplicated, on both sides: a key written
+    "Video to Video" is two words and one "video" leaves it half matched, so a
+    generic noun a key happens to repeat cannot make that capability a
+    catch-all for every query carrying the noun once.
+
     Ambiguity resolves to nothing rather than to a guess, matching
     :func:`_normalized_map`: a tie between two capabilities is not an answer.
     """
-    words = _query_tokens(query)
-    if not words:
+    counts = _query_counts(query)
+    if not counts:
         return None
+    words = frozenset(counts)
     literal = _normalize(query)
     scored: dict[str, tuple[float, int, int, int]] = {}
-    for key_words, key_norm, cid in bundle.capability_tokens:
-        hit = key_words & words
+    for key_counts, key_norm, cid in bundle.capability_tokens:
+        hit = sum((key_counts & counts).values())
         if not hit:
             continue
         context = len(bundle.capability_context.get(cid, frozenset()) & words)
-        missing = len(key_words) - len(hit)
+        missing = sum(key_counts.values()) - hit
         if missing and context <= missing:
             continue
-        score = (len(hit) / len(key_words), len(hit), len(key_norm) if key_norm in literal else 0, context)
+        score = (hit / (hit + missing), hit, len(key_norm) if key_norm in literal else 0, context)
         if score > scored.get(cid, (0.0, 0, 0, 0)):
             scored[cid] = score
     if not scored:

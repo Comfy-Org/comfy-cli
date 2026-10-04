@@ -1091,3 +1091,70 @@ class TestQueryLog:
 
         monkeypatch.setattr(tracking, "track_event", boom)
         assert _attach(command="nodes search", queries=["testvid"])["knowledge"]["models"]
+
+
+def _repeated_word_key_bundle():
+    """The shipped ``video-edit`` row's own keys, which repeat "video" in one alias.
+
+    Reproduced from ``canon/capabilities/video-edit.yaml`` rather than invented, so
+    the catch-all this guards against is the one a real bundle carries.
+    """
+    capabilities = {
+        "video-edit": {
+            "aliases": ["Video Edit", "Video Editing", "V2V", "Video to Video", "Video Extend", "Video Object Removal"],
+            "description": (
+                "Two jobs on a clip you already have: instruction edit, and extend - plus masked removal, "
+                "which is ranked here too."
+            ),
+        },
+        "image-to-video": {"description": "Animate a supplied still into a clip."},
+        "text-to-video": {"description": "Make a clip from a prompt with no source image."},
+        "upscale": {
+            "aliases": ["Video Upscale"],
+            "description": "Add resolution or restore detail after generation or editing.",
+        },
+    }
+    return knowledge._index(
+        {"models": {}, "capabilities": capabilities}, None, source="env", stale=False, path="x", mtime=0.0
+    )
+
+
+class TestRepeatedWordKeys:
+    """A key that repeats a word must not be fully matched by one of it.
+
+    Set-deduplicating "Video to Video" to ``{video}`` made ``video-edit`` a full
+    match for any query carrying the bare word, and a full match skips the
+    description test entirely - so one generic noun turned its capability into a
+    catch-all. The shipped bundle is the only one in canon with such a key, and it
+    sent "replace a person in a video with a character" to the instruction-editor
+    row, whose top pick re-clothes the subject instead of replacing it.
+    """
+
+    def test_a_repeated_word_key_counts_each_word(self):
+        assert knowledge._counts("Video to Video") == {"video": 2}
+        assert knowledge._tokens("Video to Video") == {"video"}
+
+    def test_pair_joins_are_not_counted_twice(self):
+        assert knowledge._query_counts("lip sync")["lipsync"] == 1
+        assert knowledge._query_tokens("lip sync") >= {"lip", "sync", "lipsync"}
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            # The word "video" alone must not reach video-edit through "Video to Video".
+            ("4K video generation", None),
+            ("a video of a cat", None),
+            ("replace a person in a video with a character", None),
+            ("swap the person in this video for my character", None),
+            # The keys that are actually worded still resolve.
+            ("video edit", "video-edit"),
+            ("editing this video", "video-edit"),
+            ("video to video", "video-edit"),
+            ("extend this video", "video-edit"),
+            ("upscale this video", "upscale"),
+            ("image to video", "image-to-video"),
+            ("text to video", "text-to-video"),
+        ],
+    )
+    def test_the_repeated_word_is_not_a_catch_all(self, query, expected):
+        assert knowledge._resolve_tokens(_repeated_word_key_bundle(), query) == expected
