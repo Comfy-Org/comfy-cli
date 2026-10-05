@@ -21,6 +21,7 @@ with their own vocabulary.
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 
 import typer
@@ -38,6 +39,45 @@ _UNAUTHORIZED_HINTS = {
     401: "re-run `comfy cloud login`",
     403: "re-run `comfy cloud login` if your session expired; otherwise check `details.body` — the server may be denying access to this resource",
 }
+
+
+_INSUFFICIENT_SCOPE_MESSAGE = (
+    "Your Comfy Cloud login predates a permission change; run `comfy cloud login` to re-authorize"
+)
+_SCOPE_PARAM = re.compile(r'\bscope="([^"]*)"')
+
+
+def insufficient_scope_error(status: int, body: str | None, headers=None, details: dict | None = None) -> dict | None:
+    """The envelope fields for a 403 ``insufficient_scope``, or ``None`` for any other response.
+
+    Comfy Cloud answers a token whose grant lacks a route's scope with
+    ``403`` + ``WWW-Authenticate: Bearer error="insufficient_scope", scope="…"``
+    (RFC 6750 §3.1) and an ``insufficient_scope: <scope>`` body. Refreshing
+    cannot widen a grant, so the only fix is a new authorize flow — the
+    envelope says so instead of the generic 403 hint. It never opens a
+    browser: the caller may be non-interactive.
+    """
+    if status != 403:
+        return None
+    www_auth = ""
+    if headers is not None:
+        try:
+            www_auth = headers.get("WWW-Authenticate") or ""
+        except Exception:  # noqa: BLE001
+            www_auth = ""
+    body = body if isinstance(body, str) else ""
+    if 'error="insufficient_scope"' not in www_auth and "insufficient_scope" not in body:
+        return None
+    out_details = {**(details or {}), "status": 403, "reason": "insufficient_scope"}
+    match = _SCOPE_PARAM.search(www_auth)
+    if match and match.group(1):
+        out_details["required_scope"] = match.group(1)
+    return {
+        "code": "cloud_unauthorized",
+        "message": _INSUFFICIENT_SCOPE_MESSAGE,
+        "hint": "run `comfy cloud login` to re-authorize; refreshing the existing session cannot add the permission",
+        "details": out_details,
+    }
 
 
 def _read_error_body(e: urllib.error.HTTPError) -> str:
@@ -161,6 +201,10 @@ def emit_status_error(
     more (``run``'s submit: check the job list before re-running; its poll: the
     job exists, so follow it rather than re-running).
     """
+    scope_error = insufficient_scope_error(status, details.get("body"), details=details)
+    if scope_error is not None:
+        renderer.error(**scope_error)
+        return
     if status == 402:
         renderer.error(**payment_required_error(operation, 402, *_typed_error(details), details))
         return
@@ -241,12 +285,19 @@ def handle_cloud_http_error(
                 details={**id_detail, "operation": operation, **(not_found_details or {})},
             )
         elif e.code in (401, 403):
-            renderer.error(
-                code="cloud_unauthorized",
-                message=f"HTTP {e.code} during {operation}",
-                hint=_UNAUTHORIZED_HINTS[e.code],
-                details={"status": e.code, "body": _read_error_body(e), "operation": operation, **id_detail},
+            details = {"status": e.code, "body": _read_error_body(e), "operation": operation, **id_detail}
+            scope_error = insufficient_scope_error(
+                e.code, details["body"], getattr(e, "headers", None), details=details
             )
+            if scope_error is not None:
+                renderer.error(**scope_error)
+            else:
+                renderer.error(
+                    code="cloud_unauthorized",
+                    message=f"HTTP {e.code} during {operation}",
+                    hint=_UNAUTHORIZED_HINTS[e.code],
+                    details=details,
+                )
         else:
             emit_status_error(
                 renderer,
