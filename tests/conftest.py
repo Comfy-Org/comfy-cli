@@ -15,3 +15,15 @@ def _neutralize_forced_color(monkeypatch):
     """
     for var in _COLOR_FORCING_ENV_VARS:
         monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_cloud_model_asset_lookup():
+    """Keep the suite offline and deterministic: a model value the catalog
+    lacks is NOT looked up in a Cloud asset library unless a test installs a
+    lookup itself (``comfy_cli.cql.model_assets.set_lookup``)."""
+    from comfy_cli.cql import model_assets
+
+    model_assets.set_lookup(None)
+    yield
+    model_assets.reset()

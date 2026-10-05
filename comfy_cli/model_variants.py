@@ -168,6 +168,10 @@ def resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dic
         for key, port, field, value in _model_widgets(node, graph):
             if value in {str(o) for o in port.enum_values}:
                 continue
+            # A model Cloud loads from its asset library is not missing: keep
+            # the template's own file rather than swapping in another precision.
+            if port.is_cloud_model_asset(value):
+                continue
             where = {"node_id": node.get("id"), "class_type": node.get("type"), "field": field}
             if sg_id is not None:
                 where["subgraph"] = sg_id
