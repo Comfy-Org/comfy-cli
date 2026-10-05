@@ -41,6 +41,11 @@ key only), so ``dynamic_combos`` names every option's slots and the values a
 fresh selection seeds them with — what the frontend does on a selection change
 (``dynamicWidgets.ts``), and what a converter needs to handle any other key.
 
+Dynamic groups publish a row-count controller in ``widget_order`` and a
+``dynamic_groups`` map containing each template's relative widget names,
+defaults, and min/max. Replace the default row span with the saved count when
+mapping positional values; the controller itself is never a prompt input.
+
 SHAPE (``envelope/1`` ``data`` of ``comfy nodes widget-catalog``)::
 
     {
@@ -93,6 +98,7 @@ def build_types(graph) -> dict[str, dict[str, Any]]:
     # Imported inside the function: workflow_ops sits above cql in the import
     # graph (it consumes cql.engine), so a module-level import here would make
     # the dependency circular.
+    from comfy_cli.cql.engine import _dynamic_group_widgets, _widget_default
     from comfy_cli.workflow_ops import INPUTCOUNT_WIDGET, inputcount_family_elements
 
     types: dict[str, dict[str, Any]] = {}
@@ -121,6 +127,18 @@ def build_types(graph) -> dict[str, dict[str, Any]]:
         if combos:
             entry["dynamic_combos"] = combos
 
+        groups = {
+            p.name: {
+                "min": p.options.min if p.options.min is not None else 0,
+                "max": p.options.max if p.options.max is not None else 20,
+                "widgets": [f.name for f in _dynamic_group_widgets(p)],
+                "defaults": {f.name: _widget_default(f) for f in _dynamic_group_widgets(p)},
+            }
+            for p in m.inputs
+            if p.is_dynamic_group
+        }
+        if groups:
+            entry["dynamic_groups"] = groups
         types[m.id] = entry
     return types
 

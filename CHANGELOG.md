@@ -17,6 +17,9 @@ history.
 
 ### Added
 
+- DynamicGroup workflow conversion, row editing and validation, including row
+  templates in node discovery and the widget catalog.
+
 - `--select` takes gjson row queries: `items.#(<cond>)#` keeps the elements
   that match and `items.#(<cond>)` is the first one, with `==` `!=` `<` `<=`
   `>` `>=` `%` (glob) `!%` against a quoted string, number, `true`, `false` or

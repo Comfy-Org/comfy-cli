@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "comfy nodes widget-catalog",
-  "description": "The widget catalog: a derived projection of object_info giving, per node class, the positional order of its widgets (plus the grow families that mint slots). It is what a name<->index widget converter needs — notably the CRDT applier, which stores widget values by NAME while the workflow JSON stores them POSITIONALLY in widgets_values. It is NOT object_info: no types, defaults, enum choices, or descriptions.",
+  "description": "The widget catalog: a derived projection of object_info giving, per node class, the positional order of its widgets (plus the grow families that mint slots). It is what a name<->index widget converter needs — notably the CRDT applier, which stores widget values by NAME while the workflow JSON stores them POSITIONALLY in widgets_values. It is NOT object_info: it carries layout information and defaults for dynamic rows, not full validation schemas.",
   "type": "object",
   "properties": {
     "catalog_version": {
@@ -23,6 +23,20 @@
             "type": "array",
             "items": { "type": "string" },
             "description": "Widget names in the exact positional order of the node's widgets_values array — index i in this list IS index i in widgets_values. Includes the synthetic 'control_after_generate' slot the frontend injects after a seed, dynamic-combo sub-widgets flattened as '<selector>.<sub>', and the trailing inputs frontend extensions inject ('upload' on media loaders, 'audioUI' on the audio family, 'image' on SaveGLB/Preview3D) so a widgets_values written by any frontend version decomposes. Computed by cql.engine.Graph.widget_order, the same call every set-widget in this CLI resolves against."
+          },
+          "dynamic_groups": {
+            "type": "object",
+            "description": "DynamicGroup controller name to row template. The controller stores a row count in workflow JSON and is omitted from prompts. Expand each row as '<controller>.<zero-based index>.<field>' immediately after the controller. The default widget_order includes min rows; replace that span for the saved count.",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "min": { "type": "integer", "minimum": 0 },
+                "max": { "type": "integer", "minimum": 1 },
+                "widgets": { "type": "array", "items": { "type": "string" } },
+                "defaults": { "type": "object" }
+              },
+              "required": ["min", "max", "widgets", "defaults"]
+            }
           },
           "autogrow_templates": {
             "type": "object",
