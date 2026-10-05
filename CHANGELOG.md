@@ -53,6 +53,15 @@ history.
 
 ### Fixed
 
+- On Comfy Cloud, a model in the Cloud asset library is no longer reported as
+  missing because the node catalog does not list it. `/api/object_info` lists
+  only Cloud's curated model library, while a job loads any `models` asset,
+  owned by the caller or public, whose name matches exactly. After a catalog
+  miss on a model loader's file value, `validate`, `set-widget` and run
+  preflight ask `/api/assets` for that exact name, and a match is not a
+  finding. `templates fetch` keeps an asset-backed model instead of swapping in
+  another precision. Local targets are unchanged. A failed lookup keeps the
+  finding. `COMFY_CLI_NO_MODEL_ASSET_LOOKUP=1` turns the lookup off.
 - `templates fetch` checks the template's model files when an offline catalog
   is set (`--input` or `COMFY_OBJECT_INFO_FILE`). A file the server lacks is
   replaced by the one installed file that is the same model in another
