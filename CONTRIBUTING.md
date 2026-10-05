@@ -241,6 +241,21 @@ scope in the command module, or import them inside the command function.
 `tests/comfy_cli/test_import_budget.py` fails if `comfy --version` starts
 importing them.
 
+### Updating searchable agent documentation
+
+`comfy docs` indexes a curated allowlist of README sections, `docs/json-output.md`,
+and the shipped agent skill files. When changing an included source, rebuild the
+checked-in corpus and verify it is current:
+
+```bash
+python scripts/build_docs_bundle.py
+python scripts/build_docs_bundle.py --check
+```
+
+Add or remove sources in `docs/search-sources.json`; the generator fails when a
+selected README heading is missing. Keep generated IDs, excerpts, and content
+derived from the Markdown rather than maintaining a second copy.
+
 ## Important notes
 
 - Use `typer` for all command args management

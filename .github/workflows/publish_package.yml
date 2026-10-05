@@ -42,6 +42,9 @@ jobs:
               tomlkit.dump(content, f)
           "
 
+      - name: Check bundled documentation
+        run: python scripts/build_docs_bundle.py --check
+
       - name: Build distribution
         run: python -m build --sdist --wheel --outdir dist/
 

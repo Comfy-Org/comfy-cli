@@ -357,7 +357,7 @@ def _maybe_nudge_setup(ctx: typer.Context, renderer) -> None:
     # can be closed independently of stdout (`comfy install 2>&-`, where CPython
     # sets `sys.stderr = None`). A bare `.isatty()` there would kill the command
     # from the onboarding nudge of all places. See `caller.stream_is_tty`.
-    if sub in (None, "setup") or not renderer.is_pretty() or not stream_is_tty(getattr(sys, "stderr", None)):
+    if sub in (None, "setup", "docs") or not renderer.is_pretty() or not stream_is_tty(getattr(sys, "stderr", None)):
         return
     try:
         from comfy_cli.credentials import get_session
@@ -523,12 +523,16 @@ def entry(
             rprint(cli_version)
         ctx.exit(0)
 
-    workspace_manager.setup_workspace_manager(workspace, here, recent, skip_prompt)
+    # Documentation lookup is self-contained: it must work from any directory
+    # without resolving or prompting for a ComfyUI workspace.
+    docs_command = ctx.invoked_subcommand == "docs"
+    if not docs_command:
+        workspace_manager.setup_workspace_manager(workspace, here, recent, skip_prompt)
 
     # `comfy setup` owns the telemetry consent decision as a branded wizard step
     # (with full disclosure). Suppress the bare global prompt for that one command
     # so the user is asked exactly once, in the right place — not pre-empted here.
-    if ctx.invoked_subcommand != "setup":
+    if ctx.invoked_subcommand not in {"setup", "docs"}:
         tracking.prompt_tracking_consent(skip_prompt, default_value=enable_telemetry)
 
     _maybe_nudge_setup(ctx, renderer)
@@ -2253,6 +2257,7 @@ _RootGroup.lazy_subcommands = {
         "comfy_cli.command.knowledge",
         help="Inspect the curated model-knowledge bundle: status, resolve an alias, ranked picks per capability.",
     ),
+    "docs": LazySubcommand("comfy_cli.command.docs", help="Search and read the documentation bundled with comfy-cli."),
     "workflow": LazySubcommand(
         "comfy_cli.command.workflow", help="Slot-based editing of frontend-format ComfyUI workflows."
     ),

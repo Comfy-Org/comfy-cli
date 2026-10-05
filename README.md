@@ -665,6 +665,20 @@ Enrichment only ever reads the cache, so no command waits on a fetch. The cache
 refreshes during `comfy skills install` and in the background during
 `comfy launch`, or on demand with `comfy knowledge status --refresh`.
 
+## Searching the CLI docs
+
+Search the CLI guides and installed agent guides locally:
+
+```bash
+comfy --json docs search "install custom nodes"
+comfy --json docs show "SECTION_ID"
+```
+
+Search results include a section ID, source location, and a short excerpt. Pass
+the ID to `docs show` to read the full section; use `--max-chars` and `--offset`
+to page through a long section. The docs command works offline and does not
+need a ComfyUI workspace. Its results describe this comfy-cli release.
+
 ## Analytics
 
 Analytics are **opt-in and off by default**. The first time you run the CLI in an

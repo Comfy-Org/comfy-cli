@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "comfy docs *",
+  "description": "Output shape for local documentation search and section retrieval. Fields are optional because search and show return different payloads.",
+  "type": "object",
+  "properties": {
+    "query": { "type": "string", "description": "The plain-text query passed to docs search." },
+    "results": {
+      "type": "array",
+      "description": "Ranked section previews (search).",
+      "items": { "$ref": "#/$defs/preview" }
+    },
+    "zero_hit": { "type": "boolean", "description": "Whether search found no sections." },
+    "has_more": { "type": "boolean", "description": "Whether additional results exist beyond the requested limit (search)." },
+    "search_backend": {
+      "type": "string",
+      "enum": ["fts5", "token-scan", "none"],
+      "description": "Search backend used; none means the query contained no searchable terms."
+    },
+    "hint": { "type": "string", "description": "A suggested next step when search returned no results." },
+    "id": { "type": "string", "description": "Section ID accepted by docs show." },
+    "title": { "type": "string", "description": "The source document title." },
+    "headings": { "type": "array", "items": { "type": "string" }, "description": "Heading path to this section." },
+    "source": { "type": "string", "description": "Repository-relative Markdown source path." },
+    "source_line": { "type": "integer", "minimum": 1, "description": "One-based heading line in the source file." },
+    "content": { "type": "string", "description": "The Markdown section, or one requested page of it (show)." },
+    "total_chars": { "type": "integer", "minimum": 0, "description": "Section content length in Unicode characters (show)." },
+    "offset": { "type": "integer", "minimum": 0, "description": "Starting character offset of this page (show)." },
+    "truncated": { "type": "boolean", "description": "Whether more section content is available (show)." },
+    "next_offset": { "type": ["integer", "null"], "minimum": 0, "description": "Offset for the next page, or null when the section is complete (show)." },
+    "corpus_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 identity of the installed documentation corpus." }
+  },
+  "$defs": {
+    "preview": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "headings": { "type": "array", "items": { "type": "string" } },
+        "source": { "type": "string" },
+        "source_line": { "type": "integer", "minimum": 1 },
+        "excerpt": { "type": "string", "maxLength": 800 }
+      },
+      "required": ["id", "title", "headings", "source", "source_line", "excerpt"]
+    }
+  }
+}

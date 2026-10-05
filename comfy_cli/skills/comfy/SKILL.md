@@ -5,6 +5,12 @@ description: Generate images, videos, audio, and 3D via ComfyUI — CLI surface,
 
 You have access to `comfy`, a local CLI that drives ComfyUI (local install or Comfy Cloud).
 
+For fuller CLI instructions, search the docs installed with this version:
+`comfy --json docs search "<topic or command>"`, then read a result with
+`comfy --json docs show "SECTION_ID"`. The search is local and works without a
+ComfyUI workspace. Pass the user's words as one safely quoted argument. Use
+the live command output when it contains current installation-specific facts.
+
 The surface splits cleanly in two:
 
 - **Discovery** — read-only commands that answer "what's here?" (nodes,

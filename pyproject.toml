@@ -87,6 +87,7 @@ include = [ "comfy_cli*" ]
 # they're plain data dirs matched by glob from the parent package.
 "comfy_cli.skills" = [ "*/SKILL.md" ]
 "comfy_cli.schemas" = [ "*.json", "*.md" ]
+"comfy_cli" = [ "docs/data/*.json" ]
 
 "comfy_cli.cql.data" = [ "*.yaml", "*.json" ]
 "comfy_cli.command.generate" = [ "spec/openapi.yml" ]

@@ -63,6 +63,7 @@ def _validator_for(name: str) -> jsonschema.Validator:
         # one of those unions can't ship.
         "cloud_status.json",
         "knowledge.json",
+        "docs.json",
         # The progress object is the deploy service's own and may grow fields,
         # so the event stays open where the envelopes around it are closed.
         "deploy_progress_event.json",
@@ -81,6 +82,37 @@ def test_envelope_schema_declares_contract_version():
     props = _load_schema("envelope.json")["properties"]
     assert props["schema"]["const"] == ENVELOPE_SCHEMA == "envelope/1"
     assert props["type"]["const"] == "envelope"
+
+
+def test_docs_search_and_show_payloads_validate():
+    env = os.environ.copy()
+    env["DO_NOT_TRACK"] = "1"
+    env["COMFY_NO_TELEMETRY"] = "1"
+
+    search = subprocess.run(
+        [sys.executable, "-m", "comfy_cli", "--json", "docs", "search", "install custom nodes"],
+        cwd=SCHEMAS_DIR.parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    search_envelope = json.loads(search.stdout)
+    _validator_for("envelope.json").validate(search_envelope)
+    _validator_for("docs.json").validate(search_envelope["data"])
+    section_id = search_envelope["data"]["results"][0]["id"]
+
+    shown = subprocess.run(
+        [sys.executable, "-m", "comfy_cli", "--json", "docs", "show", section_id],
+        cwd=SCHEMAS_DIR.parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    show_envelope = json.loads(shown.stdout)
+    _validator_for("envelope.json").validate(show_envelope)
+    _validator_for("docs.json").validate(show_envelope["data"])
 
 
 def test_run_event_schema_declares_contract_version():

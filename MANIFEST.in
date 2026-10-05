@@ -1,0 +1,3 @@
+include docs/search-sources.json
+include docs/json-output.md
+include scripts/build_docs_bundle.py
