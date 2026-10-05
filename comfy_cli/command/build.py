@@ -2521,6 +2521,10 @@ _BUILDER_REFUSALS: Final = {
         "code": "build_in_use",
         "message": "a deployment still references one of this build's releases",
     },
+    "BUILD_LIMIT": {
+        "code": "build_limit",
+        "message": "the workspace already holds as many builds as its limit allows, counting every member's builds",
+    },
 }
 
 #: A hostile endpoint can be reached through the env-configurable base URL, so
@@ -2706,7 +2710,7 @@ def _report_builder_error(
                     details=details,
                 )
                 return
-        # All three refusals are 409 in the builder's contract and nothing else
+        # Every refusal in the table is 409 in the builder's contract and nothing else
         # sends them, so a mapped code under any other status came from something
         # that is not the builder and must not be answered with its remediation.
         refusal = _BUILDER_REFUSALS.get(builder_error) if e.code == 409 else None
@@ -2938,7 +2942,7 @@ def _resolve_build_id(renderer, client, scope: _BuildScope) -> str:
     )
 
 
-@app.command("ls", help="List the workspace's builds.")
+@app.command("ls", help="List the builds you can see: your own, or every member's on enterprise.")
 @tracking.track_command("build")
 def ls_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
     renderer = get_renderer()
