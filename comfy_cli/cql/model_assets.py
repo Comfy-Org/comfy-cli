@@ -86,17 +86,33 @@ def reset() -> None:
 
 
 def use_where(where: str | None) -> None:
-    """Route the lookup like the command that loads the catalog: its ``--where``
-    flag, or the default route when ``None``. A change of route drops the
-    resolved lookup and its cached answers."""
+    """Route the lookup like the command that loads the catalog.
+
+    ``where`` is the command's ``--where`` (``None`` = the default route). It is
+    resolved to the effective route here, so a change of the default route
+    between calls is noticed too. A change of route drops the resolved lookup
+    and its cached answers: a cloud answer never carries over to local."""
     global _where, _lookup, _lookup_resolved
-    if where == _where:
+    effective = _effective_route(where)
+    if effective == _where:
         return
-    _where = where
+    _where = effective
     if not _installed:
         _lookup = None
         _lookup_resolved = False
         _cache.clear()
+
+
+def _effective_route(where: str | None) -> str:
+    """``"cloud"`` or ``"local"`` for ``where`` under the CLI's routing
+    precedence (flag > ``COMFY_WHERE`` > project > config > local). A route
+    that cannot be resolved counts as local: no asset lookup."""
+    try:
+        from comfy_cli import where as where_module
+
+        return where_module.resolve_default(where).target.value
+    except Exception:  # noqa: BLE001 — bad routing never enables a lookup
+        return "local"
 
 
 def model_asset_exists(value: Any) -> bool:

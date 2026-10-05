@@ -358,3 +358,54 @@ def test_the_workflow_graph_loader_routes_the_lookup(tmp_path, monkeypatch):
     oi.write_text(json.dumps(_object_info()))
     workflow._get_graph(str(oi), None, None, where="cloud")
     assert model_assets._where == "cloud"
+
+
+def _route_stubs(monkeypatch):
+    """resolve_target honours the route it is given; every asset exists."""
+    model_assets.reset()
+    seen = []
+
+    class Local:
+        is_cloud = False
+        auth_token = None
+        api_key = None
+
+    def resolve(**kw):
+        seen.append(kw["where"])
+        return _Target() if kw["where"] == "cloud" else Local()
+
+    monkeypatch.setattr("comfy_cli.target.resolve_target", resolve)
+    monkeypatch.setattr(model_assets, "asset_name_exists", lambda t, name: True)
+    return seen
+
+
+def test_a_default_route_change_drops_cloud_answers(monkeypatch):
+    seen = _route_stubs(monkeypatch)
+    monkeypatch.setenv("COMFY_WHERE", "cloud")
+    model_assets.use_where(None)
+    assert model_assets.model_asset_exists(INT8) is True
+    monkeypatch.setenv("COMFY_WHERE", "local")
+    model_assets.use_where(None)
+    assert model_assets.model_asset_exists(INT8) is False, "a cloud answer never carries over to local"
+    assert seen == ["cloud", "local"]
+
+
+def test_an_unresolvable_route_means_no_lookup(monkeypatch):
+    _route_stubs(monkeypatch)
+    monkeypatch.setenv("COMFY_WHERE", "not-a-route")
+    model_assets.use_where(None)
+    assert model_assets._where == "local"
+    assert model_assets.model_asset_exists(INT8) is False
+
+
+@pytest.mark.parametrize("flag,expect_ok", [("local", False), ("cloud", True)])
+def test_validate_binds_its_own_route_over_the_default(tmp_path, monkeypatch, flag, expect_ok):
+    _route_stubs(monkeypatch)
+    monkeypatch.setenv("COMFY_WHERE", "cloud")
+    oi = tmp_path / "object_info.json"
+    oi.write_text(json.dumps(_object_info()))
+    wf = tmp_path / "wf.json"
+    wf.write_text(json.dumps(_api_workflow(INT8)))
+    result = CliRunner().invoke(app, ["--json", "validate", "--workflow", str(wf), "--input", str(oi), "--where", flag])
+    env = json.loads(result.stdout)
+    assert env["ok"] is expect_ok, env
