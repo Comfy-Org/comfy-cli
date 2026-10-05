@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -276,3 +277,84 @@ def test_cloud_target_with_credential_uses_the_asset_lookup(monkeypatch):
     monkeypatch.setattr(model_assets, "asset_name_exists", lambda t, name: name == INT8)
     assert model_assets.model_asset_exists(INT8) is True
     assert model_assets.model_asset_exists("other.safetensors") is False
+
+
+# --- exact value, paging, routing ---------------------------------------------
+
+
+def test_the_value_is_looked_up_untrimmed(graph):
+    lookup = Lookup(INT8)
+    model_assets.set_lookup(lookup)
+    findings = _vae_port(graph).validate_catalog(f" {INT8}")
+    assert [f["code"] for f in findings] == ["unknown_enum_value"], "the server matches the value as is"
+    assert lookup.calls == [f" {INT8}"]
+
+
+def _paged(monkeypatch, pages: list[list[str]], total: int):
+    calls = []
+
+    def fake(url, target, **kw):
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        offset = int(q["offset"][0])
+        calls.append(offset)
+        idx = offset // model_assets._PAGE
+        rows = pages[idx] if idx < len(pages) else []
+        return 200, {"assets": [{"name": n} for n in rows], "total": total}
+
+    monkeypatch.setattr("comfy_cli.http.request_json", fake)
+    return calls
+
+
+def test_asset_lookup_reads_later_pages(monkeypatch):
+    first = [f"a{i}_{INT8}" for i in range(model_assets._PAGE)]
+    calls = _paged(monkeypatch, [first, [INT8]], total=model_assets._PAGE + 1)
+    assert model_assets.asset_name_exists(_Target(), INT8) is True
+    assert calls == [0, model_assets._PAGE]
+
+
+def test_asset_lookup_stops_when_the_listing_is_exhausted(monkeypatch):
+    calls = _paged(monkeypatch, [["x_" + INT8]], total=1)
+    assert model_assets.asset_name_exists(_Target(), INT8) is False
+    assert calls == [0]
+
+
+def test_asset_lookup_is_bounded(monkeypatch):
+    many = [f"a{i}_{INT8}" for i in range(model_assets._PAGE)]
+    calls = _paged(monkeypatch, [many] * 50, total=10**6)
+    assert model_assets.asset_name_exists(_Target(), INT8) is False
+    assert len(calls) == model_assets._MAX_PAGES
+
+
+def test_the_commands_where_routes_the_lookup(monkeypatch):
+    model_assets.reset()
+    seen = []
+
+    def resolve(**kw):
+        seen.append(kw["where"])
+        return _Target() if kw["where"] == "cloud" else type("L", (), {"is_cloud": False})()
+
+    monkeypatch.setattr("comfy_cli.target.resolve_target", resolve)
+    monkeypatch.setattr(model_assets, "asset_name_exists", lambda t, name: True)
+    model_assets.use_where("cloud")
+    assert model_assets.model_asset_exists(INT8) is True
+    # A different route drops the resolved lookup and its cached answers.
+    model_assets.use_where("local")
+    assert model_assets.model_asset_exists(INT8) is False
+    assert seen == ["cloud", "local"]
+
+
+def test_an_installed_lookup_survives_a_route(graph):
+    lookup = Lookup(INT8)
+    model_assets.set_lookup(lookup)
+    model_assets.use_where("cloud")
+    assert _vae_port(graph).validate_catalog(INT8) == []
+
+
+def test_the_workflow_graph_loader_routes_the_lookup(tmp_path, monkeypatch):
+    from comfy_cli.command import workflow
+
+    model_assets.reset()
+    oi = tmp_path / "object_info.json"
+    oi.write_text(json.dumps(_object_info()))
+    workflow._get_graph(str(oi), None, None, where="cloud")
+    assert model_assets._where == "cloud"
