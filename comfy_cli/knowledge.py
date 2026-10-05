@@ -687,7 +687,11 @@ def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
     scored: dict[str, tuple[float, int, int, int]] = {}
     for count_items, key_norm, cid in bundle.capability_tokens:
         key_counts = Counter(dict(count_items))
-        literal_hit = key_norm in literal
+        # Normalization intentionally ignores punctuation, but a normalized key
+        # may also be a prefix of a longer word ("video to videogame").  A
+        # repeated-word key is literal only when the query contains enough
+        # distinct word tokens to satisfy its multiplicity.
+        literal_hit = key_norm in literal and not (key_counts - counts)
         query_counts = counts if literal_hit else Counter(words)
         overlap = key_counts & query_counts
         hit = sum(overlap.values())
