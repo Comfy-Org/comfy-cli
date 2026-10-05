@@ -83,12 +83,20 @@ def handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | N
                 details={"workflow_id": workflow_id, "operation": operation},
             )
         elif e.code in (401, 403):
-            renderer.error(
-                code="cloud_unauthorized",
-                message=f"HTTP {e.code} during {operation}",
-                hint="re-run `comfy cloud login`",
-                details={"status": e.code},
+            from comfy_cli.command._cloud_errors import insufficient_scope_error
+
+            scope_error = insufficient_scope_error(
+                e.code, body, getattr(e, "headers", None), details={"operation": operation}
             )
+            if scope_error is not None:
+                renderer.error(**scope_error)
+            else:
+                renderer.error(
+                    code="cloud_unauthorized",
+                    message=f"HTTP {e.code} during {operation}",
+                    hint="re-run `comfy cloud login`",
+                    details={"status": e.code},
+                )
         else:
             from comfy_cli.command._cloud_errors import emit_status_error, retry_after_from_headers
 

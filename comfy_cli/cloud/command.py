@@ -403,6 +403,14 @@ def status_cmd(
         status_body = _billing_get(status_url, target)
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
+            from comfy_cli.command._cloud_errors import insufficient_scope_error
+
+            scope_error = insufficient_scope_error(
+                e.code, _read_error_body(e), getattr(e, "headers", None), details={"url": status_url}
+            )
+            if scope_error is not None:
+                renderer.error(**scope_error)
+                raise typer.Exit(code=1) from e
             renderer.error(
                 code="cloud_unauthorized",
                 message=f"Comfy Cloud rejected the credential (HTTP {e.code}).",
