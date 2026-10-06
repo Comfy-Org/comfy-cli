@@ -3459,9 +3459,9 @@ def test_select_watch_client_id_falls_back_to_history_then_none(monkeypatch):
 
     monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
     assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-c", None) == ("cid-from-history", None)
-    # Both endpoints answered and neither holds it: a positively empty server,
-    # so there is no id to attach as but nothing unsafe about saying so.
-    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-missing", None) == (None, None)
+    # A prompt neither store mentions leaves its record unread, so nothing has
+    # ruled out the borrowed marker and the watch polls rather than attaching.
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-missing", None) == (None, "indeterminate")
 
 
 def test_select_watch_client_id_polls_when_the_server_is_unreachable(monkeypatch):

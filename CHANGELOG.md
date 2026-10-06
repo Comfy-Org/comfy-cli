@@ -45,7 +45,22 @@ history.
   Such a run is marked both in its job state file and in the submitted
   `extra_data`, so `comfy jobs watch` declines to re-attach to it — from any
   machine, including one that cannot see the submitter's state file — and
-  polls status instead.
+  polls status instead. An override is honoured only once one of those two
+  sources has positively vouched for the run: with no readable state file and
+  no readable server record for the prompt, `--client-id` is refused with
+  `reason: "indeterminate"` rather than risking the eviction, and the watch
+  polls. A blank `--client-id` is refused (`reason: "empty"`) as it is on
+  `comfy run`.
+
+### Fixed
+
+- `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
+  accepts a connection and hangs up before answering (a restarting server, a
+  reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,
+  which `urllib` does not wrap, past the `RuntimeError` net every caller in
+  `jobs` catches.
+- A failed `comfy jobs watch` carries the node's failure under
+  `error.details.execution_error` instead of `error.details.details.error`.
 
 ### Changed
 

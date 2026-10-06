@@ -1914,62 +1914,57 @@ class _ClientIdRejected(ValueError):
 _POLL_ONLY_WATCH_POLL_S = 2.0
 
 
-def _get_json_object(url: str) -> tuple[dict[str, Any], bool]:
-    """GET a JSON **object**, reporting whether the server actually answered with one.
+def _get_json_object(url: str) -> dict[str, Any]:
+    """GET a JSON **object**, or an empty one if anything at all went wrong.
 
-    Separates "the server told us" from "we failed to ask", which a bare
-    ``{}``/``None`` fallback destroys. A 200 carrying valid JSON of the wrong
-    shape (a proxy error page, a captive portal) is a non-answer too: it cannot
-    be read as the server reporting an empty queue.
+    A failed fetch and a 200 carrying valid JSON of the wrong shape (a proxy
+    error page, a captive portal) collapse to the same empty mapping on
+    purpose: neither is a record, and the only caller treats "no record" as "we
+    did not establish anything".
     """
     try:
         body = _http_get_json(url)
     except RuntimeError:
-        return {}, False
-    return (body, True) if isinstance(body, dict) else ({}, False)
+        return {}
+    return body if isinstance(body, dict) else {}
 
 
 def _submitted_extra_data(host: str, port: int, prompt_id: str) -> tuple[Any, bool]:
-    """This prompt's ``extra_data`` as the SERVER has it, and whether that answer
-    is CONCLUSIVE.
+    """This prompt's ``extra_data`` as the SERVER has it, and whether that record
+    was POSITIVELY READ.
 
     Reads ``/queue`` while the prompt is pending or running, then ``/history``
-    once it has finished. The second element is the part that matters for
-    safety: a caller deciding whether a prompt is marked borrowed must not read
-    a failed fetch as "no marker". Mirrors ``_server_confirms_no_record`` — a
-    negative needs a positive confirmation, never an absence of evidence.
+    once it has finished. The flag is the part that matters for safety: a
+    caller deciding whether a prompt is marked borrowed must not read the
+    failure to find the record as proof the marker is not on it. Mirrors
+    ``_server_confirms_no_record`` — a negative needs a positive confirmation,
+    never an absence of evidence.
 
-    Conclusive when either store positively yielded the prompt's ``extra_data``
-    slot (one endpoint is enough — that IS the submitted record), or both
-    answered and neither holds the prompt. Inconclusive when a fetch failed, a
-    body came back the wrong shape, or the matched entry's ``extra_data`` slot
-    was missing: a prompt absent from a ``/history`` we could read may still be
-    live in a ``/queue`` we could not.
+    Only one thing counts as having read the record: matching ``prompt_id`` in
+    one of the two stores AND being able to reach its ``extra_data`` slot. Every
+    other outcome is reported as "not read" — the fetch failed, the body was the
+    wrong shape, a queue section was missing or unwalkable, the prompt was
+    nowhere to be found, or the matched entry was too short to carry the slot.
+    Deliberately NOT reasoning about which endpoints answered: that invites
+    treating a body that merely failed to mention the prompt as a conclusive
+    absence, which is the very inference this exists to refuse.
     """
-    queue, queue_answered = _get_json_object(f"http://{host}:{port}/queue")
-    if queue_answered:
-        for key in ("queue_running", "queue_pending"):
-            entries = queue.get(key)
-            if entries is None:
-                continue
-            if not isinstance(entries, list):
-                # Can't walk it, so can't conclude the prompt is absent from it.
-                queue_answered = False
-                continue
-            for entry in entries:
-                # entry layout: number, prompt_id, prompt, extra_data, outputs_to_execute
-                if isinstance(entry, list) and len(entry) > 1 and entry[1] == prompt_id:
-                    return (entry[3], True) if len(entry) > 3 else (None, False)
+    queue = _get_json_object(f"http://{host}:{port}/queue")
+    for key in ("queue_running", "queue_pending"):
+        entries = queue.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            # entry layout: number, prompt_id, prompt, extra_data, outputs_to_execute
+            if isinstance(entry, list) and len(entry) > 1 and entry[1] == prompt_id:
+                return (entry[3], True) if len(entry) > 3 else (None, False)
 
-    history, history_answered = _get_json_object(f"http://{host}:{port}/history/{prompt_id}")
-    if history_answered and prompt_id in history:
-        body = history[prompt_id]
-        prompt = body.get("prompt") if isinstance(body, dict) else None
-        if isinstance(prompt, list) and len(prompt) > 3:
-            return prompt[3], True
-        return None, False
-
-    return None, queue_answered and history_answered
+    history = _get_json_object(f"http://{host}:{port}/history/{prompt_id}")
+    body = history.get(prompt_id)
+    prompt = body.get("prompt") if isinstance(body, dict) else None
+    if isinstance(prompt, list) and len(prompt) > 3:
+        return prompt[3], True
+    return None, False
 
 
 def _select_watch_client_id(
@@ -2016,7 +2011,7 @@ def _select_watch_client_id(
         job = jobs_state.read(prompt_id)
     except (ValueError, OSError):  # unsafe prompt_id / unreadable state dir
         job = None
-    extra, server_conclusive = _submitted_extra_data(host, port, prompt_id)
+    extra, record_read = _submitted_extra_data(host, port, prompt_id)
 
     if (job is not None and job.client_id_borrowed) or _borrowed_from_extra_data(extra):
         if requested:
@@ -2024,9 +2019,10 @@ def _select_watch_client_id(
         return None, "borrowed"
 
     # A state file is its own positive evidence: `comfy run` wrote it, and it
-    # says this run did not borrow. Only when it is absent does the server's
-    # record have to carry the answer on its own.
-    if job is None and not server_conclusive:
+    # says this run did not borrow. Failing that, only the prompt's own server
+    # record can clear it — a record we could not read says nothing, and a
+    # server that simply never mentioned the prompt says nothing either.
+    if job is None and not record_read:
         if requested:
             raise _ClientIdRejected("indeterminate")
         return None, "indeterminate"
@@ -2288,7 +2284,9 @@ def watch_cmd(
             help=(
                 "Local-only: attach as this WS client_id instead of the submitting one. "
                 "ComfyUI sends execution events only to the submitting session, so watch "
-                "resolves that id automatically; override it if resolution picks wrong."
+                "resolves that id automatically; override it if resolution picks wrong. "
+                "Refused on a run that borrowed a live client's socket, and on one whose "
+                "record cannot be read — attaching could cut that client off."
             ),
         ),
     ] = None,
@@ -2300,6 +2298,19 @@ def watch_cmd(
     with report_usage_error(renderer, command="jobs watch"):
         h, p = _resolve_host_port(host, port)
     _server_or_error(h, p)
+
+    # Same handling `comfy run` gives the flag: a blank id is a mistake worth
+    # naming, and a padded one is the id the user meant. Left unstripped, "  "
+    # would be attached as a literal client_id that can never receive anything.
+    if client_id is not None and not client_id.strip():
+        renderer.error(
+            code="client_id_rejected",
+            message="--client-id must not be empty",
+            hint="pass the submitting client's id, or omit --client-id to resolve it automatically",
+            details={"reason": "empty"},
+        )
+        raise typer.Exit(code=1)
+    client_id = client_id.strip() if client_id is not None else None
 
     # If the job already finished, just print status and return — there will
     # be no more WS events.
@@ -2329,10 +2340,13 @@ def watch_cmd(
             hint = "drop --client-id; comfy jobs watch will poll this run safely"
         else:
             message = (
-                "Could not verify that --client-id is safe to attach as: the server did not answer "
-                "the lookup that says whether this run borrowed a live client's socket"
+                "Could not confirm that --client-id is safe to attach as: this prompt has no record "
+                "we could read, so whether it borrowed a live client's socket is unknown"
             )
-            hint = "retry the command, or drop --client-id; comfy jobs watch will poll this run safely"
+            hint = (
+                "drop --client-id and comfy jobs watch will poll this run safely; if the server was "
+                "briefly unreachable, retry — if the prompt_id is a typo or already pruned, no id works"
+            )
         renderer.error(
             code="client_id_rejected",
             message=message,
@@ -2370,14 +2384,14 @@ def watch_cmd(
         if poll_reason == "borrowed":
             renderer.console().print(
                 "[yellow]![/yellow] [dim]this run was submitted for another client (comfy run "
-                "--client-id), which is still receiving its live events; attaching as it would cut "
+                "--client-id) so that client receives its live events; attaching as it would cut "
                 "it off, so this watch polls status instead[/dim]"
             )
         elif poll_reason == "indeterminate":
             renderer.console().print(
-                "[yellow]![/yellow] [dim]could not verify whether this run was submitted for another "
-                "client — the server did not answer that lookup, so no socket was opened and this "
-                "watch polls status instead; retry for live events[/dim]"
+                "[yellow]![/yellow] [dim]could not confirm whether this run was submitted for another "
+                "client — no record of it could be read, so no socket was opened and this watch polls "
+                "status instead[/dim]"
             )
         elif attached_client_id is None:
             renderer.console().print(

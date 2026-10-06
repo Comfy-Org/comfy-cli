@@ -314,18 +314,23 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "events to that client rather than to the invocation that submitted it. ComfyUI's `/ws` "
         "handler evicts any socket already registered under an incoming clientId, so nothing may "
         "attach as a borrowed id without silencing the very client the flag exists to feed. "
-        "Raised by two commands, and `details.reason` says which case: on `comfy run`, `empty` (the "
-        "flag was passed with a blank value), `cloud` (local-only — cloud fans execution events out "
-        "per user/workspace regardless of submitter) and `wait` (`--wait` would watch a socket this "
-        "run's events are deliberately not sent to); on `comfy jobs watch`, `borrowed` (the prompt is "
-        "marked as having borrowed a live client's id, so it is poll-only and no override is "
-        "honoured) and `indeterminate` (the server did not answer the lookup that reads that marker, "
-        "so the run could not be shown to be safe to attach to — a failed read is not an unmarked "
-        "record, and is retryable). Refused before anything is submitted or any socket is opened.",
+        "Raised by two commands, and `details.reason` says which case. Both raise `empty` (the flag "
+        "was passed with a blank value). `comfy run` adds `cloud` (local-only — cloud fans execution "
+        "events out per user/workspace regardless of submitter) and `wait` (`--wait` would watch a "
+        "socket this run's events are deliberately not sent to). `comfy jobs watch` adds `borrowed` "
+        "(the prompt is marked as having borrowed a live client's id, so it is poll-only and no "
+        "override is honoured) and `indeterminate` (nothing vouched for the run — no readable job "
+        "state file, and the prompt's own server record could not be read, whether because the fetch "
+        "failed, the body was the wrong shape, or neither `/queue` nor `/history` mentions it, so the "
+        "marker was never ruled out). An override is honoured only once the state file or the "
+        "prompt's server record has positively cleared it. Refused before anything is submitted or "
+        "any socket is opened; a prompt that is already terminal short-circuits earlier, where the "
+        "flag is ignored rather than refused because no socket is opened at all.",
         "pass a non-empty id, or drop the conflicting flag: `--client-id` cannot be combined with "
         "`--wait` or a cloud target, and `comfy jobs watch` on a borrowed run takes no `--client-id` "
         "at all — poll it with `comfy jobs status`; on `indeterminate`, retry once the server answers "
-        "again, or drop `--client-id` to poll safely now",
+        "again, or drop `--client-id` to poll safely now — but if the prompt_id is a typo or already "
+        "pruned it stays unreadable and no id will work",
     ),
     ErrorCode(
         "host_flag_cloud",

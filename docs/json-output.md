@@ -35,11 +35,17 @@ deliberately (`attached: false`) and the watch polls status instead; passing
 `--client-id` on such a run is refused with `client_id_rejected`
 (`reason: "borrowed"`) before any socket opens, so there is no way to take that
 client off its own socket. That marker is read from the state file *and* from the
-`extra_data` the server echoes back, and when neither can be reached — a failed
-`/queue` + `/history` read with no local state file — the run is not assumed
-unmarked: the watch polls (`attached: false`) and an explicit `--client-id` is
-refused with `reason: "indeterminate"`, which a retry clears once the server
-answers again. Both
+`extra_data` the server echoes back, and an override is honoured only once one of
+them has actually vouched for the run. If there is no local state file and the
+prompt's own server record cannot be read — the fetch failed, the body came back
+the wrong shape, or neither `/queue` nor `/history` mentions the prompt — then
+nothing has ruled the marker out, so the run is not assumed unmarked: the watch
+polls (`attached: false`) and an explicit `--client-id` is refused with
+`reason: "indeterminate"`. A retry clears that once the server answers again;
+a `prompt_id` that is a typo or already pruned stays unreadable, and no id works
+for it. One gap in the guarantee: a prompt that is *already terminal* short-circuits
+below before any of this runs, so `--client-id` is ignored rather than refused
+there — harmless, because that path opens no socket at all. Both
 `data.client_id` and `data.attached` are present on *every* terminal envelope: a
 watch of an already-finished prompt short-circuits without opening a socket, and
 reports `client_id: null` / `attached: false`. Reconnecting under an existing id
@@ -648,7 +654,7 @@ lists what the cloud adds and which of the codes below cannot occur there.
 | `workflow_unknown_nodes`  | Pre-submit validation found unknown class_types / shape mismatches              | `errors` (array), `warnings` (array)               | 1 |
 | `partner_node_requires_credential` | Workflow uses a partner-API node and no `api_key_comfy_org` credential is available | `partner_nodes` (array of str, capped at 20 entries × 64 chars each), `partner_node_count` (int, the exact total — read this, not `len(partner_nodes)`), `host`, `port` | 1 |
 | `spend_consent_required`  | Workflow embeds partner-API (paid) nodes and `--allow-spend` was not passed (machine mode) or interactive consent was declined; re-run with `--allow-spend`. Free (non-partner) workflows are unaffected. | `partner_nodes` (array of str, capped at 20 entries × 64 chars each), `partner_node_count` (int, the exact total — read this, not `len(partner_nodes)`); local path also carries `host`, `port`, the cloud path carries `where: "cloud"` | 1 |
-| `client_id_rejected`      | `--client-id` was combined with something it cannot serve. On `comfy run`: the flag was blank (`empty`), the effective target is cloud (`cloud` — the flag addresses a local ComfyUI socket, and cloud fans execution events out per user/workspace anyway), or `--wait` was passed (`wait` — the run's events go to the named client, so this invocation would watch a silent socket). Also raised by `comfy jobs watch` when the prompt is marked as having borrowed a live client's id (`borrowed`): that run is poll-only and no `--client-id` override is honoured. `comfy jobs watch` raises it with `indeterminate` when the `/queue` + `/history` read that carries that marker failed and no job state file was readable either: absence of the marker is only evidence once somewhere it could have been recorded actually answered, so the override is refused rather than risking the eviction — retry once the server answers. Refused before anything is submitted and before any socket is opened | `reason` (str, `"empty"`, `"cloud"`, `"wait"`, `"borrowed"` or `"indeterminate"`) | 1 |
+| `client_id_rejected`      | `--client-id` was combined with something it cannot serve. On `comfy run`: the flag was blank (`empty`), the effective target is cloud (`cloud` — the flag addresses a local ComfyUI socket, and cloud fans execution events out per user/workspace anyway), or `--wait` was passed (`wait` — the run's events go to the named client, so this invocation would watch a silent socket). Also raised by `comfy jobs watch` when the prompt is marked as having borrowed a live client's id (`borrowed`): that run is poll-only and no `--client-id` override is honoured. `comfy jobs watch` raises it with `indeterminate` when no job state file was readable and the prompt's own server record could not be read either (the `/queue` + `/history` fetch failed, returned the wrong shape, or simply never mentioned the prompt): nothing has ruled the marker out, so the override is refused rather than risking the eviction — retry once the server answers. `comfy jobs watch` also raises `empty` for a blank `--client-id`, as `comfy run` does. Refused before anything is submitted and before any socket is opened | `reason` (str, `"empty"`, `"cloud"`, `"wait"`, `"borrowed"` or `"indeterminate"`) | 1 |
 | `prompt_rejected`         | Server returned HTTP 400 with `node_errors`                                     | `status` (400), `node_errors` (array — [shape](#node_errors-shape)) | 1 |
 | `client_error`            | Server returned another HTTP 4xx response (including 429; `cloud_rate_limited` is Cloud only) | `status` (int, 4xx), `body` (str)                  | 1 |
 | `server_error`            | Server returned an HTTP 5xx response                                            | `status` (int, 5xx), `body` (str)                  | 1 |

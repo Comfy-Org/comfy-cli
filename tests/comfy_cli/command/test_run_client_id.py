@@ -365,7 +365,11 @@ class TestWatchDoesNotStealTheSocket:
         env = _envelope(result.output)
         assert env["error"]["code"] == "execution_error"
         assert env["error"]["message"] == "node 5 exploded"
-        assert "error" not in env["error"]["details"]
+        # The failure detail is lifted out of the snapshot it arrived in and
+        # published under its own key. Asserting on `details` alone would pass
+        # vacuously: that mapping is the whole payload, which never held `error`.
+        assert env["error"]["details"]["execution_error"] == {"exception_message": "node 5 exploded", "node_id": "5"}
+        assert "error" not in env["error"]["details"]["details"]
 
     def test_an_unmarked_server_record_still_resolves(self, monkeypatch):
         monkeypatch.setattr(jobs_state, "read", lambda _: None)
@@ -448,12 +452,14 @@ class TestUnverifiableOwnershipFailsSafe:
         assert env["data"]["attached"] is False
 
 
-class TestSubmittedExtraDataReportsConclusiveness:
-    """`(extra_data, conclusive)` — the second element is the safety-critical one.
+class TestSubmittedExtraDataReportsWhetherTheRecordWasRead:
+    """`(extra_data, record_read)` — the second element is the safety-critical one.
 
-    A positive hit in either store IS the submitted record, so one endpoint is
-    enough. A negative needs BOTH to have answered: a prompt absent from a
-    `/history` we could read may still be live in a `/queue` we could not.
+    It answers exactly one question: did we get this prompt's own record in our
+    hands? A hit in either store is enough, because that IS the submitted
+    record. Everything else is False, including a server that answered
+    perfectly well and simply never mentioned the prompt — "not in the body I
+    read" is not "was never marked".
     """
 
     @staticmethod
@@ -471,48 +477,169 @@ class TestSubmittedExtraDataReportsConclusiveness:
     QUEUED = {"queue_running": [[0, "p", {}, {"client_id": "cid"}, {}]], "queue_pending": []}
     IN_HISTORY = {"p": {"prompt": [0, "p", {}, {"client_id": "cid"}, {}]}}
 
-    def test_a_queue_hit_is_conclusive_even_if_history_is_unreachable(self, monkeypatch):
+    def test_a_queue_hit_counts_even_if_history_is_unreachable(self, monkeypatch):
         self._server(monkeypatch, queue=self.QUEUED, history=self.BOOM)
         assert _submitted_extra_data("127.0.0.1", 8188, "p") == ({"client_id": "cid"}, True)
 
-    def test_a_history_hit_is_conclusive_even_if_the_queue_was_unreachable(self, monkeypatch):
+    def test_a_history_hit_counts_even_if_the_queue_was_unreachable(self, monkeypatch):
         self._server(monkeypatch, queue=self.BOOM, history=self.IN_HISTORY)
         assert _submitted_extra_data("127.0.0.1", 8188, "p") == ({"client_id": "cid"}, True)
 
-    def test_both_answering_empty_is_a_conclusive_absence(self, monkeypatch):
-        self._server(monkeypatch, queue=self.EMPTY_QUEUE, history={})
-        assert _submitted_extra_data("127.0.0.1", 8188, "p") == (None, True)
-
-    def test_an_unreadable_history_is_not_an_absence(self, monkeypatch):
-        self._server(monkeypatch, queue=self.EMPTY_QUEUE, history=self.BOOM)
-        assert _submitted_extra_data("127.0.0.1", 8188, "p") == (None, False)
-
-    def test_an_unreadable_queue_is_not_an_absence(self, monkeypatch):
-        """The prompt may be running right now in the queue we could not read."""
-        self._server(monkeypatch, queue=self.BOOM, history={})
-        assert _submitted_extra_data("127.0.0.1", 8188, "p") == (None, False)
-
-    def test_neither_answering_is_not_an_absence(self, monkeypatch):
-        self._server(monkeypatch, queue=self.BOOM, history=self.BOOM)
-        assert _submitted_extra_data("127.0.0.1", 8188, "p") == (None, False)
-
-    def test_a_wrongly_shaped_body_is_not_an_answer(self, monkeypatch):
-        """A 200 carrying valid JSON of the wrong shape (a proxy error page, a
-        captive portal) cannot be read as the server reporting an empty queue."""
-        self._server(monkeypatch, queue=["not", "a", "dict"], history={})
-        assert _submitted_extra_data("127.0.0.1", 8188, "p") == (None, False)
-
-    def test_an_unwalkable_queue_section_is_not_an_answer(self, monkeypatch):
-        self._server(monkeypatch, queue={"queue_running": "nonsense"}, history={})
-        assert _submitted_extra_data("127.0.0.1", 8188, "p") == (None, False)
-
-    def test_a_matched_entry_with_no_extra_data_slot_is_not_an_answer(self, monkeypatch):
-        """Found the prompt but cannot read where the marker would live."""
-        self._server(monkeypatch, queue={"queue_running": [[0, "p"]]}, history={})
-        assert _submitted_extra_data("127.0.0.1", 8188, "p") == (None, False)
+    @pytest.mark.parametrize(
+        ("queue", "history", "why"),
+        [
+            (EMPTY_QUEUE, {}, "answered, prompt in neither store"),
+            (EMPTY_QUEUE, BOOM, "history unreadable"),
+            (BOOM, {}, "queue unreadable, so the prompt may be running right now"),
+            (BOOM, BOOM, "neither store readable"),
+            (["not", "a", "dict"], {}, "a 200 of the wrong shape is not a queue"),
+            ({"error": "bad gateway"}, {}, "a proxy error page mentions no prompt"),
+            ({}, {}, "an object with no queue sections places nothing"),
+            ({"queue_running": "nonsense"}, {}, "an unwalkable section"),
+            ({"queue_running": [[0, "p"]]}, {}, "matched, but too short to hold extra_data"),
+            (EMPTY_QUEUE, {"p": {}}, "in history but no prompt tuple"),
+        ],
+        ids=[
+            "absent-from-both",
+            "history-unreadable",
+            "queue-unreadable",
+            "both-unreadable",
+            "wrong-shaped-body",
+            "proxy-error-page",
+            "no-queue-sections",
+            "unwalkable-section",
+            "entry-missing-extra-slot",
+            "history-entry-malformed",
+        ],
+    )
+    def test_everything_else_is_not_a_record(self, monkeypatch, queue, history, why):
+        self._server(monkeypatch, queue=queue, history=history)
+        assert _submitted_extra_data("127.0.0.1", 8188, "p") == (None, False), why
 
     def test_a_marked_record_round_trips(self, monkeypatch):
         self._server(monkeypatch, queue={"queue_running": [[0, "p", {}, _marked(), {}]]}, history={})
-        extra, conclusive = _submitted_extra_data("127.0.0.1", 8188, "p")
-        assert conclusive is True
+        extra, record_read = _submitted_extra_data("127.0.0.1", 8188, "p")
+        assert record_read is True
         assert extra[jobs_state.BORROWED_CLIENT_ID_KEY] is True
+
+
+class TestABodyThatMentionsNothingIsNotAnAllClear:
+    """A server can answer and still tell us nothing about THIS prompt.
+
+    The first fix taught the lookup to distrust a failed fetch. These are the
+    neighbouring flavour: `/queue` comes back 200 with a body that simply does
+    not place the prompt -- an object missing the queue sections, a proxy error
+    page, or a genuinely empty queue once the record has been pruned. Reading
+    any of those as "no marker, therefore safe" hands the caller's id straight
+    to the socket while the borrowed run may still be live.
+    """
+
+    @pytest.fixture(autouse=True)
+    def no_state_file(self, monkeypatch):
+        monkeypatch.setattr(jobs_state, "read", lambda _: None)
+
+    @pytest.mark.parametrize(
+        "queue_body",
+        [{}, {"error": "bad gateway"}, {"queue_running": [], "queue_pending": []}],
+        ids=["no-queue-sections", "proxy-error-page", "empty-queue-record-pruned"],
+    )
+    def test_an_explicit_override_is_refused(self, monkeypatch, queue_body):
+        monkeypatch.setattr(
+            jobs,
+            "_http_get_json",
+            lambda url, **_kw: queue_body if url.endswith("/queue") else {},
+        )
+        with pytest.raises(_ClientIdRejected) as excinfo:
+            _select_watch_client_id("127.0.0.1", 8188, "p", BORROWED)
+        assert excinfo.value.reason == "indeterminate"
+
+    @pytest.mark.parametrize(
+        "queue_body",
+        [{}, {"error": "bad gateway"}, {"queue_running": [], "queue_pending": []}],
+        ids=["no-queue-sections", "proxy-error-page", "empty-queue-record-pruned"],
+    )
+    def test_without_an_override_it_polls(self, monkeypatch, queue_body):
+        monkeypatch.setattr(
+            jobs,
+            "_http_get_json",
+            lambda url, **_kw: queue_body if url.endswith("/queue") else {},
+        )
+        assert _select_watch_client_id("127.0.0.1", 8188, "p", None) == (None, "indeterminate")
+
+
+class TestTheOrdinaryCaseStillAttaches:
+    """The guard must not turn every watch into a poll.
+
+    Drives the REAL selector -- the integration tests elsewhere monkeypatch it
+    away, so without this nothing pins that an ordinary run still opens a
+    socket at all.
+    """
+
+    @pytest.fixture(autouse=True)
+    def no_state_file(self, monkeypatch):
+        monkeypatch.setattr(jobs_state, "read", lambda _: None)
+
+    def test_a_queued_unmarked_run_resolves_and_attaches(self, monkeypatch):
+        monkeypatch.setattr(
+            jobs,
+            "_http_get_json",
+            lambda url, **_kw: (
+                {"queue_running": [[0, "p", {}, {"client_id": "submitter"}, {}]]} if url.endswith("/queue") else {}
+            ),
+        )
+        assert _select_watch_client_id("127.0.0.1", 8188, "p", None) == ("submitter", None)
+
+    def test_an_override_is_honoured_once_the_record_vouches(self, monkeypatch):
+        monkeypatch.setattr(
+            jobs,
+            "_http_get_json",
+            lambda url, **_kw: (
+                {"queue_running": [[0, "p", {}, {"client_id": "submitter"}, {}]]} if url.endswith("/queue") else {}
+            ),
+        )
+        assert _select_watch_client_id("127.0.0.1", 8188, "p", "my-own-id") == ("my-own-id", None)
+
+    def test_the_watch_opens_a_socket_for_it(self, monkeypatch):
+        """End to end through the real selector: a socket is actually opened,
+        under the resolved submitting id."""
+        opened = {}
+
+        class _WS:
+            def connect(self, url):
+                opened["url"] = url
+
+            def settimeout(self, _t):
+                pass
+
+            def recv(self):
+                raise AssertionError("stop")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(jobs, "_server_or_error", lambda *_a, **_k: True)
+        monkeypatch.setattr(jobs, "_snapshot", lambda *_: {"prompt_id": "p", "status": "running", "outputs": []})
+        monkeypatch.setattr(jobs, "_history_completed_nodes", lambda *_: set())
+        monkeypatch.setattr(
+            jobs,
+            "_http_get_json",
+            lambda url, **_kw: (
+                {"queue_running": [[0, "p", {}, {"client_id": "submitter"}, {}]]} if url.endswith("/queue") else {}
+            ),
+        )
+        monkeypatch.setattr(jobs, "WebSocket", lambda *_a, **_k: _WS())
+
+        CliRunner().invoke(jobs.app, ["watch", "p", "--where", "local", "--timeout", "1"])
+        assert "clientId=submitter" in opened.get("url", "")
+
+
+class TestABlankOverrideIsRejectedLikeRun:
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_blank_is_refused_rather_than_used_verbatim(self, monkeypatch, value):
+        monkeypatch.setattr(jobs, "_server_or_error", lambda *_a, **_k: True)
+        monkeypatch.setattr(jobs, "_snapshot", lambda *_: {"prompt_id": "p", "status": "running", "outputs": []})
+        result = CliRunner().invoke(jobs.app, ["watch", "p", "--where", "local", "--client-id", value])
+        assert result.exit_code == 1, result.output
+        env = _envelope(result.output)
+        assert env["error"]["code"] == "client_id_rejected"
+        assert env["error"]["details"]["reason"] == "empty"
