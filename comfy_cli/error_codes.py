@@ -319,10 +319,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "per user/workspace regardless of submitter) and `wait` (`--wait` would watch a socket this "
         "run's events are deliberately not sent to); on `comfy jobs watch`, `borrowed` (the prompt is "
         "marked as having borrowed a live client's id, so it is poll-only and no override is "
-        "honoured). Refused before anything is submitted or any socket is opened.",
+        "honoured) and `indeterminate` (the server did not answer the lookup that reads that marker, "
+        "so the run could not be shown to be safe to attach to — a failed read is not an unmarked "
+        "record, and is retryable). Refused before anything is submitted or any socket is opened.",
         "pass a non-empty id, or drop the conflicting flag: `--client-id` cannot be combined with "
         "`--wait` or a cloud target, and `comfy jobs watch` on a borrowed run takes no `--client-id` "
-        "at all — poll it with `comfy jobs status`",
+        "at all — poll it with `comfy jobs status`; on `indeterminate`, retry once the server answers "
+        "again, or drop `--client-id` to poll safely now",
     ),
     ErrorCode(
         "host_flag_cloud",

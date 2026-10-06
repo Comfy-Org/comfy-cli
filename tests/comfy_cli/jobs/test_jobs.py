@@ -6,6 +6,7 @@ ComfyUI server is a separate manual demo step.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import subprocess
@@ -3416,21 +3417,23 @@ def test_watch_executing_escapes_server_controlled_node_markup():
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_watch_client_id_prefers_the_job_state_file(monkeypatch):
-    """`comfy run` records the submitting client_id on disk — cheapest source,
-    and no HTTP call should be needed when it is there."""
+def test_select_watch_client_id_prefers_the_job_state_file(monkeypatch):
+    """`comfy run` records the submitting client_id on disk, and that record
+    wins over whatever the server's copy of extra_data says."""
     from comfy_cli import jobs_state
 
     jobs_state.write(jobs_state.new(prompt_id="pid-a", client_id="cid-from-state", workflow="w", where="local"))
 
-    def _no_http(url, **kw):
-        raise AssertionError(f"should not have queried the server: {url}")
+    def fake_get(url, **kw):
+        if url.endswith("/queue"):
+            return {"queue_running": [[0, "pid-a", {}, {"client_id": "cid-from-queue"}, {}]]}
+        raise AssertionError(f"unexpected url: {url}")
 
-    monkeypatch.setattr(jobs_mod, "_http_get_json", _no_http)
-    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-a") == "cid-from-state"
+    monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-a", None) == ("cid-from-state", None)
 
 
-def test_resolve_watch_client_id_falls_back_to_queue_extra_data(monkeypatch):
+def test_select_watch_client_id_falls_back_to_queue_extra_data(monkeypatch):
     """A prompt submitted by something else (browser, older CLI) has no state
     file — /queue's extra_data still carries the submitting client_id."""
 
@@ -3443,10 +3446,10 @@ def test_resolve_watch_client_id_falls_back_to_queue_extra_data(monkeypatch):
         raise AssertionError(f"unexpected url: {url}")
 
     monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
-    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-b") == "cid-from-queue"
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-b", None) == ("cid-from-queue", None)
 
 
-def test_resolve_watch_client_id_falls_back_to_history_then_none(monkeypatch):
+def test_select_watch_client_id_falls_back_to_history_then_none(monkeypatch):
     def fake_get(url, **kw):
         if url.endswith("/queue"):
             return {"queue_running": [], "queue_pending": []}
@@ -3455,17 +3458,21 @@ def test_resolve_watch_client_id_falls_back_to_history_then_none(monkeypatch):
         return {}
 
     monkeypatch.setattr(jobs_mod, "_http_get_json", fake_get)
-    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-c") == "cid-from-history"
-    # Nothing anywhere -> None, so the caller can warn instead of pretending.
-    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-missing") is None
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-c", None) == ("cid-from-history", None)
+    # Both endpoints answered and neither holds it: a positively empty server,
+    # so there is no id to attach as but nothing unsafe about saying so.
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-missing", None) == (None, None)
 
 
-def test_resolve_watch_client_id_survives_an_unreachable_server(monkeypatch):
+def test_select_watch_client_id_polls_when_the_server_is_unreachable(monkeypatch):
+    """An unreachable server leaves borrowed-ness UNKNOWN, not disproved, so the
+    watch polls rather than attaching to an id it could not vet."""
+
     def boom(url, **kw):
         raise RuntimeError("connection refused")
 
     monkeypatch.setattr(jobs_mod, "_http_get_json", boom)
-    assert jobs_mod._resolve_watch_client_id("127.0.0.1", 8188, "pid-x") is None
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-x", None) == (None, "indeterminate")
 
 
 def test_history_completed_nodes_unions_cached_executed_and_output_nodes(monkeypatch):
@@ -3604,7 +3611,7 @@ def test_watch_terminal_envelope_backfills_completed_nodes_without_events(monkey
         ]
     )
     monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: next(snapshots, None))
-    monkeypatch.setattr(jobs_mod, "_resolve_watch_client_id", lambda h, p, pid: None)
+    monkeypatch.setattr(jobs_mod, "_select_watch_client_id", lambda h, p, pid, req: (None, None))
     monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"4", "1"})
 
     result, ws, lines = _run_local_watch(monkeypatch, capsys, messages=[])
@@ -3643,7 +3650,7 @@ def test_watch_already_terminal_job_still_lists_completed_nodes(monkeypatch, cap
 
 def test_watch_client_id_flag_overrides_resolution(monkeypatch, capsys):
     monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
-    monkeypatch.setattr(jobs_mod, "_resolve_watch_client_id", lambda h, p, pid: "resolved")
+    monkeypatch.setattr(jobs_mod, "_select_watch_client_id", lambda h, p, pid, req: (req or "resolved", None))
     monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: set())
     messages = [{"type": "execution_success", "data": {"prompt_id": "pid-w"}}]
     _result, ws, lines = _run_local_watch(
@@ -3659,7 +3666,7 @@ def test_watch_terminal_envelope_validates_against_the_jobs_schema(monkeypatch, 
     import jsonschema
 
     monkeypatch.setattr(jobs_mod, "_snapshot", lambda h, p, pid: {"prompt_id": pid, "status": "running", "outputs": []})
-    monkeypatch.setattr(jobs_mod, "_resolve_watch_client_id", lambda h, p, pid: "cid")
+    monkeypatch.setattr(jobs_mod, "_select_watch_client_id", lambda h, p, pid, req: ("cid", None))
     monkeypatch.setattr(jobs_mod, "_history_completed_nodes", lambda h, p, pid: {"1"})
     messages = [{"type": "execution_success", "data": {"prompt_id": "pid-w"}}]
     _result, _ws, lines = _run_local_watch(monkeypatch, capsys, messages=messages)
@@ -4078,6 +4085,57 @@ def test_http_get_json_oversize_body_is_a_runtime_error_not_a_truncated_parse(mo
     with pytest.raises(RuntimeError) as exc_info:
         jobs_mod._http_get_json("http://127.0.0.1:8188/history")
     assert "http://127.0.0.1:8188/history" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        http.client.RemoteDisconnected("Remote end closed connection without response"),
+        http.client.IncompleteRead(b"half"),
+        http.client.BadStatusLine("not a status line"),
+        ConnectionResetError("reset by peer"),
+    ],
+    ids=["remote-disconnected", "incomplete-read", "bad-status-line", "connection-reset"],
+)
+def test_http_get_json_turns_a_hangup_into_the_one_failure_family(monkeypatch: pytest.MonkeyPatch, raised):
+    """A server that accepts the connection and then hangs up is an ordinary
+    transient, not a traceback.
+
+    urllib only wraps what the *request* raises, so these surface raw out of
+    `getresponse()` — and `URLError` does not cover them. Every call site
+    catches RuntimeError and nothing else, so anything escaping as its own type
+    crashes the command; `jobs watch` in particular depends on this to decide a
+    run's ownership is unverifiable instead of dying mid-decision.
+    """
+    import comfy_cli.http as http_mod
+
+    def boom(req, timeout=None):
+        raise raised
+
+    monkeypatch.setattr(http_mod._PLAIN_OPENER, "open", boom)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        jobs_mod._http_get_json("http://127.0.0.1:8188/queue")
+    assert "http://127.0.0.1:8188/queue" in str(exc_info.value)
+
+
+def test_watch_polls_when_a_hangup_hides_the_borrowed_marker(monkeypatch: pytest.MonkeyPatch):
+    """End to end: a mid-read hangup leaves ownership unverifiable, and an
+    explicit --client-id is refused rather than attached."""
+    import comfy_cli.http as http_mod
+    from comfy_cli import jobs_state
+
+    monkeypatch.setattr(jobs_state, "read", lambda _: None)
+
+    def hangup(req, timeout=None):
+        raise http.client.RemoteDisconnected("Remote end closed connection without response")
+
+    monkeypatch.setattr(http_mod._PLAIN_OPENER, "open", hangup)
+
+    assert jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-h", None) == (None, "indeterminate")
+    with pytest.raises(jobs_mod._ClientIdRejected) as exc_info:
+        jobs_mod._select_watch_client_id("127.0.0.1", 8188, "pid-h", "someone-elses-live-id")
+    assert exc_info.value.reason == "indeterminate"
 
 
 def test_jobs_ls_survives_an_oversize_queue_response(monkeypatch: pytest.MonkeyPatch):
