@@ -1082,7 +1082,7 @@ def _server_confirms_no_record(host: str, port: int, prompt_id: str) -> bool:
     """
     try:
         q = _http_get_json(f"http://{host}:{port}/queue")
-        hist = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
+        hist = _http_get_json(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
     except RuntimeError:
         return False
     if not isinstance(q, dict) or not isinstance(hist, dict):
@@ -1271,7 +1271,7 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
 
     # Then: history.
     try:
-        h = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
+        h = _http_get_json(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
     except RuntimeError:
         return None
     if not isinstance(h, dict) or prompt_id not in h:
@@ -1970,7 +1970,6 @@ def _get_json_object(url: str) -> dict[str, Any]:
         return {}
     return body if isinstance(body, dict) else {}
 
-
 class _SubmittedRecord(NamedTuple):
     """Everything one pass over the server's two stores established.
 
@@ -2040,7 +2039,7 @@ def _submitted_extra_data(host: str, port: int, prompt_id: str) -> _SubmittedRec
     if hit is not None:
         return _SubmittedRecord(hit[0], hit[1], frozenset(borrowed), queue_read)
 
-    history = _get_json_object(f"http://{host}:{port}/history/{prompt_id}")
+    history = _get_json_object(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
     body = history.get(prompt_id)
     prompt = body.get("prompt") if isinstance(body, dict) else None
     if isinstance(prompt, list) and len(prompt) > 3 and isinstance(prompt[3], dict):
@@ -2140,7 +2139,7 @@ def _history_completed_nodes(host: str, port: int, prompt_id: str) -> set[str]:
     """
     nodes: set[str] = set()
     try:
-        h = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
+        h = _http_get_json(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
     except RuntimeError:
         return nodes
     body = h.get(prompt_id) if isinstance(h, dict) else None
