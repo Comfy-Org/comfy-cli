@@ -24,7 +24,12 @@ from typer.testing import CliRunner
 from comfy_cli import jobs_state
 from comfy_cli.cmdline import run as run_command
 from comfy_cli.command import jobs
-from comfy_cli.command.jobs import _ClientIdRejected, _select_watch_client_id, _submitted_extra_data
+from comfy_cli.command.jobs import (
+    _ClientIdRejected,
+    _select_watch_client_id,
+    _submitted_extra_data,
+    _SubmittedRecord,
+)
 from comfy_cli.command.run import WorkflowExecution, execute
 from comfy_cli.output import Renderer, set_renderer
 from comfy_cli.output.renderer import OutputMode, reset_renderer_for_testing
@@ -198,6 +203,11 @@ def _marked(**extra):
     return {"client_id": BORROWED, jobs_state.BORROWED_CLIENT_ID_KEY: True, **extra}
 
 
+def _record(extra=None, *, read=True, borrowed_ids=()):
+    """A `_submitted_extra_data` result, for stubbing it out."""
+    return _SubmittedRecord(extra, read, frozenset(borrowed_ids))
+
+
 class TestWatchDoesNotStealTheSocket:
     @pytest.fixture(autouse=True)
     def answered_empty_server(self, monkeypatch):
@@ -206,7 +216,7 @@ class TestWatchDoesNotStealTheSocket:
         Conclusive, which is a different thing from a read that failed — the
         class below pins that difference.
         """
-        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: (None, True))
+        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: _record())
 
     def test_borrowed_record_yields_no_client_id(self, monkeypatch):
         state = jobs_state.new(
@@ -257,12 +267,12 @@ class TestWatchDoesNotStealTheSocket:
     # see the submitting run's state still has to refuse the id.
     def test_server_marker_is_honoured_without_a_state_file(self, monkeypatch):
         monkeypatch.setattr(jobs_state, "read", lambda _: None)
-        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: (_marked(), True))
+        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: _record(_marked()))
         assert _select_watch_client_id("127.0.0.1", 8188, "p", None) == (None, "borrowed")
 
     def test_explicit_override_cannot_bypass_borrowed_marker(self, monkeypatch):
         monkeypatch.setattr(jobs_state, "read", lambda _: None)
-        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: (_marked(), True))
+        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: _record(_marked()))
         with pytest.raises(_ClientIdRejected) as excinfo:
             _select_watch_client_id("127.0.0.1", 8188, "p", BORROWED)
         assert excinfo.value.reason == "borrowed"
@@ -276,7 +286,7 @@ class TestWatchDoesNotStealTheSocket:
             reads += 1
             if reads > 1:
                 raise AssertionError("selection split marker and client-id reads")
-            return _marked(), True
+            return _record(_marked())
 
         monkeypatch.setattr(jobs, "_submitted_extra_data", server_extra)
         with pytest.raises(_ClientIdRejected):
@@ -291,7 +301,7 @@ class TestWatchDoesNotStealTheSocket:
             lambda *_: {"prompt_id": "p", "status": "running", "outputs": []},
         )
         monkeypatch.setattr(jobs_state, "read", lambda _: None)
-        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: (_marked(), True))
+        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: _record(_marked()))
 
         def fail_if_constructed(*_args, **_kwargs):
             raise AssertionError("borrowed watch constructed a WebSocket")
@@ -319,7 +329,7 @@ class TestWatchDoesNotStealTheSocket:
         monkeypatch.setattr(jobs, "_history_completed_nodes", lambda *_: {"1"})
         monkeypatch.setattr(jobs, "_POLL_ONLY_WATCH_POLL_S", 0)
         monkeypatch.setattr(jobs_state, "read", lambda _: None)
-        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: (_marked(), True))
+        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: _record(_marked()))
 
         def fail_if_constructed(*_args, **_kwargs):
             raise AssertionError("borrowed watch constructed a WebSocket")
@@ -352,7 +362,7 @@ class TestWatchDoesNotStealTheSocket:
         monkeypatch.setattr(jobs, "_history_completed_nodes", lambda *_: set())
         monkeypatch.setattr(jobs, "_POLL_ONLY_WATCH_POLL_S", 0)
         monkeypatch.setattr(jobs_state, "read", lambda _: None)
-        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: (_marked(), True))
+        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: _record(_marked()))
         monkeypatch.setattr(
             jobs,
             "WebSocket",
@@ -373,7 +383,7 @@ class TestWatchDoesNotStealTheSocket:
 
     def test_an_unmarked_server_record_still_resolves(self, monkeypatch):
         monkeypatch.setattr(jobs_state, "read", lambda _: None)
-        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: ({"client_id": "cli-minted"}, True))
+        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: _record({"client_id": "cli-minted"}))
         assert _select_watch_client_id("127.0.0.1", 8188, "p", None) == ("cli-minted", None)
 
 
@@ -392,7 +402,7 @@ class TestUnverifiableOwnershipFailsSafe:
     @pytest.fixture(autouse=True)
     def unverifiable(self, monkeypatch):
         monkeypatch.setattr(jobs_state, "read", lambda _: None)
-        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: (None, False))
+        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: _record(read=False))
 
     def test_explicit_override_is_refused_rather_than_attached(self):
         with pytest.raises(_ClientIdRejected) as excinfo:
@@ -479,11 +489,11 @@ class TestSubmittedExtraDataReportsWhetherTheRecordWasRead:
 
     def test_a_queue_hit_counts_even_if_history_is_unreachable(self, monkeypatch):
         self._server(monkeypatch, queue=self.QUEUED, history=self.BOOM)
-        assert _submitted_extra_data("127.0.0.1", 8188, "p") == ({"client_id": "cid"}, True)
+        assert _submitted_extra_data("127.0.0.1", 8188, "p")[:2] == ({"client_id": "cid"}, True)
 
     def test_a_history_hit_counts_even_if_the_queue_was_unreachable(self, monkeypatch):
         self._server(monkeypatch, queue=self.BOOM, history=self.IN_HISTORY)
-        assert _submitted_extra_data("127.0.0.1", 8188, "p") == ({"client_id": "cid"}, True)
+        assert _submitted_extra_data("127.0.0.1", 8188, "p")[:2] == ({"client_id": "cid"}, True)
 
     @pytest.mark.parametrize(
         ("queue", "history", "why"),
@@ -514,11 +524,11 @@ class TestSubmittedExtraDataReportsWhetherTheRecordWasRead:
     )
     def test_everything_else_is_not_a_record(self, monkeypatch, queue, history, why):
         self._server(monkeypatch, queue=queue, history=history)
-        assert _submitted_extra_data("127.0.0.1", 8188, "p") == (None, False), why
+        assert _submitted_extra_data("127.0.0.1", 8188, "p")[:2] == (None, False), why
 
     def test_a_marked_record_round_trips(self, monkeypatch):
         self._server(monkeypatch, queue={"queue_running": [[0, "p", {}, _marked(), {}]]}, history={})
-        extra, record_read = _submitted_extra_data("127.0.0.1", 8188, "p")
+        extra, record_read, _ids = _submitted_extra_data("127.0.0.1", 8188, "p")
         assert record_read is True
         assert extra[jobs_state.BORROWED_CLIENT_ID_KEY] is True
 
@@ -565,6 +575,108 @@ class TestABodyThatMentionsNothingIsNotAnAllClear:
             lambda url, **_kw: queue_body if url.endswith("/queue") else {},
         )
         assert _select_watch_client_id("127.0.0.1", 8188, "p", None) == (None, "indeterminate")
+
+
+class TestTheIdIsCheckedToNotJustThePrompt:
+    """The marker rides a prompt; what it protects is a socket.
+
+    Watching an ordinary, fully vouched-for prompt while naming a live
+    client's id as `--client-id` evicts that client just as thoroughly as
+    attaching to the borrowed run would have. Checking only the watched
+    prompt's marker misses it entirely, so the id is checked against every
+    borrowed run the queue is still carrying.
+    """
+
+    QUEUE = {
+        "queue_running": [
+            [0, "P_BORROWED", {}, {"client_id": BORROWED, jobs_state.BORROWED_CLIENT_ID_KEY: True}, {}],
+            [1, "P_OTHER", {}, {"client_id": "ordinary"}, {}],
+        ],
+        "queue_pending": [],
+    }
+
+    @pytest.fixture(autouse=True)
+    def live_queue(self, monkeypatch):
+        monkeypatch.setattr(jobs_state, "read", lambda _: None)
+        monkeypatch.setattr(
+            jobs,
+            "_http_get_json",
+            lambda url, **_kw: self.QUEUE if url.endswith("/queue") else {},
+        )
+
+    def test_another_runs_borrowed_id_is_refused(self):
+        with pytest.raises(_ClientIdRejected) as excinfo:
+            _select_watch_client_id("127.0.0.1", 8188, "P_OTHER", BORROWED)
+        assert excinfo.value.reason == "borrowed"
+
+    def test_the_borrowed_run_itself_is_still_refused(self):
+        with pytest.raises(_ClientIdRejected) as excinfo:
+            _select_watch_client_id("127.0.0.1", 8188, "P_BORROWED", BORROWED)
+        assert excinfo.value.reason == "borrowed"
+
+    def test_an_unrelated_override_is_still_honoured(self):
+        """The check must not turn --client-id into a no-op."""
+        assert _select_watch_client_id("127.0.0.1", 8188, "P_OTHER", "my-own-id") == ("my-own-id", None)
+
+    def test_the_ordinary_watch_is_untouched(self):
+        assert _select_watch_client_id("127.0.0.1", 8188, "P_OTHER", None) == ("ordinary", None)
+
+    def test_the_borrowed_set_comes_from_the_same_read(self, monkeypatch):
+        """One `/queue` body answers both questions, so they cannot disagree."""
+        reads = []
+        monkeypatch.setattr(
+            jobs,
+            "_http_get_json",
+            lambda url, **_kw: (reads.append(url), self.QUEUE if url.endswith("/queue") else {})[1],
+        )
+        with pytest.raises(_ClientIdRejected):
+            _select_watch_client_id("127.0.0.1", 8188, "P_OTHER", BORROWED)
+        assert [u for u in reads if u.endswith("/queue")] == ["http://127.0.0.1:8188/queue"]
+
+
+class TestAnAlreadyTerminalFailureIsTrimmedToo:
+    """The short-circuit exit is a failed `jobs watch` as much as the live one.
+
+    `_emit_terminal` keys its trimming and redaction on `execution_error`, so a
+    failure left where `_snapshot` puts it reached the envelope whole.
+    """
+
+    SNAP = {
+        "prompt_id": "p",
+        "status": "error",
+        "outputs": [],
+        "error": {
+            "exception_message": "boom",
+            "node_id": "5",
+            "traceback": [f"frame{i}" for i in range(12)],
+            "current_inputs": {"api_key": "sk-SECRET-123"},
+        },
+    }
+
+    @pytest.fixture(autouse=True)
+    def terminal_failure(self, monkeypatch):
+        monkeypatch.setattr(jobs, "_server_or_error", lambda *_a, **_k: True)
+        monkeypatch.setattr(jobs, "_snapshot", lambda *_a: dict(self.SNAP))
+        monkeypatch.setattr(jobs, "_history_completed_nodes", lambda *_a: set())
+
+    def _env(self):
+        result = CliRunner().invoke(jobs.app, ["watch", "p", "--where", "local"])
+        assert result.exit_code == 1, result.output
+        return _envelope(result.output)
+
+    def test_the_failure_is_published_where_the_live_path_publishes_it(self):
+        env = self._env()
+        assert env["error"]["code"] == "execution_error"
+        assert env["error"]["details"]["execution_error"]["exception_message"] == "boom"
+        assert "error" not in env["error"]["details"]
+
+    def test_a_secret_in_current_inputs_does_not_reach_the_envelope(self):
+        assert "sk-SECRET-123" not in json.dumps(self._env())
+
+    def test_the_traceback_is_capped_to_its_tail(self):
+        env = self._env()
+        assert env["error"]["details"]["execution_error"]["traceback"] == ["frame10", "frame11"]
+        assert "frame0" not in json.dumps(env)
 
 
 class TestTheOrdinaryCaseStillAttaches:

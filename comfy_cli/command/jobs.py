@@ -36,7 +36,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NamedTuple
 
 import typer
 from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
@@ -1929,7 +1929,22 @@ def _get_json_object(url: str) -> dict[str, Any]:
     return body if isinstance(body, dict) else {}
 
 
-def _submitted_extra_data(host: str, port: int, prompt_id: str) -> tuple[Any, bool]:
+class _SubmittedRecord(NamedTuple):
+    """Everything one pass over the server's two stores established.
+
+    ``borrowed_ids`` comes from the same ``/queue`` body as ``extra`` because
+    the two answer different questions and both are needed before a socket
+    opens: the marker rides a PROMPT, but what it protects is a SOCKET, and a
+    caller can name a live client's id while watching a different prompt
+    entirely. Collected in one pass so the two cannot disagree.
+    """
+
+    extra: Any
+    read: bool
+    borrowed_ids: frozenset[str]
+
+
+def _submitted_extra_data(host: str, port: int, prompt_id: str) -> _SubmittedRecord:
     """This prompt's ``extra_data`` as the SERVER has it, and whether that record
     was POSITIVELY READ.
 
@@ -1950,21 +1965,33 @@ def _submitted_extra_data(host: str, port: int, prompt_id: str) -> tuple[Any, bo
     absence, which is the very inference this exists to refuse.
     """
     queue = _get_json_object(f"http://{host}:{port}/queue")
+    borrowed: set[str] = set()
+    hit: tuple[Any, bool] | None = None
     for key in ("queue_running", "queue_pending"):
         entries = queue.get(key)
         if not isinstance(entries, list):
             continue
         for entry in entries:
             # entry layout: number, prompt_id, prompt, extra_data, outputs_to_execute
-            if isinstance(entry, list) and len(entry) > 1 and entry[1] == prompt_id:
-                return (entry[3], True) if len(entry) > 3 else (None, False)
+            if not (isinstance(entry, list) and len(entry) > 1):
+                continue
+            extra = entry[3] if len(entry) > 3 else None
+            if _borrowed_from_extra_data(extra):
+                fed = _client_id_from_extra_data(extra)
+                if fed:
+                    borrowed.add(fed)
+            if hit is None and entry[1] == prompt_id:
+                hit = (extra, True) if len(entry) > 3 else (None, False)
+
+    if hit is not None:
+        return _SubmittedRecord(hit[0], hit[1], frozenset(borrowed))
 
     history = _get_json_object(f"http://{host}:{port}/history/{prompt_id}")
     body = history.get(prompt_id)
     prompt = body.get("prompt") if isinstance(body, dict) else None
     if isinstance(prompt, list) and len(prompt) > 3:
-        return prompt[3], True
-    return None, False
+        return _SubmittedRecord(prompt[3], True, frozenset(borrowed))
+    return _SubmittedRecord(None, False, frozenset(borrowed))
 
 
 def _select_watch_client_id(
@@ -2011,12 +2038,22 @@ def _select_watch_client_id(
         job = jobs_state.read(prompt_id)
     except (ValueError, OSError):  # unsafe prompt_id / unreadable state dir
         job = None
-    extra, record_read = _submitted_extra_data(host, port, prompt_id)
+    record = _submitted_extra_data(host, port, prompt_id)
+    extra, record_read = record.extra, record.read
 
     if (job is not None and job.client_id_borrowed) or _borrowed_from_extra_data(extra):
         if requested:
             raise _ClientIdRejected("borrowed")
         return None, "borrowed"
+
+    # The watched prompt is clean, but the id the caller named may not be: it
+    # can belong to a client some OTHER queued run is feeding on purpose.
+    # Attaching would evict it just the same, so the id is checked against
+    # every borrowed run the queue is carrying, not only against this prompt.
+    # Bounded by what the queue can still show — a run already gone from it
+    # cannot be consulted, which is why the id is only ever a last resort.
+    if requested and requested in record.borrowed_ids:
+        raise _ClientIdRejected("borrowed")
 
     # A state file is its own positive evidence: `comfy run` wrote it, and it
     # says this run did not borrow. Failing that, only the prompt's own server
@@ -2293,9 +2330,10 @@ def watch_cmd(
             help=(
                 "Local-only: attach as this WS client_id instead of the submitting one. "
                 "ComfyUI sends execution events only to the submitting session, so watch "
-                "resolves that id automatically; override it if resolution picks wrong. "
-                "Refused on a run that borrowed a live client's socket, and on one whose "
-                "record cannot be read — attaching could cut that client off."
+                "resolves that id automatically; override it as a last resort if resolution "
+                "picks wrong. Refused on a run that borrowed a live client's socket, on an id "
+                "another queued run borrowed, and on a run whose record cannot be read — "
+                "attaching could cut that client off."
             ),
         ),
     ] = None,
@@ -2337,6 +2375,12 @@ def watch_cmd(
         # ended, so no session was attached and there is no id to report.
         snap["client_id"] = None
         snap["attached"] = False
+        # Same promotion the live path does when it ends. `_emit_terminal`
+        # keys its trimming and redaction on `execution_error`, so a failure
+        # left where `_snapshot` puts it reaches the envelope whole — full
+        # traceback, and a `current_inputs` that can hold an api_key.
+        if isinstance(snap.get("error"), dict):
+            snap["execution_error"] = snap.pop("error")
         if renderer.is_pretty():
             renderer.console().print(f"[dim]Prompt {prompt_id} already {snap['status']}; nothing more to watch.[/dim]")
             _render_status_pretty(snap, host=h, port=p)
@@ -2519,6 +2563,11 @@ def watch_cmd(
         # silence, so it belongs in the envelope rather than only in the logs.
         "client_id": ws_client_id,
         "attached": attached_client_id is not None,
+        # Why no socket was opened, when none was. Pretty mode explains this in
+        # prose; without it here a --json consumer sees `attached: false` and
+        # cannot tell the two apart, though they want opposite responses —
+        # `borrowed` means drop --client-id, `indeterminate` means retry.
+        "poll_reason": poll_reason,
     }
     if state.end_details is not None:
         details = dict(state.end_details) if isinstance(state.end_details, dict) else {"raw": state.end_details}

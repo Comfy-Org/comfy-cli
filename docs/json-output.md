@@ -44,14 +44,19 @@ assumed unmarked: the watch polls (`attached: false`) and an explicit
 the server answers again; a `prompt_id` that is a typo or already pruned stays
 unreadable, and no id works for it.
 
-Two limits on that guard, both by design. It is **per prompt**: it reads the
-marker on the prompt being watched, not on the id you pass, so naming a borrowed
-client's id as `--client-id` while watching a *different*, unmarked prompt is
-still honoured — and still evicts whatever holds that id, exactly as the last
-paragraph of this section describes for any re-attach. And a prompt that is
-*already terminal* short-circuits before the guard runs, so a non-empty
-`--client-id` is ignored rather than refused there; harmless, because that path
-opens no socket at all. Both
+The check is on the id as well as on the prompt: naming a borrowed client's id
+as `--client-id` while watching some *other*, perfectly ordinary prompt is
+refused the same way, because attaching evicts that client either way. What
+bounds it is what the server can still show — the borrowed ids are read from
+`/queue`, so a run that has already left the queue cannot be consulted, and an
+id it was feeding is honoured again. Watch by `prompt_id` and let resolution do
+its job; `--client-id` is a last resort. One more gap: a prompt that is
+*already terminal* short-circuits before any of this runs, so a non-empty
+`--client-id` is ignored rather than refused there — harmless, because that path
+opens no socket at all. Separately, and by design, this protects only runs
+*comfy-cli* submitted with `--client-id`: a browser tab that submits its own
+prompt stamps no marker, so watching that prompt re-attaches as the tab, exactly
+as the last paragraph of this section describes for any re-attach. Both
 `data.client_id` and `data.attached` are present on *every* terminal envelope: a
 watch of an already-finished prompt short-circuits without opening a socket, and
 reports `client_id: null` / `attached: false`. Reconnecting under an existing id

@@ -50,8 +50,11 @@ history.
   sources has positively vouched for the run: with no readable state file and
   no readable server record for the prompt, `--client-id` is refused with
   `reason: "indeterminate"` rather than risking the eviction, and the watch
-  polls. A blank `--client-id` is refused (`reason: "empty"`) as it is on
-  `comfy run`.
+  polls. The refusal is keyed on the id too, so naming an id another queued run
+  borrowed is refused even when the prompt being watched is ordinary. A blank
+  `--client-id` is refused (`reason: "empty"`) as it is on `comfy run`. The
+  watch envelope carries `poll_reason` (`borrowed`, `indeterminate` or null) so
+  a `--json` consumer can tell why no socket was opened.
 
 ### Changed
 
