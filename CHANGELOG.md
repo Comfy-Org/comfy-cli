@@ -37,6 +37,11 @@ history.
 
 ### Changed
 
+- **Breaking:** `comfy build push` in a workspace at its build limit now fails
+  with its own `build_limit` code instead of `build_builder_error`, carrying the
+  builder's message and a hint to delete a build or ask a teammate to. The limit
+  counts every member's builds, which `comfy build ls` does not list outside the
+  enterprise plan, and its help now says so.
 - An `unknown_enum_value` finding (validate, set-widget, edit batches) names the
   closest options in `suggestions` (at most 5) with `option_count`, and carries
   `valid_options` only when the list has 12 options or fewer. It used to carry

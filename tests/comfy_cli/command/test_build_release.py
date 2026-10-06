@@ -455,7 +455,7 @@ def test_each_mapped_refusal_reaches_the_agent_under_its_own_code(
 def test_a_mapped_code_under_another_status_keeps_the_generic_envelope(
     workspace: Path, monkeypatch: pytest.MonkeyPatch, status: int
 ) -> None:
-    """All three refusals are 409 in the builder's contract, so a mapped code
+    """Every mapped refusal is 409 in the builder's contract, so a mapped code
     arriving under any other status came from something that is not the builder
     -- a proxy, a WAF page, a service that changed -- and must not hand an agent
     remediation for a limit that may not exist."""
