@@ -11,6 +11,7 @@ import pytest
 
 from comfy_cli import docs
 from comfy_cli.docs import lancedb_search
+from scripts import build_docs_bundle
 
 ROOT = Path(__file__).resolve().parents[2]
 QUERY_FIXTURE = Path(__file__).parent / "fixtures" / "docs" / "search_queries.json"
@@ -57,6 +58,15 @@ def test_packaged_corpus_is_current_and_has_valid_source_locations():
     assert all((ROOT / section["source"]).is_file() for section in sections)
     assert all(section["source_line"] > 0 for section in sections)
     assert any("```" in section["content"] for section in sections)
+
+
+def test_corpus_freshness_check_accepts_windows_checkout_newlines(tmp_path, monkeypatch):
+    expected = build_docs_bundle.build()
+    output = tmp_path / "corpus.json"
+    output.write_bytes(expected.replace(b"\n", b"\r\n"))
+    monkeypatch.setattr(build_docs_bundle, "OUTPUT", output)
+
+    assert build_docs_bundle._current_corpus(expected)
 
 
 def test_search_relevance_for_common_agent_queries(monkeypatch):

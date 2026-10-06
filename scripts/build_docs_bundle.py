@@ -127,6 +127,13 @@ def build() -> bytes:
     return (json.dumps(corpus, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
+def _current_corpus(content: bytes) -> bool:
+    """Compare generated content while ignoring checkout newline conversion."""
+    if not OUTPUT.is_file():
+        return False
+    return OUTPUT.read_bytes().replace(b"\r\n", b"\n") == content
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="fail if the checked-in corpus is stale")
@@ -138,7 +145,7 @@ def main() -> int:
         return 1
 
     if args.check:
-        if not OUTPUT.is_file() or OUTPUT.read_bytes() != content:
+        if not _current_corpus(content):
             print("docs bundle is stale; run python scripts/build_docs_bundle.py", file=sys.stderr)
             return 1
         return 0
