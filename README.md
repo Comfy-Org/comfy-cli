@@ -667,17 +667,25 @@ refreshes during `comfy skills install` and in the background during
 
 ## Searching the CLI docs
 
-Search the CLI guides and installed agent guides locally:
+Search the CLI guides and installed agent guides locally. BM25 works with the
+base CLI. The optional extra adds a version-matched LanceDB pack and local
+query encoder for offline semantic and hybrid search:
 
 ```bash
-comfy --json docs search "install custom nodes"
+pip install 'comfy-cli[docs-search]'  # optional; includes the version-matched offline pack
+comfy --json docs status
+comfy --json docs search "workflow hangs on a cloud timeout" --mode hybrid
 comfy --json docs show "SECTION_ID"
 ```
 
-Search results include a section ID, source location, and a short excerpt. Pass
-the ID to `docs show` to read the full section; use `--max-chars` and `--offset`
-to page through a long section. The docs command works offline and does not
-need a ComfyUI workspace. Its results describe this comfy-cli release.
+`docs status` reports which modes this install can use. Search results include
+a section ID, source location, and a short excerpt. Pass the ID to `docs show`
+to read the full section; use `--max-chars` and `--offset` to page through a
+long section. The docs command needs no ComfyUI workspace, and queries never
+download a model. Results describe this comfy-cli release. Without the optional
+pack, `--mode auto` uses BM25 and reports why semantic search is unavailable.
+Agents can search each part of a larger question, read the relevant sections,
+and reformulate a missed search once with a comfy command or flag.
 
 ## Analytics
 

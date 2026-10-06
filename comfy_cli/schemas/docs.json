@@ -14,10 +14,13 @@
     "has_more": { "type": "boolean", "description": "Whether additional results exist beyond the requested limit (search)." },
     "search_backend": {
       "type": "string",
-      "enum": ["fts5", "token-scan", "none"],
+      "enum": ["fts5", "token-scan", "none", "lancedb-bm25", "lancedb-vector", "lancedb-hybrid-rrf"],
       "description": "Search backend used; none means the query contained no searchable terms."
     },
-    "hint": { "type": "string", "description": "A suggested next step when search returned no results." },
+    "retrieval_mode": { "type": "string", "enum": ["none", "bm25", "semantic", "hybrid", "token-scan-fallback"] },
+    "query_mode": { "type": "string", "enum": ["auto", "bm25", "semantic", "hybrid"] },
+    "fallback_reason": { "type": ["string", "null"], "description": "Why auto mode used core BM25 instead of LanceDB hybrid retrieval." },
+    "hint": { "type": ["string", "null"], "description": "A suggested next step for a no-hit query or an unavailable optional mode." },
     "id": { "type": "string", "description": "Section ID accepted by docs show." },
     "title": { "type": "string", "description": "The source document title." },
     "headings": { "type": "array", "items": { "type": "string" }, "description": "Heading path to this section." },
@@ -28,7 +31,17 @@
     "offset": { "type": "integer", "minimum": 0, "description": "Starting character offset of this page (show)." },
     "truncated": { "type": "boolean", "description": "Whether more section content is available (show)." },
     "next_offset": { "type": ["integer", "null"], "minimum": 0, "description": "Offset for the next page, or null when the section is complete (show)." },
-    "corpus_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 identity of the installed documentation corpus." }
+    "corpus_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 identity of the installed documentation corpus." },
+    "core_modes": { "type": "array", "items": { "type": "string" } },
+    "pack_installed": { "type": "boolean" },
+    "pack_compatible": { "type": "boolean" },
+    "pack_version": { "type": ["string", "null"] },
+    "lancedb_version": { "type": ["string", "null"] },
+    "model": { "type": ["string", "null"] },
+    "highest_vector_similarity": { "type": ["number", "null"], "description": "Highest cosine similarity among vector candidates, when semantic search ran." },
+    "fts_term_coverage": { "type": "number", "minimum": 0, "maximum": 1, "description": "Fraction of meaningful query terms found in the best lexical candidate." },
+    "available_modes": { "type": "array", "items": { "type": "string" } },
+    "unavailable_reason": { "type": ["string", "null"] }
   },
   "$defs": {
     "preview": {
@@ -39,7 +52,9 @@
         "headings": { "type": "array", "items": { "type": "string" } },
         "source": { "type": "string" },
         "source_line": { "type": "integer", "minimum": 1 },
-        "excerpt": { "type": "string", "maxLength": 800 }
+        "excerpt": { "type": "string", "maxLength": 800 },
+        "score": { "type": "number", "description": "Mode-specific lexical, cosine, or fused relevance score." },
+        "score_type": { "type": "string", "enum": ["bm25", "cosine_similarity", "rrf"] }
       },
       "required": ["id", "title", "headings", "source", "source_line", "excerpt"]
     }

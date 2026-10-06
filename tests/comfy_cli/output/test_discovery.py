@@ -79,6 +79,7 @@ def test_discover_annotates_commands_with_schema():
     assert cmds["run"]["stream_event_schema"] == "run_event.json"
     assert cmds["discover"]["output_schema"] == "discover.json"
     assert cmds["docs"]["subcommands"]["search"]["output_schema"] == "docs.json"
+    assert cmds["docs"]["subcommands"]["status"]["output_schema"] == "docs.json"
     assert cmds["docs"]["subcommands"]["show"]["output_schema"] == "docs.json"
 
 

@@ -8,7 +8,7 @@ import typer
 from rich.text import Text
 
 from comfy_cli import docs as docs_index
-from comfy_cli.docs import DocsUnavailableError
+from comfy_cli.docs import DocsSearchPackError, DocsUnavailableError
 from comfy_cli.output import get_renderer
 
 app = typer.Typer(no_args_is_help=True, help="Search documentation shipped with comfy-cli.")
@@ -23,6 +23,14 @@ def _load_failure(renderer) -> None:
     raise typer.Exit(code=1)
 
 
+def _pack_failure(renderer, error: DocsSearchPackError) -> None:
+    if error.code == "docs_search_unavailable":
+        renderer.error(code="docs_search_unavailable", message=str(error), hint=error.hint)
+    else:
+        renderer.error(code="docs_pack_incompatible", message=str(error), hint=error.hint)
+    raise typer.Exit(code=1)
+
+
 @app.command("search", help="Search bundled CLI and agent documentation.")
 def search_cmd(
     query: Annotated[str, typer.Argument(help="Words, command names, or flags to search for.")],
@@ -30,13 +38,19 @@ def search_cmd(
         int,
         typer.Option("--limit", min=1, max=docs_index.MAX_RESULTS, help="Maximum number of sections to return."),
     ] = docs_index.DEFAULT_RESULTS,
+    mode: Annotated[
+        str,
+        typer.Option("--mode", help="Retrieval mode: auto, bm25, semantic, or hybrid."),
+    ] = "auto",
 ) -> None:
-    """Find relevant sections and short excerpts without a network request."""
+    """Find relevant sections with local BM25 or optional LanceDB semantic search."""
     renderer = get_renderer()
     try:
-        payload = docs_index.search(query, limit=limit)
+        payload = docs_index.search(query, limit=limit, mode=mode.casefold())
     except DocsUnavailableError:
         _load_failure(renderer)
+    except DocsSearchPackError as error:
+        _pack_failure(renderer, error)
     except ValueError as error:
         raise typer.BadParameter(str(error), param_hint="query") from error
 
@@ -52,6 +66,30 @@ def search_cmd(
                 if result["excerpt"]:
                     renderer.print(Text(f"  {result['excerpt']}"))
     renderer.emit(payload, command="docs search")
+
+
+@app.command("status", help="Show the documentation corpus and available retrieval modes.")
+def status_cmd() -> None:
+    """Report local docs pack compatibility without loading the model."""
+    renderer = get_renderer()
+    try:
+        payload = docs_index.status()
+    except DocsUnavailableError:
+        _load_failure(renderer)
+
+    if renderer.is_pretty():
+        renderer.print(Text(f"Corpus: {payload['corpus_hash']}", style="bold"))
+        renderer.print(Text(f"Search modes: {', '.join(payload['available_modes'])}"))
+        if payload["pack_installed"]:
+            renderer.print(Text(f"Search pack: {payload['pack_version']} (compatible={payload['pack_compatible']})"))
+            if payload["model"]:
+                renderer.print(Text(f"Model: {payload['model']}"))
+        else:
+            renderer.print(Text("Search pack: not installed"))
+        if payload["unavailable_reason"]:
+            renderer.print(Text(payload["unavailable_reason"], style="yellow"))
+            renderer.print(Text(payload["hint"], style="dim"))
+    renderer.emit(payload, command="docs status")
 
 
 @app.command("show", help="Read a documentation section returned by `docs search`.")

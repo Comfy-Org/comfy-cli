@@ -10,6 +10,17 @@ For fuller CLI instructions, search the docs installed with this version:
 `comfy --json docs show "SECTION_ID"`. The search is local and works without a
 ComfyUI workspace. Pass the user's words as one safely quoted argument. Use
 the live command output when it contains current installation-specific facts.
+Check `comfy --json docs status` to see available retrieval modes. By default,
+search uses hybrid retrieval when the optional `comfy-cli[docs-search]` pack is
+installed and BM25 otherwise. Use `--mode bm25` for exact flags and error
+codes, `--mode semantic` for paraphrases, and `--mode hybrid` to combine both.
+Search returns `zero_hit` when semantic or hybrid matches do not meet the
+evidence threshold. Report that docs gap; do not make up instructions.
+For a multi-part question, search each topic and read its relevant sections
+before answering. If a search misses, reformulate once with a comfy command
+name or flag. A second miss means the bundled docs do not cover that question;
+use live discovery for installation-specific facts and do not infer that a
+feature is unsupported.
 
 The surface splits cleanly in two:
 

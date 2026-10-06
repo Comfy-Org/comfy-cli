@@ -72,6 +72,14 @@ dependencies = [
 
 optional-dependencies.dev = [ "jsonschema", "pre-commit", "pytest", "pytest-cov", "ruff==0.15.15", "typer>=0.24" ]
 optional-dependencies.preview = [ "term-image>=0.7,<0.8" ]
+optional-dependencies.docs-search = [
+  "comfy-cli-docs-search==0.0.0",
+  "lancedb==0.25.0",
+  "onnxruntime==1.23.2; python_version < '3.14'",
+  "onnxruntime==1.24.3; python_version >= '3.14'",
+  "pyarrow>=16,<25",
+  "tokenizers>=0.15,<1",
+]
 urls.Repository = "https://github.com/Comfy-Org/comfy-cli.git"
 scripts.comfy = "comfy_cli.__main__:main"
 scripts.comfy-cli = "comfy_cli.__main__:main"
@@ -91,6 +99,12 @@ include = [ "comfy_cli*" ]
 
 "comfy_cli.cql.data" = [ "*.yaml", "*.json" ]
 "comfy_cli.command.generate" = [ "spec/openapi.yml" ]
+
+[tool.uv.workspace]
+members = ["packages/comfy-cli-docs-search"]
+
+[tool.uv.sources]
+comfy-cli-docs-search = { workspace = true }
 
 [tool.ruff]
 target-version = "py310"

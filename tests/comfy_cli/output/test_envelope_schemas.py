@@ -114,6 +114,18 @@ def test_docs_search_and_show_payloads_validate():
     _validator_for("envelope.json").validate(show_envelope)
     _validator_for("docs.json").validate(show_envelope["data"])
 
+    status = subprocess.run(
+        [sys.executable, "-m", "comfy_cli", "--json", "docs", "status"],
+        cwd=SCHEMAS_DIR.parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    status_envelope = json.loads(status.stdout)
+    _validator_for("envelope.json").validate(status_envelope)
+    _validator_for("docs.json").validate(status_envelope["data"])
+
 
 def test_run_event_schema_declares_contract_version():
     from comfy_cli.output.renderer import EVENT_SCHEMA

@@ -33,7 +33,7 @@ def _envelope(result):
 
 
 def test_search_and_show_work_without_workspace_or_tracking(invoke_docs):
-    result = invoke_docs(["search", "install custom nodes"])
+    result = invoke_docs(["search", "install custom nodes", "--mode", "bm25"])
     assert result.exit_code == 0, result.output
     envelope = _envelope(result)
     assert envelope["ok"] is True
@@ -80,6 +80,36 @@ def test_missing_corpus_has_a_structured_error(invoke_docs, monkeypatch):
     assert envelope["error"]["code"] == "docs_unavailable"
 
 
+def test_semantic_mode_reports_missing_pack_as_a_structured_error(invoke_docs, monkeypatch):
+    from comfy_cli.docs import lancedb_search
+
+    monkeypatch.setattr(
+        lancedb_search,
+        "inspect_pack",
+        lambda **_kwargs: {
+            "installed": False,
+            "compatible": False,
+            "reason": "pack missing",
+            "hint": "install docs-search",
+            "available_modes": ["auto", "bm25"],
+            "pack_version": None,
+            "lancedb_version": None,
+            "model": None,
+        },
+    )
+    result = invoke_docs(["search", "cloud timeout", "--mode", "semantic"])
+    assert result.exit_code == 1
+    assert _envelope(result)["error"]["code"] == "docs_search_unavailable"
+
+
+def test_docs_status_reports_available_search_modes(invoke_docs):
+    result = invoke_docs(["status"])
+    assert result.exit_code == 0, result.output
+    data = _envelope(result)["data"]
+    assert data["corpus_hash"]
+    assert "bm25" in data["available_modes"]
+
+
 def test_out_of_range_section_offset_is_a_usage_error(invoke_docs):
     section = docs_index.load_corpus()[0][0]
     invalid_offset = len(section["content"]) + 1
@@ -90,11 +120,11 @@ def test_out_of_range_section_offset_is_a_usage_error(invoke_docs):
 
 def test_pretty_output_prints_document_text_literally():
     runner = CliRunner()
-    search_result = runner.invoke(app, ["--no-json", "docs", "search", "custom nodes"])
+    search_result = runner.invoke(app, ["--no-json", "docs", "search", "custom nodes", "--mode", "bm25"])
     assert search_result.exit_code == 0, search_result.output
     assert "custom-nodes:" in search_result.output
 
-    section = docs_index.search("custom nodes")["results"][0]
+    section = docs_index.search("custom nodes", mode="bm25")["results"][0]
     show_result = runner.invoke(app, ["--no-json", "docs", "show", section["id"]])
     assert show_result.exit_code == 0, show_result.output
     assert section["source"] in show_result.output

@@ -1,3 +1,9 @@
 include docs/search-sources.json
 include docs/json-output.md
 include scripts/build_docs_bundle.py
+include scripts/build_docs_lancedb.py
+include scripts/set_release_version.py
+include packages/comfy-cli-docs-search/pyproject.toml
+include packages/comfy-cli-docs-search/README.md
+include packages/comfy-cli-docs-search/MODEL-LICENSE.txt
+recursive-include packages/comfy-cli-docs-search/src *.py *.typed

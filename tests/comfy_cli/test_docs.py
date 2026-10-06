@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from comfy_cli import docs
+from comfy_cli.docs import lancedb_search
 
 ROOT = Path(__file__).resolve().parents[2]
 QUERY_FIXTURE = Path(__file__).parent / "fixtures" / "docs" / "search_queries.json"
@@ -19,8 +20,26 @@ def _search_with_fallback(monkeypatch, query: str) -> dict:
     def no_fts(*_args, **_kwargs):
         raise NotImplementedError("forced fallback")
 
+    _force_core_search(monkeypatch)
     monkeypatch.setattr(docs, "_fts_search", no_fts)
-    return docs.search(query)
+    return docs.search(query, mode="bm25")
+
+
+def _force_core_search(monkeypatch) -> None:
+    monkeypatch.setattr(
+        lancedb_search,
+        "inspect_pack",
+        lambda **_kwargs: {
+            "installed": False,
+            "compatible": False,
+            "reason": "forced core retrieval",
+            "hint": None,
+            "available_modes": ["auto", "bm25"],
+            "pack_version": None,
+            "lancedb_version": None,
+            "model": None,
+        },
+    )
 
 
 def _matches_target(case: dict, results: list[dict]) -> bool:
@@ -42,8 +61,9 @@ def test_packaged_corpus_is_current_and_has_valid_source_locations():
 
 def test_search_relevance_for_common_agent_queries(monkeypatch):
     cases = json.loads(QUERY_FIXTURE.read_text(encoding="utf-8"))
+    _force_core_search(monkeypatch)
     for case in cases:
-        fts_results = docs.search(case["query"])["results"][:5]
+        fts_results = docs.search(case["query"], mode="bm25")["results"][:5]
         for result in fts_results:
             assert len(result["excerpt"]) <= docs.MAX_EXCERPT_CHARS
         assert _matches_target(case, fts_results), case
@@ -54,27 +74,39 @@ def test_search_relevance_for_common_agent_queries(monkeypatch):
         assert _matches_target(case, fallback["results"][:5]), case
 
 
-def test_search_is_bounded_deterministic_and_safe_for_plain_text_queries():
-    first = docs.search('"OR" --json (FTS)')
-    assert first["results"] == docs.search('"OR" --json (FTS)')["results"]
+def test_search_is_bounded_deterministic_and_safe_for_plain_text_queries(monkeypatch):
+    _force_core_search(monkeypatch)
+    first = docs.search('"OR" --json (FTS)', mode="bm25")
+    assert first["results"] == docs.search('"OR" --json (FTS)', mode="bm25")["results"]
     assert len(first["results"]) <= docs.DEFAULT_RESULTS
     assert first["search_backend"] == "fts5"
 
-    assert docs.search("and the for") == {
+    assert docs.search("and the for", mode="bm25") == {
         "query": "and the for",
         "results": [],
         "zero_hit": True,
         "has_more": False,
         "search_backend": "none",
+        "retrieval_mode": "none",
+        "query_mode": "bm25",
         "corpus_hash": docs.load_corpus()[1],
-        "hint": "No documentation matched; try a command name or a more specific topic.",
+        "fallback_reason": None,
+        "hint": "No searchable terms; try a command name or a more specific topic.",
     }
     with pytest.raises(ValueError, match="query must not be empty"):
-        docs.search("  ")
+        docs.search("  ", mode="bm25")
     with pytest.raises(ValueError, match="at most"):
-        docs.search("x" * (docs.MAX_QUERY_CHARS + 1))
+        docs.search("x" * (docs.MAX_QUERY_CHARS + 1), mode="bm25")
     with pytest.raises(ValueError, match="limit"):
-        docs.search("workflow", limit=docs.MAX_RESULTS + 1)
+        docs.search("workflow", limit=docs.MAX_RESULTS + 1, mode="bm25")
+
+
+def test_search_defaults_to_core_bm25_when_the_optional_pack_is_missing(monkeypatch):
+    _force_core_search(monkeypatch)
+    result = docs.search("stuck job wait timeout")
+    assert result["retrieval_mode"] == "bm25"
+    assert result["search_backend"] == "fts5"
+    assert result["fallback_reason"] == "forced core retrieval"
 
 
 def test_show_pages_can_be_joined_to_reconstruct_a_section():

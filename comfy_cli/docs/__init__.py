@@ -18,11 +18,20 @@ MAX_EXCERPT_CHARS = 800
 DEFAULT_SECTION_CHARS = 12_000
 MAX_SECTION_CHARS = 50_000
 _TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
-_STOP_WORDS = frozenset("a an and are as at be by for from how i in is it of on or the to with".split())
+_STOP_WORDS = frozenset("a an and are as at be by for from how i in is it not of on or the to with".split())
 
 
 class DocsUnavailableError(Exception):
     """The installed documentation corpus is absent or malformed."""
+
+
+class DocsSearchPackError(Exception):
+    """The optional LanceDB search pack is missing or incompatible."""
+
+    def __init__(self, code: str, message: str, hint: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.hint = hint
 
 
 def _canonical_sections(sections: list[dict[str, Any]]) -> bytes:
@@ -167,7 +176,7 @@ def _excerpt(section: dict[str, Any], terms: Sequence[str]) -> str:
     return excerpt
 
 
-def search(query: str, *, limit: int = DEFAULT_RESULTS) -> dict[str, Any]:
+def search(query: str, *, limit: int = DEFAULT_RESULTS, mode: str = "auto") -> dict[str, Any]:
     """Return ranked section previews for a natural-language query."""
     if not query.strip():
         raise ValueError("query must not be empty")
@@ -175,13 +184,62 @@ def search(query: str, *, limit: int = DEFAULT_RESULTS) -> dict[str, Any]:
         raise ValueError(f"query must be at most {MAX_QUERY_CHARS} characters")
     if not 1 <= limit <= MAX_RESULTS:
         raise ValueError(f"limit must be between 1 and {MAX_RESULTS}")
+    if mode not in {"auto", "bm25", "semantic", "hybrid"}:
+        raise ValueError("mode must be auto, bm25, semantic, or hybrid")
 
     sections, content_hash = load_corpus()
     terms = query_terms(query)
     if not terms:
         ranked: list[tuple[dict[str, Any], float]] = []
-        backend = "none"
-    else:
+        payload: dict[str, Any] = {
+            "query": query,
+            "results": [],
+            "zero_hit": True,
+            "has_more": False,
+            "search_backend": "none",
+            "retrieval_mode": "none",
+            "query_mode": mode,
+            "corpus_hash": content_hash,
+            "fallback_reason": None,
+        }
+        payload["hint"] = "No searchable terms; try a command name or a more specific topic."
+        return payload
+
+    from comfy_cli.docs import lancedb_search
+
+    pack_state = lancedb_search.inspect_pack(corpus_hash=content_hash)
+    requested_mode = mode
+    effective_mode = "hybrid" if mode == "auto" and pack_state["compatible"] else mode
+    fallback_reason = None if pack_state["compatible"] else pack_state["reason"]
+    if effective_mode in {"semantic", "hybrid"} and not pack_state["compatible"]:
+        code = "docs_pack_incompatible" if pack_state["installed"] else "docs_search_unavailable"
+        raise lancedb_search.DocsSearchPackError(
+            code,
+            pack_state["reason"] or "The docs-search pack is unavailable.",
+            pack_state["hint"] or "Install the matching comfy-cli[docs-search] extra.",
+        )
+
+    if pack_state["compatible"]:
+        try:
+            payload = lancedb_search.search(
+                query,
+                mode="bm25" if effective_mode == "auto" else effective_mode,
+                limit=limit,
+                sections=sections,
+                corpus_hash=content_hash,
+                fallback_reason=None,
+            )
+            payload["query_mode"] = requested_mode
+            return payload
+        except lancedb_search.DocsSearchPackError as error:
+            if requested_mode in {"semantic", "hybrid"}:
+                raise
+            fallback_reason = str(error)
+
+    if mode not in {"auto", "bm25"}:
+        raise ValueError("requested semantic retrieval is unavailable")
+
+    if terms:
         try:
             ranked = _fts_search(sections, terms, limit + 1)
             backend = "fts5"
@@ -203,11 +261,26 @@ def search(query: str, *, limit: int = DEFAULT_RESULTS) -> dict[str, Any]:
         "zero_hit": zero_hit,
         "has_more": len(ranked) > limit,
         "search_backend": backend,
+        "retrieval_mode": "bm25" if backend == "fts5" else "token-scan",
+        "query_mode": requested_mode,
         "corpus_hash": content_hash,
+        "fallback_reason": fallback_reason,
     }
     if zero_hit:
         payload["hint"] = "No documentation matched; try a command name or a more specific topic."
     return payload
+
+
+def status() -> dict[str, Any]:
+    """Describe core docs and the optional LanceDB semantic-search pack."""
+    _sections, content_hash = load_corpus()
+    from comfy_cli.docs.lancedb_search import status as pack_status
+
+    return {
+        "corpus_hash": content_hash,
+        "core_modes": ["bm25", "token-scan-fallback"],
+        **pack_status(corpus_hash=content_hash),
+    }
 
 
 def show(section_id: str, *, max_chars: int = DEFAULT_SECTION_CHARS, offset: int = 0) -> dict[str, Any] | None:

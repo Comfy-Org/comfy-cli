@@ -53,6 +53,16 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "reinstall comfy-cli to restore its documentation bundle",
     ),
     ErrorCode(
+        "docs_search_unavailable",
+        "Semantic documentation search was requested, but the optional search pack is not installed.",
+        "install the matching `comfy-cli[docs-search]` extra",
+    ),
+    ErrorCode(
+        "docs_pack_incompatible",
+        "The installed docs-search pack does not match this CLI, corpus, or supported LanceDB format.",
+        "reinstall the matching `comfy-cli[docs-search]` extra",
+    ),
+    ErrorCode(
         "usage_error",
         "The invocation itself was wrong -- an unknown option, a missing option value, a bad argument count "
         "or an unknown subcommand. Raised during argv parsing, so NOTHING ran and nothing changed; the exit "

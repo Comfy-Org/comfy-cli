@@ -27,6 +27,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy run": "run",
     "comfy discover": "discover",
     "comfy docs search": "docs",
+    "comfy docs status": "docs",
     "comfy docs show": "docs",
     "comfy auth list": "auth",
     "comfy auth set": "auth",
