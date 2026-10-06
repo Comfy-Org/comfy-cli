@@ -53,7 +53,10 @@ def test_lance_retrieval_modes_return_unique_sourceable_sections(mode, query, ex
     assert len(ids) == len(set(ids))
     assert any(expected_heading.casefold() in " ".join(item["headings"]).casefold() for item in result["results"])
     for section_id in ids:
-        assert docs.show(section_id) is not None
+        section = docs.show(section_id)
+        search_result = next(item for item in result["results"] if item["id"] == section_id)
+        assert section is not None
+        assert search_result["source_line"] == section["source_line"]
 
 
 def test_lance_bm25_or_query_matches_individual_words():

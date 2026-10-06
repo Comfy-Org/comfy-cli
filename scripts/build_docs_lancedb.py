@@ -125,7 +125,7 @@ def _split_section(section: dict[str, Any], tokenizer) -> list[dict[str, Any]]:
                 "title": section["title"],
                 "headings": headings,
                 "source": section["source"],
-                "source_line": section["source_line"] + 1 + content[:start_char].count("\n"),
+                "source_line": section["source_line"],
                 "start_char": start_char,
                 "end_char": end_char,
                 "content": body,
