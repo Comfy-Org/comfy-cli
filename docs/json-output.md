@@ -33,19 +33,25 @@ specific one — except on a run submitted by `comfy run --client-id`, where the
 id belongs to a live client being fed on purpose. Resolution withholds it
 deliberately (`attached: false`) and the watch polls status instead; passing
 `--client-id` on such a run is refused with `client_id_rejected`
-(`reason: "borrowed"`) before any socket opens, so there is no way to take that
-client off its own socket. That marker is read from the state file *and* from the
-`extra_data` the server echoes back, and an override is honoured only once one of
-them has actually vouched for the run. If there is no local state file and the
-prompt's own server record cannot be read — the fetch failed, the body came back
-the wrong shape, or neither `/queue` nor `/history` mentions the prompt — then
-nothing has ruled the marker out, so the run is not assumed unmarked: the watch
-polls (`attached: false`) and an explicit `--client-id` is refused with
-`reason: "indeterminate"`. A retry clears that once the server answers again;
-a `prompt_id` that is a typo or already pruned stays unreadable, and no id works
-for it. One gap in the guarantee: a prompt that is *already terminal* short-circuits
-below before any of this runs, so `--client-id` is ignored rather than refused
-there — harmless, because that path opens no socket at all. Both
+(`reason: "borrowed"`) before any socket opens. That marker is read from the job
+state file *and* from the `extra_data` the server echoes back, and an override is
+honoured only once one of them has actually vouched for the run. If there is no
+local state file and the prompt's own server record cannot be read — the fetch
+failed, the body came back the wrong shape, or neither `/queue` nor `/history`
+mentions the prompt — then nothing has ruled the marker out, so the run is not
+assumed unmarked: the watch polls (`attached: false`) and an explicit
+`--client-id` is refused with `reason: "indeterminate"`. A retry clears that once
+the server answers again; a `prompt_id` that is a typo or already pruned stays
+unreadable, and no id works for it.
+
+Two limits on that guard, both by design. It is **per prompt**: it reads the
+marker on the prompt being watched, not on the id you pass, so naming a borrowed
+client's id as `--client-id` while watching a *different*, unmarked prompt is
+still honoured — and still evicts whatever holds that id, exactly as the last
+paragraph of this section describes for any re-attach. And a prompt that is
+*already terminal* short-circuits before the guard runs, so a non-empty
+`--client-id` is ignored rather than refused there; harmless, because that path
+opens no socket at all. Both
 `data.client_id` and `data.attached` are present on *every* terminal envelope: a
 watch of an already-finished prompt short-circuits without opening a socket, and
 reports `client_id: null` / `attached: false`. Reconnecting under an existing id

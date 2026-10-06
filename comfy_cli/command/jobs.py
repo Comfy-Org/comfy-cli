@@ -2264,7 +2264,16 @@ def watch_cmd(
     prompt_id: Annotated[str, typer.Argument(help="The prompt_id returned by `comfy run`.")],
     host: Annotated[str | None, typer.Option()] = None,
     port: Annotated[int | None, typer.Option()] = None,
-    timeout: Annotated[int, typer.Option(help="Per-recv (or per-poll) timeout in seconds.")] = 30,
+    timeout: Annotated[
+        int,
+        typer.Option(
+            help=(
+                "Per-recv (or per-poll) timeout in seconds. A watch that polls instead of "
+                "attaching (a borrowed run, or one whose record cannot be read) has no recv to "
+                "time out: it reconciles every 2s, and this only sizes its not-found deadline."
+            )
+        ),
+    ] = 30,
     where: Annotated[
         str | None,
         typer.Option("--where", help="'local' (WebSocket) or 'cloud' (HTTP polling)."),
@@ -2292,16 +2301,13 @@ def watch_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    if _stamp_where(renderer, where) == "cloud":
-        return _cloud_watch(prompt_id, poll_interval=poll_interval, max_wait=max_wait)
 
-    with report_usage_error(renderer, command="jobs watch"):
-        h, p = _resolve_host_port(host, port)
-    _server_or_error(h, p)
-
-    # Same handling `comfy run` gives the flag: a blank id is a mistake worth
-    # naming, and a padded one is the id the user meant. Left unstripped, "  "
-    # would be attached as a literal client_id that can never receive anything.
+    # Ahead of the cloud branch and the server probe, because this needs
+    # neither: it reads one string. `comfy run` validates it just as early, and
+    # anywhere later the flag is silently dropped on the paths that return
+    # first — a cloud target, or a local server that is down. Left unstripped,
+    # "  " would be attached as a literal client_id that can never receive
+    # anything.
     if client_id is not None and not client_id.strip():
         renderer.error(
             code="client_id_rejected",
@@ -2311,6 +2317,13 @@ def watch_cmd(
         )
         raise typer.Exit(code=1)
     client_id = client_id.strip() if client_id is not None else None
+
+    if _stamp_where(renderer, where) == "cloud":
+        return _cloud_watch(prompt_id, poll_interval=poll_interval, max_wait=max_wait)
+
+    with report_usage_error(renderer, command="jobs watch"):
+        h, p = _resolve_host_port(host, port)
+    _server_or_error(h, p)
 
     # If the job already finished, just print status and return — there will
     # be no more WS events.

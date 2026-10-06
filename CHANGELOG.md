@@ -39,8 +39,9 @@ history.
   events — node highlights, progress, outputs — to that client. This is what
   lets a tool run a workflow on a user's behalf and still have the user's open
   canvas light up. Local only, and refused with `client_id_rejected` alongside
-  `--wait` or an effective `cloud` target (the flag, `COMFY_WHERE`, or a saved
-  default): ComfyUI evicts whatever socket already holds an
+  `--wait` or an effective `cloud` target (the flag, `COMFY_WHERE`, a project
+  `comfy.yaml` default, a saved default, or auto-detection from configured
+  cloud credentials): ComfyUI evicts whatever socket already holds an
   incoming clientId, so this invocation must not attach as the borrowed one.
   Such a run is marked both in its job state file and in the submitted
   `extra_data`, so `comfy jobs watch` declines to re-attach to it — from any
@@ -51,16 +52,6 @@ history.
   `reason: "indeterminate"` rather than risking the eviction, and the watch
   polls. A blank `--client-id` is refused (`reason: "empty"`) as it is on
   `comfy run`.
-
-### Fixed
-
-- `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
-  accepts a connection and hangs up before answering (a restarting server, a
-  reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,
-  which `urllib` does not wrap, past the `RuntimeError` net every caller in
-  `jobs` catches.
-- A failed `comfy jobs watch` carries the node's failure under
-  `error.details.execution_error` instead of `error.details.details.error`.
 
 ### Changed
 
@@ -80,6 +71,13 @@ history.
 
 ### Fixed
 
+- `comfy jobs watch` no longer dies with a traceback when the ComfyUI server
+  accepts a connection and hangs up before answering (a restarting server, a
+  reset connection). That surfaced as a raw `http.client.RemoteDisconnected`,
+  which `urllib` does not wrap, past the `RuntimeError` net every caller in
+  `jobs` catches.
+- A failed `comfy jobs watch` carries the node's failure under
+  `error.details.execution_error` instead of `error.details.details.error`.
 - `templates fetch` checks the template's model files when an offline catalog
   is set (`--input` or `COMFY_OBJECT_INFO_FILE`). A file the server lacks is
   replaced by the one installed file that is the same model in another

@@ -54,11 +54,11 @@
     "completed_nodes": {"type": "array", "items": {"type": "string"}},
     "client_id": {
       "type": ["string", "null"],
-      "description": "`jobs watch` local terminal: the WS session id this watch listened as. ComfyUI addresses execution events to the submitting session only, so watch re-attaches with the prompt's own client_id when it can resolve one (job state file, /queue, /history) and falls back to a fresh id otherwise."
+      "description": "`jobs watch` local terminal: the WS session id this watch listened as, or null when it opened no socket at all. ComfyUI addresses execution events to the submitting session only, so watch re-attaches with the prompt's own client_id when it can resolve one (job state file, /queue, /history) and falls back to a fresh id otherwise. Null on the poll-only paths — a run that borrowed a live client's socket, a run whose record could not be read, and a prompt that was already terminal when the watch started."
     },
     "attached": {
       "type": "boolean",
-      "description": "`jobs watch` local terminal: true when `client_id` is the prompt's real submitting session — i.e. live execution events could reach this watch. False means the id could not be resolved and the envelope is snapshot-derived."
+      "description": "`jobs watch` local terminal: true when `client_id` is the prompt's real submitting session — i.e. live execution events could reach this watch. False means no live stream and a snapshot-derived envelope, for any of three reasons: the id could not be resolved, or it was resolved and deliberately withheld because attaching would cut off the live client the run was submitted for, or the prompt had already finished. `error.details.reason` on a `client_id_rejected` failure distinguishes the withheld cases."
     },
     "count": {"type": "integer"},
     "jobs": {

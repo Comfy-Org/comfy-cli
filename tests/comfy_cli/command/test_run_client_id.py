@@ -643,3 +643,59 @@ class TestABlankOverrideIsRejectedLikeRun:
         env = _envelope(result.output)
         assert env["error"]["code"] == "client_id_rejected"
         assert env["error"]["details"]["reason"] == "empty"
+
+    # Validating it late would let the paths that return first swallow it: a
+    # cloud watch never forwards the flag, and an unreachable local server
+    # exits at the probe. `comfy run` rejects it just as early.
+    def test_a_cloud_target_still_refuses_it(self, monkeypatch):
+        monkeypatch.setattr(
+            jobs,
+            "_cloud_watch",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("cloud watch swallowed a blank --client-id")),
+        )
+        result = CliRunner().invoke(jobs.app, ["watch", "p", "--where", "cloud", "--client-id", "  "])
+        assert result.exit_code == 1, result.output
+        env = _envelope(result.output)
+        assert env["error"]["code"] == "client_id_rejected"
+        assert env["error"]["details"]["reason"] == "empty"
+
+    def test_a_server_that_is_down_still_refuses_it(self, monkeypatch):
+        monkeypatch.setattr(
+            jobs,
+            "_server_or_error",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("probed the server before validating the flag")),
+        )
+        result = CliRunner().invoke(jobs.app, ["watch", "p", "--where", "local", "--client-id", ""])
+        assert result.exit_code == 1, result.output
+        assert _envelope(result.output)["error"]["details"]["reason"] == "empty"
+
+    def test_a_padded_id_is_stripped_not_attached_verbatim(self, monkeypatch):
+        monkeypatch.setattr(jobs_state, "read", lambda _: None)
+        monkeypatch.setattr(
+            jobs,
+            "_http_get_json",
+            lambda url, **_kw: (
+                {"queue_running": [[0, "p", {}, {"client_id": "submitter"}, {}]]} if url.endswith("/queue") else {}
+            ),
+        )
+        monkeypatch.setattr(jobs, "_server_or_error", lambda *_a, **_k: True)
+        monkeypatch.setattr(jobs, "_snapshot", lambda *_: {"prompt_id": "p", "status": "running", "outputs": []})
+        monkeypatch.setattr(jobs, "_history_completed_nodes", lambda *_: set())
+        opened = {}
+
+        class _WS:
+            def connect(self, url):
+                opened["url"] = url
+
+            def settimeout(self, _t):
+                pass
+
+            def recv(self):
+                raise AssertionError("stop")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(jobs, "WebSocket", lambda *_a, **_k: _WS())
+        CliRunner().invoke(jobs.app, ["watch", "p", "--where", "local", "--timeout", "1", "--client-id", "  pad  "])
+        assert "clientId=pad" in opened.get("url", "")

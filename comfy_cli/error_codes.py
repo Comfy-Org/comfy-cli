@@ -324,8 +324,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "failed, the body was the wrong shape, or neither `/queue` nor `/history` mentions it, so the "
         "marker was never ruled out). An override is honoured only once the state file or the "
         "prompt's server record has positively cleared it. Refused before anything is submitted or "
-        "any socket is opened; a prompt that is already terminal short-circuits earlier, where the "
-        "flag is ignored rather than refused because no socket is opened at all.",
+        "any socket is opened. Two limits, both by design: the guard is per prompt, reading the "
+        "marker on the prompt being watched rather than on the id passed, so naming a borrowed "
+        "client's id while watching a different unmarked prompt is still honoured; and a prompt "
+        "that is already terminal short-circuits earlier, where a NON-EMPTY flag is ignored rather "
+        "than refused because no socket is opened at all (`empty` is still raised there).",
         "pass a non-empty id, or drop the conflicting flag: `--client-id` cannot be combined with "
         "`--wait` or a cloud target, and `comfy jobs watch` on a borrowed run takes no `--client-id` "
         "at all — poll it with `comfy jobs status`; on `indeterminate`, retry once the server answers "
