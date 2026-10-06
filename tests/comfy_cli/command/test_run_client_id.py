@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import tempfile
 import uuid
 from unittest.mock import MagicMock, patch
@@ -203,20 +204,33 @@ def _marked(**extra):
     return {"client_id": BORROWED, jobs_state.BORROWED_CLIENT_ID_KEY: True, **extra}
 
 
-def _record(extra=None, *, read=True, borrowed_ids=()):
+def _validate_watch_envelope(data):
+    """Check a watch envelope against the published schema.
+
+    The `poll_reason` enum is only worth publishing if something exercises it
+    with a non-null value.
+    """
+    import jsonschema
+
+    schema_path = pathlib.Path(jobs.__file__).parent.parent / "schemas" / "jobs.json"
+    jsonschema.Draft202012Validator(json.loads(schema_path.read_text())).validate(data)
+
+
+def _record(extra=None, *, read=True, borrowed_ids=(), queue_read=True):
     """A `_submitted_extra_data` result, for stubbing it out."""
-    return _SubmittedRecord(extra, read, frozenset(borrowed_ids))
+    return _SubmittedRecord(extra, read, frozenset(borrowed_ids), queue_read)
 
 
 class TestWatchDoesNotStealTheSocket:
     @pytest.fixture(autouse=True)
-    def answered_empty_server(self, monkeypatch):
-        """Default: the server ANSWERED and holds no record of this prompt.
+    def record_read_but_empty(self, monkeypatch):
+        """Default: this prompt's record WAS read, and carries no marker.
 
-        Conclusive, which is a different thing from a read that failed — the
-        class below pins that difference.
+        Note `read=True` with `extra=None` is the shape for a record that was
+        found and is unmarked — NOT for a server that holds no record at all,
+        which reports `read=False` and is pinned in the classes below.
         """
-        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: _record())
+        monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: _record({}))
 
     def test_borrowed_record_yields_no_client_id(self, monkeypatch):
         state = jobs_state.new(
@@ -259,7 +273,7 @@ class TestWatchDoesNotStealTheSocket:
         _cid, reason = _select_watch_client_id("127.0.0.1", 8188, "p", None)
         assert (reason == "borrowed") is borrowed
 
-    def test_an_answered_empty_server_is_attachable(self, monkeypatch):
+    def test_a_read_unmarked_record_is_attachable(self, monkeypatch):
         monkeypatch.setattr(jobs_state, "read", lambda _: None)
         assert _select_watch_client_id("127.0.0.1", 8188, "p", None) == (None, None)
 
@@ -344,6 +358,10 @@ class TestWatchDoesNotStealTheSocket:
         assert env["data"]["completed_nodes"] == ["1"]
         assert env["data"]["client_id"] is None
         assert env["data"]["attached"] is False
+        # The reason rides the envelope too: `attached: false` alone cannot
+        # tell a --json consumer to drop --client-id rather than retry.
+        assert env["data"]["poll_reason"] == "borrowed"
+        _validate_watch_envelope(env["data"])
 
     def test_borrowed_poll_preserves_a_failed_runs_error(self, monkeypatch):
         snapshots = iter(
@@ -460,6 +478,8 @@ class TestUnverifiableOwnershipFailsSafe:
         assert env["data"]["status"] == "completed"
         assert env["data"]["client_id"] is None
         assert env["data"]["attached"] is False
+        assert env["data"]["poll_reason"] == "indeterminate"
+        _validate_watch_envelope(env["data"])
 
 
 class TestSubmittedExtraDataReportsWhetherTheRecordWasRead:
@@ -507,6 +527,10 @@ class TestSubmittedExtraDataReportsWhetherTheRecordWasRead:
             ({}, {}, "an object with no queue sections places nothing"),
             ({"queue_running": "nonsense"}, {}, "an unwalkable section"),
             ({"queue_running": [[0, "p"]]}, {}, "matched, but too short to hold extra_data"),
+            ({"queue_running": [[0, "p", {}, None, {}]]}, {}, "extra_data slot present but null"),
+            ({"queue_running": [[0, "p", {}, [], {}]]}, {}, "extra_data slot is a list"),
+            ({"queue_running": [[0, "p", {}, "x", {}]]}, {}, "extra_data slot is a string"),
+            (EMPTY_QUEUE, {"p": {"prompt": [0, "p", {}, 7, {}]}}, "history slot is a number"),
             (EMPTY_QUEUE, {"p": {}}, "in history but no prompt tuple"),
         ],
         ids=[
@@ -520,6 +544,10 @@ class TestSubmittedExtraDataReportsWhetherTheRecordWasRead:
             "unwalkable-section",
             "entry-missing-extra-slot",
             "history-entry-malformed",
+            "slot-null",
+            "slot-list",
+            "slot-string",
+            "history-slot-number",
         ],
     )
     def test_everything_else_is_not_a_record(self, monkeypatch, queue, history, why):
@@ -528,7 +556,7 @@ class TestSubmittedExtraDataReportsWhetherTheRecordWasRead:
 
     def test_a_marked_record_round_trips(self, monkeypatch):
         self._server(monkeypatch, queue={"queue_running": [[0, "p", {}, _marked(), {}]]}, history={})
-        extra, record_read, _ids = _submitted_extra_data("127.0.0.1", 8188, "p")
+        extra, record_read, _ids, _q = _submitted_extra_data("127.0.0.1", 8188, "p")
         assert record_read is True
         assert extra[jobs_state.BORROWED_CLIENT_ID_KEY] is True
 
@@ -621,6 +649,43 @@ class TestTheIdIsCheckedToNotJustThePrompt:
     def test_the_ordinary_watch_is_untouched(self):
         assert _select_watch_client_id("127.0.0.1", 8188, "P_OTHER", None) == ("ordinary", None)
 
+    def test_an_unread_queue_refuses_the_override_rather_than_waving_it_through(self, monkeypatch):
+        """An empty census means "nobody is borrowing" only once the queue was
+        walked. A readable state file vouches for THIS run and says nothing
+        about whose socket the caller just named, so it must not unlock it."""
+        state = jobs_state.new(prompt_id="P_OTHER", client_id="ordinary", workflow="w.json", where="local")
+        monkeypatch.setattr(jobs_state, "read", lambda _: state)
+
+        def boom(url, **_kw):
+            if url.endswith("/queue"):
+                raise RuntimeError("connection refused")
+            return {}
+
+        monkeypatch.setattr(jobs, "_http_get_json", boom)
+        with pytest.raises(_ClientIdRejected) as excinfo:
+            _select_watch_client_id("127.0.0.1", 8188, "P_OTHER", BORROWED)
+        assert excinfo.value.reason == "indeterminate"
+        # The no-flag path names no foreign id, so it still attaches.
+        assert _select_watch_client_id("127.0.0.1", 8188, "P_OTHER", None) == ("ordinary", None)
+
+    @pytest.mark.parametrize(
+        "queue_body",
+        [{"queue_running": []}, {"queue_pending": []}, {}, {"queue_running": [], "queue_pending": "x"}],
+        ids=["only-running", "only-pending", "neither", "pending-unwalkable"],
+    )
+    def test_a_half_walkable_queue_is_not_a_census(self, monkeypatch, queue_body):
+        """A borrowed run in the section we could not walk would be missing
+        from the census without the census knowing it."""
+        monkeypatch.setattr(jobs_state, "read", lambda _: None)
+        monkeypatch.setattr(
+            jobs,
+            "_http_get_json",
+            lambda url, **_kw: queue_body if url.endswith("/queue") else {},
+        )
+        with pytest.raises(_ClientIdRejected) as excinfo:
+            _select_watch_client_id("127.0.0.1", 8188, "P_OTHER", BORROWED)
+        assert excinfo.value.reason == "indeterminate"
+
     def test_the_borrowed_set_comes_from_the_same_read(self, monkeypatch):
         """One `/queue` body answers both questions, so they cannot disagree."""
         reads = []
@@ -696,7 +761,9 @@ class TestTheOrdinaryCaseStillAttaches:
             jobs,
             "_http_get_json",
             lambda url, **_kw: (
-                {"queue_running": [[0, "p", {}, {"client_id": "submitter"}, {}]]} if url.endswith("/queue") else {}
+                {"queue_running": [[0, "p", {}, {"client_id": "submitter"}, {}]], "queue_pending": []}
+                if url.endswith("/queue")
+                else {}
             ),
         )
         assert _select_watch_client_id("127.0.0.1", 8188, "p", None) == ("submitter", None)
@@ -706,7 +773,9 @@ class TestTheOrdinaryCaseStillAttaches:
             jobs,
             "_http_get_json",
             lambda url, **_kw: (
-                {"queue_running": [[0, "p", {}, {"client_id": "submitter"}, {}]]} if url.endswith("/queue") else {}
+                {"queue_running": [[0, "p", {}, {"client_id": "submitter"}, {}]], "queue_pending": []}
+                if url.endswith("/queue")
+                else {}
             ),
         )
         assert _select_watch_client_id("127.0.0.1", 8188, "p", "my-own-id") == ("my-own-id", None)
@@ -736,7 +805,9 @@ class TestTheOrdinaryCaseStillAttaches:
             jobs,
             "_http_get_json",
             lambda url, **_kw: (
-                {"queue_running": [[0, "p", {}, {"client_id": "submitter"}, {}]]} if url.endswith("/queue") else {}
+                {"queue_running": [[0, "p", {}, {"client_id": "submitter"}, {}]], "queue_pending": []}
+                if url.endswith("/queue")
+                else {}
             ),
         )
         monkeypatch.setattr(jobs, "WebSocket", lambda *_a, **_k: _WS())
@@ -787,7 +858,9 @@ class TestABlankOverrideIsRejectedLikeRun:
             jobs,
             "_http_get_json",
             lambda url, **_kw: (
-                {"queue_running": [[0, "p", {}, {"client_id": "submitter"}, {}]]} if url.endswith("/queue") else {}
+                {"queue_running": [[0, "p", {}, {"client_id": "submitter"}, {}]], "queue_pending": []}
+                if url.endswith("/queue")
+                else {}
             ),
         )
         monkeypatch.setattr(jobs, "_server_or_error", lambda *_a, **_k: True)

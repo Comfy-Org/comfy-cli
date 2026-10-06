@@ -1937,11 +1937,19 @@ class _SubmittedRecord(NamedTuple):
     opens: the marker rides a PROMPT, but what it protects is a SOCKET, and a
     caller can name a live client's id while watching a different prompt
     entirely. Collected in one pass so the two cannot disagree.
+
+    Each has its own "we actually read it" flag, and they are NOT the same
+    fact. ``read`` covers this prompt's own record; ``queue_read`` covers the
+    queue-wide census behind ``borrowed_ids``, which is empty both when no run
+    has borrowed anything and when the fetch failed. Collapsing them would let
+    a blipped ``/queue`` pass for "nobody is borrowing" — the same absence-of-
+    evidence reasoning the rest of this module exists to refuse.
     """
 
     extra: Any
     read: bool
     borrowed_ids: frozenset[str]
+    queue_read: bool
 
 
 def _submitted_extra_data(host: str, port: int, prompt_id: str) -> _SubmittedRecord:
@@ -1965,10 +1973,14 @@ def _submitted_extra_data(host: str, port: int, prompt_id: str) -> _SubmittedRec
     absence, which is the very inference this exists to refuse.
     """
     queue = _get_json_object(f"http://{host}:{port}/queue")
+    sections = [queue.get(key) for key in ("queue_running", "queue_pending")]
+    # Both, not either: a borrowed run sitting in the section we could not walk
+    # would be missing from the census without the census knowing it.
+    queue_read = all(isinstance(entries, list) for entries in sections)
+
     borrowed: set[str] = set()
     hit: tuple[Any, bool] | None = None
-    for key in ("queue_running", "queue_pending"):
-        entries = queue.get(key)
+    for entries in sections:
         if not isinstance(entries, list):
             continue
         for entry in entries:
@@ -1981,17 +1993,17 @@ def _submitted_extra_data(host: str, port: int, prompt_id: str) -> _SubmittedRec
                 if fed:
                     borrowed.add(fed)
             if hit is None and entry[1] == prompt_id:
-                hit = (extra, True) if len(entry) > 3 else (None, False)
+                hit = (extra, True) if isinstance(extra, dict) else (None, False)
 
     if hit is not None:
-        return _SubmittedRecord(hit[0], hit[1], frozenset(borrowed))
+        return _SubmittedRecord(hit[0], hit[1], frozenset(borrowed), queue_read)
 
     history = _get_json_object(f"http://{host}:{port}/history/{prompt_id}")
     body = history.get(prompt_id)
     prompt = body.get("prompt") if isinstance(body, dict) else None
-    if isinstance(prompt, list) and len(prompt) > 3:
-        return _SubmittedRecord(prompt[3], True, frozenset(borrowed))
-    return _SubmittedRecord(None, False, frozenset(borrowed))
+    if isinstance(prompt, list) and len(prompt) > 3 and isinstance(prompt[3], dict):
+        return _SubmittedRecord(prompt[3], True, frozenset(borrowed), queue_read)
+    return _SubmittedRecord(None, False, frozenset(borrowed), queue_read)
 
 
 def _select_watch_client_id(
@@ -2050,10 +2062,17 @@ def _select_watch_client_id(
     # can belong to a client some OTHER queued run is feeding on purpose.
     # Attaching would evict it just the same, so the id is checked against
     # every borrowed run the queue is carrying, not only against this prompt.
-    # Bounded by what the queue can still show — a run already gone from it
-    # cannot be consulted, which is why the id is only ever a last resort.
     if requested and requested in record.borrowed_ids:
         raise _ClientIdRejected("borrowed")
+
+    # ...and that check is worth exactly as much as the read behind it. An
+    # empty census means "nobody is borrowing" only once the queue was actually
+    # walked; otherwise it means "we have no idea", which must not read as
+    # consent. Deliberately not folded into the state-file test below: a local
+    # record vouches for THIS run, and says nothing about whose socket the
+    # caller just named.
+    if requested and not record.queue_read:
+        raise _ClientIdRejected("indeterminate")
 
     # A state file is its own positive evidence: `comfy run` wrote it, and it
     # says this run did not borrow. Failing that, only the prompt's own server
@@ -2332,8 +2351,8 @@ def watch_cmd(
                 "ComfyUI sends execution events only to the submitting session, so watch "
                 "resolves that id automatically; override it as a last resort if resolution "
                 "picks wrong. Refused on a run that borrowed a live client's socket, on an id "
-                "another queued run borrowed, and on a run whose record cannot be read — "
-                "attaching could cut that client off."
+                "another queued run borrowed, and whenever the records that would show either "
+                "cannot be read — attaching could cut that client off."
             ),
         ),
     ] = None,
@@ -2375,6 +2394,10 @@ def watch_cmd(
         # ended, so no session was attached and there is no id to report.
         snap["client_id"] = None
         snap["attached"] = False
+        # No socket, but not withheld either — the prompt simply ended first.
+        # The key is still published so a consumer that branches on it never
+        # hits a missing one, as with `client_id` and `attached`.
+        snap["poll_reason"] = None
         # Same promotion the live path does when it ends. `_emit_terminal`
         # keys its trimming and redaction on `execution_error`, so a failure
         # left where `_snapshot` puts it reaches the envelope whole — full

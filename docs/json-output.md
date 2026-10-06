@@ -46,11 +46,13 @@ unreadable, and no id works for it.
 
 The check is on the id as well as on the prompt: naming a borrowed client's id
 as `--client-id` while watching some *other*, perfectly ordinary prompt is
-refused the same way, because attaching evicts that client either way. What
-bounds it is what the server can still show — the borrowed ids are read from
-`/queue`, so a run that has already left the queue cannot be consulted, and an
-id it was feeding is honoured again. Watch by `prompt_id` and let resolution do
-its job; `--client-id` is a last resort. One more gap: a prompt that is
+refused the same way, because attaching evicts that client either way. Those
+ids are read from `/queue`, and if that read does not come back whole the
+override is refused as `indeterminate` rather than waved through — an empty
+list of borrowed ids counts as "nobody is borrowing" only when the queue was
+actually walked. What it cannot see is a run that has already *left* the queue:
+an id that run was feeding is honoured again. Watch by `prompt_id` and let
+resolution do its job; `--client-id` is a last resort. One more gap: a prompt that is
 *already terminal* short-circuits before any of this runs, so a non-empty
 `--client-id` is ignored rather than refused there — harmless, because that path
 opens no socket at all. Separately, and by design, this protects only runs
