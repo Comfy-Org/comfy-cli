@@ -53,7 +53,7 @@ class RevisionsUnavailableError(DeployResolveError):
         )
         self.details = {"deployment_id": deployment_id}
         super().__init__(
-            f"deployment {deployment_id} carries no revision, so `{command}` has no history to work from; "
+            f"deployment {deployment_id} carries no revision, so `{command}` has no revisions to work from; "
             "deployment updates are most likely not on for this workspace yet"
         )
 
