@@ -88,6 +88,7 @@ def test_plain_typo_keeps_did_you_mean():
         "invalid",
         {"content": ["invalid"]},
         {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Missing"}}}},
+        {"content": {"application/json": {"schema": {"$ref": 1}}}},
     ],
 )
 def test_model_hint_skips_malformed_partner_request_bodies(monkeypatch, request_body):
@@ -144,6 +145,80 @@ def test_model_hint_falls_through_a_freeform_model_field(monkeypatch):
                 }
             }
         }
+    }
+
+    def load_raw_spec():
+        return raw
+
+    load_raw_spec.cache_clear = lambda: None  # type: ignore[attr-defined]
+    monkeypatch.setattr(spec, "load_raw_spec", load_raw_spec)
+
+    hint = spec._model_name_hint("example")
+    assert hint is not None
+    assert "example-model-v1" in hint
+
+
+def test_model_hint_searches_later_enum_fields_and_uses_their_real_flag(monkeypatch):
+    raw = {
+        "paths": {
+            "/proxy/kling/v1/videos/text2video": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "model": {"enum": ["family-a"]},
+                                        "model_name": {"enum": ["kling-v3"]},
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    def load_raw_spec():
+        return raw
+
+    load_raw_spec.cache_clear = lambda: None  # type: ignore[attr-defined]
+    monkeypatch.setattr(spec, "load_raw_spec", load_raw_spec)
+
+    hint = spec._model_name_hint("kling-v3")
+    assert hint is not None
+    assert "--model-name <id>" in hint, hint
+    assert "--model <id>" not in hint, hint
+
+
+def test_model_hint_skips_an_excessively_deep_ref_chain(monkeypatch):
+    schemas = {f"S{i}": {"$ref": f"#/components/schemas/S{i + 1}"} for i in range(1100)}
+    schemas["S1100"] = {"type": "object"}
+    raw = {
+        "components": {"schemas": schemas},
+        "paths": {
+            "/proxy/deep": {
+                "post": {
+                    "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/S0"}}}}
+                }
+            },
+            "/proxy/valid": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"model_id": {"enum": ["example-model-v1"]}},
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        },
     }
 
     def load_raw_spec():

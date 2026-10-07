@@ -18,6 +18,8 @@ write.
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 from comfy_cli import workflow_ops
@@ -103,6 +105,18 @@ def test_refusal_uses_the_schema_default_when_selector_value_is_absent(graph):
     msg = str(exc.value)
     assert "'MiniMax H3'" in msg, f"must name the selector's schema default: {msg}"
     assert "currently None" not in msg, msg
+
+
+def test_refusal_uses_a_declared_non_first_dynamic_default():
+    object_info = copy.deepcopy(OBJECT_INFO)
+    model_options = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"][1]
+    model_options["default"] = "MiniMax H3 Max"
+    model_options["options"][2]["inputs"]["required"]["turbo_only"] = ["BOOLEAN", {"default": False}]
+    graph = Graph.from_object_info(object_info)
+    assert graph.widget_default_for_node("MinimaxHailuo03TextToVideoNode", "model", []) == "MiniMax H3 Max"
+    assert "model.prompt_expansion_mode" in graph.widget_order_default("MinimaxHailuo03TextToVideoNode")
+    wf, _ = _fresh(graph)
+    assert wf["nodes"][0]["widgets_values"][0] == "MiniMax H3 Max"
 
 
 def test_write_succeeds_once_the_revealing_option_is_selected(graph):
