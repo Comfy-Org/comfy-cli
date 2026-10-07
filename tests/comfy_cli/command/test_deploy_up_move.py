@@ -187,6 +187,26 @@ def test_up_follows_a_waiting_move_until_it_lands(tmp_path, monkeypatch) -> None
     assert client.get_ids.count("dep-1") == 3
 
 
+def test_a_read_caught_as_the_move_lands_does_not_fail_it(tmp_path, monkeypatch) -> None:
+    # Given one read taken mid-landing: the update no longer waits, but the
+    # old release still serves at the old revision, then the move has landed
+    client = FakeDeploy(
+        [_live("dep-1")],
+        move="pending",
+        get_patches=[
+            {"pendingUpdate": None},
+            {"releaseId": "release-5", "revision": 4},
+        ],
+    )
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _envelope(result)["data"]["deployment"]["revision"] == 4
+
+
 def test_up_without_a_watch_returns_while_the_move_waits(tmp_path, monkeypatch) -> None:
     # Given
     client = FakeDeploy([_live("dep-1")], move="pending")

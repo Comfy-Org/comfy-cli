@@ -131,10 +131,23 @@ NOT_MOVABLE: Final = frozenset({"stopping", "stop_failed"})
 
 
 def move_settled(release_id: str) -> Callable[[JsonObject], bool]:
-    """When a watch on a move can stop: the move landed or failed."""
+    """When a watch on a move can stop: the move landed, its copy failed, or two
+    reads in a row show it dropped.
+
+    The service assembles a read from several queries, so one that straddles
+    the move landing can show the old release with nothing waiting, which is
+    how a dropped move reads too; the next read shows where it landed.
+    """
+    dropped_reads = 0
 
     def settled(snapshot: JsonObject) -> bool:
-        return move_outcome(snapshot, release_id) is not None
+        nonlocal dropped_reads
+        outcome = move_outcome(snapshot, release_id)
+        if outcome == "failed" and not isinstance(snapshot.get("pendingUpdate"), dict):
+            dropped_reads += 1
+            return dropped_reads >= 2
+        dropped_reads = 0
+        return outcome is not None
 
     return settled
 
