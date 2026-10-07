@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Final, Protocol
 
 from comfy_cli.command.build_spec import JsonObject, JsonValue
 from comfy_cli.command.deploy_progress import progress_of
@@ -23,6 +24,8 @@ class DeployUpClient(Protocol):
 
     def start_deployment(self, deployment_id: str) -> JsonObject: ...
 
+    def move_deployment(self, deployment_id: str, base_revision: int, release_id: str) -> JsonObject: ...
+
     def get_compute_catalog(self) -> JsonObject: ...
 
     def get_deploy_estimate(self, release_id: str, gpu_class: str, region: str) -> JsonObject: ...
@@ -41,6 +44,13 @@ class UpRequest:
     # The deployment `--deployment` named, when the Build has more than one the
     # ranking cannot separate.
     deployment_id: str | None = None
+    # `--create`: add a deployment on this release beside any the Build has,
+    # instead of moving the one it has onto the release.
+    create: bool = False
+    # Whether the caller follows the deployment once the request is accepted.
+    # A move cannot carry new worker bounds, so they are applied after it lands,
+    # and only a watch is there to see it land.
+    watch: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +71,12 @@ class UpResult:
     # create the service could not estimate: the estimate is advice and never
     # stops a deploy.
     estimate: JsonObject | None = None
+    # Set when this run moved an existing deployment onto the release: the
+    # release it served before.
+    previous_release: JsonObject | None = None
+    # Worker bounds to apply once the move lands, since the service refuses
+    # them in the same request.
+    pending_bounds: JsonObject | None = None
 
     def payload(self) -> JsonObject:
         supersedes: list[JsonValue] = [*self.supersedes]
@@ -69,6 +85,9 @@ class UpResult:
             "status": required_string(self.deployment, "status"),
             "created": self.created,
         }
+        revision = self.deployment.get("revision")
+        if isinstance(revision, int) and not isinstance(revision, bool):
+            deployment["revision"] = revision
         payload: JsonObject = {
             "deployment": deployment,
             "release": self.release,
@@ -83,7 +102,58 @@ class UpResult:
             payload["progress"] = progress
         if self.estimate is not None:
             payload["estimate"] = self.estimate
+        if self.previous_release is not None:
+            payload["previousRelease"] = self.previous_release
         return payload
+
+
+def optional_revision(deployment: JsonObject) -> int | None:
+    """The deployment's revision, or ``None`` when deployment updates are off.
+
+    The service sends ``revision`` only to a workspace inside the rollout of
+    deployment updates; outside it the move, rollback and history routes all
+    answer 404, so its absence is how a command tells the two apart.
+    """
+    revision = deployment.get("revision")
+    if revision is None:
+        return None
+    if not isinstance(revision, int) or isinstance(revision, bool):
+        raise server_shape_error("the deploy service returned an invalid revision", field="revision")
+    return revision
+
+
+# A deployment `up` will not move: one already shutting down, or one whose
+# stop did not take and may still be billing. A stopped or failed deployment
+# moves, since the service starts the new release's copy for it.
+NOT_MOVABLE: Final = frozenset({"stopping", "stop_failed"})
+
+
+def move_settled(release_id: str) -> Callable[[JsonObject], bool]:
+    """When a watch on a move can stop: the move landed or failed."""
+
+    def settled(snapshot: JsonObject) -> bool:
+        return move_outcome(snapshot, release_id) is not None
+
+    return settled
+
+
+def move_outcome(snapshot: JsonObject, release_id: str) -> str | None:
+    """``landed``, ``failed``, or ``None`` while the move to ``release_id`` still waits.
+
+    It lands when the deployment serves the release and nothing waits. It
+    failed when the copy it waits on failed, or when nothing waits any more and
+    the deployment serves another release: the service dropped the move, or
+    another change overtook it. A read with no
+    revision says nothing about the move, since the service leaves revision and
+    pendingUpdate out whenever its rollout check fails, so the watch reads on.
+    """
+    pending = snapshot.get("pendingUpdate")
+    if isinstance(pending, dict):
+        return "failed" if pending.get("status") == "failed" else None
+    serving = snapshot.get("releaseId")
+    if optional_revision(snapshot) is None:
+        return "landed" if serving == release_id else None
+    return "landed" if serving == release_id else "failed"
 
 
 class ComputeRequiredError(Exception):

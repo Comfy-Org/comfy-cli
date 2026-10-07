@@ -233,6 +233,15 @@ class DeployClient:
         _validate_compute_config(compute_config)
         return self._patch("scale", ("deployments", deployment_id), {"computeConfig": compute_config})
 
+    def move_deployment(self, deployment_id: str, base_revision: int, release_id: str) -> dict:
+        """Point the deployment at another release of its Build, keeping its id and URL.
+
+        ``base_revision`` is the revision the caller read, so a change made
+        since is refused rather than undone.
+        """
+        body = {"baseRevision": base_revision, "releaseId": release_id}
+        return self._patch("move", ("deployments", deployment_id), body)
+
     def delete_deployment(self, deployment_id: str) -> None:
         self._delete("delete", ("deployments", deployment_id))
 

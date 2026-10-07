@@ -74,6 +74,8 @@ class FakeDeploy:
         tombstone_all_creates: bool = False,
         get_statuses: list[str] | None = None,
         estimate: JsonObject | Exception | None = None,
+        move: str = "landed",
+        get_patches: list[JsonObject] | None = None,
     ) -> None:
         self.rows = {str(row["id"]): copy.deepcopy(row) for row in rows or []}
         self.generation_barrier = generation_barrier
@@ -89,6 +91,16 @@ class FakeDeploy:
         # estimate plays, so a case not about the estimate never meets one.
         self.estimate = estimate
         self.estimate_calls: list[tuple[str, str, str]] = []
+        # How a move answers: "landed" moves at once (200), "pending" waits on
+        # the new release's copy (202), and "unchanged" answers 200 at the
+        # revision it was asked against.
+        self.move = move
+        self.move_calls: list[tuple[str, int, str]] = []
+        # Raised by the next worker-bounds edit, when set.
+        self.update_error: DeployAPIError | None = None
+        # Merged into the row on each read after a move, one per read.
+        self.get_patches = list(get_patches or [])
+        self.get_ids: list[str] = []
         self._keys: dict[str, str] = {}
         self._tombstoned_once = False
         self._local = threading.local()
@@ -133,7 +145,10 @@ class FakeDeploy:
 
     def get_deployment(self, deployment_id: str) -> JsonObject:
         with self._lock:
+            self.get_ids.append(deployment_id)
             row = self.rows[deployment_id]
+            if self.move_calls and self.get_patches:
+                row.update(self.get_patches.pop(0))
             if self.get_statuses:
                 row["status"] = self.get_statuses.pop(0)
             return copy.deepcopy(row)
@@ -141,8 +156,33 @@ class FakeDeploy:
     def update_deployment(self, deployment_id: str, compute_config: JsonObject) -> JsonObject:
         with self._lock:
             self.update_calls.append(deployment_id)
+            if self.update_error is not None:
+                raise self.update_error
             self.rows[deployment_id]["computeConfig"] = copy.deepcopy(compute_config)
             return copy.deepcopy(self.rows[deployment_id])
+
+    def move_deployment(self, deployment_id: str, base_revision: int, release_id: str) -> JsonObject:
+        with self._lock:
+            self.move_calls.append((deployment_id, base_revision, release_id))
+            row = self.rows[deployment_id]
+            if row.get("revision") != base_revision:
+                raise DeployAPIError("deploy_conflict", "stale revision", status=409)
+            if self.move == "landed":
+                row["releaseId"] = release_id
+                row["revision"] = base_revision + 1
+            elif self.move == "pending":
+                row["pendingUpdate"] = {
+                    "releaseId": release_id,
+                    "baseRevision": base_revision,
+                    "status": "provisioning",
+                    "since": "2026-10-07T12:00:00Z",
+                    "kind": "update",
+                }
+            else:
+                # Another change landed the release first, so the service
+                # answers at the revision it was asked against.
+                row["releaseId"] = release_id
+            return copy.deepcopy(row)
 
     def start_deployment(self, deployment_id: str) -> JsonObject:
         with self._lock:

@@ -1452,8 +1452,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_ambiguous_deployment",
-        "Deployment resolution found multiple rows tied at the highest status rank and newest creation time. "
-        "`details.candidateIds` lists every indistinguishable deployment id.",
+        "Deployment resolution found multiple rows tied at the highest status rank and newest creation time, "
+        "or `comfy deploy up`, with deployment updates on, found more than one deployment of the Build to update. "
+        "`details.candidateIds` lists every candidate deployment id.",
         "pass `--deployment <id>` to select one deployment explicitly",
     ),
     ErrorCode(
@@ -1544,10 +1545,22 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "deploy_watch_lost",
         "The deploy control plane left the reads of a watch (`comfy deploy up`, `comfy deploy status --watch`) "
-        "unanswered, with an HTTP 5xx or no response, for the whole retry window of about a minute. Only the watch "
+        "unanswered, with an HTTP 5xx or no response, for the whole retry window of about a minute, or `up` "
+        "followed a move onto another release for an hour without it landing. Only the watch "
         "ended: the deployment's outcome is unknown and it may still be coming up. The exit code is 75, not 1, so a "
         "script can tell this from a deployment that failed. `details.deployment_id` names the deployment.",
-        "re-attach with `comfy deploy status --deployment <id> --watch` once the deploy service answers again",
+        "re-attach with `comfy deploy status --deployment <id> --watch` once the deploy service answers again; "
+        "after a move, read `comfy deploy show --deployment <id>` instead: the move has landed once it shows no "
+        "pendingUpdate and its releaseId is the release asked for",
+    ),
+    ErrorCode(
+        "deploy_update_failed",
+        "`comfy deploy up` moved a deployment onto another release, and the watch saw "
+        "the move fail: the new release's copy failed to come up, or the service dropped the update. The "
+        "deployment keeps its id and URL and still serves the release it served before. "
+        "`details.serving_release_id` names that release and `details.release_id` the one that failed.",
+        "inspect `comfy deploy events --deployment <id>`, which covers the new release's copy; `logs` shows the "
+        "release still serving",
     ),
     ErrorCode(
         "deploy_delete_needs_confirm",

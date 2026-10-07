@@ -17,6 +17,13 @@ history.
 
 ### Added
 
+- `comfy deploy up` moves the Build's existing deployment onto the new release
+  in a workspace with deployment updates on, keeping its id and URL, and follows
+  the move until it lands (`deploy_update_failed` when it does not). It refuses
+  to pick between two or more deployments (`deploy_ambiguous_deployment`), and
+  `--create` adds a separate deployment instead. Outside that rollout `up`
+  behaves as before.
+
 - `--select` takes gjson row queries: `items.#(<cond>)#` keeps the elements
   that match and `items.#(<cond>)` is the first one, with `==` `!=` `<` `<=`
   `>` `>=` `%` (glob) `!%` against a quoted string, number, `true`, `false` or
@@ -36,6 +43,11 @@ history.
   (also on `nodes search --expand-top`) list a long option list in full.
 
 ### Changed
+
+- Inside the rollout of deployment updates, `comfy deploy up` refuses a Build
+  with two or more running deployments until `--deployment` names one, and
+  refuses `--min`/`--max` with `--no-watch` on a move, since bounds apply only
+  once the move lands.
 
 - **Breaking:** `comfy build push` in a workspace at its build limit now fails
   with its own `build_limit` code instead of `build_builder_error`, carrying the
