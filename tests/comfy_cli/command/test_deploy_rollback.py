@@ -142,6 +142,38 @@ def test_rollback_to_a_release_id_the_build_no_longer_lists(monkeypatch) -> None
     assert _envelope(result)["data"]["release"] == {"id": "release-gone"}
 
 
+def test_rollback_to_the_release_it_serves_sends_nothing(monkeypatch) -> None:
+    # Given a deployment that serves v2
+    client = _moved_through(1, 2)
+
+    # When
+    result = _invoke(monkeypatch, client, "rollback", "--deployment", "dep-prod", "--to", "v2")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.rollback_calls == []
+    envelope = _envelope(result)
+    assert envelope["changed"] is False
+    assert envelope["data"]["release"] == {"id": "release-2", "version": 2}
+
+
+def test_rollback_still_goes_when_the_current_release_cannot_be_read(monkeypatch) -> None:
+    # Given a deployment serving a release the Builder no longer finds
+    client = _moved_through(1, 2)
+    client.rows["dep-prod"]["releaseId"] = "release-gone"
+    client.revisions["dep-prod"][-1]["releaseId"] = "release-gone"
+
+    # When
+    result = _invoke(monkeypatch, client, "rollback", "--deployment", "dep-prod")
+
+    # Then the rollback is sent, and only the gone release lacks a version
+    assert result.exit_code == 0, result.stderr
+    assert client.rollback_calls == [("dep-prod", 2, None)]
+    data = _envelope(result)["data"]
+    assert data["release"] == {"id": "release-1", "version": 1}
+    assert data["previousRelease"] == {"id": "release-gone"}
+
+
 def test_rollback_to_a_version_the_build_does_not_list_refuses_without_a_move(monkeypatch) -> None:
     # Given
     client = _moved_through(1, 2, 3)
@@ -362,6 +394,21 @@ def test_history_prints_the_current_revision_marked(monkeypatch) -> None:
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     assert lines[0].startswith("* r3  v1  rollback to r1  user-1")
     assert lines[2].startswith("  r1  v1  create  user-1")
+
+
+def test_history_lists_revisions_by_id_when_versions_cannot_be_read(monkeypatch) -> None:
+    # Given a deployment serving a release the Builder no longer finds
+    client = _moved_through(1, 2)
+    client.rows["dep-prod"]["releaseId"] = "release-gone"
+
+    # When
+    result = _invoke(monkeypatch, client, "history", "--deployment", "dep-prod")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    rows = _envelope(result)["data"]["revisions"]
+    assert [row["releaseId"] for row in rows] == ["release-2", "release-1"]
+    assert all("releaseVersion" not in row for row in rows)
 
 
 def test_history_outside_the_rollout_says_updates_are_off(monkeypatch) -> None:

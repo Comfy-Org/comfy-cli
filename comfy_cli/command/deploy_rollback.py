@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import urllib.error
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -28,6 +29,7 @@ from comfy_cli.command.deploy_types import (
 )
 from comfy_cli.command.deploy_up import build_deployments, refuse_unmovable, release_or_id, running_first
 from comfy_cli.deploy_api_errors import DeployAPIError
+from comfy_cli.http import ResponseTooLarge
 
 
 class DeployRollbackClient(DeployUpClient, Protocol):
@@ -172,23 +174,29 @@ def _summaries(releases: list[JsonObject]) -> dict[str, JsonObject]:
     return known
 
 
-def _target_revision(
-    deployment_id: str, revisions: Sequence[JsonObject], current: int, build: BuildReleases, selector: str
-) -> int:
-    """The latest revision before ``current`` that ran the release ``selector`` names.
+def _labels(builder: BuilderReleaseClient, release_id: str) -> dict[str, JsonObject]:
+    """Each of the Build's releases by id, for their versions only.
 
-    A version is looked up in the Build's releases; a release id is matched
-    against the revisions themselves, so a release the Build no longer lists
-    can still be returned to.
+    A failed lookup costs the versions in the output, not the command.
     """
+    try:
+        return _summaries(_build_of(builder, release_id)[1])
+    except (DeployAPIError, ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError):
+        return {}
+
+
+def _listed_release_id(build: BuildReleases, deployment_id: str, selector: str) -> str:
     build_id, releases = build
-    release_id = selector
-    version = release_version_selector(selector)
-    if version is not None:
-        listed = find_build_release(releases, selector)
-        if listed is None:
-            raise ReleaseNotListedError(build_id, deployment_id, selector)
-        release_id = required_string(listed, "id")
+    listed = find_build_release(releases, selector)
+    if listed is None:
+        raise ReleaseNotListedError(build_id, deployment_id, selector)
+    return required_string(listed, "id")
+
+
+def _latest_run(
+    deployment_id: str, revisions: Sequence[JsonObject], current: int, release_id: str, selector: str
+) -> int:
+    """The latest revision before ``current`` that ran ``release_id``."""
     ran = [
         required_int(item, "revision")
         for item in revisions
@@ -222,15 +230,23 @@ def rollback(builder: BuilderReleaseClient, client: DeployRollbackClient, reques
         raise RevisionsUnavailableError(deployment_id, "rollback")
     refuse_unmovable(target, command="rollback")
     previous_id = required_string(target, "releaseId")
-    build = build or _build_of(builder, previous_id)
     # Without `--to` the service picks the revision before the current one.
-    to_revision = (
-        None
-        if request.to is None
-        else _target_revision(
-            deployment_id, _revisions(client, deployment_id), base_revision, build, request.to.strip()
-        )
-    )
+    to_revision = None
+    if request.to is not None:
+        selector = request.to.strip()
+        # A version is looked up in the Build's releases; a release id is
+        # matched against the revisions, so a release the Build no longer
+        # lists can still be returned to.
+        release_id = selector
+        if release_version_selector(selector) is not None:
+            build = build or _build_of(builder, previous_id)
+            release_id = _listed_release_id(build, deployment_id, selector)
+        if release_id == previous_id:
+            # Already there, so nothing is sent, as `up` treats a release the deployment serves.
+            known = _summaries(build[1]) if build else _labels(builder, previous_id)
+            current = known.get(previous_id) or {"id": previous_id}
+            return MoveResult(target, current, current, False)
+        to_revision = _latest_run(deployment_id, _revisions(client, deployment_id), base_revision, release_id, selector)
     try:
         moved = client.rollback_deployment(deployment_id, base_revision, to_revision)
     except DeployAPIError as error:
@@ -241,19 +257,20 @@ def rollback(builder: BuilderReleaseClient, client: DeployRollbackClient, reques
     changed = move_changed(moved, base_revision, release_id, previous_id)
     # The reply carries no status, so the deployment is read for it.
     deployment = client.get_deployment(deployment_id)
-    known = _summaries(build[1])
+    # Read after the move, so a failed lookup costs only the versions.
+    known = _summaries(build[1]) if build else _labels(builder, previous_id)
     release = known.get(release_id) or release_or_id(builder, release_id)
     return MoveResult(deployment, release, known.get(previous_id) or {"id": previous_id}, changed)
 
 
 def history(builder: BuilderReleaseClient, client: DeployRollbackClient, deployment_id: str) -> History:
     deployment = client.get_deployment(deployment_id)
-    if optional_revision(deployment) is None:
-        raise RevisionsUnavailableError(deployment_id, "history")
-    known = _summaries(_build_of(builder, required_string(deployment, "releaseId"))[1])
-    revisions = _revisions(client, deployment_id)
     # The deployment's own revision is the one it serves.
     current = optional_revision(deployment)
+    if current is None:
+        raise RevisionsUnavailableError(deployment_id, "history")
+    known = _labels(builder, required_string(deployment, "releaseId"))
+    revisions = _revisions(client, deployment_id)
     rows: list[JsonObject] = []
     for item in reversed(revisions):
         row: JsonObject = {
@@ -262,8 +279,8 @@ def history(builder: BuilderReleaseClient, client: DeployRollbackClient, deploym
             "kind": required_string(item, "kind"),
             "createdBy": required_string(item, "createdBy"),
             "createdAt": required_string(item, "createdAt"),
-            "current": item["revision"] == current,
         }
+        row["current"] = row["revision"] == current
         version = known.get(row["releaseId"], {}).get("version")
         if isinstance(version, int):
             row["releaseVersion"] = version
