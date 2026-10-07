@@ -1970,6 +1970,7 @@ def _get_json_object(url: str) -> dict[str, Any]:
         return {}
     return body if isinstance(body, dict) else {}
 
+
 class _SubmittedRecord(NamedTuple):
     """Everything one pass over the server's two stores established.
 
