@@ -94,6 +94,25 @@ def test_socket_inputs_own_no_host_slot():
     assert len(inst["widgets_values"]) == len([p for p in pis if p.value_index is not None])
 
 
+def test_unheld_boundary_row_does_not_promote_a_widget():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [1]}],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": None}],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+
+    [item] = promoted.promoted_inputs(sg, {"sg": sg})
+    assert item.name == "prompt"
+    assert item.value_index is None
+
+
 # --------------------------------------------------------------------------- #
 # reads: host value wins, interior is the fallback
 # --------------------------------------------------------------------------- #
