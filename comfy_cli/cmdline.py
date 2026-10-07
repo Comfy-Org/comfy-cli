@@ -185,6 +185,7 @@ _SECRET_KEY_PATTERN = (
     r"(?:proxy-)?authorization|api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|"
     r"session(?:[_-]?(?:id|key))?|sid|sig|signature|(?:set-)?cookie"
 )
+_SECRET_ASSIGNMENT_KEY_PATTERN = rf"(?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})(?:[_-][\w-]+)?"
 _SECRET_PATTERNS = (
     (re.compile(r"(https?://[^\s?#'\"]+)\?[^\s'\"]*", re.IGNORECASE), r"\1?***"),
     (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]+", re.IGNORECASE), r"\1***"),
@@ -206,12 +207,23 @@ _SECRET_PATTERNS = (
         lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
     ),
     (
-        # Container- and constructor-shaped values need to be consumed as a
-        # unit. Letting the scalar branch start at their first quote leaks
-        # later list elements and can leave an unbalanced diagnostic.
+        # Constructor reprs are balanced and normally followed by useful
+        # diagnostics, so consume just the constructor (never whitespace plus
+        # an ordinary explanatory parenthetical).
         re.compile(
-            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|session(?:[_-]?(?:id|key))?|sid|sig|signature)(?:[_-][\w-]+)?"
-            r"[\"']?\s*[:=]\s*)(?:[A-Za-z_][\w.]*\s*\([^\r\n)]*\)|\[[^\r\n\]]*\]|\([^\r\n)]*\))",
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?\s*[:=]\s*)[A-Za-z_][\w.]*\([^\r\n)]*\)",
+            re.IGNORECASE,
+        ),
+        r"\1***",
+    ),
+    (
+        # A container may be nested, truncated by the message cap, or pretty
+        # printed. Once a secret value opens a container, conservatively mask
+        # the rest of that line and its indented continuations. This is linear
+        # and cannot leak later elements through a premature closer.
+        re.compile(
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?\s*[:=]\s*)"
+            r"(?:[\[({]|[A-Za-z_][\w.]*\()[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*",
             re.IGNORECASE,
         ),
         r"\1***",
@@ -219,18 +231,19 @@ _SECRET_PATTERNS = (
     (
         # The Bearer scrubber above preserves the scheme; do not remask it as an unquoted token value.
         re.compile(
-            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|session(?:[_-]?(?:id|key))?|sid|sig|signature)(?:[_-][\w-]+)?"
-            r"[\"']?\s*[:=]\s*)(?:([bBuUrR]{0,2})((?:\\)?[\"'])(?:(?!\3)(?:\\.|[^\r\n]))*\3?|(?!Bearer\s)(?:\\(?![\"'])|[^\\\s&\"',;])+)",
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?\s*[:=]\s*)"
+            r"(?:([bBuUrR]{0,2})((?:\\)?[\"'])(?:(?!\3)(?:\\.|[^\r\n]))*\3?|(?!Bearer\s)(?:\\(?![\"'])|[^\\\s&\"',;])+)",
             re.IGNORECASE,
         ),
         lambda m: f"{m[1]}{m[2]}{m[3]}***{m[3]}" if m[3] else f"{m[1]}***",
     ),
     (
-        # JSON that has itself been escaped can still carry an array/tuple.
-        # Mask the whole container before the escaped scalar patterns run.
+        # JSON that has itself been escaped can still carry a nested,
+        # truncated, or pretty-printed container. Mask its remainder without
+        # a closer-dependent regex, so backslash runs stay linear-time.
         re.compile(
             rf"(\\[\"'](?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})(?:[_-][\w-]+)?"
-            r"\\[\"']\s*[:=]\s*)(?:\[(?:\\\\.|[^\]\r\n])*\]|\((?:\\\\.|[^)\r\n])*\))",
+            r"\\[\"']\s*[:=]\s*)[\[({][^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*",
             re.IGNORECASE,
         ),
         r"\1***",
@@ -260,10 +273,10 @@ _SECRET_PATTERNS = (
     ),
     (
         re.compile(
-            r"((?:set-)?cookie\s*:\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n]+)",
+            r"((?:set-)?cookie\s*:\s*)[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*",
             re.IGNORECASE,
         ),
-        lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
+        r"\1***",
     ),
     (re.compile(r"(://)[^\s/'\"?#,]+@"), r"\1***@"),
 )

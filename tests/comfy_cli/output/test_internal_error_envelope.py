@@ -244,9 +244,13 @@ def test_a_crash_in_the_root_callback_still_emits_the_envelope(monkeypatch, work
         ("Cookie: sid=a; remember_me=LONGTOKEN", "LONGTOKEN", "Cookie:"),
         ('Cookie: pref="x"; auth=LEAK', "LEAK", "Cookie:"),
         ("headers={'token': b'sk-LIVE'}", "sk-LIVE", "headers="),
+        ("headers={'token': {'access': 'LEAK'}}", "LEAK", "headers="),
         ("params={'api_key': ['sk-LIVE']}", "sk-LIVE", "params="),
         ("params={'api_key': ['sk-LIVE', 'sk-BACKUP']}", "sk-BACKUP", "params="),
+        ("api_key=[['sk-A'], 'sk-BACKUP']", "sk-BACKUP", "api_key="),
+        ("api_key=[\n  'sk-BACKUP'", "sk-BACKUP", "api_key="),
         ("headers={'token': bytearray(b'sk-LIVE')}", "sk-LIVE", "headers="),
+        ("token=ApiKey(value='sk-LIVE'", "sk-LIVE", "token="),
         ("api_key=ApiKey(value='sk-LIVE') request=req-1", "sk-LIVE", "request=req-1"),
         (r"body={\"api_key\": [\"sk-A\", \"sk-B\"]}", "sk-B", "body="),
         (
@@ -254,6 +258,10 @@ def test_a_crash_in_the_root_callback_still_emits_the_envelope(monkeypatch, work
             "LEAK",
             "Set-Cookie:",
         ),
+        ('Cookie: "sid=abc", remember_me=LEAK', "LEAK", "Cookie:"),
+        ("Set-Cookie: sid=abc;\n remember_me=LEAKTOKEN", "LEAKTOKEN", "Set-Cookie:"),
+        ("headers={'Set-Cookie': ['sid=abc', 'remember_me=LEAK']}", "LEAK", "headers="),
+        ("cookie=abc123sid path=/x", "abc123sid", "cookie="),
         ("token=Bearer-sk-LIVE request=req-1", "sk-LIVE", "request=req-1"),
         ('body={\\"x-api-key\\": 123456789}', "123456789", "body="),
         ('body={\\"password\\": \\"a\\nb\\"}', "a\\nb", "body="),
@@ -296,3 +304,15 @@ def test_internal_error_scrubber_preserves_text_after_an_unquoted_value():
     scrubbed = _internal_error_message(RuntimeError("bad option 'token=abc' given; retry later"))
     assert "abc" not in scrubbed
     assert "bad option 'token=***' given; retry later" in scrubbed
+
+
+def test_internal_error_scrubber_preserves_explanation_after_an_unquoted_value():
+    scrubbed = _internal_error_message(RuntimeError("token=abc123 (expired at 12:00)"))
+    assert "abc123" not in scrubbed
+    assert "token=*** (expired at 12:00)" in scrubbed
+
+
+def test_internal_error_scrubber_handles_unterminated_escaped_container_with_backslashes():
+    secret = "sk-LIVE" + "\\" * 1_000
+    scrubbed = _internal_error_message(RuntimeError(r"body={\"api_key\": [\"" + secret))
+    assert "sk-LIVE" not in scrubbed

@@ -674,16 +674,30 @@ def ls_nodes_cmd(
     renderer = get_renderer()
     renderer.command = "workflow ls-nodes"
     p, workflow = _load_workflow_or_fail(renderer, file)
-    from comfy_cli.cql.engine import _subgraph_defs_by_id
+    from comfy_cli.cql.engine import _def_contains_type
 
-    # The engine resolves both explicit ids and unique definition names. Use
-    # that same index so discovery never advertises an executable legacy-name
-    # instance as an addable node class.
-    subgraph_ids = set(_subgraph_defs_by_id(workflow))
+    nodes = [node for node in workflow.get("nodes") or [] if isinstance(node, dict)]
+    node_types = {node.get("type") for node in nodes if isinstance(node.get("type"), str)}
+    definitions = workflow.get("definitions")
+    raw_subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else []
+    subgraphs = [item for item in raw_subgraphs if isinstance(item, dict)] if isinstance(raw_subgraphs, list) else []
+    ids_only = {item["id"]: item for item in subgraphs if isinstance(item.get("id"), str) and item["id"]}
+    # Resolve only aliases a top-level row actually uses. This preserves the
+    # engine's id/unique-name rules without indexing every cosmetic name in a
+    # workflow that may contain thousands of definitions.
+    subgraph_ids = {key for key in ids_only if key in node_types}
+    name_counts: dict[str, int] = {}
+    name_first: dict[str, dict] = {}
+    for definition in subgraphs:
+        name = definition.get("name")
+        if isinstance(name, str) and name in node_types:
+            name_counts[name] = name_counts.get(name, 0) + 1
+            name_first.setdefault(name, definition)
+    for name, count in name_counts.items():
+        if count == 1 and name not in ids_only and not _def_contains_type(name_first[name], name, ids_only):
+            subgraph_ids.add(name)
     rows = []
-    for n in workflow.get("nodes") or []:
-        if not isinstance(n, dict):
-            continue
+    for n in nodes:
         row = {
             "id": n.get("id"),
             "type": n.get("type"),
@@ -704,9 +718,14 @@ def ls_nodes_cmd(
         # show` cannot take that type. Only set when true, like `mode`.
         node_type = n.get("type")
         if isinstance(node_type, str):
+            properties = n.get("properties")
+            # A serialized core/custom node names its executable class here.
+            # That is stronger evidence than an unrelated definition whose
+            # cosmetic name or unusual non-UUID id happens to collide.
+            declares_real_class = isinstance(properties, dict) and properties.get("Node name for S&R") == node_type
             if node_type in workflow_ops.UI_ONLY_NODE_TYPES:
                 row["ui_only"] = True
-            elif node_type in subgraph_ids or workflow_ops._UUID_RE.match(node_type):
+            elif not declares_real_class and (node_type in subgraph_ids or workflow_ops._UUID_RE.match(node_type)):
                 row["subgraph"] = True
         rows.append(row)
     payload = {"workflow": str(p), "count": len(rows), "nodes": rows}

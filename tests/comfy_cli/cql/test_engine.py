@@ -389,6 +389,47 @@ class TestWidgetOrderForNode:
         g = self._dyn_graph()
         assert g.widget_order_default("DynNode") == ["model", "model.res", "seed", "control_after_generate"]
 
+    def test_invalid_declared_default_falls_back_to_first_key(self):
+        info = {
+            "DynNode": {
+                "input": {
+                    "required": {
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "default": "missing",
+                                "options": [
+                                    {
+                                        "key": "a",
+                                        "inputs": {
+                                            "required": {"res": ["COMBO", {"options": ["x", "y"], "default": "x"}]}
+                                        },
+                                    },
+                                    {"key": "b", "inputs": {"required": {}}},
+                                ],
+                            },
+                        ],
+                        "seed": ["INT", {"default": 0}],
+                    }
+                },
+                "input_order": {"required": ["model", "seed"]},
+                "output": ["IMAGE"],
+                "output_name": ["IMAGE"],
+                "category": "test",
+                "display_name": "Dyn",
+                "python_module": "nodes",
+            }
+        }
+        g = Graph.from_object_info(info)
+
+        assert g.widget_default_for_node("DynNode", "model") == "a"
+        assert g.widget_order_default("DynNode") == [
+            "model",
+            "model.res",
+            "seed",
+            "control_after_generate",
+        ]
+
     def test_node_order_expands_selected_key(self):
         g = self._dyn_graph()
         # Selecting "b" adds model.quality, pushing seed to index 3. The trailing
