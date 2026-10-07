@@ -95,7 +95,10 @@ class ReleaseNeverRanError(DeployResolveError):
 
 # The service's reasons for refusing a rollback, said plainly.
 _REFUSALS = {
-    "NO_EARLIER_REVISION": ("has no earlier release to roll back to", None),
+    "NO_EARLIER_REVISION": (
+        "has no earlier release to roll back to",
+        "it still runs the release it was created on; `comfy deploy up --deployment {id}` moves it to a newer one",
+    ),
     "STALE_REVISION": (
         "changed after it was read, so the rollback was refused",
         "run the rollback again to roll back from where it is now",
@@ -218,7 +221,7 @@ def _plain(error: DeployAPIError, deployment_id: str) -> DeployAPIError:
         f"deployment {deployment_id} {reason}",
         status=error.status,
         details=error.details,
-        hint=hint.format(id=deployment_id) if hint else error.hint,
+        hint=hint.format(id=deployment_id),
     )
 
 

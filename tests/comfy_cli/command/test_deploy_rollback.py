@@ -216,6 +216,7 @@ def test_a_deployment_with_one_revision_has_nothing_to_roll_back_to(monkeypatch)
     assert result.exit_code == 1
     assert error["code"] == "deploy_conflict"
     assert error["message"] == "deployment dep-prod has no earlier release to roll back to"
+    assert "comfy deploy up --deployment dep-prod" in error["hint"]
 
 
 class _Refused(FakeDeploy):
