@@ -306,6 +306,20 @@ def test_a_waiting_rollback_is_followed_until_it_lands(monkeypatch) -> None:
     assert "now serves release v1 (was release v2)" in result.stdout
 
 
+def test_a_rollback_read_caught_as_it_lands_still_lands(monkeypatch) -> None:
+    # Given v1's copy starting, one read mid-landing, then the landing
+    client = _moved_through(
+        1, 2, move="pending", get_patches=[{}, {"pendingUpdate": None}, {"releaseId": "release-1", "revision": 3}]
+    )
+
+    # When
+    result = _invoke(monkeypatch, client, "rollback", "--deployment", "dep-prod")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _envelope(result)["data"]["deployment"]["revision"] == 3
+
+
 def test_a_waiting_rollback_not_followed_says_it_waits(monkeypatch) -> None:
     # Given v1's copy starting again
     client = _moved_through(1, 2, move="pending")

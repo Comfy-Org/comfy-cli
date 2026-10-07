@@ -131,31 +131,47 @@ NOT_MOVABLE: Final = frozenset({"stopping", "stop_failed"})
 
 
 def move_settled(release_id: str) -> Callable[[JsonObject], bool]:
-    """When a watch on a move can stop: the move landed or failed."""
+    """When a watch on a move can stop: the move landed, its copy failed, or two
+    reads that say anything about it show it dropped, with no read between them
+    showing it waiting. Each watch takes its own, since it counts.
+
+    The service assembles a read from several queries, so one that straddles
+    the move landing can show the old release with nothing waiting, which is
+    how a dropped move reads too; the next read shows where it landed.
+    """
+    dropped_reads = 0
 
     def settled(snapshot: JsonObject) -> bool:
-        return move_outcome(snapshot, release_id) is not None
+        nonlocal dropped_reads
+        outcome = move_outcome(snapshot, release_id)
+        if outcome == "dropped":
+            dropped_reads += 1
+            return dropped_reads >= 2
+        if outcome == "unknown":
+            return False
+        dropped_reads = 0
+        return outcome is not None
 
     return settled
 
 
 def move_outcome(snapshot: JsonObject, release_id: str) -> str | None:
-    """``landed``, ``failed``, or ``None`` while the move to ``release_id`` still waits.
+    """``landed``, ``failed``, ``dropped``, ``unknown``, or ``None`` while the move to ``release_id`` still waits.
 
     It lands when the deployment serves the release and nothing waits. It
-    failed when the copy it waits on failed, or when nothing waits any more and
-    the deployment serves another release: the service dropped the move, or
-    another change overtook it. A read with no
-    revision says nothing about the move, since the service leaves revision and
-    pendingUpdate out whenever its rollout check fails, so the watch reads on.
+    failed when the copy it waits on failed, and it dropped when nothing waits
+    any more and the deployment serves another release: the service dropped
+    the move, or another change overtook it. A read with no revision is
+    ``unknown`` unless it already shows the release, since the service leaves
+    revision and pendingUpdate out whenever its rollout check fails.
     """
     pending = snapshot.get("pendingUpdate")
     if isinstance(pending, dict):
         return "failed" if pending.get("status") == "failed" else None
     serving = snapshot.get("releaseId")
     if optional_revision(snapshot) is None:
-        return "landed" if serving == release_id else None
-    return "landed" if serving == release_id else "failed"
+        return "landed" if serving == release_id else "unknown"
+    return "landed" if serving == release_id else "dropped"
 
 
 def move_changed(moved: JsonObject, base_revision: int, release_id: str, previous_id: str) -> bool:

@@ -162,8 +162,9 @@ def poll_deployment(
 
     ``settled`` replaces the status test when the watch waits on something
     else, such as a move onto another release, which keeps a ready deployment
-    ready throughout. ``limit`` bounds the whole watch in seconds, since such a
-    wait has no status of its own to end on.
+    ready throughout; it may count across reads, so each watch passes its own.
+    ``limit`` bounds the whole watch in seconds, since such a wait has no
+    status of its own to end on.
 
     The progress a watcher shows rides the same read the loop already makes, so
     watching costs the service nothing it was not already answering. A read the
