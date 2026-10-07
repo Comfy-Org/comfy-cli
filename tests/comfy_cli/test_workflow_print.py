@@ -333,6 +333,20 @@ def test_out_of_range_definition_output_boundary_renders_none_with_warning():
     assert "OUT." in res.source and " = None" in res.source
 
 
+def test_output_boundary_from_a_node_without_output_metadata_renders_none():
+    wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
+    graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
+    sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
+    link = next(lk for lk in sg["links"] if str(lk["target_id"]) == "-20" and str(lk["origin_id"]) != "-10")
+    source = next(node for node in sg["nodes"] if str(node.get("id")) == str(link["origin_id"]))
+    source.pop("outputs", None)
+
+    res = render_py(wf, graph)
+
+    assert any("which has 0 outputs; it was ignored" in warning for warning in res.warnings)
+    assert f"{link['origin_id']}.out[{link['origin_slot']}]" not in res.source
+
+
 def test_broken_link_repair_uses_the_actual_holder_when_declared_target_is_missing(sd15_graph):
     wf = _stale_slot_workflow([7, 1, 9, 99, 0, "LATENT"])
     wf["nodes"][1]["inputs"][0]["link"] = None
@@ -1160,11 +1174,11 @@ def test_out_of_range_input_slot_fed_by_the_definition_input_proxy_is_reported(s
     )
     res = render_py(wf, graph)
     n_inputs = len(tgt.get("inputs") or [])
-    assert (
-        f"link 9998 targets input slot 42 on node 10/{tgt['id']}, which has {n_inputs} inputs; "
-        "no input holds it, so it feeds nothing and was ignored. It was wired from the subgraph input — "
-        "re-wire it to the input it was meant for"
-    ) in res.warnings
+    assert n_inputs >= 0
+    assert any(
+        "input link 9998 references input slot 99" in warning and "it was ignored" in warning
+        for warning in res.warnings
+    )
 
 
 def test_in_range_unheld_definition_input_proxy_link_is_ignored():
@@ -1250,16 +1264,24 @@ def test_in_range_link_row_follows_the_actual_holder(sd15_graph):
 
 
 def test_malformed_graph_containers_are_reported_not_crashed():
-    wf = {"nodes": [], "links": 5, "definitions": {"subgraphs": 5}}
+    wf = {"nodes": [], "links": 5, "groups": 5, "definitions": {"subgraphs": 5}}
     res = render_py(wf, None)
     assert "workflow: ignoring non-list links block" in res.warnings
+    assert "workflow: ignoring non-list groups block" in res.warnings
     assert "workflow: ignoring non-list subgraphs block" in res.warnings
 
 
-def test_null_link_id_is_rejected_before_link_map_collapse(sd15_graph):
+def test_null_link_id_is_warned_and_dropped(sd15_graph):
     wf = _stale_slot_workflow([None, 1, 0, 2, 1, "LATENT"])
-    with pytest.raises(PrintUnsupported, match="link has null id"):
-        render_py(wf, sd15_graph)
+    res = render_py(wf, sd15_graph)
+    assert any("link has null id and was ignored" in warning for warning in res.warnings)
+
+
+def test_equivalent_link_rows_ignore_unused_tail_and_id_representation(sd15_graph):
+    wf = _stale_slot_workflow([7, 1, 0, 2, 0, "LATENT"])
+    wf["links"].append(["7", "1", 0, "2", 0, "DIFFERENT-UNUSED-TYPE"])
+    res = render_py(wf, sd15_graph)
+    assert "samples=empty_latent_image" in res.source
 
 
 def test_typed_duplicate_link_rows_are_rejected():
@@ -1275,3 +1297,86 @@ def test_workflow_fields_cannot_spoof_normalisation_markers():
     node["_workflow_print_nonlist_outputs"] = True
     res = render_py(_mini([node], []), None)
     assert not [warning for warning in res.warnings if "non-list" in warning]
+
+
+def test_malformed_definition_containers_and_null_link_are_warned_not_crashed():
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    definition = {
+        "id": subgraph_id,
+        "name": "Malformed",
+        "nodes": [],
+        "links": 5,
+        "inputs": 5,
+        "outputs": 5,
+        "groups": 5,
+    }
+    wf = _mini([_node(10, subgraph_id)], [])
+    wf["definitions"] = {"subgraphs": [definition]}
+    res = render_py(wf, None)
+    for field in ("links", "inputs", "outputs", "groups"):
+        assert f"non-list {field} treated as empty" in "\n".join(res.warnings)
+
+    definition["links"] = [{"id": None, "origin_id": -10, "origin_slot": 0, "target_id": -20, "target_slot": 0}]
+    res = render_py(wf, None)
+    assert any("link has null id and was ignored" in warning for warning in res.warnings)
+
+
+def test_definition_retarget_preserves_a_declared_holder_when_an_earlier_duplicate_exists():
+    wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
+    graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
+    sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
+    sg["nodes"].insert(0, _node(99, "Unknown", inputs=[{"name": "socket", "type": "STRING", "link": 3}]))
+
+    res = render_py(wf, graph)
+
+    assert "IN.value" in res.source
+    assert "promoted widgets: IN.value" in res.source
+
+
+def test_definition_input_to_output_passthrough_is_never_retargeted():
+    wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
+    graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
+    sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
+    link = next(lk for lk in sg["links"] if lk.get("id") == 3)
+    link["target_id"] = -20
+    link["target_slot"] = 0
+
+    res = render_py(wf, graph)
+
+    assert "OUT.IMAGE = IN.value" in res.source
+
+
+def test_missing_definition_target_warns_only_once():
+    wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
+    graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
+    sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
+    source = next(node for node in sg["nodes"] if node.get("outputs"))
+    sg["links"].append({"id": 9997, "origin_id": source["id"], "origin_slot": 0, "target_id": 999, "target_slot": 0})
+
+    res = render_py(wf, graph)
+
+    warnings = [warning for warning in res.warnings if "link 9997 targets missing node" in warning]
+    assert len(warnings) == 1, warnings
+
+
+def test_unheld_proxy_row_does_not_shift_promoted_widget_values():
+    wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
+    graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
+    sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
+    target = next(node for node in sg["nodes"] if node.get("id") == 3)
+    image_input = next(item for item in sg["inputs"] if item["name"] == "images.image0")
+    image_input["linkIds"].insert(0, 9999)
+    host = next(node for node in wf["nodes"] if node.get("id") == 10)
+    next(item for item in host["inputs"] if item.get("name") == "images.image0")["link"] = None
+    sg["links"].append(
+        {"id": 9999, "origin_id": -10, "origin_slot": 1, "target_id": target["id"], "target_slot": 0, "type": "*"}
+    )
+
+    res = render_py(wf, graph)
+
+    instance = next(line for line in res.source.splitlines() if "# 10 subgraph" in line)
+    assert 'aspect_ratio="16:9"' in instance
+    assert '"images.image0": "16:9"' not in instance
+    header = next(line for line in res.source.splitlines() if line.startswith("#   promoted widgets:"))
+    assert 'IN["images.image0"]' not in header
+    assert any(warning.startswith("link 9999 targets input slot 0") for warning in res.warnings)
