@@ -298,6 +298,8 @@ def base_url() -> str:
 
 
 def _resolve_ref(spec: dict[str, Any], ref: str) -> dict[str, Any]:
+    if not isinstance(ref, str):
+        raise SpecError(f"Invalid non-string $ref: {ref!r}")
     if not ref.startswith("#/"):
         raise SpecError(f"Only local $refs are supported: {ref}")
     parts = ref[2:].split("/")
@@ -506,14 +508,15 @@ _OPENAI_IMAGE_MODELS: dict[str, str | None] = {
 }
 
 
-def _direct_route(alias: str, model_id: str, *, suggest_partner_node: bool = True) -> str:
-    """The `comfy generate <alias> --model <id>` line, saying whether it can
+def _direct_route(alias: str, model_id: str, *, model_field: str = "model", suggest_partner_node: bool = True) -> str:
+    """The matching `comfy generate <alias> --<field> <id>` line, saying whether it can
     also `--emit-workflow`. A caller building a workflow runs `generate` with
     `--emit-workflow`, so a route that cannot emit must say so or the hint is a
     dead end for it."""
     from comfy_cli.command.generate import emit
 
-    route = f"`comfy generate {alias} --model {model_id} ...`"
+    option = model_field.replace("_", "-")
+    route = f"`comfy generate {alias} --{option} {model_id} ...`"
     if emit.is_supported(alias):
         return f"{route} (also with --emit-workflow)"
     suffix = "; that alias has no --emit-workflow"
@@ -549,7 +552,7 @@ def _model_name_hint(name: str) -> str | None:
     # partner's model family, whichever route serves it.
     raw = load_raw_spec()
     aliased = {v: k for k, v in _ALIASES.items()}
-    hits: list[tuple[str, list[str]]] = []
+    hits: list[tuple[str, str, list[str]]] = []
     for path, node in (raw.get("paths") or {}).items():
         if not str(path).startswith(PROXY_PREFIX) or not isinstance(node, dict):
             continue
@@ -569,28 +572,24 @@ def _model_name_hint(name: str) -> str | None:
             resolved = _resolve(raw, schema)
             if not isinstance(resolved, dict):
                 continue
-            prop = None
-            values = None
             for field in ("model", "model_name", "model_id"):
                 prop = _find_property(resolved, field)
                 values = _extract_enum(prop) if prop else None
-                if values:
-                    break
-        except (KeyError, TypeError, SpecError):
+                matched = [v for v in values or [] if v.lower().startswith(lowered)]
+                if matched:
+                    hits.append((str(path)[len(PROXY_PREFIX) :], field, matched))
+        except (KeyError, TypeError, SpecError, RecursionError):
             continue
-        matched = [v for v in values or [] if v.lower().startswith(lowered)]
-        if matched:
-            hits.append((str(path)[len(PROXY_PREFIX) :], matched))
     if not hits:
         return None
     lines = [
         f"Partner models matching {lowered!r} (for a workflow, find the partner node: `comfy nodes search {lowered}`):"
     ]
-    for endpoint_id, values in hits:
+    for endpoint_id, field, values in hits:
         shown = ", ".join(values[:6])
         alias = aliased.get(endpoint_id)
         if alias is not None:
-            lines.append(f"- {shown}: {_direct_route(alias, '<id>')}.")
+            lines.append(f"- {shown}: {_direct_route(alias, '<id>', model_field=field)}.")
         else:
             lines.append(f"- {shown}: served at {endpoint_id}, which has no `comfy generate` alias.")
     return "\n".join(lines)

@@ -206,13 +206,34 @@ _SECRET_PATTERNS = (
         lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
     ),
     (
+        # Container- and constructor-shaped values need to be consumed as a
+        # unit. Letting the scalar branch start at their first quote leaks
+        # later list elements and can leave an unbalanced diagnostic.
+        re.compile(
+            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|session(?:[_-]?(?:id|key))?|sid|sig|signature)(?:[_-][\w-]+)?"
+            r"[\"']?\s*[:=]\s*)(?:[A-Za-z_][\w.]*\s*\([^\r\n)]*\)|\[[^\r\n\]]*\]|\([^\r\n)]*\))",
+            re.IGNORECASE,
+        ),
+        r"\1***",
+    ),
+    (
         # The Bearer scrubber above preserves the scheme; do not remask it as an unquoted token value.
         re.compile(
             r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|session(?:[_-]?(?:id|key))?|sid|sig|signature)(?:[_-][\w-]+)?"
-            r"[\"']?\s*[:=]\s*)(?:[bBuUrR\[(]{0,2}((?:\\)?[\"'])(?:(?!\2)(?:\\.|[^\r\n]))*\2?|(?!Bearer\s)(?:\\(?![\"'])|[^\\\s&\"',;])+)",
+            r"[\"']?\s*[:=]\s*)(?:([bBuUrR]{0,2})((?:\\)?[\"'])(?:(?!\3)(?:\\.|[^\r\n]))*\3?|(?!Bearer\s)(?:\\(?![\"'])|[^\\\s&\"',;])+)",
             re.IGNORECASE,
         ),
-        lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
+        lambda m: f"{m[1]}{m[2]}{m[3]}***{m[3]}" if m[3] else f"{m[1]}***",
+    ),
+    (
+        # JSON that has itself been escaped can still carry an array/tuple.
+        # Mask the whole container before the escaped scalar patterns run.
+        re.compile(
+            rf"(\\[\"'](?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})(?:[_-][\w-]+)?"
+            r"\\[\"']\s*[:=]\s*)(?:\[(?:\\\\.|[^\]\r\n])*\]|\((?:\\\\.|[^)\r\n])*\))",
+            re.IGNORECASE,
+        ),
+        r"\1***",
     ),
     (
         re.compile(
@@ -232,7 +253,14 @@ _SECRET_PATTERNS = (
     ),
     (
         re.compile(
-            r"((?:set-)?cookie[\"']?\s*:\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n,]+)",
+            r"((?:set-)?cookie[\"']\s*:\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n,]+)",
+            re.IGNORECASE,
+        ),
+        lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
+    ),
+    (
+        re.compile(
+            r"((?:set-)?cookie\s*:\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n]+)",
             re.IGNORECASE,
         ),
         lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",

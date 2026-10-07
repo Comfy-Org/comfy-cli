@@ -1706,15 +1706,16 @@ class Graph:
         return order
 
     def widget_order_default(self, class_name: str) -> list[str]:
-        """Static order with every dynamic combo expanded at its FIRST key.
+        """Static order with every dynamic combo expanded at its declared default.
 
         :meth:`widget_order` is deliberately value-independent — a combo
         contributes only its selector, because which sub-inputs exist depends on
         the node's current selection. A CATALOG has no node and no selection, but
         its consumers still need the sub-input names in order to address them
         (``set-widget <id>.model.resolution``). So the catalog publishes the order
-        a FRESH node would have, which is the first key — the same option
-        ``add_node`` materializes via :meth:`widget_defaults`.
+        a FRESH node would have: the schema default when declared, otherwise
+        the first key — the same option ``add_node`` materializes via
+        :meth:`widget_defaults`.
         """
         m = self._nodes.get(class_name)
         if m is None:
@@ -1752,7 +1753,7 @@ class Graph:
     def dynamic_combo_options(self, class_name: str) -> dict[str, dict[str, Any]]:
         """Every dynamic-combo selector of ``class_name`` with EVERY option's slots.
 
-        ``{selector: {"default": <first key>, "options": {key: {"widgets": [...],
+        ``{selector: {"default": <declared default or first key>, "options": {key: {"widgets": [...],
         "defaults": {...}}}}}`` — per option, the DIRECT widget slots it inserts
         after its selector, in positional order (the same walk as
         :func:`_expand_widget_entries`: link-only sub-inputs own no slot, a
@@ -1787,7 +1788,8 @@ class Graph:
                         widgets.append("control_after_generate")
                         defaults["control_after_generate"] = "fixed"
                 options[str(key)] = {"widgets": widgets, "defaults": defaults}
-            out[name] = {"default": str(keys[0]) if keys else None, "options": options}
+            default = _widget_default(port)
+            out[name] = {"default": str(default) if default is not None else None, "options": options}
 
         for p in m.inputs:
             if not p.is_link and p.dynamic_options and _is_dynamic_combo_type(p.type):
@@ -1855,14 +1857,14 @@ class Graph:
 
     def widget_defaults(self, class_name: str) -> dict[str, Any]:
         """Default value per widget-order name — including dynamic-combo selectors
-        (first key), their sub-widgets, and control_after_generate. Used by
+        (declared default or first key), their sub-widgets, and control_after_generate. Used by
         ``add-node`` so a fresh node is runtime-valid, aligned with the converter."""
         m = self._nodes.get(class_name)
         if m is None:
             return {}
         out: dict[str, Any] = {}
-        # Same walk as ``widget_order_default`` (first key at every dynamic
-        # combo, link-only sub-inputs skipped), so the two can never disagree
+        # Same walk as ``widget_order_default`` (declared default or first key
+        # at every dynamic combo, link-only sub-inputs skipped), so the two can never disagree
         # about which names own a slot.
         button_values = dict(load_3d_button_slots(m))
         for entry in _expand_widget_entries(m, [], first_key=True):
@@ -2543,9 +2545,11 @@ class Graph:
 
 def _widget_default(p: Port) -> Any:
     """The value a fresh node carries for widget port ``p`` — a dynamic
-    combo's first key, else the schema default, else the first choice, else
-    the DOM-widget placeholder, else ``None``."""
+    combo's declared default (or first key), else the schema default, else the
+    first choice, else the DOM-widget placeholder, else ``None``."""
     if p.dynamic_options:
+        if p.options.default is not None:
+            return p.options.default
         return p.enum_values[0] if p.enum_values else None
     if p.options.default is not None:
         return p.options.default
@@ -2569,7 +2573,7 @@ def _input_payload(p: Port, depth: int) -> dict[str, Any]:
         "is_link": p.is_link,
         "section": "required" if p.required else "optional",
         # V3 dynamic combos keep their selection keys in enum_values
-        # internally (e.g. so widget_defaults can pick the first key), but
+        # internally (e.g. so widget_defaults can fall back to the first key), but
         # those keys are exposed to callers as `selection_keys` /
         # `dynamic_options[].key` below, not as flat `choices` — they are not
         # membership choices for the field (see _is_scalar_choice).
@@ -3827,9 +3831,9 @@ def _expand_widget_entries(
     — top-level or sub — is followed by its ``control_after_generate`` marker
     slot, exactly as the frontend serializes it.
 
-    ``first_key=True`` selects every dynamic combo's first option instead of
-    reading ``widgets_values`` — the layout of a FRESH node, which is what the
-    static catalog (``widget_order_default``) and ``add_node``
+    ``first_key=True`` selects every dynamic combo's declared default, falling
+    back to its first option, instead of reading ``widgets_values`` — the
+    layout of a FRESH node, which is what the static catalog (``widget_order_default``) and ``add_node``
     (``widget_defaults``) publish. One walk for both keeps them from ever
     disagreeing with the value-aware order ``set-widget`` indexes by.
 
@@ -3846,7 +3850,7 @@ def _expand_widget_entries(
                 return
             idx = len(entries) - 1
             if first_key:
-                selector = port.enum_values[0] if port.enum_values else None
+                selector = _widget_default(port)
             else:
                 selector = widgets_values[idx] if idx < len(widgets_values) else port.options.default
             for sub in _dynamic_combo_sub_ports(port.dynamic_options, selector, name):

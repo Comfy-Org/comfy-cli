@@ -674,15 +674,12 @@ def ls_nodes_cmd(
     renderer = get_renderer()
     renderer.command = "workflow ls-nodes"
     p, workflow = _load_workflow_or_fail(renderer, file)
-    definitions = workflow.get("definitions")
-    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else []
-    subgraph_ids: set[str] = set()
-    for definition in subgraphs if isinstance(subgraphs, list) else []:
-        if not isinstance(definition, dict):
-            continue
-        definition_id = definition.get("id")
-        if isinstance(definition_id, str) and definition_id:
-            subgraph_ids.add(definition_id)
+    from comfy_cli.cql.engine import _subgraph_defs_by_id
+
+    # The engine resolves both explicit ids and unique definition names. Use
+    # that same index so discovery never advertises an executable legacy-name
+    # instance as an addable node class.
+    subgraph_ids = set(_subgraph_defs_by_id(workflow))
     rows = []
     for n in workflow.get("nodes") or []:
         if not isinstance(n, dict):

@@ -99,6 +99,27 @@ def test_ls_nodes_marks_a_declared_non_uuid_subgraph(patched_graph, tmp_path, ca
     assert row.get("subgraph") is True, row
 
 
+def test_ls_nodes_marks_a_unique_definition_name_used_as_the_instance_type(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    wf["definitions"] = {
+        "subgraphs": [
+            {
+                "id": _SG_UUID,
+                "name": "Legacy Group",
+                "nodes": [],
+                "links": [],
+                "inputs": [],
+                "outputs": [],
+            }
+        ]
+    }
+    wf["nodes"].append({"id": 21, "type": "Legacy Group", "pos": [0, 0], "inputs": [], "outputs": []})
+
+    row = _ls_rows(tmp_path, capsys, wf)[21]
+    assert row["type"] == "Legacy Group"
+    assert row.get("subgraph") is True, row
+
+
 def test_ls_nodes_real_classes_stay_clean(patched_graph, tmp_path, capsys):
     rows = _ls_rows(tmp_path, capsys, _wf_with_reroute_and_subgraph())
     for nid in (3, 7):
