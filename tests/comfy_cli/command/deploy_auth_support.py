@@ -29,6 +29,8 @@ ENDPOINT_ORIGIN = f"https://{DEPLOYMENT_ID}.run.comfy.app"
 class DeployFixtureKind(Enum):
     UP = "up"
     PROMOTE = "promote"
+    ROLLBACK = "rollback"
+    HISTORY = "history"
     STATUS = "status"
     LS = "ls"
     SHOW = "show"
@@ -62,8 +64,21 @@ def _deployment() -> JsonObject:
         "computeConfig": {"gpuClass": "l4", "region": "US-MO-2", "min": 0, "max": 1},
         "endpointUrl": ENDPOINT_ORIGIN,
         "serving": None,
-        "revision": 1,
+        "revision": 2,
     }
+
+
+def _revisions() -> list[JsonObject]:
+    return [
+        {
+            "revision": number,
+            "releaseId": RELEASE_ID,
+            "kind": kind,
+            "createdBy": "u",
+            "createdAt": "2026-01-01T00:00:00Z",
+        }
+        for number, kind in ((1, "create"), (2, "update"))
+    ]
 
 
 class DeployRecordingTransport:
@@ -88,6 +103,11 @@ class DeployRecordingTransport:
             ("GET", "/v1/deployments"): (200, {"deployments": [row]}),
             ("GET", f"/v1/deployments/{DEPLOYMENT_ID}"): (200, row),
             ("GET", "/v1/deployments/dep-source"): (200, {**row, "id": "dep-source"}),
+            ("GET", f"/v1/deployments/{DEPLOYMENT_ID}/revisions"): (200, {"items": _revisions()}),
+            ("POST", f"/v1/deployments/{DEPLOYMENT_ID}/rollback"): (
+                200,
+                {"id": DEPLOYMENT_ID, "revision": 2, "releaseId": RELEASE_ID, "kind": "update"},
+            ),
             ("POST", f"/v1/deployments/{DEPLOYMENT_ID}/stop"): (202, {**row, "status": "stopping"}),
             ("POST", f"/v1/deployments/{DEPLOYMENT_ID}/start"): (202, {**row, "status": "queued"}),
             ("DELETE", f"/v1/deployments/{DEPLOYMENT_ID}"): (204, {}),
@@ -145,6 +165,10 @@ def prepare_deploy(kind: DeployFixtureKind, root: Path) -> list[str]:
             return ["deploy", "up", "--release", RELEASE_ID, "--gpu", "l4", "--region", "US-MO-2"]
         case DeployFixtureKind.PROMOTE:
             return ["deploy", "promote", "dep-source", DEPLOYMENT_ID, "--no-watch"]
+        case DeployFixtureKind.ROLLBACK:
+            return ["deploy", "rollback", "--deployment", DEPLOYMENT_ID, "--no-watch"]
+        case DeployFixtureKind.HISTORY:
+            return ["deploy", "history", "--deployment", DEPLOYMENT_ID]
         case DeployFixtureKind.STATUS:
             write_spec(root, build_id=BUILD_ID, models=[], nodes=[])
             return ["deploy", "status", str(root)]

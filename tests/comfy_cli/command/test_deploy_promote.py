@@ -145,6 +145,20 @@ def test_a_reply_without_a_revision_is_followed_onto_the_source_release(monkeypa
     assert data["deployment"]["revision"] == 4
 
 
+def test_a_bare_reply_is_read_again_so_an_unwatched_promote_says_it_waits(monkeypatch) -> None:
+    # Given a reply with no revision, and a read that shows the move waiting
+    client = _staging_and_production(move="pending", get_patches=[{}], strip_move_reply=True)
+
+    # When
+    result = _promote(monkeypatch, client, "dep-staging", "dep-prod", "--no-watch")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _envelope(result)["data"]
+    assert data["waiting"] is True
+    assert data["release"] == {"id": "release-5", "version": 5}
+
+
 class _SourceMovesFirst(FakeDeploy):
     def promote_deployment(self, deployment_id: str, base_revision: int, from_deployment_id: str) -> JsonObject:
         self.rows[from_deployment_id]["releaseId"] = "release-6"

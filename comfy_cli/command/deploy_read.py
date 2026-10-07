@@ -23,6 +23,7 @@ from comfy_cli.command.deploy_resolve import (
     release_version_selector,
     resolve_deployment,
 )
+from comfy_cli.command.deploy_rollback import history
 from comfy_cli.command.deploy_runtime import command_clients as _command_clients
 from comfy_cli.command.deploy_runtime import render_spec_error
 from comfy_cli.command.deploy_types import (
@@ -248,6 +249,26 @@ def _run_read(request: ReadRequest, action: ReadAction) -> None:
         raise typer.Exit(code=1) from error
 
 
+def _history_line(row: JsonObject) -> str:
+    marker = "*" if row["current"] else " "
+    version = row.get("releaseVersion")
+    release = f"v{version}" if isinstance(version, int) else str(row["releaseId"])
+    kind = str(row["kind"])
+    if "fromRevision" in row:
+        kind = f"{kind} to r{row['fromRevision']}"
+    return f"{marker} r{row['revision']}  {release}  {kind}  {row['createdBy']}  {row['createdAt']}"
+
+
+def _history(
+    renderer: Renderer, builder: BuilderReleaseClient, client: DeploymentReadClient, deployment_id: str
+) -> None:
+    result = history(builder, client, deployment_id)
+    if renderer.is_pretty():
+        for row in result.revisions:
+            renderer.print(_history_line(row))
+    renderer.emit(result.payload(), command="deploy history", changed=False)
+
+
 def run_show(request: ReadRequest) -> None:
     _run_read(request, _show)
 
@@ -261,3 +282,7 @@ def run_events(request: ReadRequest, release: str | None = None) -> None:
         request,
         lambda renderer, builder, client, deployment_id: _events(renderer, builder, client, deployment_id, release),
     )
+
+
+def run_history(request: ReadRequest) -> None:
+    _run_read(request, _history)

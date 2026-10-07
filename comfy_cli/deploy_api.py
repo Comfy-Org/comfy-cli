@@ -251,6 +251,21 @@ class DeployClient:
         body = {"baseRevision": base_revision, "fromDeploymentId": from_deployment_id}
         return self._patch("move", ("deployments", deployment_id), body)
 
+    def rollback_deployment(self, deployment_id: str, base_revision: int, to_revision: int | None = None) -> dict:
+        """Point the deployment back at an earlier revision's release, keeping its id and URL.
+
+        The service picks the revision before the current one unless
+        ``to_revision`` names another. ``base_revision`` is as for a move.
+        """
+        body: dict = {"baseRevision": base_revision}
+        if to_revision is not None:
+            body["toRevision"] = to_revision
+        return self._post("move", ("deployments", deployment_id, "rollback"), body)
+
+    def get_deployment_revisions(self, deployment_id: str) -> dict:
+        """GET /v1/deployments/{id}/revisions: every revision, oldest first."""
+        return self._get("revisions", ("deployments", deployment_id, "revisions"))
+
     def delete_deployment(self, deployment_id: str) -> None:
         self._delete("delete", ("deployments", deployment_id))
 

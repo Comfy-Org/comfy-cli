@@ -1,11 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://comfy.org/schemas/deploy_promote.json",
-  "title": "comfy deploy promote --json data payload",
+  "$id": "https://comfy.org/schemas/deploy_rollback.json",
+  "title": "comfy deploy rollback --json data payload",
   "type": "object",
   "required": [
     "deployment",
-    "source",
     "release",
     "previousRelease",
     "waiting"
@@ -43,19 +42,6 @@
         }
       }
     },
-    "source": {
-      "type": "object",
-      "required": [
-        "id"
-      ],
-      "additionalProperties": false,
-      "properties": {
-        "id": {
-          "type": "string",
-          "minLength": 1
-        }
-      }
-    },
     "release": {
       "type": "object",
       "required": [
@@ -72,13 +58,12 @@
           "minimum": 1
         }
       },
-      "description": "The release the deployment serves, or moves to while an update waits. `version` is absent when the release could not be read after the promote was accepted."
+      "description": "The release the deployment rolled back to, or moves to while the rollback waits. `version` is absent for a release the Build no longer lists."
     },
     "previousRelease": {
       "type": "object",
       "required": [
-        "id",
-        "version"
+        "id"
       ],
       "additionalProperties": false,
       "properties": {
@@ -91,11 +76,11 @@
           "minimum": 1
         }
       },
-      "description": "The release the deployment served before the promote."
+      "description": "The release the deployment served before the rollback."
     },
     "waiting": {
       "type": "boolean",
-      "description": "True while the promote waits for its release's copy to be ready; the release in `release` serves only once it lands."
+      "description": "True while the rollback waits for its release's copy to be ready; the release in `release` serves only once it lands."
     }
   }
 }

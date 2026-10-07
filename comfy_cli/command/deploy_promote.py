@@ -2,21 +2,17 @@
 
 from __future__ import annotations
 
-import urllib.error
-from dataclasses import dataclass, replace
-
-from comfy_cli.command.build_spec import JsonObject
 from comfy_cli.command.deploy_resolve import BuilderReleaseClient, DeployResolveError
 from comfy_cli.command.deploy_types import (
     DeployUpClient,
+    MoveResult,
     move_changed,
+    moved_release,
     optional_revision,
     release_summary,
     required_string,
 )
-from comfy_cli.command.deploy_up import raise_unless_landed, refuse_unmovable
-from comfy_cli.deploy_api_errors import DeployAPIError
-from comfy_cli.http import ResponseTooLarge
+from comfy_cli.command.deploy_up import refuse_unmovable, release_or_id
 
 
 class PromoteUnavailableError(DeployResolveError):
@@ -34,59 +30,7 @@ class PromoteUnavailableError(DeployResolveError):
         )
 
 
-@dataclass(frozen=True, slots=True)
-class PromoteResult:
-    deployment: JsonObject
-    source_id: str
-    release: JsonObject
-    previous_release: JsonObject
-    changed: bool
-
-    @property
-    def waiting(self) -> bool:
-        return isinstance(self.deployment.get("pendingUpdate"), dict)
-
-    def payload(self) -> JsonObject:
-        deployment: JsonObject = {
-            "id": required_string(self.deployment, "id"),
-            "status": required_string(self.deployment, "status"),
-        }
-        revision = optional_revision(self.deployment)
-        if revision is not None:
-            deployment["revision"] = revision
-        return {
-            "deployment": deployment,
-            "source": {"id": self.source_id},
-            "release": self.release,
-            "previousRelease": self.previous_release,
-        }
-
-
-def _moved_to(moved: JsonObject, source_release_id: str) -> str:
-    """The release the reply says TARGET moves to.
-
-    A reply with no revision is one the service's rollout check failed to
-    answer, so it carries neither the waiting update nor the new release; the
-    service resolved SOURCE's release, which was read just before.
-    """
-    pending = moved.get("pendingUpdate")
-    if isinstance(pending, dict):
-        return required_string(pending, "releaseId")
-    if optional_revision(moved) is None:
-        return source_release_id
-    return required_string(moved, "releaseId")
-
-
-def _late_release(builder: BuilderReleaseClient, release_id: str) -> JsonObject:
-    # SOURCE moved between its read and the promote. The move is already
-    # accepted, so a failed lookup costs the version in the output, not the watch.
-    try:
-        return release_summary(builder.get_release(release_id))
-    except (DeployAPIError, ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError):
-        return {"id": release_id}
-
-
-def promote(builder: BuilderReleaseClient, client: DeployUpClient, source_id: str, target_id: str) -> PromoteResult:
+def promote(builder: BuilderReleaseClient, client: DeployUpClient, source_id: str, target_id: str) -> MoveResult:
     """Point TARGET at SOURCE's release; the service resolves which release that is."""
     source_release_id = required_string(client.get_deployment(source_id), "releaseId")
     target = client.get_deployment(target_id)
@@ -102,14 +46,10 @@ def promote(builder: BuilderReleaseClient, client: DeployUpClient, source_id: st
     if optional_revision(moved) is None:
         # The reply says nothing about the move; one read usually does.
         moved = client.get_deployment(target_id)
-    release_id = _moved_to(moved, source_release_id)
+    # The service resolved SOURCE's release, which was read just before.
+    release_id = moved_release(moved, source_release_id)
     changed = move_changed(moved, base_revision, release_id, previous["id"])
     known = {previous["id"]: previous, source_release["id"]: source_release}
-    release = known.get(release_id) or _late_release(builder, release_id)
-    return PromoteResult(moved, source_id, release, previous, changed)
-
-
-def finish_promote(result: PromoteResult, watched: JsonObject) -> PromoteResult:
-    """The watched result, once the move it followed landed."""
-    raise_unless_landed(watched, result.release, result.previous_release)
-    return replace(result, deployment=watched)
+    # SOURCE may have moved between its read and the promote.
+    release = known.get(release_id) or release_or_id(builder, release_id)
+    return MoveResult(moved, release, previous, changed, source_id=source_id)

@@ -1,6 +1,7 @@
 """Deployment lifecycle commands."""
 
 import urllib.error
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -13,14 +14,13 @@ from comfy_cli.command import deploy_lifecycle as _deploy_lifecycle
 from comfy_cli.command import deploy_ls as _deploy_ls
 from comfy_cli.command import deploy_read as _deploy_read
 from comfy_cli.command import deploy_refs as _deploy_refs
+from comfy_cli.command import deploy_rollback as _deploy_rollback
 from comfy_cli.command import deploy_run as _deploy_run
 from comfy_cli.command.build_paths import BuildSpecNotFoundError
 from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject
 from comfy_cli.command.deploy_compute import prompt_gpu as _prompt_gpu
 from comfy_cli.command.deploy_compute import prompt_region as _prompt_region
 from comfy_cli.command.deploy_progress import DeployWatchReporter
-from comfy_cli.command.deploy_promote import PromoteResult
-from comfy_cli.command.deploy_promote import finish_promote as _finish_promote
 from comfy_cli.command.deploy_promote import promote as _promote
 from comfy_cli.command.deploy_resolve import DeployResolveError
 from comfy_cli.command.deploy_runtime import MOVE_WATCH_SECONDS, DeployWatchLostError, terminal_status_error
@@ -31,7 +31,7 @@ from comfy_cli.command.deploy_runtime import render_spec_error as _render_spec_e
 from comfy_cli.command.deploy_runtime import resolved_up_request as _resolved_up_request
 from comfy_cli.command.deploy_runtime import sleep as _sleep
 from comfy_cli.command.deploy_status import run_status as _run_status
-from comfy_cli.command.deploy_types import ComputeRequiredError, move_settled
+from comfy_cli.command.deploy_types import ComputeRequiredError, MoveResult, move_settled
 from comfy_cli.command.deploy_types import UpRequest as UpRequest
 from comfy_cli.command.deploy_types import (
     required_string as _required_string,
@@ -45,6 +45,7 @@ from comfy_cli.command.deploy_up import (
     ends_terminal,
     estimate_line,
     finish_move,
+    landed_result,
     move_line,
     move_text,
     reconcile_up,
@@ -416,24 +417,59 @@ def promote_cmd(
         typer.Option("--watch/--no-watch", help="Follow TARGET until the move lands or fails."),
     ] = True,
 ) -> None:
+    _run_move(lambda builder, client: _promote(builder, client, source, target), "promote", watch)
+
+
+@app.command("rollback", help="Move a deployment back to an earlier release, keeping its id and URL.")
+@tracking.track_command("deploy")
+def rollback_cmd(
+    path: DeployPath = None,
+    deployment_id: DeploymentOption = None,
+    to: Annotated[
+        str | None,
+        typer.Option(
+            "--to",
+            help="The release to return to, as v5, 5 or a release id. Default: the release before the current one.",
+        ),
+    ] = None,
+    watch: Annotated[
+        bool,
+        typer.Option("--watch/--no-watch", help="Follow the deployment until the rollback lands or fails."),
+    ] = True,
+) -> None:
+    request = _deploy_rollback.RollbackRequest(path, deployment_id, to)
+    _run_move(lambda builder, client: _deploy_rollback.rollback(builder, client, request), "rollback", watch)
+
+
+@app.command("history", help="List the releases a deployment ran, newest first, with what moved it.")
+@tracking.track_command("deploy")
+def history_cmd(path: DeployPath = None, deployment_id: DeploymentOption = None) -> None:
+    _deploy_read.run_history(_deploy_read.ReadRequest(path, deployment_id))
+
+
+def _run_move(start: Callable[..., MoveResult], command: str, watch: bool) -> None:
+    """Send a move, follow it as `up` follows one, and report where it left the deployment."""
     renderer = get_renderer()
     try:
         builder, client = _command_clients()
-        result = _promote(builder, client, source, target)
+        result = start(builder, client)
         if watch and result.changed:
             # A move that landed at once is said once, after the watch confirms it.
             if result.waiting and renderer.is_pretty():
-                renderer.info(_promote_text(result))
+                renderer.info(_moved_text(result))
 
             def abandoned(last: JsonObject | None) -> None:
                 if last is not None:
-                    _render_promote(renderer, replace(result, deployment=last), watch=False)
+                    _render_move(renderer, replace(result, deployment=last), command=command, watch=False)
 
-            watched = _watch(
-                renderer, client, target, moving=_required_string(result.release, "id"), on_abandon=abandoned
-            )
-            result = _finish_promote(result, watched)
-        _render_promote(renderer, result, watch=watch)
+            deployment_id = _required_string(result.deployment, "id")
+            moving = _required_string(result.release, "id")
+            watched = _watch(renderer, client, deployment_id, moving=moving, on_abandon=abandoned)
+            result = landed_result(result, watched)
+        _render_move(renderer, result, command=command, watch=watch)
+    except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:
+        _render_spec_error(renderer, error)
+        raise typer.Exit(code=1) from error
     except DeployResolveError as error:
         renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
@@ -450,17 +486,17 @@ def promote_cmd(
         raise typer.Exit(code=1) from error
 
 
-def _promote_text(result: PromoteResult) -> str:
+def _moved_text(result: MoveResult) -> str:
     deployment_id = _required_string(result.deployment, "id")
     return move_text(deployment_id, result.deployment, result.release, result.previous_release, result.changed)
 
 
-def _render_promote(renderer, result: PromoteResult, *, watch: bool) -> None:
+def _render_move(renderer, result: MoveResult, *, command: str, watch: bool) -> None:
     deployment_id = _required_string(result.deployment, "id")
     status = _required_string(result.deployment, "status")
     if renderer.is_pretty():
-        renderer.success(_promote_text(result))
-    # A promote that changed nothing leaves the target as it found it, so its
+        renderer.success(_moved_text(result))
+    # A move that changed nothing leaves the deployment as it found it, so its
     # status is reported rather than judged.
     warn_status(renderer, deployment_id, status, watch=watch and result.changed)
     if not result.changed and status in {"stopped", "failed"}:
@@ -471,7 +507,7 @@ def _render_promote(renderer, result: PromoteResult, *, watch: bool) -> None:
     terminal = result.changed and ends_terminal(result.deployment, status, moving=True)
     renderer.emit(
         result.payload(),
-        command="deploy promote",
+        command=f"deploy {command}",
         changed=result.changed,
         ok=not terminal,
         error=terminal_status_error(deployment_id, status) if terminal else None,

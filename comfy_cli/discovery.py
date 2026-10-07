@@ -55,6 +55,8 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy build blob ls": "build_blob_ls",
     "comfy deploy up": "deploy_up",
     "comfy deploy promote": "deploy_promote",
+    "comfy deploy rollback": "deploy_rollback",
+    "comfy deploy history": "deploy_history",
     "comfy deploy status": "deploy_status",
     "comfy deploy ls": "deploy_ls",
     "comfy deploy show": "deploy_show",
@@ -222,6 +224,7 @@ STREAM_EVENT_SCHEMAS: dict[str, str] = {
     "comfy deploy up": "deploy_progress_event",
     "comfy deploy status": "deploy_progress_event",
     "comfy deploy promote": "deploy_progress_event",
+    "comfy deploy rollback": "deploy_progress_event",
 }
 
 

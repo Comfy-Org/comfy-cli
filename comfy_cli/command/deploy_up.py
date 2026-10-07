@@ -1,6 +1,7 @@
 """Reconcile and render deploy-up operations."""
 
 import http.client
+import urllib.error
 import uuid
 from collections.abc import Sequence
 from dataclasses import replace
@@ -17,7 +18,14 @@ from comfy_cli.command.deploy_resolve import (
 )
 from comfy_cli.command.deploy_runtime import terminal_status_error
 from comfy_cli.command.deploy_types import NOT_MOVABLE as _NOT_MOVABLE
-from comfy_cli.command.deploy_types import ComputeRequiredError, DeployUpClient, UpRequest, UpResult, release_label
+from comfy_cli.command.deploy_types import (
+    ComputeRequiredError,
+    DeployUpClient,
+    MoveResult,
+    UpRequest,
+    UpResult,
+    release_label,
+)
 from comfy_cli.command.deploy_types import compute_config as _compute_config
 from comfy_cli.command.deploy_types import move_changed as _move_changed
 from comfy_cli.command.deploy_types import move_outcome as _move_outcome
@@ -251,6 +259,23 @@ def raise_unless_landed(watched: JsonObject, release: JsonObject, previous: Json
     raise MoveFailedError(_required_string(watched, "id"), release, serving, watched.get("status"))
 
 
+def landed_result(result: MoveResult, watched: JsonObject) -> MoveResult:
+    """The watched promote or rollback, once the move it followed landed."""
+    raise_unless_landed(watched, result.release, result.previous_release)
+    return replace(result, deployment=watched)
+
+
+def release_or_id(builder: BuilderReleaseClient, release_id: str) -> JsonObject:
+    """The release's summary, read after the move was accepted.
+
+    A failed lookup then costs the version in the output, not the watch.
+    """
+    try:
+        return _release_summary(builder.get_release(release_id))
+    except (DeployAPIError, ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError):
+        return {"id": release_id}
+
+
 def refuse_unmovable(target: JsonObject, command: str = "up") -> None:
     deployment_id = _required_string(target, "id")
     status = _required_string(target, "status")
@@ -285,7 +310,7 @@ def _merged_bounds(request: UpRequest, compute: JsonObject) -> JsonObject:
     return desired
 
 
-def _build_deployments(deployments: Sequence[JsonObject], releases: Sequence[JsonObject]) -> list[JsonObject]:
+def build_deployments(deployments: Sequence[JsonObject], releases: Sequence[JsonObject]) -> list[JsonObject]:
     release_ids = {_required_string(release, "id") for release in releases}
     return [
         deployment
@@ -299,6 +324,11 @@ def _build_deployments(deployments: Sequence[JsonObject], releases: Sequence[Jso
 _DOWN: Final = frozenset({"stopped", "failed", "stop_failed"})
 # A settled status a command that brings a deployment up reports as not ok.
 _TERMINAL: Final = frozenset({"failed", "stopped", "stop_failed", "unhealthy"})
+
+
+def running_first(candidates: list[JsonObject]) -> list[JsonObject]:
+    """The deployments a pick chooses among: those up, else every one."""
+    return [row for row in candidates if row.get("status") not in _DOWN] or candidates
 
 
 def _move_target(
@@ -324,7 +354,7 @@ def _move_target(
             return None
         pool = [pick]
     else:
-        pool = [row for row in candidates if row.get("status") not in _DOWN] or candidates
+        pool = running_first(candidates)
         if len(pool) == 1 and pool[0].get("releaseId") == release_id:
             return None
     snapshot = client.get_deployment(_required_string(pool[0], "id"))
@@ -424,7 +454,7 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         if request.deployment_id is not None:
             raise DeployAPIError("deploy_bad_request", "--create makes a new deployment, so it takes no --deployment")
     else:
-        candidates = _build_deployments(deployments, releases)
+        candidates = build_deployments(deployments, releases)
         target = _move_target(client, candidates, request, release_id)
         if target is not None and target[0].get("releaseId") != release_id:
             return _move(builder, client, request, *target, releases, supersedes)
