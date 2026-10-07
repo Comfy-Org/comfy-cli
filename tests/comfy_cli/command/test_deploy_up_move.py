@@ -274,7 +274,18 @@ def test_a_watch_interrupted_on_a_dropped_read_does_not_claim_the_move() -> None
 
     # Then
     assert "now serves" not in text
-    assert "read as still serving release v4, with no update to release v5 waiting" in text
+    assert "read as serving release v4, with no update to release v5 waiting" in text
+
+
+def test_a_watch_interrupted_after_another_move_names_the_release_the_read_shows() -> None:
+    # Given a read showing a third release, which another move put there
+    deployment = {"id": "dep-1", "status": "ready", "releaseId": "release-9", "revision": 4, "pendingUpdate": None}
+
+    # When
+    text = move_text("dep-1", deployment, {"id": "release-5", "version": 5}, {"id": "release-4", "version": 4}, True)
+
+    # Then
+    assert "read as serving release release-9" in text
 
 
 def test_up_without_a_watch_returns_while_the_move_waits(tmp_path, monkeypatch) -> None:

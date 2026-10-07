@@ -524,10 +524,12 @@ def move_text(
         if deployment.get("status") in _DOWN:
             return f"Deployment {deployment_id} starts on {label}."
         return f"Deployment {deployment_id} moves to {label} once it is ready; {was} serves until then."
-    if deployment.get("releaseId") != release.get("id"):
+    serving_id = deployment.get("releaseId")
+    if serving_id != release.get("id"):
         # A read caught as the move lands, or a watch interrupted on a dropped read.
+        serving = was if serving_id == previous.get("id") else release_label({"id": serving_id})
         return (
-            f"Deployment {deployment_id} read as still serving {was}, with no update to {label} waiting; "
+            f"Deployment {deployment_id} read as serving {serving}, with no update to {label} waiting; "
             f"run `comfy deploy show --deployment {deployment_id}` to see where it settled."
         )
     return f"Deployment {deployment_id} now serves {label} (was {was})."
