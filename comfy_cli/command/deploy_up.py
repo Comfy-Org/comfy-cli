@@ -525,7 +525,7 @@ def move_text(
             return f"Deployment {deployment_id} starts on {label}."
         return f"Deployment {deployment_id} moves to {label} once it is ready; {was} serves until then."
     if deployment.get("releaseId") != release.get("id"):
-        # Only a watch interrupted on a read that showed the move dropped gets here.
+        # A read caught as the move lands, or a watch interrupted on a dropped read.
         return (
             f"Deployment {deployment_id} read as still serving {was}, with no update to {label} waiting; "
             f"run `comfy deploy show --deployment {deployment_id}` to see where it settled."
