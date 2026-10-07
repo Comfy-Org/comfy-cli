@@ -66,11 +66,20 @@ deploy*.
 
 ## The cost model, which is the whole risk
 
-**`up` on a release that has no deployment creates one. `up` on a release that
-already has one reconciles that one.** A deployment is matched by release id, so
-cutting a new release and running `up` again does **not** move the existing
-deployment forward — it creates a **second** deployment, and the first keeps
-running and keeps billing.
+**Whether `up` on a new release moves the existing deployment or adds a second
+one depends on the workspace.** The output says which: a deployment that carries
+`revision` is in a workspace with deployment updates on.
+
+- **Updates on:** `up` on a new release **moves the Build's one deployment onto
+  it**, keeping its id and URL, and reports `previousRelease`. The old release
+  keeps serving until the new one is ready. With two or more deployments, `up`
+  refuses with `deploy_ambiguous_deployment` until `--deployment <id>` names one;
+  `--create` adds a separate deployment instead. If the new release fails to come
+  up, `up` exits 1 with `deploy_update_failed` and the old release still serves.
+- **Updates off:** a deployment is matched by release id, so cutting a new
+  release and running `up` again does **not** move the existing deployment
+  forward. It creates a **second** deployment, and the first keeps running and
+  keeps billing.
 
 The CLI tells you this: `up` returns a `supersedes` array naming every other
 live deployment of this Build still holding compute, with its id, status and
@@ -157,8 +166,17 @@ fixes — say so rather than restarting into the same wall.
 
 ```shell
 comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
-                       [--release <id>] [--deployment <id>] [--no-watch]
+                       [--release <id>] [--deployment <id>] [--create] [--no-watch]
 ```
+
+- **With deployment updates on, it moves the existing deployment** (see *The
+  cost model*), a stopped or failed one included, since the move starts the new
+  release for it. A move keeps gpu and region, refuses a `stopping` or
+  `stop_failed` deployment with `deploy_conflict`, and applies `--min`/`--max`
+  only after the move lands, so with `--no-watch` they are refused. A bounds
+  edit the service then refuses is reported as bounds that had no effect.
+- **`--create` is not idempotent:** every run adds one more deployment, so after
+  a lost response read `comfy deploy ls` before running it again.
 
 - **It selects the newest deployable release of the Build** unless `--release`
   names one. `deployable` means a `linux/nvidia` artifact reached `ready` with an

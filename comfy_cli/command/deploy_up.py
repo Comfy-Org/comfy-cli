@@ -3,18 +3,24 @@
 import http.client
 import uuid
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Final
 
 import typer
 
 from comfy_cli.command.build_spec import JsonObject
 from comfy_cli.command.deploy_resolve import (
+    AmbiguousDeploymentError,
     BuilderReleaseClient,
+    UnrelatedDeploymentError,
     select_deployment,
 )
 from comfy_cli.command.deploy_runtime import terminal_status_error
+from comfy_cli.command.deploy_types import NOT_MOVABLE as _NOT_MOVABLE
 from comfy_cli.command.deploy_types import ComputeRequiredError, DeployUpClient, UpRequest, UpResult
 from comfy_cli.command.deploy_types import compute_config as _compute_config
+from comfy_cli.command.deploy_types import move_outcome as _move_outcome
+from comfy_cli.command.deploy_types import optional_revision as _optional_revision
 from comfy_cli.command.deploy_types import release_summary as _release_summary
 from comfy_cli.command.deploy_types import required_int as _required_int
 from comfy_cli.command.deploy_types import required_string as _required_string
@@ -28,10 +34,31 @@ _CREATE_ATTEMPTS: Final = 3
 _HOLDS_COMPUTE: Final = frozenset({"queued", "provisioning", "starting", "ready", "unhealthy"})
 _DEFAULT_MINIMUM: Final = 0
 _DEFAULT_MAXIMUM: Final = 1
+# The service's refusals of a bounds edit: it was answered, and nothing changed.
+_REFUSED: Final = frozenset({400, 402, 409, 422})
 
 
-def _idempotency_key(build_id: str, release_id: str, generation: int) -> str:
-    return str(uuid.uuid5(_IDEMPOTENCY_NAMESPACE, f"{build_id}:{release_id}:{generation}"))
+def _idempotency_key(build_id: str, release_id: str, generation: int, live: int = 0) -> str:
+    # `live` counts the deployments `--create` adds beside the ones already on
+    # the release, and is 0 for every other create, so their keys never change.
+    seed = f"{build_id}:{release_id}:{generation}" + (f":{live}" if live else "")
+    return str(uuid.uuid5(_IDEMPOTENCY_NAMESPACE, seed))
+
+
+def _live_on_release(deployments: Sequence[JsonObject], release_id: str) -> int:
+    return sum(
+        deployment.get("releaseId") == release_id and deployment.get("deletedAt") is None for deployment in deployments
+    )
+
+
+class UpAmbiguousDeploymentError(AmbiguousDeploymentError):
+    """`up` found more than one deployment it could move and was not told which."""
+
+    hint = "pass `--deployment <id>` to update one of them, or `--create` to add another deployment"
+
+    def __init__(self, build_id: str, candidate_ids: list[str]) -> None:
+        super().__init__(build_id, candidate_ids)
+        self.args = (f"Build {build_id} has {len(candidate_ids)} deployments and `up` updates only one",)
 
 
 def _soft_deleted_generation(deployments: Sequence[JsonObject], release_id: str) -> int:
@@ -160,10 +187,11 @@ def _create_live_deployment(client: DeployUpClient, request: UpRequest, compute:
     for attempt in range(_CREATE_ATTEMPTS):
         exhaustive = client.list_all_deployments()
         generation = _soft_deleted_generation(exhaustive, release_id)
+        live = _live_on_release(exhaustive, release_id) if request.create else 0
         created = client.create_deployment(
             release_id,
             compute,
-            idempotency_key=_idempotency_key(request.build_id, release_id, generation),
+            idempotency_key=_idempotency_key(request.build_id, release_id, generation, live),
         )
         deployment_id = _required_string(created, "id")
         snapshot = client.get_deployment(deployment_id)
@@ -199,12 +227,212 @@ def _dropped_bounds(request: UpRequest, compute: JsonObject) -> tuple[str, ...]:
     return tuple(flag for flag, value, live in supplied if value is not None and value != live)
 
 
+class MoveFailedError(Exception):
+    """A move `up` followed did not land; the deployment serves ``serving_release_id``."""
+
+    def __init__(self, deployment_id: str, release: JsonObject, serving: JsonObject, status: object) -> None:
+        super().__init__(
+            f"the update of deployment {deployment_id} to {release_label(release)} failed; "
+            f"it still serves {release_label(serving)}"
+        )
+        self.deployment_id = deployment_id
+        self.release = release
+        self.serving_release_id = serving.get("id")
+        self.status = status
+
+
+def _refuse_unmovable(target: JsonObject) -> None:
+    deployment_id = _required_string(target, "id")
+    status = _required_string(target, "status")
+    if status in _NOT_MOVABLE:
+        raise DeployAPIError(
+            "deploy_conflict",
+            f"deployment {deployment_id} is {status}, so `up` will not move it to another release",
+            details={"deploymentId": deployment_id, "status": status},
+            hint=f"wait until `comfy deploy status --deployment {deployment_id}` shows it stopped, "
+            "running `comfy deploy stop` again if the stop failed",
+        )
+
+
+def _refuse_compute_change(request: UpRequest, deployment: JsonObject, compute: JsonObject) -> None:
+    if (request.gpu is not None and request.gpu != compute["gpuClass"]) or (
+        request.region is not None and request.region != compute["region"]
+    ):
+        raise DeployAPIError(
+            "deploy_immutable_compute",
+            "an existing deployment cannot change gpuClass or region in place",
+            details={"deploymentId": _required_string(deployment, "id"), "computeConfig": compute},
+        )
+
+
+def _merged_bounds(request: UpRequest, compute: JsonObject) -> JsonObject:
+    # An omitted bound keeps the live value, exactly as `comfy deploy scale`
+    # merges: re-running `up` after a release must not silently unscale.
+    desired = {**compute}
+    for bound, requested in (("min", request.minimum), ("max", request.maximum)):
+        if requested is not None:
+            desired[bound] = requested
+    return desired
+
+
+def _build_deployments(deployments: Sequence[JsonObject], releases: Sequence[JsonObject]) -> list[JsonObject]:
+    release_ids = {_required_string(release, "id") for release in releases}
+    return [
+        deployment
+        for deployment in deployments
+        if deployment.get("releaseId") in release_ids and deployment.get("deletedAt") is None
+    ]
+
+
+# A deployment down in one of these is a leftover the Build stopped using,
+# which a choice between deployments leaves out while any other is running.
+_DOWN: Final = frozenset({"stopped", "failed", "stop_failed"})
+
+
+def _move_target(
+    client: DeployUpClient, candidates: list[JsonObject], request: UpRequest, release_id: str
+) -> tuple[JsonObject, int] | None:
+    """The Build's deployment `up` moves onto the release, read fresh, with its revision.
+
+    ``None`` keeps today's behaviour: the workspace is outside the rollout of
+    deployment updates, so a new release gets a deployment of its own. The read
+    is made only when the answer could differ from that behaviour, which keeps
+    a plain re-run of `up` on the release it already serves to its one list.
+
+    Unnamed, the choice is among the deployments that are up, so a stopped one
+    an older `up` left behind never makes it ambiguous; a Build whose only
+    deployment is down moves that one, which keeps its URL for the fix.
+    """
+    if not candidates:
+        return None
+    named = request.deployment_id
+    if named is not None:
+        pick = next((row for row in candidates if row.get("id") == named), None)
+        if pick is None or pick.get("releaseId") == release_id:
+            return None
+        pool = [pick]
+    else:
+        pool = [row for row in candidates if row.get("status") not in _DOWN] or candidates
+        if len(pool) == 1 and pool[0].get("releaseId") == release_id:
+            return None
+    snapshot = client.get_deployment(_required_string(pool[0], "id"))
+    revision = _optional_revision(snapshot)
+    if revision is None:
+        return None
+    if len(pool) > 1:
+        raise UpAmbiguousDeploymentError(request.build_id, [_required_string(row, "id") for row in pool])
+    return snapshot, revision
+
+
+def _release_of(builder: BuilderReleaseClient, releases: Sequence[JsonObject], release_id: str) -> JsonObject:
+    # A release cut after the list was read is asked for by id.
+    listed = next((release for release in releases if release.get("id") == release_id), None)
+    return _release_summary(listed if listed is not None else builder.get_release(release_id))
+
+
+def _move(
+    builder: BuilderReleaseClient,
+    client: DeployUpClient,
+    request: UpRequest,
+    target: JsonObject,
+    base_revision: int,
+    releases: Sequence[JsonObject],
+    supersedes: list[JsonObject],
+) -> UpResult:
+    release_id = _required_string(request.release, "id")
+    deployment_id = _required_string(target, "id")
+    compute = _compute_config(target)
+    _refuse_unmovable(target)
+    _refuse_compute_change(request, target, compute)
+    desired = _merged_bounds(request, compute)
+    pending_bounds = desired if desired != compute else None
+    if pending_bounds is not None and not request.watch:
+        raise DeployAPIError(
+            "deploy_bad_request",
+            "--min and --max are applied once the update lands, which only a watch sees",
+            details={"deploymentId": deployment_id},
+            hint="drop --no-watch, or run `comfy deploy scale` once the update lands",
+        )
+    previous = _release_of(builder, releases, _required_string(target, "releaseId"))
+    moved = client.move_deployment(deployment_id, base_revision, release_id)
+    revision = _optional_revision(moved)
+    # A reply with no revision is one the service's rollout check failed to
+    # answer, so the watch finds out what happened rather than this reply.
+    changed = isinstance(moved.get("pendingUpdate"), dict) or revision is None or revision > base_revision
+    result = UpResult(
+        moved,
+        _release_summary(request.release),
+        compute,
+        [row for row in supersedes if row["id"] != deployment_id],
+        False,
+        changed,
+        previous_release=previous,
+        pending_bounds=pending_bounds,
+    )
+    # The service answers at the same revision when the deployment already
+    # serves the release, so there is nothing to wait for before the bounds.
+    return result if changed else finish_move(client, result, moved)
+
+
+def finish_move(client: DeployUpClient, result: UpResult, watched: JsonObject) -> UpResult:
+    """Confirm the move landed, then apply the bounds it could not carry.
+
+    The move has landed by the time the bounds go, so a refused bounds edit is
+    reported as bounds that had no effect rather than as a failed `up`.
+    """
+    deployment_id = _required_string(watched, "id")
+    release_id = _required_string(result.release, "id")
+    if _move_outcome(watched, release_id) != "landed":
+        previous = result.previous_release or {}
+        serving_id = watched.get("releaseId")
+        serving = previous if serving_id == previous.get("id") else {"id": serving_id}
+        raise MoveFailedError(deployment_id, result.release, serving, watched.get("status"))
+    bounds = result.pending_bounds
+    result = replace(result, deployment=watched, pending_bounds=None)
+    if bounds is None:
+        return result
+    try:
+        updated = client.update_deployment(deployment_id, bounds)
+    except DeployAPIError as error:
+        if error.status not in _REFUSED:
+            # Unanswered, or not ours to judge: the bounds may have applied, so
+            # say what is known, that the move landed, and pass the error on.
+            raise DeployAPIError(
+                error.code,
+                f"the update to {release_label(result.release)} landed, but the --min/--max edit failed: {error}",
+                status=error.status,
+                details=error.details,
+                hint=error.hint,
+            ) from error
+        live = result.compute_config
+        dropped = tuple(flag for flag, key in (("--min", "min"), ("--max", "max")) if bounds.get(key) != live.get(key))
+        return replace(result, dropped_bounds=dropped)
+    return replace(result, deployment=updated, compute_config=bounds)
+
+
 def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request: UpRequest) -> UpResult:
     release_id = _required_string(request.release, "id")
     releases = builder.list_releases(request.build_id)
     deployments = client.list_all_deployments()
     supersedes = _supersedes(deployments, releases, release_id)
-    existing = _existing_deployment(deployments, release_id, request.build_id, request.deployment_id)
+    existing: JsonObject | None = None
+    if request.create:
+        if request.deployment_id is not None:
+            raise DeployAPIError("deploy_bad_request", "--create makes a new deployment, so it takes no --deployment")
+    else:
+        candidates = _build_deployments(deployments, releases)
+        target = _move_target(client, candidates, request, release_id)
+        if target is not None and target[0].get("releaseId") != release_id:
+            return _move(builder, client, request, *target, releases, supersedes)
+        if target is not None:
+            # Another change moved it onto the release after the list was read.
+            existing = target[0]
+        else:
+            try:
+                existing = _existing_deployment(deployments, release_id, request.build_id, request.deployment_id)
+            except UnrelatedDeploymentError as error:
+                error.hint = f"{error.hint}, or pass `--create` to add a deployment on this release"
+                raise
     if existing is None:
         if request.gpu is None or request.region is None:
             raise ComputeRequiredError
@@ -226,14 +454,7 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         return UpResult(snapshot, _release_summary(request.release), compute, supersedes, True, True, estimate=estimate)
 
     compute = _compute_config(existing)
-    if (request.gpu is not None and request.gpu != compute["gpuClass"]) or (
-        request.region is not None and request.region != compute["region"]
-    ):
-        raise DeployAPIError(
-            "deploy_immutable_compute",
-            "an existing deployment cannot change gpuClass or region in place",
-            details={"deploymentId": _required_string(existing, "id"), "computeConfig": compute},
-        )
+    _refuse_compute_change(request, existing, compute)
     deployment_id = _required_string(existing, "id")
     status = _required_string(existing, "status")
     dropped = _dropped_bounds(request, compute)
@@ -242,23 +463,36 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         return UpResult(started, _release_summary(request.release), compute, supersedes, False, True, dropped)
     if status == "stop_failed":
         return UpResult(existing, _release_summary(request.release), compute, supersedes, False, False, dropped)
-    # An omitted bound keeps the live value, exactly as `comfy deploy scale`
-    # merges: re-running `up` after a release must not silently unscale.
-    desired = {**compute}
-    for bound, requested in (("min", request.minimum), ("max", request.maximum)):
-        if requested is not None:
-            desired[bound] = requested
+    desired = _merged_bounds(request, compute)
     if desired != compute:
         updated = client.update_deployment(deployment_id, desired)
         return UpResult(updated, _release_summary(request.release), desired, supersedes, False, True)
     return UpResult(existing, _release_summary(request.release), compute, supersedes, False, False)
 
 
+def release_label(release: JsonObject) -> str:
+    version = release.get("version")
+    return f"release v{version}" if isinstance(version, int) else f"release {release.get('id')}"
+
+
+def move_line(result: UpResult, deployment_id: str) -> str | None:
+    if result.previous_release is None:
+        return None
+    release, previous = release_label(result.release), release_label(result.previous_release)
+    if not result.changed:
+        return f"Deployment {deployment_id} already serves {release}."
+    if isinstance(result.deployment.get("pendingUpdate"), dict):
+        if result.deployment.get("status") in _DOWN:
+            return f"Deployment {deployment_id} starts on {release}."
+        return f"Deployment {deployment_id} moves to {release} once it is ready; {previous} serves until then."
+    return f"Deployment {deployment_id} now serves {release} (was {previous})."
+
+
 def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
     status = _required_string(result.deployment, "status")
     deployment_id = _required_string(result.deployment, "id")
     if renderer.is_pretty():
-        renderer.success(f"Deployment {deployment_id}: {status}")
+        renderer.success(move_line(result, deployment_id) or f"Deployment {deployment_id}: {status}")
     if status == "stop_failed":
         renderer.warn(
             f"Deployment {deployment_id} could not stop and may still be billing.",
@@ -297,7 +531,10 @@ def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
             f"Deployment {old_id} (release v{version}, {row['status']}) is still running and billing.",
             hint=f"run `comfy deploy stop --deployment {old_id}` if you no longer need it",
         )
-    terminal = status in {"failed", "stopped", "stop_failed", "unhealthy"}
+    # A move still waiting is judged by the move, whatever the old copy's
+    # status: one that was down stays down until the new release lands.
+    waiting = result.previous_release is not None and isinstance(result.deployment.get("pendingUpdate"), dict)
+    terminal = not waiting and status in {"failed", "stopped", "stop_failed", "unhealthy"}
     renderer.emit(
         result.payload(),
         command="deploy up",

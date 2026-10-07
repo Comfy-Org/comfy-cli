@@ -3,7 +3,7 @@
 import urllib.error
 from dataclasses import replace
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NoReturn
 
 import typer
 
@@ -15,12 +15,12 @@ from comfy_cli.command import deploy_read as _deploy_read
 from comfy_cli.command import deploy_refs as _deploy_refs
 from comfy_cli.command import deploy_run as _deploy_run
 from comfy_cli.command.build_paths import BuildSpecNotFoundError
-from comfy_cli.command.build_spec import BuildSpecInvalidError
+from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject
 from comfy_cli.command.deploy_compute import prompt_gpu as _prompt_gpu
 from comfy_cli.command.deploy_compute import prompt_region as _prompt_region
 from comfy_cli.command.deploy_progress import DeployWatchReporter
 from comfy_cli.command.deploy_resolve import DeployResolveError
-from comfy_cli.command.deploy_runtime import DeployWatchLostError
+from comfy_cli.command.deploy_runtime import MOVE_WATCH_SECONDS, DeployWatchLostError
 from comfy_cli.command.deploy_runtime import command_clients as _command_clients
 from comfy_cli.command.deploy_runtime import exit_watch_lost as _exit_watch_lost
 from comfy_cli.command.deploy_runtime import poll_deployment as _poll_deployment
@@ -28,7 +28,7 @@ from comfy_cli.command.deploy_runtime import render_spec_error as _render_spec_e
 from comfy_cli.command.deploy_runtime import resolved_up_request as _resolved_up_request
 from comfy_cli.command.deploy_runtime import sleep as _sleep
 from comfy_cli.command.deploy_status import run_status as _run_status
-from comfy_cli.command.deploy_types import ComputeRequiredError
+from comfy_cli.command.deploy_types import ComputeRequiredError, move_settled
 from comfy_cli.command.deploy_types import UpRequest as UpRequest
 from comfy_cli.command.deploy_types import (
     required_string as _required_string,
@@ -37,12 +37,15 @@ from comfy_cli.command.deploy_up import (
     _IDEMPOTENCY_NAMESPACE as _IDEMPOTENCY_NAMESPACE,
 )
 from comfy_cli.command.deploy_up import (
-    _idempotency_key as _idempotency_key,
-)
-from comfy_cli.command.deploy_up import (
+    MoveFailedError,
     _render_result,
     estimate_line,
+    finish_move,
+    move_line,
     reconcile_up,
+)
+from comfy_cli.command.deploy_up import (
+    _idempotency_key as _idempotency_key,
 )
 from comfy_cli.command.deploy_up import (
     _soft_deleted_generation as _soft_deleted_generation,
@@ -213,6 +216,57 @@ def status_cmd(
     _run_status(path, deployment_id=deployment_id, watch=watch)
 
 
+def _watch(renderer, client, deployment_id: str, *, moving: str | None, on_abandon) -> JsonObject:
+    """Follow the deployment until it settles, or until the move onto release ``moving`` does."""
+    reporter = DeployWatchReporter(renderer, deployment_id)
+    settled = move_settled(moving) if moving is not None else None
+    limit = MOVE_WATCH_SECONDS if moving is not None else None
+    try:
+        return _poll_deployment(
+            client, deployment_id, _sleep, reporter.snapshot, reporter.unanswered, settled=settled, limit=limit
+        )
+    except KeyboardInterrupt:
+        reporter.interrupted()
+        on_abandon(reporter.last)
+        raise typer.Exit(code=130) from None
+    except DeployWatchLostError as error:
+        reporter.close()
+        on_abandon(None)
+        if moving is None:
+            _exit_watch_lost(renderer, error)
+        # `status --watch` ends at ready, which a deployment being moved already is.
+        hint = (
+            f"run `comfy deploy show --deployment {deployment_id}`: the move has landed once it shows no pendingUpdate"
+        )
+        _exit_watch_lost(renderer, error, hint)
+    finally:
+        reporter.close()
+
+
+def _render_move_failed(renderer, error: MoveFailedError) -> NoReturn:
+    renderer.error(
+        code="deploy_update_failed",
+        message=str(error),
+        details={
+            "deployment_id": error.deployment_id,
+            "release_id": error.release["id"],
+            "serving_release_id": error.serving_release_id,
+            "status": error.status,
+        },
+    )
+    raise typer.Exit(code=1) from error
+
+
+def _warn_unapplied_bounds(renderer, result) -> None:
+    if result.pending_bounds is None:
+        return
+    deployment_id = _required_string(result.deployment, "id")
+    renderer.warn(
+        "--min and --max were not applied: they wait for the update to land.",
+        hint=f"run `comfy deploy scale --deployment {deployment_id} --min <n> --max <n>` once it lands",
+    )
+
+
 @app.command("up", help="Create or reconcile a deployment for the selected Build release.")
 @tracking.track_command("deploy")
 def up_cmd(
@@ -240,6 +294,13 @@ def up_cmd(
     ] = None,
     release: Annotated[str | None, typer.Option("--release", help="Deploy this release id.")] = None,
     deployment_id: DeploymentOption = None,
+    create: Annotated[
+        bool,
+        typer.Option(
+            "--create",
+            help="Add a new deployment on this release instead of updating the Build's existing one.",
+        ),
+    ] = False,
     # Watching is what someone who just asked for a deployment wants: the command
     # that starts a several-minute wait should say how the wait is going. Ctrl-C
     # and --no-watch both leave the deploy running and print how to re-attach.
@@ -262,6 +323,8 @@ def up_cmd(
             minimum=minimum,
             maximum=maximum,
             deployment_id=deployment_id,
+            create=create,
+            watch=watch,
         )
         try:
             result = reconcile_up(builder, client, request)
@@ -288,22 +351,25 @@ def up_cmd(
             renderer.info(estimate_line(result.estimate))
         if watch:
             watched_id = _required_string(result.deployment, "id")
-            reporter = DeployWatchReporter(renderer, watched_id)
-            try:
-                watched = _poll_deployment(client, watched_id, _sleep, reporter.snapshot, reporter.unanswered)
-            except KeyboardInterrupt:
+            moving = result.previous_release is not None and result.changed
+            if moving and renderer.is_pretty():
+                renderer.info(move_line(result, watched_id))
+
+            def abandoned(last: JsonObject | None) -> None:
                 # The deploy runs on the service's side and never needed this
-                # process: say so, report where it had got to, and leave it be.
-                reporter.interrupted()
-                if reporter.last is not None:
-                    _render_result(renderer, replace(result, deployment=reporter.last), watch=False)
-                raise typer.Exit(code=130) from None
-            except DeployWatchLostError as error:
-                reporter.close()
-                _exit_watch_lost(renderer, error)
-            finally:
-                reporter.close()
-            result = replace(result, deployment=watched)
+                # process: report where it had got to, and leave it be.
+                _warn_unapplied_bounds(renderer, result)
+                if last is not None:
+                    _render_result(renderer, replace(result, deployment=last, pending_bounds=None), watch=False)
+
+            watched = _watch(
+                renderer,
+                client,
+                watched_id,
+                moving=_required_string(result.release, "id") if moving else None,
+                on_abandon=abandoned,
+            )
+            result = finish_move(client, result, watched) if moving else replace(result, deployment=watched)
         _render_result(renderer, result, watch=watch)
     except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:
         _render_spec_error(renderer, error)
@@ -311,6 +377,8 @@ def up_cmd(
     except DeployResolveError as error:
         renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
+    except MoveFailedError as error:
+        _render_move_failed(renderer, error)
     except DeployAPIError as error:
         renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
