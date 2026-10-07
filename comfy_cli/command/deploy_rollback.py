@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Protocol
 
 from comfy_cli.command.build_paths import resolve_build_paths
@@ -14,9 +14,11 @@ from comfy_cli.command.deploy_resolve import (
     BuildNotPushedError,
     DeployResolveError,
     find_build_release,
+    release_version_selector,
 )
 from comfy_cli.command.deploy_types import (
     DeployUpClient,
+    MoveResult,
     move_changed,
     optional_revision,
     release_summary,
@@ -24,7 +26,7 @@ from comfy_cli.command.deploy_types import (
     required_string,
     server_shape_error,
 )
-from comfy_cli.command.deploy_up import build_deployments, raise_unless_landed, refuse_unmovable, running_first
+from comfy_cli.command.deploy_up import build_deployments, refuse_unmovable, release_or_id, running_first
 from comfy_cli.deploy_api_errors import DeployAPIError
 
 
@@ -41,7 +43,9 @@ class RevisionsUnavailableError(DeployResolveError):
 
     def __init__(self, deployment_id: str, command: str) -> None:
         self.hint = (
-            "run `comfy deploy up --create --release <id>` to start a separate deployment on an earlier release"
+            "run `comfy build release ls --id <build>` to find the earlier release, then "
+            "`comfy deploy up --create --release <id> --gpu <class> --region <region>` from the Build folder "
+            "to start a separate deployment on it"
             if command == "rollback"
             else "run `comfy deploy events` to see what the deployment did"
         )
@@ -67,6 +71,15 @@ class RollbackAmbiguousError(AmbiguousDeploymentError):
     def __init__(self, build_id: str, candidate_ids: list[str]) -> None:
         super().__init__(build_id, candidate_ids)
         self.args = (f"Build {build_id} has {len(candidate_ids)} deployments and `rollback` moves only one",)
+
+
+class ReleaseNotListedError(DeployResolveError):
+    code = "deploy_bad_request"
+
+    def __init__(self, build_id: str, deployment_id: str, selector: str) -> None:
+        self.hint = f"run `comfy deploy history --deployment {deployment_id}` and pass the release id with `--to`"
+        self.details = {"deployment_id": deployment_id, "buildId": build_id, "to": selector}
+        super().__init__(f"Build {build_id} lists no release {selector}; it may have been deleted")
 
 
 class ReleaseNeverRanError(DeployResolveError):
@@ -104,28 +117,6 @@ class RollbackRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class RollbackResult:
-    deployment: JsonObject
-    release: JsonObject
-    previous_release: JsonObject
-    changed: bool
-
-    @property
-    def waiting(self) -> bool:
-        return isinstance(self.deployment.get("pendingUpdate"), dict)
-
-    def payload(self) -> JsonObject:
-        deployment: JsonObject = {
-            "id": required_string(self.deployment, "id"),
-            "status": required_string(self.deployment, "status"),
-        }
-        revision = optional_revision(self.deployment)
-        if revision is not None:
-            deployment["revision"] = revision
-        return {"deployment": deployment, "release": self.release, "previousRelease": self.previous_release}
-
-
-@dataclass(frozen=True, slots=True)
 class History:
     deployment_id: str
     revisions: list[JsonObject]
@@ -134,21 +125,28 @@ class History:
         return {"deploymentId": self.deployment_id, "revisions": self.revisions}
 
 
-def _picked_deployment(builder: BuilderReleaseClient, client: DeployUpClient, request: RollbackRequest) -> str:
-    """The deployment named, else the Build's only one up, as `up` picks it."""
+# A Build's id and the releases it lists.
+BuildReleases = tuple[str, list[JsonObject]]
+
+
+def _picked_deployment(
+    builder: BuilderReleaseClient, client: DeployUpClient, request: RollbackRequest
+) -> tuple[str, BuildReleases | None]:
+    """The deployment named, else the Build's only one up, as `up` picks it,
+    with the Build's releases where picking read them."""
     if request.deployment_id is not None:
-        return request.deployment_id
+        return request.deployment_id, None
     spec = read_build_spec(resolve_build_paths(request.path).spec_file)
     build_id = spec.get("id")
     if not isinstance(build_id, str) or not build_id:
         raise BuildNotPushedError
-    candidates = build_deployments(client.list_all_deployments(), builder.list_releases(build_id))
-    pool = running_first(candidates)
+    releases = builder.list_releases(build_id)
+    pool = running_first(build_deployments(client.list_all_deployments(), releases))
     if not pool:
         raise NoDeploymentToRollBackError(build_id)
     if len(pool) > 1:
         raise RollbackAmbiguousError(build_id, [required_string(row, "id") for row in pool])
-    return required_string(pool[0], "id")
+    return required_string(pool[0], "id"), (build_id, releases)
 
 
 def _revisions(client: DeployRollbackClient, deployment_id: str) -> list[JsonObject]:
@@ -158,38 +156,47 @@ def _revisions(client: DeployRollbackClient, deployment_id: str) -> list[JsonObj
     return sorted(items, key=lambda item: required_int(item, "revision"))
 
 
-def _versions(builder: BuilderReleaseClient, deployment: JsonObject) -> tuple[list[JsonObject], dict[str, JsonObject]]:
-    """The Build's releases, and each one's summary by id, read from the release the deployment runs."""
-    current = builder.get_release(required_string(deployment, "releaseId"))
-    releases = builder.list_releases(required_string(current, "buildId"))
+def _build_of(builder: BuilderReleaseClient, release_id: str) -> BuildReleases:
+    """The Build the release belongs to, and its releases."""
+    build_id = required_string(builder.get_release(release_id), "buildId")
+    return build_id, builder.list_releases(build_id)
+
+
+def _summaries(releases: list[JsonObject]) -> dict[str, JsonObject]:
     known = {}
     for release in releases:
         version = release.get("version")
         known[required_string(release, "id")] = (
             release_summary(release) if isinstance(version, int) else {"id": release["id"]}
         )
-    return releases, known
+    return known
 
 
 def _target_revision(
-    deployment_id: str, revisions: Sequence[JsonObject], current: int, releases: list[JsonObject], selector: str | None
-) -> JsonObject:
-    """The earlier revision a rollback returns to: the one before, or the latest that ran ``selector``."""
-    earlier = [item for item in revisions if required_int(item, "revision") < current]
-    if selector is None:
-        before = [item for item in earlier if required_int(item, "revision") == current - 1]
-        if not before:
-            raise DeployAPIError(
-                "deploy_conflict",
-                f"deployment {deployment_id} has no earlier release to roll back to",
-                details={"deploymentId": deployment_id, "server_code": "NO_EARLIER_REVISION"},
-            )
-        return before[0]
-    release = find_build_release(releases, selector.strip())
-    ran = [item for item in earlier if release is not None and item.get("releaseId") == release.get("id")]
+    deployment_id: str, revisions: Sequence[JsonObject], current: int, build: BuildReleases, selector: str
+) -> int:
+    """The latest revision before ``current`` that ran the release ``selector`` names.
+
+    A version is looked up in the Build's releases; a release id is matched
+    against the revisions themselves, so a release the Build no longer lists
+    can still be returned to.
+    """
+    build_id, releases = build
+    release_id = selector
+    version = release_version_selector(selector)
+    if version is not None:
+        listed = find_build_release(releases, selector)
+        if listed is None:
+            raise ReleaseNotListedError(build_id, deployment_id, selector)
+        release_id = required_string(listed, "id")
+    ran = [
+        required_int(item, "revision")
+        for item in revisions
+        if required_int(item, "revision") < current and item.get("releaseId") == release_id
+    ]
     if not ran:
         raise ReleaseNeverRanError(deployment_id, selector)
-    return ran[-1]
+    return max(ran)
 
 
 def _plain(error: DeployAPIError, deployment_id: str) -> DeployAPIError:
@@ -207,47 +214,46 @@ def _plain(error: DeployAPIError, deployment_id: str) -> DeployAPIError:
     )
 
 
-def rollback(builder: BuilderReleaseClient, client: DeployRollbackClient, request: RollbackRequest) -> RollbackResult:
-    deployment_id = _picked_deployment(builder, client, request)
+def rollback(builder: BuilderReleaseClient, client: DeployRollbackClient, request: RollbackRequest) -> MoveResult:
+    deployment_id, build = _picked_deployment(builder, client, request)
     target = client.get_deployment(deployment_id)
     base_revision = optional_revision(target)
     if base_revision is None:
         raise RevisionsUnavailableError(deployment_id, "rollback")
     refuse_unmovable(target, command="rollback")
-    releases, known = _versions(builder, target)
     previous_id = required_string(target, "releaseId")
-    goal = _target_revision(deployment_id, _revisions(client, deployment_id), base_revision, releases, request.to)
-    release_id = required_string(goal, "releaseId")
-    try:
-        moved = client.rollback_deployment(
-            deployment_id, base_revision, None if request.to is None else required_int(goal, "revision")
+    build = build or _build_of(builder, previous_id)
+    # Without `--to` the service picks the revision before the current one.
+    to_revision = (
+        None
+        if request.to is None
+        else _target_revision(
+            deployment_id, _revisions(client, deployment_id), base_revision, build, request.to.strip()
         )
+    )
+    try:
+        moved = client.rollback_deployment(deployment_id, base_revision, to_revision)
     except DeployAPIError as error:
         raise _plain(error, deployment_id) from error
+    # The reply names the release it moved to, or, while that waits, the release it moves to on the pending update.
+    pending = moved.get("pendingUpdate")
+    release_id = required_string(pending if isinstance(pending, dict) else moved, "releaseId")
     changed = move_changed(moved, base_revision, release_id, previous_id)
     # The reply carries no status, so the deployment is read for it.
     deployment = client.get_deployment(deployment_id)
-    return RollbackResult(
-        deployment,
-        known.get(release_id) or {"id": release_id},
-        known.get(previous_id) or {"id": previous_id},
-        changed,
-    )
-
-
-def finish_rollback(result: RollbackResult, watched: JsonObject) -> RollbackResult:
-    """The watched result, once the rollback it followed landed."""
-    raise_unless_landed(watched, result.release, result.previous_release)
-    return replace(result, deployment=watched)
+    known = _summaries(build[1])
+    release = known.get(release_id) or release_or_id(builder, release_id)
+    return MoveResult(deployment, release, known.get(previous_id) or {"id": previous_id}, changed)
 
 
 def history(builder: BuilderReleaseClient, client: DeployRollbackClient, deployment_id: str) -> History:
     deployment = client.get_deployment(deployment_id)
     if optional_revision(deployment) is None:
         raise RevisionsUnavailableError(deployment_id, "history")
-    _, known = _versions(builder, deployment)
+    known = _summaries(_build_of(builder, required_string(deployment, "releaseId"))[1])
     revisions = _revisions(client, deployment_id)
-    current = revisions[-1]["revision"] if revisions else None
+    # The deployment's own revision is the one it serves.
+    current = optional_revision(deployment)
     rows: list[JsonObject] = []
     for item in reversed(revisions):
         row: JsonObject = {

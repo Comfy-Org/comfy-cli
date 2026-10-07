@@ -171,6 +171,50 @@ def move_changed(moved: JsonObject, base_revision: int, release_id: str, previou
     return release_id != previous_id if revision is None else revision > base_revision
 
 
+def moved_release(moved: JsonObject, fallback: str) -> str:
+    """The release the reply to a move says the deployment moves to.
+
+    A waiting move names it on its pending update. A reply with no revision is
+    one the service's rollout check failed to answer, so it carries neither,
+    and ``fallback``, the release the move asked for, stands in.
+    """
+    pending = moved.get("pendingUpdate")
+    if isinstance(pending, dict):
+        return required_string(pending, "releaseId")
+    if optional_revision(moved) is None:
+        return fallback
+    return required_string(moved, "releaseId")
+
+
+@dataclass(frozen=True, slots=True)
+class MoveResult:
+    """Where a promote or rollback left the deployment it moved."""
+
+    deployment: JsonObject
+    release: JsonObject
+    previous_release: JsonObject
+    changed: bool
+    source_id: str | None = None
+
+    @property
+    def waiting(self) -> bool:
+        return isinstance(self.deployment.get("pendingUpdate"), dict)
+
+    def payload(self) -> JsonObject:
+        deployment: JsonObject = {
+            "id": required_string(self.deployment, "id"),
+            "status": required_string(self.deployment, "status"),
+        }
+        revision = optional_revision(self.deployment)
+        if revision is not None:
+            deployment["revision"] = revision
+        payload: JsonObject = {"deployment": deployment}
+        if self.source_id is not None:
+            payload["source"] = {"id": self.source_id}
+        payload.update(release=self.release, previousRelease=self.previous_release, waiting=self.waiting)
+        return payload
+
+
 class ComputeRequiredError(Exception):
     pass
 

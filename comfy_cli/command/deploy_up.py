@@ -1,6 +1,7 @@
 """Reconcile and render deploy-up operations."""
 
 import http.client
+import urllib.error
 import uuid
 from collections.abc import Sequence
 from dataclasses import replace
@@ -17,7 +18,14 @@ from comfy_cli.command.deploy_resolve import (
 )
 from comfy_cli.command.deploy_runtime import terminal_status_error
 from comfy_cli.command.deploy_types import NOT_MOVABLE as _NOT_MOVABLE
-from comfy_cli.command.deploy_types import ComputeRequiredError, DeployUpClient, UpRequest, UpResult, release_label
+from comfy_cli.command.deploy_types import (
+    ComputeRequiredError,
+    DeployUpClient,
+    MoveResult,
+    UpRequest,
+    UpResult,
+    release_label,
+)
 from comfy_cli.command.deploy_types import compute_config as _compute_config
 from comfy_cli.command.deploy_types import move_changed as _move_changed
 from comfy_cli.command.deploy_types import move_outcome as _move_outcome
@@ -249,6 +257,23 @@ def raise_unless_landed(watched: JsonObject, release: JsonObject, previous: Json
     serving_id = watched.get("releaseId")
     serving = previous if serving_id == previous.get("id") else {"id": serving_id}
     raise MoveFailedError(_required_string(watched, "id"), release, serving, watched.get("status"))
+
+
+def landed_result(result: MoveResult, watched: JsonObject) -> MoveResult:
+    """The watched promote or rollback, once the move it followed landed."""
+    raise_unless_landed(watched, result.release, result.previous_release)
+    return replace(result, deployment=watched)
+
+
+def release_or_id(builder: BuilderReleaseClient, release_id: str) -> JsonObject:
+    """The release's summary, read after the move was accepted.
+
+    A failed lookup then costs the version in the output, not the watch.
+    """
+    try:
+        return _release_summary(builder.get_release(release_id))
+    except (DeployAPIError, ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError):
+        return {"id": release_id}
 
 
 def refuse_unmovable(target: JsonObject, command: str = "up") -> None:

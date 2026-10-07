@@ -21,6 +21,9 @@ history.
   release, keeping its id and URL, and follows the move as `up` does; `comfy
   deploy history` lists the releases a deployment ran, newest first, with what
   moved it and who. Both need deployment updates on.
+- `comfy deploy promote --json` and `comfy deploy rollback --json` say
+  `waiting: true` while the move waits for its release's copy, so a
+  `--no-watch` caller can tell a waiting move from one that landed.
 - `comfy deploy promote SOURCE TARGET` moves TARGET onto the release SOURCE
   serves, keeping TARGET's id and URL, and follows the move as `up` does. It
   needs deployment updates on (`deploy_updates_unavailable` otherwise).

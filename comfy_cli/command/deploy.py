@@ -1,6 +1,7 @@
 """Deployment lifecycle commands."""
 
 import urllib.error
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -20,7 +21,6 @@ from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject
 from comfy_cli.command.deploy_compute import prompt_gpu as _prompt_gpu
 from comfy_cli.command.deploy_compute import prompt_region as _prompt_region
 from comfy_cli.command.deploy_progress import DeployWatchReporter
-from comfy_cli.command.deploy_promote import finish_promote as _finish_promote
 from comfy_cli.command.deploy_promote import promote as _promote
 from comfy_cli.command.deploy_resolve import DeployResolveError
 from comfy_cli.command.deploy_runtime import MOVE_WATCH_SECONDS, DeployWatchLostError, terminal_status_error
@@ -31,7 +31,7 @@ from comfy_cli.command.deploy_runtime import render_spec_error as _render_spec_e
 from comfy_cli.command.deploy_runtime import resolved_up_request as _resolved_up_request
 from comfy_cli.command.deploy_runtime import sleep as _sleep
 from comfy_cli.command.deploy_status import run_status as _run_status
-from comfy_cli.command.deploy_types import ComputeRequiredError, move_settled
+from comfy_cli.command.deploy_types import ComputeRequiredError, MoveResult, move_settled
 from comfy_cli.command.deploy_types import UpRequest as UpRequest
 from comfy_cli.command.deploy_types import (
     required_string as _required_string,
@@ -45,6 +45,7 @@ from comfy_cli.command.deploy_up import (
     ends_terminal,
     estimate_line,
     finish_move,
+    landed_result,
     move_line,
     move_text,
     reconcile_up,
@@ -416,7 +417,7 @@ def promote_cmd(
         typer.Option("--watch/--no-watch", help="Follow TARGET until the move lands or fails."),
     ] = True,
 ) -> None:
-    _run_move(lambda builder, client: _promote(builder, client, source, target), _finish_promote, "promote", watch)
+    _run_move(lambda builder, client: _promote(builder, client, source, target), "promote", watch)
 
 
 @app.command("rollback", help="Move a deployment back to an earlier release, keeping its id and URL.")
@@ -437,12 +438,7 @@ def rollback_cmd(
     ] = True,
 ) -> None:
     request = _deploy_rollback.RollbackRequest(path, deployment_id, to)
-    _run_move(
-        lambda builder, client: _deploy_rollback.rollback(builder, client, request),
-        _deploy_rollback.finish_rollback,
-        "rollback",
-        watch,
-    )
+    _run_move(lambda builder, client: _deploy_rollback.rollback(builder, client, request), "rollback", watch)
 
 
 @app.command("history", help="List the releases a deployment ran, newest first, with what moved it.")
@@ -451,7 +447,7 @@ def history_cmd(path: DeployPath = None, deployment_id: DeploymentOption = None)
     _deploy_read.run_history(_deploy_read.ReadRequest(path, deployment_id))
 
 
-def _run_move(start, finish, command: str, watch: bool) -> None:
+def _run_move(start: Callable[..., MoveResult], command: str, watch: bool) -> None:
     """Send a move, follow it as `up` follows one, and report where it left the deployment."""
     renderer = get_renderer()
     try:
@@ -469,7 +465,7 @@ def _run_move(start, finish, command: str, watch: bool) -> None:
             deployment_id = _required_string(result.deployment, "id")
             moving = _required_string(result.release, "id")
             watched = _watch(renderer, client, deployment_id, moving=moving, on_abandon=abandoned)
-            result = finish(result, watched)
+            result = landed_result(result, watched)
         _render_move(renderer, result, command=command, watch=watch)
     except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:
         _render_spec_error(renderer, error)
@@ -490,12 +486,12 @@ def _run_move(start, finish, command: str, watch: bool) -> None:
         raise typer.Exit(code=1) from error
 
 
-def _moved_text(result) -> str:
+def _moved_text(result: MoveResult) -> str:
     deployment_id = _required_string(result.deployment, "id")
     return move_text(deployment_id, result.deployment, result.release, result.previous_release, result.changed)
 
 
-def _render_move(renderer, result, *, command: str, watch: bool) -> None:
+def _render_move(renderer, result: MoveResult, *, command: str, watch: bool) -> None:
     deployment_id = _required_string(result.deployment, "id")
     status = _required_string(result.deployment, "status")
     if renderer.is_pretty():

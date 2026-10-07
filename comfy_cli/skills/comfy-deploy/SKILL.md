@@ -238,14 +238,17 @@ comfy deploy promote SOURCE TARGET [--no-watch]
 ## `comfy deploy rollback` and `comfy deploy history`
 
 ```shell
-comfy deploy rollback [PATH] [--deployment <id>] [--to vN] [--no-watch]
+comfy deploy rollback [PATH] [--deployment <id>] [--to vN|<release-id>] [--no-watch]
 comfy deploy history [PATH] [--deployment <id>]
 ```
 
 - **`rollback` moves the deployment back to the release before its current
   one**, keeping its id and URL, so a second `rollback` undoes the first.
   `--to vN` returns to the latest earlier revision that ran vN, and refuses a
-  release the deployment never ran.
+  release the deployment never ran. A release the Build no longer lists has no
+  version to name; pass its id from `history` instead.
+- **`--json --no-watch` says `waiting: true`** while the earlier release's copy
+  starts; the deployment serves `previousRelease` until it lands.
 - **It picks the deployment as `up` does**: the one `--deployment` names, else
   the Build's only running one, refusing two with
   `deploy_ambiguous_deployment`.
