@@ -316,6 +316,42 @@ def test_out_of_range_output_slot_inside_a_definition_is_marked_and_qualified(sd
     assert f"BROKEN link {link['id']}: node {link['origin_id']} has no output slot 9" in res.source
 
 
+def test_out_of_range_definition_output_boundary_renders_none_with_warning():
+    wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
+    graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
+    sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
+    link = next(lk for lk in sg["links"] if str(lk["target_id"]) == "-20" and str(lk["origin_id"]) != "-10")
+    link["origin_slot"] = 9
+
+    res = render_py(wf, graph)
+
+    assert any(
+        f"output link {link['id']} references output slot 9 on node {link['origin_id']}" in warning
+        for warning in res.warnings
+    )
+    assert ".out[9]" not in res.source
+    assert "OUT." in res.source and " = None" in res.source
+
+
+def test_broken_link_repair_uses_the_actual_holder_when_declared_target_is_missing(sd15_graph):
+    wf = _stale_slot_workflow([7, 1, 9, 99, 0, "LATENT"])
+    wf["nodes"][1]["inputs"][0]["link"] = None
+    wf["nodes"].append(
+        _node(
+            3,
+            "VAEDecode",
+            inputs=[{"name": "samples", "type": "LATENT", "link": 7}, {"name": "vae", "type": "VAE", "link": None}],
+        )
+    )
+
+    res = render_py(wf, sd15_graph)
+
+    warning = next(warning for warning in res.warnings if warning.startswith("BROKEN link 7"))
+    assert "input 'samples' of node 3" in warning
+    assert "`connect 1.<output> 3.samples`" in warning
+    assert "node 99" not in warning
+
+
 def test_legacy_group_node_is_refused(sd15_graph):
     wf = _mini([_node(1, "workflow>MyGroup")], [])
     with pytest.raises(PrintUnsupported) as e:
@@ -1129,6 +1165,31 @@ def test_out_of_range_input_slot_fed_by_the_definition_input_proxy_is_reported(s
         "no input holds it, so it feeds nothing and was ignored. It was wired from the subgraph input — "
         "re-wire it to the input it was meant for"
     ) in res.warnings
+
+
+def test_in_range_unheld_definition_input_proxy_link_is_ignored():
+    wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
+    graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
+    sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
+    target = next(node for node in sg["nodes"] if node.get("inputs"))
+    sg["links"].append(
+        {
+            "id": 9999,
+            "origin_id": -10,
+            "origin_slot": 0,
+            "target_id": target["id"],
+            "target_slot": 0,
+            "type": "*",
+        }
+    )
+
+    res = render_py(wf, graph)
+
+    assert any(
+        warning.startswith(f"link 9999 targets input slot 0 on node 10/{target['id']}")
+        and warning.endswith("no input holds it, so it feeds nothing and was ignored")
+        for warning in res.warnings
+    )
 
 
 def test_non_list_inputs_are_treated_as_empty_with_warning(sd15_graph):

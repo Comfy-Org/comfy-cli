@@ -331,6 +331,7 @@ def _broken_links(nodes: list[dict], links: list[Any], qualify: Any = str) -> tu
         link_id, src_id, src_slot, tgt_id, tgt_slot = link[0], link[1], link[2], link[3], link[4]
         src_node = nodes_by_id.get(str(src_id))
         tgt_node = nodes_by_id.get(str(tgt_id))
+        effective_tgt_id = tgt_id
         if tgt_node is None:
             # A row's target can drift while another node's input still holds
             # its id. Leave that case for ``_stale_input_slot_links`` to
@@ -342,6 +343,7 @@ def _broken_links(nodes: list[dict], links: list[Any], qualify: Any = str) -> tu
                 )
                 continue
             tgt_node = holder[0]
+            effective_tgt_id = tgt_node.get("id")
         why = None
         if src_node is None:
             why = f"its source node {qualify(src_id)} does not exist"
@@ -356,9 +358,17 @@ def _broken_links(nodes: list[dict], links: list[Any], qualify: Any = str) -> tu
             continue
         broken[str(link_id)] = why
         name = holder_of(link_id, tgt_node)
-        into = f"input {name!r} of node {qualify(tgt_id)}" if name is not None else f"node {qualify(tgt_id)}"
+        into = (
+            f"input {name!r} of node {qualify(effective_tgt_id)}"
+            if name is not None
+            else f"node {qualify(effective_tgt_id)}"
+        )
         source = f"{qualify(src_id)}.<output>" if src_node is not None else "<source>.<output>"
-        fix = f"`connect {source} {qualify(tgt_id)}.{name}`" if name else "`connect` to the input it was meant for"
+        fix = (
+            f"`connect {source} {qualify(effective_tgt_id)}.{name}`"
+            if name
+            else "`connect` to the input it was meant for"
+        )
         warnings.append(f"BROKEN link {link_id} into {into}: {why}; printed as None — re-wire it with {fix}")
     return warnings, broken, rest
 
@@ -440,7 +450,8 @@ def _stale_input_slot_links(
                     f"{qualify(holder_id)}, which holds it"
                 )
             elif proxy_input_id is not None and str(src_id) == proxy_input_id:
-                warnings.append(f"{where}; the subgraph input proxy routes by target slot")
+                ignored.add(str(link_id))
+                warnings.append(f"{where}; no input holds it, so it feeds nothing and was ignored")
             else:
                 ignored.add(str(link_id))
                 warnings.append(f"{where}; no input holds it, so it feeds nothing and was ignored")
@@ -1580,6 +1591,14 @@ def _render_definition_block(
                     )
                 elif not _is_slot_index(oslot) or oslot < 0:
                     boundary_reasons.append(f"subgraph {def_id}: link {lid} has invalid source slot {oslot!r}")
+                else:
+                    outputs = source.get("outputs")
+                    if isinstance(outputs, list) and oslot >= len(outputs):
+                        boundary_ignored.add(str(lid))
+                        state.warnings.append(
+                            f"subgraph {def_id}: output link {lid} references output slot {oslot} on node {oid}, "
+                            f"which has {len(outputs)} outputs; it was ignored"
+                        )
         if from_input_proxy or to_output_proxy:
             continue
         validate_links.append([lid, oid, oslot, tid, tslot])
