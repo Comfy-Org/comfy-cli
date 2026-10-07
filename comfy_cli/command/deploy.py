@@ -253,7 +253,8 @@ def _watch(renderer, client, deployment_id: str, *, moving: str | None, on_aband
             _exit_watch_lost(renderer, error)
         # `status --watch` ends at ready, which a deployment being moved already is.
         hint = (
-            f"run `comfy deploy show --deployment {deployment_id}`: the move has landed once it shows no pendingUpdate"
+            f"run `comfy deploy show --deployment {deployment_id}`: the move has landed once it shows no pendingUpdate "
+            f"and releaseId {moving}"
         )
         _exit_watch_lost(renderer, error, hint)
     finally:

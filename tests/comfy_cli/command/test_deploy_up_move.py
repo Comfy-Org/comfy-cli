@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app
 from comfy_cli.command.build_spec import JsonObject
+from comfy_cli.command.deploy_up import move_text
 from comfy_cli.deploy_api_errors import DeployAPIError
 
 _RELEASES = [
@@ -205,6 +206,75 @@ def test_a_read_caught_as_the_move_lands_does_not_fail_it(tmp_path, monkeypatch)
     # Then
     assert result.exit_code == 0, result.stderr
     assert _envelope(result)["data"]["deployment"]["revision"] == 4
+
+
+_WAITING = {"pendingUpdate": {"releaseId": "release-5", "baseRevision": 3, "status": "provisioning", "since": "x"}}
+
+
+class _CountingWatch(FakeDeploy):
+    """Counts the reads made once the move was sent."""
+
+    watched = 0
+
+    def get_deployment(self, deployment_id: str) -> JsonObject:
+        if self.move_calls:
+            self.watched += 1
+        return super().get_deployment(deployment_id)
+
+
+@pytest.mark.parametrize(
+    ("patches", "reads"),
+    [
+        ([{"pendingUpdate": {"releaseId": "release-5", "baseRevision": 3, "status": "failed", "since": "x"}}], 1),
+        ([{"pendingUpdate": None}], 2),
+        ([{"pendingUpdate": None}, {"revision": None}, {"revision": 3}], 3),
+    ],
+    ids=["copy_failed_at_once", "dropped_twice", "no_revision_read_between"],
+)
+def test_a_watch_settles_a_failure_after_the_reads_it_needs(tmp_path, monkeypatch, patches, reads) -> None:
+    # Given
+    client = _CountingWatch([_live("dep-1")], move="pending", get_patches=patches)
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5")
+
+    # Then the watch read only as often as the failure needed
+    assert result.exit_code == 1
+    assert _envelope(result)["error"]["code"] == "deploy_update_failed"
+    assert client.watched == reads
+
+
+def test_a_dropped_read_then_a_waiting_one_starts_the_count_again(tmp_path, monkeypatch) -> None:
+    # Given dropped, waiting, dropped, then landed
+    client = FakeDeploy(
+        [_live("dep-1")],
+        move="pending",
+        get_patches=[
+            {"pendingUpdate": None},
+            _WAITING,
+            {"pendingUpdate": None},
+            {"releaseId": "release-5", "revision": 4},
+        ],
+    )
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _envelope(result)["data"]["deployment"]["revision"] == 4
+
+
+def test_a_watch_interrupted_on_a_dropped_read_does_not_claim_the_move() -> None:
+    # Given a read that shows the old release with nothing waiting
+    deployment = {"id": "dep-1", "status": "ready", "releaseId": "release-4", "revision": 3, "pendingUpdate": None}
+
+    # When
+    text = move_text("dep-1", deployment, {"id": "release-5", "version": 5}, {"id": "release-4", "version": 4}, True)
+
+    # Then
+    assert "now serves" not in text
+    assert "read as still serving release v4, with no update to release v5 waiting" in text
 
 
 def test_up_without_a_watch_returns_while_the_move_waits(tmp_path, monkeypatch) -> None:
