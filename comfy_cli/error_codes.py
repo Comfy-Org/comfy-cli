@@ -1537,18 +1537,19 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "reports only `failed` and `stop_failed`, since a `stopped` deployment is a normal thing to be "
         "asked about; `comfy deploy up` adds `stopped` (with or without `--watch`), because a deployment it was "
         "asked to bring up and that is stopped did not come up, and `unhealthy`, because one that came up and "
-        "then degraded is billing without serving and `up` does not change it. `comfy deploy promote` judges "
-        "a target it moved as `up` does, and reports one it left unchanged without judging it.",
+        "then degraded is billing without serving and `up` does not change it. `comfy deploy promote` and "
+        "`comfy deploy rollback` judge a deployment they moved as `up` does, and report one they left unchanged "
+        "without judging it.",
         "for `failed`, inspect `comfy deploy logs` and redeploy with `comfy deploy up`; for `stop_failed`, "
         "re-run `comfy deploy stop` -- it may still be billing; for `stopped`, `comfy deploy start`; for "
         "`unhealthy`, inspect `comfy deploy logs`, or `comfy deploy stop` to stop billing",
     ),
     ErrorCode(
         "deploy_watch_lost",
-        "The deploy control plane left the reads of a watch (`comfy deploy up`, `comfy deploy promote`, "
+        "The deploy control plane left the reads of a watch (`comfy deploy up`, `promote`, `rollback`, "
         "`comfy deploy status --watch`) unanswered, with an HTTP 5xx or no response, for the whole retry window "
-        "of about a minute, or `up` or `promote` followed a move onto another release for an hour without it "
-        "landing. Only the watch "
+        "of about a minute, or `up`, `promote` or `rollback` followed a move onto another release for an hour "
+        "without it landing. Only the watch "
         "ended: the deployment's outcome is unknown and it may still be coming up. The exit code is 75, not 1, so a "
         "script can tell this from a deployment that failed. `details.deployment_id` names the deployment.",
         "re-attach with `comfy deploy status --deployment <id> --watch` once the deploy service answers again; "
@@ -1557,7 +1558,7 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_update_failed",
-        "`comfy deploy up` or `comfy deploy promote` moved a deployment onto another release, and the watch saw "
+        "`comfy deploy up`, `promote` or `rollback` moved a deployment onto another release, and the watch saw "
         "the move fail: the new release's copy failed to come up, or the service dropped the update. The "
         "deployment keeps its id and URL and still serves the release it served before. "
         "`details.serving_release_id` names that release and `details.release_id` the one that failed.",
@@ -1567,11 +1568,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "deploy_updates_unavailable",
         "The command needs deployment updates, which are not on for this workspace yet: the deployment "
-        "carries no `revision`. `comfy deploy promote` needs it to move a deployment in place, and "
-        "`comfy deploy events --release` needs it, since only there does each event say which release made it. "
+        "carries no `revision`. `comfy deploy promote` and `rollback` need it to move a deployment in place, "
+        "`history` needs it to list the releases a deployment ran, and `comfy deploy events --release` needs it, "
+        "since only there does each event say which release made it. "
         "`details.deployment_id` names the deployment that was read.",
-        "for `events --release`, run it without `--release`; for `promote`, run the hint's "
-        "`comfy deploy up --create --release <id>` to start a separate deployment on that release",
+        "for `events --release`, run it without `--release`; for `history`, read `comfy deploy events`; for "
+        "`promote` or `rollback`, run the hint's `comfy deploy up --create --release <id>` to start a separate "
+        "deployment on that release",
     ),
     ErrorCode(
         "deploy_delete_needs_confirm",

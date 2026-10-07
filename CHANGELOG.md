@@ -17,6 +17,10 @@ history.
 
 ### Added
 
+- `comfy deploy rollback [--to vN]` moves a deployment back to an earlier
+  release, keeping its id and URL, and follows the move as `up` does; `comfy
+  deploy history` lists the releases a deployment ran, newest first, with what
+  moved it and who. Both need deployment updates on.
 - `comfy deploy promote SOURCE TARGET` moves TARGET onto the release SOURCE
   serves, keeping TARGET's id and URL, and follows the move as `up` does. It
   needs deployment updates on (`deploy_updates_unavailable` otherwise).

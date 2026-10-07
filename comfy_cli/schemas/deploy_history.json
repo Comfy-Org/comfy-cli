@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_history.json",
+  "title": "comfy deploy history --json data payload",
+  "type": "object",
+  "required": [
+    "deploymentId",
+    "revisions"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "deploymentId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "revisions": {
+      "type": "array",
+      "description": "Newest first; the current revision has current true.",
+      "items": {
+        "type": "object",
+        "required": [
+          "revision",
+          "releaseId",
+          "kind",
+          "createdBy",
+          "createdAt",
+          "current"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "releaseId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "releaseVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Absent for a release the Build no longer lists."
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1,
+            "description": "create, backfill, update or rollback; open to values a newer service adds."
+          },
+          "createdBy": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "fromRevision": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The revision a rollback restored."
+          },
+          "current": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

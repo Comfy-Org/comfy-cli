@@ -285,7 +285,7 @@ def _merged_bounds(request: UpRequest, compute: JsonObject) -> JsonObject:
     return desired
 
 
-def _build_deployments(deployments: Sequence[JsonObject], releases: Sequence[JsonObject]) -> list[JsonObject]:
+def build_deployments(deployments: Sequence[JsonObject], releases: Sequence[JsonObject]) -> list[JsonObject]:
     release_ids = {_required_string(release, "id") for release in releases}
     return [
         deployment
@@ -299,6 +299,11 @@ def _build_deployments(deployments: Sequence[JsonObject], releases: Sequence[Jso
 _DOWN: Final = frozenset({"stopped", "failed", "stop_failed"})
 # A settled status a command that brings a deployment up reports as not ok.
 _TERMINAL: Final = frozenset({"failed", "stopped", "stop_failed", "unhealthy"})
+
+
+def running_first(candidates: list[JsonObject]) -> list[JsonObject]:
+    """The deployments a pick chooses among: those up, else every one."""
+    return [row for row in candidates if row.get("status") not in _DOWN] or candidates
 
 
 def _move_target(
@@ -324,7 +329,7 @@ def _move_target(
             return None
         pool = [pick]
     else:
-        pool = [row for row in candidates if row.get("status") not in _DOWN] or candidates
+        pool = running_first(candidates)
         if len(pool) == 1 and pool[0].get("releaseId") == release_id:
             return None
     snapshot = client.get_deployment(_required_string(pool[0], "id"))
@@ -424,7 +429,7 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         if request.deployment_id is not None:
             raise DeployAPIError("deploy_bad_request", "--create makes a new deployment, so it takes no --deployment")
     else:
-        candidates = _build_deployments(deployments, releases)
+        candidates = build_deployments(deployments, releases)
         target = _move_target(client, candidates, request, release_id)
         if target is not None and target[0].get("releaseId") != release_id:
             return _move(builder, client, request, *target, releases, supersedes)

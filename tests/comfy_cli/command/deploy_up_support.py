@@ -101,6 +101,9 @@ class FakeDeploy:
         self.strip_move_reply = strip_move_reply
         self.move_calls: list[tuple[str, int, str]] = []
         self.promote_calls: list[tuple[str, int, str]] = []
+        self.rollback_calls: list[tuple[str, int, int | None]] = []
+        # Each deployment's revisions, oldest first, as the service lists them.
+        self.revisions: dict[str, list[JsonObject]] = {}
         # Raised by the next worker-bounds edit, when set.
         self.update_error: DeployAPIError | None = None
         # Merged into the row on each read after a move, one per read.
@@ -152,7 +155,7 @@ class FakeDeploy:
         with self._lock:
             self.get_ids.append(deployment_id)
             row = self.rows[deployment_id]
-            if (self.move_calls or self.promote_calls) and self.get_patches:
+            if (self.move_calls or self.promote_calls or self.rollback_calls) and self.get_patches:
                 row.update(self.get_patches.pop(0))
             if self.get_statuses:
                 row["status"] = self.get_statuses.pop(0)
@@ -180,6 +183,45 @@ class FakeDeploy:
                 reply.pop("revision", None)
                 reply.pop("pendingUpdate", None)
             return reply
+
+    def rollback_deployment(self, deployment_id: str, base_revision: int, to_revision: int | None = None) -> JsonObject:
+        with self._lock:
+            self.rollback_calls.append((deployment_id, base_revision, to_revision))
+            row = self.rows[deployment_id]
+            current = row.get("revision")
+            if current == 1:
+                raise DeployAPIError(
+                    "deploy_conflict", "no earlier revision", status=409, details={"server_code": "NO_EARLIER_REVISION"}
+                )
+            goal = (current - 1) if to_revision is None else to_revision
+            release_id = next(item["releaseId"] for item in self.revisions[deployment_id] if item["revision"] == goal)
+            moved = self._apply_move(deployment_id, base_revision, release_id)
+            if moved.get("revision") != base_revision:
+                self.revisions[deployment_id].append(
+                    {
+                        "revision": moved["revision"],
+                        "releaseId": release_id,
+                        "kind": "rollback",
+                        "createdBy": "user-1",
+                        "createdAt": "2026-10-07T12:00:00Z",
+                        "fromRevision": goal,
+                    }
+                )
+            reply = {key: moved[key] for key in ("id", "revision", "releaseId") if key in moved}
+            reply["kind"] = "rollback"
+            if isinstance(moved.get("pendingUpdate"), dict):
+                reply["pendingUpdate"] = {**moved["pendingUpdate"], "kind": "rollback"}
+            return reply
+
+    def get_deployment_events(self, deployment_id: str) -> JsonObject:
+        return {"deploymentId": deployment_id, "events": []}
+
+    def get_deployment_logs(self, deployment_id: str) -> JsonObject:
+        return {"deploymentId": deployment_id, "capturedAt": None, "comfyuiLog": ""}
+
+    def get_deployment_revisions(self, deployment_id: str) -> JsonObject:
+        with self._lock:
+            return {"items": copy.deepcopy(self.revisions.get(deployment_id, []))}
 
     def _apply_move(self, deployment_id: str, base_revision: int, release_id: str) -> JsonObject:
         """Call with the lock held."""

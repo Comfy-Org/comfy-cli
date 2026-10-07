@@ -1,6 +1,6 @@
 ---
 name: comfy-deploy
-description: "Run a Comfy Build release as a serverless deployment with comfy-cli. Use whenever the user wants to deploy, serve, host, or expose a ComfyUI build as an endpoint, scale or stop workers, submit a workflow to a deployment, check whether a deployment is healthy or running a stale release, or work out why one is still costing money. Covers `comfy deploy up / promote / run / status / scale / stop / start / delete / ls / show / logs / events / refs`. Assumes a green release already exists — `comfy-build` is the skill that produces one."
+description: "Run a Comfy Build release as a serverless deployment with comfy-cli. Use whenever the user wants to deploy, serve, host, or expose a ComfyUI build as an endpoint, scale or stop workers, submit a workflow to a deployment, check whether a deployment is healthy or running a stale release, or work out why one is still costing money. Covers `comfy deploy up / promote / rollback / history / run / status / scale / stop / start / delete / ls / show / logs / events / refs`. Assumes a green release already exists — `comfy-build` is the skill that produces one."
 ---
 
 # comfy-deploy
@@ -38,6 +38,8 @@ bills by time.**
 ```
 up      Create or reconcile a deployment for the selected Build release.   SPENDS
 promote Move TARGET onto the release SOURCE serves, keeping its URL.      SPENDS
+rollback Move a deployment back to an earlier release, keeping its URL.  SPENDS
+history The releases a deployment ran, newest first, and what moved it.
 run     Submit an API-format workflow to a ready deployment.               SPENDS
 status  Deployment health, release freshness, and serving activity.
 scale   Edit worker bounds, or GPU/region on a stopped deployment.
@@ -232,6 +234,27 @@ comfy deploy promote SOURCE TARGET [--no-watch]
   `deploy_updates_unavailable`; use `comfy deploy up --create` instead.
 - **It follows the move like `up` does**: exit 1 with `deploy_update_failed`
   when the new release does not come up, and TARGET still serves its old one.
+
+## `comfy deploy rollback` and `comfy deploy history`
+
+```shell
+comfy deploy rollback [PATH] [--deployment <id>] [--to vN] [--no-watch]
+comfy deploy history [PATH] [--deployment <id>]
+```
+
+- **`rollback` moves the deployment back to the release before its current
+  one**, keeping its id and URL, so a second `rollback` undoes the first.
+  `--to vN` returns to the latest earlier revision that ran vN, and refuses a
+  release the deployment never ran.
+- **It picks the deployment as `up` does**: the one `--deployment` names, else
+  the Build's only running one, refusing two with
+  `deploy_ambiguous_deployment`.
+- **It follows the move like `up` does**: exit 1 with `deploy_update_failed`
+  when the earlier release does not come back up.
+- **`history` lists each revision newest first**, the current one marked `*`:
+  its release version, what made it (`create`, `update`, `rollback`), who and
+  when. Run it before `rollback --to` to see what is there to return to.
+- **Both need deployment updates on** (`deploy_updates_unavailable` otherwise).
 
 ## `comfy deploy run`
 
