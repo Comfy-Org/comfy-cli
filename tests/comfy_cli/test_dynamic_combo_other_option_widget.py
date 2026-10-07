@@ -93,6 +93,18 @@ def test_refusal_names_the_option_to_select_first(graph):
     assert f"{nid}.model" in msg, f"must name the selector address to set first: {msg}"
 
 
+def test_refusal_uses_the_schema_default_when_selector_value_is_absent(graph):
+    wf, nid = _fresh(graph)
+    wf["nodes"][0]["widgets_values"] = []
+
+    with pytest.raises(ValueError) as exc:
+        workflow_ops.set_widget(wf, graph, nid, "model.prompt_expansion_mode", "quality")
+
+    msg = str(exc.value)
+    assert "'MiniMax H3'" in msg, f"must name the selector's schema default: {msg}"
+    assert "currently None" not in msg, msg
+
+
 def test_write_succeeds_once_the_revealing_option_is_selected(graph):
     wf, nid = _fresh(graph)
     wf, _ = workflow_ops.set_widget(wf, graph, nid, "model", "MiniMax H3 Max")

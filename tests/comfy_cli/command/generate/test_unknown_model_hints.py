@@ -80,3 +80,44 @@ def test_model_hint_for_an_alias_with_emit_names_the_emit_route():
 def test_plain_typo_keeps_did_you_mean():
     msg = spec._unknown_endpoint_message("flux-pr")
     assert "Did you mean:" in msg and "flux-pro" in msg, msg
+
+
+@pytest.mark.parametrize(
+    "request_body",
+    [
+        "invalid",
+        {"content": ["invalid"]},
+        {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Missing"}}}},
+    ],
+)
+def test_model_hint_skips_malformed_partner_request_bodies(monkeypatch, request_body):
+    raw = {
+        "paths": {
+            "/proxy/malformed": {"post": {"requestBody": request_body}},
+            "/proxy/valid": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"model_id": {"enum": ["example-model-v1"]}},
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    def load_raw_spec():
+        return raw
+
+    load_raw_spec.cache_clear = lambda: None  # type: ignore[attr-defined]
+    monkeypatch.setattr(spec, "load_raw_spec", load_raw_spec)
+
+    hint = spec._model_name_hint("example")
+    assert hint is not None
+    assert "example-model-v1" in hint
+    assert "served at valid" in hint
