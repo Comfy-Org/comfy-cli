@@ -195,6 +195,18 @@ _MODE = [
         ]
     },
 ]
+_ALT_MODE = [
+    "COMFY_DYNAMICCOMBO_V3",
+    {
+        "options": [
+            {"key": "quick", "inputs": {"required": {"steps": ["INT", {"default": 2}]}}},
+            {
+                "key": "detailed",
+                "inputs": {"required": {"steps": ["INT", {"default": 8}], "refine": ["BOOLEAN", {"default": True}]}},
+            },
+        ]
+    },
+]
 NESTED_OBJECT_INFO = {
     "NestedComboNode": {
         "input": {
@@ -277,3 +289,34 @@ def test_nested_set_slot_warning_falls_back_to_the_outer_selector(nested_graph):
     w = next(w for w in warnings if w["code"] == "unknown_dynamic_sub_input")
     assert "model='v2'" in w["message"], w
     assert "revealed_by" not in w and "'slow'" not in w["hint"], w
+
+
+def test_missing_nested_selector_uses_the_active_outer_options_default():
+    object_info = {
+        "NestedComboNode": {
+            **NESTED_OBJECT_INFO["NestedComboNode"],
+            "input": {
+                "required": {
+                    "model": [
+                        "COMFY_DYNAMICCOMBO_V3",
+                        {
+                            "options": [
+                                {"key": "v1", "inputs": {"required": {"mode": _MODE}}},
+                                {"key": "v2", "inputs": {"required": {"mode": _ALT_MODE}}},
+                            ]
+                        },
+                    ]
+                }
+            },
+        }
+    }
+    graph = Graph.from_object_info(object_info)
+    wf, nid = _fresh_nested(graph, model="v2")
+    wf["nodes"][0]["widgets_values"] = ["v2"]
+
+    with pytest.raises(ValueError) as exc:
+        workflow_ops.set_widget(wf, graph, nid, "model.mode.refine", True)
+
+    msg = str(exc.value)
+    assert "model.mode='quick'" in msg, msg
+    assert "'detailed'" in msg, msg

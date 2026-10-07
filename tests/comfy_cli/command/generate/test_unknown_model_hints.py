@@ -121,3 +121,37 @@ def test_model_hint_skips_malformed_partner_request_bodies(monkeypatch, request_
     assert hint is not None
     assert "example-model-v1" in hint
     assert "served at valid" in hint
+
+
+def test_model_hint_falls_through_a_freeform_model_field(monkeypatch):
+    raw = {
+        "paths": {
+            "/proxy/mixed": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "model": {"type": "string"},
+                                        "model_id": {"enum": ["example-model-v1"]},
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    def load_raw_spec():
+        return raw
+
+    load_raw_spec.cache_clear = lambda: None  # type: ignore[attr-defined]
+    monkeypatch.setattr(spec, "load_raw_spec", load_raw_spec)
+
+    hint = spec._model_name_hint("example")
+    assert hint is not None
+    assert "example-model-v1" in hint
