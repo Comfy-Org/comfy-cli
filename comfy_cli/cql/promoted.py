@@ -138,6 +138,11 @@ def promoted_inputs(
             entry = target_inputs[slot] if isinstance(slot, int) and 0 <= slot < len(target_inputs) else None
             if not isinstance(entry, dict):
                 continue
+            # LiteGraph treats inputs[].link as authoritative. A stale
+            # boundary row that merely points at this slot does not promote
+            # the widget unless the slot actually holds that row's id.
+            if entry.get("link") is None or str(entry["link"]) != str(link_id):
+                continue
             inner_def = _nested_definition(target, defs, _stack)
             if inner_def is not None:
                 # The target is itself a subgraph instance: its input entry

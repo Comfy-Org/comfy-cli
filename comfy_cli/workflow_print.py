@@ -212,6 +212,8 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
     reported_dupes: set[str] = set()
     for n in nodes:
         t = n.get("type")
+        if not isinstance(t, str):
+            reasons.append(f"node {n.get('id')} has non-string type {t!r}")
         extra = n.get("extra")
         is_legacy_group = (isinstance(t, str) and (t.startswith("workflow>") or t.startswith("workflow/"))) or (
             isinstance(extra, dict) and extra.get("groupNodes")
@@ -235,9 +237,6 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
         if not isinstance(link, list) or not link:
             continue
         link_id = link[0]
-        if link_id is None:
-            reasons.append(f"link has null id: {link!r}")
-            continue
         normalized_link_id = str(link_id)
         previous = seen_links.get(normalized_link_id)
         if previous is not None:
@@ -283,7 +282,7 @@ def _normalise_node_outputs(nodes: list[dict], warnings: list[str] | None, quali
     return normalised
 
 
-def _retarget_definition_links(subgraph: dict) -> dict:
+def _retarget_definition_links(subgraph: dict, warnings: list[str]) -> dict:
     """Keep promoted-input discovery aligned with the holder-based render route."""
     holders: dict[str, list[tuple[Any, int]]] = {}
     for node in subgraph.get("nodes") or []:
@@ -303,6 +302,12 @@ def _retarget_definition_links(subgraph: dict) -> dict:
         if str(link.get("target_id")) == _PROXY_OUT:
             links.append(link)
             continue
+        target_slot = link.get("target_slot")
+        if not _is_slot_index(target_slot) or target_slot < 0:
+            # Malformed boundary coordinates are diagnosed and dropped by the
+            # definition renderer; holder recovery must not make them valid.
+            links.append(link)
+            continue
         locations = holders.get(str(link.get("id")), [])
         declared = next(
             (
@@ -319,31 +324,14 @@ def _retarget_definition_links(subgraph: dict) -> dict:
             (location for location in locations if str(location[0]) == str(link.get("target_id"))),
             locations[0],
         )
+        warnings.append(
+            f"subgraph {subgraph.get('id')}: link {link.get('id')} targets input slot "
+            f"{link.get('target_slot')} on node {link.get('target_id')}, but that input does not hold it; "
+            f"rendered through input slot {holder[1]} on node {holder[0]}, which holds it"
+        )
         links.append({**link, "target_id": holder[0], "target_slot": holder[1]})
         changed = True
     return {**subgraph, "links": links} if changed else subgraph
-
-
-def _promoted_definition_view(subgraph: dict) -> dict:
-    """Drop unheld input-proxy rows only from promoted-widget indexing."""
-    nodes = {str(node.get("id")): node for node in subgraph.get("nodes") or [] if isinstance(node, dict)}
-    filtered: list[Any] = []
-    changed = False
-    for link in subgraph.get("links") or []:
-        if not isinstance(link, dict) or str(link.get("origin_id")) != _PROXY_IN:
-            filtered.append(link)
-            continue
-        target = nodes.get(str(link.get("target_id")))
-        inputs = target.get("inputs") if target is not None else None
-        slot = link.get("target_slot")
-        entry = inputs[slot] if isinstance(inputs, list) and _is_slot_index(slot) and 0 <= slot < len(inputs) else None
-        if isinstance(entry, dict) and entry.get("link") is not None and str(entry["link"]) == str(link.get("id")):
-            filtered.append(link)
-        elif str(link.get("target_id")) == _PROXY_OUT:
-            filtered.append(link)
-        else:
-            changed = True
-    return {**subgraph, "links": filtered} if changed else subgraph
 
 
 def _broken_links(nodes: list[dict], links: list[Any], qualify: Any = str) -> tuple[list[str], dict[str, str], list]:
@@ -402,9 +390,8 @@ def _broken_links(nodes: list[dict], links: list[Any], qualify: Any = str) -> tu
             why = "it has a non-integer slot"
         else:
             outputs = src_node.get("outputs")
-            output_count = len(outputs) if isinstance(outputs, list) else 0
-            if not (0 <= src_slot < output_count):
-                why = f"node {src_id} has no output slot {src_slot} (it has {output_count})"
+            if isinstance(outputs, list) and not (0 <= src_slot < len(outputs)):
+                why = f"node {src_id} has no output slot {src_slot} (it has {len(outputs)})"
         if why is None:
             rest.append(link)
             continue
@@ -427,7 +414,13 @@ def _broken_links(nodes: list[dict], links: list[Any], qualify: Any = str) -> tu
 
 def _stale_input_slot_links(
     nodes: list[dict], links: list[list], qualify: Any = str, proxy_input_id: str | None = None
-) -> tuple[list[str], set[str], dict[str, tuple[Any, int]], dict[str, list[tuple[Any, int]]]]:
+) -> tuple[
+    list[str],
+    set[str],
+    dict[str, tuple[Any, int]],
+    dict[str, list[tuple[Any, int]]],
+    set[tuple[str, int]],
+]:
     """Reconcile link-row targets with the inputs that actually hold each id.
 
     LiteGraph renders an input from ``inputs[].link`` rather than trusting a
@@ -438,6 +431,7 @@ def _stale_input_slot_links(
     warnings: list[str] = []
     ignored: set[str] = set()
     retargeted: dict[str, tuple[Any, int]] = {}
+    ignored_holders: set[tuple[str, int]] = set()
     nodes_by_id = {str(n.get("id")): n for n in nodes}
     input_holders_by_node: dict[str, dict[str, dict]] = {}
     holders_by_link: dict[str, list[tuple[Any, int, dict]]] = {}
@@ -449,18 +443,34 @@ def _stale_input_slot_links(
                 holders.setdefault(str(inp["link"]), inp)
                 holders_by_link.setdefault(str(inp["link"]), []).append((node.get("id"), slot, inp))
         input_holders_by_node[str(node.get("id"))] = holders
-    dependency_targets = {
-        link_id: [(node_id, slot) for node_id, slot, _inp in holders] for link_id, holders in holders_by_link.items()
-    }
+    dependency_targets: dict[str, list[tuple[Any, int]]] = {}
 
     for link in links:
         link_id, src_id, src_slot, tgt_id, tgt_slot = link[0], link[1], link[2], link[3], link[4]
         if proxy_input_id is not None and str(tgt_id) == _PROXY_OUT:
             continue
         locations = holders_by_link.get(str(link_id), [])
+        canonical = next(
+            (location for location in locations if str(location[0]) == str(tgt_id) and location[1] == tgt_slot),
+            next(
+                (location for location in locations if str(location[0]) == str(tgt_id)),
+                next(iter(locations), None),
+            ),
+        )
+        if canonical is not None:
+            dependency_targets[str(link_id)] = [(canonical[0], canonical[1])]
+            for holder_id, holder_slot, holder in locations:
+                if holder_id == canonical[0] and holder_slot == canonical[1]:
+                    continue
+                ignored_holders.add((str(holder_id), holder_slot))
+                warnings.append(
+                    f"link {link_id} is held by multiple inputs; kept input "
+                    f"{str(canonical[2].get('name') or '')!r} on node {qualify(canonical[0])} and ignored "
+                    f"duplicate holder input {str(holder.get('name') or '')!r} on node {qualify(holder_id)}"
+                )
         tgt_node = nodes_by_id.get(str(tgt_id))
         if tgt_node is None:
-            holder_location = next(iter(locations), None)
+            holder_location = canonical
             if holder_location is None:
                 ignored.add(str(link_id))
                 warnings.append(f"link {link_id} targets missing node {qualify(tgt_id)}; it was ignored")
@@ -478,10 +488,7 @@ def _stale_input_slot_links(
         inputs = tgt_node.get("inputs")
         if not isinstance(inputs, list):
             inputs = []
-        holder_location = next(
-            (location for location in locations if str(location[0]) == str(tgt_id)),
-            next(iter(locations), None),
-        )
+        holder_location = canonical
         if 0 <= tgt_slot < len(inputs):
             declared_input = inputs[tgt_slot]
             if (
@@ -547,7 +554,29 @@ def _stale_input_slot_links(
                         else "re-wire it to the input it was meant for"
                     )
                 )
-    return warnings, ignored, retargeted, dependency_targets
+    return warnings, ignored, retargeted, dependency_targets, ignored_holders
+
+
+def _clear_ignored_link_holders(nodes: list[dict], ignored_holders: set[tuple[str, int]]) -> list[dict]:
+    """Clear duplicate serialized holders without mutating the source workflow."""
+    if not ignored_holders:
+        return nodes
+    out: list[dict] = []
+    for node in nodes:
+        inputs = node.get("inputs")
+        if not isinstance(inputs, list):
+            out.append(node)
+            continue
+        changed = False
+        updated_inputs: list[Any] = []
+        for slot, entry in enumerate(inputs):
+            if (str(node.get("id")), slot) in ignored_holders and isinstance(entry, dict):
+                updated_inputs.append({**entry, "link": None})
+                changed = True
+            else:
+                updated_inputs.append(entry)
+        out.append({**node, "inputs": updated_inputs} if changed else node)
+    return out
 
 
 def _input_fed_from(inputs: list, links: list[list], src_id: Any, src_slot: Any, except_id: Any) -> str | None:
@@ -1265,8 +1294,6 @@ def _render_subgraph_instance_line(
     args: list[str] = []
     extra: dict[str, str] = {}
     warnings = state.warnings
-    promoted_sg = state.promoted_defs.get(str(sg_def.get("id")), sg_def)
-
     inputs = [inp for inp in node.get("inputs") or [] if isinstance(inp, dict)]
     by_name: dict[str, dict] = {}
     for inp in inputs:
@@ -1287,7 +1314,7 @@ def _render_subgraph_instance_line(
             annotations.append(ann)
         return ref if ref is not None else "None"
 
-    for pi in _promoted.promoted_inputs(promoted_sg, state.promoted_defs):
+    for pi in _promoted.promoted_inputs(sg_def, state.promoted_defs):
         rendered.add(pi.name)
         entry = by_name.get(pi.name)
         link_id = entry.get("link") if entry is not None else None
@@ -1298,9 +1325,7 @@ def _render_subgraph_instance_line(
             if text is None:
                 # ``pi`` and the definition index are this loop's own; the
                 # name-lookup entry point would re-derive both per widget.
-                value = _promoted.effective_value_for(
-                    state.workflow, node, promoted_sg, pi, ctx.graph, state.promoted_defs
-                )
+                value = _promoted.effective_value_for(state.workflow, node, sg_def, pi, ctx.graph, state.promoted_defs)
                 text = py_literal(None if value is _promoted.UNSET else value)
         elif pi.source_node is None and link_id is None and ctx.graph is not None:
             # Declared but backed by no boundary link: a legacy template still
@@ -1417,8 +1442,7 @@ def _promoted_header_line(def_id: str, sg_def: dict, state: _State) -> str | Non
     edit (``57.<name>``) and the one NOT to (``57/<id>.<name>``, the interior
     widget the host value overrides). ``None`` when nothing is promoted as a
     widget (socket-only inputs are links, not values)."""
-    promoted_sg = state.promoted_defs.get(str(sg_def.get("id")), sg_def)
-    pis = [p for p in _promoted.promoted_inputs(promoted_sg, state.promoted_defs) if p.is_widget]
+    pis = [p for p in _promoted.promoted_inputs(sg_def, state.promoted_defs) if p.is_widget]
     if not pis:
         return None
     first = state.first_instance_by_def.get(def_id, def_id)
@@ -1633,29 +1657,44 @@ def _render_definition_block(
     state.warnings.extend(f"subgraph {def_id}: {warning}" for warning in link_warnings)
 
     validate_links: list[list] = []
-    boundary_reasons: list[str] = []
     boundary_ignored: set[str] = set()
     interior_by_id = {str(node.get("id")): node for node in interior_nodes}
-    declared_inputs = [item for item in sg_def.get("inputs") or [] if isinstance(item, dict)]
+    definition_inputs = sg_def.get("inputs") or []
+    definition_outputs = sg_def.get("outputs") or []
     for lid, (oid, oslot, tid, tslot) in all_links.items():
         from_input_proxy = str(oid) == _PROXY_IN
         to_output_proxy = str(tid) == _PROXY_OUT
         if from_input_proxy:
             if not _is_slot_index(oslot) or oslot < 0:
-                boundary_reasons.append(f"subgraph {def_id}: link {lid} has invalid input-boundary slot {oslot!r}")
-            elif oslot >= len(declared_inputs):
+                boundary_ignored.add(str(lid))
+                state.warnings.append(
+                    f"subgraph {def_id}: link {lid} has invalid input-boundary slot {oslot!r}; it was ignored"
+                )
+            elif oslot >= len(definition_inputs):
                 boundary_ignored.add(str(lid))
                 state.warnings.append(
                     f"subgraph {def_id}: input link {lid} references input slot {oslot}, "
-                    f"but the definition has {len(declared_inputs)} inputs; it was ignored"
+                    f"but the definition has {len(definition_inputs)} inputs; it was ignored"
                 )
             if not to_output_proxy:
                 target = interior_by_id.get(str(tid))
-                if target is not None and not _is_slot_index(tslot):
-                    boundary_reasons.append(f"subgraph {def_id}: link {lid} has a non-integer target slot")
+                if target is not None and (not _is_slot_index(tslot) or tslot < 0):
+                    boundary_ignored.add(str(lid))
+                    state.warnings.append(
+                        f"subgraph {def_id}: link {lid} has invalid target slot {tslot!r}; it was ignored"
+                    )
         if to_output_proxy:
             if not _is_slot_index(tslot) or tslot < 0:
-                boundary_reasons.append(f"subgraph {def_id}: link {lid} has invalid output-boundary slot {tslot!r}")
+                boundary_ignored.add(str(lid))
+                state.warnings.append(
+                    f"subgraph {def_id}: link {lid} has invalid output-boundary slot {tslot!r}; it was ignored"
+                )
+            elif tslot >= len(definition_outputs):
+                boundary_ignored.add(str(lid))
+                state.warnings.append(
+                    f"subgraph {def_id}: output link {lid} references output slot {tslot}, "
+                    f"but the definition has {len(definition_outputs)} outputs; it was ignored"
+                )
             if not from_input_proxy:
                 source = interior_by_id.get(str(oid))
                 if source is None:
@@ -1664,7 +1703,10 @@ def _render_definition_block(
                         f"subgraph {def_id}: output link {lid} references missing interior node {oid}; it was ignored"
                     )
                 elif not _is_slot_index(oslot) or oslot < 0:
-                    boundary_reasons.append(f"subgraph {def_id}: link {lid} has invalid source slot {oslot!r}")
+                    boundary_ignored.add(str(lid))
+                    state.warnings.append(
+                        f"subgraph {def_id}: link {lid} has invalid source slot {oslot!r}; it was ignored"
+                    )
                 else:
                     outputs = source.get("outputs")
                     output_count = len(outputs) if isinstance(outputs, list) else 0
@@ -1679,7 +1721,6 @@ def _render_definition_block(
         validate_links.append([lid, oid, oslot, tid, tslot])
 
     reasons = [f"subgraph {def_id}: {error}" for error in link_errors]
-    reasons.extend(boundary_reasons)
     reasons.extend(_validate(interior_nodes, validate_links))
     if reasons:
         raise PrintUnsupported(reasons)
@@ -1697,10 +1738,11 @@ def _render_definition_block(
     # proxy (which ``_validate`` does not see): a stale target slot is stale
     # whatever feeds it.
     into_interior = [[lid, oid, oslot, tid, tslot] for lid, (oid, oslot, tid, tslot) in all_links.items()]
-    stale_warnings, stale_ids, retargeted, dependency_targets = _stale_input_slot_links(
+    stale_warnings, stale_ids, retargeted, dependency_targets, ignored_holders = _stale_input_slot_links(
         interior_nodes, into_interior, lambda nid: f"{first_instance}/{nid}", _PROXY_IN
     )
     state.warnings.extend(stale_warnings)
+    interior_nodes = _clear_ignored_link_holders(interior_nodes, ignored_holders)
     all_links = {lid: link for lid, link in all_links.items() if lid not in stale_ids}
     all_links = {
         lid: (oid, oslot, *retargeted.get(lid, (tid, tslot))) for lid, (oid, oslot, tid, tslot) in all_links.items()
@@ -1838,11 +1880,9 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         promoted_workflow = {**workflow, "definitions": definitions}
     if isinstance(subgraphs, list):
         normalised_subgraphs: list[Any] = []
-        promoted_subgraphs: list[Any] = []
         for subgraph in subgraphs:
             if not isinstance(subgraph, dict):
                 normalised_subgraphs.append(subgraph)
-                promoted_subgraphs.append(subgraph)
                 continue
             raw_interior = subgraph.get("nodes") or []
             if not isinstance(raw_interior, list):
@@ -1859,15 +1899,11 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
                     subgraph = {**subgraph, field: [], marker: True}
             interior = _normalise_node_inputs([node for node in raw_interior if isinstance(node, dict)], None)
             interior = _normalise_node_outputs(interior, None)
-            normalised = _retarget_definition_links({**subgraph, "nodes": interior})
+            normalised = _retarget_definition_links({**subgraph, "nodes": interior}, warnings)
             normalised_subgraphs.append(normalised)
-            promoted_subgraphs.append(_promoted_definition_view(normalised))
         subgraphs = normalised_subgraphs
         definitions = {**definitions, "subgraphs": subgraphs}
-        promoted_workflow = {
-            **workflow,
-            "definitions": {**definitions, "subgraphs": promoted_subgraphs},
-        }
+        promoted_workflow = {**workflow, "definitions": definitions}
     defs_by_id = {sg.get("id"): sg for sg in (subgraphs or []) if isinstance(sg, dict) and sg.get("id")}
 
     reasons = _validate(nodes, links)
@@ -1875,8 +1911,9 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         raise PrintUnsupported(reasons)
     broken_warnings, broken, links = _broken_links(nodes, links)
     warnings.extend(broken_warnings)
-    stale_warnings, stale_ids, retargeted, dependency_targets = _stale_input_slot_links(nodes, links)
+    stale_warnings, stale_ids, retargeted, dependency_targets, ignored_holders = _stale_input_slot_links(nodes, links)
     warnings.extend(stale_warnings)
+    nodes = _clear_ignored_link_holders(nodes, ignored_holders)
 
     link_map: dict[str, tuple] = {}
     for link in links:

@@ -300,6 +300,24 @@ def test_out_of_range_output_slot_renders_marked_instead_of_refusing(sd15_graph)
     ]
 
 
+def test_missing_output_metadata_is_unknown_not_broken(sd15_graph):
+    source = _node(1, "EmptyLatentImage", widgets=[512, 512, 1])
+    source.pop("outputs")
+    target = _node(
+        2,
+        "VAEDecode",
+        inputs=[
+            {"name": "samples", "type": "LATENT", "link": 1},
+            {"name": "vae", "type": "VAE", "link": None},
+        ],
+    )
+
+    res = render_py(_mini([source, target], [[1, 1, 0, 2, 0, "LATENT"]]), sd15_graph)
+
+    assert "samples=empty_latent_image.LATENT" in res.source
+    assert not any("BROKEN link 1" in warning for warning in res.warnings)
+
+
 def test_out_of_range_output_slot_inside_a_definition_is_marked_and_qualified(sd15_graph):
     wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
     graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
@@ -836,6 +854,15 @@ def test_non_integer_link_slot_renders_marked_not_raised(sd15_graph, slot):
     assert "samples BROKEN link 7: it has a non-integer slot" in res.source
 
 
+def test_non_string_node_type_is_reported_not_crashed():
+    wf = _mini([_node(1, {"not": "a class"})], [])
+
+    with pytest.raises(PrintUnsupported) as exc:
+        render_py(wf, None)
+
+    assert exc.value.reasons == ["node 1 has non-string type {'not': 'a class'}"]
+
+
 def test_malformed_input_entry_is_skipped_with_warning(sd15_graph):
     n = _node(2, "VAEDecode", inputs=[{"name": "samples", "type": "LATENT", "link": None}])
     n["inputs"].extend(["junk", 7])
@@ -1170,15 +1197,95 @@ def test_out_of_range_input_slot_fed_by_the_definition_input_proxy_is_reported(s
     sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
     tgt = sg["nodes"][0]
     sg["links"].append(
-        {"id": 9998, "origin_id": -10, "origin_slot": 99, "target_id": tgt["id"], "target_slot": 42, "type": "*"}
+        {"id": 9998, "origin_id": -10, "origin_slot": 0, "target_id": tgt["id"], "target_slot": 42, "type": "*"}
     )
     res = render_py(wf, graph)
     n_inputs = len(tgt.get("inputs") or [])
-    assert n_inputs >= 0
     assert any(
-        "input link 9998 references input slot 99" in warning and "it was ignored" in warning
+        f"link 9998 targets input slot 42 on node 10/{tgt['id']}, which has {n_inputs} inputs" in warning
+        and "was ignored" in warning
         for warning in res.warnings
     )
+
+
+def test_malformed_definition_boundary_slots_warn_and_drop(sd15_graph):
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    definition = {
+        "id": subgraph_id,
+        "name": "Malformed boundary slots",
+        "inputs": [{"name": "samples", "type": "LATENT", "linkIds": [1, 2]}],
+        "outputs": [{"name": "IMAGE", "type": "IMAGE", "linkIds": [3, 4]}],
+        "nodes": [
+            _node(
+                7,
+                "VAEDecode",
+                inputs=[
+                    {"name": "samples", "type": "LATENT", "link": 1},
+                    {"name": "vae", "type": "VAE", "link": 2},
+                ],
+                outputs=[{"name": "IMAGE", "type": "IMAGE"}],
+            )
+        ],
+        "links": [
+            {"id": 1, "origin_id": -10, "origin_slot": "0", "target_id": 7, "target_slot": 0},
+            {"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": -1},
+            {"id": 3, "origin_id": 7, "origin_slot": "0", "target_id": -20, "target_slot": 0},
+            {"id": 4, "origin_id": 7, "origin_slot": 0, "target_id": -20, "target_slot": -1},
+        ],
+    }
+    wf = _mini([_node(10, subgraph_id)], [])
+    wf["definitions"] = {"subgraphs": [definition]}
+
+    res = render_py(wf, sd15_graph)
+
+    assert "IN.samples" not in res.source
+    assert "OUT.IMAGE = None" in res.source
+    warnings = "\n".join(res.warnings)
+    assert "invalid input-boundary slot '0'; it was ignored" in warnings
+    assert "invalid target slot -1; it was ignored" in warnings
+    assert "invalid source slot '0'; it was ignored" in warnings
+    assert "invalid output-boundary slot -1; it was ignored" in warnings
+
+
+def test_definition_input_proxy_uses_raw_slot_positions(sd15_graph):
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    definition = {
+        "id": subgraph_id,
+        "name": "Raw boundary slots",
+        "inputs": [5, {"name": "samples", "type": "LATENT", "linkIds": [1]}],
+        "outputs": [],
+        "nodes": [
+            _node(
+                7,
+                "VAEDecode",
+                inputs=[
+                    {"name": "samples", "type": "LATENT", "link": 1},
+                    {"name": "vae", "type": "VAE", "link": None},
+                ],
+            )
+        ],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 1, "target_id": 7, "target_slot": 0}],
+    }
+    wf = _mini([_node(10, subgraph_id)], [])
+    wf["definitions"] = {"subgraphs": [definition]}
+
+    res = render_py(wf, sd15_graph)
+
+    assert "samples=IN.samples" in res.source
+    assert not any("references input slot 1" in warning for warning in res.warnings)
+
+
+def test_output_proxy_target_slot_out_of_range_is_dropped(sd15_graph):
+    wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
+    graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
+    sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
+    link = next(item for item in sg["links"] if str(item.get("target_id")) == "-20")
+    link["target_slot"] = 4
+
+    res = render_py(wf, graph)
+
+    assert "OUT.out4" not in res.source
+    assert any("references output slot 4, but the definition has 3 outputs; it was ignored" in w for w in res.warnings)
 
 
 def test_in_range_unheld_definition_input_proxy_link_is_ignored():
@@ -1245,6 +1352,29 @@ def test_link_row_is_retargeted_to_the_input_that_holds_it(sd15_graph):
     res = render_py(wf, sd15_graph)
     assert "samples=empty_latent_image" in next(line for line in res.source.splitlines() if "# 3" in line)
     assert "rendered through input 'samples' on node 3" in res.warnings[0]
+
+
+def test_duplicate_link_holder_is_ignored_without_creating_a_false_cycle():
+    wf = _mini(
+        [
+            _node(1, "A", inputs=[{"name": "from_c", "link": 2}], outputs=[{"name": "out", "links": [1]}]),
+            _node(2, "B", inputs=[{"name": "from_a", "link": 1}]),
+            _node(
+                3,
+                "C",
+                inputs=[{"name": "duplicate", "link": 1}],
+                outputs=[{"name": "out", "links": [2]}],
+            ),
+        ],
+        [[1, 1, 0, 2, 0], [2, 3, 0, 1, 0]],
+    )
+
+    res = render_py(wf, None)
+
+    assert [line.rsplit("# ", 1)[1].split()[0] for line in res.source.splitlines()] == ["3", "1", "2"]
+    assert "b = B(from_a=a" in res.source
+    assert "c = C(duplicate=None" in res.source
+    assert any("ignored duplicate holder input 'duplicate' on node 3" in warning for warning in res.warnings)
 
 
 def test_in_range_link_row_follows_the_actual_holder(sd15_graph):
@@ -1331,6 +1461,23 @@ def test_definition_retarget_preserves_a_declared_holder_when_an_earlier_duplica
 
     assert "IN.value" in res.source
     assert "promoted widgets: IN.value" in res.source
+
+
+def test_definition_retarget_emits_a_qualified_warning():
+    wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
+    graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
+    sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
+    link = next(item for item in sg["links"] if item.get("id") == 3)
+    link["target_id"] = 9
+    link["target_slot"] = 1
+
+    res = render_py(wf, graph)
+
+    assert any(
+        warning.startswith(f"subgraph {sg['id']}: link 3 targets input slot 1 on node 9")
+        and warning.endswith("rendered through input slot 0 on node 3, which holds it")
+        for warning in res.warnings
+    )
 
 
 def test_definition_input_to_output_passthrough_is_never_retargeted():
