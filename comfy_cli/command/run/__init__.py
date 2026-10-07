@@ -457,6 +457,8 @@ def execute(
     # `completed` record to `error` and flipping a successful run's exit to 1.
     completed_payload: dict | None = None
 
+    _reject_borrowed_wait(renderer, execution, wait)
+
     try:
         if wait:
             execution.connect()
@@ -792,6 +794,32 @@ def _write_state(state):
         return jobs_state.write(state)
     except (OSError, ValueError):
         return None
+
+
+def _reject_borrowed_wait(renderer, execution, wait: bool) -> None:
+    """Refuse --wait on a borrowed client_id before execute() ever tries to
+    connect, so the condition doesn't add a branch to that function's already
+    at-ceiling cyclomatic complexity (see the mccabe ratchet note in
+    pyproject.toml). Without this, execution.connect() would raise
+    RuntimeError instead -- it refuses to open a websocket as a borrowed
+    clientId, since that would evict the client this run submits on behalf
+    of. cmdline.py already rejects --wait combined with --client-id before
+    dispatch, so this is unreachable through the CLI; it exists for a
+    programmatic caller that constructs WorkflowExecution directly with
+    wait=True and a borrowed client_id, bypassing that validation.
+    """
+    if not (wait and execution.borrowed_client_id):
+        return
+    renderer.error(
+        code="client_id_rejected",
+        message=(
+            f"refusing to open a websocket as borrowed clientId {execution.client_id!r}: "
+            "it would evict the client this run submits on behalf of"
+        ),
+        hint="drop --client-id, or call without wait=True",
+        details={"reason": "borrowed"},
+    )
+    raise typer.Exit(code=1)
 
 
 def _mark_cancelled(state):
