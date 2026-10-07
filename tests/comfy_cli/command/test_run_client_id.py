@@ -731,7 +731,7 @@ class TestAnAlreadyTerminalFailureIsTrimmedToo:
             "exception_message": "boom",
             "node_id": "5",
             "traceback": [f"frame{i}" for i in range(12)],
-            "current_inputs": {"api_key": "sk-SECRET-123"},
+            "current_inputs": {"api_key": "sk-redact-me"},
         },
     }
 
@@ -753,7 +753,7 @@ class TestAnAlreadyTerminalFailureIsTrimmedToo:
         assert "error" not in env["error"]["details"]
 
     def test_a_secret_in_current_inputs_does_not_reach_the_envelope(self):
-        assert "sk-SECRET-123" not in json.dumps(self._env())
+        assert "sk-redact-me" not in json.dumps(self._env())
 
     def test_the_traceback_is_capped_to_its_tail(self):
         env = self._env()
