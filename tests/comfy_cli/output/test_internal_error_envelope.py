@@ -281,3 +281,9 @@ def test_internal_error_scrubber_marks_truncated_messages():
     scrubbed = _internal_error_message(RuntimeError(message))
     assert "password" not in scrubbed
     assert scrubbed.endswith("…")
+
+
+def test_internal_error_scrubber_preserves_text_after_an_unquoted_value():
+    scrubbed = _internal_error_message(RuntimeError("bad option 'token=abc' given; retry later"))
+    assert "abc" not in scrubbed
+    assert "bad option 'token=***' given; retry later" in scrubbed

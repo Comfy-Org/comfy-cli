@@ -1837,6 +1837,22 @@ class Graph:
                 return selector, keys
         return None
 
+    def widget_default_for_node(self, class_name: str, widget: str, widgets_values: list[Any] | None = None) -> Any:
+        """Schema default for ``widget`` in the node's active dynamic layout.
+
+        Unlike :meth:`widget_defaults`, this follows the outer selections in
+        ``widgets_values`` before locating a nested selector, so a truncated
+        node does not borrow the same-named selector default from the first
+        outer option.
+        """
+        m = self._nodes.get(class_name)
+        if m is None:
+            return None
+        for entry in _expand_widget_entries(m, widgets_values or []):
+            if entry.name == widget and entry.port is not None:
+                return _widget_default(entry.port)
+        return None
+
     def widget_defaults(self, class_name: str) -> dict[str, Any]:
         """Default value per widget-order name — including dynamic-combo selectors
         (first key), their sub-widgets, and control_after_generate. Used by

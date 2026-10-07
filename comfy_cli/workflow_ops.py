@@ -3216,7 +3216,7 @@ def _other_option_widget_error(
         if idx < len(widgets_values):
             current = widgets_values[idx]
     if current is absent:
-        current = graph.widget_defaults(class_type).get(selector)
+        current = graph.widget_default_for_node(class_type, selector, widgets_values)
     options = " or ".join(repr(k) for k in keys)
     addr = f"{node_id}.{selector}" if node_id is not None else selector
     return ValueError(
