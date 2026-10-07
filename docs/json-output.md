@@ -71,6 +71,28 @@ it reconnects.
 is the union of what the watch observed and what `/history` records for the
 prompt, so it is populated even for a watch that attached after the job ended.
 
+`data.poll_reason` says why a watch polled instead of opening a socket, and is
+`null` when it attached (and on a prompt that was already terminal, which opens
+no socket either). `"borrowed"` means the run was submitted for another client
+that is receiving its events — drop `--client-id` and keep polling.
+`"indeterminate"` means nothing could vouch for the run — retry once the server
+answers. `data.attached` alone cannot separate those two, and they want opposite
+responses, which is why the reason is published rather than only printed.
+
+**`data.execution_error` on a failed watch.** Any `jobs watch` that ends in
+`status: "error"` — not just a borrowed or poll-only one — carries the node's
+structured failure under `data.execution_error`, never under
+`data.details.error`. Both of the command's exits do this: the live/poll path
+and the short-circuit for a prompt that had already failed before the watch
+started. `data.details` keeps the rest of the record on the paths that have one.
+The key is what the shared error classifier reads to produce
+`error.code` / `error.message` / `error.hint` — the same path `comfy run` uses —
+so a failure left anywhere else reaches the envelope unclassified, and also
+unredacted: `current_inputs` is scrubbed and `traceback` capped to its last two
+frames only for the value under this key. Earlier builds of this branch put it
+at `data.details.error` (live path) and `data.error` (terminal path); neither is
+published any more.
+
 ## Overview
 
 When `--json` is passed, `comfy run` switches into a strict
