@@ -1563,6 +1563,13 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "release still serving",
     ),
     ErrorCode(
+        "deploy_updates_unavailable",
+        "The command needs deployment updates, which are not on for this workspace yet: the deployment "
+        "carries no `revision`. `comfy deploy events --release` uses it, since only there does each event "
+        "say which release made it. `details.deployment_id` names the deployment that was read.",
+        "run the command without the option that needs updates; the message names it",
+    ),
+    ErrorCode(
         "deploy_delete_needs_confirm",
         "`comfy deploy delete` was run without `--yes` in a non-interactive context. The irreversible "
         "teardown and soft-delete are refused without explicit consent; `details.deploymentId` names the "

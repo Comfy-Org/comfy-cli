@@ -189,6 +189,99 @@ def test_older_release_reports_behind_with_latest_deployable_and_new_url_hint(tm
     assert "new url" in result.stderr.lower()
 
 
+def test_a_deployment_inside_the_rollout_is_told_up_moves_it_keeping_its_url(tmp_path, monkeypatch) -> None:
+    # Given a deployment whose read carries a revision, so the workspace has updates
+    row = _status_deployment("release-3")
+    row["revision"] = 4
+    _install_clients(monkeypatch, FakeBuilder([_release(3), _release(5)]), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    stderr = " ".join(result.stderr.split())
+    assert "moves this deployment to it, keeping its URL" in stderr
+    assert "new url" not in stderr.lower()
+
+
+def _waiting(row: JsonObject, release_id: str = "release-5", kind: object = "update") -> JsonObject:
+    row["revision"] = 4
+    row["pendingUpdate"] = {
+        "releaseId": release_id,
+        "baseRevision": 4,
+        "status": "starting",
+        "since": "2026-10-07T16:20:00Z",
+        "kind": kind,
+        "fromRevision": None,
+    }
+    return row
+
+
+def test_status_shows_the_update_a_deployment_waits_on(tmp_path, monkeypatch) -> None:
+    # Given a deployment on release 3 waiting for release 5's copy
+    row = _waiting(_status_deployment("release-3"))
+    _install_clients(monkeypatch, FakeBuilder([_release(3), _release(5)]), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then the update names its release by version, and the release still serving stays the current one
+    assert result.exit_code == 0, result.stderr
+    data = _json_envelope(result)["data"]
+    assert data["update"] == {
+        "release": {"id": "release-5", "version": 5},
+        "status": "starting",
+        "since": "2026-10-07T16:20:00Z",
+        "kind": "update",
+    }
+    assert data["release"]["id"] == "release-3"
+    jsonschema.Draft202012Validator(_schema("deploy_status.json")).validate(data)
+
+
+def test_the_update_line_names_the_release_and_its_copy(tmp_path, monkeypatch) -> None:
+    # Given
+    row = _waiting(_status_deployment("release-3"), kind="rollback")
+    _install_clients(monkeypatch, FakeBuilder([_release(3), _release(5)]), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_pretty(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert "Rolling back to release v5: its copy is starting" in result.stdout
+
+
+def test_an_update_to_a_release_the_build_does_not_list_still_reads(tmp_path, monkeypatch) -> None:
+    # Given a waiting update whose release the Build's list omits, and an unknown kind
+    row = _waiting(_status_deployment("release-3"), release_id="release-9", kind=None)
+    _install_clients(monkeypatch, FakeBuilder([_release(3)]), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then the release is named by id and the kind reads as an update
+    assert result.exit_code == 0, result.stderr
+    update = _json_envelope(result)["data"]["update"]
+    assert update["release"] == {"id": "release-9"}
+    assert update["kind"] == "update"
+
+
+def test_a_settled_deployment_has_no_update_field(tmp_path, monkeypatch) -> None:
+    # Given
+    row = _status_deployment()
+    row["revision"] = 2
+    row["pendingUpdate"] = None
+    _install_clients(monkeypatch, FakeBuilder([_release(5)]), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert "update" not in _json_envelope(result)["data"]
+
+
 class SummaryListDeploy(RecordingDeploy):
     """The list endpoint's summary shape: no `error` and no `serving`."""
 
@@ -709,3 +802,93 @@ def test_watch_exits_promptly_on_stop_failed_with_retry_stop_hint(tmp_path, monk
     assert client.get_calls == ["dep-status"]
     assert client.get_statuses == ["ready"]
     assert sleeps == []
+
+
+def test_no_behind_hint_while_the_move_to_the_newest_release_waits(tmp_path, monkeypatch) -> None:
+    # Given a deployment on release 3 already moving to release 5, the newest
+    row = _waiting(_status_deployment("release-3"))
+    _install_clients(monkeypatch, FakeBuilder([_release(3), _release(5)]), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_pretty(write_spec(tmp_path))
+
+    # Then the update line stands alone, with no hint to start it
+    assert result.exit_code == 0, result.stderr
+    assert "Updating to release v5" in result.stdout
+    assert "is deployable" not in result.stdout + result.stderr
+
+
+def test_a_waiting_update_with_an_unreadable_since_is_a_shape_error(tmp_path, monkeypatch) -> None:
+    # Given
+    row = _waiting(_status_deployment("release-3"))
+    row["pendingUpdate"]["since"] = "yesterday"
+    _install_clients(monkeypatch, FakeBuilder([_release(3), _release(5)]), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 1
+    assert _json_envelope(result)["error"]["code"] == "deploy_server_error"
+
+
+def test_the_interrupt_fallback_survives_a_malformed_waiting_update() -> None:
+    # Given a last read whose pendingUpdate made the full result fail
+    module = importlib.import_module("comfy_cli.command.deploy_status")
+    row = _waiting(_status_deployment("release-3"))
+    row["pendingUpdate"]["since"] = "yesterday"
+    target = module.StatusTarget("build-1", "example", row)
+
+    # When
+    result = module._interrupted_result(FakeBuilder([_release(3), _release(5)]), target)
+
+    # Then the interrupt still reports the deployment, without the update
+    assert result.deployment["id"] == "dep-status"
+    assert result.update is None
+
+
+def test_the_behind_hint_waits_for_an_update_to_an_older_release(tmp_path, monkeypatch) -> None:
+    # Given a deployment on release 3 waiting on release 4, with release 5 the newest
+    row = _waiting(_status_deployment("release-3"), release_id="release-4")
+    builder = FakeBuilder([_release(3), _release(4), _release(5)])
+    _install_clients(monkeypatch, builder, RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_pretty(write_spec(tmp_path))
+
+    # Then the hint does not send someone to a move the service would refuse now
+    output = result.stdout + result.stderr
+    assert result.exit_code == 0, result.stderr
+    assert "once the waiting update lands or fails" in output
+    assert "keeping its URL" not in output
+
+
+def test_the_behind_hint_names_the_deployment_up_should_move(tmp_path, monkeypatch) -> None:
+    # Given
+    row = _status_deployment("release-3")
+    row["revision"] = 4
+    _install_clients(monkeypatch, FakeBuilder([_release(3), _release(5)]), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then
+    assert "`comfy deploy up --deployment dep-status` moves this deployment" in " ".join(result.stderr.split())
+
+
+def test_a_failed_update_to_the_newest_release_says_so_and_keeps_the_hint(tmp_path, monkeypatch) -> None:
+    # Given the waiting update to release 5, the newest, failed
+    row = _waiting(_status_deployment("release-3"))
+    row["pendingUpdate"]["status"] = "failed"
+    _install_clients(monkeypatch, FakeBuilder([_release(3), _release(5)]), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_pretty(write_spec(tmp_path))
+
+    # Then
+    output = " ".join((result.stdout + result.stderr).split())
+    assert result.exit_code == 0, result.stderr
+    assert "The update to release v5 failed" in output
+    assert "release v5 is deployable" in output
+    assert "the waiting update failed: read `comfy deploy events --deployment dep-status`" in output
+    assert "lands or fails" not in output

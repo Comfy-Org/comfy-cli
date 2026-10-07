@@ -277,8 +277,14 @@ comfy deploy status <dir>
   `error`.
 - **`release`** — the deployed release's id and version, plus **`behind`** and
   **`latestDeployable`**. `behind: true` means a newer deployable release exists
-  and this deployment is not running it. Moving to it means a **new deployment**
-  with a new endpoint URL, and retiring the old one — see the cost model above.
+  and this deployment is not running it. Where the workspace has deployment
+  updates (the deployment carries a `revision`), `comfy deploy up` moves this
+  deployment to it and the endpoint URL stays; elsewhere moving to it means a
+  **new deployment** with a new endpoint URL, and retiring the old one — see the
+  cost model above.
+- **`update`** — present only while the deployment waits on a move: the
+  `release` it moves to, its copy's `status`, `since`, and `kind` (`update` or
+  `rollback`). The deployment keeps serving `release` until that copy is ready.
 - **`serving`**: `capacity` (`ready`, `busy` and `starting` workers, the same on
   every GPU provider), `jobsInQueue`, and `sampledAt`. It is a sample, not a live
   feed; `sampledAt` is how stale it is. A deprecated `workers` object carries the
@@ -291,12 +297,16 @@ The rest are narrower:
 - **`logs`** — ComfyUI's captured log snapshot with a `capturedAt`. Periodic, not
   real-time, and `capturedAt` may be null if nothing was ever captured.
 - **`events`** — the ordered status transitions with timestamps and messages.
-  This is how you find out *why* something reached `failed`, which `status` only
-  reports as a state.
-- **`ls`** — live deployments of this Build. `--all` includes soft-deleted ones,
-  `--workspace` covers every Build, `--status` filters server-side, `--limit`
-  defaults to 20 and caps at 100. Reach for `--workspace` when hunting for
-  compute nobody accounted for.
+  After a move it carries every copy's transitions, each with its `releaseId`;
+  `--release v5` keeps one release's (it needs deployment updates and exits
+  `deploy_updates_unavailable` without them). Only `events` takes a version
+  there; `up --release` takes a release id. This is how you find out *why*
+  something reached `failed`, which `status` only reports as a state.
+- **`ls`** — live deployments of this Build, each row with its `releaseVersion`.
+  `--all` includes soft-deleted ones, `--workspace` covers every Build (rows there
+  keep only the `releaseId`), `--status` filters server-side, `--limit` defaults
+  to 20 and caps at 100. Reach for `--workspace` when hunting for compute nobody
+  accounted for.
 
 ## Giving compute back
 
