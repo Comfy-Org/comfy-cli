@@ -26,6 +26,8 @@ class DeployUpClient(Protocol):
 
     def move_deployment(self, deployment_id: str, base_revision: int, release_id: str) -> JsonObject: ...
 
+    def promote_deployment(self, deployment_id: str, base_revision: int, from_deployment_id: str) -> JsonObject: ...
+
     def get_compute_catalog(self) -> JsonObject: ...
 
     def get_deploy_estimate(self, release_id: str, gpu_class: str, region: str) -> JsonObject: ...
@@ -154,6 +156,19 @@ def move_outcome(snapshot: JsonObject, release_id: str) -> str | None:
     if optional_revision(snapshot) is None:
         return "landed" if serving == release_id else None
     return "landed" if serving == release_id else "failed"
+
+
+def move_changed(moved: JsonObject, base_revision: int, release_id: str, previous_id: str) -> bool:
+    """Whether the reply to a move onto ``release_id`` says anything changed.
+
+    The service answers at the same revision when the deployment already
+    serves the release. A reply with no revision is one its rollout check
+    failed to answer, so only the releases say whether a move was asked.
+    """
+    if isinstance(moved.get("pendingUpdate"), dict):
+        return True
+    revision = optional_revision(moved)
+    return release_id != previous_id if revision is None else revision > base_revision
 
 
 class ComputeRequiredError(Exception):

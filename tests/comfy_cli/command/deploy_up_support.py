@@ -76,6 +76,7 @@ class FakeDeploy:
         estimate: JsonObject | Exception | None = None,
         move: str = "landed",
         get_patches: list[JsonObject] | None = None,
+        strip_move_reply: bool = False,
     ) -> None:
         self.rows = {str(row["id"]): copy.deepcopy(row) for row in rows or []}
         self.generation_barrier = generation_barrier
@@ -95,7 +96,11 @@ class FakeDeploy:
         # the new release's copy (202), and "unchanged" answers 200 at the
         # revision it was asked against.
         self.move = move
+        # A reply the service's rollout check failed to answer: no revision
+        # and no pendingUpdate, though the move went through.
+        self.strip_move_reply = strip_move_reply
         self.move_calls: list[tuple[str, int, str]] = []
+        self.promote_calls: list[tuple[str, int, str]] = []
         # Raised by the next worker-bounds edit, when set.
         self.update_error: DeployAPIError | None = None
         # Merged into the row on each read after a move, one per read.
@@ -147,7 +152,7 @@ class FakeDeploy:
         with self._lock:
             self.get_ids.append(deployment_id)
             row = self.rows[deployment_id]
-            if self.move_calls and self.get_patches:
+            if (self.move_calls or self.promote_calls) and self.get_patches:
                 row.update(self.get_patches.pop(0))
             if self.get_statuses:
                 row["status"] = self.get_statuses.pop(0)
@@ -164,25 +169,43 @@ class FakeDeploy:
     def move_deployment(self, deployment_id: str, base_revision: int, release_id: str) -> JsonObject:
         with self._lock:
             self.move_calls.append((deployment_id, base_revision, release_id))
-            row = self.rows[deployment_id]
-            if row.get("revision") != base_revision:
-                raise DeployAPIError("deploy_conflict", "stale revision", status=409)
-            if self.move == "landed":
-                row["releaseId"] = release_id
-                row["revision"] = base_revision + 1
-            elif self.move == "pending":
-                row["pendingUpdate"] = {
-                    "releaseId": release_id,
-                    "baseRevision": base_revision,
-                    "status": "provisioning",
-                    "since": "2026-10-07T12:00:00Z",
-                    "kind": "update",
-                }
-            else:
-                # Another change landed the release first, so the service
-                # answers at the revision it was asked against.
-                row["releaseId"] = release_id
+            return self._apply_move(deployment_id, base_revision, release_id)
+
+    def promote_deployment(self, deployment_id: str, base_revision: int, from_deployment_id: str) -> JsonObject:
+        with self._lock:
+            self.promote_calls.append((deployment_id, base_revision, from_deployment_id))
+            release_id = self.rows[from_deployment_id]["releaseId"]
+            reply = self._apply_move(deployment_id, base_revision, release_id)
+            if self.strip_move_reply:
+                reply.pop("revision", None)
+                reply.pop("pendingUpdate", None)
+            return reply
+
+    def _apply_move(self, deployment_id: str, base_revision: int, release_id: str) -> JsonObject:
+        """Call with the lock held."""
+        row = self.rows[deployment_id]
+        # The service answers at the same revision, before it checks the base,
+        # when the deployment already serves the release.
+        if row.get("releaseId") == release_id and not isinstance(row.get("pendingUpdate"), dict):
             return copy.deepcopy(row)
+        if row.get("revision") != base_revision:
+            raise DeployAPIError("deploy_conflict", "stale revision", status=409)
+        if self.move == "landed":
+            row["releaseId"] = release_id
+            row["revision"] = base_revision + 1
+        elif self.move == "pending":
+            row["pendingUpdate"] = {
+                "releaseId": release_id,
+                "baseRevision": base_revision,
+                "status": "provisioning",
+                "since": "2026-10-07T12:00:00Z",
+                "kind": "update",
+            }
+        else:
+            # Another change landed the release first, so the service
+            # answers at the revision it was asked against.
+            row["releaseId"] = release_id
+        return copy.deepcopy(row)
 
     def start_deployment(self, deployment_id: str) -> JsonObject:
         with self._lock:

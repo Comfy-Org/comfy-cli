@@ -28,6 +28,7 @@ ENDPOINT_ORIGIN = f"https://{DEPLOYMENT_ID}.run.comfy.app"
 
 class DeployFixtureKind(Enum):
     UP = "up"
+    PROMOTE = "promote"
     STATUS = "status"
     LS = "ls"
     SHOW = "show"
@@ -61,6 +62,7 @@ def _deployment() -> JsonObject:
         "computeConfig": {"gpuClass": "l4", "region": "US-MO-2", "min": 0, "max": 1},
         "endpointUrl": ENDPOINT_ORIGIN,
         "serving": None,
+        "revision": 1,
     }
 
 
@@ -85,6 +87,7 @@ class DeployRecordingTransport:
         routes: dict[tuple[str, str], tuple[int, JsonObject]] = {
             ("GET", "/v1/deployments"): (200, {"deployments": [row]}),
             ("GET", f"/v1/deployments/{DEPLOYMENT_ID}"): (200, row),
+            ("GET", "/v1/deployments/dep-source"): (200, {**row, "id": "dep-source"}),
             ("POST", f"/v1/deployments/{DEPLOYMENT_ID}/stop"): (202, {**row, "status": "stopping"}),
             ("POST", f"/v1/deployments/{DEPLOYMENT_ID}/start"): (202, {**row, "status": "queued"}),
             ("DELETE", f"/v1/deployments/{DEPLOYMENT_ID}"): (204, {}),
@@ -140,6 +143,8 @@ def prepare_deploy(kind: DeployFixtureKind, root: Path) -> list[str]:
     match kind:
         case DeployFixtureKind.UP:
             return ["deploy", "up", "--release", RELEASE_ID, "--gpu", "l4", "--region", "US-MO-2"]
+        case DeployFixtureKind.PROMOTE:
+            return ["deploy", "promote", "dep-source", DEPLOYMENT_ID, "--no-watch"]
         case DeployFixtureKind.STATUS:
             write_spec(root, build_id=BUILD_ID, models=[], nodes=[])
             return ["deploy", "status", str(root)]
