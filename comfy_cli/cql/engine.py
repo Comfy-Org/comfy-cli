@@ -2566,7 +2566,8 @@ def _widget_default(p: Port) -> Any:
     if p.is_dynamic_group:
         return p.options.min or 0
     if p.dynamic_options:
-        if p.options.default is not None:
+        option_keys = [option.get("key") for option in p.dynamic_options if option.get("key") is not None]
+        if p.options.default is not None and p.options.default in option_keys:
             return p.options.default
         return p.enum_values[0] if p.enum_values else None
     if p.options.default is not None:
@@ -3695,7 +3696,8 @@ def _def_contains_type(sg: dict, type_name: str, by_id: dict[str, dict]) -> bool
         if id(cur) in seen:
             continue
         seen.add(id(cur))
-        for n in cur.get("nodes") or []:
+        raw_nodes = cur.get("nodes")
+        for n in raw_nodes if isinstance(raw_nodes, list) else []:
             if not isinstance(n, dict):
                 continue
             node_type = n.get("type")

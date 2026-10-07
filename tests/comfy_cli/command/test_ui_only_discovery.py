@@ -120,6 +120,56 @@ def test_ls_nodes_marks_a_unique_definition_name_used_as_the_instance_type(patch
     assert row.get("subgraph") is True, row
 
 
+@pytest.mark.parametrize(
+    "definitions",
+    [[], {"subgraphs": 1}, {"subgraphs": [{"id": "x", "name": "KSampler", "nodes": 1}]}],
+)
+def test_ls_nodes_tolerates_malformed_definitions_shape(patched_graph, tmp_path, capsys, definitions):
+    wf = _base_workflow()
+    wf["definitions"] = definitions
+
+    rows = _ls_rows(tmp_path, capsys, wf)
+    assert 3 in rows and 7 in rows
+
+
+def test_ls_nodes_does_not_treat_a_real_class_as_a_self_named_subgraph(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    wf["definitions"] = {
+        "subgraphs": [
+            {
+                "id": _SG_UUID,
+                "name": "KSampler",
+                "nodes": [{"id": 100, "type": "KSampler", "inputs": [], "outputs": []}],
+                "links": [],
+                "inputs": [],
+                "outputs": [],
+            }
+        ]
+    }
+
+    rows = _ls_rows(tmp_path, capsys, wf)
+    ksampler = next(row for row in rows.values() if row["type"] == "KSampler")
+    assert "subgraph" not in ksampler, ksampler
+
+
+@pytest.mark.parametrize(
+    "definition",
+    [
+        {"id": "KSampler", "nodes": [], "links": [], "inputs": [], "outputs": []},
+        {"id": _SG_UUID, "name": "KSampler", "nodes": [], "links": [], "inputs": [], "outputs": []},
+    ],
+)
+def test_ls_nodes_class_identity_wins_over_a_definition_collision(patched_graph, tmp_path, capsys, definition):
+    wf = _base_workflow()
+    wf["definitions"] = {"subgraphs": [definition]}
+    ksampler_node = next(node for node in wf["nodes"] if node["type"] == "KSampler")
+    ksampler_node["properties"] = {"Node name for S&R": "KSampler"}
+
+    rows = _ls_rows(tmp_path, capsys, wf)
+    ksampler = next(row for row in rows.values() if row["type"] == "KSampler")
+    assert "subgraph" not in ksampler, ksampler
+
+
 def test_ls_nodes_real_classes_stay_clean(patched_graph, tmp_path, capsys):
     rows = _ls_rows(tmp_path, capsys, _wf_with_reroute_and_subgraph())
     for nid in (3, 7):
