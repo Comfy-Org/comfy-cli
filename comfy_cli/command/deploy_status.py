@@ -37,6 +37,8 @@ from comfy_cli.command.deploy_runtime import (
 from comfy_cli.command.deploy_types import (
     DeployUpClient,
     compute_config,
+    optional_revision,
+    release_label,
     release_summary,
     required_int,
     required_string,
@@ -69,6 +71,11 @@ class StatusResult:
     serving: JsonObject | None
     # Where a deployment that is coming up has got to, as the service sent it.
     progress: JsonObject | None = None
+    # The release the deployment moves to once its copy is ready, while one waits.
+    update: JsonObject | None = None
+    # Whether the workspace has deployment updates, read off the deployment's
+    # revision, which the service sends only inside that rollout.
+    updates_on: bool = False
 
     def payload(self) -> JsonObject:
         payload: JsonObject = {
@@ -81,6 +88,8 @@ class StatusResult:
         # service that never sends it.
         if self.progress is not None:
             payload["progress"] = self.progress
+        if self.update is not None:
+            payload["update"] = self.update
         return payload
 
 
@@ -210,7 +219,31 @@ def status_result(builder: BuilderReleaseClient, target: StatusTarget) -> Status
         release,
         _normalized_serving(deployment),
         progress_of(deployment),
+        _waiting_update(deployment, releases),
+        optional_revision(deployment) is not None,
     )
+
+
+def _waiting_update(deployment: JsonObject, releases: list[JsonObject]) -> JsonObject | None:
+    pending = deployment.get("pendingUpdate")
+    if pending is None:
+        return None
+    if not isinstance(pending, dict):
+        raise server_shape_error("the deployment has an invalid pendingUpdate")
+    release_id = required_string(pending, "releaseId")
+    listed = next((release for release in releases if release.get("id") == release_id), None)
+    since = required_string(pending, "since")
+    try:
+        parse_rfc3339(since)
+    except ValueError as error:
+        raise server_shape_error("the deployment's pendingUpdate has an invalid since", field="since") from error
+    kind = pending.get("kind")
+    return {
+        "release": release_summary(listed) if listed is not None else {"id": release_id},
+        "status": required_string(pending, "status"),
+        "since": since,
+        "kind": kind if isinstance(kind, str) and kind else "update",
+    }
 
 
 def _interrupted_result(builder: BuilderReleaseClient, target: StatusTarget) -> StatusResult:
@@ -234,7 +267,16 @@ def _interrupted_result(builder: BuilderReleaseClient, target: StatusTarget) -> 
             None,
             _normalized_serving(deployment),
             progress_of(deployment),
+            _waiting_update_or_none(deployment),
         )
+
+
+def _waiting_update_or_none(deployment: JsonObject) -> JsonObject | None:
+    # The fallback must not raise what made the full result fail.
+    try:
+        return _waiting_update(deployment, [])
+    except DeployAPIError:
+        return None
 
 
 def _sample_age(sampled_at: str) -> str:
@@ -346,6 +388,40 @@ def _render_deployment(renderer: Renderer, deployment: JsonObject) -> str:
     return status
 
 
+def _moving_to_latest(result: StatusResult) -> bool:
+    """Whether the waiting update already goes to the newest deployable release,
+    so the hint to move there would tell someone to start what is under way."""
+    if result.update is None or result.release is None or result.update["status"] == "failed":
+        return False
+    target = result.update["release"]
+    latest = result.release.get("latestDeployable")
+    return isinstance(target, dict) and isinstance(latest, dict) and target.get("id") == latest.get("id")
+
+
+def _update_line(update: JsonObject) -> str:
+    release = update["release"]
+    assert isinstance(release, dict)  # _waiting_update builds it
+    noun, verb = ("rollback", "Rolling back") if update.get("kind") == "rollback" else ("update", "Updating")
+    if update["status"] == "failed":
+        return f"The {noun} to {release_label(release)} failed; the deployment still serves its current release."
+    return f"{verb} to {release_label(release)}: its copy is {update['status']}, asked {update['since']}."
+
+
+def _behind_hint(result: StatusResult, deployment_id: str) -> str:
+    if not result.updates_on:
+        return "running `comfy deploy up` creates a new deployment with a new URL"
+    if result.update is not None and result.update.get("status") == "failed":
+        # The service drops a failed update itself, after which a move is taken.
+        return (
+            f"the waiting update failed: read `comfy deploy events --deployment {deployment_id}`, then run "
+            f"`comfy deploy up --deployment {deployment_id}` once status shows no update"
+        )
+    if result.update is not None:
+        # The service refuses a second move while one waits.
+        return f"once the waiting update lands or fails, `comfy deploy up --deployment {deployment_id}` moves it there"
+    return f"running `comfy deploy up --deployment {deployment_id}` moves this deployment to it, keeping its URL"
+
+
 def render_status(renderer: Renderer, result: StatusResult) -> None:
     deployment = result.deployment
     if deployment is None:
@@ -358,20 +434,22 @@ def render_status(renderer: Renderer, result: StatusResult) -> None:
 
     status = _render_deployment(renderer, deployment)
     if renderer.is_pretty():
+        if result.update is not None:
+            renderer.info(_update_line(result.update))
         if result.progress is not None:
             renderer.info(describe_progress(result.progress, now=datetime.now(timezone.utc)))
         _render_error(renderer, deployment)
         _render_stop_reason(renderer, deployment)
         _render_serving(renderer, result.serving, status)
     release = result.release
-    if release is not None and release.get("behind") is True:
+    if release is not None and release.get("behind") is True and not _moving_to_latest(result):
         latest = release.get("latestDeployable")
         if not isinstance(latest, dict):
             raise server_shape_error("a behind release has no latestDeployable")
         renderer.warn(
             f"Deployment {required_string(deployment, 'id')} runs release v{required_int(release, 'version')}; "
             f"release v{required_int(latest, 'version')} is deployable.",
-            hint="running `comfy deploy up` creates a new deployment with a new URL",
+            hint=_behind_hint(result, required_string(deployment, "id")),
         )
     terminal = status in {"failed", "stop_failed"}
     renderer.emit(

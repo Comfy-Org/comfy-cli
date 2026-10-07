@@ -201,3 +201,9 @@ def compute_config(deployment: JsonObject) -> JsonObject:
 
 def release_summary(release: JsonObject) -> JsonObject:
     return {"id": required_string(release, "id"), "version": required_int(release, "version")}
+
+
+def release_label(release: JsonObject) -> str:
+    """`release v5`, or `release <id>` for a release whose version is unknown."""
+    version = release.get("version")
+    return f"release v{version}" if isinstance(version, int) else f"release {release.get('id')}"

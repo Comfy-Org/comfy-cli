@@ -17,7 +17,7 @@ from comfy_cli.command.deploy_resolve import (
 )
 from comfy_cli.command.deploy_runtime import terminal_status_error
 from comfy_cli.command.deploy_types import NOT_MOVABLE as _NOT_MOVABLE
-from comfy_cli.command.deploy_types import ComputeRequiredError, DeployUpClient, UpRequest, UpResult
+from comfy_cli.command.deploy_types import ComputeRequiredError, DeployUpClient, UpRequest, UpResult, release_label
 from comfy_cli.command.deploy_types import compute_config as _compute_config
 from comfy_cli.command.deploy_types import move_outcome as _move_outcome
 from comfy_cli.command.deploy_types import optional_revision as _optional_revision
@@ -468,11 +468,6 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         updated = client.update_deployment(deployment_id, desired)
         return UpResult(updated, _release_summary(request.release), desired, supersedes, False, True)
     return UpResult(existing, _release_summary(request.release), compute, supersedes, False, False)
-
-
-def release_label(release: JsonObject) -> str:
-    version = release.get("version")
-    return f"release v{version}" if isinstance(version, int) else f"release {release.get('id')}"
 
 
 def move_line(result: UpResult, deployment_id: str) -> str | None:

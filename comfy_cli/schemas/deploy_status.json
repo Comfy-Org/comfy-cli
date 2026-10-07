@@ -59,6 +59,26 @@
         }
       }
     },
+    "update": {
+      "type": "object",
+      "description": "The update the deployment waits on, present only while one waits: the release it moves to once that release's copy is ready, the copy's status, when it was asked, and its kind (update or rollback; read an unknown value as an update).",
+      "required": ["release", "status", "since", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "release": {
+          "type": "object",
+          "required": ["id"],
+          "additionalProperties": false,
+          "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "version": {"type": "integer", "minimum": 1}
+          }
+        },
+        "status": {"type": "string", "minLength": 1},
+        "since": {"type": "string", "format": "date-time"},
+        "kind": {"type": "string", "minLength": 1}
+      }
+    },
     "serving": {
       "type": ["object", "null"],
       "required": ["capacity", "jobsInQueue", "sampledAt"],

@@ -197,8 +197,18 @@ def logs_cmd(path: DeployPath = None, deployment_id: DeploymentOption = None) ->
 
 @app.command("events", help="Show one deployment's status events in server order.")
 @tracking.track_command("deploy")
-def events_cmd(path: DeployPath = None, deployment_id: DeploymentOption = None) -> None:
-    _deploy_read.run_events(_deploy_read.ReadRequest(path, deployment_id))
+def events_cmd(
+    path: DeployPath = None,
+    deployment_id: DeploymentOption = None,
+    release: Annotated[
+        str | None,
+        typer.Option(
+            "--release",
+            help="Only the events of this release's copy: a version such as v5, or a release id.",
+        ),
+    ] = None,
+) -> None:
+    _deploy_read.run_events(_deploy_read.ReadRequest(path, deployment_id), release)
 
 
 @app.command("status", help="Report deployment health, release freshness, and serving activity for this Build.")

@@ -24,6 +24,11 @@ history.
   `--create` adds a separate deployment instead. Outside that rollout `up`
   behaves as before.
 
+- `comfy deploy status` shows the update a deployment waits on (`update`: the
+  release, its copy's status, since, and kind) and, where the workspace has
+  deployment updates, says `comfy deploy up` moves the deployment keeping its
+  URL. `comfy deploy events --release v5` keeps one release's events, and
+  `comfy deploy ls` gives each row of a Build its `releaseVersion`.
 - `--select` takes gjson row queries: `items.#(<cond>)#` keeps the elements
   that match and `items.#(<cond>)` is the first one, with `==` `!=` `<` `<=`
   `>` `>=` `%` (glob) `!%` against a quoted string, number, `true`, `false` or
