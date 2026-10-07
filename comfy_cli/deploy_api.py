@@ -242,6 +242,15 @@ class DeployClient:
         body = {"baseRevision": base_revision, "releaseId": release_id}
         return self._patch("move", ("deployments", deployment_id), body)
 
+    def promote_deployment(self, deployment_id: str, base_revision: int, from_deployment_id: str) -> dict:
+        """Point the deployment at the release another deployment serves, keeping its id and URL.
+
+        The service resolves which release that is, so the caller never races
+        the source moving. ``base_revision`` is as for a move.
+        """
+        body = {"baseRevision": base_revision, "fromDeploymentId": from_deployment_id}
+        return self._patch("move", ("deployments", deployment_id), body)
+
     def delete_deployment(self, deployment_id: str) -> None:
         self._delete("delete", ("deployments", deployment_id))
 

@@ -17,6 +17,9 @@ history.
 
 ### Added
 
+- `comfy deploy promote SOURCE TARGET` moves TARGET onto the release SOURCE
+  serves, keeping TARGET's id and URL, and follows the move as `up` does. It
+  needs deployment updates on (`deploy_updates_unavailable` otherwise).
 - `comfy deploy up` moves the Build's existing deployment onto the new release
   in a workspace with deployment updates on, keeping its id and URL, and follows
   the move until it lands (`deploy_update_failed` when it does not). It refuses

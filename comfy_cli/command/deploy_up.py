@@ -19,6 +19,7 @@ from comfy_cli.command.deploy_runtime import terminal_status_error
 from comfy_cli.command.deploy_types import NOT_MOVABLE as _NOT_MOVABLE
 from comfy_cli.command.deploy_types import ComputeRequiredError, DeployUpClient, UpRequest, UpResult, release_label
 from comfy_cli.command.deploy_types import compute_config as _compute_config
+from comfy_cli.command.deploy_types import move_changed as _move_changed
 from comfy_cli.command.deploy_types import move_outcome as _move_outcome
 from comfy_cli.command.deploy_types import optional_revision as _optional_revision
 from comfy_cli.command.deploy_types import release_summary as _release_summary
@@ -241,13 +242,22 @@ class MoveFailedError(Exception):
         self.status = status
 
 
-def _refuse_unmovable(target: JsonObject) -> None:
+def raise_unless_landed(watched: JsonObject, release: JsonObject, previous: JsonObject) -> None:
+    """Raise MoveFailedError unless the watched move onto ``release`` landed."""
+    if _move_outcome(watched, _required_string(release, "id")) == "landed":
+        return
+    serving_id = watched.get("releaseId")
+    serving = previous if serving_id == previous.get("id") else {"id": serving_id}
+    raise MoveFailedError(_required_string(watched, "id"), release, serving, watched.get("status"))
+
+
+def refuse_unmovable(target: JsonObject, command: str = "up") -> None:
     deployment_id = _required_string(target, "id")
     status = _required_string(target, "status")
     if status in _NOT_MOVABLE:
         raise DeployAPIError(
             "deploy_conflict",
-            f"deployment {deployment_id} is {status}, so `up` will not move it to another release",
+            f"deployment {deployment_id} is {status}, so `{command}` will not move it to another release",
             details={"deploymentId": deployment_id, "status": status},
             hint=f"wait until `comfy deploy status --deployment {deployment_id}` shows it stopped, "
             "running `comfy deploy stop` again if the stop failed",
@@ -287,6 +297,8 @@ def _build_deployments(deployments: Sequence[JsonObject], releases: Sequence[Jso
 # A deployment down in one of these is a leftover the Build stopped using,
 # which a choice between deployments leaves out while any other is running.
 _DOWN: Final = frozenset({"stopped", "failed", "stop_failed"})
+# A settled status a command that brings a deployment up reports as not ok.
+_TERMINAL: Final = frozenset({"failed", "stopped", "stop_failed", "unhealthy"})
 
 
 def _move_target(
@@ -342,7 +354,7 @@ def _move(
     release_id = _required_string(request.release, "id")
     deployment_id = _required_string(target, "id")
     compute = _compute_config(target)
-    _refuse_unmovable(target)
+    refuse_unmovable(target)
     _refuse_compute_change(request, target, compute)
     desired = _merged_bounds(request, compute)
     pending_bounds = desired if desired != compute else None
@@ -355,10 +367,7 @@ def _move(
         )
     previous = _release_of(builder, releases, _required_string(target, "releaseId"))
     moved = client.move_deployment(deployment_id, base_revision, release_id)
-    revision = _optional_revision(moved)
-    # A reply with no revision is one the service's rollout check failed to
-    # answer, so the watch finds out what happened rather than this reply.
-    changed = isinstance(moved.get("pendingUpdate"), dict) or revision is None or revision > base_revision
+    changed = _move_changed(moved, base_revision, release_id, previous["id"])
     result = UpResult(
         moved,
         _release_summary(request.release),
@@ -381,12 +390,7 @@ def finish_move(client: DeployUpClient, result: UpResult, watched: JsonObject) -
     reported as bounds that had no effect rather than as a failed `up`.
     """
     deployment_id = _required_string(watched, "id")
-    release_id = _required_string(result.release, "id")
-    if _move_outcome(watched, release_id) != "landed":
-        previous = result.previous_release or {}
-        serving_id = watched.get("releaseId")
-        serving = previous if serving_id == previous.get("id") else {"id": serving_id}
-        raise MoveFailedError(deployment_id, result.release, serving, watched.get("status"))
+    raise_unless_landed(watched, result.release, result.previous_release or {})
     bounds = result.pending_bounds
     result = replace(result, deployment=watched, pending_bounds=None)
     if bounds is None:
@@ -473,21 +477,28 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
 def move_line(result: UpResult, deployment_id: str) -> str | None:
     if result.previous_release is None:
         return None
-    release, previous = release_label(result.release), release_label(result.previous_release)
-    if not result.changed:
-        return f"Deployment {deployment_id} already serves {release}."
-    if isinstance(result.deployment.get("pendingUpdate"), dict):
-        if result.deployment.get("status") in _DOWN:
-            return f"Deployment {deployment_id} starts on {release}."
-        return f"Deployment {deployment_id} moves to {release} once it is ready; {previous} serves until then."
-    return f"Deployment {deployment_id} now serves {release} (was {previous})."
+    return move_text(deployment_id, result.deployment, result.release, result.previous_release, result.changed)
 
 
-def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
-    status = _required_string(result.deployment, "status")
-    deployment_id = _required_string(result.deployment, "id")
-    if renderer.is_pretty():
-        renderer.success(move_line(result, deployment_id) or f"Deployment {deployment_id}: {status}")
+def move_text(
+    deployment_id: str, deployment: JsonObject, release: JsonObject, previous: JsonObject, changed: bool
+) -> str:
+    """Where a move onto ``release`` stands, for `up` and `promote` alike."""
+    label, was = release_label(release), release_label(previous)
+    if not changed:
+        return f"Deployment {deployment_id} already serves {label}."
+    # A read with no revision says nothing of the move, so the move waits
+    # until the deployment reads the new release.
+    unconfirmed = _optional_revision(deployment) is None and deployment.get("releaseId") != release.get("id")
+    if isinstance(deployment.get("pendingUpdate"), dict) or unconfirmed:
+        if deployment.get("status") in _DOWN:
+            return f"Deployment {deployment_id} starts on {label}."
+        return f"Deployment {deployment_id} moves to {label} once it is ready; {was} serves until then."
+    return f"Deployment {deployment_id} now serves {label} (was {was})."
+
+
+def warn_status(renderer, deployment_id: str, status: str, *, watch: bool) -> None:
+    """Warn about a deployment left billing without serving, or settled down."""
     if status == "stop_failed":
         renderer.warn(
             f"Deployment {deployment_id} could not stop and may still be billing.",
@@ -504,6 +515,21 @@ def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
         )
     elif watch and status in {"failed", "stopped"}:
         renderer.warn(f"Deployment {deployment_id} reached terminal status {status}.")
+
+
+def ends_terminal(deployment: JsonObject, status: str, *, moving: bool) -> bool:
+    # A move still waiting is judged by the move, whatever the old copy's
+    # status: one that was down stays down until the new release lands.
+    waiting = moving and isinstance(deployment.get("pendingUpdate"), dict)
+    return not waiting and status in _TERMINAL
+
+
+def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
+    status = _required_string(result.deployment, "status")
+    deployment_id = _required_string(result.deployment, "id")
+    if renderer.is_pretty():
+        renderer.success(move_line(result, deployment_id) or f"Deployment {deployment_id}: {status}")
+    warn_status(renderer, deployment_id, status, watch=watch)
     if result.dropped_bounds:
         joined = " and ".join(result.dropped_bounds)
         renderer.warn(
@@ -526,10 +552,7 @@ def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
             f"Deployment {old_id} (release v{version}, {row['status']}) is still running and billing.",
             hint=f"run `comfy deploy stop --deployment {old_id}` if you no longer need it",
         )
-    # A move still waiting is judged by the move, whatever the old copy's
-    # status: one that was down stays down until the new release lands.
-    waiting = result.previous_release is not None and isinstance(result.deployment.get("pendingUpdate"), dict)
-    terminal = not waiting and status in {"failed", "stopped", "stop_failed", "unhealthy"}
+    terminal = ends_terminal(result.deployment, status, moving=result.previous_release is not None)
     renderer.emit(
         result.payload(),
         command="deploy up",

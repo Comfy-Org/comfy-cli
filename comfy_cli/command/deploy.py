@@ -19,8 +19,11 @@ from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject
 from comfy_cli.command.deploy_compute import prompt_gpu as _prompt_gpu
 from comfy_cli.command.deploy_compute import prompt_region as _prompt_region
 from comfy_cli.command.deploy_progress import DeployWatchReporter
+from comfy_cli.command.deploy_promote import PromoteResult
+from comfy_cli.command.deploy_promote import finish_promote as _finish_promote
+from comfy_cli.command.deploy_promote import promote as _promote
 from comfy_cli.command.deploy_resolve import DeployResolveError
-from comfy_cli.command.deploy_runtime import MOVE_WATCH_SECONDS, DeployWatchLostError
+from comfy_cli.command.deploy_runtime import MOVE_WATCH_SECONDS, DeployWatchLostError, terminal_status_error
 from comfy_cli.command.deploy_runtime import command_clients as _command_clients
 from comfy_cli.command.deploy_runtime import exit_watch_lost as _exit_watch_lost
 from comfy_cli.command.deploy_runtime import poll_deployment as _poll_deployment
@@ -39,10 +42,13 @@ from comfy_cli.command.deploy_up import (
 from comfy_cli.command.deploy_up import (
     MoveFailedError,
     _render_result,
+    ends_terminal,
     estimate_line,
     finish_move,
     move_line,
+    move_text,
     reconcile_up,
+    warn_status,
 )
 from comfy_cli.command.deploy_up import (
     _idempotency_key as _idempotency_key,
@@ -398,3 +404,77 @@ def up_cmd(
     except (ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError) as error:
         renderer.error(code="deploy_server_error", message=str(error))
         raise typer.Exit(code=1) from error
+
+
+@app.command("promote", help="Move TARGET onto the release SOURCE serves, keeping TARGET's id and URL.")
+@tracking.track_command("deploy")
+def promote_cmd(
+    source: Annotated[str, typer.Argument(help="Deployment id whose release TARGET should serve.")],
+    target: Annotated[str, typer.Argument(help="Deployment id to move.")],
+    watch: Annotated[
+        bool,
+        typer.Option("--watch/--no-watch", help="Follow TARGET until the move lands or fails."),
+    ] = True,
+) -> None:
+    renderer = get_renderer()
+    try:
+        builder, client = _command_clients()
+        result = _promote(builder, client, source, target)
+        if watch and result.changed:
+            # A move that landed at once is said once, after the watch confirms it.
+            if result.waiting and renderer.is_pretty():
+                renderer.info(_promote_text(result))
+
+            def abandoned(last: JsonObject | None) -> None:
+                if last is not None:
+                    _render_promote(renderer, replace(result, deployment=last), watch=False)
+
+            watched = _watch(
+                renderer, client, target, moving=_required_string(result.release, "id"), on_abandon=abandoned
+            )
+            result = _finish_promote(result, watched)
+        _render_promote(renderer, result, watch=watch)
+    except DeployResolveError as error:
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
+        raise typer.Exit(code=1) from error
+    except MoveFailedError as error:
+        _render_move_failed(renderer, error)
+    except DeployAPIError as error:
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
+        raise typer.Exit(code=1) from error
+    except BuilderAuthError as error:
+        renderer.error(code="deploy_not_signed_in", message=str(error))
+        raise typer.Exit(code=1) from error
+    except (ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError) as error:
+        renderer.error(code="deploy_server_error", message=str(error))
+        raise typer.Exit(code=1) from error
+
+
+def _promote_text(result: PromoteResult) -> str:
+    deployment_id = _required_string(result.deployment, "id")
+    return move_text(deployment_id, result.deployment, result.release, result.previous_release, result.changed)
+
+
+def _render_promote(renderer, result: PromoteResult, *, watch: bool) -> None:
+    deployment_id = _required_string(result.deployment, "id")
+    status = _required_string(result.deployment, "status")
+    if renderer.is_pretty():
+        renderer.success(_promote_text(result))
+    # A promote that changed nothing leaves the target as it found it, so its
+    # status is reported rather than judged.
+    warn_status(renderer, deployment_id, status, watch=watch and result.changed)
+    if not result.changed and status in {"stopped", "failed"}:
+        renderer.info(
+            f"Deployment {deployment_id} is {status}.",
+            hint=f"run `comfy deploy start --deployment {deployment_id}` to serve it",
+        )
+    terminal = result.changed and ends_terminal(result.deployment, status, moving=True)
+    renderer.emit(
+        result.payload(),
+        command="deploy promote",
+        changed=result.changed,
+        ok=not terminal,
+        error=terminal_status_error(deployment_id, status) if terminal else None,
+    )
+    if terminal:
+        raise typer.Exit(code=1)

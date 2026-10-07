@@ -436,8 +436,9 @@ piped under `--no-json` they are plain lines every five seconds, with no
 carriage returns.
 ### `deploy_progress`
 
-Emitted by `comfy deploy up --watch` and `comfy deploy status --watch` while the
-deployment's status is `provisioning` or `starting`. It is part of those
+Emitted by `comfy deploy up --watch`, `comfy deploy promote --watch` and
+`comfy deploy status --watch` while the deployment's status is `provisioning`
+or `starting`. It is part of those
 commands, not the `run` stream, and validates against
 `deploy_progress_event.json`.
 

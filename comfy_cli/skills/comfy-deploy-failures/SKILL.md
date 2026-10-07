@@ -35,7 +35,7 @@ argument you pass.
 | `deploy_immutable_compute` | Tried to change GPU/region in place | `stop` → `scale` → `start` |
 | `deploy_deleted` | Tried to start a deleted deployment | `comfy deploy up` makes a new one |
 | `deploy_ambiguous_deployment` | Several deployments tie for selection, or `up` found more than one running deployment of the Build to update | Pass `--deployment <id>`, or `up --create` for a separate one |
-| `deploy_update_failed` | `up` moved a deployment onto a new release and the move failed; the old release still serves | Read `comfy deploy events --deployment <id>`; fix the release, then `up` again |
+| `deploy_update_failed` | `up` or `promote` moved a deployment onto another release and the move failed; the old release still serves | Read `comfy deploy events --deployment <id>`; fix the release, then run the same command again |
 | `deploy_unrelated_deployment` | `--deployment` names one outside this scope | Pick from `details.candidateIds` |
 | `deploy_missing_input` | A required option was omitted non-interactively | Pass everything in `details.missing` |
 | `deploy_compute_unavailable` | That GPU/region cannot provision now | Choose another pair from `comfy deploy refs compute` |
@@ -46,8 +46,8 @@ argument you pass.
 | `deploy_forbidden` | The workspace does not permit this | Confirm which workspace is signed in |
 | `deploy_not_signed_in` | No usable Cloud session or workspace API key, or the key was refused | Replace the key the hint names; otherwise `comfy cloud login` |
 | `deploy_server_error` | Control plane unavailable or 5xx | Re-read `status` before retrying, so a retry cannot double-create |
-| `deploy_updates_unavailable` | `events --release` on a deployment with no `revision`: the workspace has no deployment updates, so events carry no release | Drop `--release`; those events do not say which release made them |
-| `deploy_watch_lost` | The watch's reads went unanswered for a minute, or a move did not land within an hour (exit 75); the deployment may still be coming up | `comfy deploy status --deployment <id> --watch`, or after a move `comfy deploy show --deployment <id>` until it shows no `pendingUpdate`; do not redeploy |
+| `deploy_updates_unavailable` | `promote`, or `events --release`, on a deployment with no `revision`: the workspace has no deployment updates | `promote`: `up --create` on the release instead. `events`: drop `--release`; those events do not say which release made them |
+| `deploy_watch_lost` | The watch's reads went unanswered for a minute, or a move by `up` or `promote` did not land within an hour (exit 75); the deployment may still be coming up | `comfy deploy status --deployment <id> --watch`, or after a move `comfy deploy show --deployment <id>` until it shows no `pendingUpdate`; do not redeploy |
 | `deploy_delete_needs_confirm` | `delete` without `--yes` non-interactively | Confirm with the user, then pass `--yes` |
 
 ### Submitting a workflow

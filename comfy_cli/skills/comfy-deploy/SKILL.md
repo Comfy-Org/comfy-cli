@@ -1,6 +1,6 @@
 ---
 name: comfy-deploy
-description: "Run a Comfy Build release as a serverless deployment with comfy-cli. Use whenever the user wants to deploy, serve, host, or expose a ComfyUI build as an endpoint, scale or stop workers, submit a workflow to a deployment, check whether a deployment is healthy or running a stale release, or work out why one is still costing money. Covers `comfy deploy up / run / status / scale / stop / start / delete / ls / show / logs / events / refs`. Assumes a green release already exists — `comfy-build` is the skill that produces one."
+description: "Run a Comfy Build release as a serverless deployment with comfy-cli. Use whenever the user wants to deploy, serve, host, or expose a ComfyUI build as an endpoint, scale or stop workers, submit a workflow to a deployment, check whether a deployment is healthy or running a stale release, or work out why one is still costing money. Covers `comfy deploy up / promote / run / status / scale / stop / start / delete / ls / show / logs / events / refs`. Assumes a green release already exists — `comfy-build` is the skill that produces one."
 ---
 
 # comfy-deploy
@@ -37,6 +37,7 @@ bills by time.**
 
 ```
 up      Create or reconcile a deployment for the selected Build release.   SPENDS
+promote Move TARGET onto the release SOURCE serves, keeping its URL.      SPENDS
 run     Submit an API-format workflow to a ready deployment.               SPENDS
 status  Deployment health, release freshness, and serving activity.
 scale   Edit worker bounds, or GPU/region on a stopped deployment.
@@ -217,6 +218,20 @@ comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
   Absent on a restart, an edit, when the service gave none, or when the service
   has the estimate switched off; that is not an error, so never retry for it or
   mention its absence.
+
+## `comfy deploy promote`
+
+```shell
+comfy deploy promote SOURCE TARGET [--no-watch]
+```
+
+- **It moves deployment TARGET onto the release deployment SOURCE serves**,
+  keeping TARGET's id and URL: test on a staging deployment, then promote it to
+  production. The service resolves SOURCE's release itself.
+- **It needs deployment updates on.** Without them it refuses with
+  `deploy_updates_unavailable`; use `comfy deploy up --create` instead.
+- **It follows the move like `up` does**: exit 1 with `deploy_update_failed`
+  when the new release does not come up, and TARGET still serves its old one.
 
 ## `comfy deploy run`
 
