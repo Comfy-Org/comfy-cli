@@ -216,9 +216,19 @@ def _validate_watch_envelope(data):
     jsonschema.Draft202012Validator(json.loads(schema_path.read_text())).validate(data)
 
 
-def _record(extra=None, *, read=True, borrowed_ids=(), queue_read=True):
-    """A `_submitted_extra_data` result, for stubbing it out."""
-    return _SubmittedRecord(extra, read, frozenset(borrowed_ids), queue_read)
+def _record(extra=None, *, read=None, borrowed_ids=(), queue_read=True):
+    """A `_submitted_extra_data` result, for stubbing it out.
+
+    `read` defaults the way production derives it — a dict slot is a record
+    that was read, anything else is not — so a stub cannot model a pair
+    `_submitted_extra_data` would never return.
+    """
+    return _SubmittedRecord(
+        extra,
+        isinstance(extra, dict) if read is None else read,
+        frozenset(borrowed_ids),
+        queue_read,
+    )
 
 
 class TestWatchDoesNotStealTheSocket:
@@ -226,9 +236,10 @@ class TestWatchDoesNotStealTheSocket:
     def record_read_but_empty(self, monkeypatch):
         """Default: this prompt's record WAS read, and carries no marker.
 
-        Note `read=True` with `extra=None` is the shape for a record that was
-        found and is unmarked — NOT for a server that holds no record at all,
-        which reports `read=False` and is pinned in the classes below.
+        Note `read=True` goes with a dict `extra` — `{}` is a record found and
+        unmarked. It is NOT the shape for a server that holds no record at all,
+        nor for a non-dict slot; both report `read=False` and are pinned in the
+        classes below.
         """
         monkeypatch.setattr(jobs, "_submitted_extra_data", lambda *_: _record({}))
 
@@ -543,11 +554,11 @@ class TestSubmittedExtraDataReportsWhetherTheRecordWasRead:
             "no-queue-sections",
             "unwalkable-section",
             "entry-missing-extra-slot",
-            "history-entry-malformed",
             "slot-null",
             "slot-list",
             "slot-string",
             "history-slot-number",
+            "history-entry-malformed",
         ],
     )
     def test_everything_else_is_not_a_record(self, monkeypatch, queue, history, why):
@@ -675,8 +686,14 @@ class TestTheIdIsCheckedToNotJustThePrompt:
     )
     def test_a_half_walkable_queue_is_not_a_census(self, monkeypatch, queue_body):
         """A borrowed run in the section we could not walk would be missing
-        from the census without the census knowing it."""
-        monkeypatch.setattr(jobs_state, "read", lambda _: None)
+        from the census without the census knowing it.
+
+        The state file is READABLE on purpose: without it the record-side gate
+        would raise `indeterminate` too and the census guard could be deleted
+        with this test still green.
+        """
+        state = jobs_state.new(prompt_id="P_OTHER", client_id="ordinary", workflow="w.json", where="local")
+        monkeypatch.setattr(jobs_state, "read", lambda _: state)
         monkeypatch.setattr(
             jobs,
             "_http_get_json",
@@ -742,6 +759,81 @@ class TestAnAlreadyTerminalFailureIsTrimmedToo:
         env = self._env()
         assert env["error"]["details"]["execution_error"]["traceback"] == ["frame10", "frame11"]
         assert "frame0" not in json.dumps(env)
+
+
+class TestEachRefusalGivesAdviceThatMatchesWhatHappens:
+    """Four situations reach two published reasons, and the advice differs.
+
+    Dropping `--client-id` makes a run carrying its OWN marker poll; it makes
+    the other three ATTACH under their own resolved id. One message per reason
+    told half of them the opposite of what the command actually does.
+    """
+
+    CASES = {
+        "prompt_borrowed": (
+            {"queue_running": [[0, "p", {}, _marked(), {}]], "queue_pending": []},
+            "borrowed",
+            "poll this run safely",
+        ),
+        "id_borrowed": (
+            {
+                "queue_running": [
+                    [0, "P_B", {}, _marked(), {}],
+                    [1, "p", {}, {"client_id": "ordinary"}, {}],
+                ],
+                "queue_pending": [],
+            },
+            "borrowed",
+            "attaches normally",
+        ),
+        "nothing_vouched": (
+            {"queue_running": [], "queue_pending": []},
+            "indeterminate",
+            "poll this run safely",
+        ),
+    }
+
+    @pytest.fixture(autouse=True)
+    def live_watch(self, monkeypatch):
+        monkeypatch.setattr(jobs, "_server_or_error", lambda *_a, **_k: True)
+        monkeypatch.setattr(jobs, "_snapshot", lambda *_: {"prompt_id": "p", "status": "running", "outputs": []})
+        monkeypatch.setattr(jobs_state, "read", lambda _: None)
+
+    @pytest.mark.parametrize("cause", list(CASES))
+    def test_the_hint_names_what_dropping_the_flag_does(self, monkeypatch, cause):
+        queue, reason, expected_hint = self.CASES[cause]
+        monkeypatch.setattr(jobs, "_http_get_json", lambda u, **_k: queue if u.endswith("/queue") else {})
+        result = CliRunner().invoke(jobs.app, ["watch", "p", "--where", "local", "--client-id", BORROWED])
+        assert result.exit_code == 1, result.output
+        err = _envelope(result.output)["error"]
+        assert err["details"]["reason"] == reason
+        assert expected_hint in err["hint"]
+
+    def test_an_unread_census_says_so_rather_than_claiming_no_record(self, monkeypatch):
+        """This one has a readable record — the census is what failed — so the
+        `nothing_vouched` wording would be a flat lie here."""
+        state = jobs_state.new(prompt_id="p", client_id="ordinary", workflow="w.json", where="local")
+        monkeypatch.setattr(jobs_state, "read", lambda _: state)
+
+        def boom(url, **_kw):
+            if url.endswith("/queue"):
+                raise RuntimeError("connection refused")
+            return {}
+
+        monkeypatch.setattr(jobs, "_http_get_json", boom)
+        result = CliRunner().invoke(jobs.app, ["watch", "p", "--where", "local", "--client-id", BORROWED])
+        assert result.exit_code == 1, result.output
+        err = _envelope(result.output)["error"]
+        assert err["details"]["reason"] == "indeterminate"
+        assert "/queue" in err["message"]
+        assert "no record" not in err["message"]
+        assert "retry once the server answers" in err["hint"]
+
+    def test_every_cause_has_its_own_wording(self):
+        """A cause added later must not silently reuse another's advice."""
+        texts = [text for _reason, *text in jobs._REJECTION_TEXT.values()]
+        assert len(texts) == len(jobs._REJECTION_TEXT)
+        assert len({tuple(t) for t in texts}) == len(texts)
 
 
 class TestTheOrdinaryCaseStillAttaches:

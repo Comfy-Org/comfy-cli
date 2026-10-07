@@ -82,7 +82,12 @@ history.
   which `urllib` does not wrap, past the `RuntimeError` net every caller in
   `jobs` catches.
 - A failed `comfy jobs watch` carries the node's failure under
-  `error.details.execution_error` instead of `error.details.details.error`.
+  `error.details.execution_error` on both of its exits — instead of
+  `error.details.details.error` on the live path, and instead of
+  `error.details.error` on the one that short-circuits because the prompt had
+  already finished. Neither old key is published any more. The second exit was
+  also skipping the trimming and redaction that key drives, so it emitted the
+  full traceback and a `current_inputs` that can hold an api_key.
 - `templates fetch` checks the template's model files when an offline catalog
   is set (`--input` or `COMFY_OBJECT_INFO_FILE`). A file the server lacks is
   replaced by the one installed file that is the same model in another

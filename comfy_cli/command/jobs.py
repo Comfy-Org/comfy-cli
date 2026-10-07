@@ -1893,17 +1893,59 @@ def _borrowed_from_extra_data(extra: Any) -> bool:
 _PollReason = Literal["borrowed", "indeterminate"]
 
 
+# Four distinct situations collapse into the two published `reason` values, and
+# the advice differs even where the reason does not: dropping `--client-id`
+# makes a run whose own marker is set POLL, but makes the other three ATTACH
+# under their own resolved id. A single message per reason told half of them the
+# opposite of what happens. `reason` stays the documented pair; the cause only
+# picks the wording.
+_RejectCause = Literal["prompt_borrowed", "id_borrowed", "census_unread", "nothing_vouched"]
+
+_REJECTION_TEXT: dict[_RejectCause, tuple[_PollReason, str, str]] = {
+    "prompt_borrowed": (
+        "borrowed",
+        "This run borrowed another client's live socket and can only be watched by polling",
+        "drop --client-id; comfy jobs watch will poll this run safely",
+    ),
+    "id_borrowed": (
+        "borrowed",
+        "--client-id names a client that another queued run is feeding on purpose; attaching as it "
+        "would cut that client off",
+        "drop --client-id — this prompt resolves its own submitting client and attaches normally",
+    ),
+    "census_unread": (
+        "indeterminate",
+        "Could not confirm --client-id is free to attach as: the /queue read that lists the clients "
+        "other runs are feeding did not come back whole",
+        "retry once the server answers, or drop --client-id to attach as this prompt's own submitting client",
+    ),
+    "nothing_vouched": (
+        "indeterminate",
+        "Could not confirm that --client-id is safe to attach as: this prompt has no record we "
+        "could read, so whether it borrowed a live client's socket is unknown",
+        "drop --client-id and comfy jobs watch will poll this run safely; if the server was "
+        "briefly unreachable, retry — if the prompt_id is a typo or already pruned, no id works",
+    ),
+}
+
+
 class _ClientIdRejected(ValueError):
     """An explicit ``--client-id`` the watch must not honour, and why.
 
-    Subclasses ValueError so the reason rides the exception rather than being
+    Subclasses ValueError so the cause rides the exception rather than being
     re-derived at the call site, where the second lookup it would need could
     disagree with the one that made the decision.
     """
 
-    def __init__(self, reason: _PollReason) -> None:
-        super().__init__(reason)
-        self.reason: _PollReason = reason
+    def __init__(self, cause: _RejectCause) -> None:
+        super().__init__(cause)
+        self.cause: _RejectCause = cause
+        self.reason: _PollReason = _REJECTION_TEXT[cause][0]
+
+    @property
+    def text(self) -> tuple[str, str]:
+        """The message and hint this cause should be reported with."""
+        return _REJECTION_TEXT[self.cause][1:]
 
 
 # How long a poll-only watch waits before reconciling. The ordinary `--timeout`
@@ -2055,7 +2097,7 @@ def _select_watch_client_id(
 
     if (job is not None and job.client_id_borrowed) or _borrowed_from_extra_data(extra):
         if requested:
-            raise _ClientIdRejected("borrowed")
+            raise _ClientIdRejected("prompt_borrowed")
         return None, "borrowed"
 
     # The watched prompt is clean, but the id the caller named may not be: it
@@ -2063,7 +2105,7 @@ def _select_watch_client_id(
     # Attaching would evict it just the same, so the id is checked against
     # every borrowed run the queue is carrying, not only against this prompt.
     if requested and requested in record.borrowed_ids:
-        raise _ClientIdRejected("borrowed")
+        raise _ClientIdRejected("id_borrowed")
 
     # ...and that check is worth exactly as much as the read behind it. An
     # empty census means "nobody is borrowing" only once the queue was actually
@@ -2072,7 +2114,7 @@ def _select_watch_client_id(
     # record vouches for THIS run, and says nothing about whose socket the
     # caller just named.
     if requested and not record.queue_read:
-        raise _ClientIdRejected("indeterminate")
+        raise _ClientIdRejected("census_unread")
 
     # A state file is its own positive evidence: `comfy run` wrote it, and it
     # says this run did not borrow. Failing that, only the prompt's own server
@@ -2080,7 +2122,7 @@ def _select_watch_client_id(
     # server that simply never mentioned the prompt says nothing either.
     if job is None and not record_read:
         if requested:
-            raise _ClientIdRejected("indeterminate")
+            raise _ClientIdRejected("nothing_vouched")
         return None, "indeterminate"
 
     recorded = job.client_id if job is not None and isinstance(job.client_id, str) and job.client_id.strip() else None
@@ -2398,15 +2440,16 @@ def watch_cmd(
         # The key is still published so a consumer that branches on it never
         # hits a missing one, as with `client_id` and `attached`.
         snap["poll_reason"] = None
+        if renderer.is_pretty():
+            renderer.console().print(f"[dim]Prompt {prompt_id} already {snap['status']}; nothing more to watch.[/dim]")
+            # Before the promotion below, which moves the key this renders from.
+            _render_status_pretty(snap, host=h, port=p)
         # Same promotion the live path does when it ends. `_emit_terminal`
         # keys its trimming and redaction on `execution_error`, so a failure
         # left where `_snapshot` puts it reaches the envelope whole — full
         # traceback, and a `current_inputs` that can hold an api_key.
         if isinstance(snap.get("error"), dict):
             snap["execution_error"] = snap.pop("error")
-        if renderer.is_pretty():
-            renderer.console().print(f"[dim]Prompt {prompt_id} already {snap['status']}; nothing more to watch.[/dim]")
-            _render_status_pretty(snap, host=h, port=p)
         _emit_terminal(renderer, snap, command="jobs watch")
         return
 
@@ -2415,18 +2458,7 @@ def watch_cmd(
     try:
         attached_client_id, poll_reason = _select_watch_client_id(h, p, prompt_id, client_id)
     except _ClientIdRejected as e:
-        if e.reason == "borrowed":
-            message = "This run borrowed another client's live socket and can only be watched by polling"
-            hint = "drop --client-id; comfy jobs watch will poll this run safely"
-        else:
-            message = (
-                "Could not confirm that --client-id is safe to attach as: this prompt has no record "
-                "we could read, so whether it borrowed a live client's socket is unknown"
-            )
-            hint = (
-                "drop --client-id and comfy jobs watch will poll this run safely; if the server was "
-                "briefly unreachable, retry — if the prompt_id is a typo or already pruned, no id works"
-            )
+        message, hint = e.text
         renderer.error(
             code="client_id_rejected",
             message=message,

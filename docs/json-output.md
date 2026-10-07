@@ -59,7 +59,8 @@ opens no socket at all. Separately, and by design, this protects only runs
 *comfy-cli* submitted with `--client-id`: a browser tab that submits its own
 prompt stamps no marker, so watching that prompt re-attaches as the tab, exactly
 as the last paragraph of this section describes for any re-attach. Both
-`data.client_id` and `data.attached` are present on *every* terminal envelope: a
+`data.client_id` and `data.attached` are present on every *local* `jobs watch`
+terminal envelope (cloud watch emits neither): a
 watch of an already-finished prompt short-circuits without opening a socket, and
 reports `client_id: null` / `attached: false`. Reconnecting under an existing id
 is ComfyUI's own session-resume path, so a submitter that is *still* holding that
