@@ -674,6 +674,15 @@ def ls_nodes_cmd(
     renderer = get_renderer()
     renderer.command = "workflow ls-nodes"
     p, workflow = _load_workflow_or_fail(renderer, file)
+    definitions = workflow.get("definitions")
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else []
+    subgraph_ids: set[str] = set()
+    for definition in subgraphs if isinstance(subgraphs, list) else []:
+        if not isinstance(definition, dict):
+            continue
+        definition_id = definition.get("id")
+        if isinstance(definition_id, str) and definition_id:
+            subgraph_ids.add(definition_id)
     rows = []
     for n in workflow.get("nodes") or []:
         if not isinstance(n, dict):
@@ -700,7 +709,7 @@ def ls_nodes_cmd(
         if isinstance(node_type, str):
             if node_type in workflow_ops.UI_ONLY_NODE_TYPES:
                 row["ui_only"] = True
-            elif workflow_ops._UUID_RE.match(node_type):
+            elif node_type in subgraph_ids or workflow_ops._UUID_RE.match(node_type):
                 row["subgraph"] = True
         rows.append(row)
     payload = {"workflow": str(p), "count": len(rows), "nodes": rows}

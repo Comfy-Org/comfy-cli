@@ -88,6 +88,17 @@ def test_ls_nodes_marks_ui_only_and_subgraph_rows(patched_graph, tmp_path, capsy
     assert rows[21].get("subgraph") is True, rows[21]
 
 
+def test_ls_nodes_marks_a_declared_non_uuid_subgraph(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    subgraph_id = "named-subgraph"
+    wf["definitions"] = {"subgraphs": [{"id": subgraph_id, "nodes": [], "links": [], "inputs": [], "outputs": []}]}
+    wf["nodes"].append({"id": 21, "type": subgraph_id, "pos": [0, 0], "inputs": [], "outputs": []})
+
+    row = _ls_rows(tmp_path, capsys, wf)[21]
+    assert row["type"] == subgraph_id
+    assert row.get("subgraph") is True, row
+
+
 def test_ls_nodes_real_classes_stay_clean(patched_graph, tmp_path, capsys):
     rows = _ls_rows(tmp_path, capsys, _wf_with_reroute_and_subgraph())
     for nid in (3, 7):
