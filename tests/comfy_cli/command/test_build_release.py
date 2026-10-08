@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import sys
 import urllib.error
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -974,6 +976,79 @@ def test_a_bare_folder_name_that_holds_a_build_spec_is_the_build_path(workspace:
         {"method": "list_releases", "id": "build-2"},
         {"method": "get_release", "id": "release-9"},
     ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize(
+    "release_id",
+    [
+        # `stat` fails with "file name too long", which `Path.is_file` lets through.
+        pytest.param("r" * 300, id="longer-than-a-file-name"),
+        # No separator, so not path-shaped; `expanduser` raises on the unknown user.
+        pytest.param("~nosuchuser-dplat-2746", id="tilde-unknown-user"),
+    ],
+)
+def test_a_release_id_the_disk_probe_cannot_read_still_reaches_the_builder(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str, release_id: str
+) -> None:
+    """Looking for a build spec behind RELEASE must never fail the read: an id
+    the file system cannot even look up is no build path, so it reaches the
+    builder as the id, as it did before RELEASE could be a path."""
+    # Given
+    client.statuses = [{"id": release_id, "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], release_id, *verb[1:])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [(read, release_id)]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod 000 does not deny reads on Windows")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a chmod 000 folder")
+def test_a_release_id_that_names_an_unreadable_folder_still_reaches_the_builder(
+    workspace: Path, client: ReleaseBuilder
+) -> None:
+    """Probing `rel-locked/comfy-build.yaml` inside a folder the caller cannot
+    read raises `PermissionError`; the id still reaches the builder."""
+    # Given
+    locked = workspace / "rel-locked"
+    locked.mkdir()
+    client.statuses = [{"id": "rel-locked", "status": "complete"}]
+    locked.chmod(0)
+    try:
+        # When
+        result = invoke_release("show", "rel-locked")
+    finally:
+        locked.chmod(0o755)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.calls == [{"method": "get_release", "id": "rel-locked"}]
+
+
+@pytest.mark.parametrize(
+    ("release", "code"),
+    [
+        pytest.param("./" + "r" * 300, "build_spec_not_found", id="longer-than-a-file-name"),
+        # `expanduser` cannot resolve it, so there is no spec path to report.
+        pytest.param("~nosuchuser-dplat-2746/build", "build_missing_input", id="tilde-unknown-user"),
+    ],
+)
+def test_a_path_shaped_release_the_disk_probe_cannot_read_is_refused_before_it_reaches_the_builder(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, release: str, code: str
+) -> None:
+    """Shaped like a path, it is a path; one the file system cannot look up has
+    no spec behind it, and is refused with an envelope rather than a traceback."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+
+    # When
+    result = invoke_release("show", release)
+
+    # Then
+    assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, code, [])
 
 
 @pytest.mark.parametrize(("verb", "read"), READ_VERBS)

@@ -3041,6 +3041,27 @@ def _path_shaped(value: str) -> bool:
     )
 
 
+def _spec_behind(release: str) -> tuple[Path | None, bool]:
+    """The spec file RELEASE names when read as a PATH, and whether it is there.
+
+    Runs on every RELEASE given without a PATH, ids included, so it never
+    raises: `Path.is_file` only swallows "not found", and an id over 255
+    characters (file name too long), one naming a folder the caller cannot read
+    (`PermissionError`) or a `~name` with no such user (`expanduser` raises
+    `RuntimeError`) would otherwise fail the read with a traceback. Any of
+    those is "no spec here"; the spec path is ``None`` when it cannot even be
+    resolved.
+    """
+    try:
+        spec_file = resolve_build_paths(release, require_spec=False).spec_file
+    except (OSError, ValueError, RuntimeError):
+        return None, False
+    try:
+        return spec_file, spec_file.is_file()
+    except (OSError, ValueError):
+        return spec_file, False
+
+
 def _release_or_path(
     renderer, release: str | None, path: str | None, build_id: str | None
 ) -> tuple[str | None, str | None]:
@@ -3071,8 +3092,8 @@ def _release_or_path(
     if release is None:
         return None, path
     if path is None and release.strip():
-        spec_file = resolve_build_paths(release, require_spec=False).spec_file
-        if spec_file.is_file():
+        spec_file, has_spec = _spec_behind(release)
+        if has_spec:
             return None, release
         if _path_shaped(release):
             if build_id is not None:
@@ -3080,9 +3101,12 @@ def _release_or_path(
                 # path with no spec behind it is as harmless here as it is
                 # after the release id.
                 return None, release
-            error = BuildSpecNotFoundError(spec_file)
-            renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
-            raise typer.Exit(code=1)
+            if spec_file is not None:
+                error = BuildSpecNotFoundError(spec_file)
+                renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
+                raise typer.Exit(code=1)
+            # No spec path to report (`~nosuchuser/x` names no home folder),
+            # so it falls to the path-shaped refusal below.
     release = release.strip()
     if not release or set(release) == {"."} or _path_shaped(release):
         renderer.error(
