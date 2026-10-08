@@ -827,8 +827,8 @@ def test_non_identifier_proxy_names_use_subscripts(sd15_graph):
     sg_def = {
         "id": uuid,
         "name": "Odd Names",
-        "inputs": [{"name": "my value", "type": "LATENT"}],
-        "outputs": [{"name": "final image", "type": "IMAGE"}],
+        "inputs": [{"name": "my value", "type": "LATENT", "linkIds": [1]}],
+        "outputs": [{"name": "final image", "type": "IMAGE", "linkIds": [2]}],
         "nodes": [
             _node(
                 7,
@@ -1019,7 +1019,7 @@ def test_definition_output_warning_is_not_double_qualified(sd15_graph):
         "id": uuid,
         "name": "Dangling Out",
         "inputs": [],
-        "outputs": [{"name": "IMAGE", "type": "IMAGE"}],
+        "outputs": [{"name": "IMAGE", "type": "IMAGE", "linkIds": [1]}],
         "nodes": [_node(9, "GetNode", outputs=[{"name": "IMAGE", "type": "IMAGE"}], widgets=["nope"])],
         "links": [{"id": 1, "origin_id": 9, "origin_slot": 0, "target_id": -20, "target_slot": 0}],
     }
@@ -1240,6 +1240,7 @@ def test_out_of_range_input_slot_fed_by_the_definition_input_proxy_is_reported(s
     sg["links"].append(
         {"id": 9998, "origin_id": -10, "origin_slot": 0, "target_id": tgt["id"], "target_slot": 42, "type": "*"}
     )
+    sg["inputs"][0]["linkIds"].append(9998)
     res = render_py(wf, graph)
     n_inputs = len(tgt.get("inputs") or [])
     assert any(
@@ -1345,6 +1346,7 @@ def test_in_range_unheld_definition_input_proxy_link_is_ignored():
             "type": "*",
         }
     )
+    sg["inputs"][0]["linkIds"].append(9999)
 
     res = render_py(wf, graph)
 
@@ -1560,8 +1562,8 @@ def test_definition_boundary_link_membership_wins_over_stale_row_slots():
             )
         ],
         "links": [
-            {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0},
-            {"id": 2, "origin_id": 7, "origin_slot": 0, "target_id": -20, "target_slot": 0},
+            {"id": 1, "origin_id": -10, "origin_slot": False, "target_id": 7, "target_slot": 0},
+            {"id": 2, "origin_id": 7, "origin_slot": 0, "target_id": -20, "target_slot": 0.0},
         ],
     }
     wf = _mini([_node(10, subgraph_id)], [])
@@ -1572,8 +1574,72 @@ def test_definition_boundary_link_membership_wins_over_stale_row_slots():
     assert "value=IN.right" in res.source
     assert "OUT.right_out = " in res.source
     warnings = "\n".join(res.warnings)
-    assert "input link 1 declares boundary slot 0 but is listed under input slot 1" in warnings
-    assert "output link 2 declares boundary slot 0 but is listed under output slot 1" in warnings
+    assert "input link 1 declares boundary slot False but is listed under input slot 1" in warnings
+    assert "output link 2 declares boundary slot 0.0 but is listed under output slot 1" in warnings
+
+
+@pytest.mark.parametrize(
+    "definition_inputs, warning",
+    [
+        ([{"name": "value", "type": "STRING", "linkIds": []}], "no definition input lists it"),
+        ([{"name": "value", "type": "STRING", "linkIds": ["1"]}], "no definition input lists it"),
+        (
+            [
+                {"name": "first", "type": "STRING", "linkIds": [1]},
+                {"name": "second", "type": "STRING", "linkIds": [1]},
+            ],
+            "several definition inputs list it",
+        ),
+    ],
+)
+def test_unlisted_typed_or_ambiguous_input_boundary_membership_is_ignored(definition_inputs, warning):
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    definition = {
+        "id": subgraph_id,
+        "inputs": definition_inputs,
+        "outputs": [],
+        "nodes": [_node(7, "Example", inputs=[{"name": "value", "type": "STRING", "link": 1}])],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    workflow = _mini([_node(10, subgraph_id)], [])
+    workflow["definitions"] = {"subgraphs": [definition]}
+
+    result = render_py(workflow, None)
+
+    assert "value=IN." not in result.source
+    assert any(warning in item for item in result.warnings)
+
+
+@pytest.mark.parametrize(
+    "definition_outputs, warning",
+    [
+        ([{"name": "value", "type": "STRING", "linkIds": []}], "no definition output lists it"),
+        ([{"name": "value", "type": "STRING", "linkIds": ["1"]}], "no definition output lists it"),
+        (
+            [
+                {"name": "first", "type": "STRING", "linkIds": [1]},
+                {"name": "second", "type": "STRING", "linkIds": [1]},
+            ],
+            "several definition outputs list it",
+        ),
+    ],
+)
+def test_unlisted_typed_or_ambiguous_output_boundary_membership_is_ignored(definition_outputs, warning):
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    definition = {
+        "id": subgraph_id,
+        "inputs": [],
+        "outputs": definition_outputs,
+        "nodes": [_node(7, "Example", outputs=[{"name": "value", "type": "STRING", "links": [1]}])],
+        "links": [{"id": 1, "origin_id": 7, "origin_slot": 0, "target_id": -20, "target_slot": 0}],
+    }
+    workflow = _mini([_node(10, subgraph_id)], [])
+    workflow["definitions"] = {"subgraphs": [definition]}
+
+    result = render_py(workflow, None)
+
+    assert not any(line.startswith("    OUT.") and " = example" in line for line in result.source.splitlines())
+    assert any(warning in item for item in result.warnings)
 
 
 def test_null_link_id_is_warned_and_dropped(sd15_graph):
@@ -1727,6 +1793,7 @@ def test_definition_input_to_output_passthrough_is_never_retargeted():
     link = next(lk for lk in sg["links"] if lk.get("id") == 3)
     link["target_id"] = -20
     link["target_slot"] = 0
+    sg["outputs"][0]["linkIds"].append(3)
 
     res = render_py(wf, graph)
 

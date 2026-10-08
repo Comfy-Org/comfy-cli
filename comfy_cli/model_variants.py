@@ -162,14 +162,28 @@ def resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dic
     ``model_unavailable`` warning (with the closest options) per model file
     that has no unique sibling and is left as it was. A subgraph instance that
     carries the same filename as a promoted value, and the ``properties.models``
-    download list, follow the rewrite.
+    download list, follow the rewrite. Top-level-only replacements are applied
+    directly; a replacement that must propagate through promoted subgraph
+    values is staged on a copy so a traversal failure leaves the input intact.
     """
     from comfy_cli.cql.promoted import PromotionTraversalLimitError
 
-    candidate = copy.deepcopy(workflow)
+    needs_promoted_rename = any(
+        sg_id is not None
+        and any(
+            value not in {str(option) for option in port.enum_values}
+            and precision_sibling(value, list(port.enum_values)) is not None
+            for _key, port, _field, value in _model_widgets(node, graph)
+        )
+        for node, sg_id in _workflow_nodes(workflow)
+    )
+    if not needs_promoted_rename:
+        return _resolve_workflow_models(workflow, graph)
+
     try:
+        candidate = copy.deepcopy(workflow)
         result = _resolve_workflow_models(candidate, graph)
-    except PromotionTraversalLimitError as exc:
+    except (PromotionTraversalLimitError, RecursionError) as exc:
         raise ModelVariantResolutionError(str(exc)) from exc
     workflow.clear()
     workflow.update(candidate)

@@ -222,6 +222,48 @@ def test_subgraph_expansion_uses_boundary_link_membership_not_stale_row_slots():
     assert output_sources == {(7, 0): 1}
 
 
+@pytest.mark.parametrize("origin_id,origin_slot", [([], 0), ({}, 0), (7, True), (7, 0.0)])
+def test_subgraph_expansion_skips_malformed_output_source_coordinates(origin_id, origin_slot):
+    definition = {
+        "inputs": [],
+        "outputs": [{"name": "result", "linkIds": [1]}],
+        "nodes": [],
+        "links": [
+            {
+                "id": 1,
+                "origin_id": origin_id,
+                "origin_slot": origin_slot,
+                "target_id": -20,
+                "target_slot": 0,
+            }
+        ],
+    }
+
+    _nodes, _links, _input_targets, output_sources = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
+
+    assert output_sources == {}
+
+
+def test_large_serialized_boundary_does_not_consume_the_fanout_reserve():
+    count = 5_001
+    definition = {
+        "inputs": [{"name": f"value-{index}", "linkIds": [index]} for index in range(count)],
+        "outputs": [],
+        "nodes": [
+            {"id": index, "type": "Example", "inputs": [{"name": "value", "link": index}], "outputs": []}
+            for index in range(count)
+        ],
+        "links": [
+            {"id": index, "origin_id": -10, "origin_slot": index, "target_id": index, "target_slot": 0}
+            for index in range(count)
+        ],
+    }
+
+    _nodes, _links, input_targets, _output_sources = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
+
+    assert len(input_targets) == count
+
+
 def test_subgraph_input_resolution_fails_closed_at_materialization_cap():
     ctx = workflow_to_api._SubgraphCtx()
     ctx.input_targets["root"] = {

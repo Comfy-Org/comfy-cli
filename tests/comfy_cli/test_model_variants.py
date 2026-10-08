@@ -334,6 +334,36 @@ class TestResolveWorkflowModels:
         assert resolve_workflow_models(wf, graph) == ([], [])
         assert wf == before
 
+    def test_top_level_only_resolution_preserves_nested_identity_without_deepcopy(self, graph, monkeypatch):
+        missing = "minimax_h3_video_vae_int8_convrot.safetensors"
+        node = {"id": 1, "type": "VAELoader", "widgets_values": [missing]}
+        workflow = {"nodes": [node]}
+
+        def unexpected_copy(_workflow):
+            raise AssertionError("top-level model resolution must not deepcopy the workflow")
+
+        monkeypatch.setattr("comfy_cli.model_variants.copy.deepcopy", unexpected_copy)
+
+        substitutions, unavailable = resolve_workflow_models(workflow, graph)
+
+        assert substitutions and not unavailable
+        assert workflow["nodes"][0] is node
+        assert node["widgets_values"] == ["minimax_h3_video_vae_fp16.safetensors"]
+
+    def test_promoted_resolution_reports_deepcopy_recursion_without_mutation(self, graph, monkeypatch):
+        workflow = _template()
+        before = copy.deepcopy(workflow)
+
+        def recursive_copy(_workflow):
+            raise RecursionError("workflow nesting is too deep")
+
+        monkeypatch.setattr("comfy_cli.model_variants.copy.deepcopy", recursive_copy)
+
+        with pytest.raises(ModelVariantResolutionError, match="workflow nesting is too deep"):
+            resolve_workflow_models(workflow, graph)
+
+        assert workflow == before
+
     def test_malformed_promotion_dag_fails_before_model_mutation(self, graph):
         definitions: dict[str, dict] = {}
         depth = 18
