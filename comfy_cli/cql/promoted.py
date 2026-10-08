@@ -963,18 +963,15 @@ def _promotion_source(sg: dict, inp: dict, defs: dict[str, dict]) -> tuple[str, 
     input projects — the first of its links that lands on a nested instance's
     input or on a widget-backed input slot."""
     links = {x.get("id"): x for x in sg.get("links") or [] if isinstance(x, dict)}
+    holders = _link_holders(sg)
     for link_id in inp.get("linkIds") or []:
         link = links.get(link_id) if isinstance(link_id, (int, str)) else None
         if link is None:
             continue
-        target = _inner_node(sg, link.get("target_id"))
-        if target is None:
+        held = held_link_target(sg, link_id, link, holders)
+        if held is None:
             continue
-        entries = target.get("inputs") or []
-        slot = link.get("target_slot")
-        entry = entries[slot] if isinstance(slot, int) and 0 <= slot < len(entries) else None
-        if not isinstance(entry, dict) or not _entry_holds_link(entry, link_id):
-            continue
+        target, _slot, entry = held
         if str(target.get("type", "")) in defs:
             return str(target.get("id")), str(entry.get("name"))
         marker = entry.get("widget")
