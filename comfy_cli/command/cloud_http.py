@@ -72,7 +72,13 @@ def handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | N
     import urllib.error
 
     if isinstance(e, urllib.error.HTTPError):
-        body = (e.read() or b"")[:1000].decode("utf-8", "replace")
+        if e.code in (401, 403):
+            from comfy_cli.command._cloud_errors import read_unauthorized_body
+
+            # Detection sees more of the body than the capped `details.body`.
+            scope_body, body = read_unauthorized_body(e)
+        else:
+            body = (e.read() or b"")[:1000].decode("utf-8", "replace")
         if e.code == 404:
             renderer.error(
                 code="workflow_not_found",
@@ -83,12 +89,20 @@ def handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | N
                 details={"workflow_id": workflow_id, "operation": operation},
             )
         elif e.code in (401, 403):
-            renderer.error(
-                code="cloud_unauthorized",
-                message=f"HTTP {e.code} during {operation}",
-                hint="re-run `comfy cloud login`",
-                details={"status": e.code},
+            from comfy_cli.command._cloud_errors import insufficient_scope_error
+
+            scope_error = insufficient_scope_error(
+                e.code, scope_body, getattr(e, "headers", None), details={"operation": operation, "body": body}
             )
+            if scope_error is not None:
+                renderer.error(**scope_error)
+            else:
+                renderer.error(
+                    code="cloud_unauthorized",
+                    message=f"HTTP {e.code} during {operation}",
+                    hint="re-run `comfy cloud login`",
+                    details={"status": e.code},
+                )
         else:
             from comfy_cli.command._cloud_errors import emit_status_error, retry_after_from_headers
 

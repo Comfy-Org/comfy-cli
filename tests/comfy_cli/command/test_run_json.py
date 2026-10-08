@@ -2480,6 +2480,21 @@ class TestCloudRateLimited:
         assert err["details"]["status"] == 402
         assert "comfy jobs ls" not in err["hint"]
 
+    def test_submit_403_scope_detected_past_the_rendered_body_cap(self, monkeypatch, workflow_file, capsys):
+        """Detection reads the full body; only ``details.body`` is capped."""
+        import json as _json
+
+        from comfy_cli.comfy_client import HTTPError
+
+        body = _json.dumps({"padding": "x" * 3000, "error": "insufficient_scope: comfy-cloud:agent:write"})
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit_exc=HTTPError(403, "Forbidden", body)))
+        lines, _ = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+
+        err = _envelope(lines)["error"]
+        assert err["code"] == "cloud_unauthorized"
+        assert err["details"]["required_scope"] == "comfy-cloud:agent:write"
+        assert len(err["details"]["body"]) == 2000
+
     @pytest.mark.parametrize("status", [400, 500, 503])
     def test_submit_other_statuses_keep_cloud_http_error(self, monkeypatch, workflow_file, capsys, status):
         from comfy_cli.comfy_client import HTTPError
@@ -2616,3 +2631,38 @@ class TestPollRateLimitedIsNotTerminal:
         status, error = writes[-1]
         assert status == "error"
         assert error["code"] == "cloud_http_error"
+
+    def test_poll_403_insufficient_scope_records_the_relogin_reason(self, monkeypatch, workflow_file, capsys):
+        """The job record keeps the same re-login verdict the envelope renders."""
+        from comfy_cli import jobs_state as jobs_state_mod
+        from comfy_cli.comfy_client import HTTPError
+
+        base = _fake_client()
+
+        class Denied(base):
+            def wait_for_completion(self, prompt_id, **k):
+                raise HTTPError(
+                    403,
+                    "Forbidden",
+                    "denied",
+                    www_authenticate=(
+                        'Basic realm="x"',
+                        'Bearer error="insufficient_scope", scope="comfy-cloud:jobs:read"',
+                    ),
+                )
+
+        _install_cloud_stubs(monkeypatch, client_cls=Denied)
+        writes: list[tuple] = []
+        monkeypatch.setattr(
+            jobs_state_mod, "write", lambda state: writes.append((state.status, state.error)) or "/tmp/state.json"
+        )
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=True, timeout=5)
+
+        assert exit_code == 1
+        rendered = _envelope(lines)["error"]
+        status, error = writes[-1]
+        assert status == "error"
+        assert error["code"] == rendered["code"] == "cloud_unauthorized"
+        assert error["details"]["reason"] == "insufficient_scope"
+        assert error["details"]["required_scope"] == "comfy-cloud:jobs:read"
+        assert error["details"]["prompt_id"] == "cloud-pid"

@@ -908,7 +908,7 @@ def execute_cloud(
     (the ``comfy run --prompt`` injected default), mirroring :func:`execute`.
     """
     from comfy_cli.comfy_client import Client, HTTPError, Unauthenticated, _group_outputs
-    from comfy_cli.command._cloud_errors import emit_status_error
+    from comfy_cli.command._cloud_errors import emit_status_error, insufficient_scope_error
     from comfy_cli.target import resolve_target
 
     renderer = get_renderer()
@@ -1090,6 +1090,9 @@ def execute_cloud(
             message=f"Cloud server rejected the workflow (HTTP {e.status}): {e.message}",
             hint="check the workflow is valid and the cloud server has the required nodes",
             details={"status": e.status, "body": e.body[:2000]},
+            # Detection reads the whole body; only the rendered detail is capped.
+            scope_body=e.body,
+            www_authenticate=getattr(e, "www_authenticate", None),
             # A 429 alone does not prove the submit had no effect, and the
             # client never repeats a submit on its own. Look for the job before
             # re-running so one that did get through is not queued twice.
@@ -1294,7 +1297,14 @@ def execute_cloud(
                 )
             else:
                 state.status = "error"
-                state.error = {"code": "cloud_http_error", "message": str(e)}
+                # Record the same re-login verdict ``emit_status_error`` renders
+                # below, so a later `comfy jobs status` keeps the reason.
+                state.error = insufficient_scope_error(
+                    e.status,
+                    e.body,
+                    getattr(e, "www_authenticate", None),
+                    details={"status": e.status, "prompt_id": submit.prompt_id},
+                ) or {"code": "cloud_http_error", "message": str(e)}
             jobs_state.write(state)
             emit_status_error(
                 renderer,
@@ -1305,6 +1315,8 @@ def execute_cloud(
                 hint=None,
                 details={"status": e.status, "prompt_id": submit.prompt_id},
                 rate_limited_next_step=follow_up,
+                scope_body=e.body,
+                www_authenticate=getattr(e, "www_authenticate", None),
             )
             raise typer.Exit(code=1) from e
         except KeyboardInterrupt:
