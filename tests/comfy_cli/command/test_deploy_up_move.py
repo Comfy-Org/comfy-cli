@@ -8,6 +8,7 @@ workspace outside that rollout.
 from __future__ import annotations
 
 import functools
+import http.client
 import importlib
 import json
 from pathlib import Path
@@ -439,6 +440,32 @@ def test_a_move_that_landed_and_was_moved_on_within_one_read_landed(tmp_path, mo
 
     # Then
     assert result.exit_code == 0, result.stderr
+
+
+class _DroppedHistory(FakeDeploy):
+    """A comfy-deploy whose first history read drops the connection before it answers."""
+
+    dropped = 0
+
+    def get_deployment_revisions(self, deployment_id: str) -> JsonObject:
+        if self.dropped == 0:
+            self.dropped += 1
+            raise http.client.RemoteDisconnected("Remote end closed connection without response")
+        return super().get_deployment_revisions(deployment_id)
+
+
+def test_a_dropped_history_read_asks_again_on_the_next_read(tmp_path, monkeypatch) -> None:
+    # Given a move to v5 that landed at revision 4 and moved on, and a history read that drops once
+    moved_on = {"pendingUpdate": None, "releaseId": "release-3", "revision": 5}
+    client = _DroppedHistory([_live("dep-1")], move="pending", get_patches=[moved_on, {}])
+    client.revisions["dep-1"] = _history("release-4", "release-5", "release-3")
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.dropped == 1
 
 
 @pytest.mark.parametrize("moved_on", _MOVED_ON, ids=["a_later_update_waits", "a_later_revision_serves_another_release"])

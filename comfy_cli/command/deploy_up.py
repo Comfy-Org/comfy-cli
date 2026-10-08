@@ -368,7 +368,8 @@ class MoveOutcomes:
             return outcome
         try:
             revisions = self.client.get_deployment_revisions(self.deployment_id).get("items")
-        except (DeployAPIError, ResponseTooLarge, TimeoutError, urllib.error.URLError):
+        except (DeployAPIError, ResponseTooLarge, OSError, http.client.HTTPException):
+            # A dropped connection included, as the estimate's read takes it.
             # The next read asks again; a watch that never gets an answer
             # ends as a lost watch, never as a landed move.
             return outcome
