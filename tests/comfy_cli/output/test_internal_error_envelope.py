@@ -249,6 +249,7 @@ def test_a_crash_in_the_root_callback_still_emits_the_envelope(monkeypatch, work
         ("params={'api_key': ['sk-LIVE', 'sk-BACKUP']}", "sk-BACKUP", "params="),
         ("api_key=[['sk-A'], 'sk-BACKUP']", "sk-BACKUP", "api_key="),
         ("api_key=[\n  'sk-BACKUP'", "sk-BACKUP", "api_key="),
+        ("api_key=[\n'sk-BACKUP'] request=req-1", "sk-BACKUP", "request=req-1"),
         ("headers={'token': bytearray(b'sk-LIVE')}", "sk-LIVE", "headers="),
         ("token=ApiKey(value='sk-LIVE'", "sk-LIVE", "token="),
         ("api_key=ApiKey(value='sk-LIVE') request=req-1", "sk-LIVE", "request=req-1"),
@@ -330,6 +331,12 @@ def test_internal_error_scrubber_preserves_explanation_after_an_unquoted_value()
     scrubbed = _internal_error_message(RuntimeError("token=abc123 (expired at 12:00)"))
     assert "abc123" not in scrubbed
     assert "token=*** (expired at 12:00)" in scrubbed
+
+
+def test_internal_error_scrubber_does_not_cross_a_newline_to_find_a_container():
+    message = "invalid token:\n  (line 3) unexpected character\n  node id: 7"
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert message in scrubbed
 
 
 def test_internal_error_scrubber_handles_unterminated_escaped_container_with_backslashes():
