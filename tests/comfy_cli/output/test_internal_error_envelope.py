@@ -321,7 +321,13 @@ def test_internal_error_scrubber_preserves_ordinary_identifier_diagnostics():
 
 @pytest.mark.parametrize(
     "message",
-    ["missing required key: num_inference_steps", "--param must be key=value, got 'x'", "key: Foo(value)"],
+    [
+        "missing required key: num_inference_steps",
+        "--param must be key=value, got 'x'",
+        "key: Foo(value)",
+        'primary_key: "user-42"',
+        "foreign_key=value sort_key=value cache_key=value hash-key=value",
+    ],
 )
 def test_internal_error_scrubber_preserves_standalone_key_diagnostics(message):
     assert message in _internal_error_message(RuntimeError(message))
@@ -348,6 +354,39 @@ def test_internal_error_scrubber_drops_split_userinfo_after_earlier_redaction_co
     assert "alice:" not in scrubbed
     assert "S" * 20 not in scrubbed
     assert scrubbed.endswith("…")
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "Invalid URL 'https://alice:" + "S" * 700,
+        "url=https://alice:" + "S" * 700,
+        "db=postgres://alice:p@ss" + "S" * 700,
+    ],
+)
+def test_internal_error_scrubber_drops_any_anchorless_userinfo_tail(tail):
+    message = "Bearer " + "A" * 3_400 + " " + tail
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "alice:" not in scrubbed
+    assert "S" * 20 not in scrubbed
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "secret key: sk-LIVE",
+        "signing key = sk-LIVE",
+        "private key: -----BEGIN " + "RSA PRIVATE KEY-----",
+        "clientSecret=sk-LIVE",
+        "ClientSecret=sk-LIVE",
+        "privateKey=sk-LIVE",
+        "secretAccessKey=sk-LIVE",
+    ],
+)
+def test_internal_error_scrubber_masks_spaced_and_camel_case_credentials(message):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "sk-LIVE" not in scrubbed
+    assert "PRIVATE " + "KEY-----" not in scrubbed
 
 
 def test_internal_error_scrubber_keeps_a_long_compact_diagnostic():

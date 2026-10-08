@@ -187,11 +187,18 @@ _SECRET_KEY_PATTERN = (
 )
 _SECRET_KEY_QUALIFIER = (
     r"comfy|org|organization|workspace|project|account|user|client|partner|service|cloud|api|access|refresh|"
-    r"auth|key|id|token|secret|credentials?|cookies?|session|value|private|public|signing|oauth|jwt"
+    r"auth|key|id|token|secret|credentials?|cookies?|session|value|private|public|signing|oauth|jwt|aws"
+)
+_CAMEL_SECRET_KEY_PATTERN = (
+    r"(?:(?i:comfy|org|organization|workspace|project|account|user|client|partner|service|cloud|api|access|"
+    r"refresh|auth|private|public|signing|oauth|jwt|aws|secret)(?:[A-Z][A-Za-z0-9]*)*"
+    r"(?:KeyId|Key|Secret|Token|Password|Authorization|Cookie|Signature|SessionId))"
 )
 _SECRET_ASSIGNMENT_KEY_PATTERN = (
     rf"(?<![\w-])(?:"
-    rf"(?:[\w-]+[_-])key(?:[_-](?:{_SECRET_KEY_QUALIFIER})(?:[_-](?:{_SECRET_KEY_QUALIFIER}))*)?"
+    rf"(?:(?:{_SECRET_KEY_QUALIFIER})(?:[ _-]+(?:{_SECRET_KEY_QUALIFIER}))*[ _-]+key"
+    rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})(?:[_-](?:{_SECRET_KEY_QUALIFIER}))*)?)"
+    rf"|{_CAMEL_SECRET_KEY_PATTERN}"
     rf"|(?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})"
     rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})(?:[_-](?:{_SECRET_KEY_QUALIFIER}))*)?"
     rf")"
@@ -380,6 +387,14 @@ _SECRET_PATTERNS = (
         r"\1***",
     ),
     (
+        re.compile(
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
+            r"-----BEGIN [^\r\n]*(?:\r?\n[^\r\n]*)*",
+            re.IGNORECASE,
+        ),
+        r"\1***",
+    ),
+    (
         # The Bearer scrubber above preserves the scheme; do not remask it as an unquoted token value.
         re.compile(
             rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
@@ -445,7 +460,7 @@ def _internal_error_message(error: BaseException) -> str:
         # A userinfo scrub needs its closing ``@``. If the input cap removed
         # that anchor, drop the incomplete credential token before earlier
         # scrubbers contract the message and pull it into the visible prefix.
-        partial_userinfo = re.search(r"\s+https?://[^\s/@:]+:[^@\s]*$", text, re.IGNORECASE)
+        partial_userinfo = re.search(r"(?<![\w])[A-Za-z][A-Za-z0-9+.-]*://[^\s/'\"?#:]+:\S*$", text)
         if partial_userinfo is not None:
             text = text[: partial_userinfo.start()]
     text = _scrub_secret_constructors(text)

@@ -313,48 +313,84 @@ def _resolve(
     spec: dict[str, Any],
     node: Any,
     seen: frozenset[str] = frozenset(),
-    memo: dict[tuple[str, object, frozenset[str]], Any] | None = None,
+    memo: dict[tuple[Any, ...], tuple[Any, bool]] | None = None,
 ) -> Any:
     """Recursively inline $refs in a schema. Cycles are broken with a placeholder.
 
-    Memo keys include the active ref ancestry: a subtree resolved inside a
-    cycle contains a placeholder and is not interchangeable with that same
-    subtree reached outside the cycle. Object-identity keys also collapse YAML
-    alias DAGs whose shared inline nodes carry no ``$ref`` of their own.
+    Cycle-bearing results are keyed by active ref ancestry, so a pruned subtree
+    is not reused outside that cycle. Cycle-free results are shared regardless
+    of ancestry, and object-identity keys collapse YAML alias DAGs whose shared
+    inline nodes carry no ``$ref`` of their own.
     """
-    if memo is None:
-        memo = {}
+    value, _cyclic = _resolve_schema(spec, node, seen, memo if memo is not None else {})
+    return value
+
+
+def _resolve_schema(
+    spec: dict[str, Any],
+    node: Any,
+    seen: frozenset[str],
+    memo: dict[tuple[Any, ...], tuple[Any, bool]],
+) -> tuple[Any, bool]:
+    """Return ``(resolved, contains_cycle_placeholder)`` for :func:`_resolve`."""
     if isinstance(node, dict):
         if "$ref" in node:
             ref = node["$ref"]
             if not isinstance(ref, str):
                 raise SpecError(f"Invalid non-string $ref: {ref!r}")
             if ref in seen:
-                return {"type": "object", "x-recursive-ref": ref}
-            memo_key = ("ref", ref, seen)
+                return {"type": "object", "x-recursive-ref": ref}, True
+            shared_key = ("ref", ref)
+            if shared_key in memo:
+                return memo[shared_key]
+            memo_key = (*shared_key, seen)
             if memo_key in memo:
                 return memo[memo_key]
-            memo[memo_key] = {"type": "object", "x-recursive-ref": ref}
+            memo[memo_key] = ({"type": "object", "x-recursive-ref": ref}, True)
             resolved = _resolve_ref(spec, ref)
-            value = _resolve(spec, resolved, seen | {ref}, memo)
-            memo[memo_key] = value
-            return value
+            result = _resolve_schema(spec, resolved, seen | {ref}, memo)
+            memo[memo_key] = result
+            if not result[1]:
+                memo[shared_key] = result
+            return result
+        shared_key = ("object", id(node))
+        if shared_key in memo:
+            return memo[shared_key]
         memo_key = ("object", id(node), seen)
         if memo_key in memo:
             return memo[memo_key]
-        memo[memo_key] = {"type": "object", "x-recursive-object": True}
-        value = {k: _resolve(spec, v, seen, memo) for k, v in node.items()}
-        memo[memo_key] = value
-        return value
+        memo[memo_key] = ({"type": "object", "x-recursive-object": True}, True)
+        value: dict[str, Any] = {}
+        cyclic = False
+        for key, child in node.items():
+            resolved_child, child_cyclic = _resolve_schema(spec, child, seen, memo)
+            value[key] = resolved_child
+            cyclic = cyclic or child_cyclic
+        result = (value, cyclic)
+        memo[memo_key] = result
+        if not cyclic:
+            memo[shared_key] = result
+        return result
     if isinstance(node, list):
+        shared_key = ("list", id(node))
+        if shared_key in memo:
+            return memo[shared_key]
         memo_key = ("list", id(node), seen)
         if memo_key in memo:
             return memo[memo_key]
-        memo[memo_key] = []
-        value = [_resolve(spec, item, seen, memo) for item in node]
-        memo[memo_key] = value
-        return value
-    return node
+        memo[memo_key] = ([], True)
+        value: list[Any] = []
+        cyclic = False
+        for item in node:
+            resolved_item, item_cyclic = _resolve_schema(spec, item, seen, memo)
+            value.append(resolved_item)
+            cyclic = cyclic or item_cyclic
+        result = (value, cyclic)
+        memo[memo_key] = result
+        if not cyclic:
+            memo[shared_key] = result
+        return result
+    return node, False
 
 
 def _detect_polling(partner: str, response_schema: dict[str, Any]) -> str | None:
@@ -482,18 +518,33 @@ def _extract_enum(prop: dict[str, Any], _memo: dict[int, list[str] | None] | Non
         if not isinstance(variants, list):
             continue
         merged: list[str] = []
+        merged_values: set[str] = set()
+        merged_results: set[int] = set()
         for variant in variants:
             if isinstance(variant, dict):
                 found = _extract_enum(variant, _memo)
-                if found:
-                    merged.extend(v for v in found if v not in merged)
+                if found and id(found) not in merged_results:
+                    merged_results.add(id(found))
+                    for value in found:
+                        if value not in merged_values:
+                            merged_values.add(value)
+                            merged.append(value)
         if merged:
             return finish(merged)
     all_of = prop.get("allOf")
     if isinstance(all_of, list):
-        branch_enums = [e for v in all_of if isinstance(v, dict) if (e := _extract_enum(v, _memo))]
+        branch_enums: list[list[str]] = []
+        branch_results: set[int] = set()
+        for variant in all_of:
+            found = _extract_enum(variant, _memo) if isinstance(variant, dict) else None
+            if found and id(found) not in branch_results:
+                branch_results.add(id(found))
+                branch_enums.append(found)
         if branch_enums:
-            intersected = [v for v in branch_enums[0] if all(v in b for b in branch_enums[1:])]
+            allowed = set(branch_enums[0])
+            for branch in branch_enums[1:]:
+                allowed.intersection_update(branch)
+            intersected = [value for value in branch_enums[0] if value in allowed]
             if intersected:
                 return finish(intersected)
     return finish(None)
@@ -518,32 +569,48 @@ def model_enum(endpoint_id: str, field: str = "model") -> list[str] | None:
     return _extract_enum(prop)
 
 
-def _find_property(schema: dict[str, Any], field: str, visited: set[int] | None = None) -> dict[str, Any] | None:
+def _find_property(
+    schema: dict[str, Any],
+    field: str,
+    _memo: dict[tuple[int, str], dict[str, Any] | None] | None = None,
+    _active: set[tuple[int, str]] | None = None,
+) -> dict[str, Any] | None:
     """Locate ``field`` in ``schema['properties']``, descending into top-level
     ``allOf``/``anyOf``/``oneOf`` composition when the schema carries no direct
     match — a composed request body must not silently defeat the spec-derived
     enum and fall back to the hardcoded list."""
-    if visited is None:
-        visited = set()
-    identity = id(schema)
-    if identity in visited:
+    if _memo is None:
+        _memo = {}
+    if _active is None:
+        _active = set()
+    memo_key = (id(schema), field)
+    if memo_key in _memo:
+        return _memo[memo_key]
+    if memo_key in _active:
         return None
-    visited.add(identity)
+    _active.add(memo_key)
+    candidates: list[dict[str, Any]] = []
     props = schema.get("properties")
     if isinstance(props, dict):
         prop = props.get(field)
         if isinstance(prop, dict):
-            return prop
+            candidates.append(prop)
     for key in ("allOf", "anyOf", "oneOf"):
         variants = schema.get(key)
         if not isinstance(variants, list):
             continue
+        matches: list[dict[str, Any]] = []
         for variant in variants:
             if isinstance(variant, dict):
-                found = _find_property(variant, field, visited)
+                found = _find_property(variant, field, _memo, _active)
                 if found is not None:
-                    return found
-    return None
+                    matches.append(found)
+        if matches:
+            candidates.append(matches[0] if len(matches) == 1 else {key: matches})
+    _active.remove(memo_key)
+    result = candidates[0] if len(candidates) == 1 else ({"allOf": candidates} if candidates else None)
+    _memo[memo_key] = result
+    return result
 
 
 # OpenAI's image request schema types `model` as a free string (no enum), so

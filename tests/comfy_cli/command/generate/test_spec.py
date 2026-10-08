@@ -275,3 +275,21 @@ def test_find_property_descends_top_level_composition():
     nested = {"anyOf": [{"oneOf": [{"properties": {"model": {"enum": ["m2"]}}}]}]}
     assert spec._find_property(nested, "model") == {"enum": ["m2"]}
     assert spec._find_property({"allOf": [{"type": "object"}]}, "model") is None
+
+
+def test_find_property_preserves_combinator_enum_semantics():
+    all_of = {
+        "allOf": [
+            {"properties": {"model": {"enum": ["allowed", "forbidden"]}}},
+            {"properties": {"model": {"enum": ["allowed"]}}},
+        ]
+    }
+    any_of = {
+        "anyOf": [
+            {"properties": {"model": {"enum": ["v1"]}}},
+            {"properties": {"model": {"enum": ["v2"]}}},
+        ]
+    }
+
+    assert spec._extract_enum(spec._find_property(all_of, "model")) == ["allowed"]
+    assert spec._extract_enum(spec._find_property(any_of, "model")) == ["v1", "v2"]
