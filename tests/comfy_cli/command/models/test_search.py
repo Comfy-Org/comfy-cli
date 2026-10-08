@@ -914,7 +914,7 @@ class TestShow:
 
 
 # ---------------------------------------------------------------------------
-# --host/--port routing (BE-5788) — mirrors `comfy upload` (BE-5662)
+# --host/--port routing — mirrors `comfy upload`
 # ---------------------------------------------------------------------------
 
 
@@ -1036,6 +1036,43 @@ class TestHostPortCloudRejection:
         assert "COMFY_WHERE" in env["error"]["message"]
         assert env["error"]["details"]["where_source"] == "env"
 
+    def test_rejection_envelope_names_the_subcommand(self, monkeypatch, capsys):
+        # The shared helper stamps the verb, so the failure line carries the
+        # same ``command`` a consumer sees on that verb's success envelope.
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["list-folder", "loras", "--where", "cloud", "--host", "10.0.0.5"], capsys)
+        assert env["error"]["code"] == "host_flag_cloud"
+        assert env["command"] == "models list-folder"
+
+
+class TestRoutingResolutionFallbacks:
+    """Routing resolution in ``_resolve_and_stamp`` keeps the defensive config
+    read ``resolve_target`` had before the --host/--port flags existed."""
+
+    def test_unreadable_config_falls_through_to_next_source(self, monkeypatch, capsys):
+        import configparser
+
+        def broken_config(*_a, **_kw):
+            raise configparser.MissingSectionHeaderError("config.ini", 1, "garbage")
+
+        monkeypatch.delenv("COMFY_LOCAL_URL", raising=False)
+        monkeypatch.delenv("COMFY_WHERE", raising=False)
+        monkeypatch.setattr("comfy_cli.config_manager.ConfigManager", broken_config)
+        _patch_urlopen(monkeypatch, {"127.0.0.1:8188/models": _LOCAL_FOLDERS})
+        env = _run(["list-folders", "--where", "local"], capsys)
+        assert env["ok"] is True, env
+        assert env["data"]["url"] == "http://127.0.0.1:8188/models"
+
+    def test_invalid_where_env_is_a_where_invalid_envelope(self, monkeypatch, capsys):
+        monkeypatch.setenv("COMFY_WHERE", "moon")
+        _patch_urlopen(monkeypatch, {})
+        env = _run(["search", "--text", "x"], capsys)
+        assert env["ok"] is False, env
+        assert env["error"]["code"] == "where_invalid"
+        # The hint names every source a bad value can come from, not just --where.
+        assert "COMFY_WHERE" in env["error"]["hint"]
+        assert env["command"] == "models search"
+
 
 class TestHostPortUsageErrors:
     """A bad ``--host``/``--port`` is a usage error (exit 2), validated the same
@@ -1060,6 +1097,13 @@ class TestHostPortUsageErrors:
             "host%2fpath",
             "127.0.0.1:8188",
             "localhost:8188",
+            # Colon-free brackets used to slip past validation and crash
+            # urlsplit with "Invalid IPv6 URL"; an un-IDNA-encodable host used
+            # to escape as a raw UnicodeError.
+            "[localhost]",
+            "a]b",
+            "a" * 64 + ".example",
+            "a..b",
         ],
     )
     def test_invalid_host_is_a_usage_error(self, runner, bad):

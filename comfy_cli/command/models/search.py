@@ -182,7 +182,7 @@ def _emit_http_error(e: urllib.error.HTTPError, *, renderer, target, message: st
 
 # How a `cloud` routing decision was reached, in words, for the --host/--port
 # rejection message. Keys are `where.WhereResolution.source` values. Mirrors the
-# copy `cmdline.upload` uses (BE-5662) — kept local rather than imported so this
+# copy `cmdline.upload` uses — kept local rather than imported so this
 # module stays free of a `cmdline` import cycle.
 _WHERE_SOURCE_PHRASES = {
     "flag": "targeting cloud via --where cloud",
@@ -193,7 +193,7 @@ _WHERE_SOURCE_PHRASES = {
 }
 
 
-def _resolve_and_stamp(renderer, where: str | None, *, host: str | None = None, port: int | None = None):
+def _resolve_and_stamp(renderer, where: str | None, *, command: str, host: str | None = None, port: int | None = None):
     """Resolve the routing Target for a ``models`` verb and stamp it on the renderer.
 
     Every verb here calls this at the point it decides local-vs-cloud, so the
@@ -203,7 +203,7 @@ def _resolve_and_stamp(renderer, where: str | None, *, host: str | None = None, 
     ``emit(..., where=...)`` arguments still take precedence over the stamp.
 
     ``host``/``port`` route a **local** ``models`` query at a specific ComfyUI
-    (the ``--host``/``--port`` flags), mirroring ``comfy upload`` (BE-5662):
+    (the ``--host``/``--port`` flags), mirroring ``comfy upload``:
     they are validated the same way, rejected against an effective ``cloud``
     target, and otherwise handed to ``resolve_target``, which applies the local
     precedence explicit flag > ``COMFY_LOCAL_URL`` > ``127.0.0.1:8188``. With
@@ -215,9 +215,14 @@ def _resolve_and_stamp(renderer, where: str | None, *, host: str | None = None, 
     the configured remote target.
     """
     from comfy_cli import where as where_module
-    from comfy_cli.config_manager import ConfigManager
     from comfy_cli.host_port import report_usage_error, validate_host
     from comfy_cli.target import resolve_target
+
+    # Stamp the subcommand too, so every failure envelope from here down —
+    # the usage-error, ``where_invalid`` and ``host_flag_cloud`` rejections
+    # and the verb's own downstream errors — names the same ``command`` as
+    # the verb's success envelope rather than the renderer's group default.
+    renderer.command = command
 
     # Validate the flags before resolving anything: the host lands verbatim in
     # ``http://{host}:{port}/...``, so a URL-special or control character is a
@@ -231,13 +236,12 @@ def _resolve_and_stamp(renderer, where: str | None, *, host: str | None = None, 
         if port is not None and not (1 <= port <= 65535):
             raise typer.BadParameter(f"invalid port: {port} is out of range (1-65535)")
 
-    try:
-        decision = where_module.resolve(
-            flag=where, config_value=ConfigManager().get(where_module.CONFIG_KEY_WHERE_DEFAULT)
-        )
-    except ValueError as e:
-        renderer.error(code="where_invalid", message=str(e), hint="use --where local or --where cloud")
-        raise typer.Exit(code=1) from e
+    # ``resolve_default_or_exit`` reads the persisted ``where_default``
+    # defensively (a broken config drops to the next precedence source, as
+    # ``resolve_target`` did before these flags existed) and turns a bad
+    # --where / COMFY_WHERE / project / config value into a ``where_invalid``
+    # envelope whose hint names all of those sources.
+    decision = where_module.resolve_default_or_exit(flag=where)
 
     effective_where = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
     # Routing is decided, so every error envelope from here down can name the
@@ -296,7 +300,7 @@ def list_folders_cmd(
     ] = None,
 ):
     renderer = get_renderer()
-    target = _resolve_and_stamp(renderer, where, host=host, port=port)
+    target = _resolve_and_stamp(renderer, where, command="models list-folders", host=host, port=port)
     url = target.url(*_models_path_parts(target))
 
     try:
@@ -380,7 +384,7 @@ def list_folder_cmd(
 ):
     renderer = get_renderer()
     _reject_unsafe_path_segment(folder, kind="folder", renderer=renderer)
-    target = _resolve_and_stamp(renderer, where, host=host, port=port)
+    target = _resolve_and_stamp(renderer, where, command="models list-folder", host=host, port=port)
     # Percent-encoded for the same reason `_local_folder_matches` does it: the
     # relaxed validation above admits spaces, `?`/`#`, and non-ASCII, none of
     # which may be allowed to alter the request. Error payloads below carry the
@@ -765,7 +769,7 @@ def search_cmd(
     renderer = get_renderer()
     if type_ is not None:
         _reject_unsafe_path_segment(type_, kind="type", renderer=renderer)
-    target = _resolve_and_stamp(renderer, where, host=host, port=port)
+    target = _resolve_and_stamp(renderer, where, command="models search", host=host, port=port)
 
     try:
         if target.is_cloud:
@@ -839,15 +843,21 @@ def show_cmd(
     ] = None,
     host: Annotated[
         str | None,
-        typer.Option(help="Server host (defaults to COMFY_LOCAL_URL or 127.0.0.1). Local targets only."),
+        typer.Option(
+            help="Server host, for parity with the other `models` verbs. `show` needs the cloud asset "
+            "catalog, so a local target (including one named here) is reported as unsupported."
+        ),
     ] = None,
     port: Annotated[
         int | None,
-        typer.Option(help="Server port (defaults to COMFY_LOCAL_URL or 8188). Local targets only."),
+        typer.Option(
+            help="Server port, for parity with the other `models` verbs. `show` needs the cloud asset "
+            "catalog, so a local target (including one named here) is reported as unsupported."
+        ),
     ] = None,
 ):
     renderer = get_renderer()
-    target = _resolve_and_stamp(renderer, where, host=host, port=port)
+    target = _resolve_and_stamp(renderer, where, command="models show", host=host, port=port)
 
     if not target.is_cloud:
         # On local there's no asset catalog. We can confirm the file exists by
