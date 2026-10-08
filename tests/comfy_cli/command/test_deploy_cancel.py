@@ -72,6 +72,29 @@ def test_a_cancel_ends_the_waiting_update_and_keeps_the_release(monkeypatch) -> 
     assert client.cancel_calls == ["dep-prod"]
 
 
+class _NoRevisionRead(FakeDeploy):
+    """A comfy-deploy whose rollout check fails on the read, so it leaves revision and pendingUpdate out."""
+
+    def get_deployment(self, deployment_id: str) -> JsonObject:
+        row = super().get_deployment(deployment_id)
+        row.pop("revision", None)
+        row.pop("pendingUpdate", None)
+        return row
+
+
+def test_a_read_without_a_revision_still_sends_the_cancel(monkeypatch) -> None:
+    # Given an update waiting that the read leaves out
+    client = _NoRevisionRead(list(_waiting().rows.values()))
+
+    # When
+    result = _invoke(monkeypatch, client, "--deployment", "dep-prod")
+
+    # Then the service, not the read, says whether one waited
+    assert result.exit_code == 0, result.stderr
+    assert client.cancel_calls == ["dep-prod"]
+    assert _envelope(result)["data"]["cancelledUpdate"]["release"] == {"id": "release-5", "version": 5}
+
+
 def test_a_cancel_says_what_it_ended_and_what_still_serves(monkeypatch) -> None:
     # Given a named deployment waiting on a rollback
     client = _waiting(kind="rollback", name="production")
@@ -116,11 +139,11 @@ class _Unrouted(FakeDeploy):
 @pytest.mark.parametrize(
     ("revision", "server_code", "code", "reason", "cancels"),
     [
-        (None, None, "deploy_updates_unavailable", "updates_off", 0),
+        (None, None, "deploy_updates_unavailable", "service_too_old", 1),
         (3, None, "deploy_updates_unavailable", "service_too_old", 1),
         (3, "NOT_FOUND", "deploy_not_found", None, 1),
     ],
-    ids=["no_revision", "service_too_old", "gone_since_the_read"],
+    ids=["no_revision_in_the_read", "service_too_old", "gone_since_the_read"],
 )
 def test_a_cancel_the_service_cannot_take_says_why(
     monkeypatch, revision: int | None, server_code: str | None, code: str, reason: str | None, cancels: int

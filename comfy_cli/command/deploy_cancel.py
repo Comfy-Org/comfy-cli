@@ -62,17 +62,6 @@ class CancelUnavailableError(DeployResolveError):
         super().__init__(f"the deploy service cannot cancel the update of deployment {deployment_id} yet")
 
 
-class NoUpdatesError(DeployResolveError):
-    """A deployment with no revision: its workspace has no deployment updates, so none waits."""
-
-    code = "deploy_updates_unavailable"
-    hint = "nothing to cancel: a deployment without updates moves only by `comfy deploy up --create`"
-
-    def __init__(self, deployment_id: str) -> None:
-        self.details = {"deployment_id": deployment_id, "reason": "updates_off"}
-        super().__init__(f"deployment {deployment_id} has no deployment updates, so no update waits to cancel")
-
-
 class NoDeploymentToCancelError(DeployResolveError):
     code = "deploy_not_found"
     hint = "run `comfy deploy ls` to find one, then pass `--deployment <id>`"
@@ -150,10 +139,10 @@ def _cancelled(builder: BuilderReleaseClient, releases: Sequence[JsonObject], an
 
 def cancel(builder: BuilderReleaseClient, client: DeploymentCancelClient, request: CancelRequest) -> CancelResult:
     deployment_id, releases = _picked_deployment(builder, client, request)
-    # Read first, as rollback does: a missing deployment answers here, and one
-    # with no revision is one the service has no updates for.
-    if optional_revision(client.get_deployment(deployment_id)) is None:
-        raise NoUpdatesError(deployment_id)
+    # Read first, as rollback does: a missing deployment answers here. A read
+    # with no revision still sends the cancel, since the service leaves it out
+    # whenever its rollout check fails, while an update may still wait.
+    client.get_deployment(deployment_id)
     try:
         answer = client.cancel_pending_update(deployment_id)
     except DeployAPIError as error:

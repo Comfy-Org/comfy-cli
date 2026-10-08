@@ -411,29 +411,52 @@ def test_a_read_without_a_revision_mid_watch_does_not_fail_the_move(tmp_path, mo
     assert client.get_ids.count("dep-1") == 3
 
 
-@pytest.mark.parametrize(
-    "moved_on",
-    [
-        {
-            "pendingUpdate": {"releaseId": "release-3", "baseRevision": 4, "status": "provisioning", "since": "x"},
-            "releaseId": "release-5",
-            "revision": 4,
-        },
-        {"pendingUpdate": None, "releaseId": "release-3", "revision": 5},
-    ],
-    ids=["a_later_update_waits", "a_later_revision_serves_another_release"],
-)
+_MOVED_ON = [
+    {
+        "pendingUpdate": {"releaseId": "release-3", "baseRevision": 4, "status": "provisioning", "since": "x"},
+        "releaseId": "release-5",
+        "revision": 4,
+    },
+    {"pendingUpdate": None, "releaseId": "release-3", "revision": 5},
+]
+
+
+def _history(*releases: str) -> list[JsonObject]:
+    """Revisions 3 onward, one per release, as the service lists them."""
+    return [{"revision": 3 + n, "releaseId": release, "kind": "update"} for n, release in enumerate(releases)]
+
+
+@pytest.mark.parametrize("moved_on", _MOVED_ON, ids=["a_later_update_waits", "a_later_revision_serves_another_release"])
 def test_a_move_that_landed_and_was_moved_on_within_one_read_landed(tmp_path, monkeypatch, moved_on) -> None:
-    """The move waits from revision 3, so a later update or a revision past 4 is
-    one the deployment took after this move landed, not one that replaced it."""
-    # Given a move to v5 that landed, then another change before the next read
+    """The move waits from revision 3, so a later update or a revision past 4
+    says the deployment went on; its history shows this move made revision 4."""
+    # Given a move to v5 that landed at revision 4, then another change before the next read
     client = FakeDeploy([_live("dep-1")], move="pending", get_patches=[moved_on])
+    client.revisions["dep-1"] = _history("release-4", "release-5", "release-3")
 
     # When
     result = _up(tmp_path, monkeypatch, client, "--release", "release-5")
 
     # Then
     assert result.exit_code == 0, result.stderr
+
+
+@pytest.mark.parametrize("moved_on", _MOVED_ON, ids=["a_later_update_waits", "a_later_revision_serves_another_release"])
+def test_a_cancelled_move_a_later_one_went_past_exits_1_as_replaced(tmp_path, monkeypatch, moved_on) -> None:
+    """A cancel leaves the revision at 3, so a later move takes revision 4: the
+    deployment going past 4 is no proof this move landed."""
+    # Given the move to v5 cancelled, then a move to v3 that landed at revision 4
+    client = FakeDeploy([_live("dep-1")], move="pending", get_patches=[moved_on, moved_on])
+    client.revisions["dep-1"] = _history("release-4", "release-3", "release-4")
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5")
+
+    # Then
+    error = _envelope(result)["error"]
+    assert result.exit_code == 1
+    assert error["code"] == "deploy_update_replaced"
+    assert error["details"]["replacing_release_id"] == "release-3"
 
 
 def test_a_move_ended_before_it_landed_says_so_rather_than_failed(tmp_path, monkeypatch) -> None:
