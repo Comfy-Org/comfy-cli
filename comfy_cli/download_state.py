@@ -74,6 +74,7 @@ import json
 import os
 import re
 import secrets as _secrets
+import stat
 import sys
 import time
 import uuid
@@ -246,7 +247,8 @@ CLAIM_TMP_MAX_AGE_S = 60 * 60
 # between our `open` and our lock, so the lock we hold is on an orphan inode and
 # decides nothing. Bounded rather than unbounded: only a concurrent `prune`
 # unlinks claims at all, so more than a couple of rounds means something else is
-# churning the path and refusing is the safe direction.
+# churning the path, and the caller is told so (an ``OSError``) rather than
+# told the claim is held.
 CLAIM_LOCK_RESTAT_ATTEMPTS = 3
 
 # Poll interval for `lock_claim`'s bounded blocking wait. The lock is only ever
@@ -257,13 +259,28 @@ CLAIM_LOCK_POLL_S = 0.02
 # What a lock attempt raises when the lock is simply held elsewhere, as opposed
 # to the filesystem being unable to lock at all. POSIX `flock` reports
 # EWOULDBLOCK/EAGAIN; Windows `msvcrt.locking` reports EACCES for `LK_NBLCK` and
-# EDEADLOCK when a blocking `LK_LOCK` gives up. Everything else (ENOLCK,
-# ENOTSUP/EOPNOTSUPP on a filesystem with no locking) propagates, because it
-# means no lock was taken and the caller has to degrade rather than conclude
-# somebody else owns the destination.
+# EDEADLOCK when a blocking `LK_LOCK` gives up. Per platform, because EACCES on
+# POSIX is not contention: it is a mount or LSM denying the lock outright, and
+# reading it as "held" would refuse every submit to that destination forever
+# instead of degrading. Everything else (ENOLCK, ENOTSUP/EOPNOTSUPP on a
+# filesystem with no locking) propagates, because it means no lock was taken and
+# the caller has to degrade rather than conclude somebody else owns the
+# destination.
 _LOCK_CONTENDED_ERRNOS = frozenset(
-    getattr(errno, name) for name in ("EACCES", "EAGAIN", "EWOULDBLOCK", "EDEADLK", "EDEADLOCK") if hasattr(errno, name)
+    getattr(errno, name)
+    for name in (("EACCES", "EDEADLK", "EDEADLOCK") if sys.platform == "win32" else ("EAGAIN", "EWOULDBLOCK"))
+    if hasattr(errno, name)
 )
+
+# A claim payload is ~100 bytes. Anything past this is corrupt or planted, and
+# reading it in full under the lock would only cost memory to learn that.
+CLAIM_PAYLOAD_MAX_BYTES = 64 * 1024
+
+# Never follow a symlink planted at a claim path: the descriptor is truncated
+# and rewritten, so following one would turn the claim into an arbitrary-file
+# overwrite. Windows has no such flag (and `os.open` does not follow reparse
+# points into a write the same way); the regular-file check covers the rest.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 # `os.open` needs O_BINARY on Windows or the descriptor does newline translation
 # on a payload we byte-count. A no-op everywhere else.
@@ -394,10 +411,14 @@ class ClaimLock:
         try:
             os.lseek(fd, 0, os.SEEK_SET)
             chunks: list[bytes] = []
+            size = 0
             while True:
                 block = os.read(fd, 65536)
                 if not block:
                     break
+                size += len(block)
+                if size > CLAIM_PAYLOAD_MAX_BYTES:
+                    return None
                 chunks.append(block)
         except OSError:
             return None
@@ -441,6 +462,13 @@ class ClaimLock:
         fd, self._fd = self._fd, None
         if fd is None:
             return
+        if sys.platform == "win32":
+            # Windows documents unlock-on-close as happening "when system
+            # resources permit", which is not soon enough for a worker re-taking
+            # the lock the moment its submitter lets go. Unlock explicitly.
+            with contextlib.suppress(OSError):
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
         with contextlib.suppress(OSError):
             os.close(fd)
 
@@ -490,10 +518,10 @@ def lock_claim(path: Path, *, blocking_timeout: float = 0.0) -> ClaimLock | None
 
     ``blocking_timeout`` bounds a non-blocking retry loop rather than issuing a
     blocking lock, so the wait can never outlive the caller's patience. Zero (the
-    default) is a single attempt — the submit path wants an immediate answer,
-    because a lock that is held *is* the answer. A freshly spawned worker passes
-    a few seconds, because a competitor may hold the lock for the moment it takes
-    to inspect the payload.
+    default) is a single attempt, for bookkeeping that can simply skip a held
+    claim. A submit passes about a second and a freshly spawned worker a few,
+    because a non-owner (a sweep, a competing submit) may hold the lock for the
+    moment it takes to inspect the payload, and that is not an owner.
 
     **The re-stat guard.** Between our ``open`` and our lock, the file we opened
     can be unlinked (only :func:`prune` does this, and only on POSIX) and a
@@ -505,16 +533,20 @@ def lock_claim(path: Path, *, blocking_timeout: float = 0.0) -> ClaimLock | None
     skips the guard (inode identity there is not reliable) and pays for it by
     never unlinking a claim file at all, which removes the race instead.
 
-    Raises ``OSError`` when the claim cannot be opened or the filesystem cannot
-    lock. That is not a collision and must not be reported as one: the caller
-    degrades to its advisory guard and says so.
+    Raises ``OSError`` when the claim cannot be opened, is not a regular file (a
+    planted symlink, FIFO or device node), or the filesystem cannot lock — and
+    when every re-stat attempt lost to a concurrent unlink, which is "could not
+    settle", not "held". None of those is a collision and none must be reported
+    as one: the caller degrades to its advisory guard and says so.
     """
     path = Path(path)
     deadline = time.monotonic() + max(0.0, float(blocking_timeout))
     for _ in range(CLAIM_LOCK_RESTAT_ATTEMPTS):
-        fd = os.open(str(path), os.O_CREAT | os.O_RDWR | _O_BINARY, STATE_FILE_MODE)
+        fd = os.open(str(path), os.O_CREAT | os.O_RDWR | _O_BINARY | _O_NOFOLLOW, STATE_FILE_MODE)
         keep = False
         try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(errno.EINVAL, "claim path is not a regular file", str(path))
             if sys.platform != "win32":
                 # `os.open`'s mode is masked by the umask, exactly as
                 # `write_path`'s is, and the file may predate this code.
@@ -531,10 +563,10 @@ def lock_claim(path: Path, *, blocking_timeout: float = 0.0) -> ClaimLock | None
             if not keep:
                 with contextlib.suppress(OSError):
                     os.close(fd)
-    # Every attempt raced a concurrent unlink. Reporting "held" rather than
-    # "acquired" is the safe direction: the caller refuses instead of letting a
-    # second transfer into a destination whose ownership we could not settle.
-    return None
+    # Every attempt raced a concurrent unlink. Not "held" — nobody was shown to
+    # own the destination, and reporting None would make a worker fail a
+    # transfer nobody contested. Raise, so the caller degrades and says so.
+    raise OSError(f"claim {path} kept being replaced while it was being locked")
 
 
 @dataclass
@@ -824,7 +856,11 @@ def _sweep_claims(workspace: Path) -> None:
     left-behind claim costs ~100 bytes and refuses nobody, because ownership is
     the *lock*, which no longer exists once its holder is gone.
 
-    Two conditions, both required, and the lock has to be held for the unlink:
+    Two conditions, both required, and the lock has to be held for the unlink.
+    The payload is read under one brief lock and the liveness question answered
+    with it released (a record read, a stat and a psutil query are too slow to
+    hold a claim a submitter may be waiting on); the unlink then re-takes the
+    lock and goes ahead only if the payload still names what was judged:
 
     * we can take the lock — so no transfer owns the destination right now; and
     * the payload does not name a download that is still live. That second check
@@ -858,6 +894,22 @@ def _sweep_claims(workspace: Path) -> None:
             continue
         if not path.name.endswith(".claim") or sys.platform == "win32":
             continue
+        download_id = _sweep_payload_id(path)
+        if download_id is _SWEEP_SKIP:
+            continue
+        if download_id is not None:
+            # Judged *unlocked*: a record read, a stat of the destination and a
+            # psutil query are all slow next to the payload read, and the claim
+            # lock is what a submitter is waiting on. Holding it across them
+            # would let a sweep refuse an unrelated submit to this destination.
+            try:
+                record = read(workspace, download_id)
+            except (OSError, ValueError):
+                continue
+            if record is not None and (reconcile(record).status in ACTIVE_STATUSES or worker_alive(record)):
+                continue
+        # Re-take the lock for the unlink and re-validate: the payload must still
+        # name what we judged, or a submit stamped it in between and it is theirs.
         try:
             lock = lock_claim(path)
         except OSError:
@@ -866,15 +918,33 @@ def _sweep_claims(workspace: Path) -> None:
             continue
         try:
             payload = lock.read_payload()
-            download_id = payload["download_id"] if payload is not None else None
-            if download_id is not None:
-                record = read(workspace, download_id)
-                if record is not None and (reconcile(record).status in ACTIVE_STATUSES or worker_alive(record)):
-                    continue
-            with contextlib.suppress(OSError):
-                path.unlink()
+            if (payload["download_id"] if payload is not None else None) == download_id:
+                with contextlib.suppress(OSError):
+                    path.unlink()
         finally:
             lock.release()
+
+
+_SWEEP_SKIP: Any = object()
+
+
+def _sweep_payload_id(path: Path) -> Any:
+    """The id stamped in ``path``'s claim, read under a brief lock.
+
+    :data:`_SWEEP_SKIP` when the claim is held or cannot be locked at all — a
+    held one is owned, and an unlockable one is not ours to judge.
+    """
+    try:
+        lock = lock_claim(path)
+    except OSError:
+        return _SWEEP_SKIP
+    if lock is None:
+        return _SWEEP_SKIP
+    try:
+        payload = lock.read_payload()
+        return payload["download_id"] if payload is not None else None
+    finally:
+        lock.release()
 
 
 def prune(workspace: Path) -> int:

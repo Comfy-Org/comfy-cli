@@ -1564,7 +1564,9 @@ class TestAtomicDestinationClaim:
         The old code cleared a claim it judged stale and re-created it, so it
         needed exactly one retry and a distinct refusal for the second collision.
         Holding removes both: the lock being unavailable *is* the answer, so one
-        attempt is all there is.
+        attempt is all there is. That attempt carries a short blocking window,
+        because non-owners (prune's sweep, another submit reading the payload)
+        take the same lock for a moment and must not be mistaken for an owner.
         """
         dest = self._dest(workspace)
         rival_id = "cccccccccccc"
@@ -1574,7 +1576,7 @@ class TestAtomicDestinationClaim:
         calls: list[int] = []
 
         def held(path, **kwargs):
-            calls.append(1)
+            calls.append(kwargs.get("blocking_timeout", 0.0))
             return None
 
         monkeypatch.setattr(download_state, "lock_claim", held)
@@ -1587,7 +1589,7 @@ class TestAtomicDestinationClaim:
             self._submit(dest)
 
         assert exc.value.exit_code == 1
-        assert len(calls) == 1, "a held lock must not be retried"
+        assert calls == [models.SUBMIT_CLAIM_LOCK_TIMEOUT_S], "a held lock must not be retried"
         env = json_renderer()
         # A distinct code, not `model_download_in_flight`: the holder's payload
         # did not resolve to a record, so the status/kind that code documents
@@ -1596,6 +1598,99 @@ class TestAtomicDestinationClaim:
         assert env["error"]["details"]["download_id"] == rival_id
         # We withdrew our own record, so no phantom claim is left behind.
         assert download_state.list_all(workspace) == []
+
+    @pytest.mark.parametrize("status", ["completed", "failed"])
+    def test_a_held_claim_naming_a_finished_download_is_not_called_in_flight(
+        self, workspace, monkeypatch, json_renderer, status
+    ):
+        """The lock and the payload are independent: a worker writes its result
+        before it lets go, and a sweep can hold the lock over a long-finished id.
+        "is already writing" would be false for a download that reads finished."""
+        dest = self._dest(workspace)
+        rival_id = "cccccccccccc"
+        download_state.write(workspace, _state(id=rival_id, dest=str(dest), status=status))
+        claim = download_state.claim_path(workspace, models._dest_key(dest))
+        _plant_claim(claim, rival_id, str(dest))
+        monkeypatch.setattr(download_state, "lock_claim", lambda path, **kwargs: None)
+        self._no_spawn(monkeypatch)
+        monkeypatch.setattr(download_state, "prune", lambda ws: 0)
+
+        with pytest.raises(typer.Exit):
+            self._submit(dest)
+
+        env = json_renderer()
+        assert env["error"]["code"] == "model_download_claim_contested"
+        assert env["error"]["details"]["download_id"] == rival_id
+
+    def test_a_momentarily_held_claim_is_waited_out(self, workspace, monkeypatch, json_renderer):
+        """A non-owner (prune's sweep, a polling `downloads`) holding the lock for
+        a moment is not a reason to refuse: the submit waits it out."""
+        dest = self._dest(workspace)
+        claim = download_state.claim_path(workspace, models._dest_key(dest))
+        blocker = download_state.lock_claim(claim)
+        assert blocker is not None
+        timer = threading.Timer(0.2, blocker.release)
+        self._no_spawn(monkeypatch)
+        monkeypatch.setattr(download_state, "prune", lambda ws: 0)
+        timer.start()
+        try:
+            self._submit(dest)
+        finally:
+            timer.cancel()
+            blocker.release()
+
+        assert json_renderer()["ok"] is True
+        assert download_state.read_claim(claim) == _claim_owner(workspace)
+
+    def test_the_spawn_gap_judgment_runs_with_the_lock_released(self, workspace, monkeypatch, json_renderer):
+        """Judging a foreign payload means a record read, reconcile and a psutil
+        query. A worker that owns the destination may be waiting on the lock to
+        start, so none of that runs while the submit holds it."""
+        dest = self._dest(workspace)
+        claim = download_state.claim_path(workspace, models._dest_key(dest))
+        _plant_claim(claim, "dddddddddddd", str(dest))
+        seen: list[bool] = []
+        real = models._spawn_gap_holder
+
+        def probe(holder_id):
+            seen.append(_is_lockable(claim))
+            return real(holder_id)
+
+        monkeypatch.setattr(models, "_spawn_gap_holder", probe)
+        self._no_spawn(monkeypatch)
+        monkeypatch.setattr(download_state, "prune", lambda ws: 0)
+
+        self._submit(dest)
+
+        assert seen == [True]
+        assert json_renderer()["ok"] is True
+        assert download_state.read_claim(claim) == _claim_owner(workspace)
+
+    def test_a_claim_restamped_during_the_judgment_is_judged_again(self, workspace, monkeypatch, json_renderer):
+        """The payload can change while it is judged unlocked. A fresh id is a
+        fresh judgment — and here a live spawn-gap one, so we refuse."""
+        dest = self._dest(workspace)
+        claim = download_state.claim_path(workspace, models._dest_key(dest))
+        _plant_claim(claim, "dddddddddddd", str(dest))
+        real = models._spawn_gap_holder
+        live = _state(id="eeeeeeeeeeee", dest=str(dest))
+
+        def probe(holder_id):
+            if holder_id == "dddddddddddd":
+                download_state.write(workspace, live)
+                _plant_claim(claim, live.id, str(dest))
+            return real(holder_id)
+
+        monkeypatch.setattr(models, "_spawn_gap_holder", probe)
+        self._no_spawn(monkeypatch)
+        monkeypatch.setattr(download_state, "prune", lambda ws: 0)
+
+        with pytest.raises(typer.Exit):
+            self._submit(dest)
+
+        env = json_renderer()
+        assert env["error"]["code"] == "model_download_in_flight"
+        assert download_state.read_claim(claim) == live.id
 
     def test_an_unusable_claims_directory_degrades_to_the_advisory_guard(self, workspace, monkeypatch, json_renderer):
         """The claim is bookkeeping: a state dir we cannot write must not turn a
@@ -2022,6 +2117,9 @@ class TestWorkerReleasesTheClaim:
         somebody else owns. We exit refused and leave a terminal record, exactly
         as the submit-side withdraw path does."""
         state, path, claim = self._prepare(workspace, tmp_path)
+        # The competitor is itself inside its spawn gap: a fresh `starting`
+        # record whose worker has not come up yet.
+        download_state.write(workspace, _state(id="999999999999", dest=state.dest))
         _plant_claim(claim, "999999999999", state.dest)
         monkeypatch.setattr(models, "download_file", MagicMock(side_effect=AssertionError("a transfer started")))
 
@@ -2034,6 +2132,32 @@ class TestWorkerReleasesTheClaim:
         # Their claim is untouched and lockable again — we held it only to look.
         assert download_state.read_claim(claim) == "999999999999"
         assert _is_lockable(claim)
+
+    @pytest.mark.parametrize("planted", [None, "completed", "starting-stale"])
+    def test_a_worker_adopts_a_claim_naming_a_dead_download(self, workspace, monkeypatch, tmp_path, planted):
+        """Payloads are never blanked on release, so a claim naming a long-gone
+        download is a normal thing for a worker to find. Only a competitor still
+        inside its own spawn gap is decisive — the same test the submit side
+        applies — so a missing, terminal or past-the-grace owner is adopted."""
+        state, path, claim = self._prepare(workspace, tmp_path)
+        if planted == "completed":
+            download_state.write(workspace, _state(id="999999999999", dest=state.dest, status="completed"))
+        elif planted == "starting-stale":
+            old = _state(id="999999999999", dest=state.dest)
+            old.started_at = "2000-01-01T00:00:00+00:00"
+            old.updated_at = old.started_at
+            download_state.write(workspace, old)
+        _plant_claim(claim, "999999999999", state.dest)
+        monkeypatch.setattr(
+            models,
+            "download_file",
+            lambda url, filepath, headers, downloader, progress_callback: filepath.write_bytes(b"ok"),
+        )
+
+        models._download_worker(state_file=str(path))
+
+        assert download_state.read(workspace, state.id).status == "completed"
+        assert download_state.read_claim(claim) == state.id
 
     def test_a_worker_adopts_an_unstamped_claim_instead_of_refusing(self, workspace, monkeypatch, tmp_path):
         """Nobody can own a destination whose lock we are holding, so a claim with
@@ -2378,11 +2502,48 @@ class TestClaimLockPrimitive:
         finally:
             lock.release()
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="EACCES is Windows' contention signal")
+    def test_eacces_on_posix_is_a_lock_failure_not_contention(self, workspace, monkeypatch):
+        """A mount or LSM denying `flock` outright says nothing about an owner;
+        reading it as "held" would refuse every submit to the destination forever."""
+        claim = download_state.claim_path(workspace, "/tmp/x.safetensors")
+
+        def denied(fd, op):
+            raise OSError(errno.EACCES, "denied")
+
+        monkeypatch.setattr(download_state.fcntl, "flock", denied)
+        with pytest.raises(OSError):
+            download_state.lock_claim(claim)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+    def test_a_symlink_at_the_claim_path_is_never_followed(self, workspace, tmp_path):
+        victim = tmp_path / "victim.txt"
+        victim.write_text("precious")
+        claim = download_state.claim_path(workspace, "/tmp/x.safetensors")
+        claim.symlink_to(victim)
+
+        with pytest.raises(OSError):
+            download_state.lock_claim(claim)
+        assert victim.read_text() == "precious"
+
+    @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a FIFO")
+    def test_a_non_regular_file_at_the_claim_path_is_refused(self, workspace):
+        claim = download_state.claim_path(workspace, "/tmp/x.safetensors")
+        os.mkfifo(claim)
+        with pytest.raises(OSError):
+            download_state.lock_claim(claim)
+
+    def test_an_oversized_payload_reads_as_none(self, workspace):
+        claim = download_state.claim_path(workspace, "/tmp/x.safetensors")
+        claim.write_bytes(b" " * (download_state.CLAIM_PAYLOAD_MAX_BYTES + 1))
+        with download_state.lock_claim(claim) as lock:
+            assert lock.read_payload() is None
+
     @pytest.mark.skipif(sys.platform == "win32", reason="only POSIX ever unlinks a claim file")
-    def test_a_claim_replaced_on_every_attempt_reports_held(self, workspace, monkeypatch):
-        """Refusing is the safe direction when ownership cannot be settled: the
-        caller backs off instead of letting a second transfer into a destination
-        whose claim something else is churning."""
+    def test_a_claim_replaced_on_every_attempt_raises_rather_than_reporting_held(self, workspace, monkeypatch):
+        """Nobody was shown to hold the claim, so None ("held") would be a lie a
+        worker acts on by failing a transfer nobody contested. It raises, which
+        every caller already treats as "degrade and say so"."""
         claim = download_state.claim_path(workspace, "/tmp/x.safetensors")
         real = download_state._lock_fd_nb
 
@@ -2393,7 +2554,8 @@ class TestClaimLockPrimitive:
             return took
 
         monkeypatch.setattr(download_state, "_lock_fd_nb", always_swap)
-        assert download_state.lock_claim(claim) is None
+        with pytest.raises(OSError):
+            download_state.lock_claim(claim)
 
 
 class TestClaimSweep:
@@ -2441,6 +2603,50 @@ class TestClaimSweep:
             download_state.prune(workspace)
 
         assert not claim.exists()
+
+    @posix_only
+    def test_the_liveness_judgment_runs_with_the_lock_released(self, workspace, monkeypatch):
+        """A sweep runs at the head of every submit and every `downloads`. Holding
+        a claim across a record read, a stat and a psutil query would make an
+        unrelated submit to that destination see it held."""
+        state = _state(status="downloading", pid=4242)
+        download_state.write(workspace, state)
+        claim = download_state.claim_path(workspace, "/tmp/b.safetensors")
+        _plant_claim(claim, state.id, "/tmp/b.safetensors")
+        seen: list[bool] = []
+        real = download_state.reconcile
+
+        def probe(record, **kwargs):
+            seen.append(_is_lockable(claim))
+            return real(record, **kwargs)
+
+        monkeypatch.setattr(download_state, "reconcile", probe)
+        with patch("comfy_cli.utils.is_running", return_value=False):
+            download_state.prune(workspace)
+
+        assert seen and all(seen)
+        assert not claim.exists()
+
+    @posix_only
+    def test_a_claim_restamped_during_the_judgment_is_kept(self, workspace, monkeypatch):
+        """The unlink re-validates under a second lock: a submit that stamped the
+        claim while the sweep was judging the old id owns it now."""
+        state = _state(status="downloading", pid=4242)
+        download_state.write(workspace, state)
+        claim = download_state.claim_path(workspace, "/tmp/b.safetensors")
+        _plant_claim(claim, state.id, "/tmp/b.safetensors")
+        real = download_state.reconcile
+
+        def restamp(record, **kwargs):
+            if record.id == state.id:
+                _plant_claim(claim, "ffffffffffff", "/tmp/b.safetensors")
+            return real(record, **kwargs)
+
+        monkeypatch.setattr(download_state, "reconcile", restamp)
+        with patch("comfy_cli.utils.is_running", return_value=False):
+            download_state.prune(workspace)
+
+        assert download_state.read_claim(claim) == "ffffffffffff"
 
     def test_a_live_claim_is_kept(self, workspace):
         state = _state(status="downloading", pid=1234)

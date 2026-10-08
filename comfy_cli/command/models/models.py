@@ -1028,8 +1028,16 @@ def _download_worker(
             # sweep removed an unowned file and our own `O_CREAT` re-made it.
             # Refusing there would turn a recoverable submit-side hiccup into a
             # download that never runs. Stamp it and carry on.
+            #
+            # Nor is a payload naming a download that is no longer live. Payloads
+            # are never blanked on release (and never swept on Windows), so a
+            # long-dead id is a normal thing to find; only one still inside its
+            # own spawn gap — the same test the submit side applies — is a
+            # competitor. Anything else is adopted.
             payload = claim_lock.read_payload() if claim_lock is not None else None
             owner = payload.get("download_id") if payload is not None else None
+            if owner is not None and owner != state.id and not _claim_owner_live(path, owner):
+                owner = None
             claim_lost = claim_lock is None or (owner is not None and owner != state.id)
             if claim_lock is not None and owner is None:
                 with contextlib.suppress(OSError):
@@ -1402,11 +1410,38 @@ def _spawn_gap_holder(holder_id: str) -> download_state.DownloadState | None:
     if record is None:
         return None
     fresh, _ = _reconciled(record)
-    if fresh.status not in download_state.ACTIVE_STATUSES:
-        return None
-    if download_state.elapsed_seconds(fresh) >= download_state.STARTUP_GRACE_S:
-        return None
-    return fresh
+    return fresh if _in_spawn_gap(fresh) else None
+
+
+def _claim_owner_live(state_file: pathlib.Path, owner_id: str) -> bool:
+    """Whether ``owner_id``, found in a claim a worker just locked, is a live competitor.
+
+    The worker-side twin of :func:`_spawn_gap_holder`. Resolved next to the
+    worker's own state file rather than through :func:`get_workspace`, for the
+    same reason the claim itself is (see :func:`download_state.claim_marker_for`),
+    and reconciled without persisting: the worker writes only its own record.
+    An unreadable record is not live.
+    """
+    try:
+        record = download_state.read_path(pathlib.Path(state_file).parent / f"{owner_id}.json")
+    except (OSError, ValueError):
+        return False
+    if record is None:
+        return False
+    return _in_spawn_gap(download_state.reconcile(record))
+
+
+def _in_spawn_gap(fresh: download_state.DownloadState) -> bool:
+    """True for an already-reconciled record whose worker may still be booting."""
+    return (
+        fresh.status in download_state.ACTIVE_STATUSES
+        and download_state.elapsed_seconds(fresh) < download_state.STARTUP_GRACE_S
+    )
+
+
+# Statuses only a worker writes, as its last act before releasing the claim
+# lock. A held lock over one of these is not that download still writing.
+_HOLDER_FINISHED_STATUSES = frozenset({"completed", "failed"})
 
 
 def _refuse_held_claim(
@@ -1426,11 +1461,19 @@ def _refuse_held_claim(
     cannot resolve gets a distinct code rather than a `model_download_in_flight`
     missing the status/kind fields that code documents: quoting either would mean
     inventing it.
+
+    So does one that reads `completed` or `failed`. The lock and the payload are
+    independent — a worker writes its result before it lets go, and a sweep can
+    hold the lock over a long-finished download's id — and those two statuses are
+    only ever written by the worker as its last act, so "is already writing" would
+    be false. `cancelled` is not in that set: `download-cancel` writes it even
+    when it failed to stop the worker, and a held lock is that worker still
+    writing.
     """
     holder_id = download_state.read_claim(claim_file)
     holder = _record_or_none(holder_id)
     _withdraw_record(state, dest, holder_id)
-    if holder is not None:
+    if holder is not None and holder.status not in _HOLDER_FINISHED_STATUSES:
         return _in_flight_failure(holder, dest)
     named = f" ({holder_id})" if holder_id else ""
     return _download_failure(
@@ -1491,6 +1534,21 @@ def _withdraw_record(state: download_state.DownloadState, dest: pathlib.Path, wi
 # scheduling rather than any real work. A genuine owner holds it for its whole
 # transfer, and waiting longer for that one would only delay a refusal.
 WORKER_CLAIM_LOCK_TIMEOUT_S = 5.0
+
+# How long a submit retries the claim lock before calling it held. Not zero:
+# non-owners take the same lock — `prune`'s claim sweep at the head of every
+# submit and every `comfy model downloads`, another submit reading the payload —
+# and a submit that lands on one of those momentary holds must not be refused.
+# Short, because a genuine owner holds it for the whole transfer and this is how
+# long the refusal for that owner is delayed.
+SUBMIT_CLAIM_LOCK_TIMEOUT_S = 1.0
+
+# How many times a submit re-reads the claim after judging its holder unlocked.
+# The judgment (a record read, reconcile, a psutil query) runs with the lock
+# released, so a competitor can re-stamp the claim in between; each round is a
+# fresh payload to judge. More rounds than this means the claim is churning, and
+# that is a competitor to refuse to rather than a lock to keep fighting for.
+SUBMIT_CLAIM_ROUNDS = 3
 
 # The exclusive lock is what makes the claim decisive, and a filesystem that
 # cannot take one (some network and container mounts, a kernel with no flock)
@@ -1557,54 +1615,72 @@ def _acquire_dest_claim(
       running no longer loses its destination. Refuse.
     * **We got the lock and the payload names a live, just-submitted download.**
       We won it during another submit's spawn gap, before its worker could take
-      it. Release and refuse (:func:`_spawn_gap_holder`).
+      it. Refuse (:func:`_spawn_gap_holder`). That judgment is slow, so it runs
+      with the lock released, and the payload is re-read under the lock before
+      we stamp: if it changed meanwhile, the new id is judged afresh.
     * **We got the lock and the payload is anything else** — empty, unresolvable,
       naming a terminal or reconciled-dead record. Stale: stamp our id in and
-      spawn. There is no clear-then-retry any more, because the steal happens
-      under the lock in one step; the retry loop existed only because unlink and
-      re-create were two.
+      spawn. The steal itself happens under the lock in one step.
 
     We release before spawning rather than handing the descriptor to the worker:
     the worker re-takes the lock itself (with a short blocking window) and holds
     it for the transfer, which keeps ownership with the process actually writing
     the bytes even if this one exits first.
     """
-    try:
-        lock = download_state.lock_claim(claim_file)
-    except OSError as e:
-        # Anything other than contention (a read-only state dir, a vanished
-        # claims directory, a filesystem that cannot lock). Degrade to the
-        # advisory guard, exactly as an unavailable claims directory does — but
-        # say so first: the advisory guard re-scans rather than arbitrates, so
-        # this silently gives up the atomicity this whole path exists to
-        # provide, and a destination on such a filesystem can be raced again.
-        _report_claim_degraded(e, dest)
-        _enforce_claim(state, dest)
-        return
-
-    if lock is None:
-        raise _refuse_held_claim(state, dest, claim_file)
-
-    try:
-        payload = lock.read_payload()
-        holder_id = payload.get("download_id") if payload is not None else None
-        if holder_id is not None and holder_id != state.id:
-            holder = _spawn_gap_holder(holder_id)
-            if holder is not None:
-                lock.release()
-                _withdraw_record(state, dest, holder.id)
-                raise _in_flight_failure(holder, dest)
+    judged_stale: str | None = None
+    write_error: OSError | None = None
+    for _ in range(SUBMIT_CLAIM_ROUNDS):
         try:
-            lock.write_payload(state.id, str(dest))
+            lock = download_state.lock_claim(claim_file, blocking_timeout=SUBMIT_CLAIM_LOCK_TIMEOUT_S)
         except OSError as e:
-            # The lock is ours but the payload would not go down (ENOSPC, EIO).
-            # A lock we release without stamping decides nothing for the worker
-            # we are about to spawn, so this is the same degradation as a
-            # filesystem that cannot lock at all.
+            # Anything other than contention (a read-only state dir, a vanished
+            # claims directory, a filesystem that cannot lock). Degrade to the
+            # advisory guard, exactly as an unavailable claims directory does —
+            # but say so first: the advisory guard re-scans rather than
+            # arbitrates, so this silently gives up the atomicity this whole path
+            # exists to provide, and a destination on such a filesystem can be
+            # raced again.
             _report_claim_degraded(e, dest)
             _enforce_claim(state, dest)
-    finally:
-        lock.release()
+            return
+
+        if lock is None:
+            raise _refuse_held_claim(state, dest, claim_file)
+
+        try:
+            payload = lock.read_payload()
+            holder_id = payload.get("download_id") if payload is not None else None
+            if holder_id is None or holder_id == state.id or holder_id == judged_stale:
+                try:
+                    lock.write_payload(state.id, str(dest))
+                except OSError as e:
+                    write_error = e
+                break
+        finally:
+            lock.release()
+
+        # A foreign id, judged with the lock released: the record read, reconcile
+        # and psutil query behind `_spawn_gap_holder` are slow next to a payload
+        # read, and a worker that legitimately owns this destination may be
+        # waiting on the lock to start its transfer.
+        holder = _spawn_gap_holder(holder_id)
+        if holder is not None:
+            _withdraw_record(state, dest, holder.id)
+            raise _in_flight_failure(holder, dest)
+        judged_stale = holder_id
+    else:
+        # The payload changed under us on every round: somebody keeps stamping
+        # this claim. They are a competitor, not a stale owner.
+        raise _refuse_held_claim(state, dest, claim_file)
+
+    if write_error is not None:
+        # The lock was ours but the payload would not go down (ENOSPC, EIO). A
+        # lock we released without stamping decides nothing for the worker we
+        # are about to spawn, so this is the same degradation as a filesystem
+        # that cannot lock at all. After the release: `_enforce_claim` scans and
+        # reconciles the whole state directory.
+        _report_claim_degraded(write_error, dest)
+        _enforce_claim(state, dest)
 
 
 def _enforce_claim(state: download_state.DownloadState, dest: pathlib.Path) -> None:
