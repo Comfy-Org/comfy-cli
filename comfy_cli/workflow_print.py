@@ -1836,6 +1836,9 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
             if not isinstance(subgraph, dict):
                 normalised_subgraphs.append(subgraph)
                 continue
+            subgraph_id = subgraph.get("id")
+            if subgraph_id is not None and not isinstance(subgraph_id, str):
+                warnings.append(f"subgraph definition has non-string id {subgraph_id!r}; it cannot be instantiated")
             raw_interior = subgraph.get("nodes") or []
             if not isinstance(raw_interior, list):
                 raw_interior = []
@@ -1856,7 +1859,9 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         subgraphs = normalised_subgraphs
         definitions = {**definitions, "subgraphs": subgraphs}
         promoted_workflow = {**workflow, "definitions": definitions}
-    defs_by_id = {sg.get("id"): sg for sg in (subgraphs or []) if isinstance(sg, dict) and sg.get("id")}
+    defs_by_id = {
+        sg["id"]: sg for sg in (subgraphs or []) if isinstance(sg, dict) and isinstance(sg.get("id"), str) and sg["id"]
+    }
 
     reasons = _validate(nodes, links)
     if reasons:

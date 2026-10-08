@@ -1539,6 +1539,19 @@ def test_malformed_definition_containers_and_null_link_are_warned_not_crashed():
     assert any("link has null id and was ignored" in warning for warning in res.warnings)
 
 
+@pytest.mark.parametrize("subgraph_id", [["unhashable"], {"unhashable": True}])
+def test_non_string_definition_ids_are_warned_not_indexed(subgraph_id):
+    workflow = _mini([], [])
+    workflow["definitions"] = {
+        "subgraphs": [{"id": subgraph_id, "name": "Malformed", "nodes": [], "links": [], "inputs": []}]
+    }
+
+    result = render_py(workflow, None)
+
+    assert result.node_count == 0
+    assert any("subgraph definition has non-string id" in warning for warning in result.warnings)
+
+
 def test_definition_retarget_preserves_a_declared_holder_when_an_earlier_duplicate_exists():
     wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
     graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
