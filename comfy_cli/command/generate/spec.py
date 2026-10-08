@@ -485,9 +485,7 @@ def model_enum(endpoint_id: str, field: str = "model") -> list[str] | None:
     return _extract_enum(prop)
 
 
-def _find_property(
-    schema: dict[str, Any], field: str, visited: set[int] | None = None
-) -> dict[str, Any] | None:
+def _find_property(schema: dict[str, Any], field: str, visited: set[int] | None = None) -> dict[str, Any] | None:
     """Locate ``field`` in ``schema['properties']``, descending into top-level
     ``allOf``/``anyOf``/``oneOf`` composition when the schema carries no direct
     match — a composed request body must not silently defeat the spec-derived
