@@ -20,7 +20,7 @@ import typer
 from typer.testing import CliRunner
 
 from comfy_cli import workflow_ops
-from comfy_cli.cmdline import _internal_error_message, app
+from comfy_cli.cmdline import _INTERNAL_ERROR_SCRUB_INPUT_CAP, _internal_error_message, app
 
 
 def _boom(*_a, **_kw):
@@ -381,12 +381,65 @@ def test_internal_error_scrubber_drops_any_anchorless_userinfo_tail(tail):
         "ClientSecret=sk-LIVE",
         "privateKey=sk-LIVE",
         "secretAccessKey=sk-LIVE",
+        "consumer_key=sk-LIVE",
+        "subscription_key=sk-LIVE",
+        "Ocp-Apim-Subscription-Key: sk-LIVE",
+        "master_key=sk-LIVE",
+        "hmac_key=sk-LIVE",
+        "app_key=sk-LIVE",
+        "encryption_key=sk-LIVE",
     ],
 )
 def test_internal_error_scrubber_masks_spaced_and_camel_case_credentials(message):
     scrubbed = _internal_error_message(RuntimeError(message))
     assert "sk-LIVE" not in scrubbed
     assert "PRIVATE " + "KEY-----" not in scrubbed
+
+
+def test_internal_error_scrubber_masks_unlabelled_pem_and_preserves_following_diagnostic():
+    message = (
+        "invalid key: -----BEGIN OPENSSH PRIVATE "
+        "KEY-----\nb3BlbnNzaC1rZXk=\n-----END OPENSSH PRIVATE "
+        "KEY-----\nCaused by: HTTP 502 from the proxy"
+    )
+
+    scrubbed = _internal_error_message(RuntimeError(message))
+
+    assert "b3BlbnNzaC1rZXk" not in scrubbed
+    assert "-----BEGIN" not in scrubbed
+    assert "invalid key: ***" in scrubbed
+    assert "Caused by: HTTP 502 from the proxy" in scrubbed
+
+
+def test_internal_error_scrubber_masks_pem_without_any_key_assignment():
+    message = "could not deserialize -----BEGIN PRIVATE " + "KEY-----\nc2VjcmV0"
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "c2VjcmV0" not in scrubbed
+    assert "could not deserialize ***" in scrubbed
+
+
+def test_internal_error_scrubber_preserves_host_ports_and_complete_userinfo_at_the_input_cap():
+    tails = [
+        " retrying https://api.comfy.org:8443",
+        " retrying http://localhost:8188/prompt",
+        " retrying https://alice:secret@example.com",
+    ]
+    for tail in tails:
+        prefix = "Bearer " + "A" * (
+            _INTERNAL_ERROR_SCRUB_INPUT_CAP - len("RuntimeError: ") - len("Bearer ") - len(tail)
+        )
+        scrubbed = _internal_error_message(RuntimeError(prefix + tail + " overflow"))
+        if "example.com" in tail:
+            assert "alice:secret" not in scrubbed
+            assert "example.com" in scrubbed
+        else:
+            assert tail.strip().removeprefix("retrying ") in scrubbed
+
+
+def test_internal_error_scrubber_handles_long_non_secret_camel_names_without_backtracking():
+    name = "ComfyApiNodeExecutionContextManager" + "ProfileSettings" * 40
+    scrubbed = _internal_error_message(RuntimeError(f"{name} has no attribute x"))
+    assert "ComfyApiNodeExecutionContextManager" in scrubbed
 
 
 def test_internal_error_scrubber_keeps_a_long_compact_diagnostic():

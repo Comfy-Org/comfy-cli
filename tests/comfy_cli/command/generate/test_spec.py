@@ -293,3 +293,15 @@ def test_find_property_preserves_combinator_enum_semantics():
 
     assert spec._extract_enum(spec._find_property(all_of, "model")) == ["allowed"]
     assert spec._extract_enum(spec._find_property(any_of, "model")) == ["v1", "v2"]
+
+
+def test_find_property_treats_a_non_declaring_union_branch_as_unconstrained():
+    schema = {
+        "properties": {"model": {"enum": ["a", "b"]}},
+        "anyOf": [
+            {"properties": {"model": {"enum": ["a"]}}},
+            {"properties": {"other": {"type": "string"}}},
+        ],
+    }
+
+    assert spec._extract_enum(spec._find_property(schema, "model")) == ["a", "b"]

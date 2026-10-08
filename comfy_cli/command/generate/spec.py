@@ -322,8 +322,27 @@ def _resolve(
     of ancestry, and object-identity keys collapse YAML alias DAGs whose shared
     inline nodes carry no ``$ref`` of their own.
     """
-    value, _cyclic = _resolve_schema(spec, node, seen, memo if memo is not None else {})
+    value, _cyclic = _resolve_schema(
+        spec,
+        node,
+        seen,
+        memo if memo is not None else {},
+        [_schema_resolution_budget(spec, node)],
+    )
     return value
+
+
+def _schema_resolution_budget(spec: dict[str, Any], node: Any) -> int:
+    """A linear call budget for malformed ref graphs, including object cycles."""
+    stack = [spec, node]
+    containers: set[int] = set()
+    while stack:
+        current = stack.pop()
+        if not isinstance(current, (dict, list)) or id(current) in containers:
+            continue
+        containers.add(id(current))
+        stack.extend(current.values() if isinstance(current, dict) else current)
+    return max(1_024, len(containers) * 64)
 
 
 def _resolve_schema(
@@ -331,8 +350,12 @@ def _resolve_schema(
     node: Any,
     seen: frozenset[str],
     memo: dict[tuple[Any, ...], tuple[Any, bool]],
+    budget: list[int],
 ) -> tuple[Any, bool]:
     """Return ``(resolved, contains_cycle_placeholder)`` for :func:`_resolve`."""
+    if budget[0] <= 0:
+        raise SpecError("Schema resolution exceeded its safe traversal limit")
+    budget[0] -= 1
     if isinstance(node, dict):
         if "$ref" in node:
             ref = node["$ref"]
@@ -348,7 +371,7 @@ def _resolve_schema(
                 return memo[memo_key]
             memo[memo_key] = ({"type": "object", "x-recursive-ref": ref}, True)
             resolved = _resolve_ref(spec, ref)
-            result = _resolve_schema(spec, resolved, seen | {ref}, memo)
+            result = _resolve_schema(spec, resolved, seen | {ref}, memo, budget)
             memo[memo_key] = result
             if not result[1]:
                 memo[shared_key] = result
@@ -363,7 +386,7 @@ def _resolve_schema(
         value: dict[str, Any] = {}
         cyclic = False
         for key, child in node.items():
-            resolved_child, child_cyclic = _resolve_schema(spec, child, seen, memo)
+            resolved_child, child_cyclic = _resolve_schema(spec, child, seen, memo, budget)
             value[key] = resolved_child
             cyclic = cyclic or child_cyclic
         result = (value, cyclic)
@@ -382,7 +405,7 @@ def _resolve_schema(
         value: list[Any] = []
         cyclic = False
         for item in node:
-            resolved_item, item_cyclic = _resolve_schema(spec, item, seen, memo)
+            resolved_item, item_cyclic = _resolve_schema(spec, item, seen, memo, budget)
             value.append(resolved_item)
             cyclic = cyclic or item_cyclic
         result = (value, cyclic)
@@ -595,16 +618,24 @@ def _find_property(
         prop = props.get(field)
         if isinstance(prop, dict):
             candidates.append(prop)
-    for key in ("allOf", "anyOf", "oneOf"):
-        variants = schema.get(key)
-        if not isinstance(variants, list):
-            continue
-        matches: list[dict[str, Any]] = []
-        for variant in variants:
+    all_of = schema.get("allOf")
+    if isinstance(all_of, list):
+        for variant in all_of:
             if isinstance(variant, dict):
                 found = _find_property(variant, field, _memo, _active)
                 if found is not None:
-                    matches.append(found)
+                    candidates.append(found)
+    for key in ("anyOf", "oneOf"):
+        variants = schema.get(key)
+        if not isinstance(variants, list) or not variants:
+            continue
+        matches: list[dict[str, Any]] = []
+        for variant in variants:
+            found = _find_property(variant, field, _memo, _active) if isinstance(variant, dict) else None
+            if found is None:
+                matches = []
+                break
+            matches.append(found)
         if matches:
             candidates.append(matches[0] if len(matches) == 1 else {key: matches})
     _active.remove(memo_key)

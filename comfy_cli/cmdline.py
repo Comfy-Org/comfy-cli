@@ -190,17 +190,18 @@ _SECRET_KEY_QUALIFIER = (
     r"auth|key|id|token|secret|credentials?|cookies?|session|value|private|public|signing|oauth|jwt|aws"
 )
 _CAMEL_SECRET_KEY_PATTERN = (
-    r"(?:(?i:comfy|org|organization|workspace|project|account|user|client|partner|service|cloud|api|access|"
-    r"refresh|auth|private|public|signing|oauth|jwt|aws|secret)(?:[A-Z][A-Za-z0-9]*)*"
-    r"(?:KeyId|Key|Secret|Token|Password|Authorization|Cookie|Signature|SessionId))"
+    r"(?-i:(?!(?i:primary|foreign|sort|cache|hash)(?:KeyId|Key)\b)"
+    r"[A-Za-z][A-Za-z0-9]*(?:KeyId|Key|Secret|Token|Password|Authorization|Cookie|Signature|SessionId))"
 )
 _SECRET_ASSIGNMENT_KEY_PATTERN = (
     rf"(?<![\w-])(?:"
-    rf"(?:(?:{_SECRET_KEY_QUALIFIER})(?:[ _-]+(?:{_SECRET_KEY_QUALIFIER}))*[ _-]+key"
-    rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})(?:[_-](?:{_SECRET_KEY_QUALIFIER}))*)?)"
+    rf"(?:(?!(?:primary|foreign|sort|cache|hash)[_-]+key\b)[\w-]+[_-]key"
+    rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})){{0,8}})"
+    rf"|(?:(?:{_SECRET_KEY_QUALIFIER})(?:[ _-]+(?:{_SECRET_KEY_QUALIFIER})){{0,8}}[ _-]+key"
+    rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})){{0,8}})"
     rf"|{_CAMEL_SECRET_KEY_PATTERN}"
     rf"|(?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})"
-    rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})(?:[_-](?:{_SECRET_KEY_QUALIFIER}))*)?"
+    rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})){{0,8}}"
     rf")"
 )
 _SECRET_CONSTRUCTOR_START = re.compile(
@@ -388,8 +389,9 @@ _SECRET_PATTERNS = (
     ),
     (
         re.compile(
-            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
-            r"-----BEGIN [^\r\n]*(?:\r?\n[^\r\n]*)*",
+            rf"((?:{_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)?)"
+            r"-----BEGIN ([A-Z0-9][A-Z0-9 -]*(?:KEY|CERTIFICATE))-----"
+            r"(?:\r?\n(?!-----END \2-----)[^\r\n]*)*(?:\r?\n-----END \2-----)?",
             re.IGNORECASE,
         ),
         r"\1***",
@@ -460,8 +462,19 @@ def _internal_error_message(error: BaseException) -> str:
         # A userinfo scrub needs its closing ``@``. If the input cap removed
         # that anchor, drop the incomplete credential token before earlier
         # scrubbers contract the message and pull it into the visible prefix.
-        partial_userinfo = re.search(r"(?<![\w])[A-Za-z][A-Za-z0-9+.-]*://[^\s/'\"?#:]+:\S*$", text)
+        partial_userinfo = re.search(
+            r"(?<![\w])[A-Za-z][A-Za-z0-9+.-]*://(?P<user>[^\s/'\"?#:]+):(?P<tail>[^\s/'\"?#]*)$",
+            text,
+        )
         if partial_userinfo is not None:
+            user = partial_userinfo.group("user")
+            tail = partial_userinfo.group("tail")
+            looks_like_host_port = tail.isdigit() and (user == "localhost" or "." in user or user.startswith("["))
+            complete_host = tail.rsplit("@", 1)[1] if "@" in tail else None
+            should_trim = not looks_like_host_port and (complete_host is None or len(complete_host) > 253)
+        else:
+            should_trim = False
+        if should_trim:
             text = text[: partial_userinfo.start()]
     text = _scrub_secret_constructors(text)
     text = _scrub_secret_containers(text)
