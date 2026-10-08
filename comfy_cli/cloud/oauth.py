@@ -675,7 +675,13 @@ def _is_transient_refresh_error(exc: OAuthRefreshError) -> bool:
     return status in (0, 408) or status >= 500
 
 
-def _refresh_with_retry(**kwargs) -> TokenSet:
+def _refresh_with_retry(
+    *,
+    base_url: str,
+    client_id: str,
+    refresh_token: str,
+    resource: str | None = None,
+) -> TokenSet:
     """``refresh_tokens`` with a bounded retry on transient failures.
 
     Must be called while holding the refresh lock: it re-sends the same refresh
@@ -683,6 +689,7 @@ def _refresh_with_retry(**kwargs) -> TokenSet:
     the last ``OAuthRefreshError`` once retries are exhausted (or immediately
     for a non-transient one).
     """
+    kwargs = {"base_url": base_url, "client_id": client_id, "refresh_token": refresh_token, "resource": resource}
     try:
         return refresh_tokens(**kwargs)
     except OAuthRefreshError as e:
