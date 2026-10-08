@@ -282,64 +282,6 @@ def _normalise_node_outputs(nodes: list[dict], warnings: list[str] | None, quali
     return normalised
 
 
-def _retarget_definition_links(subgraph: dict, warnings: list[str]) -> dict:
-    """Keep promoted-input discovery aligned with the holder-based render route."""
-    holders: dict[str, list[tuple[Any, int]]] = {}
-    node_ids: set[str] = set()
-    for node in subgraph.get("nodes") or []:
-        if not isinstance(node, dict):
-            continue
-        node_ids.add(str(node.get("id")))
-        inputs = node.get("inputs")
-        for slot, inp in enumerate(inputs if isinstance(inputs, list) else []):
-            if isinstance(inp, dict) and inp.get("link") is not None:
-                holders.setdefault(str(inp["link"]), []).append((node.get("id"), slot))
-    links: list[Any] = []
-    changed = False
-    raw_links = subgraph.get("links")
-    for link in raw_links if isinstance(raw_links, list) else []:
-        if not isinstance(link, dict) or str(link.get("origin_id")) != _PROXY_IN:
-            links.append(link)
-            continue
-        if str(link.get("target_id")) == _PROXY_OUT:
-            links.append(link)
-            continue
-        target_slot = link.get("target_slot")
-        if not _is_slot_index(target_slot) or target_slot < 0:
-            # Malformed boundary coordinates are diagnosed and dropped by the
-            # definition renderer; holder recovery must not make them valid.
-            links.append(link)
-            continue
-        locations = holders.get(str(link.get("id")), [])
-        declared = next(
-            (
-                location
-                for location in locations
-                if str(location[0]) == str(link.get("target_id")) and location[1] == link.get("target_slot")
-            ),
-            None,
-        )
-        if declared is not None or not locations:
-            links.append(link)
-            continue
-        holder = next(
-            (location for location in locations if str(location[0]) == str(link.get("target_id"))),
-            locations[0],
-        )
-        target_id = link.get("target_id")
-        if str(target_id) not in node_ids:
-            where = f"targets missing node {target_id}"
-        else:
-            where = f"targets input slot {link.get('target_slot')} on node {target_id}, but that input does not hold it"
-        warnings.append(
-            f"subgraph {subgraph.get('id')}: link {link.get('id')} {where}; "
-            f"rendered through input slot {holder[1]} on node {holder[0]}, which holds it"
-        )
-        links.append({**link, "target_id": holder[0], "target_slot": holder[1]})
-        changed = True
-    return {**subgraph, "links": links} if changed else subgraph
-
-
 def _broken_links(nodes: list[dict], links: list[Any], qualify: Any = str) -> tuple[list[str], dict[str, str], list]:
     """Link rows that cannot carry a value, as ``(warnings, broken, rest)``.
 
@@ -1876,7 +1818,7 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
                     subgraph = {**subgraph, field: [], marker: True}
             interior = _normalise_node_inputs([node for node in raw_interior if isinstance(node, dict)], None)
             interior = _normalise_node_outputs(interior, None)
-            normalised = _retarget_definition_links({**subgraph, "nodes": interior}, warnings)
+            normalised = {**subgraph, "nodes": interior}
             normalised_subgraphs.append(normalised)
         subgraphs = normalised_subgraphs
         definitions = {**definitions, "subgraphs": subgraphs}

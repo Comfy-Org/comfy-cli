@@ -1515,10 +1515,11 @@ def test_definition_retarget_emits_a_qualified_warning():
     res = render_py(wf, graph)
 
     assert any(
-        warning.startswith(f"subgraph {sg['id']}: link 3 targets input slot 1 on node 9")
-        and warning.endswith("rendered through input slot 0 on node 3, which holds it")
+        warning.startswith("link 3 targets input slot 1 on node 10/9")
+        and warning.endswith("rendered through input 'value' on node 10/3, which holds it")
         for warning in res.warnings
     )
+    assert "promoted widgets: IN.value" in res.source
 
 
 def test_definition_retarget_calls_out_a_missing_declared_target():
@@ -1532,10 +1533,11 @@ def test_definition_retarget_calls_out_a_missing_declared_target():
     res = render_py(wf, graph)
 
     assert any(
-        warning.startswith(f"subgraph {sg['id']}: link 3 targets missing node 999")
-        and warning.endswith("rendered through input slot 0 on node 3, which holds it")
+        warning.startswith("link 3 targets missing node 10/999")
+        and warning.endswith("rendered through input 'value' on node 10/3, which holds it")
         for warning in res.warnings
     )
+    assert "promoted widgets: IN.value" in res.source
 
 
 def test_definition_input_to_output_passthrough_is_never_retargeted():
