@@ -2038,6 +2038,18 @@ class TestForegroundClaimsItsDestination:
 
         assert seen == [[("foreground", "downloading")]]
 
+    def test_the_part_temp_is_tagged_with_the_claim_records_id(self, workspace, monkeypatch, capsys):
+        """An untagged foreground temp would match the legacy arm of a
+        `download-cancel` of some other (dead) record for this destination, which
+        would unlink the temp this run is streaming into."""
+        calls = self._transfer(monkeypatch)
+
+        self._download()
+
+        (record,) = download_state.list_all(workspace)
+        ((_, kwargs),) = calls
+        assert kwargs["part_tag"] == record.id
+
     # -- terminal bookkeeping -------------------------------------------------
 
     def test_success_marks_the_record_completed(self, workspace, monkeypatch, capsys):
@@ -2292,7 +2304,7 @@ class TestForegroundClaimsItsDestination:
         """
         snapshot: list = []
 
-        def land_the_file(url, path, headers, downloader=None, progress_callback=None):
+        def land_the_file(url, path, headers, downloader=None, progress_callback=None, part_tag=None):
             # The size arrives before the first chunk, as it does off Content-Length.
             progress_callback(0, 4096)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -2327,7 +2339,7 @@ class TestForegroundClaimsItsDestination:
 
         monkeypatch.setattr(download_state, "write", counting_write)
 
-        def chunked(url, path, headers, downloader=None, progress_callback=None):
+        def chunked(url, path, headers, downloader=None, progress_callback=None, part_tag=None):
             for completed in range(0, 500):
                 progress_callback(completed, 4096)
 

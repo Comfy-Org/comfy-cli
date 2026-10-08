@@ -666,6 +666,11 @@ def download(
                     # finished run from a killed-mid-flight one. See
                     # `_foreground_progress`.
                     progress_callback=_foreground_progress(claim) if claim is not None else None,
+                    # Tag the `.part` with the claim record's id, the same way a
+                    # background worker tags its own, so `download-cancel` of some
+                    # other (dead) record for this destination can't sweep the temp
+                    # this run is streaming into.
+                    part_tag=claim.id if claim is not None else None,
                 )
             except DownloadException as e:
                 # `message` is rendered through `Text` (see `_download_failure`), which
@@ -1050,8 +1055,9 @@ def _download_worker(
                 progress_callback=on_progress,
                 # Tag the `.part` temp with this download's id so a cancel of a
                 # sibling download targeting the same destination can't unlink the
-                # temp this worker is streaming into. `state.id` is 12 lowercase
-                # hex (validated filename-safe before any path was built).
+                # temp this worker is streaming into. `download_file` refuses an
+                # id outside the download-id grammar (a tampered record) rather
+                # than let it steer the temp's path.
                 part_tag=state.id,
             )
         except DownloadCancelled:
@@ -1756,7 +1762,8 @@ def download_cancel(
         reclaimed = 0
         if state.status != "completed" and not download_state.worker_alive(state):
             # Scope the sweep to this download's tagged temps (plus the legacy
-            # untagged shape) so it can't reclaim a sibling download's live temp.
+            # untagged shape a pre-change binary left) so it can't reclaim a
+            # sibling download's live temp.
             reclaimed = cleanup_partials(pathlib.Path(state.dest), tag=state.id)
             if reclaimed:
                 state.completed_bytes = 0

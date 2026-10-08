@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import stat
 import subprocess
 import tempfile
@@ -527,8 +528,8 @@ def _cleanup_partial(filepath: pathlib.Path) -> None:
 # background workers can legitimately target one path (the submit-time guard is
 # only ``local_filepath.exists()``), and without the tag `download-cancel <A>`
 # unlinks B's live temp, whose closing ``os.replace`` then dies with a
-# non-retriable ``FileNotFoundError``. Callers pass the download id as the tag;
-# foreground/untagged callers keep the shorter shape.
+# non-retriable ``FileNotFoundError``. Model downloads pass their download (or
+# claim record) id as the tag; untagged callers keep the shorter shape.
 _PART_SUFFIX = ".part"
 # ``tempfile.mkstemp`` fills the middle with exactly 8 characters from this
 # alphabet (``tempfile._RandomNameSequence``). Matching its shape — not just the
@@ -547,6 +548,16 @@ _NAME_MAX = 255
 # What is left for the destination name once the separating ".", mkstemp's token
 # and the ".part" suffix have taken their share.
 _PART_STEM_MAX = _NAME_MAX - len(".") - _MKSTEMP_TOKEN_LEN - len(_PART_SUFFIX)
+# A tag is a download id, so it has to fit the download-id grammar
+# (`download_state._SAFE_ID`). The tag becomes part of mkstemp's ``prefix``,
+# which mkstemp path-joins onto ``dir`` — a ``/`` or ``..`` would land the temp
+# outside the destination directory where nothing could ever reclaim it — and an
+# over-long one would leave no room in NAME_MAX for the stem.
+_PART_TAG_RE = re.compile(r"^[a-zA-Z0-9_\-]{1,64}$")
+
+
+def _valid_part_tag(tag: str) -> bool:
+    return isinstance(tag, str) and _PART_TAG_RE.match(tag) is not None
 
 
 def _part_prefix(name: str, tag: str | None = None) -> str:
@@ -566,13 +577,14 @@ def _part_prefix(name: str, tag: str | None = None) -> str:
     long name the tagged and untagged prefixes truncate the stem to *different*
     lengths and neither is a prefix-extension of the other.
 
-    The "shared temp namespace" caveat only ever bites the untagged/foreground
-    shape now, plus the residual case of two names colliding *within* the legacy
-    (untagged) truncated stem: two destination names agreeing for that many bytes
-    share the untagged namespace, which only affects which temps
-    :func:`cleanup_partials` claims — a far smaller problem than being unable to
-    name a temp at all. A tag makes even that collision id-scoped.
+    Two destination names agreeing for the whole truncated stem share the
+    *untagged* namespace, which is why :func:`partial_paths_for` drops its legacy
+    arm for such a name; a tag makes even that collision id-scoped.
+
+    Raises ``ValueError`` for a tag outside the download-id grammar.
     """
+    if tag is not None and not _valid_part_tag(tag):
+        raise ValueError(f"unsafe partial-file tag: {tag!r}")
     if tag is None:
         stem_max = _PART_STEM_MAX
     else:
@@ -602,8 +614,7 @@ def partial_paths_for(local_filepath: pathlib.Path, tag: str | None = None) -> l
     finds those bytes; nothing else on disk is ever matched.
 
     ``tag=None`` matches only the untagged shape ``<name>.<8 token>.part`` — the
-    behaviour before download ids scoped temps, and what foreground transfers
-    still produce.
+    behaviour before download ids scoped temps.
 
     With a ``tag`` the result is the **union** of two shapes:
 
@@ -611,27 +622,37 @@ def partial_paths_for(local_filepath: pathlib.Path, tag: str | None = None) -> l
       running this code writes; matching only these is what makes a tag-scoped
       cancel skip a *sibling* download's live temp; and
     * the legacy untagged shape ``<name>.<8 token>.part`` — included so a ``.part``
-      left by a foreground transfer or a pre-change binary is still reclaimed.
+      left by a pre-change binary is still reclaimed.
 
     The two prefixes are computed independently (they truncate the stem to
     different lengths for a long name, so one is not a prefix-extension of the
     other) and the shapes never cross-match: under the untagged prefix a tagged
     temp's "token" slice is ``<tag>.<8>`` — too long and it contains a ``.``, so
     the length/charset check below rejects it; under the tagged prefix an untagged
-    temp is too short to even start with ``<name>.<tag>.``.
+    temp is too short to even start with ``<name>.<tag>.``. That holds within one
+    destination; a *different* destination literally named ``<name>.<tag>`` would
+    see ``<name>``'s tagged temp under its own legacy arm, which takes a file
+    named after another download's random id.
 
-    **Known residual:** the legacy-inclusion arm means a tag-scoped sweep can
-    still unlink a *foreground* (untagged) transfer's live temp, or one written by
-    a pre-change binary, that shares this destination. That exposure is strictly
-    narrower than the un-tagged behaviour it replaces and disappears once no
-    untagged producers remain; the companion destination-reservation change
-    removes the same-destination precondition entirely.
+    The legacy arm is dropped for a name long enough that the untagged prefix
+    truncates it: two *different* long destinations in one directory can share
+    that truncated stem, so the arm would reach a sibling destination's untagged
+    temp. A pre-change ``.part`` of such a name is then left for the user, which
+    is the smaller loss. A tag outside the download-id grammar can never have
+    named a temp (:func:`_part_prefix` refuses it), so only the legacy arm is
+    consulted for one.
+
+    Every model download running this code tags its temp — background workers
+    with their download id, foreground ones with their claim record's id — so
+    the untagged shape is left only by pre-change binaries and by a foreground
+    run that could not write a claim record.
     """
-    prefixes = [_part_prefix(local_filepath.name)]
-    if tag is not None:
-        # Tagged prefix first so the tag's own temps are the primary match; the
-        # untagged prefix is the legacy-inclusion fallback.
-        prefixes.insert(0, _part_prefix(local_filepath.name, tag))
+    prefixes = []
+    if tag is not None and _valid_part_tag(tag):
+        # The tag's own temps are the primary match.
+        prefixes.append(_part_prefix(local_filepath.name, tag))
+    if tag is None or len(local_filepath.name.encode("utf-8", "surrogatepass")) <= _PART_STEM_MAX:
+        prefixes.append(_part_prefix(local_filepath.name))
 
     try:
         entries = list(local_filepath.parent.iterdir())
@@ -924,8 +945,10 @@ def download_file(
     ``<dest>.<tag>.<token>.part`` instead of ``<dest>.<token>.part`` — so a
     concurrent ``download-cancel`` of a *sibling* transfer to the same
     destination cannot sweep away this transfer's live temp (see
-    :func:`partial_paths_for`). Callers pass their download id. The aria2 branch
-    ignores it: aria2 writes to the destination directly, with no ``.part``.
+    :func:`partial_paths_for`). Callers pass their download id; one outside the
+    download-id grammar raises ``ValueError`` before any request is made. The
+    aria2 branch ignores it: aria2 writes to the destination directly, with no
+    ``.part``.
 
     ``progress_callback`` (optional) is invoked with ``(completed_bytes,
     total_bytes)`` as the transfer advances; ``total_bytes`` is None until the
@@ -948,6 +971,8 @@ def download_file(
         raise DownloadException(
             f"Unknown downloader: {downloader!r}. Valid options: {', '.join(sorted(_VALID_DOWNLOADERS))}"
         )
+    if part_tag is not None and not _valid_part_tag(part_tag):
+        raise ValueError(f"unsafe partial-file tag: {part_tag!r}")
 
     local_filepath.parent.mkdir(parents=True, exist_ok=True)
 
