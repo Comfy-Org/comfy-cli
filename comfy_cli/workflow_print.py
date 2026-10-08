@@ -413,8 +413,6 @@ def _stale_input_slot_links(
 
     for link in links:
         link_id, src_id, src_slot, tgt_id, tgt_slot = link[0], link[1], link[2], link[3], link[4]
-        if proxy_input_id is not None and str(tgt_id) == _PROXY_OUT:
-            continue
         locations = holders_by_link.get(str(link_id), [])
         canonical = next(
             (location for location in locations if str(location[0]) == str(tgt_id) and location[1] == tgt_slot),
@@ -431,6 +429,8 @@ def _stale_input_slot_links(
                     for holder_id, _holder_slot, holder in locations
                 )
                 warnings.append(f"link {link_id} is held by multiple inputs; every holder remains live: {holder_names}")
+        if proxy_input_id is not None and str(tgt_id) == _PROXY_OUT:
+            continue
         tgt_node = nodes_by_id.get(str(tgt_id))
         if tgt_node is None:
             holder_location = canonical

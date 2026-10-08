@@ -1428,6 +1428,29 @@ def test_duplicate_link_holder_preserves_the_real_cycle():
         render_py(wf, None)
 
 
+def test_output_boundary_row_held_by_an_input_preserves_its_dependency_cycle():
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    definition = {
+        "id": subgraph_id,
+        "name": "Boundary holder cycle",
+        "inputs": [],
+        "outputs": [{"name": "value", "type": "*", "linkIds": [1]}],
+        "nodes": [
+            _node(1, "A", inputs=[{"name": "from_b", "link": 2}], outputs=[{"name": "out", "links": [1]}]),
+            _node(2, "B", inputs=[{"name": "from_a", "link": 1}], outputs=[{"name": "out", "links": [2]}]),
+        ],
+        "links": [
+            {"id": 1, "origin_id": 1, "origin_slot": 0, "target_id": -20, "target_slot": 0},
+            {"id": 2, "origin_id": 2, "origin_slot": 0, "target_id": 1, "target_slot": 0},
+        ],
+    }
+    workflow = _mini([_node(10, subgraph_id)], [])
+    workflow["definitions"] = {"subgraphs": [definition]}
+
+    with pytest.raises(PrintUnsupported, match="link cycle among nodes 1, 2"):
+        render_py(workflow, None)
+
+
 def test_in_range_link_row_follows_the_actual_holder(sd15_graph):
     wf = _stale_slot_workflow([7, 1, 0, 2, 0, "LATENT"])
     wf["links"] = [[7, 1, 0, 2, 0, "LATENT"]]
