@@ -19,6 +19,7 @@ from comfy_cli.command.deploy_resolve import (
     BuilderReleaseClient,
     BuildNotPushedError,
     DeployResolveError,
+    deployment_id_for,
     resolve_deployment,
 )
 from comfy_cli.command.deploy_runtime import (
@@ -187,6 +188,8 @@ def resolve_status(
     build_name = spec.get("name")
     if not isinstance(build_name, str) or not build_name:
         raise KeyError("name")
+    if deployment_id is not None:
+        deployment_id = deployment_id_for(builder, client, deployment_id, build_id=build_id)
     deployment = resolve_deployment(builder, client, build_id, deployment_id=deployment_id)
     return StatusTarget(build_id, build_name, deployment)
 

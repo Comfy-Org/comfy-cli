@@ -187,6 +187,21 @@ def test_a_named_deployment_is_the_one_status_reports_on(tmp_path, monkeypatch) 
     assert _json_envelope(result)["data"]["deployment"]["id"] == "dep-status"
 
 
+def test_status_reports_on_the_deployment_named(tmp_path, monkeypatch) -> None:
+    # Given staging and a newer production the ranking would pick
+    rows = [{**_status_deployment(), "name": "staging"}, {**_status_deployment(), "name": "production"}]
+    rows[1]["id"] = "dep-other"
+    rows[1]["createdAt"] = "2026-08-24T12:00:00Z"
+    _install_clients(monkeypatch, FakeBuilder([_release(5)]), RecordingDeploy(rows), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path), "--deployment", "staging")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _json_envelope(result)["data"]["deployment"]["id"] == "dep-status"
+
+
 def test_no_deployment_exits_zero_with_nullable_payload_and_up_hint(tmp_path, monkeypatch) -> None:
     # Given
     builder = FakeBuilder([_release(5)])

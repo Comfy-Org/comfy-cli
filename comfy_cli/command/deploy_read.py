@@ -19,6 +19,7 @@ from comfy_cli.command.deploy_resolve import (
     DeploymentListClient,
     DeployResolveError,
     ReleaseNotInBuildError,
+    deployment_id_for,
     find_build_release,
     release_version_selector,
     resolve_deployment,
@@ -90,7 +91,7 @@ def resolve_deployment_id(
     request: ReadRequest,
 ) -> str:
     if request.deployment_id is not None:
-        return request.deployment_id
+        return deployment_id_for(builder, deploy, request.deployment_id, path=request.path)
     paths = resolve_build_paths(request.path)
     spec = read_build_spec(paths.spec_file)
     build_id = spec.get("id")

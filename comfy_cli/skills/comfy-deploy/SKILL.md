@@ -25,8 +25,9 @@ bills by time.**
   a Build. This single fact drives most of what follows.
 - **The Build is the addressing scheme.** Nearly every command takes the install
   directory or spec path as its argument and defaults to the current directory,
-  reading the Build id out of `comfy-build.yaml`. `--deployment <id>` overrides
-  that whenever the Build has more than one.
+  reading the Build id out of `comfy-build.yaml`. `--deployment <name or id>`
+  overrides that whenever the Build has more than one, and
+  `--deployment <build>/<name>` reaches a deployment from outside its folder.
 - **`comfy-build` produced the release.** If there is no green release yet, that
   skill is the one to run: `comfy skills show comfy-build`.
 - **The failure material is a reference skill.** When a command is refused or a
@@ -169,7 +170,7 @@ fixes — say so rather than restarting into the same wall.
 
 ```shell
 comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
-                       [--release <id>] [--deployment <id>] [--create] [--no-watch]
+                       [--release <id>] [--deployment <name|id>] [--create] [--no-watch]
 ```
 
 - **With deployment updates on, it moves the existing deployment** (see *The
@@ -230,6 +231,8 @@ comfy deploy promote SOURCE TARGET [--no-watch]
 - **It moves deployment TARGET onto the release deployment SOURCE serves**,
   keeping TARGET's id and URL: test on a staging deployment, then promote it to
   production. The service resolves SOURCE's release itself.
+- **SOURCE and TARGET each take a name or an id**: a bare name in the Build's
+  folder, or `<build>/<name>` anywhere, the Build given by its name or id.
 - **It needs deployment updates on.** Without them it refuses with
   `deploy_updates_unavailable`; use `comfy deploy up --create` instead.
 - **It follows the move like `up` does**: exit 1 with `deploy_update_failed`
@@ -238,8 +241,8 @@ comfy deploy promote SOURCE TARGET [--no-watch]
 ## `comfy deploy rollback` and `comfy deploy history`
 
 ```shell
-comfy deploy rollback [PATH] [--deployment <id>] [--to vN|<release-id>] [--no-watch]
-comfy deploy history [PATH] [--deployment <id>]
+comfy deploy rollback [PATH] [--deployment <name|id>] [--to vN|<release-id>] [--no-watch]
+comfy deploy history [PATH] [--deployment <name|id>]
 ```
 
 - **`rollback` moves the deployment back to the release before its current

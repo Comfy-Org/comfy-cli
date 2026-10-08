@@ -43,6 +43,9 @@ argument you pass.
 | `deploy_payment_required` | No active subscription or credit | Billing problem; a retry will not fix it |
 | `deploy_conflict` | The deployment's state rejects the operation | Let it settle, re-read `status` |
 | `deploy_not_found` | No deployment with that id | `comfy deploy ls --workspace` |
+| `deploy_name_not_found` | No live deployment of the Build has that name; `details.names` lists the names held, empty when none has one | Pick a name from `details.names`, or pass the id from `comfy deploy ls` |
+| `deploy_build_not_found` | `<build>/<name>` named no Build, or a bare name was given outside a Build's folder | Run from the Build's folder, or name the Build from `comfy build ls` |
+| `deploy_ambiguous_build` | Two or more Builds share the name before the slash | Name the Build by its id, as `<build id>/<name>` |
 | `deploy_forbidden` | The workspace does not permit this | Confirm which workspace is signed in |
 | `deploy_not_signed_in` | No usable Cloud session or workspace API key, or the key was refused | Replace the key the hint names; otherwise `comfy cloud login` |
 | `deploy_server_error` | Control plane unavailable or 5xx | Re-read `status` before retrying, so a retry cannot double-create |

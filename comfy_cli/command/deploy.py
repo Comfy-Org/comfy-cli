@@ -22,7 +22,7 @@ from comfy_cli.command.deploy_compute import prompt_gpu as _prompt_gpu
 from comfy_cli.command.deploy_compute import prompt_region as _prompt_region
 from comfy_cli.command.deploy_progress import DeployWatchReporter
 from comfy_cli.command.deploy_promote import promote as _promote
-from comfy_cli.command.deploy_resolve import DeployResolveError
+from comfy_cli.command.deploy_resolve import DeployResolveError, deployment_id_for
 from comfy_cli.command.deploy_runtime import MOVE_WATCH_SECONDS, DeployWatchLostError, terminal_status_error
 from comfy_cli.command.deploy_runtime import command_clients as _command_clients
 from comfy_cli.command.deploy_runtime import exit_watch_lost as _exit_watch_lost
@@ -69,7 +69,16 @@ DeployPath = Annotated[
     str | None,
     typer.Argument(help="ComfyUI install directory or build spec path. Default: the current directory."),
 ]
-DeploymentOption = Annotated[str | None, typer.Option("--deployment", help="Select this deployment id.")]
+DeploymentOption = Annotated[
+    str | None,
+    typer.Option(
+        "--deployment",
+        help=(
+            "Select this deployment by name or id. As <build>/<name>, it needs no Build's folder, "
+            "except for status, and up without --release."
+        ),
+    ),
+]
 
 
 def _require_paired_bounds(renderer, minimum: int | None, maximum: int | None) -> None:
@@ -411,14 +420,20 @@ def up_cmd(
 @app.command("promote", help="Move TARGET onto the release SOURCE serves, keeping TARGET's id and URL.")
 @tracking.track_command("deploy")
 def promote_cmd(
-    source: Annotated[str, typer.Argument(help="Deployment id whose release TARGET should serve.")],
-    target: Annotated[str, typer.Argument(help="Deployment id to move.")],
+    source: Annotated[
+        str, typer.Argument(help="Deployment name or id, or <build>/<name>, whose release TARGET should serve.")
+    ],
+    target: Annotated[str, typer.Argument(help="Deployment name or id, or <build>/<name>, to move.")],
     watch: Annotated[
         bool,
         typer.Option("--watch/--no-watch", help="Follow TARGET until the move lands or fails."),
     ] = True,
 ) -> None:
-    _run_move(lambda builder, client: _promote(builder, client, source, target), "promote", watch)
+    def start(builder, client) -> MoveResult:
+        source_id = deployment_id_for(builder, client, source)
+        return _promote(builder, client, source_id, deployment_id_for(builder, client, target))
+
+    _run_move(start, "promote", watch)
 
 
 @app.command("rollback", help="Move a deployment back to an earlier release, keeping its id and URL.")

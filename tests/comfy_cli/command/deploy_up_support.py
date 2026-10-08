@@ -37,8 +37,13 @@ def deployment(
     minimum: int = 0,
     maximum: int = 1,
     deleted_at: str | None = None,
+    **served: str | None,
 ) -> JsonObject:
+    """A deployment as comfy-deploy lists it. ``name=`` adds the name a server
+    serving names answers with, null included; left out, the row is one from a
+    server that predates names."""
     return {
+        **served,
         "id": deployment_id,
         "releaseId": release_id,
         "status": status,
@@ -49,9 +54,14 @@ def deployment(
 
 
 class FakeBuilder:
-    def __init__(self, releases: list[JsonObject] | None = None) -> None:
+    def __init__(self, releases: list[JsonObject] | None = None, builds: list[JsonObject] | None = None) -> None:
         self.releases = releases or [{"id": "release-5", "buildId": "build-1", "version": 5, "deployable": True}]
+        self.builds = builds or [{"id": "build-1", "name": "example"}]
         self.calls: list[tuple[str, str]] = []
+
+    def list_builds(self) -> list[JsonObject]:
+        self.calls.append(("list_builds", ""))
+        return copy.deepcopy(self.builds)
 
     def get_release(self, release_id: str) -> JsonObject:
         self.calls.append(("get_release", release_id))
