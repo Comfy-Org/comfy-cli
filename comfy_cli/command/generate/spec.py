@@ -313,9 +313,15 @@ def _resolve(
     spec: dict[str, Any],
     node: Any,
     seen: frozenset[str] = frozenset(),
-    memo: dict[str, Any] | None = None,
+    memo: dict[tuple[str, object, frozenset[str]], Any] | None = None,
 ) -> Any:
-    """Recursively inline $refs in a schema. Cycles are broken with a placeholder."""
+    """Recursively inline $refs in a schema. Cycles are broken with a placeholder.
+
+    Memo keys include the active ref ancestry: a subtree resolved inside a
+    cycle contains a placeholder and is not interchangeable with that same
+    subtree reached outside the cycle. Object-identity keys also collapse YAML
+    alias DAGs whose shared inline nodes carry no ``$ref`` of their own.
+    """
     if memo is None:
         memo = {}
     if isinstance(node, dict):
@@ -325,15 +331,29 @@ def _resolve(
                 raise SpecError(f"Invalid non-string $ref: {ref!r}")
             if ref in seen:
                 return {"type": "object", "x-recursive-ref": ref}
-            if ref in memo:
-                return memo[ref]
+            memo_key = ("ref", ref, seen)
+            if memo_key in memo:
+                return memo[memo_key]
+            memo[memo_key] = {"type": "object", "x-recursive-ref": ref}
             resolved = _resolve_ref(spec, ref)
             value = _resolve(spec, resolved, seen | {ref}, memo)
-            memo[ref] = value
+            memo[memo_key] = value
             return value
-        return {k: _resolve(spec, v, seen, memo) for k, v in node.items()}
+        memo_key = ("object", id(node), seen)
+        if memo_key in memo:
+            return memo[memo_key]
+        memo[memo_key] = {"type": "object", "x-recursive-object": True}
+        value = {k: _resolve(spec, v, seen, memo) for k, v in node.items()}
+        memo[memo_key] = value
+        return value
     if isinstance(node, list):
-        return [_resolve(spec, item, seen, memo) for item in node]
+        memo_key = ("list", id(node), seen)
+        if memo_key in memo:
+            return memo[memo_key]
+        memo[memo_key] = []
+        value = [_resolve(spec, item, seen, memo) for item in node]
+        memo[memo_key] = value
+        return value
     return node
 
 

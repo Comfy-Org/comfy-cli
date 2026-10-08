@@ -332,3 +332,39 @@ def test_model_hint_memoizes_a_wide_ref_diamond(monkeypatch):
     hint = spec._model_name_hint("example")
     assert hint is not None
     assert "example-model-v1" in hint
+
+
+def test_resolve_memoizes_shared_inline_alias_branches():
+    schema: dict = {"type": "string"}
+    depth = 32
+    for _ in range(depth):
+        schema = {"anyOf": [schema, schema]}
+
+    with mock.patch.object(spec, "_resolve", wraps=spec._resolve) as resolve:
+        resolved = spec._resolve({}, schema)
+
+    assert isinstance(resolved, dict)
+    assert resolve.call_count <= depth * 3 + 2
+
+
+def test_ref_memo_does_not_reuse_a_cycle_pruned_resolution():
+    outer_ref = "#/components/schemas/Outer"
+    inner_ref = "#/components/schemas/Inner"
+    raw = {
+        "components": {
+            "schemas": {
+                "Outer": {
+                    "type": "object",
+                    "properties": {
+                        "model": {"enum": ["example-model-v1"]},
+                        "child": {"$ref": inner_ref},
+                    },
+                },
+                "Inner": {"allOf": [{"$ref": outer_ref}]},
+            }
+        }
+    }
+    resolved = spec._resolve(raw, {"anyOf": [{"$ref": outer_ref}, {"$ref": inner_ref}]})
+
+    sibling_inner = resolved["anyOf"][1]
+    assert spec._extract_enum(spec._find_property(sibling_inner, "model")) == ["example-model-v1"]
