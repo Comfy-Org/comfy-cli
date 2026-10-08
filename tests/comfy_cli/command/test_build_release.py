@@ -845,6 +845,95 @@ def test_delete_refuses_an_id_that_names_no_release_before_it_reaches_the_builde
     assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, "build_missing_input", [])
 
 
+#: The read verbs that take ``[RELEASE] [PATH]``, each with the options it needs
+#: to reach the builder, and the client call that reads the release.
+READ_VERBS = [
+    pytest.param(("show",), "get_release", id="show"),
+    pytest.param(("logs", "--target", "linux/nvidia"), "get_release_logs", id="logs"),
+    pytest.param(("manifest",), "get_release_manifest", id="manifest"),
+]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+def test_a_dot_before_the_release_reads_the_newest_release_of_the_build_there(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str
+) -> None:
+    """`release create .`, `release ls .` and `deploy up .` all take the path
+    first, so `release show .` is what a caller types. Read as a release id, `.`
+    reached the builder as `GET /v1/releases/.` and came back an opaque 302."""
+    # Given
+    client.releases = [{"id": "release-1", "version": 1}, {"id": "release-2", "version": 2}]
+    client.statuses = [{"id": "release-2", "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], ".", *verb[1:])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [
+        ("list_releases", "build-1"),
+        (read, "release-2"),
+    ]
+
+
+def test_a_build_path_before_the_release_reads_that_build_from_anywhere(
+    workspace: Path, client: ReleaseBuilder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Given
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    client.releases = [{"id": "release-7", "version": 7}]
+    client.statuses = [{"id": "release-7", "status": "complete"}]
+
+    # When
+    result = invoke_release("show", str(workspace))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.calls == [
+        {"method": "list_releases", "id": "build-1"},
+        {"method": "get_release", "id": "release-7"},
+    ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize(
+    "release_id",
+    [
+        pytest.param("   ", id="blank"),
+        pytest.param(".", id="dot"),
+        pytest.param("..", id="dot-dot"),
+    ],
+)
+def test_a_read_verb_refuses_an_id_that_names_no_release_before_it_reaches_the_builder(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str, release_id: str
+) -> None:
+    """With PATH given as well, a dot-only RELEASE cannot be the path, and
+    `quote(safe="")` leaves a dot segment alone, so it aims the read at the
+    collection or its parent. The empty `calls` is the load-bearing half."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+
+    # When
+    result = invoke_release(verb[0], release_id, ".", *verb[1:])
+
+    # Then
+    assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, "build_missing_input", [])
+
+
+def test_a_release_id_that_names_no_path_still_reaches_the_builder(workspace: Path, client: ReleaseBuilder) -> None:
+    # Given
+    client.statuses = [{"id": "release-3", "status": "complete"}]
+
+    # When
+    result = invoke_release("show", "release-3")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.calls == [{"method": "get_release", "id": "release-3"}]
+
+
 def test_delete_uses_one_stripped_release_id_for_the_prompt_the_url_and_the_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -3024,6 +3024,37 @@ def _newest_release_id(renderer, client, build_id: str) -> str:
     return release_id
 
 
+def _release_or_path(renderer, release: str | None, path: str | None) -> tuple[str | None, str | None]:
+    """Split the read verbs' ``[RELEASE] [PATH]`` into what the caller meant.
+
+    Every sibling verb (`release create`, `release ls`, `build show`, `deploy
+    up`) takes a path first, defaulting to `.`, so `release show .` is the
+    natural thing to type. Read as a release id, `.` reached the builder as
+    `GET /v1/releases/.`, the dot segment collapsed onto the collection, and
+    the caller got an opaque 302. A first argument that names an existing file
+    or directory, with no PATH after it, is that path.
+
+    Whatever id is left is refused when it is blank or only dots, for the reason
+    `release_delete` gives: `quote(safe="")` leaves a dot segment alone, so it
+    can never name one release. Refused here, above the client, so the first
+    envelope is the actionable one rather than a sign-in prompt.
+    """
+    if release is None:
+        return None, path
+    if path is None and os.path.exists(release):
+        return None, release
+    release = release.strip()
+    if not release or set(release) == {"."}:
+        renderer.error(
+            code="build_missing_input",
+            message="RELEASE must name one release, not an empty or dot-only path segment.",
+            hint="pass the release id shown by `comfy build release ls`, or only a build path to read its newest release",
+            details={"invalid": [release]},
+        )
+        raise typer.Exit(code=1)
+    return release, path
+
+
 def _selected_release_id(renderer, client, scope: _BuildScope, release: str | None) -> str:
     if release is not None:
         return release
@@ -3162,13 +3193,14 @@ def release_ls(
 def release_show(
     ctx: typer.Context,
     release: Annotated[
-        str | None, typer.Argument(help="Release id. Default: the current Build's newest release.")
+        str | None, typer.Argument(help="Release id, or a build path. Default: the current Build's newest release.")
     ] = None,
     path: Annotated[str | None, typer.Argument(help="Build spec path used when RELEASE is omitted.")] = None,
     build_id: Annotated[str | None, typer.Option("--id", help="Resolve the newest release from this Build id.")] = None,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
+    release, path = _release_or_path(renderer, release, path)
     client = _builder_client(renderer, builder_url)
     release_id = _selected_release_id(renderer, client, _BuildScope(ctx, path, build_id), release)
     detail = _builder_call(renderer, lambda: client.get_release(release_id))
@@ -3182,7 +3214,7 @@ def release_show(
 def release_logs(
     ctx: typer.Context,
     release: Annotated[
-        str | None, typer.Argument(help="Release id. Default: the current Build's newest release.")
+        str | None, typer.Argument(help="Release id, or a build path. Default: the current Build's newest release.")
     ] = None,
     path: Annotated[str | None, typer.Argument(help="Build spec path used when RELEASE is omitted.")] = None,
     target: Annotated[
@@ -3194,6 +3226,7 @@ def release_logs(
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
+    release, path = _release_or_path(renderer, release, path)
     target_value = require_option(
         "--target",
         target,
@@ -3407,13 +3440,14 @@ def model_dirs_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
 def release_manifest(
     ctx: typer.Context,
     release: Annotated[
-        str | None, typer.Argument(help="Release id. Default: the current Build's newest release.")
+        str | None, typer.Argument(help="Release id, or a build path. Default: the current Build's newest release.")
     ] = None,
     path: Annotated[str | None, typer.Argument(help="Build spec path used when RELEASE is omitted.")] = None,
     build_id: Annotated[str | None, typer.Option("--id", help="Resolve the newest release from this Build id.")] = None,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
+    release, path = _release_or_path(renderer, release, path)
     client = _builder_client(renderer, builder_url)
     release_id = _selected_release_id(renderer, client, _BuildScope(ctx, path, build_id), release)
     manifest = _builder_call(renderer, lambda: client.get_release_manifest(release_id))
