@@ -189,6 +189,31 @@ def test_boundary_targets_keep_every_duplicate_holder_live():
     assert promoted.boundary_widget_targets(sg, item, definitions) == [(["7"], "prompt"), (["8"], "prompt")]
 
 
+@pytest.mark.parametrize("malformed_slot", [True, False, 0.0])
+def test_malformed_target_slot_does_not_exact_match_a_holder(malformed_slot):
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [2]}],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "PromptNode",
+                "inputs": [
+                    {"name": "first", "widget": {"name": "first"}, "link": 2},
+                    {"name": "second", "widget": {"name": "second"}, "link": 2},
+                ],
+            }
+        ],
+        "links": [{"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": malformed_slot}],
+    }
+    definitions = {"sg": sg}
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert item.source_widget == "first"
+    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["7"], "first"), (["7"], "second")]
+
+
 def test_promotion_resolvers_ignore_unhashable_link_ids():
     sg = {
         "id": "sg",

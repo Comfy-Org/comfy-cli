@@ -100,6 +100,11 @@ def _entry_holds_link(entry: dict, link_id: Any) -> bool:
     return entry.get("link") is not None and str(entry["link"]) == str(link_id)
 
 
+def _is_slot_index(value: Any) -> bool:
+    """Whether ``value`` is a serialized slot index (never bool/float)."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _link_holders(sg: dict) -> dict[str, list[tuple[dict, int, dict]]]:
     """Every input that actually holds a link id, in serialized node order."""
     holders: dict[str, list[tuple[dict, int, dict]]] = {}
@@ -126,11 +131,14 @@ def held_link_targets(
     holders all remain live, matching the renderer's dependency model.
     """
     locations = (holders if holders is not None else _link_holders(sg)).get(str(link_id), [])
+    target_slot = link.get("target_slot")
     preferred = next(
         (
             location
             for location in locations
-            if str(location[0].get("id")) == str(link.get("target_id")) and location[1] == link.get("target_slot")
+            if str(location[0].get("id")) == str(link.get("target_id"))
+            and _is_slot_index(target_slot)
+            and location[1] == target_slot
         ),
         next(
             (location for location in locations if str(location[0].get("id")) == str(link.get("target_id"))),
