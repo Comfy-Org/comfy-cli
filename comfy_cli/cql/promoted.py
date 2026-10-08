@@ -962,7 +962,11 @@ def _promotion_source(sg: dict, inp: dict, defs: dict[str, dict]) -> tuple[str, 
     """``resolvePromotionSource``: the ``(interior node, widget)`` a subgraph
     input projects — the first of its links that lands on a nested instance's
     input or on a widget-backed input slot."""
-    links = {x.get("id"): x for x in sg.get("links") or [] if isinstance(x, dict)}
+    links = {
+        link.get("id"): link
+        for link in sg.get("links") or []
+        if isinstance(link, dict) and isinstance(link.get("id"), (int, str))
+    }
     holders = _link_holders(sg)
     for link_id in inp.get("linkIds") or []:
         link = links.get(link_id) if isinstance(link_id, (int, str)) else None
@@ -1094,7 +1098,11 @@ def _slot_for_widget(source: dict, widget: str, projecting_input: str | None, de
 
 def _primitive_targets(sg: dict, primitive: dict) -> list[tuple[str, int]]:
     """Every existing link out of the primitive's output 0, in link order."""
-    links = {x.get("id"): x for x in sg.get("links") or [] if isinstance(x, dict)}
+    links = {
+        link.get("id"): link
+        for link in sg.get("links") or []
+        if isinstance(link, dict) and isinstance(link.get("id"), (int, str))
+    }
     outputs = primitive.get("outputs") or []
     listed = outputs[0].get("links") if outputs and isinstance(outputs[0], dict) else None
     ordered = [links[i] for i in listed if i in links] if isinstance(listed, list) else []
@@ -1652,7 +1660,11 @@ def _boundary_targets(
         raise PromotionTraversalLimitError("promoted widget boundary traversal exceeded its safe limit")
     _budget[0] -= 1
     _stack = (*_stack, id(sg))
-    links = {x.get("id"): x for x in sg.get("links") or [] if isinstance(x, dict)}
+    links = {
+        link.get("id"): link
+        for link in sg.get("links") or []
+        if isinstance(link, dict) and isinstance(link.get("id"), (int, str))
+    }
     holders = _link_holders(sg)
     out: list[tuple[list[str], str]] = []
     for link_id in inp.get("linkIds") or []:
