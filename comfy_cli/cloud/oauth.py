@@ -32,10 +32,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import http.server
 import json
 import secrets
 import socket
+import ssl
 import threading
 import time
 import urllib.parse
@@ -587,7 +589,7 @@ def refresh_tokens(
         raise OAuthRefreshError(
             f"refresh failed: {e}",
             hint="run `comfy cloud login` to sign in again",
-            details={"status": e.status, "body": e.body},
+            details={"status": e.status, "body": e.body, "retryable": e.retryable},
         ) from None
     return _token_set_from_response(resp)
 
@@ -600,9 +602,11 @@ def refresh_tokens(
 # consumed token on disk for the next command (or the reactive 401 path) to
 # replay minutes later.
 _REFRESH_RETRY_DELAYS_S = (2.0, 4.0, 8.0)
-# Wall-clock cap on the retry phase (sleeps + retry POSTs), measured from the
-# first failure. Each retry POST's timeout is clamped to what is left, so the
-# cap holds even when every attempt times out.
+# Cap on the retry phase (sleeps + retry POSTs), measured from the first
+# failure. Each retry POST's socket timeout is clamped to what is left, so the
+# cap holds when attempts time out on connect or on a silent read. urllib's
+# timeout is per socket operation, not a whole-request deadline, so a server
+# that keeps trickling bytes can still stretch one POST past it.
 _REFRESH_RETRY_BUDGET_S = 40.0
 # Don't start a retry POST with less than this left — it could not complete.
 _REFRESH_RETRY_MIN_ATTEMPT_S = 5.0
@@ -653,16 +657,22 @@ def _is_transient_refresh_error(exc: OAuthRefreshError) -> bool:
     """True when a refresh failure is worth re-sending the *same* refresh token.
 
     Transient = no HTTP response at all (status 0: connect/read timeout, reset,
-    DNS), 408, 429, or any 5xx. A terminal token error (``invalid_grant`` /
+    DNS), 408, or any 5xx. A terminal token error (``invalid_grant`` /
     ``invalid_token`` / reuse) is never transient, whatever its status; other
     4xx (``invalid_client``, ``invalid_request``, ...) won't change on a retry.
+    429 is left out on purpose: the server has told us to back off and did not
+    process (so did not rotate) the token, so the next command can safely retry.
+    A local refusal that can never succeed (plaintext URL, TLS verification
+    failure) is marked ``retryable=False`` and skipped too.
     """
     if _is_fatal_token_error(exc):
+        return False
+    if exc.details.get("retryable") is False:
         return False
     status = exc.details.get("status")
     if not isinstance(status, int):
         return False
-    return status in (0, 408, 429) or status >= 500
+    return status in (0, 408) or status >= 500
 
 
 def _refresh_with_retry(**kwargs) -> TokenSet:
@@ -685,6 +695,8 @@ def _refresh_with_retry(**kwargs) -> TokenSet:
             break
         time.sleep(delay)
         remaining = deadline - time.monotonic()
+        if remaining < _REFRESH_RETRY_MIN_ATTEMPT_S:
+            break  # the sleep overran (loaded host, suspended process)
         try:
             return refresh_tokens(**kwargs, timeout=min(_HTTP_TIMEOUT_S, remaining))
         except OAuthRefreshError as e:
@@ -904,9 +916,12 @@ def _locked_refresh(auth_store, *, observed_refresh_token: str, leeway_s: int, f
 
 
 class _HTTPFail(Exception):
-    def __init__(self, status: int, body: str):
+    def __init__(self, status: int, body: str, *, retryable: bool = True):
         self.status = status
         self.body = body
+        # False for a local, deterministic refusal (plaintext URL, TLS
+        # verification) that re-sending the request can never fix.
+        self.retryable = retryable
         super().__init__(f"HTTP {status}: {body[:200]}")
 
 
@@ -946,7 +961,7 @@ def _assert_https_or_loopback(url: str) -> None:
     host = (parsed.hostname or "").lower()
     if host in {"localhost", "127.0.0.1", "::1"}:
         return
-    raise _HTTPFail(0, f"refusing plaintext HTTP for OAuth endpoint: {url}")
+    raise _HTTPFail(0, f"refusing plaintext HTTP for OAuth endpoint: {url}", retryable=False)
 
 
 _OAUTH_OPENER = build_http_only_opener(NoRedirectHandler())
@@ -959,15 +974,21 @@ def _send_and_parse(req: urllib.request.Request, *, timeout: float = _HTTP_TIMEO
             raw = resp.read().decode("utf-8", errors="replace") or "{}"
             return json.loads(raw)
     except HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else ""
+        try:
+            body = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else ""
+        except (OSError, http.client.HTTPException):
+            body = ""  # the status is what matters; don't lose it to a bad body read
         raise _HTTPFail(e.code, body) from None
     except URLError as e:
-        raise _HTTPFail(0, str(e)) from None
-    except OSError as e:
-        # A read timeout / reset *after* the request was sent (urllib only
-        # wraps connect-phase errors in URLError). This is exactly the "server
-        # rotated the token but the response was lost" case, so surface it as a
-        # no-response failure the refresh retry can see.
-        raise _HTTPFail(0, f"{type(e).__name__}: {e}") from None
+        verify_failed = isinstance(e.reason, ssl.SSLCertVerificationError)
+        raise _HTTPFail(0, str(e), retryable=not verify_failed) from None
+    except (OSError, http.client.HTTPException) as e:
+        # A read timeout / reset / truncated body *after* the request was sent
+        # (urllib only wraps connect-phase errors in URLError, and
+        # ``IncompleteRead`` / ``BadStatusLine`` are not OSErrors). This is
+        # exactly the "server rotated the token but the response was lost" case,
+        # so surface it as a no-response failure the refresh retry can see.
+        verify_failed = isinstance(e, ssl.SSLCertVerificationError)
+        raise _HTTPFail(0, f"{type(e).__name__}: {e}", retryable=not verify_failed) from None
     except json.JSONDecodeError as e:
         raise _HTTPFail(200, f"non-JSON response body: {e}") from None

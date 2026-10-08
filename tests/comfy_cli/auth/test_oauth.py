@@ -638,9 +638,9 @@ class TestConcurrentRefresh:
         monkeypatch.setattr(auth_store, "secrets_path", lambda: path)
         return path
 
-    def _persist_expired(self, *, refresh_token: str = "RT0") -> None:
+    def _persist_expired(self, *, refresh_token: str = "RT0", base_url: str = "https://c") -> None:
         auth_store.save_cloud_session(
-            base_url="https://c",
+            base_url=base_url,
             resource="https://c/api",
             client_id="cid",
             scope="s",
@@ -1017,12 +1017,64 @@ class TestConcurrentRefresh:
         def err(status, body=""):
             return oauth.OAuthRefreshError("refresh failed", details={"status": status, "body": body})
 
-        for status in (0, 408, 429, 500, 502, 503, 504):
+        for status in (0, 408, 500, 502, 503, 504):
             assert oauth._is_transient_refresh_error(err(status)) is True, status
-        for status in (400, 401, 403, 404):
+        for status in (400, 401, 403, 404, 429):
             assert oauth._is_transient_refresh_error(err(status)) is False, status
         assert oauth._is_transient_refresh_error(err(500, '{"error":"invalid_grant"}')) is False
         assert oauth._is_transient_refresh_error(oauth.OAuthRefreshError("x", details={})) is False
+        not_retryable = oauth.OAuthRefreshError("x", details={"status": 0, "body": "", "retryable": False})
+        assert oauth._is_transient_refresh_error(not_retryable) is False
+
+    def test_plaintext_base_url_is_not_retried(self, persisted, monkeypatch):
+        """The plaintext-URL refusal is local and deterministic: no backoff while
+        holding the lock, and the session is kept."""
+        self._persist_expired(refresh_token="RT0", base_url="http://cloud.example.com")
+        sleeps = self._record_sleeps(monkeypatch)
+        opened: list[int] = []
+        monkeypatch.setattr(oauth._OAUTH_OPENER, "open", lambda req, timeout=None: opened.append(1))
+        result = oauth.ensure_fresh_session()
+        assert opened == [] and sleeps == []
+        assert result is not None and result.refresh_token == "RT0"
+
+    def test_tls_verification_failure_is_not_retried(self, persisted, monkeypatch):
+        import ssl
+        from urllib.error import URLError
+
+        self._persist_expired(refresh_token="RT0")
+        sleeps = self._record_sleeps(monkeypatch)
+        opened: list[int] = []
+
+        def bad_cert(req, timeout=None):
+            opened.append(1)
+            raise URLError(ssl.SSLCertVerificationError(1, "certificate verify failed"))
+
+        monkeypatch.setattr(oauth._OAUTH_OPENER, "open", bad_cert)
+        result = oauth.ensure_fresh_session()
+        assert opened == [1] and sleeps == []
+        assert result is not None and result.refresh_token == "RT0"
+
+    def test_sleep_overrun_does_not_start_a_retry_past_the_budget(self, persisted, monkeypatch):
+        """A sleep that overruns (suspended process) must not start a POST with a
+        non-positive timeout."""
+        self._persist_expired(refresh_token="RT0")
+        clock = [1000.0]
+        monkeypatch.setattr(oauth.time, "monotonic", lambda: clock[0])
+
+        def overrun_sleep(s):
+            clock[0] += s + oauth._REFRESH_RETRY_BUDGET_S
+
+        monkeypatch.setattr(oauth.time, "sleep", overrun_sleep)
+        timeouts: list[float] = []
+
+        def fake_post_form(url, body, *, timeout=oauth._HTTP_TIMEOUT_S):
+            timeouts.append(timeout)
+            raise oauth._HTTPFail(503, "Service Unavailable")
+
+        monkeypatch.setattr(oauth, "_post_form", fake_post_form)
+        result = oauth.ensure_fresh_session()
+        assert timeouts == [oauth._HTTP_TIMEOUT_S]  # no retry after the overrun
+        assert result is not None and result.refresh_token == "RT0"
 
     def test_lock_timeout_returns_pre_lock_session(self, persisted, monkeypatch):
         import contextlib
@@ -1066,6 +1118,34 @@ class TestConcurrentRefresh:
         with pytest.raises(oauth._HTTPFail) as exc:
             oauth._post_form("https://c/oauth/token", {"grant_type": "refresh_token"})
         assert exc.value.status == 0
+
+    def test_truncated_response_maps_to_no_response_failure(self, monkeypatch):
+        """``IncompleteRead`` is an ``HTTPException``, not an ``OSError``: a body
+        cut short must still map to status 0 rather than escape unconverted."""
+        import http.client
+
+        def truncated(req, timeout=None):
+            raise http.client.IncompleteRead(b'{"access_tok', 40)
+
+        monkeypatch.setattr(oauth._OAUTH_OPENER, "open", truncated)
+        with pytest.raises(oauth._HTTPFail) as exc:
+            oauth._post_form("https://c/oauth/token", {"grant_type": "refresh_token"})
+        assert exc.value.status == 0 and exc.value.retryable is True
+
+    def test_error_body_read_failure_keeps_status(self, monkeypatch):
+        from urllib.error import HTTPError
+
+        class _Err(HTTPError):
+            def read(self, *a):
+                raise TimeoutError("The read operation timed out")
+
+        def fail(req, timeout=None):
+            raise _Err(req.full_url, 503, "Service Unavailable", {}, None)
+
+        monkeypatch.setattr(oauth._OAUTH_OPENER, "open", fail)
+        with pytest.raises(oauth._HTTPFail) as exc:
+            oauth._post_form("https://c/oauth/token", {"grant_type": "refresh_token"})
+        assert exc.value.status == 503 and exc.value.body == ""
 
     def test_successful_refresh_never_repersists_spent_token(self, persisted, monkeypatch):
         """Rotating server: once a refresh SUCCEEDS the token we sent is spent.
