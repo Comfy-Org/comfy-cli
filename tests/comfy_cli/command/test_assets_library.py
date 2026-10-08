@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import urllib.error
 from typing import Any
 
@@ -179,7 +180,16 @@ class TestEnsure:
         _patch_urlopen_raw(monkeypatch, b"\n")
         self._assert_unconfirmed_borrow(capsys, got_type="NoneType", status=201)
 
-    @pytest.mark.parametrize("body", [{}, {"detail": "upstream timeout"}, {"id": None, "hash": "a" * 64}])
+    @pytest.mark.skipif(not getattr(sys, "get_int_max_str_digits", lambda: 0)(), reason="no int-conversion digit limit")
+    def test_oversized_integer_body_is_cloud_http_error_not_traceback(self, cloud_target, monkeypatch, capsys):
+        # Past the int-conversion limit `json.loads` raises a bare `ValueError`, not `JSONDecodeError`.
+        _patch_urlopen_raw(monkeypatch, b'{"id": ' + b"1" * (sys.get_int_max_str_digits() + 1) + b"}")
+        self._assert_unconfirmed_borrow(capsys, got_type="NoneType", status=201)
+
+    @pytest.mark.parametrize(
+        "body",
+        [{}, {"detail": "upstream timeout"}, {"id": None, "hash": "a" * 64}, {"id": ""}, {"id": True}, {"id": [1]}],
+    )
     def test_object_without_id_is_cloud_http_error(self, cloud_target, monkeypatch, capsys, body):
         # A 2xx object with no `id` confirms nothing — it must not echo the caller's hash back as success.
         _patch_urlopen(monkeypatch, body)

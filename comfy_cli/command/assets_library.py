@@ -243,8 +243,9 @@ def ensure_cmd(
     # to `None`, so `NoneType` covers both. An object without an `id` (`{}`, or
     # a gateway error body returned with a 2xx) confirms nothing either —
     # otherwise each emits `{"ok": true}` with a null id and the caller's own
-    # hash echoed back as if the borrow had happened.
-    if not isinstance(body, dict) or not body.get("id"):
+    # hash echoed back as if the borrow had happened. A truthy non-string `id`
+    # (`true`, `[1]`) is no asset id either.
+    if not isinstance(body, dict) or not isinstance(body.get("id"), str) or not body["id"]:
         renderer.error(
             code="cloud_http_error",
             message="unexpected response from /api/assets/from-hash (expected a JSON object describing the asset)",

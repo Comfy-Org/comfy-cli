@@ -64,9 +64,11 @@ def http_request(
     try:
         return status, json.loads(raw)
     # `json.loads` decodes bytes itself, so non-UTF-8 bytes raise
-    # `UnicodeDecodeError` (not a `JSONDecodeError`), and pathologically nested
-    # JSON raises `RecursionError`; both are an unparseable body too.
-    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+    # `UnicodeDecodeError` (not a `JSONDecodeError`), an integer longer than
+    # the interpreter's int-conversion limit raises a bare `ValueError`, and
+    # pathologically nested JSON raises `RecursionError`; all are an
+    # unparseable body too. (`ValueError` covers the first two.)
+    except (ValueError, RecursionError):
         return status, None
 
 
