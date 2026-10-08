@@ -1439,7 +1439,8 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
     value) even if the value equals the node default — so the fields you want to
     vary are actually parameterizable. No auto-parameterization otherwise."""
     definitions = workflow.get("definitions")
-    if isinstance(definitions, dict) and definitions.get("subgraphs"):
+    subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
+    if isinstance(subgraphs, list) and subgraphs:
         raise RecipeError("capture does not support subgraphs yet — edit/flatten top-level nodes first")
     lift = lift or {}
     all_nodes = [n for n in (workflow.get("nodes") or []) if isinstance(n, dict) and "id" in n]

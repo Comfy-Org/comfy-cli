@@ -1699,6 +1699,16 @@ class TestCapture:
         env = _run(["capture", str(path)], capsys)
         assert env["ok"] is True, env
 
+    @pytest.mark.parametrize("subgraphs", [{"sg": {}}, "corrupt", 1])
+    def test_capture_tolerates_a_non_list_subgraphs_block(self, patched_graph, tmp_path, capsys, subgraphs):
+        """A truthy non-list ``definitions.subgraphs`` reads as "no subgraphs"
+        (as every other reader treats it) rather than refusing the capture."""
+        wf = _base_workflow()
+        wf["definitions"] = {"subgraphs": subgraphs}
+        path = _write(tmp_path, wf)
+        env = _run(["capture", str(path)], capsys)
+        assert env["ok"] is True, env
+
 
 # ---------------------------------------------------------------------------
 # capture ↔ apply agreement on UI-only nodes (review finding 1):
