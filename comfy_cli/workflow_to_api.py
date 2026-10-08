@@ -405,7 +405,9 @@ def _expand_one_subgraph(
         internal_link_map[old_id] = link
 
     input_targets: dict[int, list[tuple[Any, int]]] = {}
-    from comfy_cli.cql.promoted import held_link_target
+    from comfy_cli.cql.promoted import _link_holders, held_link_targets
+
+    holders = _link_holders(sg_def)
 
     for idx, in_def in enumerate(sg_def.get("inputs") or []):
         if not isinstance(in_def, dict):
@@ -416,9 +418,7 @@ def _expand_one_subgraph(
                 continue
             link = internal_link_map.get(lid)
             if isinstance(link, dict):
-                held = held_link_target(sg_def, lid, link)
-                if held is not None:
-                    target, target_slot, _entry = held
+                for target, target_slot, _entry in held_link_targets(sg_def, lid, link, holders):
                     targets.append((target.get("id"), target_slot))
         if targets:
             input_targets[idx] = targets

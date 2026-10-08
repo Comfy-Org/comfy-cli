@@ -113,33 +113,33 @@ def _link_holders(sg: dict) -> dict[str, list[tuple[dict, int, dict]]]:
     return holders
 
 
-def held_link_target(
+def held_link_targets(
     sg: dict,
     link_id: Any,
     link: dict,
     holders: dict[str, list[tuple[dict, int, dict]]] | None = None,
-) -> tuple[dict, int, dict] | None:
-    """The authoritative target of ``link`` according to ``inputs[].link``.
+) -> list[tuple[dict, int, dict]]:
+    """The authoritative targets of ``link`` according to ``inputs[].link``.
 
     Prefer the declared node and slot when it really holds the id, then any
-    holder on the declared node, then the first serialized holder. This is the
-    same recovery order the renderer uses for a stale link row.
+    holder on the declared node, then serialized holder order. Duplicate
+    holders all remain live, matching the renderer's dependency model.
     """
     locations = (holders if holders is not None else _link_holders(sg)).get(str(link_id), [])
-    exact = next(
+    preferred = next(
         (
             location
             for location in locations
             if str(location[0].get("id")) == str(link.get("target_id")) and location[1] == link.get("target_slot")
         ),
-        None,
+        next(
+            (location for location in locations if str(location[0].get("id")) == str(link.get("target_id"))),
+            next(iter(locations), None),
+        ),
     )
-    if exact is not None:
-        return exact
-    declared_node = next(
-        (location for location in locations if str(location[0].get("id")) == str(link.get("target_id"))), None
-    )
-    return declared_node if declared_node is not None else next(iter(locations), None)
+    if preferred is None:
+        return []
+    return [preferred, *(location for location in locations if location is not preferred)]
 
 
 def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
@@ -213,28 +213,32 @@ def promoted_inputs(
             link = links.get(link_id)
             if not isinstance(link, dict):
                 continue
-            held = held_link_target(sg, link_id, link, holders)
-            if held is None:
-                continue
-            target, _slot, entry = held
-            inner_def = _nested_definition(target, defs, _stack)
-            if inner_def is not None:
-                # The target is itself a subgraph instance: its input entry
-                # carries a widget marker when promoted, but the concrete
-                # widget lives deeper — resolve through its own promotion.
-                if depth < _MAX_NESTED_PROMOTION_DEPTH:
-                    inner_by_name = {
-                        p.name: p for p in promoted_inputs(inner_def, defs, depth + 1, _stack, _memo, _budget)
-                    }
-                    inner_pi = inner_by_name.get(str(entry.get("name")))
-                    if inner_pi is not None and inner_pi.is_widget:
-                        source = (str(target.get("id")), str(entry.get("name")), None, True)
-                        break
-                continue
-            marker = entry.get("widget")
-            if marker:
-                widget_name = marker.get("name") if isinstance(marker, dict) else None
-                source = (str(target.get("id")), str(entry.get("name")), str(widget_name or entry.get("name")), False)
+            for target, _slot, entry in held_link_targets(sg, link_id, link, holders):
+                inner_def = _nested_definition(target, defs, _stack)
+                if inner_def is not None:
+                    # The target is itself a subgraph instance: its input entry
+                    # carries a widget marker when promoted, but the concrete
+                    # widget lives deeper — resolve through its own promotion.
+                    if depth < _MAX_NESTED_PROMOTION_DEPTH:
+                        inner_by_name = {
+                            p.name: p for p in promoted_inputs(inner_def, defs, depth + 1, _stack, _memo, _budget)
+                        }
+                        inner_pi = inner_by_name.get(str(entry.get("name")))
+                        if inner_pi is not None and inner_pi.is_widget:
+                            source = (str(target.get("id")), str(entry.get("name")), None, True)
+                            break
+                    continue
+                marker = entry.get("widget")
+                if marker:
+                    widget_name = marker.get("name") if isinstance(marker, dict) else None
+                    source = (
+                        str(target.get("id")),
+                        str(entry.get("name")),
+                        str(widget_name or entry.get("name")),
+                        False,
+                    )
+                    break
+            if source is not None:
                 break
         if source is None:
             out.append(PromotedInput(name=name, type=type_str, index=idx, value_index=None))
@@ -972,15 +976,12 @@ def _promotion_source(sg: dict, inp: dict, defs: dict[str, dict]) -> tuple[str, 
         link = links.get(link_id) if isinstance(link_id, (int, str)) else None
         if link is None:
             continue
-        held = held_link_target(sg, link_id, link, holders)
-        if held is None:
-            continue
-        target, _slot, entry = held
-        if str(target.get("type", "")) in defs:
-            return str(target.get("id")), str(entry.get("name"))
-        marker = entry.get("widget")
-        if isinstance(marker, dict) and marker.get("name"):
-            return str(target.get("id")), str(marker["name"])
+        for target, _slot, entry in held_link_targets(sg, link_id, link, holders):
+            if str(target.get("type", "")) in defs:
+                return str(target.get("id")), str(entry.get("name"))
+            marker = entry.get("widget")
+            if isinstance(marker, dict) and marker.get("name"):
+                return str(target.get("id")), str(marker["name"])
     return None
 
 
@@ -1669,34 +1670,32 @@ def _boundary_targets(
     out: list[tuple[list[str], str]] = []
     for link_id in inp.get("linkIds") or []:
         link = links.get(link_id) if isinstance(link_id, (int, str)) else None
-        held = held_link_target(sg, link_id, link, holders) if link is not None else None
-        if held is None:
-            continue
-        target, _slot, entry = held
-        tid = str(target.get("id"))
-        inner_def = _nested_definition(target, defs, _stack)
-        if inner_def is not None:
-            inner_inp = next(
-                (
-                    i
-                    for i in inner_def.get("inputs") or []
-                    if isinstance(i, dict) and i.get("name") == entry.get("name")
-                ),
-                None,
-            )
-            if inner_inp is not None:
-                nested = _boundary_targets(inner_def, inner_inp, defs, depth + 1, _stack, _memo, _budget)
-                if len(nested) > _budget[0]:
+        targets = held_link_targets(sg, link_id, link, holders) if link is not None else []
+        for target, _slot, entry in targets:
+            tid = str(target.get("id"))
+            inner_def = _nested_definition(target, defs, _stack)
+            if inner_def is not None:
+                inner_inp = next(
+                    (
+                        i
+                        for i in inner_def.get("inputs") or []
+                        if isinstance(i, dict) and i.get("name") == entry.get("name")
+                    ),
+                    None,
+                )
+                if inner_inp is not None:
+                    nested = _boundary_targets(inner_def, inner_inp, defs, depth + 1, _stack, _memo, _budget)
+                    if len(nested) > _budget[0]:
+                        raise PromotionTraversalLimitError("promoted widget boundary traversal exceeded its safe limit")
+                    _budget[0] -= len(nested)
+                    out.extend(([tid, *path], widget) for path, widget in nested)
+                continue
+            marker = entry.get("widget")
+            if marker:
+                if _budget[0] <= 0:
                     raise PromotionTraversalLimitError("promoted widget boundary traversal exceeded its safe limit")
-                _budget[0] -= len(nested)
-                out.extend(([tid, *path], widget) for path, widget in nested)
-            continue
-        marker = entry.get("widget")
-        if marker:
-            if _budget[0] <= 0:
-                raise PromotionTraversalLimitError("promoted widget boundary traversal exceeded its safe limit")
-            _budget[0] -= 1
-            widget = marker.get("name") if isinstance(marker, dict) else None
-            out.append(([tid], str(widget or entry.get("name"))))
+                _budget[0] -= 1
+                widget = marker.get("name") if isinstance(marker, dict) else None
+                out.append(([tid], str(widget or entry.get("name"))))
     _memo[memo_key] = out
     return out
