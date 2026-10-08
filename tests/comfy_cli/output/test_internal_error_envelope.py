@@ -316,3 +316,12 @@ def test_internal_error_scrubber_handles_unterminated_escaped_container_with_bac
     secret = "sk-LIVE" + "\\" * 1_000
     scrubbed = _internal_error_message(RuntimeError(r"body={\"api_key\": [\"" + secret))
     assert "sk-LIVE" not in scrubbed
+
+
+def test_internal_error_scrubber_bounds_long_non_secret_key_scans():
+    import time
+
+    message = "a_" * 2_000
+    started = time.perf_counter()
+    _internal_error_message(RuntimeError(message))
+    assert time.perf_counter() - started < 0.2
