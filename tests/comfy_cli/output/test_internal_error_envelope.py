@@ -419,21 +419,17 @@ def test_internal_error_scrubber_masks_pem_without_any_key_assignment():
 
 
 def test_internal_error_scrubber_preserves_host_ports_and_complete_userinfo_at_the_input_cap():
-    tails = [
-        " retrying https://api.comfy.org:8443",
-        " retrying http://localhost:8188/prompt",
-        " retrying https://alice:secret@example.com",
+    cases = [
+        (" retrying https://api.comfy.org:8443", "RuntimeError: Bearer *** retrying https://api.comfy.org:8443…"),
+        (" retrying http://localhost:8188/prompt", "RuntimeError: Bearer *** retrying http://localhost:8188/prompt…"),
+        (" retrying https://alice:secret@example.com", "RuntimeError: Bearer *** retrying https://***@example.com…"),
     ]
-    for tail in tails:
+    for tail, expected in cases:
         prefix = "Bearer " + "A" * (
             _INTERNAL_ERROR_SCRUB_INPUT_CAP - len("RuntimeError: ") - len("Bearer ") - len(tail)
         )
         scrubbed = _internal_error_message(RuntimeError(prefix + tail + " overflow"))
-        if "example.com" in tail:
-            assert "alice:secret" not in scrubbed
-            assert "example.com" in scrubbed
-        else:
-            assert tail.strip().removeprefix("retrying ") in scrubbed
+        assert scrubbed == expected
 
 
 def test_internal_error_scrubber_handles_long_non_secret_camel_names_without_backtracking():
