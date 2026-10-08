@@ -410,6 +410,7 @@ def _stale_input_slot_links(
                 holders_by_link.setdefault(str(inp["link"]), []).append((node.get("id"), slot, inp))
         input_holders_by_node[str(node.get("id"))] = holders
     dependency_targets: dict[str, list[tuple[Any, int]]] = {}
+    links_by_id = {str(link[0]): link for link in links if isinstance(link, list) and len(link) >= 5}
 
     for link in links:
         link_id, src_id, src_slot, tgt_id, tgt_slot = link[0], link[1], link[2], link[3], link[4]
@@ -508,7 +509,7 @@ def _stale_input_slot_links(
             )
         else:
             ignored.add(str(link_id))
-            rewired = _input_fed_from(inputs, links, src_id, src_slot, link_id)
+            rewired = _input_fed_from(inputs, links_by_id, src_id, src_slot, link_id)
             if rewired is not None:
                 warnings.append(
                     f"{where}; a leftover row — input {rewired!r} already gets that value from node "
@@ -531,15 +532,16 @@ def _stale_input_slot_links(
     return warnings, ignored, retargeted, dependency_targets
 
 
-def _input_fed_from(inputs: list, links: list[list], src_id: Any, src_slot: Any, except_id: Any) -> str | None:
+def _input_fed_from(
+    inputs: list, links_by_id: dict[str, list], src_id: Any, src_slot: Any, except_id: Any
+) -> str | None:
     """The name of an input in ``inputs`` that a link OTHER than ``except_id``
     feeds from ``src_id``/``src_slot`` — a stale row whose value was already
     re-wired — else ``None``."""
-    by_id = {str(lk[0]): lk for lk in links if isinstance(lk, list) and len(lk) >= 5}
     for inp in inputs:
         if not isinstance(inp, dict) or inp.get("link") is None or str(inp["link"]) == str(except_id):
             continue
-        row = by_id.get(str(inp["link"]))
+        row = links_by_id.get(str(inp["link"]))
         if row is not None and str(row[1]) == str(src_id) and row[2] == src_slot:
             return str(inp.get("name") or "")
     return None
