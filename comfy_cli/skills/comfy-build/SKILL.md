@@ -54,7 +54,7 @@ update    Rescan the local install and rewrite the spec's definition.
 push      Push the local spec to the builder.
 pull      Replace the local spec with a fetched Build, keeping local asset identities.
 status    Report how far the spec is from the remote Build and from the install.
-ls        List the workspace's builds.
+ls        List the builds you can see: your own, or every member's on enterprise.
 show      Show a Build and its full definition.
 validate  Validate the local spec without contacting the builder.
 delete    Delete a Build (soft-delete).
@@ -69,10 +69,14 @@ blob      ls                                    (hidden; workspace private blobs
   release id instead. Once the spec exists it carries the Build id, so nothing
   after `init` needs an id from you. `--id` overrides it.
 - **`comfy which` names the install** when the user has not said where it is.
-- **Only sign in when told to.** Run `comfy cloud login` if a command answers
-  `build_not_signed_in`, and not before. Everything under `refs`, both importers
+- **Only sign in when told to.** On `build_not_signed_in`, do what its hint
+  says. Run `comfy cloud login` only when nobody is signed in or the sign-in
+  was refused, and not before. Everything under `refs`, both importers
   (`--from-snapshot`, `--from-workflow`), `validate --remote`, and every command
   that reaches the builder need it; a plain scan and a plain `validate` do not.
+  A CI job sets a workspace API key in `COMFY_CLOUD_API_KEY` instead, and that
+  key wins over a stored sign-in, so when the hint says that key was refused,
+  signing in cannot help: replace the key.
   On `build_not_enabled` the platform is in limited beta and this account is not
   enabled — stop and say so.
 
@@ -119,6 +123,15 @@ Read what it plans, decide the pins, run the conflict prediction in
 comfy build push <install>
 comfy build release create <install> --target linux/nvidia --watch
 ```
+
+**A push that uploads models can run for a long time, and it tells you how it is
+going.** It opens with an `upload_plan` line (files, bytes, how many local files
+it already holds), then an `upload_progress` line per file about every two
+seconds with `bytes_done`, `bytes_per_second` and `eta_seconds`, then an
+`upload_complete` per file. Under `--json` these are JSON lines on **stderr**
+(stdout stays the one envelope); under `--json-stream` they are on stdout. Relay
+the rate and time left instead of waiting in silence. A `bytes_per_second` that
+falls to `0` means the connection stalled, not that the upload is slow.
 
 **What `init` does, and where it stops:**
 
@@ -289,9 +302,24 @@ for comes back as a refusal envelope and exits 1: `build_update_needs_confirm`,
 Pass `--yes`, or the option it named, once the user has actually agreed. Do not
 pass `--yes` first and disclose after.
 
-**Three other refusals block rather than ask — `--yes` does nothing for them.**
+**`build_release_held` asks the same way, with its own option.** `comfy build push
+--release` saved the build but cut no release, because the save warned that a
+deployment could not download a model link. Under `--json` the error carries them
+in `details.warnings`; in text mode the tool printed each just above it. Tell the
+user which links fail and how, and pass `--release-despite-warnings` only after they say
+yes; a fixed link needs no option. `comfy build release create` cuts without this
+check.
+
+**Four other refusals block rather than ask: `--yes` does nothing for them.**
 Each is cleared by deleting something, and each exits 1:
 
+- **`build_limit`**: `comfy build push` could not create the build because the
+  workspace already holds as many builds as its limit allows. The limit counts
+  every member's builds, and `comfy build ls` lists only your own outside the
+  enterprise plan, so the list can look short or empty. The `message` is the
+  builder's own wording. Deleting a build frees a slot but takes its releases
+  with it, so ask the user first, or ask them to have a teammate delete one;
+  then push again.
 - **`build_release_limit`** — the cut was refused because the workspace already
   holds as many releases as its limit allows. Free a slot, then cut again.
 - **`build_release_in_use`** — `comfy build release delete` was refused because a

@@ -49,9 +49,10 @@ def test_build_flux_text_to_image_class_type_and_params():
     assert wf["1"]["inputs"]["model.width"] == 512
     assert wf["1"]["inputs"]["model.height"] == 768
     # save node references the partner output
-    save = [n for n in wf.values() if n["class_type"] == "SaveImage"]
+    save = [n for n in wf.values() if n["class_type"] == "SaveImageAdvanced"]
     assert len(save) == 1
     assert save[0]["inputs"]["images"] == ["1", 0]
+    assert save[0]["inputs"]["format"] == "png"
 
 
 def test_build_nano_banana_wires_load_image():
@@ -199,7 +200,7 @@ def test_build_flux_ultra_folds_width_height_into_aspect_ratio():
     assert wf["1"]["inputs"]["aspect_ratio"] == "1024:768"
     assert wf["1"]["inputs"]["prompt"] == "a fox"
     assert wf["1"]["inputs"]["prompt_upsampling"] is False
-    save = [n for n in wf.values() if n["class_type"] == "SaveImage"]
+    save = [n for n in wf.values() if n["class_type"] == "SaveImageAdvanced"]
     assert len(save) == 1
     assert save[0]["inputs"]["images"] == ["1", 0]
 
@@ -241,7 +242,7 @@ def test_emit_refuses_a_flag_the_node_cannot_carry():
 def test_emit_names_every_unsupported_flag_at_once():
     """Reporting one at a time turns a single fix into a guessing loop."""
     with pytest.raises(emit.EmitError) as ei:
-        emit.build_workflow("flux-2", {"prompt": "p", "safety_tolerance": 2, "output_format": "png"})
+        emit.build_workflow("flux-2", {"prompt": "p", "safety_tolerance": 2, "output_format": "jpeg"})
     msg = str(ei.value)
     assert "--output_format" in msg and "--safety_tolerance" in msg
     assert "Drop those flags" in msg
@@ -362,7 +363,7 @@ def test_unsupported_model_raises_a_typed_error_carrying_the_supported_list():
 
 
 def test_cli_emit_unsupported_model_has_its_own_error_code(runner, tmp_path, monkeypatch):
-    """The prod payload: `generate_workflow flux-pro` → `emit_workflow_failed`
+    """`--emit-workflow` on `flux-pro` → `emit_workflow_failed`
     "--emit-workflow does not support model 'flux-pro'. Supported: …". The
     umbrella code also covers bad params and unwritable paths, so the agent
     could not tell "pick another model" from "fix your arguments". Now it is
@@ -379,6 +380,7 @@ def test_cli_emit_unsupported_model_has_its_own_error_code(runner, tmp_path, mon
     assert err["code"] == "emit_workflow_unsupported_model"
     assert err["details"]["model"] == "flux-pro"
     assert err["details"]["supported"] == emit.supported_models()
+    assert err["details"]["suggested"][0] == "flux-2"
     assert "generate list" in err["hint"]
     assert not out.exists()
 
@@ -466,7 +468,7 @@ def test_cli_emit_output_prefix(runner, tmp_path, monkeypatch):
     )
     assert r.exit_code == 0, r.stdout
     wf = json.loads(out.read_text())
-    save = next(n for n in wf.values() if n["class_type"] == "SaveImage")
+    save = next(n for n in wf.values() if n["class_type"] == "SaveImageAdvanced")
     assert save["inputs"]["filename_prefix"] == "myfox"
 
 

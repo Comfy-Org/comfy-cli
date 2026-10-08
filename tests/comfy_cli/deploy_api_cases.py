@@ -49,6 +49,31 @@ WIRES = [
         args=("dep-1", COMPUTE),
         body={"computeConfig": COMPUTE},
     ),
+    Wire(
+        "move",
+        "move_deployment",
+        "PATCH",
+        f"{BASE}/v1/deployments/dep-1",
+        args=("dep-1", 3, "v2"),
+        body={"baseRevision": 3, "releaseId": "v2"},
+    ),
+    Wire(
+        "move",
+        "promote_deployment",
+        "PATCH",
+        f"{BASE}/v1/deployments/dep-1",
+        args=("dep-1", 3, "dep-2"),
+        body={"baseRevision": 3, "fromDeploymentId": "dep-2"},
+    ),
+    Wire(
+        "move",
+        "rollback_deployment",
+        "POST",
+        f"{BASE}/v1/deployments/dep-1/rollback",
+        args=("dep-1", 3, 1),
+        body={"baseRevision": 3, "toRevision": 1},
+    ),
+    Wire("revisions", "get_deployment_revisions", "GET", f"{BASE}/v1/deployments/dep-1/revisions", args=("dep-1",)),
     Wire("delete", "delete_deployment", "DELETE", f"{BASE}/v1/deployments/dep-1", args=("dep-1",)),
     Wire("start", "start_deployment", "POST", f"{BASE}/v1/deployments/dep-1/start", args=("dep-1",)),
     Wire("stop", "stop_deployment", "POST", f"{BASE}/v1/deployments/dep-1/stop", args=("dep-1",)),
@@ -61,7 +86,14 @@ WIRES = [
         args=("dep-1",),
         max_bytes=MAX_LOG_JSON,
     ),
-    Wire("compute", "get_compute_catalog", "GET", f"{BASE}/v1/compute-catalog"),
+    Wire("compute", "get_compute_catalog", "GET", f"{BASE}/v1/compute-catalog?levels=all"),
+    Wire(
+        "estimate",
+        "get_deploy_estimate",
+        "GET",
+        f"{BASE}/v1/deploy-estimate?releaseId=v1&gpuClass=l4&region=US-MO-2",
+        args=("v1", "l4", "US-MO-2"),
+    ),
 ]
 
 

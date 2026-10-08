@@ -666,7 +666,9 @@ def test_cli_permissions_lists_pending_and_names_approve_first(tmp_path: Path):
     assert data["pending"] == [req]
     assert list(data["grant"])[0] == "approve"
     assert "--approve <id>" in data["grant"]["approve"]
-    assert "comfy agent deny <id>" == data["grant"]["deny"]
+    # This run's data dir is not the default, so the hints carry it (the user's
+    # terminal would otherwise look somewhere else).
+    assert data["grant"]["deny"] == f'comfy agent deny --data-dir "{root}" <id>'
     _validate(data)
 
     _pin_renderer(OutputMode.PRETTY)
@@ -681,7 +683,11 @@ def test_cli_permissions_lists_pending_and_names_approve_first(tmp_path: Path):
         assert out.find(needle) >= 0, f"{needle!r} missing from:\n{out}"
     assert out.index(req["id"]) < out.index("hosts the user approved")
     assert "ago" in out
-    assert "comfy agent allow --approve 0123456789abcdef" in out
+    # The per-request line is the generated hint with the id filled in, so it
+    # carries --data-dir like the JSON grant does.
+    flat = "".join(out.split())
+    assert "".join(f'comfy agent allow --data-dir "{root}" --approve 0123456789abcdef'.split()) in flat
+    assert "".join(f'comfy agent deny --data-dir "{root}" 0123456789abcdef'.split()) in flat
 
 
 def test_cli_allow_approve_round_trip(tmp_path: Path):
@@ -786,3 +792,66 @@ def test_cli_deny_reports_a_broken_permissions_file(tmp_path: Path):
 def test_agent_schema_rejects_incomplete_approve_and_deny_payloads(payload):
     with pytest.raises(jsonschema.ValidationError):
         _validate(payload)
+
+
+# The user's terminal is a different process from the agent's: the incident
+# behind these was an agent handing over `comfy agent allow --approve <id>`
+# while it ran with a non-default AGENT_DATA_DIR, so the command answered
+# agent_unknown_request. The hints now carry the dir, and name the CLI the way
+# this process was actually started.
+def test_permissions_grant_carries_a_non_default_data_dir(tmp_path: Path, home: Path):
+    root = tmp_path / "data"
+    _write_pending(root, _req("0123456789abcdef", "host", "models.example.com"))
+    res = CliRunner().invoke(app, ["permissions", "--data-dir", str(root)])
+    assert res.exit_code == 0, res.stdout
+    grant = _envelope(res)["data"]["grant"]
+    for key, hint in grant.items():
+        assert f'--data-dir "{root}"' in hint, f"{key} must name the dir this agent uses: {hint}"
+    assert grant["approve"].startswith(f'comfy agent allow --data-dir "{root}" --approve')
+
+
+def test_permissions_grant_omits_the_data_dir_when_it_is_the_default(home: Path):
+    _write_pending(home / ".comfy-agent", _req("0123456789abcdef", "host", "models.example.com"))
+    res = CliRunner().invoke(app, ["permissions"])
+    assert res.exit_code == 0, res.stdout
+    grant = _envelope(res)["data"]["grant"]
+    assert grant["deny"] == "comfy agent deny <id>"
+    assert all("--data-dir" not in hint for hint in grant.values())
+
+
+@pytest.mark.parametrize("via_env", [False, True])
+def test_permissions_grant_makes_a_relative_data_dir_absolute(tmp_path: Path, home: Path, monkeypatch, via_env: bool):
+    # The hint is pasted into another shell, whose cwd need not be this one's —
+    # so a relative dir is emitted absolute, even when it is also the default.
+    monkeypatch.chdir(tmp_path)
+    _write_pending(tmp_path / "rel", _req("0123456789abcdef", "host", "models.example.com"))
+    if via_env:
+        monkeypatch.setenv("AGENT_DATA_DIR", "rel")
+        argv = ["permissions"]
+    else:
+        argv = ["permissions", "--data-dir", "rel"]
+    res = CliRunner().invoke(app, argv)
+    assert res.exit_code == 0, res.stdout
+    grant = _envelope(res)["data"]["grant"]
+    assert grant["deny"] == f'comfy agent deny --data-dir "{tmp_path / "rel"}" <id>'
+
+
+@pytest.mark.parametrize(
+    ("argv0", "want"),
+    [
+        ("/opt/venv/bin/comfy", "comfy"),
+        ("C:\\venv\\Scripts\\comfy.exe", "comfy"),
+        ("/opt/venv/bin/comfycli", "comfycli"),
+        ("/opt/venv/bin/comfy-cli", "comfy-cli"),
+        ("/src/comfy_cli/__main__.py", f"{Path(sys.executable).name} -m comfy_cli"),
+        # Anything else (a test runner, an embedding host) is not a way to call
+        # the CLI, so the hint names the installed entry point instead.
+        ("/usr/bin/pytest", "comfy"),
+    ],
+)
+def test_permissions_grant_names_the_cli_as_it_was_invoked(home: Path, monkeypatch, argv0: str, want: str):
+    _write_pending(home / ".comfy-agent", _req("0123456789abcdef", "host", "models.example.com"))
+    monkeypatch.setattr(sys, "argv", [argv0, "agent", "permissions"])
+    res = CliRunner().invoke(app, ["permissions"])
+    assert res.exit_code == 0, res.stdout
+    assert _envelope(res)["data"]["grant"]["deny"] == f"{want} agent deny <id>"

@@ -1,14 +1,15 @@
 ---
 name: comfy-deploy
-description: "Run a Comfy Build release as a serverless deployment with comfy-cli. Use whenever the user wants to deploy, serve, host, or expose a ComfyUI build as an endpoint, scale or stop workers, submit a workflow to a deployment, check whether a deployment is healthy or running a stale release, or work out why one is still costing money. Covers `comfy deploy up / run / status / scale / stop / start / delete / ls / show / logs / events / refs`. Assumes a green release already exists — `comfy-build` is the skill that produces one."
+description: "Run a Comfy Build release as a serverless deployment with comfy-cli. Use whenever the user wants to deploy, serve, host, or expose a ComfyUI build as an endpoint, scale or stop workers, submit a workflow to a deployment, check whether a deployment is healthy or running a stale release, or work out why one is still costing money. Covers `comfy deploy up / promote / rollback / history / run / status / scale / stop / start / delete / ls / show / logs / events / refs`. Assumes a green release already exists — `comfy-build` is the skill that produces one."
 ---
 
 # comfy-deploy
 
 The commands here are the `comfy deploy` group from
 [comfy-cli](https://github.com/Comfy-Org/comfy-cli). Everything in it needs
-`comfy cloud login`; a command answers `deploy_not_signed_in` when there is no
-usable session.
+`comfy cloud login`, or a workspace API key in `COMFY_CLOUD_API_KEY`, which a CI
+job uses in place of a sign-in and which wins over a stored sign-in; a command
+answers `deploy_not_signed_in` when it has neither, or when the key is refused.
 
 **Deploying spends money continuously, not once.** Building does not: it is capped
 by counts — how many builds and releases a workspace holds — and metered by nothing,
@@ -36,6 +37,9 @@ bills by time.**
 
 ```
 up      Create or reconcile a deployment for the selected Build release.   SPENDS
+promote Move TARGET onto the release SOURCE serves, keeping its URL.      SPENDS
+rollback Move a deployment back to an earlier release, keeping its URL.  SPENDS
+history The releases a deployment ran, newest first, and what moved it.
 run     Submit an API-format workflow to a ready deployment.               SPENDS
 status  Deployment health, release freshness, and serving activity.
 scale   Edit worker bounds, or GPU/region on a stopped deployment.
@@ -54,7 +58,7 @@ refs    compute — deployable regions and GPU classes with availability.
 ```shell
 comfy build release show                          # confirm deployable: true
 comfy deploy refs compute                         # read the real GPU/region pairs
-comfy deploy up <dir> --gpu <class> --region <region> --min 0 --max 1 --watch
+comfy deploy up <dir> --gpu <class> --region <region> --min 0 --max 1
 comfy deploy status <dir>
 comfy deploy run <dir> --workflow <api-workflow>.json
 comfy deploy stop <dir>                           # when the user is done
@@ -65,19 +69,29 @@ deploy*.
 
 ## The cost model, which is the whole risk
 
-**`up` on a release that has no deployment creates one. `up` on a release that
-already has one reconciles that one.** A deployment is matched by release id, so
-cutting a new release and running `up` again does **not** move the existing
-deployment forward — it creates a **second** deployment, and the first keeps
-running and keeps billing.
+**Whether `up` on a new release moves the existing deployment or adds a second
+one depends on the workspace.** The output says which: a deployment that carries
+`revision` is in a workspace with deployment updates on.
+
+- **Updates on:** `up` on a new release **moves the Build's one deployment onto
+  it**, keeping its id and URL, and reports `previousRelease`. The old release
+  keeps serving until the new one is ready. With two or more deployments, `up`
+  refuses with `deploy_ambiguous_deployment` until `--deployment <id>` names one;
+  `--create` adds a separate deployment instead. If the new release fails to come
+  up, `up` exits 1 with `deploy_update_failed` and the old release still serves.
+- **Updates off:** a deployment is matched by release id, so cutting a new
+  release and running `up` again does **not** move the existing deployment
+  forward. It creates a **second** deployment, and the first keeps running and
+  keeps billing.
 
 The CLI tells you this: `up` returns a `supersedes` array naming every other
 live deployment of this Build still holding compute, with its id, status and
-release version. **Read it and act on it.** An empty array means nothing else is
-running; a non-empty one is a bill the user has not agreed to.
+release version, and prints a "still running and billing" warning for each
+(on stderr under `--json`). **Read it and act on it.** An empty array means
+nothing else is running; a non-empty one is a bill the user has not agreed to.
 
 ```shell
-comfy deploy up <dir> --watch          # note `supersedes` in the output
+comfy deploy up <dir>                  # note `supersedes` in the output
 comfy deploy stop --deployment <old-id>
 ```
 
@@ -109,8 +123,43 @@ as a pair, `--min` accepts 0–20 and `--max` 1–20.
 | `stop_failed` | **maybe** | Stop did not take; retry it |
 | `failed` | no | Permanent failure |
 
-`--watch` on `up` and `status` polls until `ready`, `failed`, `stopped` or
-`stop_failed`. The other five are transitional and it keeps waiting.
+`up` follows the deployment by default; pass `--no-watch` to return as soon as it
+is accepted. `status` waits only when asked, with `--watch`. Either way the wait
+ends at `ready`, `unhealthy`, `failed`, `stopped` or `stop_failed`. `unhealthy`
+only ever follows `ready`, so the deployment already came up: `up` reports it as
+not ok (`deploy_status_terminal`, exit 1) because it is billing without serving,
+and `status` reports it as recoverable. Through `queued`, `provisioning`,
+`starting` and `stopping` it keeps waiting.
+
+While the status is `provisioning` or `starting` the deployment carries a
+`progress` object, and `status --json` returns it as `data.progress`: `step`
+(`staging_models`, `creating_endpoint`, `waiting_for_worker`) and, while models
+are copied onto the deployment's storage, `modelsDone` / `modelsTotal`,
+`bytesDone` / `bytesTotal`, `currentModel`, `bytesPerSecond` and `etaSeconds`.
+Under `--watch` the same object arrives as `deploy_progress` events, one per new
+sample (the service rewrites it about every three seconds in every step): on **stderr** under `--json`,
+on stdout under `--json-stream`. Relay those numbers instead of "still
+provisioning". Things to read correctly:
+
+- `bytesTotal` absent means nobody measured the release, so there is no time
+  left to quote; `0` means every model was already in place.
+- `bytesTotalIsFloor: true` means "at least this much", with no `etaSeconds`.
+- `etaSeconds` covers staging only. Creating the endpoint and the first worker's
+  cold start come after it.
+- `attempt` above 1 means the step was restarted, and `bytesDone` started again.
+- `stale: true` on an event means the service has not rewritten the sample for a
+  minute. Its writes are best-effort, so that is not evidence the deploy stopped;
+  the status is still the verdict.
+- How long a step has run is now minus `startedAt`. `updatedAt` only says how
+  fresh the sample is, and it moves every few seconds in every step.
+- No `progress` at all is an older service, or a status other than the two above.
+
+Interrupting the wait leaves the deployment coming up on the service's side;
+`comfy deploy status --deployment <id> --watch` attaches again. A deploy API that
+stops answering (a 5xx or a dropped connection, as during its own rollout) is
+retried for about a minute; if it is still down, the wait ends with
+`deploy_watch_lost` and **exit 75**, not 1. That is not a failed deployment:
+attach again with the command in the hint rather than redeploying.
 
 `status` also reports **why** a deployment stopped, as `stopReason`: `user`,
 `credits`, or `policy`. `credits` is a billing problem and not something a retry
@@ -120,8 +169,17 @@ fixes — say so rather than restarting into the same wall.
 
 ```shell
 comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
-                       [--release <id>] [--deployment <id>] [--watch]
+                       [--release <id>] [--deployment <id>] [--create] [--no-watch]
 ```
+
+- **With deployment updates on, it moves the existing deployment** (see *The
+  cost model*), a stopped or failed one included, since the move starts the new
+  release for it. A move keeps gpu and region, refuses a `stopping` or
+  `stop_failed` deployment with `deploy_conflict`, and applies `--min`/`--max`
+  only after the move lands, so with `--no-watch` they are refused. A bounds
+  edit the service then refuses is reported as bounds that had no effect.
+- **`--create` is not idempotent:** every run adds one more deployment, so after
+  a lost response read `comfy deploy ls` before running it again.
 
 - **It selects the newest deployable release of the Build** unless `--release`
   names one. `deployable` means a `linux/nvidia` artifact reached `ready` with an
@@ -130,8 +188,12 @@ comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
   all" from "releases, none deployable".
 - **`--gpu` and `--region` are required for a new deployment**, and it prompts
   for them interactively. Under `--json` an omission is `deploy_missing_input`.
-  Take the values from `comfy deploy refs compute`, which lists regions with
-  their GPU classes, VRAM and availability — do not invent a class name.
+  Take the values from `comfy deploy refs compute`, which lists every location
+  with its level (a whole country such as `us` down to one datacenter), its
+  parent, its GPU classes, VRAM and availability. A wider location is a valid
+  `--region`, and some GPU classes are sold only on one. A blank availability
+  means the service gave no hint for that row, not that it has no stock. Do not
+  invent a class name.
 - **Availability is volatile, so re-read `refs compute` immediately before `up`,
   never from an earlier plan.** A region offering RTX PRO 6000 at planning time
   had none an hour later, and `up` refused with `deploy_compute_unavailable`. The
@@ -147,6 +209,55 @@ comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
   reported back as dropped.
 - **It restarts a `stopped` or `failed` deployment** for that release instead of
   creating another.
+- **A create carries the service's estimate** of how long the deployment takes to
+  come up, as `estimate` in the output: `etaSecondsLow`/`etaSecondsHigh` until
+  ready and `bytesToFetch` of models to download, with `atLeast: true` when some
+  models have no recorded size. A person at a terminal sees it before `up` starts
+  following the deployment. Under `--json` it arrives with the one envelope, after
+  the watch, so to relay it before a long wait run `up --no-watch`, tell the user,
+  then follow with `comfy deploy status --watch`. It is a range, not a promise,
+  and it stops at ready: the first run can still wait for a worker to start.
+  Absent on a restart, an edit, when the service gave none, or when the service
+  has the estimate switched off; that is not an error, so never retry for it or
+  mention its absence.
+
+## `comfy deploy promote`
+
+```shell
+comfy deploy promote SOURCE TARGET [--no-watch]
+```
+
+- **It moves deployment TARGET onto the release deployment SOURCE serves**,
+  keeping TARGET's id and URL: test on a staging deployment, then promote it to
+  production. The service resolves SOURCE's release itself.
+- **It needs deployment updates on.** Without them it refuses with
+  `deploy_updates_unavailable`; use `comfy deploy up --create` instead.
+- **It follows the move like `up` does**: exit 1 with `deploy_update_failed`
+  when the new release does not come up, and TARGET still serves its old one.
+
+## `comfy deploy rollback` and `comfy deploy history`
+
+```shell
+comfy deploy rollback [PATH] [--deployment <id>] [--to vN|<release-id>] [--no-watch]
+comfy deploy history [PATH] [--deployment <id>]
+```
+
+- **`rollback` moves the deployment back to the release before its current
+  one**, keeping its id and URL, so a second `rollback` undoes the first.
+  `--to vN` returns to the latest earlier revision that ran vN, and refuses a
+  release the deployment never ran. A release the Build no longer lists has no
+  version to name; pass its id from `history` instead.
+- **`--json --no-watch` says `waiting: true`** while the earlier release's copy
+  starts; the deployment serves `previousRelease` until it lands.
+- **It picks the deployment as `up` does**: the one `--deployment` names, else
+  the Build's only running one, refusing two with
+  `deploy_ambiguous_deployment`.
+- **It follows the move like `up` does**: exit 1 with `deploy_update_failed`
+  when the earlier release does not come back up.
+- **`history` lists each revision newest first**, the current one marked `*`:
+  its release version, what made it (`create`, `update`, `rollback`), who and
+  when. Run it before `rollback --to` to see what is there to return to.
+- **Both need deployment updates on** (`deploy_updates_unavailable` otherwise).
 
 ## `comfy deploy run`
 
@@ -161,6 +272,13 @@ comfy deploy run [PATH] --workflow <api-workflow>.json
   use ComfyUI's *File → Export (API)*. An empty object is
   `deploy_workflow_empty`, and a JSON list, string or number is
   `deploy_workflow_not_api_format`. None of these cost anything.
+- **A job submission is at most 10 MB.** A bigger one is refused locally with
+  `deploy_workflow_too_large` before the job request is sent, so no job exists
+  and a resubmit after shrinking it is safe. Files the workflow names may
+  already have been uploaded as assets; a resubmit finds them by hash and does
+  not upload them again. The size is almost always data held
+  inline in the workflow (an embedded base64 image, a long text value); files
+  the workflow names by path are uploaded separately and do not count.
 - **The deployment must be `ready`.** Anything else is `deploy_not_ready`. Wait
   if the status is transitional; investigate if it is terminal.
 - **Local files in the workflow are uploaded, and only from allowed roots.** The
@@ -180,8 +298,8 @@ comfy deploy run [PATH] --workflow <api-workflow>.json
   `failed`, `expired`.
 - **Each `run` is a fresh idempotency key, so a resubmit is a second billed job.**
   `deploy_job_submit_unknown` means the submission timed out and the job **may
-  have been created**, and nothing can settle which: the API has no job-list
-  endpoint, no lookup by idempotency key, and no client-supplied job id. Read
+  have been created**, and the CLI cannot settle which: no `comfy` command looks
+  a job up by the idempotency key it carried (`details.idempotency_key`). Read
   `comfy deploy status` anyway — the deployment's own state may be what caused
   the timeout, and `serving` plus `jobsInQueue` say whether *something* is
   running — but it cannot tell you that something is your job. Report what it
@@ -200,11 +318,18 @@ comfy deploy status <dir>
   `error`.
 - **`release`** — the deployed release's id and version, plus **`behind`** and
   **`latestDeployable`**. `behind: true` means a newer deployable release exists
-  and this deployment is not running it. Moving to it means a **new deployment**
-  with a new endpoint URL, and retiring the old one — see the cost model above.
-- **`serving`** — worker counts by state (`idle`, `initializing`, `ready`,
-  `running`, `throttled`, `unhealthy`), `jobsInQueue`, and `sampledAt`. It is a
-  sample, not a live feed; `sampledAt` is how stale it is.
+  and this deployment is not running it. Where the workspace has deployment
+  updates (the deployment carries a `revision`), `comfy deploy up` moves this
+  deployment to it and the endpoint URL stays; elsewhere moving to it means a
+  **new deployment** with a new endpoint URL, and retiring the old one — see the
+  cost model above.
+- **`update`** — present only while the deployment waits on a move: the
+  `release` it moves to, its copy's `status`, `since`, and `kind` (`update` or
+  `rollback`). The deployment keeps serving `release` until that copy is ready.
+- **`serving`**: `capacity` (`ready`, `busy` and `starting` workers, the same on
+  every GPU provider), `jobsInQueue`, and `sampledAt`. It is a sample, not a live
+  feed; `sampledAt` is how stale it is. A deprecated `workers` object carries the
+  provider's own counts while the deploy service still sends them.
 
 The rest are narrower:
 
@@ -213,12 +338,16 @@ The rest are narrower:
 - **`logs`** — ComfyUI's captured log snapshot with a `capturedAt`. Periodic, not
   real-time, and `capturedAt` may be null if nothing was ever captured.
 - **`events`** — the ordered status transitions with timestamps and messages.
-  This is how you find out *why* something reached `failed`, which `status` only
-  reports as a state.
-- **`ls`** — live deployments of this Build. `--all` includes soft-deleted ones,
-  `--workspace` covers every Build, `--status` filters server-side, `--limit`
-  defaults to 20 and caps at 100. Reach for `--workspace` when hunting for
-  compute nobody accounted for.
+  After a move it carries every copy's transitions, each with its `releaseId`;
+  `--release v5` keeps one release's (it needs deployment updates and exits
+  `deploy_updates_unavailable` without them). Only `events` takes a version
+  there; `up --release` takes a release id. This is how you find out *why*
+  something reached `failed`, which `status` only reports as a state.
+- **`ls`** — live deployments of this Build, each row with its `releaseVersion`.
+  `--all` includes soft-deleted ones, `--workspace` covers every Build (rows there
+  keep only the `releaseId`), `--status` filters server-side, `--limit` defaults
+  to 20 and caps at 100. Reach for `--workspace` when hunting for compute nobody
+  accounted for.
 
 ## Giving compute back
 
@@ -270,8 +399,8 @@ ever hit one, because the wrong reflex costs money or trust:
 
 - **`deploy_job_submit_unknown`** — the submission timed out and the job **may
   have been created**. Every `run` mints a fresh idempotency key, so a resubmit is
-  a *second billed job*, not a retry — and no lookup exists to confirm the first
-  one either way. Stop, and hand the ambiguity to the user.
+  a *second billed job*, not a retry — and the CLI cannot look the first one up
+  to confirm it either way. Stop, and hand the ambiguity to the user.
 - **`deploy_endpoint_unknown` / `deploy_insecure_url`** — a refusal to trust the
   server, not a transport failure. The CLI talks only to deployment hosts under
   its configured suffixes and downloads outputs only from its configured storage

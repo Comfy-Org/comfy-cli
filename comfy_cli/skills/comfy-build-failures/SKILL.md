@@ -72,7 +72,29 @@ with `--json`.
 ## A refusal is not a cut
 
 `push` and `release create` can reject a definition before anything is built, and
-the message names the field:
+the message names the field. `validate` and `push` check model entries first and
+refuse with `build_spec_invalid`, one line per entry and `details.invalid` as
+`{field, reason, model}`, before anything uploads. A local model's kept link is
+checked after `push` hashes its file, so it is reported once the other problems
+are fixed: a second refusal after a fix is that, not a new problem. What reaches the builder anyway
+comes back as **`build_definition_invalid`**. When the builder lists its reasons,
+they come one per line and in `details.invalid` (a list too long for the message
+stops on a whole line and ends `... and N more`; `details.invalid` holds every
+one); otherwise the reason is the builder's `message`, with no `details.invalid`.
+The same definition is refused the same way every
+time, so edit it rather than retrying. Its `models[<n>]` counts the spec as the
+last push wrote it, and under `push --release` each such line also names the
+model, as `details.invalid[].model` does in JSON. Two kinds of field are not the definition, and the message
+then says the builder refused the release. A `targets[<n>]` field is the n-th
+`--target` value (a repeated os/gpu pair, or one the builder cannot build): run
+the command again with the targets `comfy build refs build-targets` lists. A
+`blob:<id>` field (`not uploaded`, `unknown blob`, a size or content mismatch) is
+a model's file or a node's zip that never reached the builder whole: delete that
+`blobId` from its entry and run `comfy build push`, which uploads the file again,
+since a push skips an entry that has a `blobId`. A push uploads only a
+`source: local` entry, so one that had only the `blobId` needs `source: local`
+with a `localPath` (the model's file, the node's directory), or another source it
+can take (a model's `sourceUri`, a node's `registryVersion` or `repository`), first.
 
 - `must be a 64-character sha256` — a model entry's `sha256`. Correct it from the
   candidate you took it off rather than uploading anything.
@@ -85,15 +107,25 @@ the message names the field:
 - `build_spec_stale` — the remote moved under you, or `--id` names a Build the
   spec's `syncedRevision` does not belong to. See *Revising*.
 
-Two refusals are the workspace being full rather than the definition being wrong,
-and neither is fixed by editing anything:
+- **`build_release_held`** — the save warned that a deployment could not download a
+  model link, so the push cut no release. Under `--json`, `details.warnings` names
+  each link and how its host refused; in text mode the tool printed each just above. Fix the link, or ask the user before passing
+  `--release-despite-warnings`.
 
+Three refusals are the workspace being full rather than the definition being wrong,
+and none is fixed by editing anything:
+
+- **`build_limit`**: the workspace holds its maximum number of builds, counting
+  every member's, though `comfy build ls` lists only your own outside the
+  enterprise plan. Deleting a build clears it, or a teammate deletes one of
+  theirs. A delete takes the build's releases with it, so ask the user first;
+  `comfy skills show comfy-build` carries the rules for it.
 - **`build_release_limit`** — the workspace holds its maximum number of releases.
   A retry does not clear it; deleting one does. `comfy build release delete` is the
   procedure, and `comfy skills show comfy-build` carries the rules for it.
 - **`429 CONCURRENCY_LIMIT`**, which arrives as `build_builder_error` with the
   builder's own message — too many builds running at once. Transient, unlike the
-  one above. Wait for one to finish, or say which are running.
+  two above. Wait for one to finish, or say which are running.
 
 ## A cut that failed after the request went out
 

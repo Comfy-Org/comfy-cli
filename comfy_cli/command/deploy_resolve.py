@@ -178,6 +178,36 @@ def deployment_selection_key(deployment: JsonObject) -> tuple[int, datetime]:
     return rank, created
 
 
+class ReleaseNotInBuildError(DeployResolveError):
+    code = "deploy_bad_request"
+
+    def __init__(self, build_id: str, release: str) -> None:
+        self.hint = f"run `comfy build release ls --id {build_id}` to see the Build's releases"
+        self.details = {"buildId": build_id, "release": release}
+        super().__init__(f"Build {build_id} has no release {release}")
+
+
+def release_version_selector(value: str) -> int | None:
+    """The version `v5` or `5` names, or None where the value is a release id."""
+    digits = value[1:] if value[:1] in {"v", "V"} else value
+    if not (digits.isascii() and digits.isdigit()):
+        return None
+    version = int(digits)
+    return version if version > 0 else None
+
+
+def find_build_release(releases: list[JsonObject], selector: str) -> JsonObject | None:
+    """The release among a Build's that `selector` names: a version such as v5
+    or 5, or a release id."""
+    version = release_version_selector(selector)
+    for release in releases:
+        if version is None and release.get("id") == selector:
+            return release
+        if version is not None and release.get("version") == version:
+            return release
+    return None
+
+
 def resolve_release(
     builder: BuilderReleaseClient,
     request: ReleaseResolveRequest,

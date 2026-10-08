@@ -26,7 +26,9 @@ from typing import Any
 # ``comfy-cloud-mcp-server/src/pricing.ts``. Keep all three in lockstep.
 CREDITS_PER_USD = 211
 
-MICROS_PER_USD = 1_000_000
+# The balance endpoint names its fields ``*_micros`` but sends cents: ingest's
+# balance handler says a client dividing them by 1e6 understates the balance
+# 10,000x. The names stay (they are the wire contract); the unit is cents.
 CENTS_PER_USD = 100
 
 # Default concurrency per tier, shown as context beside the live
@@ -166,7 +168,7 @@ def coerce_bool(value: Any) -> bool | None:
 
 
 def select_effective_balance_micros(balance: Mapping[str, Any] | None) -> int | None:
-    """Resolve the balance in micro-dollars, or None when nothing is reported.
+    """Resolve the balance in cents, or None when nothing is reported.
 
     Walks :data:`BALANCE_FIELDS` in priority order and returns the first
     NON-ZERO value. Returns 0 only when at least one field was present and
@@ -191,10 +193,10 @@ def select_effective_balance_micros(balance: Mapping[str, Any] | None) -> int | 
     return 0 if saw_numeric_field else None
 
 
-def micros_to_usd(micros: int | None) -> float | None:
-    if micros is None:
+def cents_to_usd(cents: int | None) -> float | None:
+    if cents is None:
         return None
-    return micros / MICROS_PER_USD
+    return cents / CENTS_PER_USD
 
 
 def usd_to_credits(usd: float | None) -> int | None:
@@ -389,12 +391,12 @@ def suggest_upgrade(plans: list[dict[str, Any]], current_plan_slug: str | None) 
     from the endpoint, so ranking on it cannot go stale.
 
     When the current plan's price cannot be established we return None rather
-    than guessing. Guessing is actively harmful here and prod proves it: the
-    live team account reports ``plan_slug: "team-pro-monthly"`` from
-    /api/billing/status while /api/billing/plans carries no such slug, and a
-    "cheapest available plan" fallback then suggested a $0.00 per-credit plan
-    as an *upgrade* from PRO. No suggestion is strictly better than a wrong
-    one, so an unresolvable current price means we stay quiet.
+    than guessing. Guessing is actively harmful here: an account can report a
+    ``plan_slug`` (say ``"example-plan-monthly"``) that the plans list does
+    not carry, and a "cheapest available plan" fallback would then suggest a
+    free per-credit plan as an *upgrade* from a paid tier. No suggestion is
+    strictly better than a wrong one, so an unresolvable current price means
+    we stay quiet.
     """
     priced = [p for p in plans if p["available"] and p["price_cents"] is not None]
     if not priced:

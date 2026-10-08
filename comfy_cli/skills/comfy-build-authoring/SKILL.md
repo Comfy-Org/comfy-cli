@@ -214,7 +214,9 @@ definition:
   `null`** — absence selects the default, a null is refused. An unrecognized id
   is refused by the builder at push, not locally.
 - **`models`** — a list, max 512. Each entry needs `type`, and **exactly one** of
-  `sourceUri` or `blobId`; setting both, or neither, is refused. `sourceUri` must
+  `sourceUri` or `blobId`; setting both, or neither, is refused. `type` is a
+  folder under models/: one `comfy build refs model-dirs` lists, spelled as it
+  lists it (`loras`, never `Loras`), or a relative path of safe segments. `sourceUri` must
   be an `https` URL. `filename` is optional but becomes a path segment, so it must
   be a single safe segment — and a public model with no `filename` whose URL
   basename has no extension is refused, because it would build and then fail to
@@ -291,7 +293,14 @@ resolved at the cut to whatever it points at then, so two cuts of one definition
 can build different code. The registry pin check never covers a `repository`
 source either way.
 
-**`comfy build validate <dir>` runs offline and names the field it refuses.** It
+**`comfy build validate <dir>` runs offline and names the field it refuses.** For
+model entries it applies the builder's own rules (the folder, the filename, a link
+with no extension, the sha256) and names every entry that breaks one at once,
+each with the model it is about; only a case variant of a folder needs the
+builder's list, so `--remote` and `push` catch that one and offline does not
+(it says so, and `--json` carries `folder_case_checked: false`). A local model's
+link is left to `push`, which checks the link it keeps after hashing its file, so
+that one is reported once the other problems are fixed. It
 is the only check available on this path, because the conflict prediction in
 `comfy-build-pins` reads requirement files this machine does not have. It echoes
 the policy fields back unchecked, so a pass showing your `mode` is not
