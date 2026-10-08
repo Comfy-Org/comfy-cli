@@ -101,12 +101,16 @@ def _parse_retry_after(headers: Any) -> float | None:
     return float(max(0, round((when - datetime.now(timezone.utc)).total_seconds())))
 
 
-def _www_authenticate(headers: Any) -> str | None:
+def _www_authenticate(headers: Any) -> tuple[str, ...]:
+    """Every ``WWW-Authenticate`` value: a server may send one field per challenge."""
+    if headers is None:
+        return ()
     try:
-        value = headers.get("WWW-Authenticate") if headers is not None else None
+        get_all = getattr(headers, "get_all", None)
+        values = get_all("WWW-Authenticate") if callable(get_all) else [headers.get("WWW-Authenticate")]
     except Exception:  # noqa: BLE001
-        return None
-    return value if isinstance(value, str) else None
+        return ()
+    return tuple(v for v in (values or []) if isinstance(v, str) and v)
 
 
 class HTTPError(Exception):
@@ -115,7 +119,7 @@ class HTTPError(Exception):
     ``retry_after`` carries the server's ``Retry-After`` header (seconds)
     when one was present, so retry layers above ``_request`` (e.g. the
     wait_for_completion poll loop) can honor it. ``www_authenticate`` carries
-    the ``WWW-Authenticate`` header, which names a missing OAuth scope.
+    every ``WWW-Authenticate`` value, which names a missing OAuth scope.
     """
 
     def __init__(
@@ -125,7 +129,7 @@ class HTTPError(Exception):
         body: str = "",
         *,
         retry_after: float | None = None,
-        www_authenticate: str | None = None,
+        www_authenticate: tuple[str, ...] = (),
     ):
         # Redact before super().__init__ so str(self) is safe to log.
         message = _redact(message)

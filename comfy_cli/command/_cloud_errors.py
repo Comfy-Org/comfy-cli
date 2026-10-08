@@ -44,10 +44,14 @@ _UNAUTHORIZED_HINTS = {
 _INSUFFICIENT_SCOPE_MESSAGE = (
     "Your Comfy Cloud login predates a permission change; run `comfy cloud login` to re-authorize"
 )
-# One auth-param of a WWW-Authenticate challenge: ``name = "quoted"`` or
-# ``name = token`` (RFC 7235 §2.1), so the scan never reads inside a quoted
-# value such as ``error_description``.
-_AUTH_PARAM = re.compile(r'([A-Za-z0-9_\-]+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,"]+))')
+# One piece of a WWW-Authenticate field (RFC 7235 §2.1): an auth-param
+# ``name = "quoted"`` / ``name = token``, or else a bare token, which starts a
+# new challenge. Quoted values are consumed whole, so the scan never reads
+# inside one such as ``error_description``.
+_CHALLENGE_PART = re.compile(
+    r"([!#$%&'*+\-.^_`|~0-9A-Za-z]+)"
+    r'(?P<param>\s*=\s*(?:"(?P<quoted>(?:[^"\\]|\\.)*)"|(?P<token>[^\s,"]*)))?'
+)
 # The plain-text body the scope middleware writes: ``insufficient_scope`` or
 # ``insufficient_scope: <scope>`` and nothing else. Anchored at both ends so a
 # body that merely mentions the token in prose is not mistaken for one.
@@ -61,9 +65,14 @@ _MAX_REQUIRED_SCOPE_CHARS = 200
 
 
 def _www_authenticate_values(headers) -> list[str]:
-    """Every ``WWW-Authenticate`` value as ``str``; ``[]`` on any odd headers object."""
+    """Every ``WWW-Authenticate`` value as ``str``; ``[]`` on any odd headers object.
+
+    ``headers`` may also be the values themselves (``HTTPError.www_authenticate``).
+    """
     if headers is None:
         return []
+    if isinstance(headers, (list, tuple)):
+        return [v for v in headers if isinstance(v, str) and v]
     try:
         get_all = getattr(headers, "get_all", None)
         values = get_all("WWW-Authenticate") if callable(get_all) else [headers.get("WWW-Authenticate")]
@@ -72,14 +81,25 @@ def _www_authenticate_values(headers) -> list[str]:
     return [v for v in (values or []) if isinstance(v, str) and v]
 
 
+def _challenges(value: str) -> list[tuple[str, dict[str, str]]]:
+    """Split one ``WWW-Authenticate`` value into ``(scheme, params)`` challenges."""
+    challenges: list[tuple[str, dict[str, str]]] = []
+    for m in _CHALLENGE_PART.finditer(value):
+        if m.group("param") is None:
+            challenges.append((m.group(1).lower(), {}))
+        elif challenges:
+            raw = m.group("quoted")
+            param = re.sub(r"\\(.)", r"\1", raw) if raw is not None else m.group("token")
+            challenges[-1][1].setdefault(m.group(1).lower(), param)
+    return challenges
+
+
 def _bearer_scope_challenge(values: list[str]) -> tuple[bool, str | None]:
-    """Whether a challenge says ``error=insufficient_scope``, and the ``scope`` it names."""
+    """Whether a Bearer challenge says ``error=insufficient_scope``, and the ``scope`` that challenge names."""
     for value in values:
-        params = {}
-        for m in _AUTH_PARAM.finditer(value):
-            params.setdefault(m.group(1).lower(), m.group(2) if m.group(2) is not None else m.group(3))
-        if params.get("error") == "insufficient_scope":
-            return True, params.get("scope")
+        for scheme, params in _challenges(value):
+            if scheme == "bearer" and params.get("error") == "insufficient_scope":
+                return True, params.get("scope")
     return False, None
 
 
@@ -254,7 +274,7 @@ def emit_status_error(
     details: dict,
     rate_limited_next_step: str = _DEFAULT_RATE_LIMITED_NEXT_STEP,
     scope_body: str | None = None,
-    www_authenticate: str | None = None,
+    www_authenticate: tuple[str, ...] | str | None = None,
 ) -> None:
     """Emit the envelope for a cloud HTTP status that has no caller-specific code.
 
@@ -277,7 +297,7 @@ def emit_status_error(
     scope_error = insufficient_scope_error(
         status,
         scope_body if scope_body is not None else details.get("body"),
-        {"WWW-Authenticate": www_authenticate} if www_authenticate else None,
+        (www_authenticate,) if isinstance(www_authenticate, str) else www_authenticate,
         details=details,
     )
     if scope_error is not None:
