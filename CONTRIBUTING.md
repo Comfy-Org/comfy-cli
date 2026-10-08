@@ -102,6 +102,24 @@ effect, and link the issue it closes.
 Notable user-facing changes should be summarized in
 [`CHANGELOG.md`](CHANGELOG.md) under `## [Unreleased]`.
 
+## Cutting a release
+
+1. **Roll the changelog first**, in a PR merged before the release: rename
+   `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, give it the same
+   `[Full notes](...)` header line the other releases carry, add its compare
+   link at the bottom of the file and point `[Unreleased]` at `vX.Y.Z...HEAD`,
+   leaving an empty `## [Unreleased]` above it. Mark every entry that changes
+   what a script sees (an output shape, an error code, an exit code, a removed
+   command or option) `**Breaking:**` under Changed.
+2. **Create the GitHub release `vX.Y.Z` from `main` and publish it directly,
+   never as a draft.** `.github/workflows/publish_package.yml` runs only on the
+   `release: created` event, which a draft never fires, and it takes the version
+   from the tag with the `v` stripped. PyPI refuses a second upload of the same
+   version, so a botched publish is fixed with a new patch version, not a retry.
+3. **Check the workflow run.** Its second job, `test-pip-installation`, installs
+   `comfy-cli==X.Y.Z` from PyPI and runs `comfy --help`; that job passing is the
+   check that the release shipped.
+
 ## Running the unit tests
 
 ```bash
