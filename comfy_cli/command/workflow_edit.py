@@ -711,7 +711,11 @@ def ls_nodes_cmd(
         # or call a workflow runnable while a required node is muted.
         # Emitted only when set, so a normal node stays a single clean row.
         mode = n.get("mode")
-        if isinstance(mode, int) and not isinstance(mode, bool) and (label := _MODE_LABELS.get(mode)) is not None:
+        if (
+            isinstance(mode, int | float)
+            and not isinstance(mode, bool)
+            and (label := _MODE_LABELS.get(mode)) is not None
+        ):
             row["mode"] = label
         # A row's `type` reads like an addable class. Two kinds are not: a
         # frontend-only node (Reroute/Note/PrimitiveNode/...) and a subgraph
