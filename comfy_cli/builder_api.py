@@ -17,13 +17,18 @@ Field names match services/comfy-builder/openapi.yaml exactly:
 
 from __future__ import annotations
 
+import urllib.error
 import urllib.parse
+from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
+from typing import BinaryIO
 
 import requests
 
 from comfy_cli import credentials
 from comfy_cli.builder_pagination import PAGE_LIMIT, cursor_pages
+from comfy_cli.credentials import Credential
 from comfy_cli.http import request_json
 from comfy_cli.target import Target
 
@@ -44,24 +49,106 @@ _POST_TIMEOUT = 30.0
 _WORKFLOW_IMPORT_TIMEOUT = 90.0
 
 
+# How much `_CountingReader` hands over per step when something iterates it
+# instead of calling `read`. Only the chunked path does, and only for an empty
+# file, so the size is not a tuning knob.
+_UPLOAD_ITER_BYTES = 1024 * 1024
+
+
+class _CountingReader:
+    """A file as ``requests`` sees it, reporting each block the transport pulls.
+
+    ``requests`` sizes a streamed body with ``os.fstat(body.fileno())`` and sends
+    it by calling ``read`` until it runs dry, so passing ``fileno`` and ``tell``
+    through keeps the request byte-identical to one handed the bare file: same
+    ``Content-Length``, no chunked transfer, which a presigned GCS PUT would
+    refuse. ``__iter__`` is there because its presence is how ``requests``
+    decides a body streams at all.
+
+    ``progress`` receives the size of each block as it is read, not a running
+    total. It runs once per transport block (16 KiB), so it must stay cheap.
+    """
+
+    def __init__(self, raw: BinaryIO, progress: Callable[[int], None]) -> None:
+        self._raw = raw
+        self._progress = progress
+
+    def read(self, size: int = -1) -> bytes:
+        block = self._raw.read(size)
+        if block:
+            self._progress(len(block))
+        return block
+
+    @property
+    def mode(self) -> str:
+        # `requests` reads this straight after `fileno` to warn about text mode.
+        return self._raw.mode
+
+    def fileno(self) -> int:
+        return self._raw.fileno()
+
+    def tell(self) -> int:
+        return self._raw.tell()
+
+    def __iter__(self) -> Iterator[bytes]:
+        return iter(lambda: self.read(_UPLOAD_ITER_BYTES), b"")
+
+
 class BuilderAuthError(Exception):
-    """No usable Cloud JWT — the user needs to run `comfy cloud login`."""
+    """No workspace API key and no usable Cloud JWT to authenticate with."""
+
+
+class BuilderCredentialRefused(urllib.error.HTTPError):
+    """The builder answered 401 to a credential no refresh can replace.
+
+    Still an ``HTTPError``, so every existing handler catches it; ``hint`` names
+    the credential this client sent and what to do about it.
+    """
+
+    def __init__(self, error: urllib.error.HTTPError, hint: str) -> None:
+        super().__init__(error.filename, error.code, error.msg, error.hdrs, error.fp)
+        self.hint = hint
 
 
 class BuilderClient:
-    """Thin authed client over the builder's /v1 API. One OAuth JWT, attached
-    as Bearer via the shared authed HTTP path (HTTPS-enforced, no credential
+    """Thin authed client over the builder's /v1 API. One credential per client:
+    a Cloud JWT attached as Bearer, or a workspace API key attached as
+    ``X-API-Key``, via the shared authed HTTP path (HTTPS-enforced, no credential
     replay on redirect, response-size capped)."""
 
-    def __init__(self, base_url: str, token: str):
-        # kind="cloud" is what makes the shared http layer attach the Bearer;
+    def __init__(self, base_url: str, token: str | None = None, *, api_key: Credential | None = None):
+        # kind="cloud" is what makes the shared http layer attach the credential;
         # path_prefix carries the /v1 base so target.url("builds") is right.
         self.target = Target(
             kind="cloud",
             base_url=base_url.rstrip("/"),
             path_prefix="/v1",
             auth_token=token,
+            api_key=api_key.value if api_key is not None else None,
         )
+        # Only a client built from the stored sign-in may swap its token; one
+        # handed a token (COMFY_BUILDER_TOKEN) or a key keeps it and lets a 401 surface.
+        self._refreshes_on_401 = False
+        # What to replace once the builder refuses this client's credential.
+        self._refused_hint = (
+            credentials.refused_key_hint(api_key)
+            if api_key is not None
+            else "replace COMFY_BUILDER_TOKEN with a fresh Cloud JWT"
+        )
+
+    @classmethod
+    def from_credentials(cls, base_url: str) -> BuilderClient:
+        """Build a client from the workspace API key when one is set, else from the sign-in."""
+        key = credentials.platform_api_key()
+        if key is None:
+            try:
+                return cls.from_session(base_url)
+            except BuilderAuthError:
+                # A sign-in whose refresh failed is cleared, and a saved key may stand behind it.
+                key = credentials.platform_api_key()
+                if key is None:
+                    raise
+        return cls(base_url, api_key=key)
 
     @classmethod
     def from_session(cls, base_url: str) -> BuilderClient:
@@ -69,13 +156,37 @@ class BuilderClient:
         is near expiry (the CLI's existing rotation machinery)."""
         session = credentials.get_session(refresh=True)
         if not session or not session.access_token:
-            raise BuilderAuthError("not signed in — run `comfy cloud login`")
-        return cls(base_url, session.access_token)
+            raise BuilderAuthError("not signed in: run `comfy cloud login` or set COMFY_CLOUD_API_KEY")
+        client = cls(base_url, session.access_token)
+        client._refreshes_on_401 = True
+        client._refused_hint = "run `comfy cloud login` first"
+        return client
+
+    def _send(self, url: str, **kwargs) -> tuple[int, dict | list | None]:
+        """Every builder request goes through here, so a long wait survives its token expiring.
+
+        The access token lasts fifteen minutes. After a 401 a client built from
+        the stored sign-in forces the shared refresh and sends the request once
+        more; the server refuses before acting, so that is safe for every method.
+        """
+        try:
+            return request_json(url, self.target, **kwargs)
+        except urllib.error.HTTPError as error:
+            if error.code != 401:
+                raise
+            token = credentials.refreshed_access_token(self.target.auth_token) if self._refreshes_on_401 else None
+            if token is None:
+                raise BuilderCredentialRefused(error, self._refused_hint) from error
+        self.target = replace(self.target, auth_token=token)
+        try:
+            return request_json(url, self.target, **kwargs)
+        except urllib.error.HTTPError as error:
+            if error.code != 401:
+                raise
+            raise BuilderCredentialRefused(error, self._refused_hint) from error
 
     def _post(self, parts: tuple[str, ...], body: dict, *, timeout: float = _POST_TIMEOUT) -> dict:
-        _, parsed = request_json(
-            self.target.url(*parts), self.target, method="POST", body=body, max_bytes=_MAX_JSON, timeout=timeout
-        )
+        _, parsed = self._send(self.target.url(*parts), method="POST", body=body, max_bytes=_MAX_JSON, timeout=timeout)
         return parsed or {}
 
     def create_blob(self, kind: str, filename: str, sha256: str, size_bytes: int) -> tuple[str, str | None]:
@@ -95,17 +206,20 @@ class BuilderClient:
             return blob_id, None
         return blob_id, r["uploadUrl"]
 
-    def upload_blob(self, upload_url: str, path: Path) -> None:
+    def upload_blob(self, upload_url: str, path: Path, progress: Callable[[int], None] | None = None) -> None:
         """Stream a file to its presigned PUT URL (bytes go straight to storage).
 
         The builder signs the URL with ``x-goog-if-generation-match: 0`` (create-
         only, so re-using a blob id can't clobber bytes), and that header is part
         of the signature — GCS rejects the PUT with 400 unless the client sends it.
+
+        ``progress`` is called with the size of each block as the transport reads
+        it off disk, which is as close to "bytes sent" as a streamed PUT exposes.
         """
         with path.open("rb") as f:
             resp = requests.put(
                 upload_url,
-                data=f,
+                data=f if progress is None else _CountingReader(f, progress),
                 headers={"x-goog-if-generation-match": "0"},
                 timeout=_UPLOAD_TIMEOUT,
                 # A presigned PUT targets one exact object; a 3xx would divert the file
@@ -118,20 +232,25 @@ class BuilderClient:
             )
         resp.raise_for_status()
 
-    def create_build(self, name: str, definition: dict, description: str | None = None) -> str:
-        """Create a build from a definition. Returns its id."""
+    def create_build_response(self, name: str, definition: dict, description: str | None = None) -> dict:
+        """Create a build from a definition. Returns the created build, carrying
+        the ``warnings`` the save earned, which a read never returns."""
         body: dict = {"name": name, "definition": definition}
         if description:
             body["description"] = description
-        return self._post(("builds",), body)["id"]
+        return self._post(("builds",), body)
 
     def create_release(self, build_id: str, targets: list[dict] | None = None) -> tuple[str, str]:
         """POST /v1/builds/{id}/releases: freeze the definition and enqueue a
         build for ``targets``. Returns (releaseId, statusUrl).
 
-        ``targets`` is required and must be non-empty: an implicit target spends
-        build minutes the caller never asked for, so a missing or empty list is a
+        ``targets`` is required and must be non-empty: an implicit target builds
+        an artifact the caller never asked for, so a missing or empty list is a
         caller error raised here, before any request is issued.
+
+        The cut is idempotent. The builder dedupes on the definition's content hash
+        scoped to the build, so retrying this call after an ambiguous failure
+        returns the same release rather than cutting a second one.
 
         A server that predates the version-to-release rename still answers with
         ``buildVersionId``, so that key is the fallback and the CLI works against
@@ -144,9 +263,7 @@ class BuilderClient:
 
     def get_release(self, release_id: str) -> dict:
         """GET /v1/releases/{id}: poll a release's build status."""
-        _, parsed = request_json(
-            self.target.url("releases", release_id), self.target, method="GET", max_bytes=_MAX_JSON
-        )
+        _, parsed = self._send(self.target.url("releases", release_id), method="GET", max_bytes=_MAX_JSON)
         return parsed or {}
 
     def resolve_models(self, filenames: list[str]) -> list[dict]:
@@ -187,7 +304,7 @@ class BuilderClient:
             query = urllib.parse.urlencode({k: v for k, v in params.items() if v})
             if query:
                 url = f"{url}?{query}"
-        _, parsed = request_json(url, self.target, method="GET", max_bytes=max_bytes)
+        _, parsed = self._send(url, method="GET", max_bytes=max_bytes)
         return parsed or {}
 
     def list_builds(self) -> list[dict]:
@@ -230,15 +347,38 @@ class BuilderClient:
         """DELETE /v1/builds/{id} -> soft-delete. Idempotent (204 even when
         already gone); the builder returns 409 while a deployment still runs one of
         its releases."""
-        request_json(self.target.url("builds", build_id), self.target, method="DELETE", max_bytes=_MAX_JSON)
+        self._send(self.target.url("builds", build_id), method="DELETE", max_bytes=_MAX_JSON)
+
+    def delete_release(self, release_id: str) -> None:
+        """DELETE /v1/releases/{id} -> stamp the release deleted, freeing the slot
+        it held against the workspace's release limit. Idempotent (204 even when
+        already gone); the builder returns 409 while any deployment in the
+        workspace still references it, a stopped one included."""
+        # Keep the id a single terminal path segment: ``Target.url`` only
+        # ``strip('/')``s each part, so an id carrying ``/`` or ``..`` would aim
+        # this DELETE, through any normalizing proxy, at a resource the caller
+        # never confirmed. Percent-encoding belongs here because only the client
+        # knows it is building a URL -- but it is not enough on its own:
+        # ``quote(safe="")`` leaves ``.`` and ``..`` untouched, RFC 3986 calling
+        # both unreserved, so those two are refused rather than encoded.
+        #
+        # This is the guarantee, and it holds for whoever calls the method.
+        # ``release_delete`` refuses the same ids above its own prompt, and that
+        # check is the one a person or an agent actually reads: it names the
+        # command's argument and points at `comfy build release ls`. This one
+        # only has to keep the sentence above true.
+        release_id = (release_id or "").strip()
+        if not release_id or set(release_id) == {"."}:
+            raise ValueError("release_id must name one release, not an empty or dot-only path segment")
+        encoded_id = urllib.parse.quote(release_id, safe="")
+        self._send(self.target.url("releases", encoded_id), method="DELETE", max_bytes=_MAX_JSON)
 
     def validate_build(self, build_id: str) -> dict:
         """POST /v1/builds/{id}/validate -> dry-run resolve the stored
         definition (no build). 200 with a ValidateResult when resolvable; the
         builder returns 400 with the issues when the definition has problems."""
-        _, parsed = request_json(
+        _, parsed = self._send(
             self.target.url("builds", build_id, "validate"),
-            self.target,
             method="POST",
             max_bytes=_MAX_JSON,
         )
@@ -266,9 +406,8 @@ class BuilderClient:
             body["name"] = name
         if description is not None:
             body["description"] = description
-        _, parsed = request_json(
+        _, parsed = self._send(
             self.target.url("builds", build_id),
-            self.target,
             method="PATCH",
             body=body,
             max_bytes=_MAX_JSON,

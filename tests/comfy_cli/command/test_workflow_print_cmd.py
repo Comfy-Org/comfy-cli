@@ -173,10 +173,9 @@ def test_print_unsupported_lists_reasons(tmp_path, capsys):
     }
     env = _run(["print", str(_write_workflow(tmp_path, wf)), "--input", str(SD15_OI)], capsys, expect_ok=False)
     assert env["error"]["code"] == "workflow_print_unsupported"
-    assert env["error"]["details"]["reasons"] == [
-        "node 1 is a legacy group node (workflow>Grp)",
-        "link 7 references missing node 99",
-    ]
+    # A broken link is rendered and marked, never a refusal; the legacy group
+    # node still is.
+    assert env["error"]["details"]["reasons"] == ["node 1 is a legacy group node (workflow>Grp)"]
 
 
 def test_print_rejects_unknown_format(capsys):
@@ -200,3 +199,38 @@ def test_print_help_mentions_only_real_commands():
     from comfy_cli.help_json import HELP_EXAMPLES
 
     assert "comfy workflow print" in HELP_EXAMPLES
+
+
+def test_print_renders_a_stale_input_slot_link_and_reports_it(tmp_path, capsys):
+    """A link whose target input slot is gone is reported in `warnings`, not a refusal."""
+    wf = {
+        "nodes": [
+            {
+                "id": 1,
+                "type": "EmptyLatentImage",
+                "inputs": [],
+                "outputs": [{"name": "LATENT", "type": "LATENT", "links": [1]}],
+                "widgets_values": [512, 512, 1],
+            },
+            {
+                "id": 2,
+                "type": "VAEDecode",
+                "inputs": [
+                    {"name": "samples", "type": "LATENT", "link": 1},
+                    {"name": "vae", "type": "VAE", "link": None},
+                ],
+                "outputs": [],
+                "widgets_values": [],
+            },
+        ],
+        "links": [[1, 1, 0, 2, 0, "LATENT"], [7, 1, 0, 2, 6, "LATENT"]],
+        "version": 0.4,
+    }
+    env = _run(["print", str(_write_workflow(tmp_path, wf)), "--input", str(SD15_OI)], capsys)
+    d = env["data"]
+    assert d["node_count"] == 2
+    assert "samples=empty_latent_image" in d["source"]
+    assert d["warnings"] == [
+        "link 7 targets input slot 6 on node 2, which has 2 inputs; a leftover row — input 'samples' already gets "
+        "that value from node 1 output 0 through another link, so nothing needs re-wiring"
+    ]

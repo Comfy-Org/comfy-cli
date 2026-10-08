@@ -141,7 +141,7 @@ def test_list_rows_say_whether_emit_workflow_supports_them():
     """`--emit-workflow` renders only the handful of models that have a partner
     node mapping, while `generate list` advertises the whole proxy catalog. An
     agent that read the list and asked for `--emit-workflow` on `flux-pro` got
-    `emit_workflow_failed` with no way to know beforehand (Langfuse 2026-08-27).
+    `emit_workflow_failed` with no way to know beforehand.
     Each row must carry the answer so the agent never has to try and see."""
     from comfy_cli.command.generate import emit
 
@@ -151,8 +151,61 @@ def test_list_rows_say_whether_emit_workflow_supports_them():
     supported = {row["alias"] for row in data["models"] if row["emit_supported"]}
     assert supported == set(emit.supported_models())
     by_alias = {row["alias"]: row for row in data["models"]}
-    assert by_alias["flux-pro"]["emit_supported"] is False  # the prod case: no ComfyUI node for BFL Flux Pro 1.1
+    assert by_alias["flux-pro"]["emit_supported"] is False  # no ComfyUI node for BFL Flux Pro 1.1
     assert by_alias["flux-2"]["emit_supported"] is True
+
+
+def test_list_rows_name_the_node_class_they_would_mint():
+    """`emit_supported` says a mapping exists; `node_class` says what it points
+    at. MODEL_NODE_MAP is hand-written, so without this a consumer outside this
+    repo cannot tell that an entry has gone stale against the catalog its own
+    ComfyUI serves — which is how `flux-2` kept emitting a class ComfyUI had
+    deprecated until a user reported the workflow."""
+    from comfy_cli.command.generate import emit
+
+    data = _envelope(["--json", "generate", "list"])["data"]
+    by_alias = {row["alias"]: row for row in data["models"]}
+
+    for row in data["models"]:
+        assert "node_class" in row, row
+        if row["emit_supported"]:
+            assert isinstance(row["node_class"], str) and row["node_class"], row
+        else:
+            assert row["node_class"] is None, row
+
+    # Every mapped row names the class its NodeSpec holds, not a guess.
+    for alias, ns in emit.MODEL_NODE_MAP.items():
+        assert by_alias[alias]["node_class"] == ns.node_class
+
+    assert by_alias["flux-pro"]["node_class"] is None
+
+
+@pytest.mark.parametrize(
+    "emit_supported, node_class, valid",
+    [
+        (True, "Flux2ProImageNode", True),
+        (False, None, True),
+        (True, None, False),
+        (True, "", False),
+        (False, "Flux2ProImageNode", False),
+        (True, ..., False),
+    ],
+)
+def test_list_schema_ties_node_class_to_emit_supported(emit_supported, node_class, valid):
+    """The live payload never breaks the pairing, so only a hand-built row shows
+    the schema itself enforces it for consumers that validate against it."""
+    row = {
+        "alias": "flux-2",
+        "id": "bfl/flux-2-pro/generate",
+        "partner": "bfl",
+        "category": "text-to-image",
+        "mode": "async",
+        "summary": "x",
+        "emit_supported": emit_supported,
+    }
+    if node_class is not ...:
+        row["node_class"] = node_class
+    assert _validator_for("generate_list.json").is_valid({"models": [row], "count": 1}) is valid
 
 
 def test_list_with_no_matches_is_an_empty_success_not_an_error():

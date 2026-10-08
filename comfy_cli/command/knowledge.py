@@ -2,7 +2,7 @@
 
     comfy knowledge status [--refresh]
     comfy knowledge resolve <alias-or-id>
-    comfy knowledge pick [capability]
+    comfy knowledge pick [capability] [--check-local]
 
 Backed by :mod:`comfy_cli.knowledge`. JSON mode is the contract; pretty mode
 is a short courtesy view.
@@ -181,6 +181,63 @@ def _emit_capabilities(renderer, bundle: knowledge.Bundle, *, query: str | None 
     renderer.emit(payload, command="knowledge pick")
 
 
+def _check_picks_locally(picks: list[dict[str, Any]]) -> str:
+    """Flag each ``oss`` pick whose template the local ComfyUI cannot run.
+
+    Returns ``ok`` when the check ran. A pick that could not be checked carries
+    its own ``local_check`` instead of a flag. A failure that would repeat for
+    every pick (server down, no gallery) returns its error code instead and
+    marks nothing.
+    """
+    from comfy_cli.command import templates as templates_cmd
+
+    marks: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    listings: dict[str, list[str] | None] = {}
+    rows: list[dict[str, Any]] | None = None
+    index_fresh = False
+    try:
+        for pick in picks:
+            template = pick.get("template")
+            if pick.get("route") != "oss" or not template:
+                continue
+            if rows is None:
+                rows = templates_cmd._gallery_rows(None, refresh=False)
+                # A failed re-fetch serves the stale cache, which cannot show that
+                # a template is absent upstream.
+                index_fresh = not templates_cmd._cache_is_stale(templates_cmd._cache_path())
+            try:
+                _row, wf = templates_cmd._template_workflow(template, rows, refresh=False)
+            except templates_cmd.TemplateCheckError as e:
+                if e.code == "template_not_found" and index_fresh:
+                    flag = {"available_locally": False, "unavailable_reason": knowledge.UNAVAILABLE_TEMPLATE_NOT_FOUND}
+                    marks.append((pick, flag))
+                else:
+                    marks.append((pick, {"local_check": e.code}))
+                continue
+            required = templates_cmd._collect_model_requirements(wf)
+            _present, missing, _warnings = templates_cmd._match_local_models(required, listings)
+            verdict = templates_cmd._compute_verdict(
+                api_dependent=False,
+                missing=missing,
+                required_count=len(required),
+                node_types=templates_cmd._collect_node_class_types(wf),
+            )
+            if verdict == "unknown":
+                marks.append((pick, {"local_check": "unknown"}))
+            elif missing:
+                if all(listings.get(m["directory"]) is None for m in missing):
+                    reason = knowledge.UNAVAILABLE_MODEL_FOLDER_NOT_FOUND
+                else:
+                    reason = knowledge.UNAVAILABLE_MISSING_MODELS
+                flag = {"available_locally": False, "unavailable_reason": reason, "missing_models": len(missing)}
+                marks.append((pick, flag))
+    except templates_cmd.TemplateCheckError as e:
+        return e.code
+    for pick, mark in marks:
+        pick.update(mark)
+    return "ok"
+
+
 @app.command("pick", help="Ranked model picks for a capability; omit it to list every capability.")
 @tracking.track_command("knowledge")
 def pick_cmd(
@@ -188,6 +245,16 @@ def pick_cmd(
         str | None,
         typer.Argument(help="Capability id (e.g. lipsync, text-to-video). Omit to list every capability."),
     ] = None,
+    check_local: Annotated[
+        bool,
+        typer.Option(
+            "--check-local",
+            help=(
+                "Check each oss pick's template against the local ComfyUI's model folders and flag "
+                "the picks it cannot run. Fetches uncached template workflows and calls the local server."
+            ),
+        ),
+    ] = False,
 ):
     renderer = get_renderer()
     bundle = _require_bundle(renderer)
@@ -218,15 +285,21 @@ def pick_cmd(
         "compiled_at": bundle.compiled_at,
         "stale": bundle.stale,
     }
+    if check_local:
+        payload["local_check"] = _check_picks_locally(picks)
     if renderer.is_pretty():
         from rich.table import Table
 
         columns = ("rank", "model", "route", "template", "status", "caveat", "best_for")
+        if check_local:
+            columns += ("unavailable_reason", "local_check")
         tbl = Table(show_header=True, header_style="bold")
         for col in columns:
             tbl.add_column(col)
         for p in picks:
             cells = {**p, "best_for": ", ".join(p.get("best_for") or [])}
-            tbl.add_row(*(sanitize_markup("" if cells[c] is None else cells[c]) for c in columns))
+            tbl.add_row(*(sanitize_markup("" if cells.get(c) is None else cells[c]) for c in columns))
         renderer.console().print(tbl)
+        if check_local and payload["local_check"] != "ok":
+            rprint(f"[yellow]local check did not finish:[/yellow] {payload['local_check']}")
     renderer.emit(payload, command="knowledge pick")

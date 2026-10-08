@@ -26,6 +26,11 @@
           "endpointUrl": {"type": ["string", "null"]},
           "id": {"type": "string", "minLength": 1},
           "releaseId": {"type": "string", "minLength": 1},
+          "releaseVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The version of the release the deployment serves. Present when the list is one Build's; absent under --workspace, where rows span Builds."
+          },
           "status": {
             "enum": ["queued", "provisioning", "starting", "ready", "unhealthy", "stopping", "stop_failed", "stopped", "failed"]
           },

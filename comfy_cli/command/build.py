@@ -34,11 +34,11 @@ import subprocess
 import tempfile
 import time
 import urllib.error
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Final, NoReturn
+from typing import TYPE_CHECKING, Annotated, Any, Final, NoReturn
 from urllib.parse import urlsplit
 
 import requests
@@ -65,6 +65,7 @@ from comfy_cli.command.build_paths import (
 from comfy_cli.command.build_pull import UnsyncedDefinitionError, merge_pulled_spec
 from comfy_cli.command.build_push import (
     SkippedSymlink,
+    already_held_count,
     pending_uploads,
     prepare_push,
     public_node_identities,
@@ -87,9 +88,13 @@ from comfy_cli.command.build_targets import (
     catalog_choices,
     parse_build_targets,
 )
+from comfy_cli.command.build_upload_progress import UploadProgressReporter, plan_line
 from comfy_cli.command.build_validation import (
+    _go_trim,
     lookup_public_model_sources,
+    model_label,
     project_wire_definition,
+    validate_kept_links,
     validate_local_build_spec,
 )
 from comfy_cli.command.pack_scan import read_pyproject
@@ -1569,6 +1574,49 @@ def init_cmd(
     )
 
 
+def _raise_spec_invalid(renderer, error: BuildSpecInvalidError, spec_file: Path) -> NoReturn:
+    """The ``build_spec_invalid`` envelope for a spec the local checks refused. When
+    they found several problems the message lists each on its own line, and JSON also
+    carries them apart under ``details.invalid``."""
+    details: dict = {"path": str(spec_file)}
+    if error.issues and not renderer.is_pretty():
+        details["invalid"] = error.issues
+    renderer.error(code=error.code, message=str(error), details=details)
+    raise typer.Exit(code=1) from error
+
+
+#: Said when no folder list was read, so a case variant of a folder passed unchecked.
+_FOLDER_CASE_UNCHECKED = "a folder's case (`Loras` for `loras`) was not checked"
+
+
+def _has_models(spec: Mapping) -> bool:
+    definition = spec.get("definition")
+    return isinstance(definition, dict) and bool(definition.get("models"))
+
+
+def _model_directories(renderer, client, spec: Mapping) -> frozenset[str] | None:
+    """The builder's vetted model directories, read only by a signed-in command whose
+    spec has models, or None. They are what tells a case variant ("Loras") from a new
+    folder. A list that cannot be read, or names no folder, refuses nothing, and says
+    so: the save warns about the same field. A blank name ("", "  ") names no folder."""
+    if client is None or not _has_models(spec):
+        return None
+    try:
+        listed = client.list_model_directories()
+    except Exception:
+        # Advisory, so no failure to read it (a cut-off body, an oversized one) stops the command.
+        listed = None
+    vetted = (
+        frozenset(name for name in listed if isinstance(name, str) and _go_trim(name))
+        if isinstance(listed, list)
+        else None
+    )
+    if not vetted:
+        renderer.warn(f"could not read the builder's model folders, so {_FOLDER_CASE_UNCHECKED}")
+        return None
+    return vetted
+
+
 def _read_spec(renderer, spec_file: Path) -> dict:
     try:
         return read_build_spec(spec_file)
@@ -1855,6 +1903,13 @@ def push_cmd(
         bool,
         typer.Option("--force", help="Overwrite remote changes, retrying a bounded GET-then-PATCH."),
     ] = False,
+    release_despite_warnings: Annotated[
+        bool,
+        typer.Option(
+            "--release-despite-warnings",
+            help="With --release, cut the release even though the save warned about a model link.",
+        ),
+    ] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Compute uploads locally; send no HTTP requests.")] = False,
     models_dir: Annotated[
         str | None,
@@ -1873,6 +1928,14 @@ def push_cmd(
             message="--release cuts a release from a real push, and --dry-run sends nothing.",
             hint="drop --dry-run to cut the release, or drop --release to preview the push",
             details={"conflict": ["--release", "--dry-run"]},
+        )
+        raise typer.Exit(code=1)
+    if release_despite_warnings and not release:
+        renderer.error(
+            code="build_missing_input",
+            message="--release-despite-warnings applies only to the release --release cuts.",
+            hint="pass --release to cut a release despite the save's model link warnings",
+            details={"missing": ["--release"]},
         )
         raise typer.Exit(code=1)
     targets = _parse_release_targets(renderer, target or ())
@@ -1914,15 +1977,16 @@ def push_cmd(
     # The scratch directory holds one archive per local node, and it is released
     # the moment the last upload lands: nothing after this block reads an
     # archive, and the create/update round-trip that follows can take a while.
+    directories = _model_directories(renderer, client, spec)
     with tempfile.TemporaryDirectory(prefix="comfy-build-push-") as package_dir:
         try:
-            validate_local_build_spec(spec, paths)
+            validate_local_build_spec(spec, paths, model_directories=directories)
             preparation = prepare_push(spec, paths, ModelDigestCache(_sha256_file), package_dir=Path(package_dir))
+            validate_kept_links(preparation.definition)
         except NodePackageError as error:
             _raise_node_package_error(renderer, error)
         except BuildSpecInvalidError as error:
-            renderer.error(code=error.code, message=str(error), details={"path": str(paths.spec_file)})
-            raise typer.Exit(code=1) from error
+            _raise_spec_invalid(renderer, error, paths.spec_file)
 
         uploads = pending_uploads(preparation)
         payload = {
@@ -1936,10 +2000,23 @@ def push_cmd(
             "uploaded": 0,
             "deduped": 0,
         }
+        if _has_models(spec):
+            payload["folder_case_checked"] = directories is not None
         reported = _warn_skipped_symlinks(renderer, preparation.skipped_symlinks)
         if reported:
             payload["skipped_symlinks"] = reported
         if dry_run:
+            # The envelope is the whole answer and prints nothing in pretty mode, so a
+            # person gets the real push's opening line and word that nothing moved.
+            # "Already held" is what the spec records; the builder, never asked,
+            # may hold more.
+            if renderer.is_pretty():
+                renderer.info(plan_line(len(uploads), payload["upload_bytes"], already_held_count(preparation)))
+                renderer.info(
+                    "--dry-run: nothing was sent; the builder may already hold more of these than the spec records."
+                )
+                if _has_models(spec):
+                    renderer.info(f"--dry-run reads no folder list from the builder, so {_FOLDER_CASE_UNCHECKED}.")
             renderer.emit(payload, command="build push", changed=False)
             return
         assert client is not None
@@ -1975,24 +2052,42 @@ def push_cmd(
                 )
                 raise typer.Exit(code=1)
 
+        # Said before the first byte moves, and said even when nothing will: a
+        # multi-GB upload is otherwise silent until it ends, and "0 files" is
+        # the answer to "is it going to upload that again?".
+        reporter = UploadProgressReporter(renderer)
+        reporter.plan(uploads, already_held=already_held_count(preparation))
+
         # Checkpoint the reconciled spec after every blob so an interrupted push
         # resumes instead of restarting: `prepare_push` skips entries that
         # already carry a `blobId`, and until this lands on disk the ids exist
         # only in memory — a crash would re-upload the same bytes under new ids
         # and orphan the ones the builder already stored.
-        uploaded = _builder_call(
-            renderer,
-            lambda: upload_assets(
-                preparation, client, lambda: _write_spec(renderer, paths.spec_file, preparation.spec)
-            ),
-        )
+        started = time.monotonic()
+        try:
+            uploaded = _builder_call(
+                renderer,
+                lambda: upload_assets(
+                    preparation, client, lambda: _write_spec(renderer, paths.spec_file, preparation.spec), reporter
+                ),
+            )
+        except BaseException:
+            _track_push_upload(uploads, uploaded=None, seconds=time.monotonic() - started)
+            raise
+        _track_push_upload(uploads, uploaded=uploaded, seconds=time.monotonic() - started)
     wire_definition = project_wire_definition(preparation.definition)
     target_id = build_id or stored_id
     name = str(spec["name"])
     description = str(spec["description"])
     if target_id is None:
-        target_id = _builder_call(renderer, lambda: client.create_build(name, wire_definition, description))
-        saved = _builder_call(renderer, lambda: client.get_build(target_id))
+        created_build = _builder_call(
+            renderer, lambda: client.create_build_response(name, wire_definition, description)
+        )
+        target_id = created_build["id"]
+        saved = {
+            **_builder_call(renderer, lambda: client.get_build(target_id)),
+            "warnings": created_build.get("warnings"),
+        }
         created = True
     elif force:
         saved = _force_update(renderer, client, target_id, wire_definition, name, description)
@@ -2028,10 +2123,22 @@ def push_cmd(
             "deduped": len(uploads) - uploaded,
         }
     )
+    warnings = _save_warnings(saved)
+    if warnings:
+        payload["warnings"] = warnings
+    _hold_release_on_link_warnings(
+        renderer, warnings, target_id, saved["updatedAt"], release and not release_despite_warnings
+    )
     release_summary: dict[str, str] | None = None
     if release:
         requested = [item.as_wire() for item in targets]
-        release_id, status_url = _builder_call(renderer, lambda: client.create_release(target_id, requested))
+        release_id, status_url = _builder_call(
+            renderer,
+            lambda: client.create_release(target_id, requested),
+            {"buildId": target_id},
+            hint=_CUT_RETRY_HINT,
+            models=preparation.definition.get("models") or [],
+        )
         release_summary = {"releaseId": release_id, "statusUrl": status_url}
         payload["targets"] = requested
         payload["release"] = release_summary
@@ -2043,6 +2150,73 @@ def push_cmd(
             renderer.print(f"  release: {release_summary['releaseId']}")
             renderer.print(f"  status:  {release_summary['statusUrl']}")
     renderer.emit(payload, command="build push", changed=True)
+
+
+# A warning at this field is comfy-builder's for a model link a deployment could
+# not download; it is the whole contract a held release rests on. Any other
+# field, such as pipDependencies, is printed and never holds a release.
+_MODEL_LINK_FIELD = re.compile(r"models\[\d+\]\.sourceUri")
+
+
+def _save_warnings(saved: dict) -> list[dict[str, str]]:
+    """The warnings a save returned, as field and reason, dropping anything the
+    builder sent in another shape rather than failing a push that landed."""
+    raw = saved.get("warnings")
+    if not isinstance(raw, list):
+        return []
+    return [
+        {"field": item["field"], "reason": item["reason"]}
+        for item in raw
+        if isinstance(item, dict) and isinstance(item.get("field"), str) and isinstance(item.get("reason"), str)
+    ]
+
+
+def _hold_release_on_link_warnings(
+    renderer, warnings: list[dict[str, str]], build_id: str, revision: str, cutting: bool
+) -> None:
+    """Print every warning the save returned, and refuse the cut a push asked for
+    while one is about a model link a deployment could not download. The build is
+    already saved and the spec already carries its revision, so a second push with
+    the go-ahead option cuts without saving anything twice."""
+    for warning in warnings:
+        renderer.warn(f"{warning['field']}: {warning['reason']}")
+    held = [warning for warning in warnings if _MODEL_LINK_FIELD.fullmatch(warning["field"])]
+    if not cutting or not held:
+        return
+    details: dict = {"id": build_id, "syncedRevision": revision}
+    # Text mode has already printed each warning above; only JSON carries them again.
+    if not renderer.is_pretty():
+        details["warnings"] = warnings
+    renderer.error(
+        code="build_release_held",
+        message=f"saved build {build_id}, but cut no release: the save warned that a deployment could not "
+        "download " + ", ".join(warning["field"] for warning in held),
+        details=details,
+    )
+    raise typer.Exit(code=1)
+
+
+def _track_push_upload(uploads, *, uploaded: int | None, seconds: float) -> None:
+    """One event per push that had something to upload: how much, how long, how it
+    ended. Nothing measured an upload before this, in the CLI or the portal, so the
+    size and the seconds are what say whether a change to uploads changed anything
+    for anyone. No filename: a private model's name is the customer's.
+
+    ``uploaded`` is None when the upload did not finish; then ``deduped`` is not
+    known either and is left out rather than guessed.
+    """
+    if not uploads:
+        return
+    properties: dict[str, Any] = {
+        "upload_count": len(uploads),
+        "upload_bytes": sum(upload.size_bytes for upload in uploads),
+        "seconds": round(seconds, 3),
+        "outcome": "ok" if uploaded is not None else "error",
+    }
+    if uploaded is not None:
+        properties["uploaded"] = uploaded
+        properties["deduped"] = len(uploads) - uploaded
+    tracking.track_event("build:push_upload", properties=properties)
 
 
 def _prompt_build_id(renderer, client) -> str | None:
@@ -2309,10 +2483,11 @@ def _status_drift(renderer, ctx, paths, stored: dict, *, no_scan: bool, comfy_ve
 def _builder_client(renderer, builder_url: str | None):
     """Build an authed BuilderClient, or emit a not-signed-in envelope + exit(1).
 
-    A caller that already holds a Cloud JWT — the Developer Platform agent service
-    forwarding the request's token, or CI — injects it via ``COMFY_BUILDER_TOKEN``
-    and skips the interactive OAuth session ``from_session`` uses. The env var wins
-    over a stored session so an explicit token always takes precedence.
+    A caller that already holds a Cloud JWT, such as the Developer Platform agent
+    service forwarding the request's token, injects it via ``COMFY_BUILDER_TOKEN``,
+    and that explicit token comes first. Otherwise ``from_credentials`` uses a
+    workspace API key from ``COMFY_CLOUD_API_KEY``, which a CI job sets, then the
+    stored sign-in.
     """
     from comfy_cli.builder_api import BuilderAuthError, BuilderClient
 
@@ -2321,22 +2496,146 @@ def _builder_client(renderer, builder_url: str | None):
     if token:
         return BuilderClient(base_url, token)
     try:
-        return BuilderClient.from_session(base_url)
+        return BuilderClient.from_credentials(base_url)
     except BuilderAuthError as e:
         renderer.error(code="build_not_signed_in", message=str(e))
         raise typer.Exit(code=1) from e
 
 
-def _report_builder_error(renderer, e) -> None:
+#: comfy-builder refusals the caller can clear itself, keyed on the builder's own
+#: ``error`` field under a 409. That field is the contract and its ``message`` is
+#: explicitly rewordable, so matching the field beats matching a substring of the
+#: body -- which would also break the day the body grows past the cap below. Each
+#: row's ``message`` stands in only for a builder that sent none. Everything
+#: absent from this table stays on ``build_builder_error``.
+_BUILDER_REFUSALS: Final = {
+    "RELEASE_LIMIT": {
+        "code": "build_release_limit",
+        "message": "the workspace already holds as many releases as its limit allows",
+    },
+    "RELEASE_IN_USE": {
+        "code": "build_release_in_use",
+        "message": "a deployment still references this release",
+    },
+    "BUILD_IN_USE": {
+        "code": "build_in_use",
+        "message": "a deployment still references one of this build's releases",
+    },
+    "BUILD_LIMIT": {
+        "code": "build_limit",
+        "message": "the workspace already holds as many builds as its limit allows, counting every member's builds",
+    },
+}
+
+#: A hostile endpoint can be reached through the env-configurable base URL, so
+#: nothing it sends reaches the envelope unbounded: the body is read under
+#: ``_BUILDER_ERROR_READ``, excerpted into ``details.body`` at
+#: ``_BUILDER_BODY_CAP``, and a carried message is capped at
+#: ``_BUILDER_MESSAGE_CAP`` -- room enough for a long list of blocking
+#: deployments and their prose without letting one endpoint decide how big an
+#: envelope is. The message cap counts **bytes** (see ``_capped_message``),
+#: because a cap on characters is one the sender picks the multiplier for: a
+#: message of four-byte characters costs four times what it promises. The body
+#: excerpt is a debugging aid rather than the envelope's payload, so it keeps its
+#: cheaper slice and is bounded in turn by the byte-counted ``_BUILDER_ERROR_READ``.
+#:
+#: Bounded, not sanitized. What reaches a terminal is sanitized at the terminal
+#: (``error_panel``); the envelope stays byte-faithful -- see
+#: ``_report_builder_error``.
+_BUILDER_BODY_CAP: Final = 1000
+_BUILDER_MESSAGE_CAP: Final = 8 * 1024
+_BUILDER_ERROR_READ: Final = 64 * 1024
+
+
+def _capped_message(text: str) -> str:
+    """``text`` truncated to ``_BUILDER_MESSAGE_CAP`` UTF-8 bytes, whole characters only.
+
+    Slicing the ``str`` would cap Python characters instead, which bounds the
+    envelope only for ASCII. Truncation happens on the encoded form and the
+    partial character a byte cut can leave behind is dropped, so what the JSON
+    writer receives is always decodable. Text that already fits is returned
+    unchanged rather than round-tripped, so the common case stays byte-identical.
+    """
+    encoded = text.encode("utf-8", "replace")
+    if len(encoded) <= _BUILDER_MESSAGE_CAP:
+        return text
+    return encoded[:_BUILDER_MESSAGE_CAP].decode("utf-8", "ignore")
+
+
+def _capped_lines(heading: str, lines: list[str], where: str) -> str:
+    """*heading* and as many whole *lines* as fit ``_BUILDER_MESSAGE_CAP``, then, when
+    some did not fit, a line counting them that says *where* every one is listed.
+
+    ``_capped_message`` would stop the last line mid-word with nothing to say the
+    rest were dropped, and the pretty panel leaves ``details.invalid`` out, so the
+    rest would be nowhere. Room for the count line is kept back at its longest,
+    since how many are dropped is only known once the kept lines are chosen."""
+    text = "\n".join([heading, *lines])
+    if len(text.encode("utf-8", "replace")) <= _BUILDER_MESSAGE_CAP:
+        return text
+    more = "  ... and {} more; " + where
+    room = _BUILDER_MESSAGE_CAP - len(heading.encode("utf-8", "replace")) - 1 - len(more.format(len(lines)).encode())
+    kept = []
+    for line in lines:
+        room -= len(line.encode("utf-8", "replace")) + 1
+        if room < 0:
+            break
+        kept.append(line)
+    return "\n".join([heading, *kept, more.format(len(lines) - len(kept))])
+
+
+#: Any URL in an exception's text, with its query string. Both shapes ``requests``
+#: produces quote what they were talking to: ``raise_for_status`` gives the whole
+#: URL ("... for url: https://host/o?sig=..."), while a ``ConnectionError`` gives
+#: the path alone ("Max retries exceeded with url: /o?sig=..."), so both forms are
+#: matched. The query is lazy-anchored to the FIRST ``?`` in the run, and must be
+#: non-empty, so a sentence ending in a question mark is left alone.
+_URL_QUERY_RE: Final = re.compile(r"(?:[a-z][a-z0-9+.\-]*://\S*?|/\S*?)\?\S+", re.IGNORECASE)
+
+
+def _without_signed_query(e: BaseException) -> str:
+    """``str(e)`` with the query string cut off every URL it quotes.
+
+    ``upload_assets`` runs inside ``_builder_call``, and it talks to a presigned
+    GCS PUT whose query string *is* the credential: an ordinary failed upload
+    would otherwise write a still-valid ``X-Goog-Credential`` and
+    ``X-Goog-Signature`` to stdout, into the JSON envelope, and into any CI log
+    that captured either. Only the query comes off -- the host and the path are
+    what make the failure diagnosable.
+
+    This errs toward removing too much: a path with a legitimate ``?`` in it
+    loses its tail. That is the correct bias for a redaction, and the same one
+    ``tracking._scrub_value`` takes for a URL standing alone as a value.
+    """
+    return _URL_QUERY_RE.sub(lambda m: m.group(0).partition("?")[0], str(e))
+
+
+def _report_builder_error(
+    renderer,
+    e,
+    subject: Mapping[str, str] | None = None,
+    hint: str | None = None,
+    models: Sequence[Mapping] = (),
+) -> None:
     """Emit one error envelope for a builder failure. Prefers the limited-beta 403,
     then the builder's own error body (e.g. `INVALID_DEFINITION: …` or
-    `SUBSCRIPTION_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
+    `PAYMENT_REQUIRED: …`) over urllib's opaque "HTTP Error 400", then the
     generic transport error.
 
-    It carries no Build id, because the old `create` verb's orphan case is gone:
-    `push` writes the id into the spec on disk before it cuts, so a cut that
-    fails afterwards leaves the id in the user's own file rather than only in
-    this envelope."""
+    *subject* is the id the command was acting on, spread into every envelope
+    that carries details, and spread first so it can never displace `status` or
+    `body`. A mapped refusal needs it because clearing the state means deleting
+    the named thing; a lost response needs it because retrying means naming the
+    id the first attempt used. A call site that passes none invents nothing: the
+    old `create` verb's orphan case is gone, because `push` writes the id into
+    the spec on disk before it cuts, so a cut that fails afterwards leaves the id
+    in the user's own file rather than only in this envelope.
+
+    *hint* is the caller's chance to say what a retry of *this* call does, and it
+    reaches only the two ambiguous outcomes — an unmapped builder error and a
+    transport failure — where the envelope cannot say whether the write landed.
+    The TLS, limited-beta and mapped-refusal branches keep their own remediation,
+    which names a cause and a next step the call site does not know about."""
     import urllib.error
 
     from comfy_cli.http import tls_trust_hint, tls_verification_failed
@@ -2344,41 +2643,141 @@ def _report_builder_error(renderer, e) -> None:
     # Ahead of the transport clause below, whose hint ("check the builder URL and
     # your access") points away from a failure that is neither: the endpoint and
     # the credential are both fine and the CA store is the problem.
+    # Redacted like the transport branch below: a verification failure on the
+    # presigned blob PUT quotes that URL, whose query string is the credential.
     if tls_verification_failed(e):
         renderer.error(
-            code="tls_verify_failed", message=f"TLS certificate verification failed: {e}", hint=tls_trust_hint()
+            code="tls_verify_failed",
+            message=f"TLS certificate verification failed: {_without_signed_query(e)}",
+            hint=tls_trust_hint(),
         )
         return
     if isinstance(e, urllib.error.HTTPError):
         body = ""
         try:
-            body = e.read().decode("utf-8", "replace")
+            body = (e.read(_BUILDER_ERROR_READ) or b"").decode("utf-8", "replace")
         except Exception:
             pass
+        # A 401 means the credential itself was refused, and a client built from the
+        # sign-in has already tried a refresh, so the credential has to change. The
+        # client knows which credential it sent, so it names the one to replace.
+        if e.code == 401:
+            from comfy_cli.builder_api import BuilderCredentialRefused
+
+            renderer.error(
+                code="build_not_signed_in",
+                message="the builder refused the credential (401)",
+                hint=e.hint if isinstance(e, BuilderCredentialRefused) else "run `comfy cloud login` first",
+            )
+            return
         if e.code == 403 and "FEATURE_NOT_ENABLED" in body:
             renderer.error(
                 code="build_not_enabled",
                 message="The developer platform is in limited beta and your account isn't enabled yet.",
             )
             return
+        builder_error, builder_message = _builder_error_fields(body)
+        # A definition the builder refused: its reasons lead, one per line, where the
+        # generic branch below would lead with the code and leave the reasons in the
+        # body excerpt as one JSON string. The caller's retry hint is dropped with it,
+        # since only an edit clears this.
+        if e.code == 400 and builder_error == "INVALID_DEFINITION":
+            invalid = _named_models(_builder_invalid(body), models)
+            if invalid or builder_message:
+                details = {**(subject or {}), "status": e.code}
+                if invalid and not renderer.is_pretty():
+                    details["invalid"] = invalid
+                lines = [
+                    f"  {issue['field']}"
+                    + (f" ({issue['model']})" if "model" in issue else "")
+                    + f": {issue['reason']}"
+                    for issue in invalid
+                ]
+                # Only the cut refuses a target or a blob, and neither is the definition.
+                refused = "the build's definition" if _invalid_kinds(invalid) <= {"spec"} else "the release"
+                # The list apart is only in JSON, so that is where the count line points.
+                where = (
+                    "read every one with `--json`" if renderer.is_pretty() else "read every one in `details.invalid`"
+                )
+                renderer.error(
+                    code="build_definition_invalid",
+                    message=(
+                        _capped_lines(f"the builder refused {refused}:", lines, where)
+                        if invalid
+                        else _capped_message(builder_message)
+                    ),
+                    hint=_definition_invalid_hint(invalid),
+                    details=details,
+                )
+                return
+        # Every refusal in the table is 409 in the builder's contract and nothing else
+        # sends them, so a mapped code under any other status came from something
+        # that is not the builder and must not be answered with its remediation.
+        refusal = _BUILDER_REFUSALS.get(builder_error) if e.code == 409 else None
+        if refusal is not None:
+            # The blocking deployment ids ride in the builder's prose and nowhere
+            # else in its contract, so the message is carried unparsed under its
+            # own cap: a regex over a rewordable sentence is a contract nobody
+            # wrote, and the body excerpt would lose the tail of a long one.
+            #
+            # Carried BYTE-FAITHFULLY, and deliberately not sanitized. The
+            # sanitizer's module docstring rules the JSON/NDJSON paths out, and
+            # here the cost is concrete: its unterminated-introducer rule cuts
+            # from a stray introducer to the end of the string, so one byte of
+            # ordinary mojibake would silently delete every blocking id after it
+            # -- the ids being the whole reason an agent reads this refusal.
+            # Stripping buys nothing either, since `details.body` beside it
+            # carries the same bytes raw. A terminal is protected where the
+            # terminal is: `error_panel` sanitizes `message` and every details
+            # row on the pretty path.
+            renderer.error(
+                code=refusal["code"],
+                message=_capped_message(builder_message or refusal["message"]),
+                details={**(subject or {}), "status": e.code, "body": body[:_BUILDER_BODY_CAP]},
+            )
+            return
         detail = _builder_msg(body) or getattr(e, "reason", None) or str(e)
         renderer.error(
             code="build_builder_error",
-            message=f"builder call failed ({e.code}): {detail}",
-            details={"status": e.code, "body": body[:1000]},
+            message=f"builder call failed ({e.code}): {_capped_message(str(detail))}",
+            hint=hint,
+            details={**(subject or {}), "status": e.code, "body": body[:_BUILDER_BODY_CAP]},
         )
         return
-    renderer.error(code="build_builder_error", message=f"builder call failed: {e}")
+    # A dropped connection, a reset or a timeout: the caller's own remediation is
+    # to retry, which needs the id the lost attempt named. The exception is
+    # redacted rather than interpolated raw -- a failed blob upload quotes its
+    # presigned PUT URL, whose query string is a live credential (see
+    # ``_without_signed_query``).
+    renderer.error(
+        code="build_builder_error",
+        message=f"builder call failed: {_without_signed_query(e)}",
+        hint=hint,
+        details=dict(subject or {}),
+    )
 
 
-def _builder_call(renderer, fn):
+def _builder_call(
+    renderer,
+    fn,
+    subject: Mapping[str, str] | None = None,
+    *,
+    hint: str | None = None,
+    models: Sequence[Mapping] = (),
+):
     """Run a builder API call, mapping every failure class to one error envelope
-    + exit(1) via _report_builder_error.
+    + exit(1) via _report_builder_error. *subject* names the id the command is
+    acting on, so a refusal an agent must act on says which one.
 
     Never package inside *fn*. ``NodePackageError`` is a ``ValueError``, so the
     clause below would relabel a packaging failure as ``build_missing_input``
     and drop the node path from ``details`` — the contract
     ``_raise_node_package_error`` exists to hold. Package before the call.
+
+    ``hint`` rides through to the builder-error and transport envelopes for calls
+    whose failure leaves the caller unable to tell whether the write landed. See
+    ``_CUT_RETRY_HINT``. ``models`` are the models of the definition the builder
+    read, when the caller has them, so a refused ``models[<n>]`` names its model.
     """
     import urllib.error
 
@@ -2391,25 +2790,130 @@ def _builder_call(renderer, fn):
         # beats an unhandled traceback.
         renderer.error(code="build_builder_error", message=f"builder response exceeded the client size cap ({e})")
         raise typer.Exit(code=1) from e
+    # Transport before ValueError: ``requests.exceptions.MissingSchema``,
+    # ``InvalidURL`` and ``InvalidSchema`` subclass both, and a malformed builder-supplied upload
+    # URL is the builder's failure, reported redacted, not the caller's input.
+    except (urllib.error.URLError, requests.RequestException, KeyError) as e:
+        _report_builder_error(renderer, e, subject, hint, models)
+        raise typer.Exit(code=1) from e
     except ValueError as e:
         renderer.error(code="build_missing_input", message=str(e))
         raise typer.Exit(code=1) from e
-    except (urllib.error.URLError, requests.RequestException, KeyError) as e:
-        _report_builder_error(renderer, e)
-        raise typer.Exit(code=1) from e
+
+
+def _encodable(text: str) -> str:
+    """``text`` with anything unencodable replaced, so it can reach stdout.
+
+    A lone surrogate is legal in a JSON string and legal in a Python ``str``, but
+    encoding one raises ``UnicodeEncodeError`` — a ``ValueError``, which the JSON
+    writer's own except clause swallows, so a crafted ``message`` would cost the
+    caller the whole envelope rather than one bad character. Scrubbed where the
+    strings are produced, because that writer belongs to every command.
+    """
+    return text.encode("utf-8", "replace").decode("utf-8", "replace")
+
+
+def _builder_error_fields(body: str) -> tuple[str, str]:
+    """Split a builder JSON error body ({error, message}) into its two fields,
+    or ``("", "")`` when the body isn't the expected shape.
+
+    ``RecursionError`` is a ``RuntimeError``, so a deeply nested body escapes the
+    ``ValueError`` clause and, uncaught, every clause up to the CLI — leaving the
+    caller exit 1 and no envelope on any builder HTTP error path.
+    """
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        return "", ""
+    if not isinstance(parsed, dict):
+        return "", ""
+    return (
+        _encodable(str(parsed.get("error") or "").strip()),
+        _encodable(str(parsed.get("message") or "").strip()),
+    )
+
+
+def _builder_invalid(body: str) -> list[dict[str, str]]:
+    """The ``invalid`` list of a builder 400 (``[{field, reason}]``), dropping any
+    entry in another shape, or ``[]`` when the body carries none."""
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, ValueError, RecursionError):
+        return []
+    raw = parsed.get("invalid") if isinstance(parsed, dict) else None
+    if not isinstance(raw, list):
+        return []
+    return [
+        {"field": _encodable(item["field"]), "reason": _encodable(item["reason"])}
+        for item in raw
+        if isinstance(item, dict) and isinstance(item.get("field"), str) and isinstance(item.get("reason"), str)
+    ]
+
+
+_MODEL_FIELD: Final = re.compile(r"models\[(\d+)\]")
+
+
+def _named_models(invalid: list[dict[str, str]], models: Sequence[Mapping]) -> list[dict[str, str]]:
+    """*invalid* with each ``models[<n>]`` issue naming its model as a local refusal
+    does (``model_label``), when *models* are the ones the builder counted."""
+    named = []
+    for issue in invalid:
+        match = _MODEL_FIELD.match(issue["field"])
+        index = int(match[1]) if match else len(models)
+        entry = models[index] if index < len(models) else None
+        label = model_label(entry) if isinstance(entry, dict) else ""
+        named.append({**issue, "model": _encodable(label)} if label else issue)
+    return named
+
+
+def _invalid_kinds(invalid: list[dict[str, str]]) -> set[str]:
+    """What each refused field is about: ``targets`` for the cut's ``targets[<n>]``
+    (the n-th ``--target``), ``blob`` for its ``blob:<id>``, ``spec`` for the rest."""
+    return {
+        "targets" if issue["field"].startswith("targets[") else "blob" if issue["field"].startswith("blob:") else "spec"
+        for issue in invalid
+    }
+
+
+#: The fix for a ``targets[<n>]`` field, which releases_cut.go ``validateTargets``
+#: returns for a repeated os/gpu pair or one the builder cannot build.
+_TARGETS_HINT = (
+    "a `targets[<n>]` field is the n-th `--target` value, counting from 0: drop a repeated one or "
+    "pick one `comfy build refs build-targets` lists, then run the command again with those `--target` values"
+)
+
+#: The fix for a ``blob:<id>`` field. The cut checks a node's zip as well as a
+#: model's file, and a push uploads again only a ``source: local`` entry without a
+#: ``blobId``. Which kind the entry is lives in the spec, not here, so it covers both.
+_BLOB_HINT = (
+    "a `blob:<id>` field is a file the definition names (a model's file, a node's zip) that never "
+    "reached the builder whole: delete that `blobId` from its entry in the spec, and if that entry has "
+    "no `source: local`, give it `source: local` with a `localPath` to the model's file or the node's "
+    "directory, or another source it can take (a model's `sourceUri`, a node's `registryVersion` or "
+    "`repository`); then run `comfy build push`, which uploads a local file again and saves its new id"
+)
+
+
+def _definition_invalid_hint(invalid: list[dict[str, str]]) -> str | None:
+    """The hint for a refused definition or release, or None for the registered one.
+    The cut refuses a ``--target`` value and a file that never reached storage under
+    the same code as the definition, and no edit to the spec's rules clears either, so
+    each kind present names its own fix."""
+    kinds = _invalid_kinds(invalid)
+    if kinds <= {"spec"}:
+        return None
+    fixes = {
+        "spec": "fix each named definition field in the spec and push it again",
+        "targets": _TARGETS_HINT,
+        "blob": _BLOB_HINT,
+    }
+    return "; ".join(fix for kind, fix in fixes.items() if kind in kinds)
 
 
 def _builder_msg(body: str) -> str:
     """Pull ``"<error>: <message>"`` out of a builder JSON error body ({error, message}),
     or ``""`` when the body isn't the expected shape."""
-    try:
-        parsed = json.loads(body)
-    except (json.JSONDecodeError, ValueError):
-        return ""
-    if not isinstance(parsed, dict):
-        return ""
-    err = str(parsed.get("error") or "").strip()
-    msg = str(parsed.get("message") or "").strip()
+    err, msg = _builder_error_fields(body)
     return f"{err}: {msg}".strip(": ").strip() if (err or msg) else ""
 
 
@@ -2438,7 +2942,7 @@ def _resolve_build_id(renderer, client, scope: _BuildScope) -> str:
     )
 
 
-@app.command("ls", help="List the workspace's builds.")
+@app.command("ls", help="List the builds you can see: your own, or every member's on enterprise.")
 @tracking.track_command("build")
 def ls_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
     renderer = get_renderer()
@@ -2552,6 +3056,18 @@ def _release_failed(release: dict) -> bool:
     return isinstance(failed, int) and failed > 0
 
 
+# A cut that fails after the request went out is ambiguous: the builder may have
+# committed the release and lost the response. It dedupes on the definition's content
+# hash scoped to the Build and re-drives the enqueue of a release it committed but
+# never queued, so the retry is the repair and not a second cut. "Spec unchanged" is
+# load-bearing — the hash is over the definition, so a `push` in between does cut again.
+_CUT_RETRY_HINT = (
+    "a cut is idempotent — the builder dedupes on the definition's content hash, so re-running this exact "
+    "command with the spec unchanged returns the same release rather than cutting a second one; "
+    "`comfy build release ls` shows what exists"
+)
+
+
 @release_app.command("create", help="Cut a release from the current Build.")
 @tracking.track_command("build")
 def release_create(
@@ -2592,6 +3108,8 @@ def release_create(
     release_id, status_url = _builder_call(
         renderer,
         lambda: client.create_release(selected_build_id, requested),
+        {"buildId": selected_build_id},
+        hint=_CUT_RETRY_HINT,
     )
     payload = {
         "buildId": selected_build_id,
@@ -2756,11 +3274,11 @@ def validate_cmd(
         renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
         raise typer.Exit(code=1) from error
     spec = _read_spec(renderer, paths.spec_file)
+    directories = _model_directories(renderer, client, spec)
     try:
-        wire_definition = validate_local_build_spec(spec, paths)
+        wire_definition = validate_local_build_spec(spec, paths, model_directories=directories)
     except BuildSpecInvalidError as error:
-        renderer.error(code=error.code, message=str(error), details={"path": str(paths.spec_file)})
-        raise typer.Exit(code=1) from error
+        _raise_spec_invalid(renderer, error, paths.spec_file)
 
     result = {
         "spec_file": str(paths.spec_file),
@@ -2768,11 +3286,16 @@ def validate_cmd(
         "wire_definition": wire_definition,
         "model_lookups": [],
     }
+    if _has_models(spec):
+        result["folder_case_checked"] = directories is not None
     if client is not None:
         lookups = _builder_call(renderer, lambda: lookup_public_model_sources(wire_definition, client.resolve_models))
         result["model_lookups"] = [lookup.as_json() for lookup in lookups]
     if renderer.is_pretty():
         renderer.success(f"Build spec is valid → {paths.spec_file}")
+        # A failed read of the list has already said so.
+        if client is None and _has_models(spec):
+            renderer.info(f"validate reads the builder's folder list only with --remote, so {_FOLDER_CASE_UNCHECKED}.")
         for lookup in result["model_lookups"]:
             label = lookup["filename"] or lookup["entry"]
             detail = f": {lookup['error']}" if lookup.get("error") else ""
@@ -2807,7 +3330,7 @@ def delete_cmd(
         # `build_delete_needs_confirm` rather than reaching this branch.
         renderer.info("Aborted.")
         return
-    _builder_call(renderer, lambda: client.delete_build(selected_build_id))
+    _builder_call(renderer, lambda: client.delete_build(selected_build_id), {"buildId": selected_build_id})
     if renderer.is_pretty():
         renderer.success(f"Deleted build {selected_build_id}")
     renderer.emit({"buildId": selected_build_id, "deleted": True}, command="build delete", changed=True)
@@ -2897,6 +3420,63 @@ def release_manifest(
     if renderer.is_pretty():
         renderer.console().print_json(json.dumps(manifest))
     renderer.emit(manifest, command="build release manifest")
+
+
+@release_app.command("delete", help="Delete a release, freeing its slot against the workspace release limit.")
+@tracking.track_command("build")
+def release_delete(
+    ctx: typer.Context,
+    release: Annotated[str, typer.Argument(help="Release id to delete.")],
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
+    builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
+):
+    # The one release verb that destroys something names its target and takes no
+    # other selector: a caller whose connection dropped retries, and a resolved
+    # default would re-resolve against a list the builder has already filtered the
+    # first delete out of, destroying a second release nobody asked for.
+    renderer = get_renderer()
+    # Normalized and refused once, above both the client and the prompt, so the
+    # id confirmed, the id deleted and the id reported are one string rather than
+    # three. Above the client because `_builder_client` can exit with
+    # `build_not_signed_in` after an OAuth round trip: a signed-out caller
+    # passing a blank id would be told to sign in, do so, and only then learn the
+    # id was never usable. This check needs nothing but the argument, so the
+    # first envelope is the actionable one.
+    #
+    # A segment of only dots is refused rather than encoded: `quote(safe="")`
+    # leaves it alone (RFC 3986 unreserved) and nothing between here and the
+    # service resolves dot segments, so `.` would aim this DELETE at the
+    # collection and `..` a level above it -- and `.` is a plausible argument,
+    # since every other `comfy build` verb takes a path defaulting to it.
+    # `delete_release` refuses the same ids for any other caller; this is the
+    # copy that produces the readable refusal. What else an id may look like is
+    # the builder's to say, so nothing here spells out its grammar.
+    release = release.strip()
+    if not release or set(release) == {"."}:
+        renderer.error(
+            code="build_missing_input",
+            message="RELEASE must name one release, not an empty or dot-only path segment.",
+            hint="pass the release id shown by `comfy build release ls`",
+            details={"invalid": [release]},
+        )
+        raise typer.Exit(code=1)
+    client = _builder_client(renderer, builder_url)
+    if not confirm(
+        f"Delete release {release}?",
+        yes=yes,
+        error_code="build_release_delete_needs_confirm",
+        details={"releaseId": release},
+        ctx=ctx,
+    ):
+        # Declining needs a prompt, and a prompt needs pretty mode, where `emit`
+        # is a no-op; a machine caller is refused above with
+        # `build_release_delete_needs_confirm` rather than reaching this branch.
+        renderer.info("Aborted.")
+        return
+    _builder_call(renderer, lambda: client.delete_release(release), {"releaseId": release})
+    if renderer.is_pretty():
+        renderer.success(f"Deleted release {release}")
+    renderer.emit({"releaseId": release, "deleted": True}, command="build release delete", changed=True)
 
 
 @blob_app.command("ls", help="List the workspace's private blobs.")

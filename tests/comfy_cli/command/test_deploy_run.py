@@ -12,6 +12,7 @@ from deploy_up_support import option_names
 from typer.testing import CliRunner
 from typing_extensions import NotRequired, TypedDict
 
+from comfy_cli import deploy_jobs
 from comfy_cli.cmdline import app
 from comfy_cli.command import deploy, deploy_run
 from comfy_cli.command.build_spec import JsonObject, JsonValue
@@ -190,7 +191,7 @@ def test_deploy_run_is_registered_with_the_complete_option_surface() -> None:
     } <= option_names("run")
 
 
-def test_deploy_tree_is_exactly_the_twelve_designed_commands() -> None:
+def test_deploy_tree_is_exactly_the_fifteen_designed_commands() -> None:
     # Given / When
     command = typer.main.get_command(deploy.app)
     assert hasattr(command, "commands"), command
@@ -199,6 +200,9 @@ def test_deploy_tree_is_exactly_the_twelve_designed_commands() -> None:
     # Then
     assert command_names == {
         "up",
+        "promote",
+        "rollback",
+        "history",
         "status",
         "ls",
         "show",
@@ -425,3 +429,84 @@ def test_the_resolved_credential_is_carried_into_the_submission(
     # Then
     assert result.exit_code == 0, result.stdout
     assert job_client.requests[0].partner_credential == credential
+
+
+@pytest.mark.parametrize(
+    ("partner_env", "partner_key"),
+    [(None, "comfyui-team"), ("comfyui-partner-billing", "comfyui-partner-billing")],
+    ids=["workspace-key", "explicit-partner-key-kept"],
+)
+def test_a_key_is_sent_to_the_endpoint_and_to_partner_nodes_in_place_of_a_sign_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, partner_env: str | None, partner_key: str
+) -> None:
+    """Given a control-plane client holding a workspace API key, When a workflow runs,
+    Then the deployment's endpoint and its partner nodes both receive that key.
+
+    platform-gateway reads a key only as a Bearer value, and the job runs in the
+    key's workspace, so a sign-in's token must not reach partner nodes beside it.
+    """
+    # Given
+    workflow = write_partner_workflow(tmp_path / "workflow.json")
+    job_client = FakeJobClient(job())
+    control = FakeControl("https://dep-id.run.comfy.app")
+    control.target = Target(kind="cloud", base_url="https://control.test", path_prefix="/v1", api_key="comfyui-team")
+    install_run(monkeypatch, control, job_client)
+    endpoint_credentials: list[str] = []
+    monkeypatch.setattr(
+        deploy_run, "DeployJobClient", lambda _origin, credential: endpoint_credentials.append(credential) or job_client
+    )
+    # The sign-in is never consulted, so its refresh never runs.
+    monkeypatch.setattr(deploy_run, "resolve_partner_credential", lambda: pytest.fail("sign-in consulted"))
+    if partner_env is None:
+        monkeypatch.delenv("COMFY_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("COMFY_API_KEY", partner_env)
+
+    # When
+    result = invoke(workflow, "--deployment", "dep-id", "--no-wait")
+
+    # Then
+    assert result.exit_code == 0, result.stdout
+    assert (endpoint_credentials, job_client.requests[0].partner_credential) == (
+        ["comfyui-team"],
+        ("api_key_comfy_org", partner_key),
+    )
+
+
+# --- a workflow over the size limit ---------------------------------------------
+
+
+def test_an_oversize_workflow_is_refused_after_its_assets_are_uploaded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The size is measured on the request that carries asset ids, so the files go first.
+
+    The refusal must not claim nothing was sent: the local file is already an
+    asset. Only the job request is withheld.
+    """
+    # Given
+    workflow = write_workflow(tmp_path / "workflow.json", local_asset=True)
+    nodes = json.loads(workflow.read_text(encoding="utf-8"))
+    nodes["2"] = {"class_type": "PreviewAny", "inputs": {"source": "x" * 10_100_000}}
+    workflow.write_text(json.dumps(nodes), encoding="utf-8")
+    asset_client = FakeAssetClient(AssetResolveResult({"id": "asset-1"}, uploaded=1, deduped=0, bytes=5))
+    job_requests: list[object] = []
+    monkeypatch.setattr(
+        deploy_run, "_command_clients", lambda: (FakeBuilder(), FakeControl("https://dep-id.run.comfy.app"))
+    )
+    monkeypatch.setattr(deploy_run, "DeployAssetClient", lambda *_args, **_kwargs: asset_client)
+    monkeypatch.setattr(deploy_run, "resolve_partner_credential", lambda: None)
+    monkeypatch.setattr(deploy_jobs, "request_json", lambda *args, **_kwargs: job_requests.append(args))
+
+    # When
+    result = invoke(workflow, str(tmp_path), "--deployment", "dep-id", "--no-wait")
+
+    # Then
+    error = envelope_error(result)
+    assert error["code"] == "deploy_workflow_too_large"
+    assert len(asset_client.requests) == 1
+    assert job_requests == []
+    message = str(error["message"])
+    assert "nothing was sent" not in message
+    assert "the job was not submitted, so no job was created" in message
