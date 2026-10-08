@@ -90,8 +90,13 @@ def handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | N
                 details={"status": e.code},
             )
         else:
-            renderer.error(
-                code="cloud_http_error",
+            from comfy_cli.command._cloud_errors import emit_status_error, retry_after_from_headers
+
+            emit_status_error(
+                renderer,
+                status=e.code,
+                retry_after=retry_after_from_headers(getattr(e, "headers", None)),
+                operation=operation,
                 message=f"HTTP {e.code} during {operation}",
                 hint="check `details.body` for the server's message",
                 details={"status": e.code, "body": body, "operation": operation},

@@ -17,35 +17,355 @@ history.
 
 ### Added
 
+- `comfy deploy rollback [--to vN]` moves a deployment back to an earlier
+  release, keeping its id and URL, and follows the move as `up` does; `comfy
+  deploy history` lists the releases a deployment ran, newest first, with what
+  moved it and who. Both need deployment updates on.
+- `comfy deploy promote --json` and `comfy deploy rollback --json` say
+  `waiting: true` while the move waits for its release's copy, so a
+  `--no-watch` caller can tell a waiting move from one that landed.
+- `comfy deploy promote SOURCE TARGET` moves TARGET onto the release SOURCE
+  serves, keeping TARGET's id and URL, and follows the move as `up` does. It
+  needs deployment updates on (`deploy_updates_unavailable` otherwise).
+- `comfy deploy up` moves the Build's existing deployment onto the new release
+  in a workspace with deployment updates on, keeping its id and URL, and follows
+  the move until it lands (`deploy_update_failed` when it does not). It refuses
+  to pick between two or more deployments (`deploy_ambiguous_deployment`), and
+  `--create` adds a separate deployment instead. Outside that rollout `up`
+  behaves as before.
+
+- `comfy deploy status` shows the update a deployment waits on (`update`: the
+  release, its copy's status, since, and kind) and, where the workspace has
+  deployment updates, says `comfy deploy up` moves the deployment keeping its
+  URL. `comfy deploy events --release v5` keeps one release's events, and
+  `comfy deploy ls` gives each row of a Build its `releaseVersion`.
+- `--select` takes gjson row queries: `items.#(<cond>)#` keeps the elements
+  that match and `items.#(<cond>)` is the first one, with `==` `!=` `<` `<=`
+  `>` `>=` `%` (glob) `!%` against a quoted string, number, `true`, `false` or
+  `null` (e.g. `slots.#(node_type=="CLIPTextEncode")#.address`,
+  `inputs.#(name=="lora_name").choices.#(%"*detail*")#`). The corpus in
+  `tests/data/selector_conformance.json` pins the grammar for other
+  implementations.
+- `comfy workflow connect` wires two nodes inside the same subgraph
+  (`connect 70/2005.0 70/2011.text`) and emits a `connect` op carrying the
+  instance `path`. A link that crosses the subgraph boundary is still refused,
+  and so is a link inside a definition shared by several instances.
+- `comfy workflow validate` reports broken link rows of a canvas workflow as
+  `link_slot_out_of_range` / `link_source_missing` errors, each with the
+  `connect` that repairs it. The UI→API lowering used to drop such a row and
+  validate said the graph was valid.
+- `comfy workflow validate --full-options` and `comfy nodes show --all-choices`
+  (also on `nodes search --expand-top`) list a long option list in full.
+
+### Changed
+
+- Inside the rollout of deployment updates, `comfy deploy up` refuses a Build
+  with two or more running deployments until `--deployment` names one, and
+  refuses `--min`/`--max` with `--no-watch` on a move, since bounds apply only
+  once the move lands.
+
+- **Breaking:** `comfy build push` in a workspace at its build limit now fails
+  with its own `build_limit` code instead of `build_builder_error`, carrying the
+  builder's message and a hint to delete a build or ask a teammate to. The limit
+  counts every member's builds, which `comfy build ls` does not list outside the
+  enterprise plan, and its help now says so.
+- An `unknown_enum_value` finding (validate, set-widget, edit batches) names the
+  closest options in `suggestions` (at most 5) with `option_count`, and carries
+  `valid_options` only when the list has 12 options or fewer. It used to carry
+  the whole folder listing twice; one validate in production came to ~340K
+  tokens.
+- `comfy nodes show` and `nodes search --expand-top` cut a combo input's
+  `choices` longer than 20 to the first 20, with `choices_total`,
+  `choices_truncated` and a `choices_note` naming the `--select` that filters
+  the full list. `--select` still projects the full schema.
+- `comfy workflow print` renders a graph with broken links instead of refusing
+  it: the input prints `None`, the line is marked `BROKEN`, and a warning names
+  the `connect` that repairs it. A stale row whose value already reaches the
+  node through another link is reported as a leftover.
+
+### Fixed
+
+- `templates fetch` checks the template's model files when an offline catalog
+  is set (`--input` or `COMFY_OBJECT_INFO_FILE`). A file the server lacks is
+  replaced by the one installed file that is the same model in another
+  precision (`*_int8_convrot` → `*_fp16`) and reported under
+  `data.model_substitutions`; a file with no such variant is left as is and
+  reported under `data.unavailable_models` with its closest options.
+- `validate` names that same-model variant on an `unknown_enum_value` model
+  finding. A `CustomCombo` choice (options the frontend defines) is no longer
+  `no_options_available`, and a BOOLEAN saved as the string `"True"` (which
+  the server reads as true) is no longer a shape error.
+- `connect`, `delete-node` and `set-node-field` accept a template node id
+  (`24`) on a canvas whose ids were remapped by `insert_workflow`
+  (`insert:…:root:node:24`), as `set-widget` already did.
+- `connect` reaches a dynamic combo's link sub-input (`speech.audio` once
+  `speech` is `audio`); with another option selected it names the value to set.
+- A number or JSON value written to a STRING widget is written as its text,
+  with a `normalized_value` warning. A value written to a link-only input
+  (`forceInput`) says to connect a source and names a primitive node for it.
+- A cloud request the account's plan does not allow (free generations used up,
+  subscription required, a partner node or model that needs a paid plan) is now
+  `cloud_payment_required`, carrying the server's message in `message` and its
+  refusal type in `details.reason`. An HTTP 402 was `cloud_http_error`, whose
+  hint said to check the workflow; the same refusal sent as a typed HTTP 429
+  (how the cloud sends it today) was `cloud_rate_limited`, whose "wait, then
+  retry" hint could never succeed. A full queue (`QUEUE_LIMIT`) and a
+  temporarily unavailable free tier stay `cloud_rate_limited`.
+- `comfy skills install --skill <path>` and `comfy skills validate` refuse a
+  skill whose frontmatter `name:` is one the CLI ships (`skill_invalid`),
+  whether the path is a `SKILL.md` file or a folder carrying that name. Such a
+  path used to overwrite the shipped skill, `comfy` included, in Claude Code,
+  Cursor and `AGENTS.md`; a capitalised `Comfy` did the same on macOS and
+  Windows. An unedited copy of this release's shipped text still installs by
+  path, and `comfy skills uninstall --skill <path>` is unchanged. Where a path
+  install already replaced a shipped skill, a plain `comfy skills install`
+  writes the shipped Claude Code and Cursor files back; a `Comfy` block such
+  an install added to `AGENTS.md` stays until removed by hand.
+- `workflow print`, `slots`, `validate` and the edit commands no longer hang on
+  a subgraph whose definition is named after the node class it wraps (gallery
+  templates `video_wanmove_480p`, `video_wanmove_480p_hallucination` and
+  `templates_rob_wan_ati_motion_control` wrap `WanMoveTrackToVideo` in a
+  subgraph of that name). The definition-name fallback resolved the interior
+  node to its own definition, and the nested-promotion walk recursed into it,
+  fanning out to its depth cap; it now treats that node as the class it is, and
+  the walk stops at any definition already on its stack.
+- `validate` and `set-widget` accept a number for a float COMBO option it
+  equals: `1` for `scale_factor`'s `1.0`. A frontend-saved workflow writes
+  `1.0` as `1`, and the server compares numerically, so this was refused as
+  `unknown_enum_value` although it runs.
+- `set-widget` (and `apply` set_widget ops) write an aspect-ratio option whose
+  `W:H` ratio the value names when exactly one option has it: `'16:9 (Landscape)'`
+  or `'16:9'` becomes `'16:9 (Widescreen)'`, with a `normalized_value` warning.
+  The ratio is the value and the parenthetical a label; any other value keeps
+  the `unknown_enum_value` refusal and its `best_match` hint.
+
+## [1.22.0] - 2026-09-30
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.22.0) · 15 commits since v1.21.0. Breaking changes are marked **Breaking** under Changed.
+
+### Added
+
+- `comfy build` and `comfy deploy` run with only a workspace API key, so a CI
+  job needs no sign-in: set `COMFY_CLOUD_API_KEY` and each command sends the key
+  in `X-API-Key`, and `comfy deploy run` sends it to the deployment and, unless
+  `COMFY_API_KEY` names a partner key, to its partner nodes. A key saved with
+  `comfy cloud set-key` is used only when nobody is signed in.
+- `comfy workflow set-node-field FILE NODE_ID FIELD VALUE` (or `--clear`) writes
+  or clears one durable node field — `title`, `mode`, `flags.collapsed` or
+  `flags.pinned` — emitting a `set_node_field` op with one LWW register per
+  `(node, field)`, so it never clobbers a concurrent widget write on the same
+  node the way an `add_node` upsert would. **Proposed, pending ratification**:
+  `set_node_field` is a candidate addition to `docs/op-vocabulary-v1.md` (§1.8 /
+  amendment v1.6), mirroring comfy-multi-player#235's merged CRDT op of the
+  same name (superseding this project's earlier, title-only `set_title`
+  proposal, which never shipped in a release).
+
+### Changed
+
+- **Breaking:** `comfy build` and `comfy deploy` send `COMFY_CLOUD_API_KEY`, when it is set, in
+  place of a stored sign-in, so a signed-in shell that exports it builds and
+  deploys in the key's workspace. `comfy cloud` commands still prefer the sign-in,
+  and a Cloud JWT in `COMFY_BUILDER_TOKEN` still comes first for `comfy build`.
+- **Breaking:** a definition the builder refuses now arrives as `build_definition_invalid`, its
+  reasons one per line and in `details.invalid` when the builder lists them (else
+  its message), instead of `build_builder_error`
+  with the code as the message, the reasons in `details.body` and a hint to
+  re-run the cut. A file the definition names that never reached the builder
+  (`blob:<id>`, a model's file or a node's zip) gets a hint to delete that
+  `blobId` and push again, pointing an entry that had only the `blobId` at the
+  file (`source: local`, `localPath`) or another source it can take (a model's
+  `sourceUri`, a node's `registryVersion` or `repository`) first. A `--target`
+  the cut refuses (`targets[<n>]`, a repeated or unbuildable os/gpu pair) says the
+  builder refused the release, not the definition, and points at the `--target`
+  values and `comfy build refs build-targets`; a refusal of several kinds names
+  each fix. Under `push --release` a refused `models[<n>]` also names its model,
+  in the message and as `model` in `details.invalid`. A list too long for the
+  message stops on a whole line and ends `... and N more`, pointing at `--json`
+  (or `details.invalid`, which holds every one).
+- **Breaking:** a 429 from Cloud to `comfy run`, `comfy jobs`, `comfy workflow` or
+  `comfy assets library` now arrives as `cloud_rate_limited` instead of
+  `cloud_http_error`, and the CLI no longer retries a request that is not a read,
+  such as a job submit, on a 429, so it fails at once.
+- **Breaking:** a deploy watch that loses the deploy API ends with
+  `deploy_watch_lost` and exit code 75 instead of `deploy_server_error` and exit
+  1, since the deployment may still be coming up; the hint names the command
+  that re-attaches.
+- `comfy deploy status` prints a deployment's workers as ready, busy and
+  starting, the same words on every GPU provider, in place of RunPod's own six
+  states. An idle scale-to-zero deployment no longer reads as throttled. The
+  `--json` output adds `serving.capacity`; `serving.workers` stays while the
+  deploy service still sends it and is deprecated.
+- `comfy build validate` and `comfy build push` refuse model entries the builder's
+  release would refuse: a `type` that is not a model folder, an unsafe `filename`,
+  a link with no file extension and no `filename`, a malformed `sha256`. Every
+  such entry is named at once, with the model it is about, under
+  `build_spec_invalid` (`details.invalid` in JSON), and `push` refuses before
+  uploading anything. A case variant of a folder (`Loras` for `loras`) needs the
+  builder's list, so `push` and `validate --remote` read it and offline `validate`
+  and a `--dry-run` push do not. When a spec with models was not checked for a
+  folder's case (offline `validate`, a `--dry-run` push, a list that could not be
+  read or named no folder), the command prints a line saying so, and its `--json`
+  payload carries `folder_case_checked: false` (`true` when the case was checked;
+  absent for a spec with no models).
+- The local model rules trim a value as the builder does (Go's
+  `strings.TrimSpace`, which keeps `\x1c`-`\x1f`), so a `sha256` or `filename`
+  holding one is refused locally as the builder would refuse it. A refused entry
+  named by its link is named without the link's query, fragment and userinfo,
+  where a signed link or a Civitai `?token=` carries its credential.
+- `comfy build push` checks the link a local model keeps (its file still matches
+  its `sha256`, so it is not uploaded) by the same rules as any other link,
+  before anything uploads. The link is checked after its file is hashed, so a bad
+  kept link is reported once the spec's other problems are fixed, not with them.
+
+### Fixed
+
+- `comfy deploy up` and `comfy deploy status --watch` no longer end the watch on
+  one 503 or dropped connection from the deploy API, as happened each time it
+  rolled out a new version, for a deployment that went on to ready. The watch
+  retries a 5xx or a failed connection for about a minute, saying once that it is
+  retrying; a 4xx still ends it at once.
+- `comfy deploy run` refuses a workflow bigger than the 10 MB a deployment
+  accepts before sending the job request, with `deploy_workflow_too_large`,
+  whose message names the request's size and the limit
+  (`details.request_bytes`, `details.limit_bytes`). Files the workflow names
+  are uploaded as assets before the size is measured, so they may already be
+  uploaded; no job is created. It used to start sending, lose the connection when the
+  deployment refused, and report `deploy_job_submit_unknown` ("the job may
+  exist, do not resubmit") for a request that created nothing. A 413 from the
+  deployment now maps to the same code instead of `deploy_bad_request`.
+- `deploy_job_submit_unknown` no longer says the API has no job list. It says
+  the CLI cannot look the job up, and `details.idempotency_key` carries the key
+  the submission used.
+- `comfy assets library ensure` accepts a hash written as a file name,
+  `<hex>.<ext>`, by sending it as `blake3:<hex>`, and a mangled hash it cannot
+  find names up to three stored hashes it may be a copy of.
+- `comfy generate` names the model to retry with when it refuses a workflow's
+  model (`emit_workflow_unsupported_model`).
+- `comfy workflow add-node Note` and a widget edit on a Note point at
+  `comfy workflow insert-workflow` instead of ending with no next step.
+- Converting a workflow to an API prompt reserves a seed's companion slot only
+  where the ComfyUI frontend adds one, so widget values line up with the
+  frontend's.
+
+## [1.21.0] - 2026-09-24
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.21.0) · 50 commits since v1.20.0. Breaking changes are marked **Breaking** under Changed.
+
+### Added
+
+- `comfy build push` says how far along an upload is. It prints the plan before
+  the first byte ("3 files, 53.0 GB to upload, 2 already held"), then bytes sent,
+  rate and time left while each file moves. Under `--json-stream` the same numbers
+  are `upload_plan` / `upload_progress` / `upload_complete` events on stdout; under
+  `--json` they go to stderr so stdout stays the single envelope. The rate is
+  measured over the last ten seconds on a timer, so a stalled upload reports a
+  falling rate instead of going quiet. Schema: `build_push_event.json`.
+- `comfy deploy up --watch` and `comfy deploy status` show where a deployment that
+  is coming up has got to: the step, and while models are copied onto its storage
+  the model, bytes done of the total, rate and time left ("Staging models: model 1
+  of 2 sd_xl_base_1.0.safetensors, 3.5 GB of 7.3 GB, 44.2 MB/s, 1m 25s left"). The
+  numbers are the deploy service's own `progress` object, which `status --json`
+  and `up --json` now carry while the status is `provisioning` or `starting` and
+  omit otherwise. Under `--watch`, `--json-stream` emits a `deploy_progress` event
+  per new sample on stdout and `--json` puts the same lines on stderr. Ctrl-C
+  during `--watch` stops the watching and nothing else, and prints the command
+  that re-attaches. A service that sends no `progress` prints what it printed
+  before. Schema: `deploy_progress_event.json`.
+- `comfy deploy up` says roughly how long a new deployment will take to come up
+  before it waits: a range until ready and how many GB of models it has to
+  download, from the deploy service's estimate. Under `--json` it is `estimate`
+  in the output. A service that gives no estimate, or has it switched off,
+  changes nothing and prints nothing.
 - `comfy build release delete RELEASE` deletes the named release, freeing the slot
   it held against the workspace's release limit. It confirms first (`--yes` skips
   the prompt, `build_release_delete_needs_confirm` refuses a caller that cannot
   answer one), and repeating the same id is safe: the builder answers success
   again for a release already deleted.
-- Three builder refusals an agent can act on now arrive under their own error
-  codes instead of the one `build_builder_error` envelope: `build_release_limit`
-  (the workspace holds as many releases as its limit allows),
-  `build_release_in_use` and `build_in_use` (a deployment still references the
-  release, or one of the build's releases). The builder's message is carried
-  whole up to 8 KiB, so the blocking deployment ids it names are no longer lost
-  to the 1000-byte cap on the raw body.
+- `comfy knowledge pick CAPABILITY --check-local` checks each `oss` pick's
+  template against the local ComfyUI's model folders, the same check
+  `comfy templates check` runs. A pick whose model files are missing gets
+  `available_locally: false`, an `unavailable_reason` and a `missing_models`
+  count, and a template absent from a fresh gallery index is flagged too. A pick
+  that could not be checked carries its own `local_check` naming why. The
+  payload's `local_check` is `ok` when the check ran. When the server is down, a
+  model folder listing is over the size cap, or the gallery cannot load, it
+  carries that error code and no pick is marked. The flag is off by default
+  because it fetches uncached template workflows and calls the local server.
+
+### Changed
+
+- **Breaking:** `comfy deploy up` now follows the deployment until it settles, instead of
+  returning as soon as the deploy service accepts it. A script that relied on
+  `up` returning at once passes `--no-watch`.
+- **Breaking:** a watch (`up`, or `status --watch`) now stops at `unhealthy` instead of
+  waiting for `ready`: the status only ever follows `ready`, so the wait could
+  last as long as the endpoint stayed degraded, with nothing printed. `up` reports
+  an unhealthy deployment as not ok (`deploy_status_terminal`, exit 1), with
+  or without the watch, since it is billing without serving; `status` still
+  reports it as recoverable.
+- **Breaking:** `comfy build push --release` cuts no release while a save warning
+  says a deployment could not download a model link: the build is saved, and the
+  push exits 1 with `build_release_held` where it used to cut regardless.
+  `--release-despite-warnings` cuts anyway. Every warning a save returns is now
+  printed.
+- **Breaking:** three builder refusals an agent can act on now arrive under their
+  own error codes instead of the one `build_builder_error` envelope:
+  `build_release_limit` (the workspace holds as many releases as its limit
+  allows), `build_release_in_use` and `build_in_use` (a deployment still
+  references the release, or one of the build's releases). A script that matched
+  `build_builder_error` for these now gets the new codes. The builder's message
+  is carried whole up to 8 KiB, so the blocking deployment ids it names are no
+  longer lost to the 1000-byte cap on the raw body.
+- **Breaking:** `comfy deploy refs compute` and the `comfy deploy up` pickers now
+  list every location the deploy service sells in, not only its datacenters, so
+  B200, H100 and H200, which are sold only under `us`, can be picked. The table
+  gains `level` and `parent` columns, the region picker names each location's
+  level, and `refs compute --json` now carries the wider rows too, so a script
+  reading its first row gets `anywhere` rather than a datacenter. The region
+  picker lists the broadest location first, so accepting its first choice now
+  creates at `anywhere`.
+- **Breaking:** a wait on a build or a deployment (`comfy build release create
+  --watch`, `comfy build release logs --follow`, `comfy deploy up --watch`,
+  `comfy deploy status --watch`) no longer fails once the sign-in token it
+  started with expires. The builder and deploy clients now refresh the stored
+  sign-in after a 401 and retry the request once; a token passed through
+  `COMFY_BUILDER_TOKEN` is never swapped. A build command the builder still
+  refuses now reports `build_not_signed_in` with the `comfy cloud login` hint
+  rather than a bare `build_builder_error`, so a script that matched
+  `build_builder_error` for it now gets `build_not_signed_in`.
 
 ### Fixed
 
+- `comfy build push --dry-run` prints what it would upload, and how much the
+  spec already records as uploaded, followed by a line saying nothing was sent,
+  instead of exiting with no output at all. `--json` output is unchanged.
+- `comfy deploy up` now warns about each deployment of an older release of the
+  Build that is still running and billing, with the
+  `comfy deploy stop --deployment <id>` to run. `up` on a new release creates a
+  new deployment and leaves the old one running; the JSON `supersedes` array
+  already listed it, but the terminal said nothing. Under `--json` the warning
+  goes to stderr.
+- `comfy cloud status` shows the workspace balance at its real size. The balance
+  endpoint sends cents in fields named `*_micros`, and the CLI divided them by
+  1,000,000, so every balance and credit figure was 10,000 times too small.
+- `insert_workflow` (`comfy workflow insert-workflow`) now rebases the inserted
+  template beside the target graph's existing nodes instead of leaving its
+  original absolute `pos` values untouched, which could land it thousands of
+  pixels away as a disconnected cluster on canvas. The whole block moves by a
+  single delta, so the template's own internal relative layout is preserved.
+- `comfy templates check` returns an error envelope instead of a traceback when
+  the gallery or workflow fetch gets a non-200 status or an over-cap body, or
+  when a model folder listing is over the size cap. It also percent-encodes the
+  model folder name it asks the local server for, accepts a folder name with
+  `..` inside it, and refreshes a stale gallery index before looking up the name.
 - A failed blob upload during `comfy build push` no longer writes the presigned
   PUT URL's query string to stdout, into the JSON envelope, or into a CI log.
   Both a rejected upload and a dropped connection quote the URL they were talking
   to, and for a presigned GCS PUT that query string is a live credential
   (`X-Goog-Credential`, `X-Goog-Signature`). The host and path are kept, so the
   failure still says what it failed to reach.
-- `comfy install --fast-deps --nvidia` no longer installs a torch that its
-  torchvision was not built against, which made ComfyUI fail to import with
-  `RuntimeError: operator torchvision::nms does not exist`. The GPU override
-  named `torch` outright, and a uv `--override` replaces every requirement for
-  the package it names, so torchvision's `torch==<x.y.z>` pin was discarded and
-  a same-day torch release resolved ahead of its matching torchvision.
 - `comfy … | head` exits 0 again, and `--json` keeps stderr clean, on typer
-  >= 0.24. typer now runs on a vendored copy of click, so the broken-pipe guard
+  >= 0.26. typer now runs on a vendored copy of click, so the broken-pipe guard
   no longer recognized the stdout wrapper click installs on EPIPE and reported a
   genuine failure instead. The wrapper is now matched by class name and owning
   package, which also stops the deprecated `click.utils.PacifyFlushWrapper`
@@ -53,6 +373,110 @@ history.
 - `comfy --help-json` lists `choices` for enum options again, for the same
   reason: the vendored param types are not instances of the installed click's
   `Choice`, so the choice list was silently dropped.
+- `comfy deploy status` shows why a deployment failed and how many workers it
+  has. It read the deployment list, whose rows leave out `error` and `serving`,
+  so both were always empty; it now reads the chosen deployment in full, prints
+  the failure reason in the terminal rather than only under `--json`, and says
+  how old the worker-count sample is beside the counts. `comfy deploy logs` on a
+  deployment with no log yet says so, says the log arrives when the health check
+  finishes, and points at `comfy deploy events`.
+
+## [1.20.0] - 2026-09-01
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.20.0) · 42 commits since v1.19.0. Breaking changes are marked **Breaking** under Changed.
+
+### Added
+
+- `comfy build init --from-workflow <workflow.json>` and `comfy build update
+  --from-workflow <workflow.json>` read a ComfyUI workflow, in the editing
+  format or the API export, into the local spec.
+- `comfy build init --base-image <id>` and `comfy build update --base-image
+  <id>` choose the curated base image a build is built on — the CUDA, Python
+  and torch runtime — instead of leaving it to the catalog default.
+  `comfy build refs base-images` lists the ids.
+- `comfy build pull` names what it would change before changing it: the same
+  definition diff `comfy build update` prints, echoed in the confirmation and
+  carried in the `--json` payload as `summary` and `diff`. A fetched Build that
+  omits `models` or `customNodes` drops the local entries, and the diff is where
+  that is now visible. `comfy build pull --dry-run` prints the diff and writes
+  nothing — with `--yes` the payload only arrives after the write, so this is
+  how a non-interactive caller reads the diff before deciding.
+- `comfy deploy` — run a Build release as a serverless endpoint: `up`, `status`,
+  `ls`, `show`, `logs`, `events`, `scale`, `stop`, `start`, `delete`, `run`, and
+  `refs compute`.
+
+### Changed
+
+- **Breaking:** `comfy build --json` payloads say `buildId`, `releaseId`,
+  `builds` and `releases`, and nothing else: the retired `distributionId`,
+  `versionId`, `distributions` and `versions` keys are gone from every payload,
+  every error `details`, and every shipped schema rather than being carried
+  alongside. Read the builder's own spelling.
+- **Breaking:** `import comfy_cli.distribution_api` no longer works. The
+  deprecation shim is removed together with the surface it shimmed; import
+  `comfy_cli.builder_api`.
+- **Breaking:** the `comfy_cli.builder_api` methods that still said version now
+  say release, with no aliases left behind: `cut_version` → `create_release`,
+  `get_version` → `get_release`, `get_version_logs` → `get_release_logs`, and
+  `get_version_manifest` → `get_release_manifest`.
+- **Breaking:** `comfy build` is restructured around a local `comfy-build.yaml`
+  spec — `init`, `push`, `pull`, `status`, `ls`, `show`, `validate`, `update`,
+  `delete`, plus `release`, `refs`, and `blob` subgroups. The `comfy distribution`
+  alias and the `scan` / `create` / `version` / `artifact download` /
+  `from-snapshot` / `from-workflow` commands it fronted are removed.
+  `from-workflow` returns as the `comfy build init --from-workflow` and
+  `comfy build update --from-workflow` options described under Added.
+- **Breaking:** the read verbs are renamed, with no aliases left behind:
+  `comfy build list` → `comfy build ls`, `comfy build get` → `comfy build show`,
+  and `comfy build blob list` → `comfy build blob ls`. The reference lookups
+  (`resolve`, `base-images`, `build-targets`, `model-dirs`) move under
+  `comfy build refs`, and `comfy build blob upload` is removed — `comfy build push`
+  uploads local models and nodes from the spec.
+- **Breaking:** the `build_upload_unavailable` error code is retired. It was only
+  ever raised by the removed `create` path, so nothing emits it and it no longer
+  appears in `comfy discover`. This is the one exception to the append-only rule
+  in `comfy_cli/schemas/error_codes.md`: the code is retired, never reused.
+- **Breaking:** a `--json` run of `comfy build` or `comfy deploy` is never
+  prompted, even from a terminal. A confirmation or missing required option now
+  returns the matching refusal envelope — `*_needs_confirm`, `*_missing_input`,
+  or `build_id_unknown` where a Build id could not be resolved — and exits 1,
+  where it previously opened a TUI prompt on the same stream the envelope is
+  written to. Pass `--yes` or the option itself to proceed non-interactively.
+  Other command families still prompt under `--json`; they do not route through
+  `comfy_cli.interaction`, and `--skip-prompt` remains the way to suppress them.
+- **Breaking:** the global `--skip-prompt` now applies to `comfy build delete`,
+  which previously ignored it. Combined with a non-agentic caller it accepts the
+  delete confirmation, matching `build pull` and `build update`.
+- **Breaking:** `comfy generate <model>`, `comfy generate resume` and sync-mode
+  creates now emit the `envelope/1` contract in `--output json` / `ndjson` modes
+  instead of a bare partner blob: the partner payload is wrapped as
+  `data.result` (verbatim) with `data.saved` listing `--download` artifacts, so
+  a script that read the payload at the top level reads `data.result`. The
+  payload schema is registered as `comfy generate` → `generate_result.json` so
+  `comfy discover` advertises it. Pretty mode with a tail `--json` keeps the
+  legacy raw blob.
+- **Breaking:** packaging a local custom node is all-or-nothing. Anything under
+  `custom_nodes/<node>/` that cannot be read now fails `init` / `update` /
+  `status` / `push` / `pull` with one `build_spec_invalid` envelope naming the
+  node directory. Previously the two failure modes diverged and neither was
+  usable: an unreadable **directory** was silently dropped from the archive
+  whose digest becomes the node's committed `localDigest`, while an unreadable
+  **file** escaped as an uncaught `PermissionError` — a traceback with no
+  envelope at all, even under `--json`.
+- Symlinks inside a custom node are still excluded from its archive, but are no
+  longer excluded in silence: `init`, `update`, `push` and `pull` name them on
+  stderr and carry them in a `skipped_symlinks` payload key, including on a
+  `--dry-run` that writes nothing. `status` rescans but publishes no definition
+  to point into, so for it the stderr warning is the whole report.
+
+### Fixed
+
+- `comfy install --fast-deps --nvidia` no longer installs a torch that its
+  torchvision was not built against, which made ComfyUI fail to import with
+  `RuntimeError: operator torchvision::nms does not exist`. The GPU override
+  named `torch` outright, and a uv `--override` replaces every requirement for
+  the package it names, so torchvision's `torch==<x.y.z>` pin was discarded and
+  a same-day torch release resolved ahead of its matching torchvision.
 - Promoted subgraph widgets are edited where the frontend reads them. The
   frontend (ADR 0009) keeps a promoted widget's value on the HOST instance
   (`widgets_values` positional over the widget-backed subgraph inputs) and
@@ -118,116 +542,6 @@ history.
   (`createNodeMap(LoadImage): widgets_values has 2 entries but widget_order
   names only 1`) and `set-widget`/conversion read the values after such a
   slot one position off.
-- `comfy generate <model>`, `comfy generate resume` and sync-mode creates now
-  emit the `envelope/1` contract in `--output json` / `ndjson` modes instead
-  of a bare partner blob: the partner payload is wrapped as `data.result`
-  (verbatim) with `data.saved` listing `--download` artifacts, and the
-  payload schema is registered as `comfy generate` → `generate_result.json`
-  so `comfy discover` advertises it. Pretty mode with a tail `--json` keeps
-  the legacy raw blob.
-
-### Added
-
-- `comfy workflow add-node` and an `add_node` op in `comfy workflow apply`
-  refuse a class the catalog marks deprecated (`node_deprecated`), naming the
-  live class with the same display name when there is one. Pass
-  `--allow-deprecated` (or `"allow_deprecated": true` on the op) to add it
-  anyway.
-- `comfy nodes search` and `comfy nodes ls` hide deprecated classes by
-  default; `--include-deprecated` shows them.
-
-- `comfy knowledge pick` attaches each pick's model `fits` block (VRAM per
-  variant, credit rate, max refs) when the bundle carries one, so a size or
-  price constraint can be checked against a number rather than the caveat text.
-- `comfy-build`, the skill for building a custom ComfyUI environment on the
-  developer platform, is now bundled with the CLI. `comfy skills show
-  comfy-build` works, and an argument-free `comfy skills install` writes it on a
-  machine with no network.
-- `comfy build init --from-workflow <workflow.json>` and `comfy build update
-  --from-workflow <workflow.json>` read a ComfyUI workflow, in the editing
-  format or the API export, into the local spec.
-- `comfy build init --base-image <id>` and `comfy build update --base-image
-  <id>` choose the curated base image a build is built on — the CUDA, Python
-  and torch runtime — instead of leaving it to the catalog default.
-  `comfy build refs base-images` lists the ids.
-- A workflow import prints its full report: the node classes nothing provides,
-  the closest pack the registry named for each one, every model the graph loads
-  (a workflow import carries none of them), the classes served by a partner API,
-  and whether a ComfyUI version still has to be pinned.
-- `comfy build pull` names what it would change before changing it: the same
-  definition diff `comfy build update` prints, echoed in the confirmation and
-  carried in the `--json` payload as `summary` and `diff`. A fetched Build that
-  omits `models` or `customNodes` drops the local entries, and the diff is where
-  that is now visible. `comfy build pull --dry-run` prints the diff and writes
-  nothing — with `--yes` the payload only arrives after the write, so this is
-  how a non-interactive caller reads the diff before deciding.
-- `CONTRIBUTING.md` (renamed from `DEV_README.md`) and this changelog.
-- `comfy deploy` — run a Build release as a serverless endpoint: `up`, `status`,
-  `ls`, `show`, `logs`, `events`, `scale`, `stop`, `start`, `delete`, `run`, and
-  `refs compute`.
-
-### Changed
-
-- `comfy skills install` no longer fetches any skill over the network.
-  `comfy-build` was the only one it fetched, and it now ships in the wheel and
-  is versioned with the CLI release, so the skill and the commands it describes
-  can no longer drift apart.
-- The builder client module is now `comfy_cli.builder_api` (was
-  `comfy_cli.distribution_api`), and its methods say build and release
-  (`create_build`, `create_release`, `list_releases`, ...), matching the
-  builder's public API. The `distribution-definition/0` schema id is unchanged.
-- **Breaking:** `comfy build --json` payloads say `buildId`, `releaseId`,
-  `builds` and `releases`, and nothing else: the retired `distributionId`,
-  `versionId`, `distributions` and `versions` keys are gone from every payload,
-  every error `details`, and every shipped schema rather than being carried
-  alongside. Read the builder's own spelling.
-- **Breaking:** `import comfy_cli.distribution_api` no longer works. The
-  deprecation shim is removed together with the surface it shimmed; import
-  `comfy_cli.builder_api`.
-- **Breaking:** `comfy build` is restructured around a local `comfy-build.yaml`
-  spec — `init`, `push`, `pull`, `status`, `ls`, `show`, `validate`, `update`,
-  `delete`, plus `release`, `refs`, and `blob` subgroups. The `comfy distribution`
-  alias and the `scan` / `create` / `version` / `artifact download` /
-  `from-snapshot` / `from-workflow` commands it fronted are removed.
-  `from-workflow` returns as the `comfy build init --from-workflow` and
-  `comfy build update --from-workflow` options described under Added.
-- **Breaking:** the read verbs are renamed, with no aliases left behind:
-  `comfy build list` → `comfy build ls`, `comfy build get` → `comfy build show`,
-  and `comfy build blob list` → `comfy build blob ls`. The reference lookups
-  (`resolve`, `base-images`, `build-targets`, `model-dirs`) move under
-  `comfy build refs`, and `comfy build blob upload` is removed — `comfy build push`
-  uploads local models and nodes from the spec.
-- **Breaking:** the `build_upload_unavailable` error code is retired. It was only
-  ever raised by the removed `create` path, so nothing emits it and it no longer
-  appears in `comfy discover`. This is the one exception to the append-only rule
-  in `comfy_cli/schemas/error_codes.md`: the code is retired, never reused.
-- **Breaking:** a `--json` run of `comfy build` or `comfy deploy` is never
-  prompted, even from a terminal. A confirmation or missing required option now
-  returns the matching refusal envelope — `*_needs_confirm`, `*_missing_input`,
-  or `build_id_unknown` where a Build id could not be resolved — and exits 1,
-  where it previously opened a TUI prompt on the same stream the envelope is
-  written to. Pass `--yes` or the option itself to proceed non-interactively.
-  Other command families still prompt under `--json`; they do not route through
-  `comfy_cli.interaction`, and `--skip-prompt` remains the way to suppress them.
-- **Breaking:** the global `--skip-prompt` now applies to `comfy build delete`,
-  which previously ignored it. Combined with a non-agentic caller it accepts the
-  delete confirmation, matching `build pull` and `build update`.
-- **Breaking:** packaging a local custom node is all-or-nothing. Anything under
-  `custom_nodes/<node>/` that cannot be read now fails `init` / `update` /
-  `status` / `push` / `pull` with one `build_spec_invalid` envelope naming the
-  node directory. Previously the two failure modes diverged and neither was
-  usable: an unreadable **directory** was silently dropped from the archive
-  whose digest becomes the node's committed `localDigest`, while an unreadable
-  **file** escaped as an uncaught `PermissionError` — a traceback with no
-  envelope at all, even under `--json`.
-- Symlinks inside a custom node are still excluded from its archive, but are no
-  longer excluded in silence: `init`, `update`, `push` and `pull` name them on
-  stderr and carry them in a `skipped_symlinks` payload key, including on a
-  `--dry-run` that writes nothing. `status` rescans but publishes no definition
-  to point into, so for it the stderr warning is the whole report.
-
-### Fixed
-
 - `comfy build ls` and `comfy build release ls` show every row. The builder
   pages both reads, and the client took only the first page, so a workspace or
   a build past one page lost its tail — silently, with no error and nothing in
@@ -261,6 +575,79 @@ history.
   opened and read later, when urllib got round to consuming it; both now come
   from a single open handle, and the body is bounded to exactly the declared
   size.
+
+## [1.19.0] - 2026-08-29
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.19.0) · 22 commits since v1.18.0. No breaking changes.
+
+### Added
+
+- `comfy workflow add-node` and an `add_node` op in `comfy workflow apply`
+  refuse a class the catalog marks deprecated (`node_deprecated`), naming the
+  live class with the same display name when there is one. Pass
+  `--allow-deprecated` (or `"allow_deprecated": true` on the op) to add it
+  anyway.
+- `comfy nodes search` and `comfy nodes ls` hide deprecated classes by
+  default; `--include-deprecated` shows them.
+- `comfy knowledge pick` attaches each pick's model `fits` block (VRAM per
+  variant, credit rate, max refs) when the bundle carries one, so a size or
+  price constraint can be checked against a number rather than the caveat text.
+- `comfy-build`, the skill for building a custom ComfyUI environment on the
+  developer platform, is now bundled with the CLI. `comfy skills show
+  comfy-build` works, and an argument-free `comfy skills install` writes it on a
+  machine with no network.
+- `comfy build from-workflow --from <workflow.json> --name <name>` creates a
+  build from a ComfyUI workflow, in the editing format or the API export.
+- A workflow import prints its full report: the node classes nothing provides,
+  the closest pack the registry named for each one, every model the graph loads
+  (a workflow import carries none of them), the classes served by a partner API,
+  and whether a ComfyUI version still has to be pinned.
+
+### Changed
+
+- `comfy skills install` no longer fetches any skill over the network.
+  `comfy-build` was the only one it fetched, and it now ships in the wheel and
+  is versioned with the CLI release, so the skill and the commands it describes
+  can no longer drift apart.
+- The builder client module is now `comfy_cli.builder_api` (was
+  `comfy_cli.distribution_api`), and its methods say build and release
+  (`create_build`, `list_releases`, ...), matching the builder's public API.
+  The `distribution-definition/0` schema id is unchanged.
+- `comfy build --json` payloads carry the builder's vocabulary: `buildId`,
+  `releaseId`, and `builds` and `releases` arrays. The retired `distributionId`,
+  `versionId`, `distributions` and `versions` keys are emitted alongside them
+  with identical values, so a pinned script keeps parsing. The shipped schema
+  filenames are unchanged.
+
+### Deprecated
+
+- `import comfy_cli.distribution_api` still works for one release and warns;
+  import `comfy_cli.builder_api` instead.
+- The `distributionId`, `versionId`, `distributions` and `versions` keys in
+  `comfy build` `--json` output will be removed after one release; read
+  `buildId`, `releaseId`, `builds` and `releases` instead. The six schemas that
+  declare them mark each retired key deprecated in its description.
+
+### Fixed
+
+- The shipped `build_from_snapshot.json` schema now requires the `build` key
+  the builder actually serves; it still required the pre-rename `distribution`
+  key, so a valid `comfy build from-snapshot --json` payload failed validation.
+
+## [1.18.0] - 2026-08-24
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.18.0) · 11 commits since v1.17.0. No breaking changes.
+
+This file recorded no entries for this release; the full notes list its
+pull requests.
+
+## [1.17.0] - 2026-08-22
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.17.0) · 33 commits since v1.16.0. No breaking changes.
+
+### Added
+
+- `CONTRIBUTING.md` (renamed from `DEV_README.md`) and this changelog.
 
 ## [1.16.0] - 2026-08-10
 
@@ -480,7 +867,13 @@ from the terminal. Additive and backward-compatible for interactive use.
 [releases page](https://github.com/Comfy-Org/comfy-cli/releases) with
 auto-generated pull-request lists.
 
-[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.16.0...HEAD
+[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.22.0...HEAD
+[1.22.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.21.0...v1.22.0
+[1.21.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.20.0...v1.21.0
+[1.20.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.19.0...v1.20.0
+[1.19.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.18.0...v1.19.0
+[1.18.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.17.0...v1.18.0
+[1.17.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.16.0...v1.17.0
 [1.16.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.15.0...v1.16.0
 [1.15.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.14.0...v1.15.0
 [1.14.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.13.0...v1.14.0

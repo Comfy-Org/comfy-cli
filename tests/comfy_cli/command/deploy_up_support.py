@@ -9,6 +9,7 @@ import typer
 
 from comfy_cli.command import deploy
 from comfy_cli.command.build_spec import JsonObject
+from comfy_cli.deploy_api_errors import DeployAPIError
 
 
 def option_names(*path: str) -> set[str]:
@@ -72,6 +73,10 @@ class FakeDeploy:
         tombstone_first_create: bool = False,
         tombstone_all_creates: bool = False,
         get_statuses: list[str] | None = None,
+        estimate: JsonObject | Exception | None = None,
+        move: str = "landed",
+        get_patches: list[JsonObject] | None = None,
+        strip_move_reply: bool = False,
     ) -> None:
         self.rows = {str(row["id"]): copy.deepcopy(row) for row in rows or []}
         self.generation_barrier = generation_barrier
@@ -83,6 +88,27 @@ class FakeDeploy:
         self.update_calls: list[str] = []
         self.start_calls: list[str] = []
         self.catalog_calls = 0
+        # A service too old to estimate answers 404, which is what an unset
+        # estimate plays, so a case not about the estimate never meets one.
+        self.estimate = estimate
+        self.estimate_calls: list[tuple[str, str, str]] = []
+        # How a move answers: "landed" moves at once (200), "pending" waits on
+        # the new release's copy (202), and "unchanged" answers 200 at the
+        # revision it was asked against.
+        self.move = move
+        # A reply the service's rollout check failed to answer: no revision
+        # and no pendingUpdate, though the move went through.
+        self.strip_move_reply = strip_move_reply
+        self.move_calls: list[tuple[str, int, str]] = []
+        self.promote_calls: list[tuple[str, int, str]] = []
+        self.rollback_calls: list[tuple[str, int, int | None]] = []
+        # Each deployment's revisions, oldest first, as the service lists them.
+        self.revisions: dict[str, list[JsonObject]] = {}
+        # Raised by the next worker-bounds edit, when set.
+        self.update_error: DeployAPIError | None = None
+        # Merged into the row on each read after a move, one per read.
+        self.get_patches = list(get_patches or [])
+        self.get_ids: list[str] = []
         self._keys: dict[str, str] = {}
         self._tombstoned_once = False
         self._local = threading.local()
@@ -127,7 +153,10 @@ class FakeDeploy:
 
     def get_deployment(self, deployment_id: str) -> JsonObject:
         with self._lock:
+            self.get_ids.append(deployment_id)
             row = self.rows[deployment_id]
+            if (self.move_calls or self.promote_calls or self.rollback_calls) and self.get_patches:
+                row.update(self.get_patches.pop(0))
             if self.get_statuses:
                 row["status"] = self.get_statuses.pop(0)
             return copy.deepcopy(row)
@@ -135,8 +164,90 @@ class FakeDeploy:
     def update_deployment(self, deployment_id: str, compute_config: JsonObject) -> JsonObject:
         with self._lock:
             self.update_calls.append(deployment_id)
+            if self.update_error is not None:
+                raise self.update_error
             self.rows[deployment_id]["computeConfig"] = copy.deepcopy(compute_config)
             return copy.deepcopy(self.rows[deployment_id])
+
+    def move_deployment(self, deployment_id: str, base_revision: int, release_id: str) -> JsonObject:
+        with self._lock:
+            self.move_calls.append((deployment_id, base_revision, release_id))
+            return self._apply_move(deployment_id, base_revision, release_id)
+
+    def promote_deployment(self, deployment_id: str, base_revision: int, from_deployment_id: str) -> JsonObject:
+        with self._lock:
+            self.promote_calls.append((deployment_id, base_revision, from_deployment_id))
+            release_id = self.rows[from_deployment_id]["releaseId"]
+            reply = self._apply_move(deployment_id, base_revision, release_id)
+            if self.strip_move_reply:
+                reply.pop("revision", None)
+                reply.pop("pendingUpdate", None)
+            return reply
+
+    def rollback_deployment(self, deployment_id: str, base_revision: int, to_revision: int | None = None) -> JsonObject:
+        with self._lock:
+            self.rollback_calls.append((deployment_id, base_revision, to_revision))
+            row = self.rows[deployment_id]
+            current = row.get("revision")
+            if current == 1:
+                raise DeployAPIError(
+                    "deploy_conflict", "no earlier revision", status=409, details={"server_code": "NO_EARLIER_REVISION"}
+                )
+            goal = (current - 1) if to_revision is None else to_revision
+            release_id = next(item["releaseId"] for item in self.revisions[deployment_id] if item["revision"] == goal)
+            moved = self._apply_move(deployment_id, base_revision, release_id)
+            if moved.get("revision") != base_revision:
+                self.revisions[deployment_id].append(
+                    {
+                        "revision": moved["revision"],
+                        "releaseId": release_id,
+                        "kind": "rollback",
+                        "createdBy": "user-1",
+                        "createdAt": "2026-10-07T12:00:00Z",
+                        "fromRevision": goal,
+                    }
+                )
+            reply = {key: moved[key] for key in ("id", "revision", "releaseId") if key in moved}
+            reply["kind"] = "rollback"
+            if isinstance(moved.get("pendingUpdate"), dict):
+                reply["pendingUpdate"] = {**moved["pendingUpdate"], "kind": "rollback"}
+            return reply
+
+    def get_deployment_events(self, deployment_id: str) -> JsonObject:
+        return {"deploymentId": deployment_id, "events": []}
+
+    def get_deployment_logs(self, deployment_id: str) -> JsonObject:
+        return {"deploymentId": deployment_id, "capturedAt": None, "comfyuiLog": ""}
+
+    def get_deployment_revisions(self, deployment_id: str) -> JsonObject:
+        with self._lock:
+            return {"items": copy.deepcopy(self.revisions.get(deployment_id, []))}
+
+    def _apply_move(self, deployment_id: str, base_revision: int, release_id: str) -> JsonObject:
+        """Call with the lock held."""
+        row = self.rows[deployment_id]
+        # The service answers at the same revision, before it checks the base,
+        # when the deployment already serves the release.
+        if row.get("releaseId") == release_id and not isinstance(row.get("pendingUpdate"), dict):
+            return copy.deepcopy(row)
+        if row.get("revision") != base_revision:
+            raise DeployAPIError("deploy_conflict", "stale revision", status=409)
+        if self.move == "landed":
+            row["releaseId"] = release_id
+            row["revision"] = base_revision + 1
+        elif self.move == "pending":
+            row["pendingUpdate"] = {
+                "releaseId": release_id,
+                "baseRevision": base_revision,
+                "status": "provisioning",
+                "since": "2026-10-07T12:00:00Z",
+                "kind": "update",
+            }
+        else:
+            # Another change landed the release first, so the service
+            # answers at the revision it was asked against.
+            row["releaseId"] = release_id
+        return copy.deepcopy(row)
 
     def start_deployment(self, deployment_id: str) -> JsonObject:
         with self._lock:
@@ -163,6 +274,14 @@ class FakeDeploy:
                 },
             ]
         }
+
+    def get_deploy_estimate(self, release_id: str, gpu_class: str, region: str) -> JsonObject:
+        self.estimate_calls.append((release_id, gpu_class, region))
+        if self.estimate is None:
+            raise DeployAPIError("deploy_not_found", "the deploy service has no estimate route", status=404)
+        if isinstance(self.estimate, Exception):
+            raise self.estimate
+        return copy.deepcopy(self.estimate)
 
     def soft_delete(self, deployment_id: str) -> None:
         with self._lock:

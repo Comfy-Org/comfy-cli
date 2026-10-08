@@ -4,10 +4,11 @@ import os
 import urllib.error
 import urllib.parse
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 from comfy_cli import credentials
+from comfy_cli.credentials import Credential
 from comfy_cli.deploy_api_errors import (
     DeployAPIError,
     assert_safe_deploy_url,
@@ -32,7 +33,7 @@ class DeployAuthError(DeployAPIError):
     code = "deploy_not_signed_in"
 
     def __init__(self) -> None:
-        super().__init__(self.code, "not signed in — run `comfy cloud login`")
+        super().__init__(self.code, "not signed in: run `comfy cloud login` or set COMFY_CLOUD_API_KEY")
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,10 +76,35 @@ def _validate_compute_config(compute_config: dict) -> None:
 
 
 class DeployClient:
-    def __init__(self, base_url: str | None, token: str):
+    def __init__(self, base_url: str | None, token: str | None = None, *, api_key: Credential | None = None):
         resolved_url = _resolved_base_url(base_url).rstrip("/")
         assert_safe_deploy_url(resolved_url, source=_base_url_source(base_url))
-        self.target = Target(kind="cloud", base_url=resolved_url, path_prefix="/v1", auth_token=token)
+        self.target = Target(
+            kind="cloud",
+            base_url=resolved_url,
+            path_prefix="/v1",
+            auth_token=token,
+            api_key=api_key.value if api_key is not None else None,
+        )
+        # What to replace once the server refuses this client's key.
+        self._refused_key_hint = credentials.refused_key_hint(api_key) if api_key is not None else None
+        # Only a client built from the stored sign-in may swap its token; one
+        # handed a token or a key keeps it and lets a 401 surface.
+        self._refreshes_on_401 = False
+
+    @classmethod
+    def from_credentials(cls, base_url: str | None = None) -> DeployClient:
+        """Build a client from the workspace API key when one is set, else from the sign-in."""
+        key = credentials.platform_api_key()
+        if key is None:
+            try:
+                return cls.from_session(base_url)
+            except DeployAuthError:
+                # A sign-in whose refresh failed is cleared, and a saved key may stand behind it.
+                key = credentials.platform_api_key()
+                if key is None:
+                    raise
+        return cls(base_url, api_key=key)
 
     @classmethod
     def from_session(cls, base_url: str | None = None) -> DeployClient:
@@ -87,7 +113,9 @@ class DeployClient:
         session = credentials.get_session(refresh=True)
         if not session or not session.access_token:
             raise DeployAuthError
-        return cls(resolved_url, session.access_token)
+        client = cls(resolved_url, session.access_token)
+        client._refreshes_on_401 = True
+        return client
 
     def _request(self, request: _Request) -> dict:
         url = self.target.url(*request.parts)
@@ -96,7 +124,19 @@ class DeployClient:
             if query:
                 url = f"{url}?{query}"
         try:
-            _, parsed = request_json(
+            _, parsed = self._send(url, request)
+        except urllib.error.HTTPError as error:
+            mapped = mapped_error(request.operation, error, url)
+            if error.code == 401 and self._refused_key_hint is not None:
+                mapped.hint = self._refused_key_hint
+            raise mapped from error
+        except (TimeoutError, urllib.error.URLError) as error:
+            raise transport_error(request.operation, error) from error
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _send(self, url: str, request: _Request) -> tuple[int, dict | list | None]:
+        def send() -> tuple[int, dict | list | None]:
+            return request_json(
                 url,
                 self.target,
                 method=request.method,
@@ -104,11 +144,20 @@ class DeployClient:
                 headers=request.headers,
                 max_bytes=request.max_bytes,
             )
+
+        try:
+            return send()
         except urllib.error.HTTPError as error:
-            raise mapped_error(request.operation, error, url) from error
-        except (TimeoutError, urllib.error.URLError) as error:
-            raise transport_error(request.operation, error) from error
-        return parsed if isinstance(parsed, dict) else {}
+            # The access token lasts fifteen minutes, so a wait that polls past
+            # that is refused here. The server refuses before acting, so sending
+            # the same request again is safe for every method.
+            if error.code != 401 or not self._refreshes_on_401:
+                raise
+            token = credentials.refreshed_access_token(self.target.auth_token)
+            if token is None:
+                raise
+            self.target = replace(self.target, auth_token=token)
+            return send()
 
     def _get(self, operation: str, parts: tuple[str, ...], params: dict | None = None) -> dict:
         return self._request(_Request(operation=operation, parts=parts, params=params))
@@ -184,6 +233,39 @@ class DeployClient:
         _validate_compute_config(compute_config)
         return self._patch("scale", ("deployments", deployment_id), {"computeConfig": compute_config})
 
+    def move_deployment(self, deployment_id: str, base_revision: int, release_id: str) -> dict:
+        """Point the deployment at another release of its Build, keeping its id and URL.
+
+        ``base_revision`` is the revision the caller read, so a change made
+        since is refused rather than undone.
+        """
+        body = {"baseRevision": base_revision, "releaseId": release_id}
+        return self._patch("move", ("deployments", deployment_id), body)
+
+    def promote_deployment(self, deployment_id: str, base_revision: int, from_deployment_id: str) -> dict:
+        """Point the deployment at the release another deployment serves, keeping its id and URL.
+
+        The service resolves which release that is, so the caller never races
+        the source moving. ``base_revision`` is as for a move.
+        """
+        body = {"baseRevision": base_revision, "fromDeploymentId": from_deployment_id}
+        return self._patch("move", ("deployments", deployment_id), body)
+
+    def rollback_deployment(self, deployment_id: str, base_revision: int, to_revision: int | None = None) -> dict:
+        """Point the deployment back at an earlier revision's release, keeping its id and URL.
+
+        The service picks the revision before the current one unless
+        ``to_revision`` names another. ``base_revision`` is as for a move.
+        """
+        body: dict = {"baseRevision": base_revision}
+        if to_revision is not None:
+            body["toRevision"] = to_revision
+        return self._post("move", ("deployments", deployment_id, "rollback"), body)
+
+    def get_deployment_revisions(self, deployment_id: str) -> dict:
+        """GET /v1/deployments/{id}/revisions: every revision, oldest first."""
+        return self._get("revisions", ("deployments", deployment_id, "revisions"))
+
     def delete_deployment(self, deployment_id: str) -> None:
         self._delete("delete", ("deployments", deployment_id))
 
@@ -201,5 +283,12 @@ class DeployClient:
             _Request(operation="logs", parts=("deployments", deployment_id, "logs"), max_bytes=_MAX_LOG_JSON)
         )
 
+    def get_deploy_estimate(self, release_id: str, gpu_class: str, region: str) -> dict:
+        return self._get(
+            "estimate", ("deploy-estimate",), {"releaseId": release_id, "gpuClass": gpu_class, "region": region}
+        )
+
     def get_compute_catalog(self) -> dict:
-        return self._get("compute", ("compute-catalog",))
+        # Without levels=all the service answers with datacenters alone, and a GPU
+        # sold only on a wider location never appears.
+        return self._get("compute", ("compute-catalog",), {"levels": "all"})

@@ -22,8 +22,8 @@ Bundled skills (6 total) — see ``comfy skills list`` for descriptions:
 Reference skills (``REFERENCE_SKILLS``) are the other half: ``show`` resolves
 them and no default install writes them, so a parent skill can cite one by name
 and load its depth only on the tasks that need it. A bare name passed to
-``install`` is redirected to ``show``; an explicit path, or a direct
-``install()`` call, still writes one, and ``uninstall <name>`` removes it.
+``install`` is redirected to ``show``; a path to the CLI's own copy, or a
+direct ``install()`` call, still writes one, and ``uninstall <name>`` removes it.
 """
 
 from __future__ import annotations
@@ -38,6 +38,8 @@ from comfy_cli.output import get_renderer, rprint
 from comfy_cli.skills import (
     BUNDLED_SKILLS,
     REFERENCE_SKILLS,
+    SHIPPED_NAME_HINT,
+    ShippedSkillNameError,
     TargetKind,
     _compute_skill_state,
     _looks_like_path,
@@ -48,6 +50,7 @@ from comfy_cli.skills import (
     read_manifest,
     readable_skill_names,
     reference_skill_names,
+    refuse_shipped_name,
     skill_content,
 )
 from comfy_cli.skills import (
@@ -104,21 +107,28 @@ def _validate_skills(skills: list[str] | None, *, refuse_reference: bool = True)
     for s in skills:
         if _looks_like_path(s):
             # Path-based token: validate it eagerly so we fail fast before any writes.
-            # A path is an explicit request, including for a reference skill, so it
-            # is honoured rather than redirected — see the branch below.
+            # A path is an explicit request, including for the CLI's own copy of a
+            # reference skill, so it is honoured rather than redirected (see the
+            # branch below). Install refuses a path claiming a shipped name; uninstall
+            # (refuse_reference=False) accepts one, since removing overwrites nothing.
             try:
-                load_skill_source(s)
+                src = load_skill_source(s)
+                if refuse_reference:
+                    refuse_shipped_name(src, s)
             except ValueError as e:
                 renderer.error(
                     code="skill_invalid",
                     message=str(e),
-                    hint="a skill is a directory named after the skill containing SKILL.md with `name:` and `description:` frontmatter; check with `comfy skills validate <path>`",
+                    hint=SHIPPED_NAME_HINT
+                    if isinstance(e, ShippedSkillNameError)
+                    else "a skill is a directory named after the skill containing SKILL.md with `name:` and `description:` frontmatter; check with `comfy skills validate <path>`",
                 )
                 raise typer.Exit(code=1) from e
         elif refuse_reference and s in reference_skill_names():
             # A nudge, not a boundary: the reach is for the material, not for a
             # file that would then sit in every agent's context on every task.
-            # Anyone who does want it installed says so by path or via `install()`.
+            # Anyone who does want it installed passes the CLI's own copy by path,
+            # or calls `install()`.
             raise typer.BadParameter(
                 f"{s!r} is a reference skill, which is read on demand rather than installed; "
                 f"run `comfy skills show {s}` to read it"
@@ -450,11 +460,14 @@ def validate_cmd(
     renderer = get_renderer()
     try:
         src = load_skill_source(path)
+        refuse_shipped_name(src, path)
     except ValueError as e:
         renderer.error(
             code="skill_invalid",
             message=str(e),
-            hint="a skill is a directory named after the skill containing SKILL.md with `name:` and `description:` frontmatter",
+            hint=SHIPPED_NAME_HINT
+            if isinstance(e, ShippedSkillNameError)
+            else "a skill is a directory named after the skill containing SKILL.md with `name:` and `description:` frontmatter",
         )
         raise typer.Exit(code=1) from e
     payload = {"valid": True, "name": src.name, "bundled": src.bundled, "path": path}

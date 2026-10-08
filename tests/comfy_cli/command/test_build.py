@@ -599,7 +599,7 @@ def test_builder_client_endpoints_and_parsing(monkeypatch):
 
     c = BuilderClient("https://builder.test/", "jwt-token")
     assert c.create_blob("model", "f.safetensors", "hash", 5) == ("b1", "https://put")
-    assert c.create_build("n", {"models": [], "customNodes": []}) == "d1"
+    assert c.create_build_response("n", {"models": [], "customNodes": []})["id"] == "d1"
     assert c.create_release("d1", [{"os": "linux", "gpu": "nvidia"}]) == ("v1", "https://s")
     results = c.resolve_models(["a.safetensors"])
     assert results[0]["candidates"][0]["sourceUri"] == "https://u"

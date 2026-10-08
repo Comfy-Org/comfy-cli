@@ -59,8 +59,7 @@ _REQUEST_KINDS = ("path", "host")
 
 
 # Folders a terminal grant may never name, in either direction. This mirrors
-# the agent's own deny list (``CredentialDenyDirs`` in the cloud repo,
-# services/agent/internal/runner/sandbox_seatbelt_profile.go) — the credential
+# the agent's own sandbox deny list (``CredentialDenyDirs``) — the credential
 # and browser-profile stores of every platform, denied on every platform so a
 # grant vetted on one OS means the same on another — plus ``.azure`` and the
 # whole of ``.docker``, where the CLI is stricter than the agent. A folder that

@@ -1,8 +1,8 @@
 """Tests for ``comfy nodes search --expand-top N`` (V1-017).
 
-The measured agent loop is search → show × N (the show args are ~92% a copy of
-the search hit). ``--expand-top N`` folds the show payload for the top-N hits
-into the search envelope so the follow-up ``show`` calls disappear.
+A typical agent loop is search → show × N (the show args are almost always a
+copy of the search hit). ``--expand-top N`` folds the show payload for the
+top-N hits into the search envelope so the follow-up ``show`` calls disappear.
 
 Contract under test:
   * ``--expand-top N`` attaches ``data.expanded`` — one entry per expanded hit,
