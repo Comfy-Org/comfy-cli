@@ -252,6 +252,11 @@ def test_a_crash_in_the_root_callback_still_emits_the_envelope(monkeypatch, work
         ("headers={'token': bytearray(b'sk-LIVE')}", "sk-LIVE", "headers="),
         ("token=ApiKey(value='sk-LIVE'", "sk-LIVE", "token="),
         ("api_key=ApiKey(value='sk-LIVE') request=req-1", "sk-LIVE", "request=req-1"),
+        (
+            "api_key=ApiKey(value=SecretStr('sk-A'), backup='sk-B') request=req-1",
+            "sk-B",
+            "request=req-1",
+        ),
         (r"body={\"api_key\": [\"sk-A\", \"sk-B\"]}", "sk-B", "body="),
         (
             "Set-Cookie: sid=abc; expires=Wed, 09 Jun 2021 10:18:14 GMT, remember_me=LEAK",
