@@ -3765,6 +3765,16 @@ def _definition_alias_conflicts(
     return conflicts
 
 
+class _SubgraphDefs(dict[str, dict]):
+    """Definition index with per-index promotion traversal caches."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.promotion_visit_limit: int | None = None
+        self.promotion_holders: dict[int, dict[str, list[tuple[dict, int, dict]]]] = {}
+        self.promotion_links: dict[int, dict[Any, dict]] = {}
+
+
 def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
     """Index subgraph definitions so an instance's ``type`` resolves to its def.
 
@@ -3789,7 +3799,7 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
     defs = definitions.get("subgraphs")
     if not isinstance(defs, list):
         return {}
-    by_id: dict[str, dict] = {}
+    by_id: dict[str, dict] = _SubgraphDefs()
     name_counts: dict[str, int] = {}
     name_first: dict[str, dict] = {}
     for sg in defs:

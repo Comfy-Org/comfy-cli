@@ -105,6 +105,11 @@ def _is_slot_index(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _is_link_id(value: Any) -> bool:
+    """Whether ``value`` is a hashable serialized link id (never bool)."""
+    return isinstance(value, (int, str)) and not isinstance(value, bool)
+
+
 def _listed_link_ids(entry: dict) -> list[Any]:
     """A definition entry's serialized link-id list, or empty when malformed."""
     value = entry.get("linkIds")
@@ -133,6 +138,53 @@ def _link_holders(sg: dict) -> dict[str, list[tuple[dict, int, dict]]]:
     return holders
 
 
+def _link_rows_by_id(sg: dict) -> dict[Any, dict]:
+    """Hashable, non-boolean serialized link rows keyed by their raw ids."""
+    return {
+        link.get("id"): link for link in sg.get("links") or [] if isinstance(link, dict) and _is_link_id(link.get("id"))
+    }
+
+
+def _cached_link_rows(sg: dict, defs: dict[str, dict]) -> dict[Any, dict]:
+    cache = getattr(defs, "promotion_links", None)
+    if cache is None:
+        return _link_rows_by_id(sg)
+    links = cache.get(id(sg))
+    if links is None:
+        links = _link_rows_by_id(sg)
+        cache[id(sg)] = links
+    return links
+
+
+def _cached_link_holders(sg: dict, defs: dict[str, dict]) -> dict[str, list[tuple[dict, int, dict]]]:
+    cache = getattr(defs, "promotion_holders", None)
+    if cache is None:
+        return _link_holders(sg)
+    holders = cache.get(id(sg))
+    if holders is None:
+        holders = _link_holders(sg)
+        cache[id(sg)] = holders
+    return holders
+
+
+def _invalidate_promotion_caches(defs: dict[str, dict], sg: dict | None = None) -> None:
+    """Drop derived indexes after an in-place definition repair."""
+    if hasattr(defs, "promotion_visit_limit"):
+        defs.promotion_visit_limit = None
+    cache = getattr(defs, "promotion_holders", None)
+    if cache is not None:
+        if sg is None:
+            cache.clear()
+        else:
+            cache.pop(id(sg), None)
+    cache = getattr(defs, "promotion_links", None)
+    if cache is not None:
+        if sg is None:
+            cache.clear()
+        else:
+            cache.pop(id(sg), None)
+
+
 def held_link_targets(
     sg: dict,
     link_id: Any,
@@ -151,7 +203,7 @@ def held_link_targets(
     cache_key = id(link)
     if cache is not None and cache_key in cache:
         result = cache[cache_key]
-        _spend_traversal_budget(budget, len(result), limit_message)
+        _spend_traversal_budget(budget, 1, limit_message)
         return result
     locations = (holders if holders is not None else _link_holders(sg)).get(str(link_id), [])
     _spend_traversal_budget(budget, len(locations), limit_message)
@@ -180,6 +232,9 @@ def held_link_targets(
 
 def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
     """A linear cap for malformed definition DAGs with exponentially many paths."""
+    cached = getattr(defs, "promotion_visit_limit", None)
+    if cached is not None:
+        return cached
     definitions = {id(definition): definition for definition in defs.values() if isinstance(definition, dict)}
     definitions.setdefault(id(root), root)
     graph_size = 0
@@ -188,7 +243,10 @@ def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
         for field_name in ("inputs", "nodes", "links"):
             values = definition.get(field_name)
             graph_size += len(values) if isinstance(values, list) else 0
-    return max(1, graph_size) * (_MAX_NESTED_PROMOTION_DEPTH + 1)
+    limit = max(1, graph_size) * (_MAX_NESTED_PROMOTION_DEPTH + 1)
+    if hasattr(defs, "promotion_visit_limit") and any(definition is root for definition in defs.values()):
+        defs.promotion_visit_limit = limit
+    return limit
 
 
 def promoted_inputs(
@@ -198,6 +256,7 @@ def promoted_inputs(
     _stack: tuple[int, ...] = (),
     _memo: dict[tuple[int, int, tuple[int, ...]], list[PromotedInput]] | None = None,
     _budget: list[int] | None = None,
+    _name_memo: dict[int, dict[str, PromotedInput]] | None = None,
 ) -> list[PromotedInput]:
     """Every declared input of definition ``sg`` in declaration order, with the
     host value slot each widget-backed one owns — the frontend's own rule
@@ -215,26 +274,24 @@ def promoted_inputs(
     to the serialized definition graph rather than its path count."""
     if _memo is None:
         _memo = {}
+    if _name_memo is None:
+        _name_memo = {}
     if _budget is None:
         _budget = [_promotion_visit_limit(defs, sg)]
     memo_key = (id(sg), depth, _stack)
     if memo_key in _memo:
         result = _memo[memo_key]
-        _spend_traversal_budget(_budget, len(result), "promoted input traversal exceeded its safe limit")
+        _spend_traversal_budget(_budget, 1, "promoted input traversal exceeded its safe limit")
         return result
     if _budget[0] <= 0:
         raise PromotionTraversalLimitError("promoted input traversal exceeded its safe limit")
     _budget[0] -= 1
     _stack = (*_stack, id(sg))
-    holders = _link_holders(sg)
+    holders = _cached_link_holders(sg, defs)
     target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
     # Only hashable ids can be looked up; a malformed (list/dict) id is skipped
     # rather than crashing conversion of the whole workflow.
-    links = {
-        link.get("id"): link
-        for link in sg.get("links") or []
-        if isinstance(link, dict) and isinstance(link.get("id"), (int, str)) and not isinstance(link.get("id"), bool)
-    }
+    links = _cached_link_rows(sg, defs)
     out: list[PromotedInput] = []
     value_index = 0
     for idx, inp in enumerate(sg.get("inputs") or []):
@@ -248,7 +305,7 @@ def promoted_inputs(
         source: tuple[str, str, str | None, bool] | None = None
         for link_id in _listed_link_ids(inp):
             _spend_traversal_budget(_budget, 1, "promoted input traversal exceeded its safe limit")
-            if not isinstance(link_id, (int, str)):
+            if not _is_link_id(link_id):
                 continue
             link = links.get(link_id)
             if not isinstance(link, dict):
@@ -267,9 +324,16 @@ def promoted_inputs(
                     # carries a widget marker when promoted, but the concrete
                     # widget lives deeper — resolve through its own promotion.
                     if depth < _MAX_NESTED_PROMOTION_DEPTH:
-                        inner_by_name = {
-                            p.name: p for p in promoted_inputs(inner_def, defs, depth + 1, _stack, _memo, _budget)
-                        }
+                        inner = promoted_inputs(
+                            inner_def,
+                            defs,
+                            depth + 1,
+                            _stack,
+                            _memo,
+                            _budget,
+                            _name_memo,
+                        )
+                        inner_by_name = _name_memo.setdefault(id(inner), {p.name: p for p in inner})
                         inner_pi = inner_by_name.get(str(entry.get("name")))
                         if inner_pi is not None and inner_pi.is_widget:
                             source = (str(target.get("id")), str(entry.get("name")), None, True)
@@ -1013,17 +1077,13 @@ def _promotion_source(sg: dict, inp: dict, defs: dict[str, dict]) -> tuple[str, 
     """``resolvePromotionSource``: the ``(interior node, widget)`` a subgraph
     input projects — the first of its links that lands on a nested instance's
     input or on a widget-backed input slot."""
-    links = {
-        link.get("id"): link
-        for link in sg.get("links") or []
-        if isinstance(link, dict) and isinstance(link.get("id"), (int, str)) and not isinstance(link.get("id"), bool)
-    }
-    holders = _link_holders(sg)
+    links = _cached_link_rows(sg, defs)
+    holders = _cached_link_holders(sg, defs)
     target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
     budget = [_promotion_visit_limit(defs, sg)]
     for link_id in _listed_link_ids(inp):
         _spend_traversal_budget(budget, 1, "promotion source traversal exceeded its safe limit")
-        link = links.get(link_id) if isinstance(link_id, (int, str)) else None
+        link = links.get(link_id) if _is_link_id(link_id) else None
         if link is None:
             continue
         for target, _slot, entry in held_link_targets(
@@ -1157,11 +1217,7 @@ def _slot_for_widget(source: dict, widget: str, projecting_input: str | None, de
 
 def _primitive_targets(sg: dict, primitive: dict) -> list[tuple[str, int]]:
     """Every existing link out of the primitive's output 0, in link order."""
-    links = {
-        link.get("id"): link
-        for link in sg.get("links") or []
-        if isinstance(link, dict) and isinstance(link.get("id"), (int, str)) and not isinstance(link.get("id"), bool)
-    }
+    links = _link_rows_by_id(sg)
     outputs = primitive.get("outputs") or []
     listed = outputs[0].get("links") if outputs and isinstance(outputs[0], dict) else None
     ordered = (
@@ -1674,6 +1730,7 @@ def flush_proxy_migration(
     # The host array, positional over the (now repaired) widget-backed inputs:
     # migrated values first, then what the host already carried, then the
     # interior default — the serialization the frontend writes after its flush.
+    _invalidate_promotion_caches(defs, sg)
     values: list[Any] = []
     for p in promoted_inputs(sg, defs):
         if not p.is_widget:
@@ -1725,7 +1782,7 @@ def _boundary_targets(
         result = _memo[memo_key]
         _spend_traversal_budget(
             _budget,
-            len(result),
+            1,
             "promoted widget boundary traversal exceeded its safe limit",
         )
         return result
@@ -1733,17 +1790,13 @@ def _boundary_targets(
         raise PromotionTraversalLimitError("promoted widget boundary traversal exceeded its safe limit")
     _budget[0] -= 1
     _stack = (*_stack, id(sg))
-    links = {
-        link.get("id"): link
-        for link in sg.get("links") or []
-        if isinstance(link, dict) and isinstance(link.get("id"), (int, str)) and not isinstance(link.get("id"), bool)
-    }
-    holders = _link_holders(sg)
+    links = _cached_link_rows(sg, defs)
+    holders = _cached_link_holders(sg, defs)
     target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
     out: list[tuple[list[str], str]] = []
     for link_id in _listed_link_ids(inp):
         _spend_traversal_budget(_budget, 1, "promoted widget boundary traversal exceeded its safe limit")
-        link = links.get(link_id) if isinstance(link_id, (int, str)) else None
+        link = links.get(link_id) if _is_link_id(link_id) else None
         targets = (
             held_link_targets(
                 sg,
@@ -1771,9 +1824,6 @@ def _boundary_targets(
                 )
                 if inner_inp is not None:
                     nested = _boundary_targets(inner_def, inner_inp, defs, depth + 1, _stack, _memo, _budget)
-                    if len(nested) > _budget[0]:
-                        raise PromotionTraversalLimitError("promoted widget boundary traversal exceeded its safe limit")
-                    _budget[0] -= len(nested)
                     out.extend(([tid, *path], widget) for path, widget in nested)
                 continue
             marker = entry.get("widget")

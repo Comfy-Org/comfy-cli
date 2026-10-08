@@ -36,7 +36,7 @@ from unittest import mock
 import pytest
 
 from comfy_cli.cql import promoted
-from comfy_cli.cql.engine import Graph
+from comfy_cli.cql.engine import Graph, _SubgraphDefs
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 _GALLERY = _FIXTURES / "gallery"
@@ -238,6 +238,28 @@ def test_promotion_resolvers_ignore_unhashable_link_ids():
     assert promoted.boundary_widget_targets(sg, item, definitions) == [(["8"], "prompt")]
 
 
+def test_promotion_resolvers_do_not_alias_boolean_link_ids_to_integers():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [True]}],
+        "nodes": [
+            {
+                "id": 8,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 1}],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0}],
+    }
+    definitions = {"sg": sg}
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert item.value_index is None
+    assert promoted._promotion_source(sg, sg["inputs"][0], definitions) is None
+    assert promoted.boundary_widget_targets(sg, item, definitions) == []
+
+
 def test_promotion_resolvers_treat_non_list_link_ids_as_empty():
     sg = {
         "id": "sg",
@@ -398,7 +420,7 @@ def test_holder_materialization_is_charged_before_ordering():
         )
 
 
-def test_holder_cache_hits_are_charged_by_materialized_result_size():
+def test_holder_cache_hits_use_constant_budget():
     sg = {"nodes": [{"id": node_id, "inputs": [{"name": "value", "link": 1}]} for node_id in range(3)]}
     holders = promoted._link_holders(sg)
     link = {"id": 1, "target_id": 0, "target_slot": 0}
@@ -408,12 +430,12 @@ def test_holder_cache_hits_are_charged_by_materialized_result_size():
     first = promoted.held_link_targets(sg, 1, link, holders, cache, budget)
     assert budget == [3]
     assert promoted.held_link_targets(sg, 1, link, holders, cache, budget) is first
-    assert budget == [0]
-    with pytest.raises(promoted.PromotionTraversalLimitError, match="safe limit"):
-        promoted.held_link_targets(sg, 1, link, holders, cache, budget)
+    assert budget == [2]
+    assert promoted.held_link_targets(sg, 1, link, holders, cache, budget) is first
+    assert budget == [1]
 
 
-def test_promoted_input_memo_hits_are_charged_by_result_size():
+def test_promoted_input_memo_hits_use_constant_budget_and_cached_name_index():
     child = {
         "id": "child",
         "inputs": [{"name": f"value-{index}", "type": "STRING", "linkIds": []} for index in range(50)],
@@ -428,7 +450,84 @@ def test_promoted_input_memo_hits_are_charged_by_result_size():
     second = promoted.promoted_inputs(child, {"child": child}, 1, (123,), memo, budget)
 
     assert second is first
-    assert budget[0] == remaining - len(first)
+    assert budget[0] == remaining - 1
+
+
+def test_wide_reused_definition_does_not_exhaust_the_linear_budget():
+    width = 100
+    instances = 300
+    child = {
+        "id": "child",
+        "inputs": [{"name": f"value-{index}", "type": "STRING", "linkIds": []} for index in range(width)],
+        "nodes": [],
+        "links": [],
+    }
+    outer = {
+        "id": "outer",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": list(range(instances))}],
+        "nodes": [
+            {
+                "id": index,
+                "type": "child",
+                "inputs": [{"name": "value-0", "link": index}],
+            }
+            for index in range(instances)
+        ],
+        "links": [
+            {"id": index, "origin_id": -10, "origin_slot": 0, "target_id": index, "target_slot": 0}
+            for index in range(instances)
+        ],
+    }
+    definitions = _SubgraphDefs()
+    definitions.update({"outer": outer, "child": child})
+
+    [item] = promoted.promoted_inputs(outer, definitions)
+
+    assert item.value_index is None
+
+
+def test_definition_index_caches_limit_and_holder_scans():
+    definition = {
+        "id": "sg",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+        "nodes": [{"id": 7, "inputs": [{"name": "value", "link": 1}]}],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = definition
+
+    with (
+        mock.patch.object(promoted, "_link_holders", wraps=promoted._link_holders) as holder_scan,
+        mock.patch.object(promoted, "_link_rows_by_id", wraps=promoted._link_rows_by_id) as link_scan,
+    ):
+        promoted.promoted_inputs(definition, definitions)
+        promoted.promoted_inputs(definition, definitions)
+
+    assert holder_scan.call_count == 1
+    assert link_scan.call_count == 1
+    assert definitions.promotion_visit_limit is not None
+
+
+def test_definition_repairs_invalidate_cached_limits_and_holders():
+    definition = {
+        "id": "sg",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+        "nodes": [{"id": 7, "inputs": [{"name": "value", "link": 1}]}],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = definition
+    original = promoted._cached_link_holders(definition, definitions)
+    original_links = promoted._cached_link_rows(definition, definitions)
+    assert promoted._promotion_visit_limit(definitions, definition) > 0
+
+    definition["nodes"].append({"id": 8, "inputs": [{"name": "value", "link": 1}]})
+    promoted._invalidate_promotion_caches(definitions, definition)
+
+    assert promoted._cached_link_holders(definition, definitions) is not original
+    assert promoted._cached_link_rows(definition, definitions) is not original_links
+    assert len(promoted._cached_link_holders(definition, definitions)["1"]) == 2
+    assert definitions.promotion_visit_limit is None
 
 
 def test_promotion_traversal_limit_is_a_value_error_for_command_boundaries():

@@ -29,6 +29,7 @@ from comfy_cli.cql.engine import (
     LOAD_3D_BUTTON_VALUES,
     DynamicGroupBindingError,
     _dynamic_combo_server_key_matches,
+    _SubgraphDefs,
     _dynamic_group_fields,
     _dynamic_group_row_count,
     _is_dynamic_combo_type,
@@ -317,7 +318,7 @@ def _collect_subgraph_defs(workflow: dict) -> dict[str, dict]:
     subgraphs = definitions.get("subgraphs")
     if not isinstance(subgraphs, list):
         return {}
-    defs: dict[str, dict] = {}
+    defs: dict[str, dict] = _SubgraphDefs()
     for sg in subgraphs:
         if not isinstance(sg, dict):
             continue
@@ -428,11 +429,16 @@ def _expand_one_subgraph(
         internal_link_map[old_id] = link
 
     input_targets: dict[int, list[tuple[Any, int]]] = {}
-    from comfy_cli.cql.promoted import _link_holders, _listed_link_ids, held_link_targets
+    from comfy_cli.cql.promoted import _is_slot_index, _link_holders, _listed_link_ids, held_link_targets
 
     holders = _link_holders(sg_def)
     target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
-    target_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS]
+    serialized_boundary_links = sum(
+        len(link_ids)
+        for entry in sg_def.get("inputs") or []
+        if isinstance(entry, dict) and isinstance((link_ids := entry.get("linkIds")), list)
+    )
+    target_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + 3 * serialized_boundary_links]
 
     for idx, in_def in enumerate(sg_def.get("inputs") or []):
         if not isinstance(in_def, dict):
@@ -476,7 +482,10 @@ def _expand_one_subgraph(
                 continue
             link = internal_link_map.get(lid)
             if isinstance(link, dict):
-                output_sources[(link.get("origin_id"), link.get("origin_slot"))] = idx
+                origin_id = link.get("origin_id")
+                origin_slot = link.get("origin_slot")
+                if _is_link_id(origin_id) and _is_slot_index(origin_slot):
+                    output_sources[(origin_id, origin_slot)] = idx
 
     expanded_nodes: list[dict] = []
     for inner in internal_nodes:
