@@ -331,3 +331,21 @@ def test_every_alias_targets_an_allowlisted_endpoint(monkeypatch, tmp_path):
     # And the allowlist itself only names endpoints the bundled spec declares,
     # so every alias is reachable end-to-end.
     assert allowlisted <= _bundled_proxy_ids(monkeypatch, tmp_path)
+
+
+def test_find_property_preserves_combinator_enum_semantics():
+    all_of = {
+        "allOf": [
+            {"properties": {"model": {"enum": ["allowed", "forbidden"]}}},
+            {"properties": {"model": {"enum": ["allowed"]}}},
+        ]
+    }
+    any_of = {
+        "anyOf": [
+            {"properties": {"model": {"enum": ["v1"]}}},
+            {"properties": {"model": {"enum": ["v2"]}}},
+        ]
+    }
+
+    assert spec._extract_enum(spec._find_property(all_of, "model")) == ["allowed"]
+    assert spec._extract_enum(spec._find_property(any_of, "model")) == ["v1", "v2"]

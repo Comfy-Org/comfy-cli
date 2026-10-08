@@ -340,11 +340,42 @@ def test_resolve_memoizes_shared_inline_alias_branches():
     for _ in range(depth):
         schema = {"anyOf": [schema, schema]}
 
-    with mock.patch.object(spec, "_resolve", wraps=spec._resolve) as resolve:
+    with mock.patch.object(spec, "_resolve_schema", wraps=spec._resolve_schema) as resolve:
         resolved = spec._resolve({}, schema)
 
     assert isinstance(resolved, dict)
     assert resolve.call_count <= depth * 3 + 2
+
+
+def test_resolve_shares_cycle_free_targets_across_different_ref_ancestries():
+    schemas: dict[str, dict] = {"S40": {"type": "string"}}
+    for level in reversed(range(40)):
+        schemas[f"S{level}"] = {
+            "anyOf": [
+                {"$ref": f"#/components/schemas/A{level}"},
+                {"$ref": f"#/components/schemas/B{level}"},
+            ]
+        }
+        schemas[f"A{level}"] = {"$ref": f"#/components/schemas/S{level + 1}"}
+        schemas[f"B{level}"] = {"$ref": f"#/components/schemas/S{level + 1}"}
+    raw = {"components": {"schemas": schemas}}
+
+    with mock.patch.object(spec, "_resolve_schema", wraps=spec._resolve_schema) as resolve:
+        resolved = spec._resolve(raw, {"$ref": "#/components/schemas/S0"})
+
+    assert isinstance(resolved, dict)
+    assert resolve.call_count <= 40 * 10
+
+
+def test_extract_enum_deduplicates_repeated_cached_branches_linearly():
+    enum = {"enum": [f"model-{index}" for index in range(2_000)]}
+    schema = {"anyOf": [enum] * 2_000}
+
+    with mock.patch.object(spec, "_extract_enum", wraps=spec._extract_enum) as extract:
+        values = spec._extract_enum(schema)
+
+    assert values == enum["enum"]
+    assert extract.call_count <= 2_001
 
 
 def test_ref_memo_does_not_reuse_a_cycle_pruned_resolution():
