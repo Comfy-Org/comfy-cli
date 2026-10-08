@@ -43,6 +43,26 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "User pressed Ctrl-C; in-flight work was torn down.",
     ),
     ErrorCode(
+        "docs_not_found",
+        "A documentation section ID is not present in the installed corpus.",
+        "search for the topic again with `comfy docs search`",
+    ),
+    ErrorCode(
+        "docs_unavailable",
+        "The packaged documentation corpus is missing or invalid.",
+        "reinstall comfy-cli to restore its documentation bundle",
+    ),
+    ErrorCode(
+        "docs_search_unavailable",
+        "Semantic documentation search was requested, but the optional search pack is not installed.",
+        "install the matching `comfy-cli[docs-search]` extra",
+    ),
+    ErrorCode(
+        "docs_pack_incompatible",
+        "The installed docs-search pack does not match this CLI, corpus, or supported LanceDB format.",
+        "reinstall the matching `comfy-cli[docs-search]` extra",
+    ),
+    ErrorCode(
         "usage_error",
         "The invocation itself was wrong -- an unknown option, a missing option value, a bad argument count "
         "or an unknown subcommand. Raised during argv parsing, so NOTHING ran and nothing changed; the exit "

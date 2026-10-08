@@ -1,0 +1,22 @@
+[
+  {"query": "install custom nodes", "target": "Managing Custom Nodes"},
+  {"query": "install ComfyUI", "targets": ["Installing ComfyUI", "Path A — from a ComfyUI install"]},
+  {"query": "update ComfyUI", "target": "Updating ComfyUI"},
+  {"query": "update comfy cli", "target": "Updating ComfyUI"},
+  {"query": "cloud login", "target": "Cloud"},
+  {"query": "submit workflow", "target": "Submit a workflow"},
+  {"query": "wait for job", "target": "Job-stuck triage"},
+  {"query": "stuck job wait timeout", "target": "Job-stuck triage"},
+  {"query": "JSON output envelope contract", "target": "Output contract"},
+  {"query": "output NDJSON stream", "target": "Stream shape"},
+  {"query": "comfy knowledge pick capability", "target": "Curated model knowledge"},
+  {"query": "resolve model alias", "target": "Models — find what's installed"},
+  {"query": "search templates gallery", "target": "Templates"},
+  {"query": "models local folder", "target": "Models — find what's installed"},
+  {"query": "install custom node dependencies", "target": "Managing Custom Nodes"},
+  {"query": "write custom node V3", "target": "Custom nodes for ComfyUI"},
+  {"query": "deploy release", "target": "comfy-deploy"},
+  {"query": "when comfy build fails", "target": "When something fails"},
+  {"query": "agent permission browser", "target": "Permissions on the local comfy agent"},
+  {"query": "image to video generation", "target": "Video"}
+]

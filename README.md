@@ -665,6 +665,28 @@ Enrichment only ever reads the cache, so no command waits on a fetch. The cache
 refreshes during `comfy skills install` and in the background during
 `comfy launch`, or on demand with `comfy knowledge status --refresh`.
 
+## Searching the CLI docs
+
+Search the CLI guides and installed agent guides locally. BM25 works with the
+base CLI. The optional extra adds a version-matched LanceDB pack and local
+query encoder for offline semantic and hybrid search:
+
+```bash
+pip install 'comfy-cli[docs-search]'  # optional; includes the version-matched offline pack
+comfy --json docs status
+comfy --json docs search "workflow hangs on a cloud timeout" --mode hybrid
+comfy --json docs show "SECTION_ID"
+```
+
+`docs status` reports which modes this install can use. Search results include
+a section ID, source location, and a short excerpt. Pass the ID to `docs show`
+to read the full section; use `--max-chars` and `--offset` to page through a
+long section. The docs command needs no ComfyUI workspace, and queries never
+download a model. Results describe this comfy-cli release. Without the optional
+pack, `--mode auto` uses BM25 and reports why semantic search is unavailable.
+Agents can search each part of a larger question, read the relevant sections,
+and reformulate a missed search once with a comfy command or flag.
+
 ## Analytics
 
 Analytics are **opt-in and off by default**. The first time you run the CLI in an
