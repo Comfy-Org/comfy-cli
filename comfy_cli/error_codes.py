@@ -797,8 +797,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "model_download_claim_contested",
-        "`comfy model download --background` lost the race for a destination it had just judged "
-        "free: the stale claim it cleared was re-taken by another submitter before its own retry, "
+        "`comfy model download` (foreground or `--background`) lost the race for a destination it had "
+        "just judged free: the stale claim it cleared was re-taken by another submitter before its "
+        "own retry, "
         "and that new claim does not (yet) resolve to a live download record. `details.path` is the "
         "destination; `details.download_id` names the new claim's holder when its claim file was "
         "readable, and is null otherwise. Unlike `model_download_in_flight` there is no `status`/"
@@ -807,8 +808,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "model_download_claim_unclearable",
-        "`comfy model download --background` found a stale destination claim it could not remove "
-        "(`details.claim_file`): the file is not deletable by this user, or something else (e.g. a "
+        "`comfy model download` (foreground or `--background`) found a stale destination claim it "
+        "could not remove (`details.claim_file`): the file is not deletable by this user, or something else (e.g. a "
         "directory) sits at the claim path. Every submission to `details.path` will be refused "
         "until the claim file is cleared, so the command reports the real obstacle rather than a "
         "phantom in-flight download. `details.download_id` is the stale claim's recorded holder, "

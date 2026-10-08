@@ -582,16 +582,13 @@ def download(
     claim = _claim_foreground(url=url, dest=local_filepath, downloader=resolved_downloader)
     claim_file: pathlib.Path | None = None
     if claim is not None:
-        _enforce_claim(claim, local_filepath)
-        claim_file = _dest_claim_path(local_filepath)
-        if claim_file is not None:
-            # Withdraws our record and raises the `model_download_in_flight`
-            # refusal if we lost — before the `try` below, so the release in its
-            # `finally` never runs for a claim that was never ours.
-            _acquire_dest_claim(claim, local_filepath, claim_file)
-        # else: the claims directory is unusable, exactly as in
-        # `_submit_background_download` — degrade to the advisory guard rather
-        # than turn a working download into an error.
+        # Withdraws our record and raises the `model_download_in_flight` refusal
+        # if we lost — before the `try` below, so the release in its `finally`
+        # never runs for a claim that was never ours. None (an unusable claims
+        # directory) degrades to the advisory guard, exactly as in
+        # `_submit_background_download`, rather than turn a working download
+        # into an error.
+        claim_file = _take_dest_claim(claim, local_filepath)
     # `claim is None` (record unwritable, or no `pid_create_time`) skips the
     # claim file entirely: a claim pointing at a record that does not exist reads
     # stale to the next submitter and is swept, so taking one buys nothing and
@@ -932,12 +929,8 @@ def _submit_background_download(
     # submitter backing off, nothing downloading). It cannot deadlock the other
     # way either: withdrawal here is only ever against a strictly earlier
     # `_claim_order`, so the earliest record never withdraws.
-    _enforce_claim(state, dest)
-
-    claim_file = _dest_claim_path(dest)
-    if claim_file is not None:
-        _acquire_dest_claim(state, dest, claim_file)
-    # else: the claims directory is unusable (a read-only state dir, or
+    claim_file = _take_dest_claim(state, dest)
+    # None: the claims directory is unusable (a read-only state dir, or
     # something sitting where `claims/` should be). Bookkeeping must not turn a
     # download that used to work into an error, so that degrades to the advisory
     # guard above — which is exactly the behavior that shipped before this.
@@ -1528,6 +1521,23 @@ def _acquire_dest_claim(
         )
 
 
+def _take_dest_claim(state: download_state.DownloadState, dest: pathlib.Path) -> pathlib.Path | None:
+    """Advisory re-scan, then the `O_EXCL` claim — the one sequence both paths use.
+
+    The order is the safety property, which is why it lives in one place: the
+    re-scan runs *before* the claim (see :func:`_submit_background_download`
+    for why it must not run after), and the record was written before either.
+    Returns the claim file, or None when the claims directory is unusable and
+    the caller is left with the advisory guard alone. Raises the caller's
+    refusal when the destination belongs to someone else.
+    """
+    _enforce_claim(state, dest)
+    claim_file = _dest_claim_path(dest)
+    if claim_file is not None:
+        _acquire_dest_claim(state, dest, claim_file)
+    return claim_file
+
+
 def _enforce_claim(state: download_state.DownloadState, dest: pathlib.Path) -> None:
     """Re-scan for a competing claim on ``dest`` and withdraw ours if we lost.
 
@@ -1629,8 +1639,15 @@ def _claim_foreground(url: str, dest: pathlib.Path, downloader: str) -> download
         # death is worse than no claim, so degrade to the pre-claim behavior
         # exactly as an unwritable state directory does.
         return None
+    workspace = get_workspace()
+    # Same bookkeeping as `_submit_background_download`: this path now leaves
+    # claim files too, and a hard-killed run strands its claim until something
+    # sweeps `claims/` — so a foreground-only workflow has to prune as well, or
+    # nothing ever would. Never let it fail a download.
+    with contextlib.suppress(Exception):
+        download_state.prune(workspace)
     try:
-        download_state.write(get_workspace(), state)
+        download_state.write(workspace, state)
     except (OSError, ValueError):
         return None
     return state

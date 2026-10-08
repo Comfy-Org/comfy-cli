@@ -2532,9 +2532,10 @@ class TestForegroundAtomicDestinationClaim:
         dest = self._dest(workspace)
         orphan = download_state.claim_path(workspace, models._dest_key(dest))
         assert download_state.acquire_claim(orphan, download_id="deadbeefcafe", dest=str(dest))
-        # No `prune` stub needed, unlike the `--background` equivalent: the
-        # foreground path never prunes, so `prune`'s claim sweep is not what
-        # clears this one — `_acquire_dest_claim`'s collision handling is.
+        # Stub `prune`, as the `--background` equivalent does: its claim sweep
+        # would clear the orphan first, and what is under test here is
+        # `_acquire_dest_claim`'s own collision handling.
+        monkeypatch.setattr(download_state, "prune", lambda ws: 0)
         attempts: list = []
         real_acquire = download_state.acquire_claim
 
@@ -2654,6 +2655,28 @@ class TestForegroundAtomicDestinationClaim:
         self._download()
 
         assert _claim_owner(workspace) == "ffffffffffff"
+
+    def test_a_foreground_run_sweeps_a_stranded_claim(self, workspace, monkeypatch, capsys):
+        """The foreground path produces claim files now, so it prunes like a
+        submit does: a hard-killed run's claim for a destination never
+        re-downloaded must not wait for a `--background` submit to be swept."""
+        stranded = download_state.claim_path(workspace, "/elsewhere/other.safetensors")
+        assert download_state.acquire_claim(stranded, download_id="abcdefabcdef", dest="/elsewhere/other.safetensors")
+        self._transfer(monkeypatch)
+
+        self._download()
+
+        assert not stranded.exists()
+
+    def test_a_failing_prune_does_not_fail_the_download(self, workspace, monkeypatch, capsys):
+        monkeypatch.setattr(download_state, "prune", MagicMock(side_effect=RuntimeError("boom")))
+        calls = self._transfer(monkeypatch)
+
+        self._download()
+
+        assert len(calls) == 1
+        (record,) = download_state.list_all(workspace)
+        assert record.status == "completed"
 
     # -- degradation ----------------------------------------------------------
 
