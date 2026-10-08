@@ -31,6 +31,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -141,6 +142,74 @@ def test_every_promotion_resolver_skips_an_unheld_row_before_a_live_one():
     assert item.source_node == "8"
     assert promoted._promotion_source(sg, sg["inputs"][0], definitions) == ("8", "prompt")
     assert promoted.boundary_widget_targets(sg, item, definitions) == [(["8"], "prompt")]
+
+
+def test_nested_fanout_memoizes_repeated_definition_walks():
+    definitions: dict[str, dict] = {}
+    depth = 10
+    width = 4
+    for level in reversed(range(depth)):
+        definition_id = f"level-{level}"
+        child_id = f"level-{level + 1}"
+        nodes = []
+        links = []
+        for index in range(width):
+            link_id = index + 1
+            node_type = child_id if level + 1 < depth else "PlainNode"
+            nodes.append(
+                {
+                    "id": index,
+                    "type": node_type,
+                    "inputs": [{"name": "value", "type": "STRING", "link": link_id}],
+                }
+            )
+            links.append({"id": link_id, "origin_id": -10, "origin_slot": 0, "target_id": index, "target_slot": 0})
+        definitions[definition_id] = {
+            "id": definition_id,
+            "inputs": [{"name": "value", "type": "STRING", "linkIds": list(range(1, width + 1))}],
+            "nodes": nodes,
+            "links": links,
+        }
+
+    with mock.patch.object(promoted, "_nested_definition", wraps=promoted._nested_definition) as resolver:
+        [item] = promoted.promoted_inputs(definitions["level-0"], definitions)
+
+    assert item.value_index is None
+    assert resolver.call_count == depth * width
+
+
+def test_distinct_nested_paths_are_bounded_by_definition_graph_size():
+    definitions: dict[str, dict] = {}
+    depth = 18
+    for level in reversed(range(depth)):
+        for side in ("left", "right"):
+            definition_id = f"{side}-{level}"
+            next_level = level + 1
+            child_types = (
+                (f"left-{next_level}", f"right-{next_level}") if next_level < depth else ("PlainLeft", "PlainRight")
+            )
+            definitions[definition_id] = {
+                "id": definition_id,
+                "inputs": [{"name": "value", "type": "STRING", "linkIds": [1, 2]}],
+                "nodes": [
+                    {
+                        "id": index,
+                        "type": child_type,
+                        "inputs": [{"name": "value", "type": "STRING", "link": index + 1}],
+                    }
+                    for index, child_type in enumerate(child_types)
+                ],
+                "links": [
+                    {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 0, "target_slot": 0},
+                    {"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": 0},
+                ],
+            }
+
+    with mock.patch.object(promoted, "_nested_definition", wraps=promoted._nested_definition) as resolver:
+        [item] = promoted.promoted_inputs(definitions["left-0"], definitions)
+
+    assert item.value_index is None
+    assert resolver.call_count <= promoted._promotion_visit_limit(definitions, definitions["left-0"]) * 2
 
 
 # --------------------------------------------------------------------------- #
