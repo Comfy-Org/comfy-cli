@@ -102,6 +102,18 @@ history.
 
 ### Fixed
 
+- `comfy build release show .` (and `release logs .`, `release manifest .`)
+  reads `.` as the build path, the way `release create .` does, and shows that
+  Build's newest release. It used to send `.` to the builder as a release id
+  and fail with an opaque `builder call failed (302)`. RELEASE is read as a
+  path only when it looks like one: `.` or `..`, a name with a `/`, a
+  `.yaml`/`.json` spec file, or a folder holding `comfy-build.yaml`; any other
+  name stays a release id even when a file of that name sits in the current
+  folder. A path-shaped RELEASE with no spec behind it fails as
+  `build_spec_not_found`, and a blank, dot-only or path-shaped release id given
+  before a PATH as `build_missing_input`, both before any request. A release id
+  the file system cannot look up (longer than a file name, naming a folder you
+  cannot read, or `~name` for no such user) still reaches the builder as the id.
 - `templates fetch` checks the template's model files when an offline catalog
   is set (`--input` or `COMFY_OBJECT_INFO_FILE`). A file the server lacks is
   replaced by the one installed file that is the same model in another

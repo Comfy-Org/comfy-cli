@@ -1245,8 +1245,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "build_release_not_found",
-        "A `comfy build release show`, `logs`, or `manifest` command omitted RELEASE, but the current Build "
-        "has no release to select. `details.buildId` names the Build whose exhaustive release list was empty.",
+        "A `comfy build release show`, `logs`, or `manifest` command was asked for a Build's newest release "
+        "(RELEASE omitted, or given as a build path such as `.`), but that Build has no release to select. "
+        "`details.buildId` names the Build whose exhaustive release list was empty.",
         "run `comfy build release create --target <os>/<gpu>` first, or pass an existing RELEASE id",
     ),
     ErrorCode(
