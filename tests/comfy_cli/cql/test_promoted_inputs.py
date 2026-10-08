@@ -212,6 +212,47 @@ def test_distinct_nested_paths_are_bounded_by_definition_graph_size():
     assert resolver.call_count <= promoted._promotion_visit_limit(definitions, definitions["left-0"]) * 2
 
 
+def test_boundary_target_fanout_is_bounded_by_definition_graph_size():
+    definitions: dict[str, dict] = {}
+    depth = 18
+    for level in reversed(range(depth)):
+        for side in ("left", "right"):
+            definition_id = f"{side}-{level}"
+            next_level = level + 1
+            child_types = (
+                (f"left-{next_level}", f"right-{next_level}") if next_level < depth else ("PlainLeft", "PlainRight")
+            )
+            definitions[definition_id] = {
+                "id": definition_id,
+                "inputs": [{"name": "value", "type": "STRING", "linkIds": [1, 2]}],
+                "nodes": [
+                    {
+                        "id": index,
+                        "type": child_type,
+                        "inputs": [
+                            {
+                                "name": "value",
+                                "type": "STRING",
+                                "widget": {"name": "value"},
+                                "link": index + 1,
+                            }
+                        ],
+                    }
+                    for index, child_type in enumerate(child_types)
+                ],
+                "links": [
+                    {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 0, "target_slot": 0},
+                    {"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": 0},
+                ],
+            }
+
+    root = definitions["left-0"]
+    item = promoted.PromotedInput("value", "STRING", 0, 0)
+
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="boundary traversal"):
+        promoted.boundary_widget_targets(root, item, definitions)
+
+
 # --------------------------------------------------------------------------- #
 # reads: host value wins, interior is the fallback
 # --------------------------------------------------------------------------- #
