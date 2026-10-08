@@ -213,6 +213,18 @@ def test_promotion_resolvers_ignore_unhashable_link_ids():
     assert promoted.boundary_widget_targets(sg, item, definitions) == [(["8"], "prompt")]
 
 
+def test_primitive_targets_ignore_unhashable_listed_link_ids():
+    primitive = {"id": 7, "outputs": [{"links": [[], 2]}]}
+    subgraph = {
+        "links": [
+            {"id": [], "origin_id": 7, "origin_slot": 0, "target_id": 8, "target_slot": 0},
+            {"id": 2, "origin_id": 7, "origin_slot": 0, "target_id": 9, "target_slot": 1},
+        ]
+    }
+
+    assert promoted._primitive_targets(subgraph, primitive) == [("9", 1)]
+
+
 def test_nested_fanout_memoizes_repeated_definition_walks():
     definitions: dict[str, dict] = {}
     depth = 10
