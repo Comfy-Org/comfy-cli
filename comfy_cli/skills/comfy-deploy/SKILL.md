@@ -308,7 +308,8 @@ comfy deploy run [PATH] --workflow <api-workflow>.json
 - **It waits and downloads by default.** Outputs land in `./outputs/` unless
   `--output-dir` says otherwise, and each is reported with its `node_id`, `name`,
   `type` and `path`. `--no-wait` returns the job id immediately instead.
-  `--timeout` bounds the wait.
+  `--timeout` bounds the wait. `job.releaseVersion` names the release that ran
+  the job, and is absent where the gateway does not report it.
 - **Job statuses are** `queued`, `running`, `succeeded`, `canceling`, `canceled`,
   `failed`, `expired`.
 - **Each `run` is a fresh idempotency key, so a resubmit is a second billed job.**
