@@ -236,7 +236,7 @@ def _scrub_secret_constructors(text: str) -> str:
 
 _SECRET_CONTAINER_START = re.compile(
     rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
-    r"(?P<opener>[\[({])",
+    r"(?P<opener>[\[({<])",
     re.IGNORECASE,
 )
 
@@ -246,7 +246,7 @@ def _scrub_secret_containers(text: str) -> str:
     chunks: list[str] = []
     cursor = 0
     search_from = 0
-    closers = {"[": "]", "(": ")", "{": "}"}
+    closers = {"[": "]", "(": ")", "{": "}", "<": ">"}
     while match := _SECRET_CONTAINER_START.search(text, search_from):
         stack = [closers[match.group("opener")]]
         index = match.end()

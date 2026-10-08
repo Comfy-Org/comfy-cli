@@ -278,6 +278,7 @@ def test_a_crash_in_the_root_callback_still_emits_the_envelope(monkeypatch, work
         ("cookies={'remember_me': 'LEAKTOKEN'} request=req-1", "LEAKTOKEN", "request=req-1"),
         ("API key: sk-LIVE request=req-1", "sk-LIVE", "request=req-1"),
         ("access token: sk-LIVE request=req-1", "sk-LIVE", "request=req-1"),
+        ("token=<ApiKey value='sk-LIVE'> request=req-1", "sk-LIVE", "request=req-1"),
         ("token=Bearer-sk-LIVE request=req-1", "sk-LIVE", "request=req-1"),
         ('body={\\"x-api-key\\": 123456789}', "123456789", "body="),
         ('body={\\"password\\": \\"a\\nb\\"}', "a\\nb", "body="),
