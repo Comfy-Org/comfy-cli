@@ -34,7 +34,8 @@ argument you pass.
 | `deploy_not_ready` | The deployment is not in `ready` | Wait if transitional; read `events` if terminal |
 | `deploy_immutable_compute` | Tried to change GPU/region in place | `stop` → `scale` → `start` |
 | `deploy_deleted` | Tried to start a deleted deployment | `comfy deploy up` makes a new one |
-| `deploy_ambiguous_deployment` | Several deployments tie for selection | Pass `--deployment <id>` |
+| `deploy_ambiguous_deployment` | Several deployments tie for selection, or `up` found more than one running deployment of the Build to update | Pass `--deployment <id>`, or `up --create` for a separate one |
+| `deploy_update_failed` | `up`, `promote` or `rollback` moved a deployment onto another release and the move failed; the old release still serves | Read `comfy deploy events --deployment <id>`; fix the release, then run the same command again |
 | `deploy_unrelated_deployment` | `--deployment` names one outside this scope | Pick from `details.candidateIds` |
 | `deploy_missing_input` | A required option was omitted non-interactively | Pass everything in `details.missing` |
 | `deploy_compute_unavailable` | That GPU/region cannot provision now | Choose another pair from `comfy deploy refs compute` |
@@ -43,8 +44,10 @@ argument you pass.
 | `deploy_conflict` | The deployment's state rejects the operation | Let it settle, re-read `status` |
 | `deploy_not_found` | No deployment with that id | `comfy deploy ls --workspace` |
 | `deploy_forbidden` | The workspace does not permit this | Confirm which workspace is signed in |
-| `deploy_not_signed_in` | No usable Cloud session | `comfy cloud login` |
+| `deploy_not_signed_in` | No usable Cloud session or workspace API key, or the key was refused | Replace the key the hint names; otherwise `comfy cloud login` |
 | `deploy_server_error` | Control plane unavailable or 5xx | Re-read `status` before retrying, so a retry cannot double-create |
+| `deploy_updates_unavailable` | `promote`, `rollback`, `history` or `events --release` on a deployment with no `revision`: the workspace has no deployment updates | `promote` or `rollback`: `up --create` on the release instead. `history`: read `events`. `events`: drop `--release`; those events do not say which release made them |
+| `deploy_watch_lost` | The watch's reads went unanswered for a minute, or a move by `up`, `promote` or `rollback` did not land within an hour (exit 75); the deployment may still be coming up | `comfy deploy status --deployment <id> --watch`, or after a move `comfy deploy show --deployment <id>` until it shows no `pendingUpdate`; do not redeploy |
 | `deploy_delete_needs_confirm` | `delete` without `--yes` non-interactively | Confirm with the user, then pass `--yes` |
 
 ### Submitting a workflow
@@ -55,28 +58,33 @@ argument you pass.
 | `deploy_workflow_empty` | Well-formed JSON object holding no nodes | Export a workflow with nodes in it |
 | `deploy_workflow_not_api_format` | Parsed as JSON but is not a workflow at all | Check the file is the right one |
 | `deploy_workflow_invalid` | The data plane rejected the nodes | Fix the nodes in `details.node_errors`, resubmit |
+| `deploy_workflow_too_large` | Over the 10 MB a deployment accepts; the job was not submitted | Move large inline data (embedded images, long text) out of the workflow, resubmit |
 | `deploy_workflow_asset_outside_root` | A local input resolves outside every allowed root | Move it under `models/`, `input/`, `output/`, or pass `--asset-root <dir>` |
 | `deploy_workflow_asset_marker_reserved` | The workflow already claims a `local-asset:` id | Remove that reserved id |
 | `deploy_asset_missing` | An asset needs uploading and `--no-upload` was set | Drop `--no-upload`, or pre-upload it |
 | `deploy_asset_upload_failed` | Upload failed or the hash moved mid-read | Confirm the file is stable, retry |
 | `deploy_rate_limited` | Queue full or rate limited | Wait for capacity |
 | `deploy_idempotency_reuse` | That idempotency key was already used | The earlier submit landed; say so rather than resubmitting |
-| `deploy_job_submit_unknown` | Submit timed out and the job **may exist** | **Do not auto-resubmit.** No job lookup exists — ask the user |
+| `deploy_job_submit_unknown` | Submit timed out and the job **may exist** | **Do not auto-resubmit.** The CLI cannot look the job up — ask the user |
 | `deploy_job_failed` | The job ran and failed | Fix the workflow or its inputs |
 | `deploy_job_canceled` | The job was canceled | Resubmit if that was not intended |
 
 The first three are caught locally, before anything is submitted, so they cost
-nothing.
+nothing. `deploy_workflow_too_large` creates no job either: the size is checked
+before the job request is sent, and a deployment that refuses the size does so
+before creating a job, so a resubmit after shrinking the workflow is safe. Files
+the workflow names may already have been uploaded as assets by then; a resubmit
+finds them by hash and does not upload them again.
 
 **`deploy_job_submit_unknown` is the one that can cost money twice.** The
 submission timed out, so the job may or may not have been created. Every `run` is
 a fresh idempotency key, which means a resubmit is a *second billed job* rather
 than a retry of the first.
 
-**The job itself cannot be found.** The API has no job-list endpoint, no lookup
-by idempotency key, and no client-supplied job id — the error message says as
-much. So "I looked and found nothing" is not evidence the job was never created,
-and must never be read as permission to resubmit. `comfy deploy status` is still
+**The CLI cannot find the job.** No `comfy` command looks a job up by the
+idempotency key the submission carried (`details.idempotency_key`). So "I looked
+and found nothing" is not evidence the job was never created, and must never be
+read as permission to resubmit. `comfy deploy status` is still
 the thing to read: the deployment's own state may be what caused the timeout, and
 the `serving` worker counts and `jobsInQueue` say whether *something* is running.
 Report that much, and let the user decide.

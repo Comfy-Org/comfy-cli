@@ -51,3 +51,54 @@ def test_phantom_companion_still_dropped_when_next_widget_is_not_that_combo():
     assert ("seed", 42) in pairs
     assert ("steps", 20) in pairs
     assert not any(v == "randomize" for _n, v in pairs)
+
+
+# An unflagged ``seed`` INT followed by a COMBO whose options include a control
+# keyword, then a trailing INT. The current frontend always saves a companion
+# after ``seed``, so the stream is [seed, <companion>, sampler, steps]. Older
+# streams without the companion are [seed, sampler, steps].
+_SEED_THEN_KEYWORD_COMBO = {
+    "input": {
+        "required": {
+            "seed": ["INT", {"default": 0}],
+            "sampler": [["randomize", "euler", "ddim"], {}],
+            "steps": ["INT", {"default": 20}],
+        },
+    },
+    "input_order": {"required": ["seed", "sampler", "steps"]},
+}
+
+
+def test_current_stream_consumes_companion_even_when_next_combo_lists_it():
+    # Companion slot present: "randomize" at index 1 is the seed's companion,
+    # the COMBO's real value is "euler", and steps stays aligned.
+    pairs = _schema_widget_pairs(_SEED_THEN_KEYWORD_COMBO, [42, "randomize", "euler", 30])
+    assert pairs == [("seed", 42), ("sampler", "euler"), ("steps", 30)]
+
+
+def test_current_stream_with_combo_also_set_to_the_keyword():
+    pairs = _schema_widget_pairs(_SEED_THEN_KEYWORD_COMBO, [42, "fixed", "randomize", 30])
+    assert pairs == [("seed", 42), ("sampler", "randomize"), ("steps", 30)]
+
+
+def test_legacy_stream_without_companion_keeps_combo_value():
+    # No companion slot: "randomize" is the COMBO's real saved value.
+    pairs = _schema_widget_pairs(_SEED_THEN_KEYWORD_COMBO, [42, "randomize", 30])
+    assert pairs == [("seed", 42), ("sampler", "randomize"), ("steps", 30)]
+
+
+def test_current_stream_noise_seed_companion_consumed():
+    schema = {
+        "input": {
+            "required": {
+                "noise_seed": ["INT", {"default": 0}],
+                "mode": [["fixed", "increment", "loop"], {}],
+                "cfg": ["FLOAT", {"default": 7.0}],
+            },
+        },
+        "input_order": {"required": ["noise_seed", "mode", "cfg"]},
+    }
+    pairs = _schema_widget_pairs(schema, [7, "fixed", "loop", 5.5])
+    assert pairs == [("noise_seed", 7), ("mode", "loop"), ("cfg", 5.5)]
+    legacy = _schema_widget_pairs(schema, [7, "fixed", 5.5])
+    assert legacy == [("noise_seed", 7), ("mode", "fixed"), ("cfg", 5.5)]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import urllib.error
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import Final
 
 import typer
@@ -11,6 +12,8 @@ import typer
 from comfy_cli.builder_api import BuilderAuthError
 from comfy_cli.command.build_paths import BuildSpecNotFoundError, resolve_build_paths
 from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, read_build_spec
+from comfy_cli.command.deploy_progress import DeployWatchReporter, progress_of
+from comfy_cli.command.deploy_progress import describe as describe_progress
 from comfy_cli.command.deploy_resolve import (
     _STATUS_RANK,
     BuilderReleaseClient,
@@ -19,12 +22,14 @@ from comfy_cli.command.deploy_resolve import (
     resolve_deployment,
 )
 from comfy_cli.command.deploy_runtime import (
-    command_clients as _command_clients,
-)
-from comfy_cli.command.deploy_runtime import (
+    DeployWatchLostError,
+    exit_watch_lost,
     poll_deployment,
     render_spec_error,
     terminal_status_error,
+)
+from comfy_cli.command.deploy_runtime import (
+    command_clients as _command_clients,
 )
 from comfy_cli.command.deploy_runtime import (
     sleep as _sleep,
@@ -32,6 +37,8 @@ from comfy_cli.command.deploy_runtime import (
 from comfy_cli.command.deploy_types import (
     DeployUpClient,
     compute_config,
+    optional_revision,
+    release_label,
     release_summary,
     required_int,
     required_string,
@@ -41,8 +48,10 @@ from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output import get_renderer
 from comfy_cli.output.renderer import Renderer
+from comfy_cli.utils import parse_rfc3339
 
 _WORKER_STATES: Final = ("idle", "initializing", "ready", "running", "throttled", "unhealthy")
+_CAPACITY: Final = ("ready", "busy", "starting")
 _STOP_REASONS: Final = frozenset({"user", "credits", "policy"})
 
 
@@ -60,14 +69,28 @@ class StatusResult:
     deployment: JsonObject | None
     release: JsonObject | None
     serving: JsonObject | None
+    # Where a deployment that is coming up has got to, as the service sent it.
+    progress: JsonObject | None = None
+    # The release the deployment moves to once its copy is ready, while one waits.
+    update: JsonObject | None = None
+    # Whether the workspace has deployment updates, read off the deployment's
+    # revision, which the service sends only inside that rollout.
+    updates_on: bool = False
 
     def payload(self) -> JsonObject:
-        return {
+        payload: JsonObject = {
             "build": {"id": self.build_id, "name": self.build_name},
             "deployment": self.deployment,
             "release": self.release,
             "serving": self.serving,
         }
+        # Absent rather than null once the deployment has settled, and from a
+        # service that never sends it.
+        if self.progress is not None:
+            payload["progress"] = self.progress
+        if self.update is not None:
+            payload["update"] = self.update
+        return payload
 
 
 def _nullable_string(value: JsonObject, key: str) -> str | None:
@@ -107,12 +130,46 @@ def _normalized_serving(deployment: JsonObject) -> JsonObject | None:
     if not isinstance(serving, dict):
         raise server_shape_error("the deployment has an invalid serving sample")
     workers = serving.get("workers")
-    if not isinstance(workers, dict):
-        raise server_shape_error("the deployment serving sample has no workers")
-    return {
-        "workers": {state: required_int(workers, state) for state in _WORKER_STATES},
+    if workers is not None and not isinstance(workers, dict):
+        raise server_shape_error("the deployment serving sample has invalid workers")
+    normalized: JsonObject = {
+        "capacity": _capacity(serving.get("capacity"), workers),
         "jobsInQueue": required_int(serving, "jobsInQueue"),
         "sampledAt": required_string(serving, "sampledAt"),
+    }
+    # The provider's own counts ride along while the service still sends them,
+    # so a script reading them keeps working. A state the service leaves out is
+    # left out, so a deprecated field that thins out cannot fail the command;
+    # one it sends malformed is still a shape error.
+    if isinstance(workers, dict):
+        normalized["workers"] = {state: _count(workers, state) for state in _WORKER_STATES if state in workers}
+    return normalized
+
+
+def _count(value: JsonObject, key: str) -> int:
+    count = required_int(value, key)
+    if count < 0:
+        raise server_shape_error(f"the deploy service returned a negative {key}", field=key)
+    return count
+
+
+def _capacity(capacity: object, workers: object) -> JsonObject:
+    """Ready, busy and starting workers, the same words on every GPU provider.
+
+    Read as the service sends it, or worked out from the provider's own counts
+    the way the service does, for a service that predates the field.
+    """
+    if isinstance(capacity, dict):
+        return {key: _count(capacity, key) for key in _CAPACITY}
+    if capacity is not None:
+        raise server_shape_error("the deployment serving sample has an invalid capacity")
+    if not isinstance(workers, dict):
+        raise server_shape_error("the deployment serving sample has neither capacity nor workers")
+    return {
+        # RunPod counts one warm worker as both idle and ready, so idle alone.
+        "ready": _count(workers, "idle"),
+        "busy": _count(workers, "running"),
+        "starting": _count(workers, "initializing"),
     }
 
 
@@ -161,21 +218,131 @@ def status_result(builder: BuilderReleaseClient, target: StatusTarget) -> Status
         _normalized_deployment(deployment),
         release,
         _normalized_serving(deployment),
+        progress_of(deployment),
+        _waiting_update(deployment, releases),
+        optional_revision(deployment) is not None,
     )
 
 
-def _render_serving(renderer: Renderer, serving: JsonObject | None) -> None:
+def _waiting_update(deployment: JsonObject, releases: list[JsonObject]) -> JsonObject | None:
+    pending = deployment.get("pendingUpdate")
+    if pending is None:
+        return None
+    if not isinstance(pending, dict):
+        raise server_shape_error("the deployment has an invalid pendingUpdate")
+    release_id = required_string(pending, "releaseId")
+    listed = next((release for release in releases if release.get("id") == release_id), None)
+    since = required_string(pending, "since")
+    try:
+        parse_rfc3339(since)
+    except ValueError as error:
+        raise server_shape_error("the deployment's pendingUpdate has an invalid since", field="since") from error
+    kind = pending.get("kind")
+    return {
+        "release": release_summary(listed) if listed is not None else {"id": release_id},
+        "status": required_string(pending, "status"),
+        "since": since,
+        "kind": kind if isinstance(kind, str) and kind else "update",
+    }
+
+
+def _interrupted_result(builder: BuilderReleaseClient, target: StatusTarget) -> StatusResult:
+    """The last read, for a watch the person stopped.
+
+    Its release summary needs one more read of the Build's releases, and a
+    person often presses Ctrl-C because the network went away. That read is not
+    worth turning an interrupt (130) into a server error (1): without it the
+    envelope still carries the deployment and its progress, with no release.
+    """
+    try:
+        return status_result(builder, target)
+    except (DeployAPIError, BuilderAuthError, ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError):
+        deployment = target.deployment
+        if deployment is None:
+            return StatusResult(target.build_id, target.build_name, None, None, None)
+        return StatusResult(
+            target.build_id,
+            target.build_name,
+            _normalized_deployment(deployment),
+            None,
+            _normalized_serving(deployment),
+            progress_of(deployment),
+            _waiting_update_or_none(deployment),
+        )
+
+
+def _waiting_update_or_none(deployment: JsonObject) -> JsonObject | None:
+    # The fallback must not raise what made the full result fail.
+    try:
+        return _waiting_update(deployment, [])
+    except DeployAPIError:
+        return None
+
+
+def _sample_age(sampled_at: str) -> str:
+    """How long ago the counts were taken, for the line that prints them.
+
+    The counts are a snapshot the control plane refreshes on its own schedule,
+    and a deployment whose endpoint stopped answering keeps the last one it got,
+    so the timestamp alone does not say whether these numbers still describe
+    now. Never raises: a timestamp this cannot read still has to print its
+    counts, so an unreadable one degrades to saying the age is unknown.
+    """
+    try:
+        elapsed = (datetime.now(timezone.utc) - parse_rfc3339(sampled_at)).total_seconds()
+    except ValueError:
+        return "age unknown"
+    seconds = int(elapsed)
+    if seconds < 0:
+        # The sample is stamped by the server, so a clock a little apart from
+        # ours reads as the future rather than as an age.
+        return "just now"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        hours, rest = divmod(seconds, 3600)
+        return f"{hours}h {rest // 60}m ago"
+    return f"{seconds // 86400}d ago"
+
+
+def _render_serving(renderer: Renderer, serving: JsonObject | None, status: str) -> None:
     if serving is None:
         renderer.info("Serving: not sampled yet.")
         return
-    workers = serving["workers"]
-    if not isinstance(workers, dict):
-        raise server_shape_error("the normalized serving sample has no workers")
-    counts = " ".join(f"{state}={required_int(workers, state)}" for state in _WORKER_STATES)
+    capacity = serving["capacity"]
+    if not isinstance(capacity, dict):
+        raise server_shape_error("the normalized serving sample has no capacity")
+    counts = " ".join(f"{key}={required_int(capacity, key)}" for key in _CAPACITY)
     queue = required_int(serving, "jobsInQueue")
     sampled_at = required_string(serving, "sampledAt")
-    suffix = " — healthy idle (scale-to-zero)" if queue == 0 and all(value == 0 for value in workers.values()) else ""
-    renderer.info(f"Serving: {counts} queued={queue}; sampledAt={sampled_at}{suffix}")
+    # Workers the provider reports as failing can take no job, so capacity never
+    # counts them; they are named here so an all-zero line is not read as healthy.
+    workers = serving.get("workers")
+    unhealthy = workers.get("unhealthy", 0) if isinstance(workers, dict) else 0
+    if unhealthy:
+        counts += f" unhealthy={unhealthy}"
+    # Only a ready deployment is called healthy: its status, not the provider's
+    # deprecated counts, is what says so.
+    idle = status == "ready" and queue == 0 and not unhealthy and all(value == 0 for value in capacity.values())
+    suffix = ": healthy idle (scale-to-zero)" if idle else ""
+    renderer.info(f"Serving: {counts} queued={queue}; sampledAt={sampled_at} ({_sample_age(sampled_at)}){suffix}")
+
+
+def _render_error(renderer: Renderer, deployment: JsonObject) -> None:
+    """The failure detail the deployment carries, which only `--json` showed.
+
+    Set when the status is failed (why it failed) or stop_failed (why the stop
+    could not release the compute); null otherwise, so this prints nothing for
+    a deployment that is fine.
+    """
+    error = deployment.get("error")
+    if error is None:
+        return
+    if not isinstance(error, str):
+        raise server_shape_error("the normalized deployment has an invalid error")
+    renderer.warn(f"Reason: {error}")
 
 
 def _render_stop_reason(renderer: Renderer, deployment: JsonObject) -> None:
@@ -221,6 +388,40 @@ def _render_deployment(renderer: Renderer, deployment: JsonObject) -> str:
     return status
 
 
+def _moving_to_latest(result: StatusResult) -> bool:
+    """Whether the waiting update already goes to the newest deployable release,
+    so the hint to move there would tell someone to start what is under way."""
+    if result.update is None or result.release is None or result.update["status"] == "failed":
+        return False
+    target = result.update["release"]
+    latest = result.release.get("latestDeployable")
+    return isinstance(target, dict) and isinstance(latest, dict) and target.get("id") == latest.get("id")
+
+
+def _update_line(update: JsonObject) -> str:
+    release = update["release"]
+    assert isinstance(release, dict)  # _waiting_update builds it
+    noun, verb = ("rollback", "Rolling back") if update.get("kind") == "rollback" else ("update", "Updating")
+    if update["status"] == "failed":
+        return f"The {noun} to {release_label(release)} failed; the deployment still serves its current release."
+    return f"{verb} to {release_label(release)}: its copy is {update['status']}, asked {update['since']}."
+
+
+def _behind_hint(result: StatusResult, deployment_id: str) -> str:
+    if not result.updates_on:
+        return "running `comfy deploy up` creates a new deployment with a new URL"
+    if result.update is not None and result.update.get("status") == "failed":
+        # The service drops a failed update itself, after which a move is taken.
+        return (
+            f"the waiting update failed: read `comfy deploy events --deployment {deployment_id}`, then run "
+            f"`comfy deploy up --deployment {deployment_id}` once status shows no update"
+        )
+    if result.update is not None:
+        # The service refuses a second move while one waits.
+        return f"once the waiting update lands or fails, `comfy deploy up --deployment {deployment_id}` moves it there"
+    return f"running `comfy deploy up --deployment {deployment_id}` moves this deployment to it, keeping its URL"
+
+
 def render_status(renderer: Renderer, result: StatusResult) -> None:
     deployment = result.deployment
     if deployment is None:
@@ -233,17 +434,22 @@ def render_status(renderer: Renderer, result: StatusResult) -> None:
 
     status = _render_deployment(renderer, deployment)
     if renderer.is_pretty():
+        if result.update is not None:
+            renderer.info(_update_line(result.update))
+        if result.progress is not None:
+            renderer.info(describe_progress(result.progress, now=datetime.now(timezone.utc)))
+        _render_error(renderer, deployment)
         _render_stop_reason(renderer, deployment)
-        _render_serving(renderer, result.serving)
+        _render_serving(renderer, result.serving, status)
     release = result.release
-    if release is not None and release.get("behind") is True:
+    if release is not None and release.get("behind") is True and not _moving_to_latest(result):
         latest = release.get("latestDeployable")
         if not isinstance(latest, dict):
             raise server_shape_error("a behind release has no latestDeployable")
         renderer.warn(
             f"Deployment {required_string(deployment, 'id')} runs release v{required_int(release, 'version')}; "
             f"release v{required_int(latest, 'version')} is deployable.",
-            hint="running `comfy deploy up` creates a new deployment with a new URL",
+            hint=_behind_hint(result, required_string(deployment, "id")),
         )
     terminal = status in {"failed", "stop_failed"}
     renderer.emit(
@@ -263,8 +469,28 @@ def run_status(path: str | None, *, deployment_id: str | None = None, watch: boo
         builder, client = _command_clients()
         target = resolve_status(builder, client, path, deployment_id)
         if watch and target.deployment is not None:
-            watched = poll_deployment(client, required_string(target.deployment, "id"), _sleep)
+            watched_id = required_string(target.deployment, "id")
+            reporter = DeployWatchReporter(renderer, watched_id)
+            try:
+                watched = poll_deployment(client, watched_id, _sleep, reporter.snapshot, reporter.unanswered)
+            except KeyboardInterrupt:
+                # Watching is all this command does, so Ctrl-C stops the watching
+                # and nothing else: the deployment is the service's to bring up.
+                reporter.interrupted()
+                if reporter.last is not None:
+                    render_status(renderer, _interrupted_result(builder, replace(target, deployment=reporter.last)))
+                raise typer.Exit(code=130) from None
+            except DeployWatchLostError as error:
+                reporter.close()
+                exit_watch_lost(renderer, error)
+            finally:
+                reporter.close()
             target = replace(target, deployment=watched)
+        elif target.deployment is not None:
+            # The list reply is a summary without `error` or `serving`, so the
+            # one deployment this reports on is read again in full.
+            full = client.get_deployment(required_string(target.deployment, "id"))
+            target = replace(target, deployment=full)
         render_status(renderer, status_result(builder, target))
     except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:
         render_spec_error(renderer, error)

@@ -20,9 +20,14 @@ know what exists, and reach for the right one rather than improvising its job:**
 `comfy-director` (multi-shot narrative video — story, continuity, conform),
 `comfy-build` (build a custom ComfyUI environment on the developer platform),
 `comfy-deploy` (run a build release as a serverless deployment, and stop it
-costing money), `comfy-debug` (any failed job: error code → fix), `comfy-relay`
+costing money), `comfy-custom-nodes` (write or fix a custom node pack — the V3 node API,
+layout, testing, publishing), `comfy-debug` (any failed job: error code → fix), `comfy-relay`
 (surface a workflow/result in chat, never leave it in /tmp). When a task spans
 several, load them up front instead of discovering the gap mid-render.
+
+Inside the local comfy agent (the `comfy-agent` binary on a user's machine), a permission that
+blocks you — a folder, a host, a shell — is a question for the user: the `comfy-agent-permissions`
+skill says what the agent may reach, how the user grants more, and what can never be granted.
 
 ---
 
@@ -80,6 +85,13 @@ rather than an answer to anything. Five rules:
    it resolves to. A row flagged this way also pulls in `picks[]` for the
    capabilities that rank it, so the highest-ranked entry *without* the flag is
    the runnable alternative. Say what is missing, then name that alternative.
+   When routing is local, add `--check-local` to `knowledge pick`: it also
+   flags an `oss` pick whose model files are missing, with `missing_models`
+   counting them, and `comfy --json templates check <template>` names them with
+   download URLs. Unless the payload's `local_check` is `ok`, the check did not
+   finish and no pick is flagged. A pick carrying its own `local_check` was not
+   checked, so it is not yet the runnable alternative. Ask before downloading
+   anything.
 3. **Verify before denying.** A missing `knowledge` key or a `nudge` means
    nothing is curated for that query, not that it is unsupported. A `nudge` on
    a block that still carries rows means your search term matched nothing
@@ -352,14 +364,17 @@ of a live graph, use the structured-edit primitives below — never raw `jq`/`se
 (This rule exists because that exact jq-on-`id==128` hand-edit is the anti-pattern
 `decompose` — and these primitives — were built to kill.)
 
-## Structured graph edits — `add-node` / `connect` / `set-widget` / `delete-node`
+## Structured graph edits — `insert-workflow` / `add-node` / `connect` / `set-widget` / `set-node-field` / `delete-node`
 
 The **sanctioned** way to mutate a graph's *structure* from code — the
-alternative to `jq`/`sed` on `nodes`/`links`/`widgets_values`. Each edit is
-validated against `object_info` (node class, widget name, widget value **shape**,
-and connection **type** are hard-checked; unknown COMBO values / out-of-range
-numbers come back as soft `warnings`) and emits a replayable **operation** in
-`data.op`.
+alternative to `jq`/`sed` on `nodes`/`links`/`widgets_values`. `insert-workflow`
+is emit-only: the CLI checks JSON shape and forwards the workflow without
+semantic validation or id remapping. The cmp applier on the server validates node
+types, links, and definition ids, remaps ids, and returns errors that the CLI
+surfaces verbatim. The other edits are validated against `object_info` (node
+class, widget name, widget value **shape**, and connection **type** are
+hard-checked; unknown COMBO values / out-of-range numbers come back as soft
+`warnings`) and emit a replayable **operation** in `data.op`.
 
 **When to use which editing path:**
 - **Reusable / human-authored workflow** → fragments + blueprint (above). *Default.*
@@ -368,8 +383,8 @@ numbers come back as soft `warnings`) and emits a replayable **operation** in
   nodes; the in-app agent's path; any edit that must merge with a concurrent
   human editor) → the primitives here.
 
-> **Live co-editing / CRDT:** only the structured-edit primitives (`add-node`/
-> `connect`/`set-widget`/`delete-node`/`apply`) emit a mergeable **op** in
+> **Live co-editing / CRDT:** only the structured-edit primitives (`insert-workflow`/
+> `add-node`/`connect`/`set-widget`/`set-node-field`/`delete-node`/`apply`) emit a mergeable **op** in
 > `data.op`/`data.ops` (`op_id` + `actor` + `base_version` + `stamp`). Fragments +
 > `compose` produce a **whole-document** graph — fine for authoring a *fresh*
 > draft (the base), but it does **not** emit ops and will clobber a concurrent
@@ -385,9 +400,14 @@ CAT="--where cloud"
 # Start from an existing graph, or an empty one:
 echo '{"nodes":[],"links":[],"last_node_id":0,"last_link_id":0}' > wf.json
 
+comfy --json workflow insert-workflow wf.json template.json                # emits one atomic insert_workflow op
+cat template.json | comfy --json workflow insert-workflow wf.json -        # '-' reads the template from stdin
 comfy --json workflow add-node    wf.json KSampler --at 400,200 $CAT  # → data.op.node_id (minted)
 comfy --json workflow connect     wf.json 7.LATENT 3.samples $CAT     # source out-slot → target in-slot
 comfy --json workflow set-widget  wf.json 3.steps 35 $CAT             # widget by NAME; op carries {old,value}
+comfy --json workflow set-node-field wf.json 3 title "My Sampler"    # rename a node; PROPOSED op, no catalog needed
+comfy --json workflow set-node-field wf.json 3 title --clear         # clear a field back to absent
+comfy --json workflow set-node-field wf.json 3 flags.collapsed true  # collapse a node
 comfy --json workflow delete-node wf.json 7 $CAT                      # removes node + its links
 comfy --json workflow ls-nodes    wf.json                            # id / type / title (no catalog needed)
 ```
@@ -466,6 +486,17 @@ comfy --json download --out-dir ./out < run.json                      # pull the
   `set-widget` additionally resolves values **inside a subgraph** directly — use
   the flat promoted address `slots` advertises (e.g. `57.text`) or the nested
   form (`57/27.text`); no decompose needed.
+- **`set-node-field` writes one durable, per-node scalar field** — `title`,
+  `mode`, `flags.collapsed` or `flags.pinned` — (or `--clear`s it back to
+  absent). It needs no catalog — none of those four is a widget — and is the
+  only way to change one that produces a mergeable op; hand-editing the field
+  in the JSON does not replicate to a concurrent editor. Unlike `add-node`'s
+  whole-node upsert, it claims one LWW register per `(node, field)`, so a
+  title write and a concurrent widget write on the same node never contend.
+  **PROPOSED:** `set_node_field` is not yet part of the ratified
+  `docs/op-vocabulary-v1.md` contract (§1.8) — it is implemented and tested,
+  pending maintainer ratification, and mirrors comfy-multi-player#235's
+  merged CRDT op of the same name.
 
 ---
 

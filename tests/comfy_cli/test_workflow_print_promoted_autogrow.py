@@ -374,6 +374,39 @@ def test_socket_only_subgraph_inputs_are_not_listed_as_promoted_widgets(promoted
     assert "IN.clip_to_resize" not in promoted_line and "IN.base_video" not in promoted_line
 
 
+def test_unwired_declared_subgraph_output_prints_as_none():
+    """A missing boundary wire must be visible, not omitted from the read."""
+    uuid = "aaaaaaaa-0000-4000-8000-aaaaaaaaaaaa"
+    wf = {
+        **_empty(),
+        "nodes": [{"id": 10, "type": uuid, "inputs": [], "outputs": []}],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": uuid,
+                    "name": "Partially wired",
+                    "inputs": [],
+                    "outputs": [{"name": "IMAGE"}, {"name": "MASK"}],
+                    "nodes": [
+                        {
+                            "id": 3,
+                            "type": "Producer",
+                            "inputs": [],
+                            "outputs": [{"name": "IMAGE", "links": [1]}],
+                        }
+                    ],
+                    "links": [{"id": 1, "origin_id": 3, "origin_slot": 0, "target_id": -20, "target_slot": 0}],
+                }
+            ]
+        },
+    }
+
+    source = render_py(wf, None).source
+
+    assert "OUT.IMAGE = producer" in source
+    assert "OUT.MASK = None" in source
+
+
 def test_outside_link_into_a_promoted_input_prints_as_a_link(promoted_graph):
     wf = _gallery("image_z_image_turbo.json")
     wf, prim = _add(wf, promoted_graph, "PrimitiveInt")

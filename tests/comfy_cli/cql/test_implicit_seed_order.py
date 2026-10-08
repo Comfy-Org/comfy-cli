@@ -1,16 +1,14 @@
 """The implicit control_after_generate rule must reach EVERY widget-order surface.
 
 The frontend's ``useIntWidget`` composable appends a ``control_after_generate``
-companion widget after seed-like INT inputs even when the schema omits the
-flag — partner nodes ship ``image_seed``/``model_seed``/``Seed``/``rand_seed``
-unflagged (Tripo, Rodin3D, …). The UI→API converter already models this
-(``workflow_to_api._has_control_after_generate_companion``); the engine's
-``_has_control_after_generate_slot`` predicate exists for the same purpose but
-``widget_order`` / ``widget_order_default`` / ``widget_defaults`` were checking
-the raw schema flag instead of the predicate — so the exported widget catalog
-(sha256-versioned, consumed by the CRDT doc host for name<->index mapping) was
-off by one for every implicitly-companioned node: a consumer writing by index
-landed in the control marker slot. Silent canvas corruption.
+companion widget after an INT named exactly ``seed``/``noise_seed`` even when
+the schema omits the flag. Other seed-like names (``image_seed`` on Tripo) get
+one only when flagged: saved Tripo templates carry no marker after them (see
+``test_seed_companion_frontend_parity``). ``widget_order`` /
+``widget_order_default`` / ``widget_defaults`` must all use the engine's
+``_has_control_after_generate_slot`` predicate, or the exported widget catalog
+(consumed by the CRDT doc host for name<->index mapping) disagrees with the
+edit path about where the marker sits.
 """
 
 from __future__ import annotations
@@ -20,15 +18,15 @@ import pytest
 from comfy_cli.cql.engine import Graph
 
 _OBJECT_INFO = {
-    # Tripo shape: unflagged seed-like INT, then a combo the off-by-one would eat.
+    # Unflagged INT named exactly ``seed``, then a combo the off-by-one would eat.
     "TripoLike": {
         "input": {
             "required": {
-                "image_seed": ["INT", {"default": 0}],
+                "seed": ["INT", {"default": 0}],
                 "style": [["clay", "steel"], {}],
             },
         },
-        "input_order": {"required": ["image_seed", "style"]},
+        "input_order": {"required": ["seed", "style"]},
         "output": [],
         "output_name": [],
         "category": "test",
@@ -68,7 +66,7 @@ def graph() -> Graph:
     return Graph.from_object_info(_OBJECT_INFO)
 
 
-EXPECTED_TRIPO = ["image_seed", "control_after_generate", "style"]
+EXPECTED_TRIPO = ["seed", "control_after_generate", "style"]
 
 
 class TestImplicitSeedCompanionInEveryOrderSurface:
