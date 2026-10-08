@@ -25,6 +25,7 @@ import pytest
 
 from comfy_cli import workflow_ops, workflow_to_api
 from comfy_cli.cql.engine import Graph
+from comfy_cli.cql.promoted import PromotionTraversalLimitError
 from comfy_cli.workflow_to_api import convert_ui_to_api
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -186,3 +187,14 @@ def test_subgraph_input_resolution_fails_closed_at_materialization_cap():
 
     with pytest.raises(workflow_to_api.WorkflowConversionError, match="input resolution exceeded"):
         workflow_to_api._resolve_subgraph_input_all("root", 0, ctx)
+
+
+def test_promotion_traversal_limit_is_a_structured_conversion_failure(object_info):
+    with (
+        mock.patch(
+            "comfy_cli.cql.promoted.promoted_inputs",
+            side_effect=PromotionTraversalLimitError("promoted input traversal exceeded"),
+        ),
+        pytest.raises(workflow_to_api.WorkflowConversionError, match="promoted input traversal exceeded"),
+    ):
+        convert_ui_to_api(_load("audio_minimax_music_3.json"), object_info)

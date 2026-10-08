@@ -1801,6 +1801,16 @@ def _render_definition_block(
 
 
 def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
+    """Render a workflow, mapping bounded promotion failures to print diagnostics."""
+    from comfy_cli.cql.promoted import PromotionTraversalLimitError
+
+    try:
+        return _render_py(workflow, graph)
+    except PromotionTraversalLimitError as exc:
+        raise PrintUnsupported([str(exc)]) from exc
+
+
+def _render_py(workflow: dict, graph: Graph | None) -> PrintResult:
     warnings: list[str] = []
 
     raw_nodes = workflow.get("nodes") or []

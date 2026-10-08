@@ -394,6 +394,25 @@ def test_legacy_group_node_is_refused(sd15_graph):
     assert e.value.reasons == ["node 1 is a legacy group node (workflow>MyGroup)"]
 
 
+def test_promotion_traversal_limit_is_a_structured_print_failure():
+    subgraph_id = "11111111-2222-3333-4444-555555555555"
+    workflow = _mini([_node(1, subgraph_id)], [])
+    workflow["definitions"] = {
+        "subgraphs": [{"id": subgraph_id, "inputs": [], "outputs": [], "nodes": [], "links": []}]
+    }
+
+    with (
+        mock.patch(
+            "comfy_cli.cql.promoted.promoted_inputs",
+            side_effect=workflow_print._promoted.PromotionTraversalLimitError("promoted input traversal exceeded"),
+        ),
+        pytest.raises(PrintUnsupported, match="promoted input traversal exceeded") as exc,
+    ):
+        render_py(workflow, None)
+
+    assert exc.value.reasons == ["promoted input traversal exceeded"]
+
+
 def test_reroute_is_spliced(sd15_graph):
     wf = _mini(
         [

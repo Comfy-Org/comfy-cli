@@ -43,6 +43,10 @@ _WORD_TAIL = re.compile(r"(?:^|[_\-.])(?P<tok>[^_\-.]+)$")
 MODEL_FILE = re.compile(r"\.(safetensors|sft|ckpt|pt|pth|bin|gguf|onnx)$", re.IGNORECASE)
 
 
+class ModelVariantResolutionError(RuntimeError):
+    """A malformed promoted-widget graph prevented safe model substitution."""
+
+
 def _parse(name: str) -> tuple[tuple[str, str, str], tuple[str, ...]] | None:
     """``((directory, name, extension), precision tag)`` for a model filename.
 
@@ -159,6 +163,28 @@ def resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dic
     carries the same filename as a promoted value, and the ``properties.models``
     download list, follow the rewrite.
     """
+    # Promoted values are updated after their interior model selector. Validate
+    # that traversal before mutating either place, so a bounded malformed DAG
+    # returns a structured failure without leaving a half-rewritten workflow.
+    needs_promoted_rename = any(
+        sg_id is not None
+        and any(
+            value not in {str(option) for option in port.enum_values}
+            and precision_sibling(value, list(port.enum_values)) is not None
+            for _key, port, _field, value in _model_widgets(node, graph)
+        )
+        for node, sg_id in _workflow_nodes(workflow)
+    )
+    if needs_promoted_rename:
+        from comfy_cli.cql.promoted import PromotionTraversalLimitError, defs_by_id, promoted_inputs
+
+        defs = defs_by_id(workflow)
+        try:
+            for definition in {id(value): value for value in defs.values()}.values():
+                promoted_inputs(definition, defs)
+        except PromotionTraversalLimitError as exc:
+            raise ModelVariantResolutionError(str(exc)) from exc
+
     subs: list[dict] = []
     unavailable: list[dict] = []
     # Per subgraph definition: (interior node id, widget) -> (old, new). An

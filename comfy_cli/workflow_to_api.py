@@ -104,6 +104,15 @@ def convert_ui_to_api(workflow: dict, object_info: dict) -> dict:
     Returns:
         API-format dict: ``{node_id_str: {class_type, inputs, _meta}}``.
     """
+    from comfy_cli.cql.promoted import PromotionTraversalLimitError
+
+    try:
+        return _convert_ui_to_api(workflow, object_info)
+    except PromotionTraversalLimitError as exc:
+        raise WorkflowConversionError(str(exc)) from exc
+
+
+def _convert_ui_to_api(workflow: dict, object_info: dict) -> dict:
     if is_api_format(workflow):
         return workflow
     if not isinstance(workflow, dict):

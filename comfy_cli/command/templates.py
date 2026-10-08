@@ -846,13 +846,16 @@ def _resolve_template_models(wf: Any, input_path: str | None) -> dict[str, Any]:
         return {}
     from comfy_cli.cql.engine import Graph
     from comfy_cli.cql.loader import resilient_load_object_info
-    from comfy_cli.model_variants import resolve_workflow_models
+    from comfy_cli.model_variants import ModelVariantResolutionError, resolve_workflow_models
 
     try:
         graph = Graph.from_object_info(resilient_load_object_info(input_path=input_path))
     except Exception as e:  # noqa: BLE001 — a missing catalog only skips the check
         return {"model_check_skipped": f"could not load object_info: {e}"}
-    subs, unavailable = resolve_workflow_models(wf, graph)
+    try:
+        subs, unavailable = resolve_workflow_models(wf, graph)
+    except ModelVariantResolutionError as e:
+        return {"model_check_skipped": f"could not safely resolve promoted model widgets: {e}"}
     notes: dict[str, Any] = {}
     if subs:
         notes["model_substitutions"] = subs

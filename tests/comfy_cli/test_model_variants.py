@@ -27,7 +27,12 @@ from typer.testing import CliRunner
 from comfy_cli.caller import Caller
 from comfy_cli.command import templates as templates_cmd
 from comfy_cli.cql.engine import Graph
-from comfy_cli.model_variants import precision_key, precision_sibling, resolve_workflow_models
+from comfy_cli.model_variants import (
+    ModelVariantResolutionError,
+    precision_key,
+    precision_sibling,
+    resolve_workflow_models,
+)
 from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
 
 VAES = [
@@ -329,6 +334,47 @@ class TestResolveWorkflowModels:
         assert resolve_workflow_models(wf, graph) == ([], [])
         assert wf == before
 
+    def test_malformed_promotion_dag_fails_before_model_mutation(self, graph):
+        definitions: dict[str, dict] = {}
+        depth = 18
+        for level in reversed(range(depth)):
+            for side in ("left", "right"):
+                definition_id = f"{side}-{level}"
+                next_level = level + 1
+                child_types = (
+                    (f"left-{next_level}", f"right-{next_level}") if next_level < depth else ("PlainLeft", "PlainRight")
+                )
+                definitions[definition_id] = {
+                    "id": definition_id,
+                    "inputs": [{"name": "value", "type": "STRING", "linkIds": [1, 2]}],
+                    "nodes": [
+                        {
+                            "id": index,
+                            "type": child_type,
+                            "inputs": [{"name": "value", "type": "STRING", "link": index + 1}],
+                        }
+                        for index, child_type in enumerate(child_types)
+                    ],
+                    "links": [
+                        {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 0, "target_slot": 0},
+                        {"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": 0},
+                    ],
+                }
+        definitions["left-0"]["nodes"].append(
+            {
+                "id": 99,
+                "type": "VAELoader",
+                "widgets_values": ["minimax_h3_video_vae_int8_convrot.safetensors"],
+            }
+        )
+        workflow = {"nodes": [], "definitions": {"subgraphs": list(definitions.values())}}
+        before = copy.deepcopy(workflow)
+
+        with pytest.raises(ModelVariantResolutionError, match="input traversal"):
+            resolve_workflow_models(workflow, graph)
+
+        assert workflow == before
+
 
 # ---------------------------------------------------------------------------
 # templates fetch
@@ -406,6 +452,22 @@ class TestTemplatesFetch:
         assert env["ok"] is True
         assert "could not load object_info" in env["data"]["model_check_skipped"]
         assert json.loads(out.read_text()) == _template()
+
+    def test_promotion_limit_skips_model_check_with_structured_reason(self, tmp_path: Path, monkeypatch):
+        info = tmp_path / "object_info.json"
+        info.write_text(json.dumps(_object_info()))
+        workflow = _template()
+        before = copy.deepcopy(workflow)
+
+        def fail_resolution(*_args, **_kwargs):
+            raise ModelVariantResolutionError("promoted input traversal exceeded its safe limit")
+
+        monkeypatch.setattr("comfy_cli.model_variants.resolve_workflow_models", fail_resolution)
+
+        notes = templates_cmd._resolve_template_models(workflow, str(info))
+
+        assert "promoted input traversal exceeded" in notes["model_check_skipped"]
+        assert workflow == before
 
 
 # ---------------------------------------------------------------------------
