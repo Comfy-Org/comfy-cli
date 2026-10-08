@@ -236,15 +236,7 @@ def execute(
     # workflow_dict / display_name / is_ui / checkpoint_user_set tuple. Everything
     # downstream is unchanged; `checkpoint_user_set` gates runtime checkpoint
     # resolution for the bundled default (skip it when the user pinned one).
-    if preloaded is not None:
-        raw_workflow, workflow_name, is_ui, checkpoint_user_set = preloaded
-    else:
-        checkpoint_user_set = False
-        try:
-            raw_workflow, workflow_name, is_ui = _load_workflow_file(workflow)
-        except WorkflowLoadError as e:
-            renderer.error(code=e.code, message=str(e), hint=e.hint)
-            raise typer.Exit(code=1) from e
+    raw_workflow, workflow_name, is_ui, checkpoint_user_set = _load_workflow_or_exit(renderer, workflow, preloaded)
 
     if not print_prompt and not check_comfy_server_running(port, host, timeout=timeout):
         renderer.error(
@@ -508,7 +500,7 @@ def execute(
             # The event-order contract (docs/json-output.md) is
             # `prompt_preview → queued → node events`, so this must also
             # precede `watch_execution`'s WebSocket stream.
-            _emit_queued(renderer, execution)
+            _emit_queued_event(renderer, execution)
 
             # `watch_execution` reports a terminal server event by rendering
             # the error and raising `typer.Exit` (1 for `execution_error`, 130
@@ -574,56 +566,29 @@ def execute(
             # Async path (the default). Write the initial state file and
             # spawn a detached watcher to keep it updated; the foreground
             # caller returns immediately with the prompt_id.
-            state = jobs_state.new(
-                prompt_id=execution.prompt_id,
-                client_id=execution.client_id,
-                workflow=workflow_name,
+            _, state_file = _init_queued_state(
+                execution.prompt_id,
+                execution.client_id,
+                workflow_name,
                 where="local",
+                compose_meta=compose_meta,
                 host=host,
                 port=port,
             )
-            state.item_map = (compose_meta or {}).get("items")
-            state_file = jobs_state.write(state)
             watcher_spawned = _spawn_watcher(execution.prompt_id, where="local", host=host, port=port, notify=notify)
-
             # Emitted after the state file and the watcher spawn attempt, so a
             # consumer reading this line can already `comfy jobs status` it.
-            _emit_queued(renderer, execution)
-
-            if renderer.is_pretty():
-                from comfy_cli.output.glyphs import status_glyph
-
-                pprint(
-                    f"{status_glyph('queued')} [dim]{execution.prompt_id}[/dim]\n"
-                    f"  [dim]workflow [/dim]{workflow_name}\n"
-                    f"  [dim]watch    [/dim][cyan]comfy jobs watch {execution.prompt_id}[/cyan]\n"
-                    f"  [dim]state    [/dim]{state_file}"
-                )
-                if not watcher_spawned:
-                    pprint(
-                        "[yellow]⚠ Background watcher could not start; poll manually with `comfy jobs status`[/yellow]"
-                    )
-            renderer.emit(
-                {
-                    "workflow": workflow_name,
-                    "status": "queued",
-                    "prompt_id": execution.prompt_id,
-                    "client_id": execution.client_id,
-                    "outputs": [],
-                    "elapsed_seconds": None,
-                    "host": host,
-                    "port": port,
-                    "state_file": str(state_file) if state_file else None,
-                    "watcher_spawned": watcher_spawned,
-                },
-                command="run",
+            _emit_queued_event(renderer, execution)
+            _announce_async_queued(
+                execution.prompt_id,
+                execution.client_id,
+                workflow_name,
                 where="local",
+                watch_command=f"comfy jobs watch {execution.prompt_id}",
+                state_file=state_file,
+                watcher_spawned=watcher_spawned,
+                locator_fields={"host": host, "port": port},
             )
-            # Pretty mode: brief live tail so the user can see the job
-            # move through "allocated → executing → completed" without
-            # having to run `comfy jobs watch`. The background watcher
-            # keeps writing the state file after we return.
-            _tail_state_file(execution.prompt_id)
     except KeyboardInterrupt:
         if progress is not None:
             progress.stop()
@@ -755,8 +720,14 @@ def execute(
         renderer.emit(completed_payload, command="run", where="local")
 
 
-def _emit_queued(renderer, execution) -> None:
-    """Emit the contractual local `queued` event (docs/json-output.md#queued).
+def _emit_queued_event(renderer, execution) -> None:
+    """Emit the contractual local `queued` NDJSON stream event
+    (docs/json-output.md#queued).
+
+    Distinct from :func:`_announce_async_queued` below, which owns the pretty-printed
+    status panel, the final `queued` envelope, and the live state tail — this
+    is the per-line machine event a `--json-stream` consumer sees as soon as
+    the server has accepted the prompt, on both the `--wait` and async paths.
 
     Lives in the caller rather than ``WorkflowExecution.queue()`` so it can be
     emitted *after* the job's state file is persisted — a consumer that sees
@@ -861,6 +832,101 @@ def _journal_run(workflow: str, prompt_id, where: str) -> None:
         pass
 
 
+def _load_workflow_or_exit(renderer, workflow, preloaded):
+    """Resolve the ``(raw_workflow, workflow_name, is_ui, checkpoint_user_set)``
+    quadruple that opens both :func:`execute` and :func:`execute_cloud`: honor
+    an in-memory ``preloaded`` graph when present, else load from disk —
+    mapping a load failure to a rendered error + ``typer.Exit(1)``.
+    ``checkpoint_user_set`` is always False for a disk load; it only carries
+    meaning for the bundled ``--prompt`` default's preloaded graph."""
+    if preloaded is not None:
+        return preloaded
+    try:
+        raw_workflow, workflow_name, is_ui = _load_workflow_file(workflow)
+        return raw_workflow, workflow_name, is_ui, False
+    except WorkflowLoadError as e:
+        renderer.error(code=e.code, message=str(e), hint=e.hint)
+        raise typer.Exit(code=1) from e
+
+
+def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_meta, **where_fields):
+    """Create + persist the initial ``queued`` job state. Shared by the local
+    async path and the cloud non-wait path — the ``--wait`` paths (local and
+    cloud) build the state inline instead, since they also stamp their own
+    watcher pid + create_time before the first write.
+
+    ``where_fields`` carries the target-specific locators (``host``/``port`` for
+    local, ``base_url`` for cloud). Returns the ``(state, state_file)`` pair."""
+    state = jobs_state.new(
+        prompt_id=prompt_id,
+        client_id=client_id,
+        workflow=workflow_name,
+        where=where,
+        **where_fields,
+    )
+    state.item_map = (compose_meta or {}).get("items")
+    state_file = jobs_state.write(state)
+    return state, state_file
+
+
+def _announce_async_queued(
+    prompt_id,
+    client_id,
+    workflow_name,
+    *,
+    where,
+    watch_command,
+    state_file,
+    watcher_spawned,
+    locator_fields,
+):
+    """Async-submit ``queued`` tail shared by the local async path and the
+    cloud non-wait path: the pretty status panel (+ watcher-failure warning),
+    the machine-readable ``queued`` envelope, and the brief live state tail.
+
+    The divergent bits stay at the call sites and arrive via parameters:
+    ``watch_command`` (the ``comfy jobs watch …`` hint, with ``--where cloud``
+    for cloud) and ``locator_fields`` (``host``/``port`` for local,
+    ``base_url`` for cloud). The envelope keys shared by both targets —
+    ``state_file`` and ``watcher_spawned`` (docs/json-output.md: "the same on
+    both targets, ``watcher_spawned`` included") — are stamped here, after the
+    locator, so the field order of the public agent-mode JSON contract stays
+    verbatim per target and the two call sites cannot drift apart on them."""
+    renderer = get_renderer()
+    if renderer.is_pretty():
+        from comfy_cli.output.glyphs import status_glyph
+
+        pprint(
+            f"{status_glyph('queued')} [dim]{prompt_id}[/dim]\n"
+            f"  [dim]workflow [/dim]{workflow_name}\n"
+            f"  [dim]watch    [/dim][cyan]{watch_command}[/cyan]\n"
+            f"  [dim]state    [/dim]{state_file}"
+        )
+        if not watcher_spawned:
+            pprint("[yellow]⚠ Background watcher could not start; poll manually with `comfy jobs status`[/yellow]")
+    renderer.emit(
+        {
+            "workflow": workflow_name,
+            "status": "queued",
+            "prompt_id": prompt_id,
+            "client_id": client_id,
+            "outputs": [],
+            "elapsed_seconds": None,
+            **locator_fields,
+            "state_file": str(state_file) if state_file else None,
+            # Lets a consumer know whether something is keeping the state file
+            # fresh, or whether it must poll `comfy jobs status` itself.
+            "watcher_spawned": watcher_spawned,
+        },
+        command="run",
+        where=where,
+    )
+    # Pretty mode: brief live tail so the user sees the job move through
+    # "allocated → executing → completed" before the foreground exits. The
+    # background watcher keeps writing the state file after we return.
+    _tail_state_file(prompt_id)
+
+
 def _count_output_nodes(workflow: dict, object_info: dict) -> int | None:
     """Count nodes in ``workflow`` whose class is an output node, per
     ``object_info``. Returns None when object_info is empty/unknown so callers
@@ -912,15 +978,7 @@ def execute_cloud(
     from comfy_cli.target import resolve_target
 
     renderer = get_renderer()
-    if preloaded is not None:
-        raw_workflow, workflow_name, is_ui, checkpoint_user_set = preloaded
-    else:
-        checkpoint_user_set = False
-        try:
-            raw_workflow, workflow_name, is_ui = _load_workflow_file(workflow)
-        except WorkflowLoadError as e:
-            renderer.error(code=e.code, message=str(e), hint=e.hint)
-            raise typer.Exit(code=1) from e
+    raw_workflow, workflow_name, is_ui, checkpoint_user_set = _load_workflow_or_exit(renderer, workflow, preloaded)
 
     # The cloud object_info snapshot is used twice below (UI→API conversion and
     # checkpoint resolution/preflight). `_load_from_target` is a live, uncached
@@ -1158,54 +1216,28 @@ def execute_cloud(
         )
 
     if not wait:
-        state = jobs_state.new(
-            prompt_id=submit.prompt_id,
-            client_id=client_id,
-            workflow=workflow_name,
+        _, state_file = _init_queued_state(
+            submit.prompt_id,
+            client_id,
+            workflow_name,
             where="cloud",
+            compose_meta=compose_meta,
             base_url=target.base_url,
         )
-        state.item_map = (compose_meta or {}).get("items")
-        state_file = jobs_state.write(state)
         _journal_run(workflow_name, submit.prompt_id, "cloud")
         watcher_spawned = _spawn_watcher(submit.prompt_id, where="cloud", notify=notify)
-
         # Durable record + watcher exist: safe to announce.
         _emit_queued_cloud()
-
-        if renderer.is_pretty():
-            from comfy_cli.output.glyphs import status_glyph
-
-            pprint(
-                f"{status_glyph('queued')} [dim]{submit.prompt_id}[/dim]\n"
-                f"  [dim]workflow [/dim]{workflow_name}\n"
-                f"  [dim]watch    [/dim][cyan]comfy jobs watch {submit.prompt_id} --where cloud[/cyan]\n"
-                f"  [dim]state    [/dim]{state_file}"
-            )
-            if not watcher_spawned:
-                pprint("[yellow]⚠ Background watcher could not start; poll manually with `comfy jobs status`[/yellow]")
-        renderer.emit(
-            {
-                "workflow": workflow_name,
-                "status": "queued",
-                "prompt_id": submit.prompt_id,
-                "client_id": client_id,
-                "outputs": [],
-                "elapsed_seconds": None,
-                "base_url": target.base_url,
-                "state_file": str(state_file) if state_file else None,
-                # Same async-envelope field the local path carries: whether the
-                # detached watcher that keeps the state file fresh actually
-                # started. Consumers poll `comfy jobs status` themselves when
-                # it is false.
-                "watcher_spawned": watcher_spawned,
-            },
-            command="run",
+        _announce_async_queued(
+            submit.prompt_id,
+            client_id,
+            workflow_name,
             where="cloud",
+            watch_command=f"comfy jobs watch {submit.prompt_id} --where cloud",
+            state_file=state_file,
+            watcher_spawned=watcher_spawned,
+            locator_fields={"base_url": target.base_url},
         )
-        # Pretty mode only: short live tail of the state file so the human
-        # sees status transitions before the foreground exits.
-        _tail_state_file(submit.prompt_id)
         return
 
     # --wait: poll the cloud API directly from the foreground process. No

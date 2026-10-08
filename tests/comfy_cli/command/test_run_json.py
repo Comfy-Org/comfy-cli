@@ -301,6 +301,70 @@ class TestSuccessfulRun:
         assert env["data"]["status"] == "queued"
         assert env["data"]["prompt_id"] == "p123"
 
+    def test_queued_envelope_field_set_local_golden(self, workflow_file, capsys):
+        """Golden field set *and order* of the local async ``queued`` envelope.
+        The shared ``_announce_async_queued`` helper must never
+        silently drop/add/reorder a key — the envelope is a public agent-mode
+        JSON contract. Local carries ``host``/``port`` as its locator."""
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open") as mock_open,
+            patch("comfy_cli.command.run._spawn_watcher", return_value=True),
+            patch("comfy_cli.jobs_state.write", return_value="/tmp/state.json"),
+        ):
+            mock_open.return_value.__enter__.return_value.read.return_value = json.dumps({"prompt_id": "pL"}).encode()
+            lines, exit_code = _run_execute_capture(workflow_file, capsys, wait=False)
+        assert exit_code == 0
+        data = _envelope(lines)["data"]
+        assert list(data) == [
+            "workflow",
+            "status",
+            "prompt_id",
+            "client_id",
+            "outputs",
+            "elapsed_seconds",
+            "host",
+            "port",
+            "state_file",
+            "watcher_spawned",
+        ]
+        assert data["status"] == "queued"
+        assert data["host"] == "127.0.0.1"
+        assert data["port"] == 8188
+        assert data["state_file"] == "/tmp/state.json"
+        assert data["watcher_spawned"] is True
+        assert data["outputs"] == []
+        assert data["elapsed_seconds"] is None
+
+    def test_queued_envelope_field_set_cloud_golden(self, monkeypatch, workflow_file, capsys):
+        """Golden field set *and order* of the cloud non-wait ``queued``
+        envelope. Cloud carries ``base_url`` (not ``host``/``port``) as its
+        locator, and — like local — ``watcher_spawned``: docs/json-output.md
+        documents the async envelope as the same on both targets,
+        ``watcher_spawned`` included."""
+        _install_cloud_stubs(monkeypatch, client_cls=_fake_client(submit=_FakeSubmit(prompt_id="pC")))
+        lines, exit_code = _cloud_capture(capsys, workflow_file, wait=False, timeout=5)
+        assert exit_code == 0
+        data = _envelope(lines)["data"]
+        assert list(data) == [
+            "workflow",
+            "status",
+            "prompt_id",
+            "client_id",
+            "outputs",
+            "elapsed_seconds",
+            "base_url",
+            "state_file",
+            "watcher_spawned",
+        ]
+        assert data["status"] == "queued"
+        assert data["prompt_id"] == "pC"
+        assert data["base_url"] == _FakeTarget.base_url
+        assert data["state_file"] == "/tmp/state.json"
+        assert data["watcher_spawned"] is True
+        assert data["outputs"] == []
+        assert data["elapsed_seconds"] is None
+
     def test_envelope_after_success(self, workflow_file, capsys):
         """Mocked WS flow → queued + executing/executed/output events + ok envelope."""
         with (
