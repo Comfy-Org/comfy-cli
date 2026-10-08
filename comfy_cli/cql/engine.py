@@ -3853,8 +3853,12 @@ def _expand_widget_entries(
             idx = len(entries) - 1
             if first_key:
                 selector = _widget_default(port)
+            elif idx < len(widgets_values):
+                selector = widgets_values[idx]
+            elif port.options.default is not None:
+                selector = _widget_default(port)
             else:
-                selector = widgets_values[idx] if idx < len(widgets_values) else port.options.default
+                selector = None
             for sub in _dynamic_combo_sub_ports(port.dynamic_options, selector, name):
                 if sub.is_link:
                     if sub_links is not None:

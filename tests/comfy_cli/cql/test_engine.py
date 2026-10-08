@@ -429,6 +429,12 @@ class TestWidgetOrderForNode:
             "seed",
             "control_after_generate",
         ]
+        assert g.widget_order_for_node("DynNode", []) == [
+            "model",
+            "model.res",
+            "seed",
+            "control_after_generate",
+        ]
 
     def test_node_order_expands_selected_key(self):
         g = self._dyn_graph()
