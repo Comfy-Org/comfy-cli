@@ -511,3 +511,48 @@ def test_an_oversize_workflow_is_refused_after_its_assets_are_uploaded(
     message = str(error["message"])
     assert "nothing was sent" not in message
     assert "the job was not submitted, so no job was created" in message
+
+
+def test_the_release_version_the_gateway_names_is_printed_and_emitted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    workflow = write_workflow(tmp_path / "workflow.json")
+    install_run(
+        monkeypatch, FakeControl("https://dep-id.run.comfy.app"), FakeJobClient({**job(), "release_version": 7})
+    )
+
+    # When
+    agentic = invoke(workflow, "--deployment", "dep-id", "--no-wait")
+    pretty = invoke(workflow, "--deployment", "dep-id", "--no-wait", agentic=False)
+
+    # Then
+    assert agentic.exit_code == 0, agentic.stderr
+    data = envelope_data(agentic)
+    assert data["job"] == {"id": "job-1", "status": "queued", "releaseVersion": 7}
+    published_validator().validate(data)
+    assert pretty.exit_code == 0, pretty.stderr
+    assert "Deployment job job-1 (release v7) is queued" in pretty.output
+
+
+@pytest.mark.parametrize("version", [None, "7", 7.5, True, 0])
+def test_a_missing_or_unusable_release_version_leaves_the_result_as_it_was(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    version: JsonValue,
+) -> None:
+    # Given
+    workflow = write_workflow(tmp_path / "workflow.json")
+    submitted = job() if version is None else {**job(), "release_version": version}
+    install_run(monkeypatch, FakeControl("https://dep-id.run.comfy.app"), FakeJobClient(submitted))
+
+    # When
+    agentic = invoke(workflow, "--deployment", "dep-id", "--no-wait")
+    pretty = invoke(workflow, "--deployment", "dep-id", "--no-wait", agentic=False)
+
+    # Then
+    assert agentic.exit_code == 0, agentic.stderr
+    assert envelope_data(agentic)["job"] == {"id": "job-1", "status": "queued"}
+    assert pretty.exit_code == 0, pretty.stderr
+    assert "Deployment job job-1 is queued" in pretty.output
