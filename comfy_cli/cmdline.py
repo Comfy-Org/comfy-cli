@@ -185,7 +185,14 @@ _SECRET_KEY_PATTERN = (
     r"(?:proxy-)?authorization|auth|api[ _-]?key|token|access[ _-]?token|refresh[ _-]?token|secret|password|"
     r"session(?:[ _-]?(?:id|key))?|sid|sig|signature|(?:set-)?cookies?"
 )
-_SECRET_ASSIGNMENT_KEY_PATTERN = rf"(?<![\w-])(?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})(?:[_-][\w-]+)?"
+_SECRET_KEY_QUALIFIER = (
+    r"comfy|org|organization|workspace|project|account|user|client|partner|service|cloud|api|access|refresh|"
+    r"auth|key|id|token|secret|credentials?|cookies?|session|value|private|public|signing|oauth|jwt"
+)
+_SECRET_ASSIGNMENT_KEY_PATTERN = (
+    rf"(?<![\w-])(?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})"
+    rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})(?:[_-](?:{_SECRET_KEY_QUALIFIER}))*)?"
+)
 _SECRET_CONSTRUCTOR_START = re.compile(
     rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
     r"[A-Za-z_][\w.]*\(",
@@ -336,7 +343,7 @@ _SECRET_PATTERNS = (
         # truncated, or pretty-printed container. Mask its remainder without
         # a closer-dependent regex, so backslash runs stay linear-time.
         re.compile(
-            rf"(\\[\"'](?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})(?:[_-][\w-]+)?"
+            rf"(\\[\"'](?:{_SECRET_ASSIGNMENT_KEY_PATTERN})"
             r"\\[\"']\s*[:=]\s*)[\[({][^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*",
             re.IGNORECASE,
         ),
@@ -344,7 +351,7 @@ _SECRET_PATTERNS = (
     ),
     (
         re.compile(
-            rf"(\\[\"'](?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})(?:[_-][\w-]+)?"
+            rf"(\\[\"'](?:{_SECRET_ASSIGNMENT_KEY_PATTERN})"
             r"\\[\"']\s*[:=]\s*\\[\"'])((?:\\\\.|\\(?![\"'])|[^\\])*?)(\\[\"']|[\r\n]|$)",
             re.IGNORECASE,
         ),
@@ -352,7 +359,7 @@ _SECRET_PATTERNS = (
     ),
     (
         re.compile(
-            rf"(\\[\"'](?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})(?:[_-][\w-]+)?"
+            rf"(\\[\"'](?:{_SECRET_ASSIGNMENT_KEY_PATTERN})"
             r"\\[\"']\s*[:=]\s*)(?!\\[\"'])(?:\\(?![\"'])|[^\s,}])+",
             re.IGNORECASE,
         ),

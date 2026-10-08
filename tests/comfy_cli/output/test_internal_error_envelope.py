@@ -307,7 +307,10 @@ def test_internal_error_scrubber_does_not_treat_query_at_as_userinfo():
 
 
 def test_internal_error_scrubber_preserves_ordinary_identifier_diagnostics():
-    message = "sigma=0.8 max_tokens=100 sidecar=on signal: 9"
+    message = (
+        "sigma=0.8 max_tokens=100 sidecar=on signal: 9 "
+        "input_token_count=8192 signature_algorithm=ed25519 password_length=32"
+    )
     assert message in _internal_error_message(RuntimeError(message))
 
 
