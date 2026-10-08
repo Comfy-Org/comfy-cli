@@ -91,6 +91,11 @@ def _nested_definition(target: dict, defs: dict[str, dict], stack: tuple[int, ..
     return inner_def
 
 
+def _entry_holds_link(entry: dict, link_id: Any) -> bool:
+    """Whether LiteGraph will render ``entry`` from this boundary link."""
+    return entry.get("link") is not None and str(entry["link"]) == str(link_id)
+
+
 def promoted_inputs(
     sg: dict, defs: dict[str, dict], depth: int = 0, _stack: tuple[int, ...] = ()
 ) -> list[PromotedInput]:
@@ -141,7 +146,7 @@ def promoted_inputs(
             # LiteGraph treats inputs[].link as authoritative. A stale
             # boundary row that merely points at this slot does not promote
             # the widget unless the slot actually holds that row's id.
-            if entry.get("link") is None or str(entry["link"]) != str(link_id):
+            if not _entry_holds_link(entry, link_id):
                 continue
             inner_def = _nested_definition(target, defs, _stack)
             if inner_def is not None:
@@ -896,7 +901,7 @@ def _promotion_source(sg: dict, inp: dict, defs: dict[str, dict]) -> tuple[str, 
         entries = target.get("inputs") or []
         slot = link.get("target_slot")
         entry = entries[slot] if isinstance(slot, int) and 0 <= slot < len(entries) else None
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or not _entry_holds_link(entry, link_id):
             continue
         if str(target.get("type", "")) in defs:
             return str(target.get("id")), str(entry.get("name"))
@@ -1565,7 +1570,7 @@ def _boundary_targets(
         entries = target.get("inputs") or []
         slot = link.get("target_slot")
         entry = entries[slot] if isinstance(slot, int) and 0 <= slot < len(entries) else None
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or not _entry_holds_link(entry, link_id):
             continue
         tid = str(target.get("id"))
         inner_def = _nested_definition(target, defs, _stack)
