@@ -982,7 +982,8 @@ def test_a_bare_folder_name_that_holds_a_build_spec_is_the_build_path(workspace:
 @pytest.mark.parametrize(
     "release_id",
     [
-        # `stat` fails with "file name too long", which `Path.is_file` lets through.
+        # `stat` fails with "file name too long", which `Path.is_file` lets
+        # through before Python 3.14 (3.14 answers False).
         pytest.param("r" * 300, id="longer-than-a-file-name"),
         # No separator, so not path-shaped; `expanduser` raises on the unknown user.
         pytest.param("~nosuchuser-dplat-2746", id="tilde-unknown-user"),
@@ -1036,8 +1037,9 @@ def test_a_path_shaped_release_naming_an_unreadable_folder_fails_as_release_ls_d
     workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str, release: str
 ) -> None:
     """A path-shaped RELEASE is a path, so a spec the caller cannot read fails
-    the way `release ls` fails on that path, never as `build_spec_not_found`
-    with a hint to run `comfy build init` over a spec that is there."""
+    the way `release ls` fails on that path. Which code that is depends on the
+    Python: `Path.is_file` raises `PermissionError` there up to 3.13, and 3.14
+    answers False, so both read it as `build_spec_not_found`."""
     # Given
     locked = make_workspace(workspace / "locked")
     write_spec(locked, build_id="build-3", revision="revision-1", models=[], nodes=[])
@@ -1050,34 +1052,49 @@ def test_a_path_shaped_release_naming_an_unreadable_folder_fails_as_release_ls_d
         locked.chmod(0o755)
 
     # Then
-    code = envelope(result)["error"]["code"]
-    assert code != "build_spec_not_found"
-    assert (result.exit_code, code, client.calls) == (listed.exit_code, envelope(listed)["error"]["code"], [])
+    assert (result.exit_code, envelope(result)["error"]["code"], client.calls) == (
+        listed.exit_code,
+        envelope(listed)["error"]["code"],
+        [],
+    )
 
 
-@pytest.mark.parametrize(
-    ("release", "code"),
-    [
-        # Shaped like a path, so the "file name too long" from looking up its
-        # spec raises as it does for `release ls` on the same path.
-        pytest.param("./" + "r" * 300, "internal_error", id="longer-than-a-file-name"),
-        # `expanduser` cannot resolve it, so there is no spec path to report.
-        pytest.param("~nosuchuser-dplat-2746/build", "build_missing_input", id="tilde-unknown-user"),
-    ],
-)
-def test_a_path_shaped_release_the_disk_probe_cannot_read_is_refused_before_it_reaches_the_builder(
-    workspace: Path, monkeypatch: pytest.MonkeyPatch, release: str, code: str
+def test_a_path_shaped_release_longer_than_a_file_name_fails_as_release_ls_does(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Shaped like a path, it is a path, refused before any request with an
-    envelope rather than a traceback."""
+    envelope rather than a traceback, the way `release ls` refuses it. Which
+    code that is depends on the Python: looking up its spec raises "file name
+    too long" up to 3.13, and 3.14's `Path.is_file` answers False, so no spec."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+    release = "./" + "r" * 300
+
+    # When
+    listed = invoke_release("ls", release)
+    result = invoke_release("show", release)
+
+    # Then
+    assert (result.exit_code, envelope(result)["error"]["code"], calls) == (
+        listed.exit_code,
+        envelope(listed)["error"]["code"],
+        [],
+    )
+
+
+def test_a_path_shaped_release_for_an_unknown_user_is_refused_before_it_reaches_the_builder(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`expanduser` cannot resolve it, so there is no spec path to report; it is
+    refused with an envelope rather than a traceback."""
     # Given
     calls = _recording_builder(monkeypatch)
 
     # When
-    result = invoke_release("show", release)
+    result = invoke_release("show", "~nosuchuser-dplat-2746/build")
 
     # Then
-    assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, code, [])
+    assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, "build_missing_input", [])
 
 
 @pytest.mark.parametrize(("verb", "read"), READ_VERBS)
