@@ -186,6 +186,54 @@ _SECRET_KEY_PATTERN = (
     r"session(?:[_-]?(?:id|key))?|sid|sig|signature|(?:set-)?cookie"
 )
 _SECRET_ASSIGNMENT_KEY_PATTERN = rf"(?<![\w-])(?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})(?:[_-][\w-]+)?"
+_SECRET_CONSTRUCTOR_START = re.compile(
+    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
+    r"[A-Za-z_][\w.]*\(",
+    re.IGNORECASE,
+)
+
+
+def _scrub_secret_constructors(text: str) -> str:
+    """Mask constructor-shaped secret values without stopping at an inner call."""
+    chunks: list[str] = []
+    cursor = 0
+    search_from = 0
+    while match := _SECRET_CONSTRUCTOR_START.search(text, search_from):
+        index = match.end()
+        depth = 1
+        quote: str | None = None
+        escaped = False
+        while index < len(text) and depth:
+            char = text[index]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif quote is not None:
+                if char == quote:
+                    quote = None
+            elif char in {"'", '"'}:
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            elif char in "\r\n":
+                break
+            index += 1
+        if depth:
+            # The conservative container rule below owns truncated values.
+            search_from = match.end()
+            continue
+        chunks.extend((text[cursor : match.start()], match.group("prefix"), "***"))
+        cursor = index
+        search_from = index
+    if not chunks:
+        return text
+    chunks.append(text[cursor:])
+    return "".join(chunks)
+
+
 _SECRET_PATTERNS = (
     (re.compile(r"(https?://[^\s?#'\"]+)\?[^\s'\"]*", re.IGNORECASE), r"\1?***"),
     (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]+", re.IGNORECASE), r"\1***"),
@@ -290,6 +338,7 @@ def _internal_error_message(error: BaseException) -> str:
     raw_text = f"{type(error).__name__}: {detail}"
     scrub_input_truncated = len(raw_text) > _INTERNAL_ERROR_SCRUB_INPUT_CAP
     text = raw_text[:_INTERNAL_ERROR_SCRUB_INPUT_CAP]
+    text = _scrub_secret_constructors(text)
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
     if len(text) > _INTERNAL_ERROR_MESSAGE_CAP:
