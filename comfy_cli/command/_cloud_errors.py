@@ -44,7 +44,78 @@ _UNAUTHORIZED_HINTS = {
 _INSUFFICIENT_SCOPE_MESSAGE = (
     "Your Comfy Cloud login predates a permission change; run `comfy cloud login` to re-authorize"
 )
-_SCOPE_PARAM = re.compile(r'\bscope="([^"]*)"')
+# One auth-param of a WWW-Authenticate challenge: ``name = "quoted"`` or
+# ``name = token`` (RFC 7235 §2.1), so the scan never reads inside a quoted
+# value such as ``error_description``.
+_AUTH_PARAM = re.compile(r'([A-Za-z0-9_\-]+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,"]+))')
+# The plain-text body the scope middleware writes: ``insufficient_scope`` or
+# ``insufficient_scope: <scope>`` and nothing else. Anchored at both ends so a
+# body that merely mentions the token in prose is not mistaken for one.
+_BODY_SCOPE = re.compile(r"\s*insufficient_scope(?:\s*:\s*(?P<scope>[^\r\n]*?))?\s*\Z")
+# Structured fields a JSON error body may carry the error in.
+_BODY_SCOPE_FIELDS = ("message", "error", "code", "type")
+# ``required_scope`` comes from the server, and ``base_url`` is configurable,
+# so bound it and keep only RFC 6749 §3.3 scope-token characters.
+_SCOPE_TOKEN = re.compile(r"[\x21\x23-\x5B\x5D-\x7E]+")
+_MAX_REQUIRED_SCOPE_CHARS = 200
+
+
+def _www_authenticate_values(headers) -> list[str]:
+    """Every ``WWW-Authenticate`` value as ``str``; ``[]`` on any odd headers object."""
+    if headers is None:
+        return []
+    try:
+        get_all = getattr(headers, "get_all", None)
+        values = get_all("WWW-Authenticate") if callable(get_all) else [headers.get("WWW-Authenticate")]
+    except Exception:  # noqa: BLE001
+        return []
+    return [v for v in (values or []) if isinstance(v, str) and v]
+
+
+def _bearer_scope_challenge(values: list[str]) -> tuple[bool, str | None]:
+    """Whether a challenge says ``error=insufficient_scope``, and the ``scope`` it names."""
+    for value in values:
+        params = {}
+        for m in _AUTH_PARAM.finditer(value):
+            params.setdefault(m.group(1).lower(), m.group(2) if m.group(2) is not None else m.group(3))
+        if params.get("error") == "insufficient_scope":
+            return True, params.get("scope")
+    return False, None
+
+
+def _body_scope_error(body: str) -> tuple[bool, str | None]:
+    """Whether the body is an ``insufficient_scope`` error, and the scope it names.
+
+    A JSON body is judged by its structured fields only; a plain body must be
+    exactly the documented ``insufficient_scope[: <scope>]`` form.
+    """
+    candidates = [body]
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        candidates = [parsed[k] for k in _BODY_SCOPE_FIELDS if isinstance(parsed.get(k), str)]
+        nested = parsed.get("error")
+        if isinstance(nested, dict):
+            candidates += [nested[k] for k in _BODY_SCOPE_FIELDS if isinstance(nested.get(k), str)]
+    elif parsed is not None:
+        candidates = [parsed] if isinstance(parsed, str) else []
+    for text in candidates:
+        m = _BODY_SCOPE.match(text)
+        if m:
+            return True, m.group("scope")
+    return False, None
+
+
+def _clean_scope(scope: str | None) -> str | None:
+    if not scope:
+        return None
+    tokens = _SCOPE_TOKEN.findall(scope)
+    if not tokens or " ".join(tokens) != " ".join(scope.split()):
+        return None
+    cleaned = " ".join(tokens)
+    return cleaned if len(cleaned) <= _MAX_REQUIRED_SCOPE_CHARS else None
 
 
 def insufficient_scope_error(status: int, body: str | None, headers=None, details: dict | None = None) -> dict | None:
@@ -59,23 +130,21 @@ def insufficient_scope_error(status: int, body: str | None, headers=None, detail
     """
     if status != 403:
         return None
-    www_auth = ""
-    if headers is not None:
-        try:
-            www_auth = headers.get("WWW-Authenticate") or ""
-        except Exception:  # noqa: BLE001
-            www_auth = ""
-    body = body if isinstance(body, str) else ""
-    if 'error="insufficient_scope"' not in www_auth and "insufficient_scope" not in body:
+    header_hit, header_scope = _bearer_scope_challenge(_www_authenticate_values(headers))
+    body_hit, body_scope = _body_scope_error(body if isinstance(body, str) else "")
+    if not header_hit and not body_hit:
         return None
     out_details = {**(details or {}), "status": 403, "reason": "insufficient_scope"}
-    match = _SCOPE_PARAM.search(www_auth)
-    if match and match.group(1):
-        out_details["required_scope"] = match.group(1)
+    required_scope = _clean_scope(header_scope) or _clean_scope(body_scope)
+    if required_scope:
+        out_details["required_scope"] = required_scope
     return {
         "code": "cloud_unauthorized",
         "message": _INSUFFICIENT_SCOPE_MESSAGE,
-        "hint": "run `comfy cloud login` to re-authorize; refreshing the existing session cannot add the permission",
+        "hint": (
+            "run `comfy cloud login` to re-authorize; refreshing the existing session cannot add the permission."
+            " If you set COMFY_CLOUD_SCOPES or the `cloud_scopes` config, add the required scope to it first"
+        ),
         "details": out_details,
     }
 
@@ -184,6 +253,8 @@ def emit_status_error(
     hint: str | None,
     details: dict,
     rate_limited_next_step: str = _DEFAULT_RATE_LIMITED_NEXT_STEP,
+    scope_body: str | None = None,
+    www_authenticate: str | None = None,
 ) -> None:
     """Emit the envelope for a cloud HTTP status that has no caller-specific code.
 
@@ -200,8 +271,15 @@ def emit_status_error(
     ``rate_limited_next_step`` finishes the 429 hint for a caller that knows
     more (``run``'s submit: check the job list before re-running; its poll: the
     job exists, so follow it rather than re-running).
+    ``scope_body`` / ``www_authenticate`` let a caller whose ``details`` omit
+    the body (``run``'s poll) still have a 403 ``insufficient_scope`` detected.
     """
-    scope_error = insufficient_scope_error(status, details.get("body"), details=details)
+    scope_error = insufficient_scope_error(
+        status,
+        scope_body if scope_body is not None else details.get("body"),
+        {"WWW-Authenticate": www_authenticate} if www_authenticate else None,
+        details=details,
+    )
     if scope_error is not None:
         renderer.error(**scope_error)
         return

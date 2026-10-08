@@ -101,15 +101,32 @@ def _parse_retry_after(headers: Any) -> float | None:
     return float(max(0, round((when - datetime.now(timezone.utc)).total_seconds())))
 
 
+def _www_authenticate(headers: Any) -> str | None:
+    try:
+        value = headers.get("WWW-Authenticate") if headers is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+    return value if isinstance(value, str) else None
+
+
 class HTTPError(Exception):
     """Server returned a non-2xx response.
 
     ``retry_after`` carries the server's ``Retry-After`` header (seconds)
     when one was present, so retry layers above ``_request`` (e.g. the
-    wait_for_completion poll loop) can honor it.
+    wait_for_completion poll loop) can honor it. ``www_authenticate`` carries
+    the ``WWW-Authenticate`` header, which names a missing OAuth scope.
     """
 
-    def __init__(self, status: int, message: str, body: str = "", *, retry_after: float | None = None):
+    def __init__(
+        self,
+        status: int,
+        message: str,
+        body: str = "",
+        *,
+        retry_after: float | None = None,
+        www_authenticate: str | None = None,
+    ):
         # Redact before super().__init__ so str(self) is safe to log.
         message = _redact(message)
         body = _redact(body)
@@ -118,6 +135,7 @@ class HTTPError(Exception):
         self.message = message
         self.body = body
         self.retry_after = retry_after
+        self.www_authenticate = www_authenticate
 
 
 class Unauthenticated(Exception):
@@ -335,6 +353,7 @@ class Client:
                 e.reason or "HTTP error",
                 body_text,
                 retry_after=_parse_retry_after(getattr(e, "headers", None)),
+                www_authenticate=_www_authenticate(getattr(e, "headers", None)),
             ) from e
 
     # ----- submit -----
