@@ -40,6 +40,7 @@ bills by time.**
 up      Create or reconcile a deployment for the selected Build release.   SPENDS
 promote Move TARGET onto the release SOURCE serves, keeping its URL.      SPENDS
 rollback Move a deployment back to an earlier release, keeping its URL.  SPENDS
+rename  Give a deployment a new name, keeping its id and URL.
 history The releases a deployment ran, newest first, and what moved it.
 run     Submit an API-format workflow to a ready deployment.               SPENDS
 status  Deployment health, release freshness, and serving activity.
@@ -77,7 +78,8 @@ one depends on the workspace.** The output says which: a deployment that carries
 - **Updates on:** `up` on a new release **moves the Build's one deployment onto
   it**, keeping its id and URL, and reports `previousRelease`. The old release
   keeps serving until the new one is ready. With two or more deployments, `up`
-  refuses with `deploy_ambiguous_deployment` until `--deployment <id>` names one;
+  refuses with `deploy_ambiguous_deployment`, listing each one's name, release
+  and status, until `--deployment <name>` names one;
   `--create` adds a separate deployment instead. If the new release fails to come
   up, `up` exits 1 with `deploy_update_failed` and the old release still serves.
 - **Updates off:** a deployment is matched by release id, so cutting a new
@@ -170,7 +172,8 @@ fixes — say so rather than restarting into the same wall.
 
 ```shell
 comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
-                       [--release <id>] [--deployment <name|id>] [--create] [--no-watch]
+                       [--release <id>] [--deployment <name|id>] [--create [--name <name>]] [--no-watch]
+comfy deploy rename [PATH] <name> [--deployment <name|id>]
 ```
 
 - **With deployment updates on, it moves the existing deployment** (see *The
@@ -181,6 +184,15 @@ comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
   edit the service then refuses is reported as bounds that had no effect.
 - **`--create` is not idempotent:** every run adds one more deployment, so after
   a lost response read `comfy deploy ls` before running it again.
+- **`--name` names the deployment a create makes**, the Build's first included;
+  without it comfy-deploy names the first `production` and later ones
+  `deployment-N`. A name is 1 to 40 lowercase letters, digits and hyphens,
+  starting and ending with a letter or digit, never starting with `dep-`, and
+  unique among the Build's live deployments
+  (`deploy_invalid_name`, `deploy_name_taken`). The same `up --name` run again
+  finds the deployment holding that name. `up` refuses `--name` when it would
+  update a deployment holding another name: `comfy deploy rename` names an
+  existing one, and without `--deployment` renames the Build's only one.
 
 - **It selects the newest deployable release of the Build** unless `--release`
   names one. `deployable` means a `linux/nvidia` artifact reached `ready` with an

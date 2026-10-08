@@ -17,6 +17,13 @@ history.
 
 ### Added
 
+- `comfy deploy up --create --name staging` names the deployment it creates,
+  and `comfy deploy rename [PATH] <name>` renames one, keeping its id and URL.
+  A name outside comfy-deploy's rule is refused before any call
+  (`deploy_invalid_name`), and one another deployment holds is named
+  (`deploy_name_taken`). `up`, `rollback` and `rename` refusing two or more
+  deployments list each one's name, release and status in
+  `details.candidates`, and `up --json` carries the deployment's `name`.
 - Every command that takes `--deployment`, and both arguments of `comfy deploy
   promote`, take a deployment's name as well as its id: `--deployment staging`
   in a Build's folder, or `--deployment flux-pipeline/staging`, the Build given

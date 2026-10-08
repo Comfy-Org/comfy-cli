@@ -87,6 +87,8 @@ class FakeDeploy:
         move: str = "landed",
         get_patches: list[JsonObject] | None = None,
         strip_move_reply: bool = False,
+        serves_names: bool = False,
+        name_races: int = 0,
     ) -> None:
         self.rows = {str(row["id"]): copy.deepcopy(row) for row in rows or []}
         self.generation_barrier = generation_barrier
@@ -109,6 +111,12 @@ class FakeDeploy:
         # A reply the service's rollout check failed to answer: no revision
         # and no pendingUpdate, though the move went through.
         self.strip_move_reply = strip_move_reply
+        # A comfy-deploy that names deployments, as comfy-deploy's own names
+        # rule does; otherwise one that predates names and answers none.
+        self.serves_names = serves_names
+        self.name_races = name_races
+        self.create_names: list[str | None] = []
+        self.rename_calls: list[tuple[str, str]] = []
         self.move_calls: list[tuple[str, int, str]] = []
         self.promote_calls: list[tuple[str, int, str]] = []
         self.rollback_calls: list[tuple[str, int, int | None]] = []
@@ -127,15 +135,16 @@ class FakeDeploy:
     def list_all_deployments(self) -> list[JsonObject]:
         call_count = getattr(self._local, "list_count", 0) + 1
         self._local.list_count = call_count
-        if call_count == 2 and self.generation_barrier is not None:
-            self.generation_barrier.wait(timeout=2)
         with self._lock:
             snapshot = copy.deepcopy(list(self.rows.values()))
-            if call_count >= 2:
-                self.generation_deleted_counts.append(
-                    sum(row.get("releaseId") == "release-5" and row.get("deletedAt") is not None for row in snapshot)
-                )
-            return snapshot
+            self.generation_deleted_counts.append(
+                sum(row.get("releaseId") == "release-5" and row.get("deletedAt") is not None for row in snapshot)
+            )
+        # The first list is the one a create's first key is read from, so both
+        # callers read it before either creates.
+        if call_count == 1 and self.generation_barrier is not None:
+            self.generation_barrier.wait(timeout=2)
+        return snapshot
 
     def create_deployment(
         self,
@@ -143,23 +152,74 @@ class FakeDeploy:
         compute_config: JsonObject,
         *,
         idempotency_key: str | None = None,
+        name: str | None = None,
     ) -> JsonObject:
         assert idempotency_key is not None
         with self._lock:
             self.create_keys.append(idempotency_key)
+            self.create_names.append(name)
             existing_id = self._keys.get(idempotency_key)
             if existing_id is not None:
                 existing = self.rows[existing_id]
-                return {"id": existing_id, "status": existing["status"]}
+                return {"id": existing_id, "status": existing["status"], **self._served_name(existing)}
+            if self.serves_names and name is not None:
+                self._refuse_taken(name)
+            if name is None and self.name_races > 0:
+                self.name_races -= 1
+                raise DeployAPIError(
+                    "deploy_conflict",
+                    "concurrent creates in this build took each default name tried; send the create again",
+                    status=409,
+                    details={"server_code": "NAME_RACE"},
+                )
             deployment_id = f"dep-{len(self._keys) + 1}"
             row = deployment(deployment_id, release_id=release_id)
+            if self.serves_names:
+                row["name"] = name or self._default_name()
             row["computeConfig"] = copy.deepcopy(compute_config)
             self.rows[deployment_id] = row
             self._keys[idempotency_key] = deployment_id
             if self.tombstone_all_creates or (self.tombstone_first_create and not self._tombstoned_once):
                 row["deletedAt"] = "2026-08-23T12:30:00Z"
                 self._tombstoned_once = True
-            return {"id": deployment_id, "status": row["status"]}
+            return {"id": deployment_id, "status": row["status"], **self._served_name(row)}
+
+    def rename_deployment(self, deployment_id: str, name: str) -> JsonObject:
+        with self._lock:
+            self.rename_calls.append((deployment_id, name))
+            if not self.serves_names:
+                # A body with neither computeConfig nor baseRevision.
+                raise DeployAPIError(
+                    "deploy_bad_request", "nothing to update", status=400, details={"server_code": "INVALID_REQUEST"}
+                )
+            self._refuse_taken(name, keep=deployment_id)
+            self.rows[deployment_id]["name"] = name
+            return copy.deepcopy(self.rows[deployment_id])
+
+    def _served_name(self, row: JsonObject) -> JsonObject:
+        return {"name": row.get("name")} if self.serves_names else {}
+
+    def _live_names(self, keep: str | None = None) -> set[str]:
+        return {
+            row["name"]
+            for row in self.rows.values()
+            if row.get("deletedAt") is None and row["id"] != keep and isinstance(row.get("name"), str)
+        }
+
+    def _default_name(self) -> str:
+        taken = self._live_names()
+        if not taken:
+            return "production"
+        return next(f"deployment-{n}" for n in range(1, len(taken) + 2) if f"deployment-{n}" not in taken)
+
+    def _refuse_taken(self, name: str, keep: str | None = None) -> None:
+        if name in self._live_names(keep):
+            raise DeployAPIError(
+                "deploy_conflict",
+                f"this build already has a live deployment named {name!r}",
+                status=409,
+                details={"server_code": "NAME_TAKEN"},
+            )
 
     def get_deployment(self, deployment_id: str) -> JsonObject:
         with self._lock:

@@ -30,6 +30,7 @@ class DeployFixtureKind(Enum):
     UP = "up"
     PROMOTE = "promote"
     ROLLBACK = "rollback"
+    RENAME = "rename"
     HISTORY = "history"
     STATUS = "status"
     LS = "ls"
@@ -122,7 +123,7 @@ class DeployRecordingTransport:
             ("GET", "/v1/compute-catalog"): (200, {"regions": []}),
         }
         if method == "PATCH" and path == f"/v1/deployments/{DEPLOYMENT_ID}":
-            return 200, copy.deepcopy(row)
+            return 200, copy.deepcopy({**row, **(body or {})})
         route = routes.get((method, path))
         if route is None:
             pytest.fail(f"unexpected deploy control-plane call: {method} {url}")
@@ -167,6 +168,8 @@ def prepare_deploy(kind: DeployFixtureKind, root: Path) -> list[str]:
             return ["deploy", "promote", "dep-source", DEPLOYMENT_ID, "--no-watch"]
         case DeployFixtureKind.ROLLBACK:
             return ["deploy", "rollback", "--deployment", DEPLOYMENT_ID, "--no-watch"]
+        case DeployFixtureKind.RENAME:
+            return ["deploy", "rename", "--deployment", DEPLOYMENT_ID, "canary"]
         case DeployFixtureKind.HISTORY:
             return ["deploy", "history", "--deployment", DEPLOYMENT_ID]
         case DeployFixtureKind.STATUS:

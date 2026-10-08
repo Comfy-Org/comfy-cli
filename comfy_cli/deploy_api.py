@@ -177,7 +177,9 @@ class DeployClient:
         compute_config: dict,
         *,
         idempotency_key: str | None = None,
+        name: str | None = None,
     ) -> dict:
+        """Start a deployment of the release. Without ``name``, comfy-deploy names it."""
         if not release_id.strip():
             raise bad_request("releaseId is required")
         _validate_compute_config(compute_config)
@@ -189,7 +191,11 @@ class DeployClient:
                 operation="create",
                 parts=("deployments",),
                 method="POST",
-                body={"releaseId": release_id, "computeConfig": compute_config},
+                body={
+                    "releaseId": release_id,
+                    "computeConfig": compute_config,
+                    **({"name": name} if name is not None else {}),
+                },
                 headers=headers,
             )
         )
@@ -232,6 +238,10 @@ class DeployClient:
     def update_deployment(self, deployment_id: str, compute_config: dict) -> dict:
         _validate_compute_config(compute_config)
         return self._patch("scale", ("deployments", deployment_id), {"computeConfig": compute_config})
+
+    def rename_deployment(self, deployment_id: str, name: str) -> dict:
+        """Give the deployment a new name, unique among its Build's live deployments, and nothing else."""
+        return self._patch("rename", ("deployments", deployment_id), {"name": name})
 
     def move_deployment(self, deployment_id: str, base_revision: int, release_id: str) -> dict:
         """Point the deployment at another release of its Build, keeping its id and URL.

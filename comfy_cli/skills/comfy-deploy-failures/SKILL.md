@@ -34,7 +34,7 @@ argument you pass.
 | `deploy_not_ready` | The deployment is not in `ready` | Wait if transitional; read `events` if terminal |
 | `deploy_immutable_compute` | Tried to change GPU/region in place | `stop` → `scale` → `start` |
 | `deploy_deleted` | Tried to start a deleted deployment | `comfy deploy up` makes a new one |
-| `deploy_ambiguous_deployment` | Several deployments tie for selection, or `up` found more than one running deployment of the Build to update | Pass `--deployment <id>`, or `up --create` for a separate one |
+| `deploy_ambiguous_deployment` | Several deployments tie for selection, or `up`, `rollback` or `rename` found more than one deployment of the Build; `details.candidates` lists each one's name, release and status | Pass `--deployment <name>`, or `up --create` for a separate one |
 | `deploy_update_failed` | `up`, `promote` or `rollback` moved a deployment onto another release and the move failed; the old release still serves | Read `comfy deploy events --deployment <id>`; fix the release, then run the same command again |
 | `deploy_unrelated_deployment` | `--deployment` names one outside this scope | Pick from `details.candidateIds` |
 | `deploy_missing_input` | A required option was omitted non-interactively | Pass everything in `details.missing` |
@@ -45,6 +45,9 @@ argument you pass.
 | `deploy_not_found` | No deployment with that id | `comfy deploy ls --workspace` |
 | `deploy_name_not_found` | No live deployment of the Build has that name; `details.names` lists the names held, empty when none has one | Pick a name from `details.names`, or pass the id from `comfy deploy ls` |
 | `deploy_build_not_found` | `<build>/<name>` named no Build, or a bare name was given outside a Build's folder | Run from the Build's folder, or name the Build from `comfy build ls` |
+| `deploy_invalid_name` | `--name` or `rename` was given a name comfy-deploy would refuse; nothing was created or renamed | Use 1 to 40 lowercase letters, digits and hyphens, starting and ending with a letter or digit, not starting with `dep-` |
+| `deploy_name_taken` | Another live deployment of the Build holds that name | Pick another, or rename that one first |
+| `deploy_names_unavailable` | `rename` reached a comfy-deploy that does not serve names yet | Reach the deployment by its id until it does |
 | `deploy_ambiguous_build` | Two or more Builds share the name before the slash | Name the Build by its id, as `<build id>/<name>` |
 | `deploy_forbidden` | The workspace does not permit this | Confirm which workspace is signed in |
 | `deploy_not_signed_in` | No usable Cloud session or workspace API key, or the key was refused | Replace the key the hint names; otherwise `comfy cloud login` |

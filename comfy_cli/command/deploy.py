@@ -14,6 +14,7 @@ from comfy_cli.command import deploy_lifecycle as _deploy_lifecycle
 from comfy_cli.command import deploy_ls as _deploy_ls
 from comfy_cli.command import deploy_read as _deploy_read
 from comfy_cli.command import deploy_refs as _deploy_refs
+from comfy_cli.command import deploy_rename as _deploy_rename
 from comfy_cli.command import deploy_rollback as _deploy_rollback
 from comfy_cli.command import deploy_run as _deploy_run
 from comfy_cli.command.build_paths import BuildSpecNotFoundError
@@ -328,6 +329,13 @@ def up_cmd(
             help="Add a new deployment on this release instead of updating the Build's existing one.",
         ),
     ] = False,
+    name: Annotated[
+        str | None,
+        typer.Option(
+            "--name",
+            help="Name the deployment this creates. Default: production for a Build's first, else deployment-N.",
+        ),
+    ] = None,
     # Watching is what someone who just asked for a deployment wants: the command
     # that starts a several-minute wait should say how the wait is going. Ctrl-C
     # and --no-watch both leave the deploy running and print how to re-attach.
@@ -351,6 +359,7 @@ def up_cmd(
             maximum=maximum,
             deployment_id=deployment_id,
             create=create,
+            name=name,
             watch=watch,
         )
         try:
@@ -455,6 +464,24 @@ def rollback_cmd(
 ) -> None:
     request = _deploy_rollback.RollbackRequest(path, deployment_id, to)
     _run_move(lambda builder, client: _deploy_rollback.rollback(builder, client, request), "rollback", watch)
+
+
+@app.command("rename", help="Give a deployment a new name, keeping its id and URL.")
+@tracking.track_command("deploy")
+def rename_cmd(
+    args: Annotated[
+        list[str],
+        typer.Argument(
+            metavar="[PATH] NAME",
+            help="The new name, after the Build's folder or spec path. Default folder: the current directory.",
+        ),
+    ],
+    deployment_id: DeploymentOption = None,
+) -> None:
+    if len(args) > 2:
+        raise typer.BadParameter("rename takes the new name, and at most a folder before it", param_hint="[PATH] NAME")
+    path = args[0] if len(args) == 2 else None
+    _deploy_rename.run_rename(_deploy_rename.RenameRequest(path, deployment_id, args[-1]))
 
 
 @app.command("history", help="List the releases a deployment ran, newest first, with what moved it.")

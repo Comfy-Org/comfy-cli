@@ -7,16 +7,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from comfy_cli.command.build_paths import resolve_build_paths
-from comfy_cli.command.build_spec import JsonObject, read_build_spec
+from comfy_cli.command.build_spec import JsonObject
 from comfy_cli.command.deploy_resolve import (
-    AmbiguousDeploymentError,
     BuilderReleaseClient,
-    BuildNotPushedError,
+    ChoiceRefusedError,
     DeployResolveError,
     deployment_id_for,
     find_build_release,
     release_version_selector,
+    sole_deployment,
 )
 from comfy_cli.command.deploy_types import (
     DeployUpClient,
@@ -28,7 +27,7 @@ from comfy_cli.command.deploy_types import (
     required_string,
     server_shape_error,
 )
-from comfy_cli.command.deploy_up import build_deployments, refuse_unmovable, release_or_id, running_first
+from comfy_cli.command.deploy_up import refuse_unmovable, release_or_id, running_first
 from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.http import ResponseTooLarge
 
@@ -68,12 +67,11 @@ class NoDeploymentToRollBackError(DeployResolveError):
         super().__init__(f"Build {build_id} has no deployment to roll back")
 
 
-class RollbackAmbiguousError(AmbiguousDeploymentError):
-    hint = "pass `--deployment <id>` to roll back one of them"
+class RollbackAmbiguousError(ChoiceRefusedError):
+    hint = "pass `--deployment <name|id>` to roll back one of them"
 
-    def __init__(self, build_id: str, candidate_ids: list[str]) -> None:
-        super().__init__(build_id, candidate_ids)
-        self.args = (f"Build {build_id} has {len(candidate_ids)} deployments and `rollback` moves only one",)
+    def __init__(self, build_id: str, rows: Sequence[JsonObject], releases: Sequence[JsonObject]) -> None:
+        super().__init__(build_id, "rollback", rows, releases)
 
 
 class ReleaseNotListedError(DeployResolveError):
@@ -142,17 +140,15 @@ def _picked_deployment(
     with the Build's releases where picking read them."""
     if request.deployment_id is not None:
         return deployment_id_for(builder, client, request.deployment_id, path=request.path), None
-    spec = read_build_spec(resolve_build_paths(request.path).spec_file)
-    build_id = spec.get("id")
-    if not isinstance(build_id, str) or not build_id:
-        raise BuildNotPushedError
-    releases = builder.list_releases(build_id)
-    pool = running_first(build_deployments(client.list_all_deployments(), releases))
-    if not pool:
-        raise NoDeploymentToRollBackError(build_id)
-    if len(pool) > 1:
-        raise RollbackAmbiguousError(build_id, [required_string(row, "id") for row in pool])
-    return required_string(pool[0], "id"), (build_id, releases)
+    deployment_id, build_id, releases = sole_deployment(
+        builder,
+        client,
+        request.path,
+        none=NoDeploymentToRollBackError,
+        many=RollbackAmbiguousError,
+        prefer=running_first,
+    )
+    return deployment_id, (build_id, releases)
 
 
 def _revisions(client: DeployRollbackClient, deployment_id: str) -> list[JsonObject]:

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import urllib.error
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final, Protocol
@@ -10,6 +12,7 @@ from typing import Final, Protocol
 from comfy_cli.command.build_paths import BuildSpecNotFoundError, resolve_build_paths
 from comfy_cli.command.build_spec import BuildSpec, JsonObject, JsonValue, read_build_spec
 from comfy_cli.command.deploy_types import deployment_name, required_string, server_shape_error
+from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.utils import parse_rfc3339
 
 # Wave 8 status formatting must import this table rather than redefine the order.
@@ -27,6 +30,11 @@ _STATUS_RANK: Final[dict[str, int]] = {
 # A deployment id, today's or an older row's; comfy-deploy refuses a name
 # starting with dep-, so a value with either prefix is never a name.
 _ID_PREFIXES: Final = ("dep-", "dep_")
+# comfy-deploy's own rule for a deployment's name.
+_NAME: Final = re.compile(r"[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?")
+_NAME_RULE: Final = (
+    "1 to 40 lowercase letters, digits and hyphens, starting and ending with a letter or digit and never with dep-"
+)
 
 
 class BuilderReleaseClient(Protocol):
@@ -100,6 +108,41 @@ class AmbiguousDeploymentError(DeployResolveError):
         candidate_values: list[JsonValue] = [*ordered_ids]
         self.details = {"buildId": build_id, "candidateIds": candidate_values}
         super().__init__(f"Build {build_id} has indistinguishable deployments: {', '.join(ordered_ids)}")
+
+
+class ChoiceRefusedError(AmbiguousDeploymentError):
+    """A command that acts on one deployment found several and was not told which.
+
+    Each is listed by name, release and status, so the refusal is enough to
+    choose from without a `comfy deploy ls`.
+    """
+
+    hint = "pass `--deployment <name|id>` to pick one"
+
+    def __init__(self, build_id: str, command: str, rows: Sequence[JsonObject], releases: Sequence[JsonObject]) -> None:
+        versions = {required_string(release, "id"): release.get("version") for release in releases}
+        choices = sorted(
+            (_choice(row, versions) for row in rows),
+            key=lambda choice: str(choice["id"]),
+        )
+        super().__init__(build_id, [str(choice["id"]) for choice in choices])
+        listed: list[JsonValue] = [*choices]
+        self.details["candidates"] = listed
+        labels = ", ".join(
+            f"{choice['name'] or choice['id']} ({choice['release']}, {choice['status']})" for choice in choices
+        )
+        self.args = (f"Build {build_id} has {len(choices)} deployments and `{command}` acts on only one: {labels}",)
+
+
+def _choice(row: JsonObject, versions: dict[str, JsonValue]) -> JsonObject:
+    release_id = required_string(row, "releaseId")
+    version = versions.get(release_id)
+    return {
+        "id": required_string(row, "id"),
+        "name": deployment_name(row),
+        "release": f"v{version}" if isinstance(version, int) and not isinstance(version, bool) else release_id,
+        "status": required_string(row, "status"),
+    }
 
 
 class UnrelatedDeploymentError(DeployResolveError):
@@ -299,6 +342,15 @@ class DeploymentNameNotFoundError(DeployResolveError):
         super().__init__(message if live else f"Build {build_id} has no live deployment, so none is named {name}")
 
 
+class NamesUnavailableError(DeployResolveError):
+    code = "deploy_names_unavailable"
+    hint = "comfy-deploy has to serve names before a deployment can be renamed"
+
+    def __init__(self, name: str) -> None:
+        self.details = {"name": name}
+        super().__init__(f"comfy-deploy does not serve deployment names yet, so nothing was named {name}")
+
+
 class BuildNotFoundError(DeployResolveError):
     code = "deploy_build_not_found"
     hint = "run `comfy build ls` to see each Build's name and id; a teammate's Build is named by its id"
@@ -317,6 +369,76 @@ class NameOutsideBuildError(DeployResolveError):
         self.details = {"build": None, "name": name}
         self.hint = f"run it from the Build's folder, or name the Build as `<build>/{name}`"
         super().__init__(f"no Build's folder is here to say whose deployment {name} is")
+
+
+class InvalidNameError(DeployResolveError):
+    code = "deploy_invalid_name"
+    hint = "pick a name such as staging or canary-2"
+
+    def __init__(self, name: str) -> None:
+        self.details = {"name": name}
+        super().__init__(f"{name!r} is not a deployment name: a name is {_NAME_RULE}")
+
+
+class NameTakenError(DeployResolveError):
+    code = "deploy_name_taken"
+    hint = "pick another name, or rename that deployment first with `comfy deploy rename`"
+
+    def __init__(self, name: str) -> None:
+        self.details = {"name": name}
+        super().__init__(f"another live deployment of this Build is already named {name}")
+
+
+def valid_name(name: str) -> str:
+    """``name``, refused unless it is a name comfy-deploy would take."""
+    if not _NAME.fullmatch(name) or name.startswith(_ID_PREFIXES):
+        raise InvalidNameError(name)
+    return name
+
+
+def build_deployments(deployments: Sequence[JsonObject], releases: Sequence[JsonObject]) -> list[JsonObject]:
+    """The live deployments among ``deployments`` that run one of ``releases``, a Build's."""
+    release_ids = {required_string(release, "id") for release in releases}
+    return [
+        deployment
+        for deployment in deployments
+        if deployment.get("releaseId") in release_ids and deployment.get("deletedAt") is None
+    ]
+
+
+def name_refusal(error: DeployAPIError, name: str) -> Exception:
+    """comfy-deploy's refusal of ``name``, said in its own words, or ``error`` as it came."""
+    server_code = (error.details or {}).get("server_code")
+    if server_code == "NAME_TAKEN":
+        return NameTakenError(name)
+    if server_code == "INVALID_NAME":
+        return InvalidNameError(name)
+    return error
+
+
+def sole_deployment(
+    builder: BuilderReleaseClient,
+    deploy: DeploymentListClient,
+    path: str | None,
+    *,
+    none: Callable[[str], Exception],
+    many: Callable[[str, list[JsonObject], list[JsonObject]], Exception],
+    prefer: Callable[[list[JsonObject]], list[JsonObject]] = list,
+) -> tuple[str, str, list[JsonObject]]:
+    """The id of the only deployment of the Build in the folder at ``path``, with
+    the Build's id and releases, refusing none or several.
+
+    ``prefer`` narrows the Build's live deployments first, as a command that
+    brings one up leaves out a stopped leftover.
+    """
+    build_id = spec_build_id(path)
+    releases = builder.list_releases(build_id)
+    pool = prefer(build_deployments(deploy.list_all_deployments(), releases))
+    if not pool:
+        raise none(build_id)
+    if len(pool) > 1:
+        raise many(build_id, pool, releases)
+    return required_string(pool[0], "id"), build_id, releases
 
 
 class AmbiguousBuildError(DeployResolveError):
@@ -407,13 +529,17 @@ def _named_build_rows(
 
 def _folder_build_id(path: str | None, name: str) -> str:
     try:
-        spec = read_build_spec(resolve_build_paths(path).spec_file)
+        return spec_build_id(path)
     except BuildSpecNotFoundError as error:
         # A PATH given and mistyped is the mistake to name, as it is without a name.
         if path is not None:
             raise
         raise NameOutsideBuildError(name) from error
-    build_id = spec.get("id")
+
+
+def spec_build_id(path: str | None) -> str:
+    """The id of the Build whose folder is at ``path``, refused until it is pushed."""
+    build_id = read_build_spec(resolve_build_paths(path).spec_file).get("id")
     if not isinstance(build_id, str) or not build_id:
         raise BuildNotPushedError
     return build_id
