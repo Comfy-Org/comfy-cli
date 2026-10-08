@@ -51,6 +51,7 @@ _SUBGRAPH_OUTPUT_NODE_ID = -20
 # in malformed inputs.
 _MAX_RESOLUTION_DEPTH = 100
 _MAX_SUBGRAPH_ITERATIONS = 10
+_MAX_RESOLVED_SUBGRAPH_INPUTS = 10_000
 
 # Strings that ComfyUI appends after seed-like INT widgets to control how the
 # value changes between runs. They're not real inputs and must be stripped from
@@ -408,17 +409,38 @@ def _expand_one_subgraph(
     from comfy_cli.cql.promoted import _link_holders, held_link_targets
 
     holders = _link_holders(sg_def)
+    target_cache: dict[str, tuple[tuple[dict, int, dict], ...]] = {}
+    target_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS]
 
     for idx, in_def in enumerate(sg_def.get("inputs") or []):
         if not isinstance(in_def, dict):
             continue
         targets = []
+        seen_targets: set[tuple[str, int]] = set()
         for lid in in_def.get("linkIds") or []:
+            if target_budget[0] <= 0:
+                raise WorkflowConversionError("subgraph input expansion exceeded its safe limit")
+            target_budget[0] -= 1
             if not _is_link_id(lid):
                 continue
             link = internal_link_map.get(lid)
             if isinstance(link, dict):
-                for target, target_slot, _entry in held_link_targets(sg_def, lid, link, holders):
+                for target, target_slot, _entry in held_link_targets(
+                    sg_def,
+                    lid,
+                    link,
+                    holders,
+                    target_cache,
+                    target_budget,
+                    "subgraph input expansion exceeded its safe limit",
+                ):
+                    target_key = (str(target.get("id")), target_slot)
+                    if target_key in seen_targets:
+                        continue
+                    if target_budget[0] <= 0:
+                        raise WorkflowConversionError("subgraph input expansion exceeded its safe limit")
+                    target_budget[0] -= 1
+                    seen_targets.add(target_key)
                     targets.append((target.get("id"), target_slot))
         if targets:
             input_targets[idx] = targets
@@ -545,8 +567,23 @@ def _resolve_subgraph_output(node_id_str: str, slot: Any, ctx: _SubgraphCtx, dep
 
 
 def _resolve_subgraph_input_all(
-    node_id_str: str, slot: Any, ctx: _SubgraphCtx, depth: int = 0
+    node_id_str: str,
+    slot: Any,
+    ctx: _SubgraphCtx,
+    depth: int = 0,
+    _memo: dict[tuple[str, str], tuple[tuple[Any, Any], ...]] | None = None,
+    _budget: list[int] | None = None,
 ) -> list[tuple[Any, Any]]:
+    if _memo is None:
+        _memo = {}
+    if _budget is None:
+        _budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS]
+    memo_key = (node_id_str, repr(slot))
+    if memo_key in _memo:
+        return list(_memo[memo_key])
+    if _budget[0] <= 0:
+        raise WorkflowConversionError("subgraph input resolution exceeded its safe limit")
+    _budget[0] -= 1
     if depth > _MAX_RESOLUTION_DEPTH:
         return [(node_id_str, slot)]
     mapping = ctx.input_targets.get(node_id_str)
@@ -555,7 +592,7 @@ def _resolve_subgraph_input_all(
 
     sg_input_idx = slot
     outer_map = ctx.outer_to_input_idx.get(node_id_str)
-    if outer_map and slot in outer_map:
+    if outer_map and isinstance(slot, (int, str)) and slot in outer_map:
         sg_input_idx = outer_map[slot]
 
     targets = mapping.get(sg_input_idx)
@@ -563,10 +600,31 @@ def _resolve_subgraph_input_all(
         return [(node_id_str, slot)]
 
     out: list[tuple[Any, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    seen_direct: set[tuple[str, str]] = set()
     for internal_node, internal_slot in targets:
+        direct_key = (str(internal_node), repr(internal_slot))
+        if direct_key in seen_direct:
+            continue
+        seen_direct.add(direct_key)
+        if _budget[0] <= 0:
+            raise WorkflowConversionError("subgraph input resolution exceeded its safe limit")
+        _budget[0] -= 1
         new_id = f"{node_id_str}:{internal_node}"
-        out.extend(_resolve_subgraph_input_all(new_id, internal_slot, ctx, depth + 1))
-    return out or [(node_id_str, slot)]
+        for resolved_node, resolved_slot in _resolve_subgraph_input_all(
+            new_id, internal_slot, ctx, depth + 1, _memo, _budget
+        ):
+            resolved_key = (str(resolved_node), repr(resolved_slot))
+            if resolved_key in seen:
+                continue
+            if _budget[0] <= 0:
+                raise WorkflowConversionError("subgraph input resolution exceeded its safe limit")
+            _budget[0] -= 1
+            seen.add(resolved_key)
+            out.append((resolved_node, resolved_slot))
+    result = tuple(out or [(node_id_str, slot)])
+    _memo[memo_key] = result
+    return list(result)
 
 
 # ---------------------------------------------------------------------------
