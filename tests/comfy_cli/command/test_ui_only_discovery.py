@@ -88,6 +88,15 @@ def test_ls_nodes_marks_ui_only_and_subgraph_rows(patched_graph, tmp_path, capsy
     assert rows[21].get("subgraph") is True, rows[21]
 
 
+def test_ls_nodes_uuid_subgraph_signal_wins_over_serialized_class_identity(patched_graph, tmp_path, capsys):
+    wf = _wf_with_reroute_and_subgraph()
+    subgraph = next(node for node in wf["nodes"] if node["id"] == 21)
+    subgraph["properties"] = {"Node name for S&R": _SG_UUID}
+
+    row = _ls_rows(tmp_path, capsys, wf)[21]
+    assert row.get("subgraph") is True, row
+
+
 def test_ls_nodes_marks_a_declared_non_uuid_subgraph(patched_graph, tmp_path, capsys):
     wf = _base_workflow()
     subgraph_id = "named-subgraph"
