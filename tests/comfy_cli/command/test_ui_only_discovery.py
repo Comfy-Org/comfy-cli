@@ -154,6 +154,16 @@ def test_ls_nodes_tolerates_malformed_properties_and_mode(patched_graph, tmp_pat
     assert "mode" not in row
 
 
+def test_ls_nodes_matches_execution_semantics_for_integral_float_modes(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    node = next(item for item in wf["nodes"] if item["type"] == "KSampler")
+    node["mode"] = 4.0
+
+    row = _ls_rows(tmp_path, capsys, wf)[node["id"]]
+
+    assert row["mode"] == "bypass"
+
+
 def test_ls_nodes_does_not_treat_a_real_class_as_a_self_named_subgraph(patched_graph, tmp_path, capsys):
     wf = _base_workflow()
     wf["definitions"] = {
