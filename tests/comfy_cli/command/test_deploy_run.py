@@ -536,6 +536,28 @@ def test_the_release_version_the_gateway_names_is_printed_and_emitted(
     assert "Deployment job job-1 (release v7) is queued" in pretty.output
 
 
+def test_a_waited_run_names_the_release_version_of_the_finished_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    workflow = write_workflow(tmp_path / "workflow.json")
+    watched = JobWatchResult({**job("succeeded"), "release_version": 7}, [])
+    install_run(monkeypatch, FakeControl("https://dep-id.run.comfy.app"), FakeJobClient(job()), watched=watched)
+
+    # When
+    agentic = invoke(workflow, "--deployment", "dep-id")
+    pretty = invoke(workflow, "--deployment", "dep-id", agentic=False)
+
+    # Then
+    assert agentic.exit_code == 0, agentic.stderr
+    data = envelope_data(agentic)
+    assert data["job"] == {"id": "job-1", "status": "succeeded", "releaseVersion": 7}
+    published_validator().validate(data)
+    assert pretty.exit_code == 0, pretty.stderr
+    assert "Deployment job job-1 (release v7) is succeeded" in pretty.output
+
+
 @pytest.mark.parametrize("version", [None, "7", 7.5, True, 0])
 def test_a_missing_or_unusable_release_version_leaves_the_result_as_it_was(
     tmp_path: Path,

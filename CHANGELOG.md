@@ -38,6 +38,10 @@ history.
   release, keeping its id and URL, and follows the move as `up` does; `comfy
   deploy history` lists the releases a deployment ran, newest first, with what
   moved it and who. Both need deployment updates on.
+- `comfy deploy run` prints the version of the release that ran the job,
+  `Deployment job job-1 (release v7) is succeeded`, and `--json` carries it as
+  `job.releaseVersion`, once the platform gateway names it. Against a gateway
+  that does not, the output is as before.
 - `comfy deploy promote --json` and `comfy deploy rollback --json` say
   `waiting: true` while the move waits for its release's copy, so a
   `--no-watch` caller can tell a waiting move from one that landed.

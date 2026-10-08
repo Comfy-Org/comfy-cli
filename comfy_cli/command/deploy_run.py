@@ -168,8 +168,8 @@ def _emit_cancelled(renderer: Renderer, state: _RunState) -> None:
 def _emit_result(renderer: Renderer, result: _RunResult) -> None:
     payload = result.payload()
     if renderer.is_pretty():
-        release_version = _release_version(result.job)
-        release = f" (release v{release_version})" if release_version is not None else ""
+        job = payload["job"]
+        release = f" (release v{job['releaseVersion']})" if isinstance(job, dict) and "releaseVersion" in job else ""
         renderer.success(
             f"Deployment job {required_string(result.job, 'id')}{release} is {required_string(result.job, 'status')}"
         )
