@@ -285,9 +285,11 @@ def _normalise_node_outputs(nodes: list[dict], warnings: list[str] | None, quali
 def _retarget_definition_links(subgraph: dict, warnings: list[str]) -> dict:
     """Keep promoted-input discovery aligned with the holder-based render route."""
     holders: dict[str, list[tuple[Any, int]]] = {}
+    node_ids: set[str] = set()
     for node in subgraph.get("nodes") or []:
         if not isinstance(node, dict):
             continue
+        node_ids.add(str(node.get("id")))
         inputs = node.get("inputs")
         for slot, inp in enumerate(inputs if isinstance(inputs, list) else []):
             if isinstance(inp, dict) and inp.get("link") is not None:
@@ -324,9 +326,13 @@ def _retarget_definition_links(subgraph: dict, warnings: list[str]) -> dict:
             (location for location in locations if str(location[0]) == str(link.get("target_id"))),
             locations[0],
         )
+        target_id = link.get("target_id")
+        if str(target_id) not in node_ids:
+            where = f"targets missing node {target_id}"
+        else:
+            where = f"targets input slot {link.get('target_slot')} on node {target_id}, but that input does not hold it"
         warnings.append(
-            f"subgraph {subgraph.get('id')}: link {link.get('id')} targets input slot "
-            f"{link.get('target_slot')} on node {link.get('target_id')}, but that input does not hold it; "
+            f"subgraph {subgraph.get('id')}: link {link.get('id')} {where}; "
             f"rendered through input slot {holder[1]} on node {holder[0]}, which holds it"
         )
         links.append({**link, "target_id": holder[0], "target_slot": holder[1]})

@@ -1509,6 +1509,23 @@ def test_definition_retarget_emits_a_qualified_warning():
     )
 
 
+def test_definition_retarget_calls_out_a_missing_declared_target():
+    wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
+    graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
+    sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
+    link = next(item for item in sg["links"] if item.get("id") == 3)
+    link["target_id"] = 999
+    link["target_slot"] = 1
+
+    res = render_py(wf, graph)
+
+    assert any(
+        warning.startswith(f"subgraph {sg['id']}: link 3 targets missing node 999")
+        and warning.endswith("rendered through input slot 0 on node 3, which holds it")
+        for warning in res.warnings
+    )
+
+
 def test_definition_input_to_output_passthrough_is_never_retargeted():
     wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
     graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
