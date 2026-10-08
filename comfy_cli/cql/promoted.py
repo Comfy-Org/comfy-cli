@@ -48,7 +48,7 @@ _MAX_NESTED_PROMOTION_DEPTH = 32
 UNSET: Any = object()
 
 
-class PromotionTraversalLimitError(RuntimeError):
+class PromotionTraversalLimitError(ValueError):
     """Promotion resolution exceeded its bounded malformed-graph traversal."""
 
 
@@ -105,6 +105,12 @@ def _is_slot_index(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
+def _listed_link_ids(entry: dict) -> list[Any]:
+    """A definition entry's serialized link-id list, or empty when malformed."""
+    value = entry.get("linkIds")
+    return value if isinstance(value, list) else []
+
+
 def _spend_traversal_budget(budget: list[int] | None, amount: int, message: str) -> None:
     """Charge serialized traversal work before materializing its result."""
     if budget is None:
@@ -132,7 +138,7 @@ def held_link_targets(
     link_id: Any,
     link: dict,
     holders: dict[str, list[tuple[dict, int, dict]]] | None = None,
-    cache: dict[str, tuple[tuple[dict, int, dict], ...]] | None = None,
+    cache: dict[int, tuple[tuple[dict, int, dict], ...]] | None = None,
     budget: list[int] | None = None,
     limit_message: str = "promoted input traversal exceeded its safe limit",
 ) -> tuple[tuple[dict, int, dict], ...]:
@@ -142,10 +148,12 @@ def held_link_targets(
     holder on the declared node, then serialized holder order. Duplicate
     holders all remain live, matching the renderer's dependency model.
     """
-    cache_key = str(link_id)
+    cache_key = id(link)
     if cache is not None and cache_key in cache:
-        return cache[cache_key]
-    locations = (holders if holders is not None else _link_holders(sg)).get(cache_key, [])
+        result = cache[cache_key]
+        _spend_traversal_budget(budget, len(result), limit_message)
+        return result
+    locations = (holders if holders is not None else _link_holders(sg)).get(str(link_id), [])
     _spend_traversal_budget(budget, len(locations), limit_message)
     target_slot = link.get("target_slot")
     preferred = next(
@@ -211,19 +219,21 @@ def promoted_inputs(
         _budget = [_promotion_visit_limit(defs, sg)]
     memo_key = (id(sg), depth, _stack)
     if memo_key in _memo:
-        return _memo[memo_key]
+        result = _memo[memo_key]
+        _spend_traversal_budget(_budget, len(result), "promoted input traversal exceeded its safe limit")
+        return result
     if _budget[0] <= 0:
         raise PromotionTraversalLimitError("promoted input traversal exceeded its safe limit")
     _budget[0] -= 1
     _stack = (*_stack, id(sg))
     holders = _link_holders(sg)
-    target_cache: dict[str, tuple[tuple[dict, int, dict], ...]] = {}
+    target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
     # Only hashable ids can be looked up; a malformed (list/dict) id is skipped
     # rather than crashing conversion of the whole workflow.
     links = {
         link.get("id"): link
         for link in sg.get("links") or []
-        if isinstance(link, dict) and isinstance(link.get("id"), (int, str))
+        if isinstance(link, dict) and isinstance(link.get("id"), (int, str)) and not isinstance(link.get("id"), bool)
     }
     out: list[PromotedInput] = []
     value_index = 0
@@ -236,7 +246,7 @@ def promoted_inputs(
         # repr of whatever was there — callers treat "" as "accept the source".
         type_str = type_id if isinstance(type_id, str) else ""
         source: tuple[str, str, str | None, bool] | None = None
-        for link_id in inp.get("linkIds") or []:
+        for link_id in _listed_link_ids(inp):
             _spend_traversal_budget(_budget, 1, "promoted input traversal exceeded its safe limit")
             if not isinstance(link_id, (int, str)):
                 continue
@@ -1006,12 +1016,12 @@ def _promotion_source(sg: dict, inp: dict, defs: dict[str, dict]) -> tuple[str, 
     links = {
         link.get("id"): link
         for link in sg.get("links") or []
-        if isinstance(link, dict) and isinstance(link.get("id"), (int, str))
+        if isinstance(link, dict) and isinstance(link.get("id"), (int, str)) and not isinstance(link.get("id"), bool)
     }
     holders = _link_holders(sg)
-    target_cache: dict[str, tuple[tuple[dict, int, dict], ...]] = {}
+    target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
     budget = [_promotion_visit_limit(defs, sg)]
-    for link_id in inp.get("linkIds") or []:
+    for link_id in _listed_link_ids(inp):
         _spend_traversal_budget(budget, 1, "promotion source traversal exceeded its safe limit")
         link = links.get(link_id) if isinstance(link_id, (int, str)) else None
         if link is None:
@@ -1150,12 +1160,16 @@ def _primitive_targets(sg: dict, primitive: dict) -> list[tuple[str, int]]:
     links = {
         link.get("id"): link
         for link in sg.get("links") or []
-        if isinstance(link, dict) and isinstance(link.get("id"), (int, str))
+        if isinstance(link, dict) and isinstance(link.get("id"), (int, str)) and not isinstance(link.get("id"), bool)
     }
     outputs = primitive.get("outputs") or []
     listed = outputs[0].get("links") if outputs and isinstance(outputs[0], dict) else None
     ordered = (
-        [links[link_id] for link_id in listed if isinstance(link_id, (int, str)) and link_id in links]
+        [
+            links[link_id]
+            for link_id in listed
+            if isinstance(link_id, (int, str)) and not isinstance(link_id, bool) and link_id in links
+        ]
         if isinstance(listed, list)
         else []
     )
@@ -1165,7 +1179,7 @@ def _primitive_targets(sg: dict, primitive: dict) -> list[tuple[str, int]]:
             for x in links.values()
             if str(x.get("origin_id")) == str(primitive.get("id")) and x.get("origin_slot") == 0
         ]
-    return [(str(x.get("target_id")), x.get("target_slot")) for x in ordered if isinstance(x.get("target_slot"), int)]
+    return [(str(x.get("target_id")), x.get("target_slot")) for x in ordered if _is_slot_index(x.get("target_slot"))]
 
 
 def _types_compatible(a: str, b: str) -> bool:
@@ -1708,7 +1722,13 @@ def _boundary_targets(
         _budget = [_promotion_visit_limit(defs, sg)]
     memo_key = (id(sg), id(inp), depth, _stack)
     if memo_key in _memo:
-        return _memo[memo_key]
+        result = _memo[memo_key]
+        _spend_traversal_budget(
+            _budget,
+            len(result),
+            "promoted widget boundary traversal exceeded its safe limit",
+        )
+        return result
     if _budget[0] <= 0:
         raise PromotionTraversalLimitError("promoted widget boundary traversal exceeded its safe limit")
     _budget[0] -= 1
@@ -1716,12 +1736,12 @@ def _boundary_targets(
     links = {
         link.get("id"): link
         for link in sg.get("links") or []
-        if isinstance(link, dict) and isinstance(link.get("id"), (int, str))
+        if isinstance(link, dict) and isinstance(link.get("id"), (int, str)) and not isinstance(link.get("id"), bool)
     }
     holders = _link_holders(sg)
-    target_cache: dict[str, tuple[tuple[dict, int, dict], ...]] = {}
+    target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
     out: list[tuple[list[str], str]] = []
-    for link_id in inp.get("linkIds") or []:
+    for link_id in _listed_link_ids(inp):
         _spend_traversal_budget(_budget, 1, "promoted widget boundary traversal exceeded its safe limit")
         link = links.get(link_id) if isinstance(link_id, (int, str)) else None
         targets = (

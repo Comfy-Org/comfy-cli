@@ -238,16 +238,57 @@ def test_promotion_resolvers_ignore_unhashable_link_ids():
     assert promoted.boundary_widget_targets(sg, item, definitions) == [(["8"], "prompt")]
 
 
+def test_promotion_resolvers_treat_non_list_link_ids_as_empty():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": 2}],
+        "nodes": [
+            {
+                "id": 8,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 2}],
+            }
+        ],
+        "links": [{"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0}],
+    }
+
+    [item] = promoted.promoted_inputs(sg, {"sg": sg})
+
+    assert item.value_index is None
+    assert promoted._promotion_source(sg, sg["inputs"][0], {"sg": sg}) is None
+    assert promoted.boundary_widget_targets(sg, item, {"sg": sg}) == []
+
+
 def test_primitive_targets_ignore_unhashable_listed_link_ids():
-    primitive = {"id": 7, "outputs": [{"links": [[], 2]}]}
+    primitive = {"id": 7, "outputs": [{"links": [True, [], 2]}]}
     subgraph = {
         "links": [
+            {"id": True, "origin_id": 7, "origin_slot": 0, "target_id": 8, "target_slot": 0},
             {"id": [], "origin_id": 7, "origin_slot": 0, "target_id": 8, "target_slot": 0},
             {"id": 2, "origin_id": 7, "origin_slot": 0, "target_id": 9, "target_slot": 1},
         ]
     }
 
     assert promoted._primitive_targets(subgraph, primitive) == [("9", 1)]
+
+
+def test_holder_cache_distinguishes_typed_link_rows_with_different_targets():
+    sg = {
+        "nodes": [
+            {"id": 7, "inputs": [{"name": "first", "link": 1}]},
+            {"id": 8, "inputs": [{"name": "second", "link": "1"}]},
+        ]
+    }
+    holders = promoted._link_holders(sg)
+    first_link = {"id": 1, "target_id": 7, "target_slot": 0}
+    second_link = {"id": "1", "target_id": 8, "target_slot": 0}
+    cache: dict = {}
+
+    first = promoted.held_link_targets(sg, 1, first_link, holders, cache)
+    second = promoted.held_link_targets(sg, "1", second_link, holders, cache)
+
+    assert first[0][0]["id"] == 7
+    assert second[0][0]["id"] == 8
 
 
 def test_nested_fanout_memoizes_repeated_definition_walks():
@@ -355,6 +396,43 @@ def test_holder_materialization_is_charged_before_ordering():
             holders,
             budget=[2],
         )
+
+
+def test_holder_cache_hits_are_charged_by_materialized_result_size():
+    sg = {"nodes": [{"id": node_id, "inputs": [{"name": "value", "link": 1}]} for node_id in range(3)]}
+    holders = promoted._link_holders(sg)
+    link = {"id": 1, "target_id": 0, "target_slot": 0}
+    cache: dict = {}
+    budget = [6]
+
+    first = promoted.held_link_targets(sg, 1, link, holders, cache, budget)
+    assert budget == [3]
+    assert promoted.held_link_targets(sg, 1, link, holders, cache, budget) is first
+    assert budget == [0]
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="safe limit"):
+        promoted.held_link_targets(sg, 1, link, holders, cache, budget)
+
+
+def test_promoted_input_memo_hits_are_charged_by_result_size():
+    child = {
+        "id": "child",
+        "inputs": [{"name": f"value-{index}", "type": "STRING", "linkIds": []} for index in range(50)],
+        "nodes": [],
+        "links": [],
+    }
+    memo: dict = {}
+    budget = [200]
+
+    first = promoted.promoted_inputs(child, {"child": child}, 1, (123,), memo, budget)
+    remaining = budget[0]
+    second = promoted.promoted_inputs(child, {"child": child}, 1, (123,), memo, budget)
+
+    assert second is first
+    assert budget[0] == remaining - len(first)
+
+
+def test_promotion_traversal_limit_is_a_value_error_for_command_boundaries():
+    assert issubclass(promoted.PromotionTraversalLimitError, ValueError)
 
 
 def test_boundary_target_fanout_is_bounded_by_definition_graph_size():
