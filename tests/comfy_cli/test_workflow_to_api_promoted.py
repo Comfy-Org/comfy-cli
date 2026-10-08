@@ -16,6 +16,7 @@ else the interior widget.
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -144,7 +145,15 @@ def test_stale_boundary_target_reattaches_external_value_to_the_actual_holder(ob
     stale = next(node for node in sg["nodes"] if node is not actual and node.get("inputs"))
     link["target_id"] = stale["id"]
     link["target_slot"] = 0
+    duplicate = copy.deepcopy(actual)
+    duplicate["id"] = 999
+    for entry in duplicate.get("inputs") or []:
+        if isinstance(entry, dict):
+            entry["link"] = link["id"] if entry.get("name") == "width" else None
+    sg["nodes"].append(duplicate)
 
     api = convert_ui_to_api(wf, object_info)
 
-    assert _api_node(api, "EmptySD3LatentImage", "57:13")["inputs"]["width"] == [str(primitive["node_id"]), 0]
+    expected = [str(primitive["node_id"]), 0]
+    assert _api_node(api, "EmptySD3LatentImage", "57:13")["inputs"]["width"] == expected
+    assert api["57:999"]["inputs"]["width"] == expected
