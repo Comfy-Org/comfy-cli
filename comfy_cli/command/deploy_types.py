@@ -15,7 +15,12 @@ class DeployUpClient(Protocol):
     def list_all_deployments(self) -> list[JsonObject]: ...
 
     def create_deployment(
-        self, release_id: str, compute_config: JsonObject, *, idempotency_key: str | None = None
+        self,
+        release_id: str,
+        compute_config: JsonObject,
+        *,
+        idempotency_key: str | None = None,
+        name: str | None = None,
     ) -> JsonObject: ...
 
     def get_deployment(self, deployment_id: str) -> JsonObject: ...
@@ -49,6 +54,9 @@ class UpRequest:
     # `--create`: add a deployment on this release beside any the Build has,
     # instead of moving the one it has onto the release.
     create: bool = False
+    # `--name`: the name a created deployment gets, where comfy-deploy would
+    # otherwise pick one.
+    name: str | None = None
     # Whether the caller follows the deployment once the request is accepted.
     # A move cannot carry new worker bounds, so they are applied after it lands,
     # and only a watch is there to see it land.
@@ -79,11 +87,14 @@ class UpResult:
     # Worker bounds to apply once the move lands, since the service refuses
     # them in the same request.
     pending_bounds: JsonObject | None = None
+    # The name `--name` asked a create for, to say so where comfy-deploy took none.
+    requested_name: str | None = None
 
     def payload(self) -> JsonObject:
         supersedes: list[JsonValue] = [*self.supersedes]
         deployment = {
             "id": required_string(self.deployment, "id"),
+            "name": deployment_name(self.deployment),
             "status": required_string(self.deployment, "status"),
             "created": self.created,
         }

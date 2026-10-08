@@ -1453,9 +1453,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "deploy_ambiguous_deployment",
         "Deployment resolution found multiple rows tied at the highest status rank and newest creation time, "
-        "or `comfy deploy up`, with deployment updates on, found more than one deployment of the Build to update. "
-        "`details.candidateIds` lists every candidate deployment id.",
-        "pass `--deployment <id>` to select one deployment explicitly",
+        "or `comfy deploy up`, with deployment updates on, `rollback` or `rename`, given no `--deployment`, found "
+        "more than one deployment of the Build to act on. `details.candidateIds` lists every candidate deployment "
+        "id, and on `up`, `rollback` and `rename` `details.candidates` lists each one's id, name, release and status.",
+        "pass `--deployment <name|id>` to select one deployment explicitly",
     ),
     ErrorCode(
         "deploy_unrelated_deployment",
@@ -1485,6 +1486,26 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "`<build>/<name>` named a Build by a name two or more Builds share, since a Build's name is not unique in "
         "a workspace. `details.buildIds` lists each Build with that name.",
         "name the Build by its id, as `<build id>/<name>`",
+    ),
+    ErrorCode(
+        "deploy_invalid_name",
+        "`comfy deploy up --name` or `comfy deploy rename` was given a name comfy-deploy would refuse. A name is 1 "
+        "to 40 lowercase letters, digits and hyphens, starting and ending with a letter or digit, and never "
+        "starting with `dep-`. "
+        "comfy-cli refuses it before calling comfy-deploy, so nothing was created or renamed.",
+        "pick a name such as `staging` or `canary-2`",
+    ),
+    ErrorCode(
+        "deploy_name_taken",
+        "comfy-deploy refused a name another live deployment of the same Build holds, on `up --name` or `rename`. "
+        "`details.name` echoes it.",
+        "pick another name, or rename that deployment first with `comfy deploy rename`",
+    ),
+    ErrorCode(
+        "deploy_names_unavailable",
+        "`comfy deploy rename` reached a comfy-deploy that does not serve deployment names yet: it refused the "
+        "rename as a request it does not know, or answered without the name. Nothing was renamed.",
+        "wait until comfy-deploy serves names; until then a deployment is reached by its id",
     ),
     ErrorCode(
         "deploy_missing_input",

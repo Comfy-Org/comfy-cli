@@ -70,7 +70,7 @@ def test_up_moves_the_one_deployment_onto_the_new_release(tmp_path, monkeypatch)
     envelope = _envelope(result)
     data = envelope["data"]
     assert envelope["changed"] is True
-    assert data["deployment"] == {"id": "dep-1", "status": "ready", "created": False, "revision": 4}
+    assert data["deployment"] == {"id": "dep-1", "name": None, "status": "ready", "created": False, "revision": 4}
     assert data["release"] == {"id": "release-5", "version": 5}
     assert data["previousRelease"] == {"id": "release-4", "version": 4}
     # The moved deployment no longer serves v4, so it is not reported as billing beside the new one.

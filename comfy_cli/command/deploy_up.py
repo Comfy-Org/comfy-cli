@@ -11,11 +11,15 @@ import typer
 
 from comfy_cli.command.build_spec import JsonObject
 from comfy_cli.command.deploy_resolve import (
-    AmbiguousDeploymentError,
     BuilderReleaseClient,
+    ChoiceRefusedError,
+    NameTakenError,
     UnrelatedDeploymentError,
+    build_deployments,
     deployment_id_for,
+    name_refusal,
     select_deployment,
+    valid_name,
 )
 from comfy_cli.command.deploy_runtime import terminal_status_error
 from comfy_cli.command.deploy_types import NOT_MOVABLE as _NOT_MOVABLE
@@ -25,6 +29,8 @@ from comfy_cli.command.deploy_types import (
     MoveResult,
     UpRequest,
     UpResult,
+    deployment_label,
+    deployment_name,
     release_label,
 )
 from comfy_cli.command.deploy_types import compute_config as _compute_config
@@ -48,10 +54,17 @@ _DEFAULT_MAXIMUM: Final = 1
 _REFUSED: Final = frozenset({400, 402, 409, 422})
 
 
-def _idempotency_key(build_id: str, release_id: str, generation: int, live: int = 0) -> str:
+def _idempotency_key(
+    build_id: str, release_id: str, generation: int, live: int = 0, *, name: str | None = None, made: int = 0
+) -> str:
     # `live` counts the deployments `--create` adds beside the ones already on
     # the release, and is 0 for every other create, so their keys never change.
+    # A name joins the key, since comfy-deploy refuses a retry of a key under
+    # another name; `=` keeps it apart from `live`, as no name holds one. A
+    # named key also counts the deployments the Build has ever had, which only
+    # grows, so one renamed or moved off the release never hands its key back.
     seed = f"{build_id}:{release_id}:{generation}" + (f":{live}" if live else "")
+    seed += f":name={name}:{made}" if name else ""
     return str(uuid.uuid5(_IDEMPOTENCY_NAMESPACE, seed))
 
 
@@ -61,14 +74,13 @@ def _live_on_release(deployments: Sequence[JsonObject], release_id: str) -> int:
     )
 
 
-class UpAmbiguousDeploymentError(AmbiguousDeploymentError):
+class UpAmbiguousDeploymentError(ChoiceRefusedError):
     """`up` found more than one deployment it could move and was not told which."""
 
-    hint = "pass `--deployment <id>` to update one of them, or `--create` to add another deployment"
+    hint = "pass `--deployment <name|id>` to update one of them, or `--create` to add another deployment"
 
-    def __init__(self, build_id: str, candidate_ids: list[str]) -> None:
-        super().__init__(build_id, candidate_ids)
-        self.args = (f"Build {build_id} has {len(candidate_ids)} deployments and `up` updates only one",)
+    def __init__(self, build_id: str, rows: Sequence[JsonObject], releases: Sequence[JsonObject]) -> None:
+        super().__init__(build_id, "up", rows, releases)
 
 
 def _soft_deleted_generation(deployments: Sequence[JsonObject], release_id: str) -> int:
@@ -192,17 +204,45 @@ def estimate_line(estimate: JsonObject) -> str:
     return f"Expected ready in {time} ({what})."
 
 
-def _create_live_deployment(client: DeployUpClient, request: UpRequest, compute: JsonObject) -> JsonObject:
+def _deployments_made(deployments: Sequence[JsonObject], releases: Sequence[JsonObject]) -> int:
+    """Every deployment the Build has had, deleted ones included."""
+    build_release_ids = {_required_string(release, "id") for release in releases}
+    return sum(row.get("releaseId") in build_release_ids for row in deployments)
+
+
+def _create_live_deployment(
+    client: DeployUpClient, request: UpRequest, compute: JsonObject, deployments: Sequence[JsonObject], made: int
+) -> JsonObject:
+    """Create on the release, the first key read from the list the name check read, so a rerun's matches the first run's."""
     release_id = _required_string(request.release, "id")
     for attempt in range(_CREATE_ATTEMPTS):
-        exhaustive = client.list_all_deployments()
+        exhaustive = deployments if attempt == 0 else client.list_all_deployments()
         generation = _soft_deleted_generation(exhaustive, release_id)
         live = _live_on_release(exhaustive, release_id) if request.create else 0
-        created = client.create_deployment(
-            release_id,
-            compute,
-            idempotency_key=_idempotency_key(request.build_id, release_id, generation, live),
-        )
+        key = _idempotency_key(request.build_id, release_id, generation, live, name=request.name, made=made)
+        try:
+            created = client.create_deployment(
+                release_id,
+                compute,
+                idempotency_key=key,
+                name=request.name,
+            )
+        except DeployAPIError as error:
+            # Concurrent creates in the Build took the default name, and comfy-deploy
+            # stored nothing under the key, so the create is sent again, its key read afresh.
+            if (error.details or {}).get("server_code") != "NAME_RACE":
+                refusal = error if request.name is None else name_refusal(error, request.name)
+                if refusal is error:
+                    raise
+                raise refusal from error
+            if attempt + 1 < _CREATE_ATTEMPTS:
+                continue
+            raise DeployAPIError(
+                "deploy_conflict",
+                "concurrent creates in this Build kept taking the default name",
+                details={"attempts": _CREATE_ATTEMPTS, "releaseId": release_id},
+                hint="run it again, or pass `--name` to pick one",
+            ) from error
         deployment_id = _required_string(created, "id")
         snapshot = client.get_deployment(deployment_id)
         if snapshot.get("deletedAt") is not None:
@@ -224,6 +264,33 @@ def _create_live_deployment(client: DeployUpClient, request: UpRequest, compute:
         # server-side CAS or delete-intent change and is deliberately out of scope.
         return snapshot
     raise AssertionError("bounded create loop exhausted without returning or raising")
+
+
+def _deployment_holding_name(request: UpRequest, candidates: list[JsonObject]) -> UpRequest:
+    """`up --name` again: the deployment already holding the name is the one to reconcile."""
+    holder = next((row for row in candidates if deployment_name(row) == request.name), None)
+    if holder is None:
+        return request
+    return replace(request, deployment_id=_required_string(holder, "id"))
+
+
+def _name_on_update(request: UpRequest, deployment_id: str | None = None) -> DeployAPIError:
+    """`--name` where `up` would update a deployment, the one named or one of several, rather than create one."""
+    which = f"deployment {deployment_id}" if deployment_id else f"one of Build {request.build_id}'s"
+    rename = (
+        f"--deployment {deployment_id} {request.name}" if deployment_id else f"--deployment <name|id> {request.name}"
+    )
+    return DeployAPIError(
+        "deploy_bad_request",
+        f"--name names a new deployment, and `up` would update {which} instead",
+        details={"buildId": request.build_id, "deploymentId": deployment_id, "name": request.name},
+        hint=f"pass `--create` to add a deployment named {request.name}, or run `comfy deploy rename {rename}`",
+    )
+
+
+def _refuse_name_on_update(request: UpRequest, deployment: JsonObject) -> None:
+    if request.name is not None and deployment_name(deployment) != request.name:
+        raise _name_on_update(request, _required_string(deployment, "id"))
 
 
 def _dropped_bounds(request: UpRequest, compute: JsonObject) -> tuple[str, ...]:
@@ -311,15 +378,6 @@ def _merged_bounds(request: UpRequest, compute: JsonObject) -> JsonObject:
     return desired
 
 
-def build_deployments(deployments: Sequence[JsonObject], releases: Sequence[JsonObject]) -> list[JsonObject]:
-    release_ids = {_required_string(release, "id") for release in releases}
-    return [
-        deployment
-        for deployment in deployments
-        if deployment.get("releaseId") in release_ids and deployment.get("deletedAt") is None
-    ]
-
-
 # A deployment down in one of these is a leftover the Build stopped using,
 # which a choice between deployments leaves out while any other is running.
 _DOWN: Final = frozenset({"stopped", "failed", "stop_failed"})
@@ -333,7 +391,11 @@ def running_first(candidates: list[JsonObject]) -> list[JsonObject]:
 
 
 def _move_target(
-    client: DeployUpClient, candidates: list[JsonObject], request: UpRequest, release_id: str
+    client: DeployUpClient,
+    candidates: list[JsonObject],
+    releases: Sequence[JsonObject],
+    request: UpRequest,
+    release_id: str,
 ) -> tuple[JsonObject, int] | None:
     """The Build's deployment `up` moves onto the release, read fresh, with its revision.
 
@@ -363,7 +425,7 @@ def _move_target(
     if revision is None:
         return None
     if len(pool) > 1:
-        raise UpAmbiguousDeploymentError(request.build_id, [_required_string(row, "id") for row in pool])
+        raise UpAmbiguousDeploymentError(request.build_id, pool, releases)
     return snapshot, revision
 
 
@@ -446,6 +508,8 @@ def finish_move(client: DeployUpClient, result: UpResult, watched: JsonObject) -
 
 
 def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request: UpRequest) -> UpResult:
+    if request.name is not None:
+        valid_name(request.name)
     release_id = _required_string(request.release, "id")
     releases = builder.list_releases(request.build_id)
     deployments = client.list_all_deployments()
@@ -455,11 +519,20 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         if request.deployment_id is not None:
             raise DeployAPIError("deploy_bad_request", "--create makes a new deployment, so it takes no --deployment")
     else:
+        if request.name is not None and request.deployment_id is None:
+            request = _deployment_holding_name(request, build_deployments(deployments, releases))
         if request.deployment_id is not None:
             named = deployment_id_for(builder, client, request.deployment_id, build_id=request.build_id)
             request = replace(request, deployment_id=named)
         candidates = build_deployments(deployments, releases)
-        target = _move_target(client, candidates, request, release_id)
+        try:
+            target = _move_target(client, candidates, releases, request, release_id)
+        except UpAmbiguousDeploymentError as error:
+            if request.name is None:
+                raise
+            raise _name_on_update(request) from error
+        if target is not None:
+            _refuse_name_on_update(request, target[0])
         if target is not None and target[0].get("releaseId") != release_id:
             return _move(builder, client, request, *target, releases, supersedes)
         if target is not None:
@@ -471,7 +544,15 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
             except UnrelatedDeploymentError as error:
                 error.hint = f"{error.hint}, or pass `--create` to add a deployment on this release"
                 raise
+            if existing is not None:
+                _refuse_name_on_update(request, existing)
     if existing is None:
+        # A create would reuse the key of the one that made this deployment on
+        # the release it has since left, and comfy-deploy would answer with it.
+        if request.name is not None and any(
+            deployment_name(row) == request.name for row in build_deployments(deployments, releases)
+        ):
+            raise NameTakenError(request.name)
         if request.gpu is None or request.region is None:
             raise ComputeRequiredError
         minimum = _DEFAULT_MINIMUM if request.minimum is None else request.minimum
@@ -488,8 +569,18 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
             "max": maximum,
         }
         estimate = _deploy_estimate(client, release_id, compute)
-        snapshot = _create_live_deployment(client, request, compute)
-        return UpResult(snapshot, _release_summary(request.release), compute, supersedes, True, True, estimate=estimate)
+        made = _deployments_made(deployments, releases)
+        snapshot = _create_live_deployment(client, request, compute, deployments, made)
+        return UpResult(
+            snapshot,
+            _release_summary(request.release),
+            compute,
+            supersedes,
+            True,
+            True,
+            estimate=estimate,
+            requested_name=request.name,
+        )
 
     compute = _compute_config(existing)
     _refuse_compute_change(request, existing, compute)
@@ -569,8 +660,19 @@ def ends_terminal(deployment: JsonObject, status: str, *, moving: bool) -> bool:
 def _render_result(renderer, result: UpResult, *, watch: bool) -> None:
     status = _required_string(result.deployment, "status")
     deployment_id = _required_string(result.deployment, "id")
+    name = deployment_name(result.deployment)
     if renderer.is_pretty():
-        renderer.success(move_line(result, deployment_id) or f"Deployment {deployment_id}: {status}")
+        label = deployment_label(result.deployment)
+        renderer.success(move_line(result, deployment_id) or f"Deployment {label}: {status}")
+    if result.created and result.requested_name is not None and name != result.requested_name:
+        # It bills either way, so it is reported rather than refused.
+        took = "without a name" if name is None else f"named {name}"
+        renderer.warn(
+            f"Deployment {deployment_id} was created {took}, not {result.requested_name}: "
+            "comfy-deploy may not serve deployment names yet.",
+            hint=f"rename it with `comfy deploy rename --deployment {deployment_id} {result.requested_name}`, "
+            "or use its id wherever a command takes a deployment",
+        )
     warn_status(renderer, deployment_id, status, watch=watch)
     if result.dropped_bounds:
         joined = " and ".join(result.dropped_bounds)
