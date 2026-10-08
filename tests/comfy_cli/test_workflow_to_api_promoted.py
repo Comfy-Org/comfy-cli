@@ -19,6 +19,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -157,3 +158,31 @@ def test_stale_boundary_target_reattaches_external_value_to_the_actual_holder(ob
     expected = [str(primitive["node_id"]), 0]
     assert _api_node(api, "EmptySD3LatentImage", "57:13")["inputs"]["width"] == expected
     assert api["57:999"]["inputs"]["width"] == expected
+
+
+def test_nested_duplicate_input_holders_resolve_once_per_level():
+    ctx = workflow_to_api._SubgraphCtx()
+    node_id = "root"
+    for _ in range(40):
+        ctx.input_targets[node_id] = {0: [(7, 0)] * 8}
+        node_id = f"{node_id}:7"
+
+    with mock.patch.object(
+        workflow_to_api,
+        "_resolve_subgraph_input_all",
+        wraps=workflow_to_api._resolve_subgraph_input_all,
+    ) as resolver:
+        result = workflow_to_api._resolve_subgraph_input_all("root", 0, ctx)
+
+    assert result == [(node_id, 0)]
+    assert resolver.call_count <= 41
+
+
+def test_subgraph_input_resolution_fails_closed_at_materialization_cap():
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.input_targets["root"] = {
+        0: [(node_id, 0) for node_id in range(workflow_to_api._MAX_RESOLVED_SUBGRAPH_INPUTS + 1)]
+    }
+
+    with pytest.raises(workflow_to_api.WorkflowConversionError, match="input resolution exceeded"):
+        workflow_to_api._resolve_subgraph_input_all("root", 0, ctx)
