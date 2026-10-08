@@ -200,6 +200,42 @@ def test_model_hint_searches_later_enum_fields_and_uses_their_real_flag(monkeypa
     assert "--model <id>" not in hint, hint
 
 
+def test_model_hint_emits_one_route_when_multiple_fields_match(monkeypatch):
+    raw = {
+        "paths": {
+            "/proxy/kling/v1/videos/text2video": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "model": {"enum": ["kling-v3"]},
+                                        "model_name": {"enum": ["kling-v3"]},
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    def load_raw_spec():
+        return raw
+
+    load_raw_spec.cache_clear = lambda: None  # type: ignore[attr-defined]
+    monkeypatch.setattr(spec, "load_raw_spec", load_raw_spec)
+
+    hint = spec._model_name_hint("kling-v3")
+    assert hint is not None
+    assert hint.count("- kling-v3:") == 1, hint
+    assert "--model <id>" in hint, hint
+    assert "--model-name <id>" not in hint, hint
+
+
 def test_extract_enum_memoizes_shared_schema_branches():
     schema: dict = {"enum": ["example-model-v1"]}
     depth = 32
