@@ -141,6 +141,19 @@ def test_ls_nodes_tolerates_malformed_definitions_shape(patched_graph, tmp_path,
     assert 3 in rows and 7 in rows
 
 
+def test_ls_nodes_tolerates_malformed_properties_and_mode(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    node = next(item for item in wf["nodes"] if item["type"] == "KSampler")
+    node["properties"] = ["invalid"]
+    node["mode"] = []
+
+    row = _ls_rows(tmp_path, capsys, wf)[node["id"]]
+
+    assert row["type"] == "KSampler"
+    assert row.get("title") is None
+    assert "mode" not in row
+
+
 def test_ls_nodes_does_not_treat_a_real_class_as_a_self_named_subgraph(patched_graph, tmp_path, capsys):
     wf = _base_workflow()
     wf["definitions"] = {
