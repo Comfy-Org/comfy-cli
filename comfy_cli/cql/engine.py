@@ -565,6 +565,24 @@ class Port:
         hits = [str(o) for o in self.enum_values if _leading_token(o) == token]
         return hits[0] if len(hits) == 1 else None
 
+    def is_model_port(self) -> bool:
+        """Whether this COMBO lists model files (a model loader's file widget)."""
+        from comfy_cli.cql.model_assets import MODEL_FILE
+
+        return self.type == "COMBO" and any(isinstance(o, str) and MODEL_FILE.search(o) for o in self.enum_values or [])
+
+    def is_cloud_model_asset(self, value: Any) -> bool:
+        """Whether ``value`` is a model Cloud loads from its asset library
+        although this catalog does not list it (see :mod:`comfy_cli.cql.model_assets`).
+
+        Asked only for a model port, so a filename never satisfies a dropdown of
+        some other kind."""
+        if not self.is_model_port():
+            return False
+        from comfy_cli.cql.model_assets import model_asset_exists
+
+        return model_asset_exists(value)
+
     def _note_precision_sibling(self, warning: dict, value: Any) -> None:
         """Name the option that is ``value`` in another precision, when there
         is exactly one: an unavailable ``*_int8_convrot`` file whose ``*_fp16``
@@ -647,7 +665,11 @@ class Port:
             if isinstance(value, float) and value.is_integer():
                 candidates.add(str(int(value)))
             enum_str = {str(e) for e in self.enum_values}
-            if not (candidates & enum_str) and not self._numeric_combo_member(value):
+            if (
+                not (candidates & enum_str)
+                and not self._numeric_combo_member(value)
+                and not self.is_cloud_model_asset(value)
+            ):
                 suggestions = self.suggest_combo(value, limit=ENUM_SUGGEST_MAX)
                 best = self.best_combo_match(value)
                 if best is not None:
