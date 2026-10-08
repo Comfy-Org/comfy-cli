@@ -15,6 +15,10 @@ history.
 
 ## [Unreleased]
 
+## [1.23.0] - 2026-10-08
+
+[Full notes](https://github.com/Comfy-Org/comfy-cli/releases/tag/v1.23.0) · 20 commits since v1.22.0. Breaking changes are marked **Breaking** under Changed.
+
 ### Added
 
 - `comfy deploy cancel [PATH] [--deployment <name|id>]` ends the update a
@@ -911,7 +915,8 @@ from the terminal. Additive and backward-compatible for interactive use.
 [releases page](https://github.com/Comfy-Org/comfy-cli/releases) with
 auto-generated pull-request lists.
 
-[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.22.0...HEAD
+[Unreleased]: https://github.com/Comfy-Org/comfy-cli/compare/v1.23.0...HEAD
+[1.23.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.22.0...v1.23.0
 [1.22.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.21.0...v1.22.0
 [1.21.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.20.0...v1.21.0
 [1.20.0]: https://github.com/Comfy-Org/comfy-cli/compare/v1.19.0...v1.20.0
