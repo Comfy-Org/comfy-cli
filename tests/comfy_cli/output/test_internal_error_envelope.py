@@ -352,6 +352,19 @@ def test_internal_error_scrubber_does_not_cross_a_newline_to_find_a_container():
     assert message in scrubbed
 
 
+@pytest.mark.parametrize(
+    ("message", "secrets"),
+    [
+        ("token=ApiKey(\nvalue='sk-LIVE')", ("sk-LIVE",)),
+        ("api_key=Outer(Inner('sk-A'), value='sk-LIVE'\n  retrying", ("sk-A", "sk-LIVE", "retrying")),
+    ],
+)
+def test_internal_error_scrubber_masks_the_tail_of_multiline_constructors(message, secrets):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert scrubbed.endswith("=***")
+    assert not any(secret in scrubbed for secret in secrets)
+
+
 def test_internal_error_scrubber_handles_unterminated_escaped_container_with_backslashes():
     secret = "sk-LIVE" + "\\" * 1_000
     scrubbed = _internal_error_message(RuntimeError(r"body={\"api_key\": [\"" + secret))
