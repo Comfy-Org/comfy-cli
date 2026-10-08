@@ -329,7 +329,8 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "cloud_http_error",
-        "Cloud returned a non-2xx HTTP error. `details.status` carries the code.",
+        "Cloud returned a non-2xx HTTP error, or a 2xx whose body could not confirm the operation (unparseable, "
+        "not an object, or missing a required field). `details.status` carries the code.",
         "check `details.body` for the server's message",
     ),
     ErrorCode(

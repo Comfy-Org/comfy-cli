@@ -236,10 +236,33 @@ def ensure_cmd(
             not_found_details=extra,
         ) from e
 
-    b = body or {}
+    # Unlike `ls`, an EMPTY body is an error here, not an empty result: a POST
+    # cannot confirm the borrow without one, and the server contract
+    # (`AssetCreated`) always returns an object with an `id`. `http_request`
+    # also collapses an unparseable body (an HTML error page from a proxy, say)
+    # to `None`, so `NoneType` covers both. An object without an `id` (`{}`, or
+    # a gateway error body returned with a 2xx) confirms nothing either —
+    # otherwise each emits `{"ok": true}` with a null id and the caller's own
+    # hash echoed back as if the borrow had happened. A truthy non-string `id`
+    # (`true`, `[1]`) is no asset id either.
+    if not isinstance(body, dict) or not isinstance(body.get("id"), str) or not body["id"]:
+        renderer.error(
+            code="cloud_http_error",
+            message="unexpected response from /api/assets/from-hash (expected a JSON object describing the asset)",
+            hint="the borrow could not be confirmed; retry, and check whether a proxy is intercepting the request",
+            details={
+                "operation": "ensure",
+                "hash": hash,
+                "status": status,
+                "got_type": type(body).__name__,
+                "missing": "id" if isinstance(body, dict) else None,
+            },
+        )
+        raise typer.Exit(code=1)
+
     payload = {
-        "id": b.get("id"),
-        "hash": b.get("hash", normalized_hash),
+        "id": body["id"],
+        "hash": body.get("hash") or normalized_hash,
         "created_new": status == 201,
     }
     renderer.emit(payload, command="assets library ensure", where="cloud")

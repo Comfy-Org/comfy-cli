@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import urllib.error
 from typing import Any
 
@@ -48,6 +49,10 @@ def cloud_target(monkeypatch: pytest.MonkeyPatch):
 
 
 def _run(args: list[str], capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
+    return _run_with_rc(args, capsys)[0]
+
+
+def _run_with_rc(args: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[dict[str, Any], int]:
     r = Renderer.resolve(
         is_stdout_tty=False, env={}, caller=Caller(kind="user", agentic=False, source_env=None), json_flag=True
     )
@@ -56,7 +61,10 @@ def _run(args: list[str], capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
     result = CliRunner().invoke(assets_library.app, args, standalone_mode=False)
     captured = capsys.readouterr().out or result.stdout or ""
     assert captured.strip(), f"no envelope on stdout (rc={result.exit_code}, exc={result.exception})"
-    return json.loads(captured.strip().splitlines()[-1])
+    # Under `standalone_mode=False` click returns a `typer.Exit` code as the
+    # return value instead of exiting, so `exit_code` alone reads 0.
+    rc = result.exit_code or (result.return_value if isinstance(result.return_value, int) else 0)
+    return json.loads(captured.strip().splitlines()[-1]), rc
 
 
 def _http_error(code: int, body: bytes = b""):
@@ -88,6 +96,35 @@ def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, outcome):
     return calls
 
 
+def _patch_urlopen_raw(monkeypatch: pytest.MonkeyPatch, raw: bytes, status: int = 201):
+    """Serve ``raw`` verbatim, unlike ``_patch_urlopen`` which JSON-encodes it.
+
+    Needed for the bodies a real proxy/gateway returns — an HTML error page,
+    nothing at all — which never survive a ``json.dumps`` round trip.
+    """
+    calls: list[dict] = []
+
+    class _Resp:
+        def __init__(self):
+            self.status = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=None):
+            return raw
+
+    def _fake(req, timeout=None):
+        calls.append({"url": req.full_url, "method": req.get_method(), "body": req.data})
+        return _Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake)
+    return calls
+
+
 class TestEnsure:
     def test_404_is_asset_not_found_not_workflow_not_found(self, cloud_target, monkeypatch, capsys):
         _patch_urlopen(monkeypatch, _http_error(404))
@@ -103,6 +140,66 @@ class TestEnsure:
         assert "workflow list" not in err["hint"]
         assert err["details"]["hash"] == "comfyorg_logo.png"
         assert err["details"]["operation"] == "ensure"
+
+    def _assert_unconfirmed_borrow(self, capsys, *, got_type: str, status: int, missing: str | None = None):
+        env, rc = _run_with_rc(["ensure", "--hash", "a" * 64, "--where", "cloud"], capsys)
+        assert rc == 1
+        assert env["ok"] is False
+        err = env["error"]
+        assert err["code"] == "cloud_http_error"
+        assert error_codes.is_registered(err["code"])
+        assert err["details"]["operation"] == "ensure"
+        assert err["details"]["hash"] == "a" * 64
+        assert err["details"]["got_type"] == got_type
+        assert err["details"]["status"] == status
+        assert err["details"]["missing"] == missing
+        assert "created_new" not in json.dumps(env)
+
+    def test_non_object_body_is_cloud_http_error(self, cloud_target, monkeypatch, capsys):
+        # Pre-fix: `AttributeError: 'list' object has no attribute 'get'` and no envelope at all.
+        _patch_urlopen(monkeypatch, [1, 2, 3])
+        self._assert_unconfirmed_borrow(capsys, got_type="list", status=201)
+
+    def test_unparseable_body_is_cloud_http_error_not_fake_success(self, cloud_target, monkeypatch, capsys):
+        # Pre-fix: `{"ok": true, "data": {"id": null, "hash": <the caller's own hash>, "created_new": true}}`
+        # — a borrow the server never confirmed, reported as done.
+        _patch_urlopen_raw(monkeypatch, b"<html><body>502 Bad Gateway</body></html>")
+        self._assert_unconfirmed_borrow(capsys, got_type="NoneType", status=201)
+
+    def test_non_utf8_body_is_cloud_http_error_not_traceback(self, cloud_target, monkeypatch, capsys):
+        # `json.loads(bytes)` raises `UnicodeDecodeError`, not `JSONDecodeError`.
+        _patch_urlopen_raw(monkeypatch, b"\xff")
+        self._assert_unconfirmed_borrow(capsys, got_type="NoneType", status=201)
+
+    def test_empty_body_is_cloud_http_error(self, cloud_target, monkeypatch, capsys):
+        # A POST with no body cannot confirm the borrow: unlike `ls`, empty is an error here.
+        _patch_urlopen_raw(monkeypatch, b"", status=200)
+        self._assert_unconfirmed_borrow(capsys, got_type="NoneType", status=200)
+
+    def test_whitespace_body_is_cloud_http_error(self, cloud_target, monkeypatch, capsys):
+        _patch_urlopen_raw(monkeypatch, b"\n")
+        self._assert_unconfirmed_borrow(capsys, got_type="NoneType", status=201)
+
+    @pytest.mark.skipif(not getattr(sys, "get_int_max_str_digits", lambda: 0)(), reason="no int-conversion digit limit")
+    def test_oversized_integer_body_is_cloud_http_error_not_traceback(self, cloud_target, monkeypatch, capsys):
+        # Past the int-conversion limit `json.loads` raises a bare `ValueError`, not `JSONDecodeError`.
+        _patch_urlopen_raw(monkeypatch, b'{"id": ' + b"1" * (sys.get_int_max_str_digits() + 1) + b"}")
+        self._assert_unconfirmed_borrow(capsys, got_type="NoneType", status=201)
+
+    @pytest.mark.parametrize(
+        "body",
+        [{}, {"detail": "upstream timeout"}, {"id": None, "hash": "a" * 64}, {"id": ""}, {"id": True}, {"id": [1]}],
+    )
+    def test_object_without_id_is_cloud_http_error(self, cloud_target, monkeypatch, capsys, body):
+        # A 2xx object with no `id` confirms nothing — it must not echo the caller's hash back as success.
+        _patch_urlopen(monkeypatch, body)
+        self._assert_unconfirmed_borrow(capsys, got_type="dict", status=201, missing="id")
+
+    def test_null_hash_in_response_falls_back_to_requested_hash(self, cloud_target, monkeypatch, capsys):
+        _patch_urlopen(monkeypatch, {"id": "asset-1", "hash": None})
+        env = _run(["ensure", "--hash", "a" * 64, "--where", "cloud"], capsys)
+        assert env["ok"] is True
+        assert env["data"]["hash"] == "a" * 64
 
     def test_401_is_still_cloud_unauthorized(self, cloud_target, monkeypatch, capsys):
         _patch_urlopen(monkeypatch, _http_error(401))
