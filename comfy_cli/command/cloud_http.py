@@ -135,12 +135,19 @@ def handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | N
     import urllib.error
 
     if isinstance(e, urllib.error.HTTPError):
-        # Best effort: a server that drops the connection partway through its
-        # error body must not keep the status from being classified.
-        try:
-            body = (e.read() or b"")[:1000].decode("utf-8", "replace")
-        except (http.client.HTTPException, OSError):
-            body = ""
+        if e.code in (401, 403):
+            from comfy_cli.command._cloud_errors import read_unauthorized_body
+
+            # Detection sees more of the body than the capped `details.body`.
+            # read_unauthorized_body already degrades a dropped connection to empty bodies.
+            scope_body, body = read_unauthorized_body(e)
+        else:
+            # Best effort: a server that drops the connection partway through its
+            # error body must not keep the status from being classified.
+            try:
+                body = (e.read() or b"")[:1000].decode("utf-8", "replace")
+            except (http.client.HTTPException, OSError):
+                body = ""
         if e.code == 404:
             renderer.error(
                 code="workflow_not_found",
@@ -154,7 +161,7 @@ def handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | N
             from comfy_cli.command._cloud_errors import insufficient_scope_error
 
             scope_error = insufficient_scope_error(
-                e.code, body, getattr(e, "headers", None), details={"operation": operation, "body": body}
+                e.code, scope_body, getattr(e, "headers", None), details={"operation": operation, "body": body}
             )
             if scope_error is not None:
                 renderer.error(**scope_error)
