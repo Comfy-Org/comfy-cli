@@ -698,10 +698,11 @@ def ls_nodes_cmd(
             subgraph_ids.add(name)
     rows = []
     for n in nodes:
+        properties = n.get("properties")
         row = {
             "id": n.get("id"),
             "type": n.get("type"),
-            "title": n.get("title") or (n.get("properties") or {}).get("Node name for S&R"),
+            "title": n.get("title") or (properties.get("Node name for S&R") if isinstance(properties, dict) else None),
         }
         # ComfyUI disables a node without deleting it: mode 4 = bypass (input
         # passes through), mode 2 = mute/never (dropped from execution). Both are
@@ -709,7 +710,8 @@ def ls_nodes_cmd(
         # from a live one — and would "repair" a graph that is merely bypassed,
         # or call a workflow runnable while a required node is muted.
         # Emitted only when set, so a normal node stays a single clean row.
-        if (label := _MODE_LABELS.get(n.get("mode"))) is not None:
+        mode = n.get("mode")
+        if isinstance(mode, int) and not isinstance(mode, bool) and (label := _MODE_LABELS.get(mode)) is not None:
             row["mode"] = label
         # A row's `type` reads like an addable class. Two kinds are not: a
         # frontend-only node (Reroute/Note/PrimitiveNode/...) and a subgraph
@@ -718,7 +720,6 @@ def ls_nodes_cmd(
         # show` cannot take that type. Only set when true, like `mode`.
         node_type = n.get("type")
         if isinstance(node_type, str):
-            properties = n.get("properties")
             # A serialized core/custom node names its executable class here.
             # That is stronger evidence than an unrelated definition whose
             # cosmetic name or unusual non-UUID id happens to collide.
