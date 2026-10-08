@@ -1110,10 +1110,11 @@ class TestTaggedPartials:
         assert partial_paths_for(dest, tag=self.TAG_X) == [x_part]
 
     @patch("httpx.stream")
-    def test_a_long_name_with_a_tag_still_fits_and_both_shapes_are_found(self, mock_stream, tmp_path):
+    def test_a_long_name_with_a_tag_still_fits_and_skips_the_legacy_arm(self, mock_stream, tmp_path):
         """Case 5: a destination name over the tagged stem budget truncates to a
         different stem than the untagged prefix, the full tagged temp name still
-        fits in NAME_MAX, and the union matcher finds both shapes for that name."""
+        fits in NAME_MAX, and a tag-scoped query for it matches only the tagged
+        shape — the truncated untagged stem may belong to another destination."""
         # 250 bytes: past both the 241-byte untagged and 228-byte tagged budgets.
         dest = tmp_path / ("m" * 238 + ".safetensors")
         assert len(dest.name.encode()) > 228
@@ -1135,13 +1136,50 @@ class TestTaggedPartials:
         assert dest.read_bytes() == b"data"
         assert partial_paths_for(dest, tag=self.TAG_X) == []
 
-        # Both shapes for this long name are reclaimed by one tag-scoped query.
+        # A tag-scoped query reclaims only the tagged temp for this long name.
         tagged_temp = dest.parent / (tagged_prefix + "a1b2c3d4" + file_utils._PART_SUFFIX)
         untagged_temp = dest.parent / (untagged_prefix + "b2c3d4e5" + file_utils._PART_SUFFIX)
         tagged_temp.write_bytes(b"tagged")
         untagged_temp.write_bytes(b"untagged")
-        assert set(partial_paths_for(dest, tag=self.TAG_X)) == {tagged_temp, untagged_temp}
-        assert cleanup_partials(dest, tag=self.TAG_X) == 2
+        assert partial_paths_for(dest, tag=self.TAG_X) == [tagged_temp]
+        assert cleanup_partials(dest, tag=self.TAG_X) == 1
+        assert untagged_temp.read_bytes() == b"untagged"
+
+    def test_a_tagged_cancel_skips_another_long_names_untagged_temp(self, tmp_path):
+        """Two different long destinations in one directory share the truncated
+        untagged stem, so a tag-scoped cancel of one must not claim the other's
+        live untagged temp."""
+        stem = "m" * 245
+        dest_a = tmp_path / (stem + "-a.safetensors")
+        dest_b = tmp_path / (stem + "-b.safetensors")
+        assert file_utils._part_prefix(dest_a.name) == file_utils._part_prefix(dest_b.name)
+
+        b_part = tmp_path / (file_utils._part_prefix(dest_b.name) + "b2c3d4e5" + file_utils._PART_SUFFIX)
+        b_part.write_bytes(b"B")
+
+        assert partial_paths_for(dest_a, tag=self.TAG_X) == []
+        assert cleanup_partials(dest_a, tag=self.TAG_X) == 0
+        assert b_part.read_bytes() == b"B"
+
+    @pytest.mark.parametrize("tag", ["../escape", "a/b", "a.b", "", "x" * 65])
+    def test_a_tag_outside_the_id_grammar_is_refused(self, tag, tmp_path):
+        """A tampered record id must not steer mkstemp's prefix out of the
+        destination directory or past NAME_MAX; it is refused before any temp
+        exists, and a sweep with it only consults the legacy arm."""
+        dest = tmp_path / "model.safetensors"
+        with pytest.raises(ValueError):
+            file_utils._part_prefix(dest.name, tag)
+        with pytest.raises(ValueError):
+            download_file("http://example.com/model.safetensors", dest, part_tag=tag)
+        assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+        legacy = self._untagged(dest)
+        assert partial_paths_for(dest, tag=tag) == [legacy]
+
+    def test_a_64_char_tag_still_fits_name_max(self):
+        name = "m" * 300 + ".safetensors"
+        prefix = file_utils._part_prefix(name, "x" * 64)
+        assert len((prefix + "a1b2c3d4" + file_utils._PART_SUFFIX).encode()) <= file_utils._NAME_MAX
 
 
 class TestDownloadHTTPStatusRetry:
