@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import http.client
+import http.server
 import io
 import json
+import socket
+import threading
 import urllib.error
 from typing import Any
 
 import pytest
 
 from comfy_cli.deploy_api_errors import DeployAPIError
-from comfy_cli.deploy_jobs import _MAX_SERVER_MESSAGE, DeployJobClient, JobSubmitRequest
+from comfy_cli.deploy_jobs import _MAX_REQUEST_BODY, _MAX_SERVER_MESSAGE, DeployJobClient, JobSubmitRequest
 
 _BASE_URL = "https://dep-1.run.comfy.app"
 _WORKFLOW = {"1": {"class_type": "KSampler", "inputs": {}}}
@@ -126,8 +129,12 @@ def test_the_resolved_credential_is_forwarded_under_its_own_field(monkeypatch, f
 
 @pytest.mark.parametrize(
     "failure",
-    [TimeoutError("timed out"), urllib.error.URLError("connection refused")],
-    ids=["timeout", "connection-error"],
+    [
+        TimeoutError("timed out"),
+        urllib.error.URLError("connection refused"),
+        urllib.error.URLError(socket.gaierror(8, "nodename nor servname provided, or not known")),
+    ],
+    ids=["timeout", "connection-error", "dns-failure"],
 )
 def test_unknown_transport_outcome_is_never_retried(monkeypatch, failure):
     # Given
@@ -142,8 +149,11 @@ def test_unknown_transport_outcome_is_never_retried(monkeypatch, failure):
     assert exc_info.value.code == "deploy_job_submit_unknown"
     assert len(transport.calls) == 1
     message = str(exc_info.value).lower()
-    assert "job may exist" in message and "no way to find" in message
+    assert "job may exist" in message and "outcome is unknown" in message and "cannot look the job up" in message
+    # A DNS failure never sent anything and a 5xx is an answer: the message claims neither.
+    assert "was sent" not in message and "no answer" not in message
     assert "poll your" not in message and "list your" not in message
+    assert exc_info.value.details == {"deployment_id": "dep-1", "idempotency_key": _KEY}
 
 
 def test_5xx_is_the_same_single_attempt_unknown_outcome(monkeypatch):
@@ -158,6 +168,8 @@ def test_5xx_is_the_same_single_attempt_unknown_outcome(monkeypatch):
     # Then
     assert exc_info.value.code == "deploy_job_submit_unknown"
     assert len(transport.calls) == 1
+    message = str(exc_info.value).lower()
+    assert "outcome is unknown" in message and "no answer" not in message
 
 
 def test_deployment_not_ready_retries_same_key_then_refreshes_status(monkeypatch):
@@ -429,3 +441,183 @@ def test_node_errors_survive_a_server_code_the_client_does_not_enumerate(monkeyp
 
     # Then
     assert exc_info.value.details["node_errors"] == node_errors
+
+
+def _workflow_with_request_bytes(size: int) -> dict[str, Any]:
+    """A workflow whose submission body encodes to exactly ``size`` bytes.
+
+    Shaped like the case that found this: one node holding a long inline
+    string.
+    """
+    empty = {"1": {"class_type": "PreviewAny", "inputs": {"source": ""}}}
+    overhead = len(json.dumps({"workflow": empty}).encode("utf-8"))
+    return {"1": {"class_type": "PreviewAny", "inputs": {"source": "x" * (size - overhead)}}}
+
+
+def test_a_workflow_over_the_gateway_limit_is_refused_before_the_job_request(monkeypatch):
+    # Given
+    transport = _Transport()
+    monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", transport)
+    request = JobSubmitRequest(_workflow_with_request_bytes(_MAX_REQUEST_BODY + 1), _KEY, "dep-1")
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        DeployJobClient(_BASE_URL, "jwt-token").submit_job(request, _ControlPlane())
+
+    # Then
+    assert exc_info.value.code == "deploy_workflow_too_large"
+    assert transport.calls == []
+    assert exc_info.value.details == {
+        "deployment_id": "dep-1",
+        "request_bytes": _MAX_REQUEST_BODY + 1,
+        "limit_bytes": 10_000_000,
+    }
+    message = str(exc_info.value)
+    assert "10,000,001 bytes" in message and "no job was created" in message
+
+
+def test_a_workflow_exactly_at_the_gateway_limit_is_sent(monkeypatch):
+    # Given
+    transport = _Transport((201, _JOB))
+    monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", transport)
+    request = JobSubmitRequest(_workflow_with_request_bytes(_MAX_REQUEST_BODY), _KEY, "dep-1")
+
+    # When
+    job = DeployJobClient(_BASE_URL, "jwt-token").submit_job(request, _ControlPlane())
+
+    # Then
+    assert job["id"] == "job-1"
+    assert len(json.dumps(transport.calls[0]["body"]).encode("utf-8")) == _MAX_REQUEST_BODY
+
+
+def test_the_size_check_measures_with_the_encoder_request_json_sends(monkeypatch):
+    """The check and the sender share one encoder, so a change to it moves both.
+
+    Here the encoder is swapped for one that indents: the same workflow that is
+    exactly at the limit compact is now over it, and is refused unsent.
+    """
+    # Given
+    transport = _Transport()
+    monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", transport)
+    monkeypatch.setattr(
+        "comfy_cli.deploy_jobs.encode_json_body", lambda body: json.dumps(body, indent=1).encode("utf-8")
+    )
+    request = JobSubmitRequest(_workflow_with_request_bytes(_MAX_REQUEST_BODY), _KEY, "dep-1")
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        DeployJobClient(_BASE_URL, "jwt-token").submit_job(request, _ControlPlane())
+
+    # Then
+    assert exc_info.value.code == "deploy_workflow_too_large"
+    assert exc_info.value.details["request_bytes"] > _MAX_REQUEST_BODY
+    assert transport.calls == []
+
+
+def test_the_credential_counts_toward_the_limit(monkeypatch):
+    """The limit is on the whole request body, and ``extra_data`` rides in it."""
+    # Given
+    transport = _Transport()
+    monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", transport)
+    request = JobSubmitRequest(
+        _workflow_with_request_bytes(_MAX_REQUEST_BODY), _KEY, "dep-1", ("api_key_comfy_org", "comfy-secret")
+    )
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        DeployJobClient(_BASE_URL, "jwt-token").submit_job(request, _ControlPlane())
+
+    # Then
+    assert exc_info.value.code == "deploy_workflow_too_large"
+    assert transport.calls == []
+
+
+class _RecordingJobServer(http.server.HTTPServer):
+    """A loopback server that reads one job submission in full and answers 201."""
+
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), _RecordingJobHandler)
+        self.timeout = 10
+        self.content_length: int | None = None
+        self.body_bytes = 0
+
+
+class _RecordingJobHandler(http.server.BaseHTTPRequestHandler):
+    timeout = 10
+    server: _RecordingJobServer
+
+    def do_POST(self) -> None:
+        length = int(self.headers["Content-Length"])
+        self.server.content_length = length
+        remaining = length
+        while remaining:
+            chunk = self.rfile.read(min(remaining, 1 << 20))
+            if not chunk:
+                break
+            self.server.body_bytes += len(chunk)
+            remaining -= len(chunk)
+        payload = json.dumps(_JOB).encode("utf-8")
+        self.send_response(201)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        pass
+
+
+def test_a_workflow_exactly_at_the_limit_is_sent_whole_on_the_real_transport(monkeypatch):
+    """The real path at the boundary: the bytes the check measured are the bytes on the wire.
+
+    A body over the limit used to be partly written before the gateway's 413
+    closed the connection, and urllib reported the closed socket as a broken
+    pipe, which the client read as "the job may exist". This sends a body of
+    exactly the limit through the real opener to a loopback server and checks
+    every byte arrived and the job came back.
+    """
+    # Given
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.setenv(name, "127.0.0.1")
+    server = _RecordingJobServer()
+    thread = threading.Thread(target=server.handle_request, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    request = JobSubmitRequest(_workflow_with_request_bytes(_MAX_REQUEST_BODY), _KEY, "dep-1")
+
+    try:
+        # When
+        job = DeployJobClient(f"http://127.0.0.1:{port}", "jwt-token").submit_job(request, _ControlPlane())
+    finally:
+        thread.join(timeout=10)
+        server.server_close()
+
+    # Then
+    assert not thread.is_alive()
+    assert server.content_length == _MAX_REQUEST_BODY
+    assert server.body_bytes == _MAX_REQUEST_BODY
+    assert job == _JOB
+
+
+def test_a_413_from_the_gateway_says_the_workflow_is_too_large(monkeypatch):
+    """The gateway's 413 body is echo's own ``{"message": ...}``, not the error envelope."""
+    # Given
+    refusal = urllib.error.HTTPError(
+        _BASE_URL,
+        413,
+        "Request Entity Too Large",
+        http.client.HTTPMessage(),
+        io.BytesIO(b'{"message":"Request Entity Too Large"}'),
+    )
+    transport = _Transport(refusal)
+    monkeypatch.setattr("comfy_cli.deploy_jobs.request_json", transport)
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        DeployJobClient(_BASE_URL, "jwt-token").submit_job(_request(), _ControlPlane())
+
+    # Then
+    assert exc_info.value.code == "deploy_workflow_too_large"
+    assert exc_info.value.status == 413
+    assert len(transport.calls) == 1
+    assert "before creating a job" in str(exc_info.value)

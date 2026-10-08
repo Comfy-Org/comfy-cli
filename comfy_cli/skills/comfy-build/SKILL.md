@@ -18,10 +18,25 @@ or lists `scan` / `create` / `from-snapshot` — the verbs this surface replaced
 **A cut is not undoable and a build takes minutes**, so the user hears what is
 about to be sent, and agrees, before anything is created on the platform.
 
+**But a re-run of the same cut is not a second cut.** The builder dedupes a release
+on the definition's content hash, scoped to the Build: `release create` run twice
+over an unchanged spec returns the same release id both times, and re-drives the
+build of a release that was committed but never queued. So a retry after an
+*ambiguous* failure — a timeout, a 5xx, a dropped connection, an envelope you cannot
+tell landed — is the repair and not a risk, and `comfy build release ls` is the read
+that confirms which it was. The exception is a `push` in between: that moves the
+hash, so the next cut is genuinely a new release.
+
 ## What the platform is
 
 - **A Build is an editable definition; a release is an immutable cut of it.**
   Editing a Build changes nothing that already exists, so every fix is a new cut.
+- **What a cut spends is a slot, not metered time.** Nothing on this surface bills
+  by the minute or by the build: a workspace is capped on what it *holds*, and past
+  a cap the builder refuses the cut rather than charging for it. So the care a cap
+  asks for is "do not cut what nobody needs", never "do not leave it running" — a
+  finished release costs a slot, not a meter. *The two limits, and what clears
+  each* below is how a slot comes back.
 - **The definition lives in a file the user owns.** `comfy build init` writes
   `comfy-build.yaml` next to the install. That file is the working copy: it is
   what you edit, what the user commits, and what every later command reads. The
@@ -39,24 +54,29 @@ update    Rescan the local install and rewrite the spec's definition.
 push      Push the local spec to the builder.
 pull      Replace the local spec with a fetched Build, keeping local asset identities.
 status    Report how far the spec is from the remote Build and from the install.
-ls        List the workspace's builds.
+ls        List the builds you can see: your own, or every member's on enterprise.
 show      Show a Build and its full definition.
 validate  Validate the local spec without contacting the builder.
 delete    Delete a Build (soft-delete).
-release   create · ls · show · logs · manifest
+release   create · ls · show · logs · manifest · delete
 refs      resolve · base-images · build-targets · model-dirs
 blob      ls                                    (hidden; workspace private blobs)
 ```
 
 - **Every command that reads the spec takes the install directory or the spec
   path** as its argument, defaulting to the current directory. `ls`, `refs` and
-  `blob` are workspace-level and take none. Once the spec exists it carries the
-  Build id, so nothing after `init` needs an id from you. `--id` overrides it.
+  `blob` are workspace-level and take none, and `release delete` takes the
+  release id instead. Once the spec exists it carries the Build id, so nothing
+  after `init` needs an id from you. `--id` overrides it.
 - **`comfy which` names the install** when the user has not said where it is.
-- **Only sign in when told to.** Run `comfy cloud login` if a command answers
-  `build_not_signed_in`, and not before. Everything under `refs`, both importers
+- **Only sign in when told to.** On `build_not_signed_in`, do what its hint
+  says. Run `comfy cloud login` only when nobody is signed in or the sign-in
+  was refused, and not before. Everything under `refs`, both importers
   (`--from-snapshot`, `--from-workflow`), `validate --remote`, and every command
   that reaches the builder need it; a plain scan and a plain `validate` do not.
+  A CI job sets a workspace API key in `COMFY_CLOUD_API_KEY` instead, and that
+  key wins over a stored sign-in, so when the hint says that key was refused,
+  signing in cannot help: replace the key.
   On `build_not_enabled` the platform is in limited beta and this account is not
   enabled — stop and say so.
 
@@ -104,6 +124,15 @@ comfy build push <install>
 comfy build release create <install> --target linux/nvidia --watch
 ```
 
+**A push that uploads models can run for a long time, and it tells you how it is
+going.** It opens with an `upload_plan` line (files, bytes, how many local files
+it already holds), then an `upload_progress` line per file about every two
+seconds with `bytes_done`, `bytes_per_second` and `eta_seconds`, then an
+`upload_complete` per file. Under `--json` these are JSON lines on **stderr**
+(stdout stays the one envelope); under `--json-stream` they are on stdout. Relay
+the rate and time left instead of waiting in silence. A `bytes_per_second` that
+falls to `0` means the connection stalled, not that the upload is slow.
+
 **What `init` does, and where it stops:**
 
 - **It fails rather than warns when it cannot read the environment.** No
@@ -148,7 +177,7 @@ comfy --json build init <dir> --name <name> --from-workflow <workflow>.json
 ```
 
 - **It writes a local spec and creates no Build.** `push` only uploads; `release
-  create` is the line that starts billable build minutes.
+  create` is the line that commits a release and spends the slot.
 - **Hand it the file unchanged.** It reads both the editing format and the API
   export, so converting first only refuses files it would have taken.
 - **Save the report.** The importer's findings arrive as `advisories` in the
@@ -258,7 +287,8 @@ Say all of this in plain words, and wait for a yes:
   three promised uploads can report `uploaded: 0`. Offer to list the filenames.
 - **Which targets you will cut**, since each is a separate build. Name them, and
   take the set from `comfy build refs build-targets`.
-- **What it takes**: any upload, then a build of several minutes.
+- **What it takes**: any upload, then a build of several minutes of wall clock —
+  and one of the workspace's release slots.
 - **What a failure means**: a fix and another build, and that you stop after three.
 - **The policy**, whichever path produced the definition: the release will record
   no restriction on which models or partner nodes it permits, and that record
@@ -267,9 +297,63 @@ Say all of this in plain words, and wait for a yes:
 
 **Under `--json`, nothing prompts.** A confirmation the command would have asked
 for comes back as a refusal envelope and exits 1: `build_update_needs_confirm`,
-`build_pull_needs_confirm`, `build_delete_needs_confirm`, `build_missing_input`,
-`build_id_unknown`. Pass `--yes`, or the option it named, once the user has
-actually agreed. Do not pass `--yes` first and disclose after.
+`build_pull_needs_confirm`, `build_delete_needs_confirm`,
+`build_release_delete_needs_confirm`, `build_missing_input`, `build_id_unknown`.
+Pass `--yes`, or the option it named, once the user has actually agreed. Do not
+pass `--yes` first and disclose after.
+
+**`build_release_held` asks the same way, with its own option.** `comfy build push
+--release` saved the build but cut no release, because the save warned that a
+deployment could not download a model link. Under `--json` the error carries them
+in `details.warnings`; in text mode the tool printed each just above it. Tell the
+user which links fail and how, and pass `--release-despite-warnings` only after they say
+yes; a fixed link needs no option. `comfy build release create` cuts without this
+check.
+
+**Four other refusals block rather than ask: `--yes` does nothing for them.**
+Each is cleared by deleting something, and each exits 1:
+
+- **`build_limit`**: `comfy build push` could not create the build because the
+  workspace already holds as many builds as its limit allows. The limit counts
+  every member's builds, and `comfy build ls` lists only your own outside the
+  enterprise plan, so the list can look short or empty. The `message` is the
+  builder's own wording. Deleting a build frees a slot but takes its releases
+  with it, so ask the user first, or ask them to have a teammate delete one;
+  then push again.
+- **`build_release_limit`** — the cut was refused because the workspace already
+  holds as many releases as its limit allows. Free a slot, then cut again.
+- **`build_release_in_use`** — `comfy build release delete` was refused because a
+  deployment still references that release. The `message` is the builder's own
+  wording and names the blocking deployments, though on a long list it may name
+  only the first several and say so.
+- **`build_in_use`** — `comfy build delete` was refused because a deployment
+  still references one of that build's releases. The `message` is the builder's
+  own wording and names the blocking deployments, though on a long list it may
+  name only the first several and say so.
+
+## The two limits, and what clears each
+
+A workspace has a ceiling on **how many releases it may hold**, counting every
+status and whether or not anything deploys them, and a separate ceiling on **how
+many builds it may keep**. Both are cleared the same way, by deleting:
+
+- **`comfy build release delete RELEASE`** gives up one release slot. RELEASE is
+  required — there is no default and no spec to fall back on, so name the id from
+  `comfy build release ls`. Repeating the same id is safe: the builder answers
+  success again for a release already deleted, so a retry after a dropped
+  connection costs nothing.
+- **`comfy build delete`** gives up the build slot *and* every release that build
+  held, so it is how to free several release slots at once. Say that plainly
+  before running it: the releases go with it.
+
+**A deployment blocking either delete has to be deleted, not stopped.** The
+builder counts a stopped or failed deployment exactly as it counts a serving one,
+so stopping one and retrying is refused a second time. It stops blocking only
+once it has been deleted *and* its teardown has released its compute, so a delete
+still tearing down keeps refusing. **A deleted deployment never starts again** —
+that is a decision for the user to make, not one to take on their behalf to clear
+a limit. Name the deployments the refusal message lists, say what deleting them
+costs, and wait.
 
 ## Watching the release
 
@@ -289,6 +373,14 @@ nothing deployable. `--watch` exits 1 when any target failed.
 
 Stop after 30 minutes and tell the user the build is still running rather than
 polling on. `--watch` itself polls without a cap.
+
+**A release sitting in `queued` with every artifact still `queued` and an empty log
+is the one case worth acting on rather than waiting out.** That is the shape of a
+cut the builder committed but never enqueued. Re-running the identical
+`release create` re-drives the enqueue for exactly this reason and returns the same
+release id, so it is the first thing to try — not an escalation, and not a second
+cut. Escalate with the release id, the artifact ids and the created-at only if a
+re-drive changes nothing.
 
 ## When something fails
 

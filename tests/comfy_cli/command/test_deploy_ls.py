@@ -271,3 +271,70 @@ def test_ls_still_refuses_a_row_with_no_release(tmp_path: Path, monkeypatch) -> 
     envelope = json.loads([line for line in result.stdout.splitlines() if line.strip()][-1])
     assert envelope["error"]["code"] == "deploy_server_error"
     assert "releaseId" in envelope["error"]["message"]
+
+
+def _invoke_pretty(*args: str):
+    return CliRunner().invoke(app, ["--no-json", "deploy", "ls", *args], env={"COLUMNS": "400"})
+
+
+def test_a_builds_rows_carry_and_print_their_release_version(tmp_path: Path, monkeypatch) -> None:
+    # Given two deployments on two of the Build's releases
+    builder = FakeBuilder(
+        [
+            {"id": "release-4", "buildId": "build-1", "version": 4, "deployable": True},
+            {"id": "release-5", "buildId": "build-1", "version": 5, "deployable": True},
+        ]
+    )
+    deploy = PagedDeploy([[_summary("dep-old", "release-4"), _summary("dep-new", "release-5")]])
+    _install_clients(monkeypatch, builder, deploy)
+
+    # When
+    as_json = _invoke_json(write_spec(tmp_path))
+    pretty = _invoke_pretty(str(write_spec(tmp_path)))
+
+    # Then
+    assert as_json.exit_code == 0, as_json.stderr
+    assert {row["id"]: row["releaseVersion"] for row in _deployments(as_json)} == {"dep-old": 4, "dep-new": 5}
+    assert "dep-old  ready  v4" in pretty.stdout
+    assert "dep-new  ready  v5" in pretty.stdout
+
+
+def test_workspace_rows_keep_only_the_release_id(tmp_path: Path, monkeypatch) -> None:
+    # Given
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([[_summary("other-live", "release-other")]]))
+
+    # When
+    as_json = _invoke_json(write_spec(tmp_path), "--workspace")
+    pretty = _invoke_pretty(str(write_spec(tmp_path)), "--workspace")
+
+    # Then
+    assert as_json.exit_code == 0, as_json.stderr
+    assert "releaseVersion" not in _deployments(as_json)[0]
+    assert "other-live  ready  release-other" in pretty.stdout
+
+
+def test_a_release_without_a_version_still_lists(tmp_path: Path, monkeypatch) -> None:
+    # Given a Build release the builder sent with no version
+    builder = FakeBuilder([{"id": "release-5", "buildId": "build-1", "deployable": True}])
+    _install_clients(monkeypatch, builder, PagedDeploy([[_summary("dep-1", "release-5")]]))
+
+    # When
+    result = _invoke_pretty(str(write_spec(tmp_path)))
+
+    # Then the row prints its release id in place of a version
+    assert result.exit_code == 0, result.stderr
+    assert "dep-1  ready  release-5" in result.stdout
+
+
+def test_a_workspace_row_without_a_release_still_lists(tmp_path: Path, monkeypatch) -> None:
+    # Given
+    row = _summary("other-live", "release-other")
+    row["releaseId"] = None
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([[row]]))
+
+    # When
+    result = _invoke_pretty(str(write_spec(tmp_path)), "--workspace")
+
+    # Then the row prints with no release column
+    assert result.exit_code == 0, result.stderr
+    assert "other-live  ready" in result.stdout

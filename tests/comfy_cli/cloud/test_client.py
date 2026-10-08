@@ -470,14 +470,23 @@ class TestTransientRetry:
         assert exc.value.status == 429
         assert urlopen.call_count == comfy_client._MAX_TRANSIENT_RETRIES + 1
 
-    def test_submit_retries_on_429(self):
-        # 429 means the request was rejected (not processed), so retrying a POST is safe.
-        seq = [_http_error(429), _mock_response({"prompt_id": "pid-1", "node_errors": {}})]
-        with patch("comfy_cli.comfy_client.time.sleep"):
-            with patch.object(comfy_client._OPENER, "open", side_effect=seq) as urlopen:
-                res = comfy_client.Client(CLOUD).submit_prompt({"1": {}}, "cid")
-        assert res.prompt_id == "pid-1"
-        assert urlopen.call_count == 2
+    def test_submit_is_not_auto_retried_on_429(self):
+        # A 429 alone does not prove the submit had no effect, so the client
+        # must not repeat a non-idempotent POST by itself (duplicate-job risk).
+        # The 429 surfaces once, with its Retry-After, for the caller to handle.
+        from http.client import HTTPMessage
+
+        hdrs = HTTPMessage()
+        hdrs["Retry-After"] = "9"
+        err = urllib.error.HTTPError(url="https://cloud/x", code=429, msg="429", hdrs=hdrs, fp=io.BytesIO(b""))
+        with patch("comfy_cli.comfy_client.time.sleep") as sleep:
+            with patch.object(comfy_client._OPENER, "open", side_effect=[err]) as urlopen:
+                with pytest.raises(comfy_client.HTTPError) as exc:
+                    comfy_client.Client(CLOUD).submit_prompt({"1": {}}, "cid")
+        assert exc.value.status == 429
+        assert exc.value.retry_after == 9.0
+        assert urlopen.call_count == 1
+        sleep.assert_not_called()
 
     def test_5xx_retried_on_get(self):
         seq = [_http_error(503), _mock_response({"status": "success"})]

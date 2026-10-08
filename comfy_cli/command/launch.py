@@ -34,7 +34,7 @@ console = Console()
 
 
 def _hard_exit(code: int) -> None:
-    """`os._exit(code)`, but drain telemetry on the way out.
+    """`os._exit(code)`, but finish the running command's event and drain telemetry on the way out.
 
     Every exit path in this module uses `os._exit` (plain `sys.exit` doesn't
     work once the redirector threads are running), which skips atexit handlers —
@@ -51,7 +51,7 @@ def _hard_exit(code: int) -> None:
     try:
         from comfy_cli import tracking
 
-        tracking.flush_for_hard_exit()
+        tracking.flush_for_hard_exit(code)
     except BaseException:  # noqa: BLE001  # pragma: no cover - defensive
         pass
     os._exit(code)

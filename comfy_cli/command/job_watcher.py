@@ -387,6 +387,28 @@ def _cloud_record_meta(record: dict) -> dict[str, Any]:
     }
 
 
+def _cloud_poll_error(prompt_id: str, e: Exception) -> dict[str, Any]:
+    """The transient ``state.error`` for a cloud status poll that raised.
+
+    A 429 the client already retried to exhaustion is throttling, not a broken
+    poll: record the same ``cloud_rate_limited`` shape the foreground commands
+    emit (with the prompt id and ``details.retry_after``) so a reader of the
+    state file knows to back off. Anything else stays ``watcher_poll_error``.
+    """
+    from comfy_cli.comfy_client import HTTPError
+
+    if isinstance(e, HTTPError) and e.status == 429:
+        from comfy_cli.command._cloud_errors import rate_limited_error
+
+        return rate_limited_error(
+            "job status",
+            e.retry_after,
+            {"prompt_id": prompt_id},
+            next_step="the watcher keeps polling",
+        )
+    return {"code": "watcher_poll_error", "message": str(e), "details": {}}
+
+
 def _poll_cloud_once(state: jobs_state.JobState, *, client: Any = None) -> bool:
     """Update ``state`` in-place from Comfy Cloud. Return True if terminal."""
     try:
@@ -400,7 +422,7 @@ def _poll_cloud_once(state: jobs_state.JobState, *, client: Any = None) -> bool:
             client = Client(target, timeout=30.0, clear_session_on_auth_failure=False)
         record = client.get_job_status(state.prompt_id)
     except Exception as e:  # noqa: BLE001
-        state.error = {"code": "watcher_poll_error", "message": str(e), "details": {}}
+        state.error = _cloud_poll_error(state.prompt_id, e)
         return False
 
     if record is None:

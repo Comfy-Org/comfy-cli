@@ -1,6 +1,6 @@
 """Tests for ``comfy workflow delete-nodes <id...>`` (V1-020).
 
-The measured agent loop runs ``delete-node`` once per doomed node (×22 runs) —
+A typical agent loop runs ``delete-node`` once per doomed node —
 N file loads, N writes, N catalog loads. ``delete-nodes`` is the batch verb:
 N ids, ONE atomic write, one frozen ``delete_node`` op per id (via
 ``workflow_ops.delete_node`` — no new op kind).

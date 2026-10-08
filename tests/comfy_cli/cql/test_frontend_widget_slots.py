@@ -147,6 +147,21 @@ def _object_info() -> dict[str, Any]:
             "display_name": "Load 3D Advanced",
             "python_module": "comfy_extras.nodes_load_3d",
         },
+        "Preview3DAdvanced": {
+            "input": {
+                "required": {
+                    "model_3d": ["MESH", {}],
+                    "viewport_state": ["LOAD_3D", {}],
+                    "width": ["INT", {"default": 1024}],
+                }
+            },
+            "input_order": {"required": ["model_3d", "viewport_state", "width"]},
+            "output": [],
+            "output_name": [],
+            "output_node": True,
+            "display_name": "Preview 3D Advanced",
+            "python_module": "comfy_extras.nodes_load_3d",
+        },
         "SaveGLB": {
             "input": {
                 "required": {"mesh": ["MESH,FILE_3D_GLB", {}], "filename_prefix": ["STRING", {"default": "3d/ComfyUI"}]}
@@ -301,16 +316,57 @@ class TestCaptureRefusesInjectedSlots:
             workflow_ops.capture_recipe(wf, graph, lift={(nid, "upload"): "up"})
 
 
+_LOAD_3D_BUTTONS = ["upload 3d model", "upload extra resources", "clear"]
+
+
 class TestDomWidgetInputs:
     def test_load3d_viewport_is_a_slot_in_declared_position(self, graph: Graph):
-        assert graph.widget_order("Load3D") == ["model_file", "image", "width", "height"]
+        # The LOAD_3D factory injects its three buttons BEFORE its own
+        # component widget, so they sit between model_file and the viewport
+        # slot — not trailing, the way upload/audioUI do.
+        assert graph.widget_order("Load3D") == ["model_file", *_LOAD_3D_BUTTONS, "image", "width", "height"]
 
     def test_load3d_advanced_server_declared_state_is_not_duplicated(self, graph: Graph):
-        assert graph.widget_order("Load3DAdvanced") == ["model_file", "viewport_state", "width"]
+        assert graph.widget_order("Load3DAdvanced") == ["model_file", *_LOAD_3D_BUTTONS, "viewport_state", "width"]
+
+    def test_link_fed_3d_viewer_gets_no_buttons(self, graph: Graph):
+        # ``hasModelFileWidget`` gates the injection: this node is fed by a
+        # model_3d LINK, so its viewport slot follows nothing.
+        assert graph.widget_order("Preview3DAdvanced") == ["viewport_state", "width"]
 
     def test_dom_widget_default_keeps_later_slots_aligned(self, graph: Graph):
-        # A fresh Load3D must serialize its viewport slot, or width lands in it.
-        assert graph.widget_defaults("Load3D") == {"model_file": "none", "image": "", "width": 1024, "height": 1024}
+        # A fresh Load3D must serialize its viewport slot, or width lands in
+        # it — and the three button slots ahead of it the same way, or the
+        # viewport value lands in the first button.
+        assert graph.widget_defaults("Load3D") == {
+            "model_file": "none",
+            "upload 3d model": "upload3dmodel",
+            "upload extra resources": "uploadExtraResources",
+            "clear": "clear",
+            "image": "",
+            "width": 1024,
+            "height": 1024,
+        }
+
+    def test_a_fresh_load3d_serializes_the_frontends_exact_shape(self, graph: Graph):
+        # The captured shape from api_hunyuan3d_model2uv.json, modulo the
+        # unset model file: what add_node must write for the doc host to
+        # accept a Load3D at all.
+        wf, _ = workflow_ops.add_node(_empty_workflow(), graph, "Load3D")
+        assert wf["nodes"][0]["widgets_values"] == [
+            "none",
+            "upload3dmodel",
+            "uploadExtraResources",
+            "clear",
+            "",
+            1024,
+            1024,
+        ]
+
+    def test_button_slots_are_refused_as_write_targets(self, graph: Graph):
+        wf, op = workflow_ops.add_node(_empty_workflow(), graph, "Load3D")
+        with pytest.raises(workflow_ops.RecipeError, match="clear"):
+            workflow_ops.capture_recipe(wf, graph, lift={(op["node_id"], "clear"): "c"})
 
     def test_save_glb_preview_is_injected_last(self, graph: Graph):
         assert graph.widget_order("SaveGLB") == ["filename_prefix", "image"]

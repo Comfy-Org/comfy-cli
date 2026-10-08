@@ -181,6 +181,8 @@ the `--print-prompt` and `--no-wait` stream shapes.
 | -------------------- | ------------------------------------------------------------------ | -------------------------------- | ---- |
 | `cloud_unauthorized` | No usable cloud session, or the session was rejected — run `comfy cloud login` | —                     | 1 |
 | `cloud_http_error`   | The cloud API returned a non-2xx response on submit or while polling | `status` (int), `body` (str) on submit; `status`, `prompt_id` while polling | 1 |
+| `cloud_rate_limited` | The cloud API throttled the request (HTTP 429) on submit or while polling. Throttling is not a verdict on the workflow, but it does not by itself prove the submit had no effect, and the CLI never repeats a submit on its own. On submit, wait, then check `comfy jobs ls --where cloud` for the job before re-running; while polling, the job was already submitted, so follow it with `comfy jobs watch <prompt_id> --where cloud` instead of re-running (the job record is left non-terminal). Cloud only: a local server's 429 is `client_error` | same as `cloud_http_error`, plus `retry_after` (seconds) when the server sent `Retry-After` | 1 |
+| `cloud_payment_required` | The cloud refused the request because the account's plan does not allow it (HTTP 402, or a legacy HTTP 429 whose body type is a plan refusal: free generations used up, subscription required, a partner node or model that needs a paid plan). Not throttling and not a workflow problem; nothing was queued, so do not retry or edit the workflow. A full queue stays `cloud_rate_limited` | `status` (402 or 429), `body` (str), `reason` (the server's refusal type, when it sent one) | 1 |
 | `cloud_timeout`      | The cloud job produced no progress for `--timeout` seconds          | `prompt_id` (str)               | 1 |
 | `cql_no_graph`       | A UI-format workflow needs the cloud `object_info` snapshot to be lowered to API format, and it could not be loaded — run `comfy nodes refresh --where cloud` | — | 1 |
 
@@ -398,6 +400,91 @@ time. If the callback never arrives, the terminal envelope is an
 {"schema": "event/1", "type": "login_url", "url": "https://api.comfy.org/oauth/authorize?...", "timeout_s": 300}
 ```
 
+### `upload_plan`, `upload_progress`, `upload_complete`
+
+Emitted by `comfy build push` while it uploads model files and packaged custom
+nodes. They are part of the push, not the `run` stream, and validate against
+`build_push_event.json`.
+
+Where they go depends on the mode. Under `--json-stream` they are on stdout,
+ahead of the envelope, like every other event. Under plain `--json` (which is
+what a caller with a piped stdout resolves to, so every agent) they are on
+**stderr**, because stdout in that mode is exactly one envelope. Read stderr line
+by line and keep the lines that parse as JSON with `schema: "event/1"`.
+
+A push opens with one `upload_plan`, sent before the first byte and sent even
+when there is nothing to upload. Each file that transfers gets an
+`upload_progress` as it starts and about every two seconds after, then one
+`upload_complete`. A file the builder already held gets only an
+`upload_complete` with `deduplicated: true`. A file whose upload fails gets no
+`upload_complete`; the error envelope is the next line.
+
+```json
+{"schema": "event/1", "type": "upload_plan", "files": 3, "bytes_total": 56908316672, "already_held": 2}
+{"schema": "event/1", "type": "upload_progress", "file": "model.safetensors", "kind": "model", "index": 1, "of": 3, "bytes_done": 1288490188, "bytes_total": 23761671782, "bytes_per_second": 47500000, "eta_seconds": 473, "overall_bytes_done": 1288490188, "overall_bytes_total": 56908316672, "overall_eta_seconds": 1171}
+{"schema": "event/1", "type": "upload_complete", "file": "model.safetensors", "kind": "model", "index": 1, "of": 3, "bytes_total": 23761671782, "seconds": 498.2, "bytes_per_second": 47695045, "deduplicated": false, "overall_bytes_done": 23761671782, "overall_bytes_total": 56908316672}
+```
+
+`bytes_per_second` on a progress event is measured over the last ten seconds
+and is sampled on a timer, not on bytes moving, so a stalled connection keeps
+reporting and its rate falls to `0` with `eta_seconds: null`. That is how to
+tell a slow upload from a dead one. `bytes_done` counts bytes handed to the
+connection, which runs slightly ahead of bytes the server has acknowledged.
+
+At a terminal the same numbers render as one redrawn progress line; with output
+piped under `--no-json` they are plain lines every five seconds, with no
+carriage returns.
+### `deploy_progress`
+
+Emitted by `comfy deploy up --watch`, `comfy deploy promote --watch`,
+`comfy deploy rollback --watch` and `comfy deploy status --watch` while the deployment's status is `provisioning`
+or `starting`. It is part of those
+commands, not the `run` stream, and validates against
+`deploy_progress_event.json`.
+
+Where it goes depends on the mode, the same way upload progress does. Under
+`--json-stream` it is on stdout, ahead of the envelope. Under plain `--json`
+(what a caller with a piped stdout resolves to, so every agent) it is on
+**stderr**, because stdout in that mode is exactly one envelope.
+
+```json
+{"schema": "event/1", "type": "deploy_progress", "deployment_id": "dep-7edc1262", "status": "provisioning", "stale": false, "progress": {"step": "staging_models", "modelsDone": 0, "modelsTotal": 2, "bytesDone": 3536540667, "bytesTotal": 7272719498, "currentModel": "models/checkpoints/sd_xl_base_1.0.safetensors", "bytesPerSecond": 44205525, "etaSeconds": 85, "attempt": 1, "startedAt": "2026-09-20T01:59:55Z", "updatedAt": "2026-09-20T02:01:15Z"}}
+{"schema": "event/1", "type": "deploy_progress", "deployment_id": "dep-7edc1262", "status": "starting", "stale": false, "progress": {"step": "waiting_for_worker", "attempt": 1, "startedAt": "2026-09-20T02:02:46Z", "updatedAt": "2026-09-20T02:02:46Z"}}
+```
+
+The event's own fields are snake_case like every other event. `progress` is the
+deploy service's object, passed through unchanged, so its fields are the API's
+camelCase, the same as `computeConfig` and `endpointUrl` in the envelopes. The
+service computes `bytesPerSecond` and `etaSeconds`; the CLI computes nothing, so
+the portal and the CLI show the same numbers.
+
+One event per new sample: the CLI polls every two seconds and the service writes
+about every three, and a sample is keyed on its `updatedAt` (on its whole content
+where a sample carries no `updatedAt`). If a sample then goes
+a minute without being rewritten, one more event carries it with `stale: true`.
+The service's writes are best-effort, so a stale sample is not evidence that the
+deploy stopped; `status` remains the verdict. A service that sends no `progress`
+object produces no events, and the command behaves as it did before.
+
+`comfy deploy status --json` (with or without `--watch`) and `comfy deploy up
+--json` carry the same object as `data.progress` while the deployment is coming
+up, and omit the key otherwise.
+
+At a terminal the numbers render as one redrawn progress line; with output piped
+under `--no-json` they are plain lines, one per new sample, with no carriage
+returns. Ctrl-C during `--watch` exits 130 after printing that the deployment
+keeps coming up and the command that re-attaches, and in the JSON modes still
+writes the envelope for the last state it read.
+
+A watch rides out a deploy API that stops answering, as it does for a few
+seconds while a new version rolls out: a 5xx or a failed connection on its read
+is retried, backing off (2, 4, 8, then 15 seconds), for about a minute from the
+first failure, and the watch says once that it is retrying. A 4xx still ends the
+watch at once. If the API is still not answering when the window closes, the
+watch ends with the error code `deploy_watch_lost` and exit code **75**, never 1:
+only the watch ended, and the deployment may still be coming up. Its `hint`
+carries the command that re-attaches and `details.deployment_id` the deployment.
+
 ## Success envelope
 
 On `--wait` success, `data` carries:
@@ -458,7 +545,9 @@ crash the CLI hasn't established: when local `--wait` gives up on its *own*
 `--timeout` (`ws_timeout`), and when cloud `--wait` dies on a network error
 that escapes its handlers (a DNS failure or connection reset while polling, as
 opposed to the handled `cloud_timeout` / `cloud_unauthorized` /
-`cloud_http_error` exits, which record a terminal verdict of their own). In
+`cloud_http_error` exits, which record a terminal verdict of their own), or
+when cloud `--wait` gives up on a throttled status poll (`cloud_rate_limited`,
+recorded as the record's `error` until the next successful status poll). In
 both cases the record is left non-terminal with no pid, the reap never touches
 it, and `comfy jobs status <prompt_id>` can still consult the server for the
 real outcome.
@@ -550,7 +639,7 @@ lists what the cloud adds and which of the codes below cannot occur there.
 | `partner_node_requires_credential` | Workflow uses a partner-API node and no `api_key_comfy_org` credential is available | `partner_nodes` (array of str, capped at 20 entries × 64 chars each), `partner_node_count` (int, the exact total — read this, not `len(partner_nodes)`), `host`, `port` | 1 |
 | `spend_consent_required`  | Workflow embeds partner-API (paid) nodes and `--allow-spend` was not passed (machine mode) or interactive consent was declined; re-run with `--allow-spend`. Free (non-partner) workflows are unaffected. | `partner_nodes` (array of str, capped at 20 entries × 64 chars each), `partner_node_count` (int, the exact total — read this, not `len(partner_nodes)`); local path also carries `host`, `port`, the cloud path carries `where: "cloud"` | 1 |
 | `prompt_rejected`         | Server returned HTTP 400 with `node_errors`                                     | `status` (400), `node_errors` (array — [shape](#node_errors-shape)) | 1 |
-| `client_error`            | Server returned another HTTP 4xx response                                       | `status` (int, 4xx), `body` (str)                  | 1 |
+| `client_error`            | Server returned another HTTP 4xx response (including 429; `cloud_rate_limited` is Cloud only) | `status` (int, 4xx), `body` (str)                  | 1 |
 | `server_error`            | Server returned an HTTP 5xx response                                            | `status` (int, 5xx), `body` (str)                  | 1 |
 | `invalid_response`        | Server returned HTTP 2xx but body was unparseable or lacked `prompt_id`         | `status` (int, 2xx)                                | 1 |
 | `ws_timeout`              | WebSocket `recv` idle past `--timeout`                                          | `timeout` (int, seconds)                           | 1 |
@@ -558,6 +647,32 @@ lists what the cloud adds and which of the codes below cannot occur there.
 | `cancelled`               | Run was interrupted — client `SIGINT` (Ctrl-C) or the server's `execution_interrupted` (e.g. `/interrupt`) | —                       | 130 |
 | `execution_error`         | A node raised during execution (server emitted `execution_error`)               | `node_id` (str), `class_type` (str), `title` (str), `exception_type` (str), `traceback` (str) | 1 |
 | `transient_auth`          | The `execution_error` cause was an API node's server-side session token expiring mid-execution — transient, so resubmitting the same workflow succeeds. Local credentials are fine; `comfy cloud login` does not help | Same fields as `execution_error` | 1 |
+
+### CLI-wide codes
+
+Two codes can end any command's `--json` stream, not only `comfy run`:
+
+| `code`           | Triggered when                                                                 | `details`                                                                                  | Exit |
+| ---------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ | ---- |
+| `usage_error`    | argv did not parse (unknown option or command, missing value); nothing ran     | `command` (str), `exit_code` (int); `option` and `did_you_mean` for a near-miss option     | 2 |
+| `internal_error` | The command crashed on an exception it did not handle (a comfy-cli bug)        | `exception` (str, the exception type), `command` (str), `traceback` (array of up to 3 `file:line:func` strings, innermost last) | 1 |
+
+`internal_error`'s `message` is `"<Type>: <text>"`, capped at 500 characters.
+URL query strings, bearer tokens, `key=value` token pairs and `user:pass@`
+userinfo are replaced with `***`. The full traceback still goes to stderr.
+Whether anything was written depends on where the command crashed, so re-read
+state before retrying.
+
+### Workflow-edit refusal fields
+
+`workflow set-widget` / `set-slot` / `ls-nodes` add these fields for agents:
+
+| Where | Field | Meaning |
+| ----- | ----- | ------- |
+| `unknown_enum_value` finding (the `set-widget` error's `details`, `validate` findings) | `best_match` (str, optional) | The ONE option sharing the rejected value's leading token (`'16:9 (Landscape)'` → `'16:9 (Widescreen)'`). It is also first in `did_you_mean`. It is never auto-applied, and is absent for filenames and ambiguous tokens |
+| `unknown_dynamic_sub_input` warning (`set-slot`) | `revealed_by` (array of str, optional) | The options of the dynamic combo that reveal the requested sub-widget (`model.prompt_expansion_mode` → `["MiniMax H3 Max", "MiniMax H3 Max Turbo"]`). Set the selector to one of them first |
+| `workflow ls-nodes` rows | `ui_only` (true, optional) | A frontend-only node (Reroute, Note, MarkdownNote, PrimitiveNode, GetNode, SetNode). It is readable on the canvas but cannot be added with `add-node` or shown with `nodes show` |
+| `workflow ls-nodes` rows | `subgraph` (true, optional) | A subgraph instance: its `type` is the definition uuid, not a node class |
 
 ### `exception_type` field
 
@@ -641,6 +756,9 @@ should treat the run as failed when **both**:
   empty.
 
 Stderr may contain a Python traceback in these cases.
+
+An exception inside the CLI itself is not one of these. It ends the stream
+with an [`internal_error`](#cli-wide-codes) envelope.
 
 ## Examples
 
