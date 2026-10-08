@@ -178,6 +178,14 @@ def test_nested_duplicate_input_holders_resolve_once_per_level():
     assert result == [(node_id, 0)]
     assert resolver.call_count <= 41
 
+    memo: dict = {}
+    budget = [workflow_to_api._MAX_RESOLVED_SUBGRAPH_INPUTS]
+    first = workflow_to_api._resolve_subgraph_input_all("root", 0, ctx, _memo=memo, _budget=budget)
+    remaining = budget[0]
+    second = workflow_to_api._resolve_subgraph_input_all("root", 0, ctx, _memo=memo, _budget=budget)
+    assert second is first
+    assert budget[0] == remaining
+
 
 def test_subgraph_input_resolution_fails_closed_at_materialization_cap():
     ctx = workflow_to_api._SubgraphCtx()
