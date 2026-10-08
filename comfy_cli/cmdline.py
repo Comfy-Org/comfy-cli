@@ -398,7 +398,7 @@ def _internal_error_message(error: BaseException) -> str:
         # header, or token. Dropping the final partial token is safer than
         # asking the scrubbers to recognize a value whose prefix was cut off.
         partial = re.search(r"\s+\S*$", text)
-        if partial is not None:
+        if partial is not None and partial.start() >= len(text) - _INTERNAL_ERROR_MESSAGE_CAP:
             text = text[: partial.start()]
     text = _scrub_secret_constructors(text)
     text = _scrub_secret_containers(text)
