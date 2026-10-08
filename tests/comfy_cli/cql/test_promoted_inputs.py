@@ -205,11 +205,19 @@ def test_distinct_nested_paths_are_bounded_by_definition_graph_size():
                 ],
             }
 
-    with mock.patch.object(promoted, "_nested_definition", wraps=promoted._nested_definition) as resolver:
-        [item] = promoted.promoted_inputs(definitions["left-0"], definitions)
+    with (
+        mock.patch.object(promoted, "_nested_definition", wraps=promoted._nested_definition) as resolver,
+        pytest.raises(promoted.PromotionTraversalLimitError, match="input traversal"),
+    ):
+        promoted.promoted_inputs(definitions["left-0"], definitions)
 
-    assert item.value_index is None
     assert resolver.call_count <= promoted._promotion_visit_limit(definitions, definitions["left-0"]) * 2
+
+    instance = {"id": 7, "type": "left-0", "widgets_values": ["keep"]}
+    workflow = {"nodes": [instance], "definitions": {"subgraphs": list(definitions.values())}}
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="input traversal"):
+        promoted.set_host_value(workflow, instance, "value", "replace", graph=None)
+    assert instance["widgets_values"] == ["keep"]
 
 
 def test_boundary_target_fanout_is_bounded_by_definition_graph_size():

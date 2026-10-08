@@ -142,20 +142,6 @@ def held_link_target(
     return declared_node if declared_node is not None else next(iter(locations), None)
 
 
-def _unpromoted_inputs(sg: dict) -> list[PromotedInput]:
-    """Declared inputs with no host-value slots, used when traversal is capped."""
-    return [
-        PromotedInput(
-            name=str(inp.get("name") or ""),
-            type=inp.get("type") if isinstance(inp.get("type"), str) else "",
-            index=index,
-            value_index=None,
-        )
-        for index, inp in enumerate(sg.get("inputs") or [])
-        if isinstance(inp, dict)
-    ]
-
-
 def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
     """A linear cap for malformed definition DAGs with exponentially many paths."""
     definitions = {id(definition): definition for definition in defs.values() if isinstance(definition, dict)}
@@ -199,9 +185,7 @@ def promoted_inputs(
     if memo_key in _memo:
         return _memo[memo_key]
     if _budget[0] <= 0:
-        capped = _unpromoted_inputs(sg)
-        _memo[memo_key] = capped
-        return capped
+        raise PromotionTraversalLimitError("promoted input traversal exceeded its safe limit")
     _budget[0] -= 1
     _stack = (*_stack, id(sg))
     holders = _link_holders(sg)
