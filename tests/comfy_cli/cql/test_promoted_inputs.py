@@ -144,6 +144,29 @@ def test_every_promotion_resolver_skips_an_unheld_row_before_a_live_one():
     assert promoted.boundary_widget_targets(sg, item, definitions) == [(["8"], "prompt")]
 
 
+def test_every_promotion_resolver_follows_a_holder_when_the_row_target_drifted():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [2]}],
+        "nodes": [
+            {"id": 7, "type": "Other", "inputs": [{"name": "other", "link": None}]},
+            {
+                "id": 8,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 2}],
+            },
+        ],
+        "links": [{"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = {"sg": sg}
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert item.source_node == "8"
+    assert promoted._promotion_source(sg, sg["inputs"][0], definitions) == ("8", "prompt")
+    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["8"], "prompt")]
+
+
 def test_nested_fanout_memoizes_repeated_definition_walks():
     definitions: dict[str, dict] = {}
     depth = 10
