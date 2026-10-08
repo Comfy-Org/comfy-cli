@@ -986,7 +986,7 @@ def test_a_bare_folder_name_that_holds_a_build_spec_is_the_build_path(workspace:
         # through before Python 3.14 (3.14 answers False).
         pytest.param("r" * 300, id="longer-than-a-file-name"),
         # No separator, so not path-shaped; `expanduser` raises on the unknown user.
-        pytest.param("~nosuchuser-dplat-2746", id="tilde-unknown-user"),
+        pytest.param("~nosuchuser-comfy-test", id="tilde-unknown-user"),
     ],
 )
 def test_a_release_id_the_disk_probe_cannot_read_still_reaches_the_builder(
@@ -1091,7 +1091,7 @@ def test_a_path_shaped_release_for_an_unknown_user_is_refused_before_it_reaches_
     calls = _recording_builder(monkeypatch)
 
     # When
-    result = invoke_release("show", "~nosuchuser-dplat-2746/build")
+    result = invoke_release("show", "~nosuchuser-comfy-test/build")
 
     # Then
     assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, "build_missing_input", [])
