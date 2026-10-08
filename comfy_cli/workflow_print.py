@@ -1682,12 +1682,11 @@ def _render_definition_block(
                     )
                 else:
                     outputs = source.get("outputs")
-                    output_count = len(outputs) if isinstance(outputs, list) else 0
-                    if oslot >= output_count:
+                    if isinstance(outputs, list) and not source.get(_NONLIST_OUTPUTS) and oslot >= len(outputs):
                         boundary_ignored.add(str(lid))
                         state.warnings.append(
                             f"subgraph {def_id}: output link {lid} references output slot {oslot} on node {oid}, "
-                            f"which has {output_count} outputs; it was ignored"
+                            f"which has {len(outputs)} outputs; it was ignored"
                         )
         if from_input_proxy or to_output_proxy:
             continue

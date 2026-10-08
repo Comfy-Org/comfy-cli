@@ -351,7 +351,7 @@ def test_out_of_range_definition_output_boundary_renders_none_with_warning():
     assert "OUT." in res.source and " = None" in res.source
 
 
-def test_output_boundary_from_a_node_without_output_metadata_renders_none():
+def test_output_boundary_from_a_node_without_output_metadata_is_not_rejected():
     wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
     graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
     sg = next(s for s in wf["definitions"]["subgraphs"] if s["id"] == "d33c1791-dfd2-4102-8540-aa63e4434cd2")
@@ -361,8 +361,9 @@ def test_output_boundary_from_a_node_without_output_metadata_renders_none():
 
     res = render_py(wf, graph)
 
-    assert any("which has 0 outputs; it was ignored" in warning for warning in res.warnings)
-    assert f"{link['origin_id']}.out[{link['origin_slot']}]" not in res.source
+    assert not any("which has 0 outputs; it was ignored" in warning for warning in res.warnings)
+    assert "OUT." in res.source
+    assert " = None" not in next(line for line in res.source.splitlines() if line.lstrip().startswith("OUT."))
 
 
 def test_broken_link_repair_uses_the_actual_holder_when_declared_target_is_missing(sd15_graph):
