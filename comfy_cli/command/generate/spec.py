@@ -610,6 +610,7 @@ def _model_name_hint(name: str) -> str | None:
                 matched = [v for v in values or [] if v.lower().startswith(lowered)]
                 if matched:
                     hits.append((str(path)[len(PROXY_PREFIX) :], field, matched))
+                    break
         except (KeyError, TypeError, SpecError, RecursionError):
             continue
     if not hits:
