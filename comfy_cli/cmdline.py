@@ -234,6 +234,52 @@ def _scrub_secret_constructors(text: str) -> str:
     return "".join(chunks)
 
 
+_SECRET_CONTAINER_START = re.compile(
+    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
+    r"(?P<opener>[\[({])",
+    re.IGNORECASE,
+)
+
+
+def _scrub_secret_containers(text: str) -> str:
+    """Mask balanced or truncated secret containers, including multiline values."""
+    chunks: list[str] = []
+    cursor = 0
+    search_from = 0
+    closers = {"[": "]", "(": ")", "{": "}"}
+    while match := _SECRET_CONTAINER_START.search(text, search_from):
+        stack = [closers[match.group("opener")]]
+        index = match.end()
+        quote: str | None = None
+        escaped = False
+        while index < len(text) and stack:
+            char = text[index]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif quote is not None:
+                if char == quote:
+                    quote = None
+            elif char in {"'", '"'}:
+                quote = char
+            elif char in closers:
+                stack.append(closers[char])
+            elif char == stack[-1]:
+                stack.pop()
+            index += 1
+        chunks.extend((text[cursor : match.start()], match.group("prefix"), "***"))
+        if stack:
+            # A truncated wrapper has no safe boundary. Mask the full tail.
+            return "".join(chunks)
+        cursor = index
+        search_from = index
+    if not chunks:
+        return text
+    chunks.append(text[cursor:])
+    return "".join(chunks)
+
+
 _SECRET_PATTERNS = (
     (re.compile(r"(https?://[^\s?#'\"]+)\?[^\s'\"]*", re.IGNORECASE), r"\1?***"),
     (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]+", re.IGNORECASE), r"\1***"),
@@ -259,7 +305,7 @@ _SECRET_PATTERNS = (
         # diagnostics, so consume just the constructor (never whitespace plus
         # an ordinary explanatory parenthetical).
         re.compile(
-            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?\s*[:=]\s*)[A-Za-z_][\w.]*\([^\r\n)]*\)",
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)[A-Za-z_][\w.]*\([^\r\n)]*\)",
             re.IGNORECASE,
         ),
         r"\1***",
@@ -270,7 +316,7 @@ _SECRET_PATTERNS = (
         # the rest of that line and its indented continuations. This is linear
         # and cannot leak later elements through a premature closer.
         re.compile(
-            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?\s*[:=]\s*)"
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
             r"(?:[\[({]|[A-Za-z_][\w.]*\()[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*",
             re.IGNORECASE,
         ),
@@ -279,7 +325,7 @@ _SECRET_PATTERNS = (
     (
         # The Bearer scrubber above preserves the scheme; do not remask it as an unquoted token value.
         re.compile(
-            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?\s*[:=]\s*)"
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
             r"(?:([bBuUrR]{0,2})((?:\\)?[\"'])(?:(?!\3)(?:\\.|[^\r\n]))*\3?|(?!Bearer\s)(?:\\(?![\"'])|[^\\\s&\"',;])+)",
             re.IGNORECASE,
         ),
@@ -346,6 +392,7 @@ def _internal_error_message(error: BaseException) -> str:
         if partial is not None:
             text = text[: partial.start()]
     text = _scrub_secret_constructors(text)
+    text = _scrub_secret_containers(text)
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
     if len(text) > _INTERNAL_ERROR_MESSAGE_CAP:
