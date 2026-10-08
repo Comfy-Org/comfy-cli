@@ -3041,21 +3041,28 @@ def _path_shaped(value: str) -> bool:
     )
 
 
-def _spec_behind(release: str) -> tuple[Path | None, bool]:
+def _spec_behind(release: str, *, path_shaped: bool) -> tuple[Path | None, bool]:
     """The spec file RELEASE names when read as a PATH, and whether it is there.
 
-    Runs on every RELEASE given without a PATH, ids included, so it never
-    raises: `Path.is_file` only swallows "not found", and an id over 255
-    characters (file name too long), one naming a folder the caller cannot read
-    (`PermissionError`) or a `~name` with no such user (`expanduser` raises
-    `RuntimeError`) would otherwise fail the read with a traceback. Any of
-    those is "no spec here"; the spec path is ``None`` when it cannot even be
-    resolved.
+    Runs on every RELEASE given without a PATH, ids included, so for a bare
+    name it never raises: `Path.is_file` only swallows "not found", and an id
+    over 255 characters (file name too long), one naming a folder the caller
+    cannot read (`PermissionError`) or a `~name` with no such user
+    (`expanduser` raises `RuntimeError`) would otherwise fail the read with a
+    traceback. Any of those is "no spec here"; the spec path is ``None`` when it
+    cannot even be resolved.
+
+    A ``path_shaped`` RELEASE is a path whatever is on disk, so an error from
+    looking at its spec file raises, as it does for the same path given as
+    PATH (`release ls locked/`): a spec in a folder the caller cannot read is
+    there, and must not be reported as missing.
     """
     try:
         spec_file = resolve_build_paths(release, require_spec=False).spec_file
     except (OSError, ValueError, RuntimeError):
         return None, False
+    if path_shaped:
+        return spec_file, spec_file.is_file()
     try:
         return spec_file, spec_file.is_file()
     except (OSError, ValueError):
@@ -3092,10 +3099,11 @@ def _release_or_path(
     if release is None:
         return None, path
     if path is None and release.strip():
-        spec_file, has_spec = _spec_behind(release)
+        path_shaped = _path_shaped(release)
+        spec_file, has_spec = _spec_behind(release, path_shaped=path_shaped)
         if has_spec:
             return None, release
-        if _path_shaped(release):
+        if path_shaped:
             if build_id is not None:
                 # `--id` picks the Build, and PATH is never read then, so a
                 # path with no spec behind it is as harmless here as it is

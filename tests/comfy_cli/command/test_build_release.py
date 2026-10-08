@@ -1028,10 +1028,39 @@ def test_a_release_id_that_names_an_unreadable_folder_still_reaches_the_builder(
     assert client.calls == [{"method": "get_release", "id": "rel-locked"}]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod 000 does not deny reads on Windows")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a chmod 000 folder")
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize("release", ["locked/", "./locked/comfy-build.yaml"], ids=["folder", "spec-file"])
+def test_a_path_shaped_release_naming_an_unreadable_folder_fails_as_release_ls_does(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str, release: str
+) -> None:
+    """A path-shaped RELEASE is a path, so a spec the caller cannot read fails
+    the way `release ls` fails on that path, never as `build_spec_not_found`
+    with a hint to run `comfy build init` over a spec that is there."""
+    # Given
+    locked = make_workspace(workspace / "locked")
+    write_spec(locked, build_id="build-3", revision="revision-1", models=[], nodes=[])
+    locked.chmod(0)
+    try:
+        # When
+        listed = invoke_release("ls", release)
+        result = invoke_release(verb[0], release, *verb[1:])
+    finally:
+        locked.chmod(0o755)
+
+    # Then
+    code = envelope(result)["error"]["code"]
+    assert code != "build_spec_not_found"
+    assert (result.exit_code, code, client.calls) == (listed.exit_code, envelope(listed)["error"]["code"], [])
+
+
 @pytest.mark.parametrize(
     ("release", "code"),
     [
-        pytest.param("./" + "r" * 300, "build_spec_not_found", id="longer-than-a-file-name"),
+        # Shaped like a path, so the "file name too long" from looking up its
+        # spec raises as it does for `release ls` on the same path.
+        pytest.param("./" + "r" * 300, "internal_error", id="longer-than-a-file-name"),
         # `expanduser` cannot resolve it, so there is no spec path to report.
         pytest.param("~nosuchuser-dplat-2746/build", "build_missing_input", id="tilde-unknown-user"),
     ],
@@ -1039,8 +1068,8 @@ def test_a_release_id_that_names_an_unreadable_folder_still_reaches_the_builder(
 def test_a_path_shaped_release_the_disk_probe_cannot_read_is_refused_before_it_reaches_the_builder(
     workspace: Path, monkeypatch: pytest.MonkeyPatch, release: str, code: str
 ) -> None:
-    """Shaped like a path, it is a path; one the file system cannot look up has
-    no spec behind it, and is refused with an envelope rather than a traceback."""
+    """Shaped like a path, it is a path, refused before any request with an
+    envelope rather than a traceback."""
     # Given
     calls = _recording_builder(monkeypatch)
 
