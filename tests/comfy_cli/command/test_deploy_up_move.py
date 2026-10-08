@@ -24,6 +24,7 @@ from comfy_cli.command.deploy_up import move_text
 from comfy_cli.deploy_api_errors import DeployAPIError
 
 _RELEASES = [
+    {"id": "release-3", "buildId": "build-1", "version": 3, "deployable": True},
     {"id": "release-4", "buildId": "build-1", "version": 4, "deployable": True},
     {"id": "release-5", "buildId": "build-1", "version": 5, "deployable": True},
 ]
@@ -410,10 +411,35 @@ def test_a_read_without_a_revision_mid_watch_does_not_fail_the_move(tmp_path, mo
     assert client.get_ids.count("dep-1") == 3
 
 
-def test_a_move_another_change_overtook_is_a_failure(tmp_path, monkeypatch) -> None:
-    # Given a later revision that serves neither release up asked about
+@pytest.mark.parametrize(
+    "moved_on",
+    [
+        {
+            "pendingUpdate": {"releaseId": "release-3", "baseRevision": 4, "status": "provisioning", "since": "x"},
+            "releaseId": "release-5",
+            "revision": 4,
+        },
+        {"pendingUpdate": None, "releaseId": "release-3", "revision": 5},
+    ],
+    ids=["a_later_update_waits", "a_later_revision_serves_another_release"],
+)
+def test_a_move_that_landed_and_was_moved_on_within_one_read_landed(tmp_path, monkeypatch, moved_on) -> None:
+    """The move waits from revision 3, so a later update or a revision past 4 is
+    one the deployment took after this move landed, not one that replaced it."""
+    # Given a move to v5 that landed, then another change before the next read
+    client = FakeDeploy([_live("dep-1")], move="pending", get_patches=[moved_on])
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+
+
+def test_a_move_ended_before_it_landed_says_so_rather_than_failed(tmp_path, monkeypatch) -> None:
+    # Given a cancel that ended the update up watches, leaving v4 serving
     client = FakeDeploy(
-        [_live("dep-1")], move="pending", get_patches=[{"pendingUpdate": None, "releaseId": "release-3", "revision": 5}]
+        [_live("dep-1")], move="pending", get_patches=[{"pendingUpdate": None, "releaseId": "release-4", "revision": 3}]
     )
 
     # When
@@ -423,7 +449,86 @@ def test_a_move_another_change_overtook_is_a_failure(tmp_path, monkeypatch) -> N
     error = _envelope(result)["error"]
     assert result.exit_code == 1
     assert error["code"] == "deploy_update_failed"
-    assert error["details"]["serving_release_id"] == "release-3"
+    assert (
+        error["message"]
+        == "the update of deployment dep-1 to release v5 ended before it landed; it still serves release v4"
+    )
+
+
+def test_a_move_another_change_overtook_names_the_update_that_replaced_it(tmp_path, monkeypatch) -> None:
+    # Given the revision after the move's base serving neither release up asked about
+    client = FakeDeploy(
+        [_live("dep-1")], move="pending", get_patches=[{"pendingUpdate": None, "releaseId": "release-3", "revision": 4}]
+    )
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5")
+
+    # Then
+    error = _envelope(result)["error"]
+    assert result.exit_code == 1
+    assert error["code"] == "deploy_update_replaced"
+    assert error["details"]["replacing_release_id"] == "release-3"
+    assert error["message"] == "the update of deployment dep-1 to release v5 was replaced by an update to release v3"
+
+
+def test_a_newer_update_while_one_waits_exits_1_as_replaced(tmp_path, monkeypatch) -> None:
+    # Given a newer move to another release that replaced the one up is watching
+    patch = {"pendingUpdate": {"releaseId": "release-3", "baseRevision": 3, "status": "provisioning", "since": "x"}}
+    client = FakeDeploy([_live("dep-1")], move="pending", get_patches=[patch])
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5")
+
+    # Then
+    error = _envelope(result)["error"]
+    assert result.exit_code == 1
+    assert error["code"] == "deploy_update_replaced"
+    assert error["details"] == {
+        "deployment_id": "dep-1",
+        "release_id": "release-5",
+        "replacing_release_id": "release-3",
+    }
+    assert error["message"] == "the update of deployment dep-1 to release v5 was replaced by an update to release v3"
+    assert "comfy deploy status --deployment dep-1" in error["hint"]
+
+
+@pytest.mark.parametrize(
+    "reads",
+    [
+        [
+            {
+                "pendingUpdate": {
+                    "releaseId": "release-5",
+                    "baseRevision": 3,
+                    "status": "provisioning",
+                    "since": "2026-10-07T12:00:05.804551Z",
+                }
+            }
+        ],
+        [
+            {"pendingUpdate": {"releaseId": "release-3", "baseRevision": 3, "status": "provisioning", "since": "x"}},
+            {},
+        ],
+    ],
+    ids=["the_same_release_asked_again", "one_read_still_showing_a_replaced_update"],
+)
+def test_a_move_that_still_waits_on_its_release_lands(tmp_path, monkeypatch, reads) -> None:
+    """A read naming this move's release waits, whenever it was asked, and one
+    read that straddles a change is not enough to call the move replaced."""
+    # Given reads that keep the move to release-5 waiting, then it lands
+    waiting = {"pendingUpdate": {"releaseId": "release-5", "baseRevision": 3, "status": "provisioning", "since": "x"}}
+    landed = {"pendingUpdate": None, "releaseId": "release-5", "revision": 4, "status": "ready"}
+    client = FakeDeploy(
+        [_live("dep-1")], move="pending", get_patches=[waiting if patch == {} else patch for patch in reads] + [landed]
+    )
+
+    # When
+    result = _up(tmp_path, monkeypatch, client, "--release", "release-5")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _envelope(result)["data"]["release"]["id"] == "release-5"
 
 
 def test_a_refused_bounds_edit_after_a_landed_move_still_reports_the_move(tmp_path, monkeypatch) -> None:

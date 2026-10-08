@@ -1454,9 +1454,10 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "deploy_ambiguous_deployment",
         "Deployment resolution found multiple rows tied at the highest status rank and newest creation time, "
-        "or `comfy deploy up`, with deployment updates on, `rollback` or `rename`, given no `--deployment`, found "
-        "more than one deployment of the Build to act on. `details.candidateIds` lists every candidate deployment "
-        "id, and on `up`, `rollback` and `rename` `details.candidates` lists each one's id, name, release and status.",
+        "or `comfy deploy up`, with deployment updates on, `rollback`, `rename` or `cancel`, given no "
+        "`--deployment`, found more than one deployment of the Build to act on. `details.candidateIds` lists every "
+        "candidate deployment id, and on `up`, `rollback`, `rename` and `cancel` `details.candidates` lists each "
+        "one's id, name, release and status.",
         "pass `--deployment <name|id>` to select one deployment explicitly",
     ),
     ErrorCode(
@@ -1602,22 +1603,34 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ErrorCode(
         "deploy_update_failed",
         "`comfy deploy up`, `promote` or `rollback` moved a deployment onto another release, and the watch saw "
-        "the move fail: the new release's copy failed to come up, or the service dropped the update. The "
+        "the move fail: the new release's copy failed to come up, or the update ended before it landed, which "
+        "a `comfy deploy cancel`, a move back to the release it served, or the service dropping it does. The "
         "deployment keeps its id and URL and still serves the release it served before. "
         "`details.serving_release_id` names that release and `details.release_id` the one that failed.",
         "inspect `comfy deploy events --deployment <id>`, which covers the new release's copy; `logs` shows the "
         "release still serving",
     ),
     ErrorCode(
+        "deploy_update_replaced",
+        "`comfy deploy up`, `promote` or `rollback` moved a deployment onto another release, and before the "
+        "move landed a newer update replaced it: someone ran another `up`, `promote` or `rollback` on the same "
+        "deployment, and the service cancelled this one. The deployment keeps its id and URL. "
+        "`details.release_id` names the release this move asked for and `details.replacing_release_id` the one "
+        "the newer update moves to.",
+        "run `comfy deploy status --deployment <id>` to see the newer update, and, while it still waits, "
+        "`comfy deploy cancel --deployment <id>` to end it",
+    ),
+    ErrorCode(
         "deploy_updates_unavailable",
         "The command needs deployment updates, which are not on for this workspace yet: the deployment "
         "carries no `revision`. `comfy deploy promote` and `rollback` need it to move a deployment in place, "
         "`history` needs it to list the releases a deployment ran, and `comfy deploy events --release` needs it, "
-        "since only there does each event say which release made it. "
+        "since only there does each event say which release made it. `comfy deploy cancel` answers it too where "
+        "the deploy service is too old to cancel an update. "
         "`details.deployment_id` names the deployment that was read.",
         "for `events --release`, run it without `--release`; for `history`, read `comfy deploy events`; for "
         "`promote` or `rollback`, run the hint's `comfy deploy up --create --release <id>` to start a separate "
-        "deployment on that release",
+        "deployment on that release; for `cancel`, wait until the update lands or fails",
     ),
     ErrorCode(
         "deploy_delete_needs_confirm",
