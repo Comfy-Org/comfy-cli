@@ -124,6 +124,11 @@ def test_model_hint_skips_malformed_partner_request_bodies(monkeypatch, request_
     assert "served at valid" in hint
 
 
+def test_unhashable_ref_raises_the_schema_error():
+    with pytest.raises(spec.SpecError, match="Invalid non-string \\$ref"):
+        spec._resolve({}, {"$ref": ["not", "a", "reference"]})
+
+
 def test_model_hint_falls_through_a_freeform_model_field(monkeypatch):
     raw = {
         "paths": {
@@ -200,6 +205,53 @@ def test_model_hint_skips_an_excessively_deep_ref_chain(monkeypatch):
         "components": {"schemas": schemas},
         "paths": {
             "/proxy/deep": {
+                "post": {
+                    "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/S0"}}}}
+                }
+            },
+            "/proxy/valid": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"model_id": {"enum": ["example-model-v1"]}},
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        },
+    }
+
+    def load_raw_spec():
+        return raw
+
+    load_raw_spec.cache_clear = lambda: None  # type: ignore[attr-defined]
+    monkeypatch.setattr(spec, "load_raw_spec", load_raw_spec)
+
+    hint = spec._model_name_hint("example")
+    assert hint is not None
+    assert "example-model-v1" in hint
+
+
+def test_model_hint_memoizes_a_wide_ref_diamond(monkeypatch):
+    schemas = {
+        f"S{i}": {
+            "allOf": [
+                {"$ref": f"#/components/schemas/S{i + 1}"},
+                {"$ref": f"#/components/schemas/S{i + 1}"},
+            ]
+        }
+        for i in range(32)
+    }
+    schemas["S32"] = {"type": "object"}
+    raw = {
+        "components": {"schemas": schemas},
+        "paths": {
+            "/proxy/wide": {
                 "post": {
                     "requestBody": {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/S0"}}}}
                 }

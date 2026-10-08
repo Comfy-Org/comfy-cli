@@ -309,18 +309,31 @@ def _resolve_ref(spec: dict[str, Any], ref: str) -> dict[str, Any]:
     return node
 
 
-def _resolve(spec: dict[str, Any], node: Any, seen: frozenset[str] = frozenset()) -> Any:
+def _resolve(
+    spec: dict[str, Any],
+    node: Any,
+    seen: frozenset[str] = frozenset(),
+    memo: dict[str, Any] | None = None,
+) -> Any:
     """Recursively inline $refs in a schema. Cycles are broken with a placeholder."""
+    if memo is None:
+        memo = {}
     if isinstance(node, dict):
         if "$ref" in node:
             ref = node["$ref"]
+            if not isinstance(ref, str):
+                raise SpecError(f"Invalid non-string $ref: {ref!r}")
             if ref in seen:
                 return {"type": "object", "x-recursive-ref": ref}
+            if ref in memo:
+                return memo[ref]
             resolved = _resolve_ref(spec, ref)
-            return _resolve(spec, resolved, seen | {ref})
-        return {k: _resolve(spec, v, seen) for k, v in node.items()}
+            value = _resolve(spec, resolved, seen | {ref}, memo)
+            memo[ref] = value
+            return value
+        return {k: _resolve(spec, v, seen, memo) for k, v in node.items()}
     if isinstance(node, list):
-        return [_resolve(spec, item, seen) for item in node]
+        return [_resolve(spec, item, seen, memo) for item in node]
     return node
 
 
@@ -472,11 +485,19 @@ def model_enum(endpoint_id: str, field: str = "model") -> list[str] | None:
     return _extract_enum(prop)
 
 
-def _find_property(schema: dict[str, Any], field: str) -> dict[str, Any] | None:
+def _find_property(
+    schema: dict[str, Any], field: str, visited: set[int] | None = None
+) -> dict[str, Any] | None:
     """Locate ``field`` in ``schema['properties']``, descending into top-level
     ``allOf``/``anyOf``/``oneOf`` composition when the schema carries no direct
     match — a composed request body must not silently defeat the spec-derived
     enum and fall back to the hardcoded list."""
+    if visited is None:
+        visited = set()
+    identity = id(schema)
+    if identity in visited:
+        return None
+    visited.add(identity)
     props = schema.get("properties")
     if isinstance(props, dict):
         prop = props.get(field)
@@ -488,7 +509,7 @@ def _find_property(schema: dict[str, Any], field: str) -> dict[str, Any] | None:
             continue
         for variant in variants:
             if isinstance(variant, dict):
-                found = _find_property(variant, field)
+                found = _find_property(variant, field, visited)
                 if found is not None:
                     return found
     return None
