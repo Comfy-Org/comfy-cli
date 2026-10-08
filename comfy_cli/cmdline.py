@@ -182,8 +182,8 @@ def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | Non
 _INTERNAL_ERROR_MESSAGE_CAP = 500
 _INTERNAL_ERROR_SCRUB_INPUT_CAP = _INTERNAL_ERROR_MESSAGE_CAP * 8
 _SECRET_KEY_PATTERN = (
-    r"(?:proxy-)?authorization|api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|"
-    r"session(?:[_-]?(?:id|key))?|sid|sig|signature|(?:set-)?cookie"
+    r"(?:proxy-)?authorization|auth|api[ _-]?key|token|access[ _-]?token|refresh[ _-]?token|secret|password|"
+    r"session(?:[ _-]?(?:id|key))?|sid|sig|signature|(?:set-)?cookies?"
 )
 _SECRET_ASSIGNMENT_KEY_PATTERN = rf"(?<![\w-])(?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})(?:[_-][\w-]+)?"
 _SECRET_CONSTRUCTOR_START = re.compile(
