@@ -558,6 +558,28 @@ def test_a_waited_run_names_the_release_version_of_the_finished_job(
     assert "Deployment job job-1 (release v7) is succeeded" in pretty.output
 
 
+def test_a_waited_run_keeps_the_submit_answers_version_when_the_finished_job_names_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given
+    workflow = write_workflow(tmp_path / "workflow.json")
+    watched = JobWatchResult(job("succeeded"), [])
+    install_run(
+        monkeypatch,
+        FakeControl("https://dep-id.run.comfy.app"),
+        FakeJobClient({**job(), "release_version": 7}),
+        watched=watched,
+    )
+
+    # When
+    agentic = invoke(workflow, "--deployment", "dep-id")
+
+    # Then
+    assert agentic.exit_code == 0, agentic.stderr
+    assert envelope_data(agentic)["job"] == {"id": "job-1", "status": "succeeded", "releaseVersion": 7}
+
+
 @pytest.mark.parametrize("version", [None, "7", 7.5, True, 0])
 def test_a_missing_or_unusable_release_version_leaves_the_result_as_it_was(
     tmp_path: Path,

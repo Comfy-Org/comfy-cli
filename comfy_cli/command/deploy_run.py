@@ -111,6 +111,17 @@ def _release_version(job: JsonObject) -> int | None:
     return value
 
 
+def _with_release_version(job: JsonObject, submitted: JsonObject) -> JsonObject:
+    """The finished job, naming the submit answer's release version where its own read named none.
+
+    A job's release never changes, so a version the final read could not look up
+    is still the one the submit answer named.
+    """
+    if _release_version(job) is not None or _release_version(submitted) is None:
+        return job
+    return {**job, "release_version": submitted["release_version"]}
+
+
 @dataclass(slots=True)
 class _RunState:
     """Mutable state exists only to make submission-aware SIGINT cancellation one-shot."""
@@ -252,7 +263,10 @@ def run_deploy(ctx: typer.Context, request: DeployRunRequest) -> None:
             OutputDownloadRequest(tuple(watched.outputs), endpoint_origin, data_credential, request.output_dir),
             renderer,
         )
-        _emit_result(renderer, _RunResult(deployment_id, endpoint_origin, watched.job, assets, outputs))
+        _emit_result(
+            renderer,
+            _RunResult(deployment_id, endpoint_origin, _with_release_version(watched.job, submitted), assets, outputs),
+        )
     except KeyboardInterrupt as error:
         try:
             _cancel_once(state, renderer)
