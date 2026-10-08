@@ -1341,6 +1341,18 @@ def test_non_list_inputs_are_treated_as_empty_with_warning(sd15_graph):
     assert res.warnings == ["node 1 has non-list inputs; treated as empty"]
 
 
+def test_non_list_outputs_keep_unknown_link_slots_live():
+    source = _node(1, "Source")
+    source["outputs"] = {"malformed": True}
+    target = _node(2, "Target", inputs=[{"name": "value", "link": 7}])
+
+    res = render_py(_mini([source, target], [[7, 1, 19, 2, 0]]), None)
+
+    assert "target = Target(value=source" in res.source
+    assert "node 1 has non-list outputs; treated as empty" in res.warnings
+    assert not any("BROKEN link 7" in warning for warning in res.warnings)
+
+
 def test_definition_inputs_are_normalized_before_promoted_lookup(sd15_graph):
     subgraph_id = "22222222-3333-4444-5555-666666666666"
     interior = _node(7, "VAEDecode")

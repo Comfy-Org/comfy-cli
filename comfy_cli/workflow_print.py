@@ -396,7 +396,7 @@ def _broken_links(nodes: list[dict], links: list[Any], qualify: Any = str) -> tu
             why = "it has a non-integer slot"
         else:
             outputs = src_node.get("outputs")
-            if isinstance(outputs, list) and not (0 <= src_slot < len(outputs)):
+            if isinstance(outputs, list) and not src_node.get(_NONLIST_OUTPUTS) and not (0 <= src_slot < len(outputs)):
                 why = f"node {src_id} has no output slot {src_slot} (it has {len(outputs)})"
         if why is None:
             rest.append(link)
