@@ -579,7 +579,7 @@ def execute(
             # Emitted after the state file and the watcher spawn attempt, so a
             # consumer reading this line can already `comfy jobs status` it.
             _emit_queued_event(renderer, execution)
-            _emit_queued(
+            _announce_async_queued(
                 execution.prompt_id,
                 execution.client_id,
                 workflow_name,
@@ -587,12 +587,7 @@ def execute(
                 watch_command=f"comfy jobs watch {execution.prompt_id}",
                 state_file=state_file,
                 watcher_spawned=watcher_spawned,
-                extra_envelope_fields={
-                    "host": host,
-                    "port": port,
-                    "state_file": str(state_file) if state_file else None,
-                    "watcher_spawned": watcher_spawned,
-                },
+                locator_fields={"host": host, "port": port},
             )
     except KeyboardInterrupt:
         if progress is not None:
@@ -729,7 +724,7 @@ def _emit_queued_event(renderer, execution) -> None:
     """Emit the contractual local `queued` NDJSON stream event
     (docs/json-output.md#queued).
 
-    Distinct from :func:`_emit_queued` below, which owns the pretty-printed
+    Distinct from :func:`_announce_async_queued` below, which owns the pretty-printed
     status panel, the final `queued` envelope, and the live state tail — this
     is the per-line machine event a `--json-stream` consumer sees as soon as
     the server has accepted the prompt, on both the `--wait` and async paths.
@@ -874,7 +869,7 @@ def _init_queued_state(prompt_id, client_id, workflow_name, *, where, compose_me
     return state, state_file
 
 
-def _emit_queued(
+def _announce_async_queued(
     prompt_id,
     client_id,
     workflow_name,
@@ -883,7 +878,7 @@ def _emit_queued(
     watch_command,
     state_file,
     watcher_spawned,
-    extra_envelope_fields,
+    locator_fields,
 ):
     """Async-submit ``queued`` tail shared by the local async path and the
     cloud non-wait path: the pretty status panel (+ watcher-failure warning),
@@ -891,10 +886,12 @@ def _emit_queued(
 
     The divergent bits stay at the call sites and arrive via parameters:
     ``watch_command`` (the ``comfy jobs watch …`` hint, with ``--where cloud``
-    for cloud) and ``extra_envelope_fields`` (the target locator plus the
-    local-only ``watcher_spawned`` key). The caller owns envelope field
-    membership + ordering so the public agent-mode JSON contract stays verbatim
-    per target."""
+    for cloud) and ``locator_fields`` (``host``/``port`` for local,
+    ``base_url`` for cloud). The envelope keys shared by both targets —
+    ``state_file`` and ``watcher_spawned`` (docs/json-output.md: "the same on
+    both targets, ``watcher_spawned`` included") — are stamped here, after the
+    locator, so the field order of the public agent-mode JSON contract stays
+    verbatim per target and the two call sites cannot drift apart on them."""
     renderer = get_renderer()
     if renderer.is_pretty():
         from comfy_cli.output.glyphs import status_glyph
@@ -915,7 +912,11 @@ def _emit_queued(
             "client_id": client_id,
             "outputs": [],
             "elapsed_seconds": None,
-            **extra_envelope_fields,
+            **locator_fields,
+            "state_file": str(state_file) if state_file else None,
+            # Lets a consumer know whether something is keeping the state file
+            # fresh, or whether it must poll `comfy jobs status` itself.
+            "watcher_spawned": watcher_spawned,
         },
         command="run",
         where=where,
@@ -1227,7 +1228,7 @@ def execute_cloud(
         watcher_spawned = _spawn_watcher(submit.prompt_id, where="cloud", notify=notify)
         # Durable record + watcher exist: safe to announce.
         _emit_queued_cloud()
-        _emit_queued(
+        _announce_async_queued(
             submit.prompt_id,
             client_id,
             workflow_name,
@@ -1235,15 +1236,7 @@ def execute_cloud(
             watch_command=f"comfy jobs watch {submit.prompt_id} --where cloud",
             state_file=state_file,
             watcher_spawned=watcher_spawned,
-            extra_envelope_fields={
-                "base_url": target.base_url,
-                "state_file": str(state_file) if state_file else None,
-                # Same async-envelope field the local path carries: whether the
-                # detached watcher that keeps the state file fresh actually
-                # started. Consumers poll `comfy jobs status` themselves when
-                # it is false.
-                "watcher_spawned": watcher_spawned,
-            },
+            locator_fields={"base_url": target.base_url},
         )
         return
 
