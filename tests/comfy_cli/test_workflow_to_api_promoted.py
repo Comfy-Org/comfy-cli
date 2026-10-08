@@ -125,3 +125,26 @@ def test_dangling_link_on_a_promoted_input_does_not_drop_the_host_value(object_i
     assert all(link[0] != 999999 for link in wf["links"])
     api = convert_ui_to_api(wf, object_info)
     assert _api_node(api, "MiniMaxMusic3TextEncode", "37:13")["inputs"]["caption"].startswith("Global Metadata")
+
+
+def test_stale_boundary_target_reattaches_external_value_to_the_actual_holder(object_info, graph):
+    wf = _load("image_z_image_turbo.json")
+    wf, primitive = workflow_ops.add_node(wf, graph, "PrimitiveInt")
+    wf, _ = workflow_ops.set_widget(wf, graph, primitive["node_id"], "value", 640)
+    wf, _ = workflow_ops.connect(wf, graph, primitive["node_id"], "INT", 57, "width")
+    inst = next(node for node in wf["nodes"] if node["id"] == 57)
+    sg = next(definition for definition in wf["definitions"]["subgraphs"] if definition["id"] == inst["type"])
+    width = next(item for item in sg["inputs"] if item["name"] == "width")
+    link = next(item for item in sg["links"] if item["id"] == width["linkIds"][0])
+    actual = next(
+        node
+        for node in sg["nodes"]
+        if any(isinstance(entry, dict) and entry.get("link") == link["id"] for entry in node.get("inputs") or [])
+    )
+    stale = next(node for node in sg["nodes"] if node is not actual and node.get("inputs"))
+    link["target_id"] = stale["id"]
+    link["target_slot"] = 0
+
+    api = convert_ui_to_api(wf, object_info)
+
+    assert _api_node(api, "EmptySD3LatentImage", "57:13")["inputs"]["width"] == [str(primitive["node_id"]), 0]

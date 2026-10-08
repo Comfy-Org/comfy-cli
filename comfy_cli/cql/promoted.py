@@ -48,6 +48,10 @@ _MAX_NESTED_PROMOTION_DEPTH = 32
 UNSET: Any = object()
 
 
+class PromotionTraversalLimitError(RuntimeError):
+    """Promotion resolution exceeded its bounded malformed-graph traversal."""
+
+
 @dataclass(frozen=True)
 class PromotedInput:
     """One declared subgraph input, as the host instance sees it.
@@ -94,6 +98,48 @@ def _nested_definition(target: dict, defs: dict[str, dict], stack: tuple[int, ..
 def _entry_holds_link(entry: dict, link_id: Any) -> bool:
     """Whether LiteGraph will render ``entry`` from this boundary link."""
     return entry.get("link") is not None and str(entry["link"]) == str(link_id)
+
+
+def _link_holders(sg: dict) -> dict[str, list[tuple[dict, int, dict]]]:
+    """Every input that actually holds a link id, in serialized node order."""
+    holders: dict[str, list[tuple[dict, int, dict]]] = {}
+    for node in sg.get("nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        inputs = node.get("inputs")
+        for slot, entry in enumerate(inputs if isinstance(inputs, list) else []):
+            if isinstance(entry, dict) and entry.get("link") is not None:
+                holders.setdefault(str(entry["link"]), []).append((node, slot, entry))
+    return holders
+
+
+def held_link_target(
+    sg: dict,
+    link_id: Any,
+    link: dict,
+    holders: dict[str, list[tuple[dict, int, dict]]] | None = None,
+) -> tuple[dict, int, dict] | None:
+    """The authoritative target of ``link`` according to ``inputs[].link``.
+
+    Prefer the declared node and slot when it really holds the id, then any
+    holder on the declared node, then the first serialized holder. This is the
+    same recovery order the renderer uses for a stale link row.
+    """
+    locations = (holders if holders is not None else _link_holders(sg)).get(str(link_id), [])
+    exact = next(
+        (
+            location
+            for location in locations
+            if str(location[0].get("id")) == str(link.get("target_id")) and location[1] == link.get("target_slot")
+        ),
+        None,
+    )
+    if exact is not None:
+        return exact
+    declared_node = next(
+        (location for location in locations if str(location[0].get("id")) == str(link.get("target_id"))), None
+    )
+    return declared_node if declared_node is not None else next(iter(locations), None)
 
 
 def _unpromoted_inputs(sg: dict) -> list[PromotedInput]:
@@ -158,7 +204,7 @@ def promoted_inputs(
         return capped
     _budget[0] -= 1
     _stack = (*_stack, id(sg))
-    inner = {str(n.get("id")): n for n in sg.get("nodes") or [] if isinstance(n, dict)}
+    holders = _link_holders(sg)
     # Only hashable ids can be looked up; a malformed (list/dict) id is skipped
     # rather than crashing conversion of the whole workflow.
     links = {
@@ -183,19 +229,10 @@ def promoted_inputs(
             link = links.get(link_id)
             if not isinstance(link, dict):
                 continue
-            target = inner.get(str(link.get("target_id")))
-            if target is None:
+            held = held_link_target(sg, link_id, link, holders)
+            if held is None:
                 continue
-            target_inputs = target.get("inputs") or []
-            slot = link.get("target_slot")
-            entry = target_inputs[slot] if isinstance(slot, int) and 0 <= slot < len(target_inputs) else None
-            if not isinstance(entry, dict):
-                continue
-            # LiteGraph treats inputs[].link as authoritative. A stale
-            # boundary row that merely points at this slot does not promote
-            # the widget unless the slot actually holds that row's id.
-            if not _entry_holds_link(entry, link_id):
-                continue
+            target, _slot, entry = held
             inner_def = _nested_definition(target, defs, _stack)
             if inner_def is not None:
                 # The target is itself a subgraph instance: its input entry
