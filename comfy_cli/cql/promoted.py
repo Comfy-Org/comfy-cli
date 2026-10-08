@@ -96,8 +96,40 @@ def _entry_holds_link(entry: dict, link_id: Any) -> bool:
     return entry.get("link") is not None and str(entry["link"]) == str(link_id)
 
 
+def _unpromoted_inputs(sg: dict) -> list[PromotedInput]:
+    """Declared inputs with no host-value slots, used when traversal is capped."""
+    return [
+        PromotedInput(
+            name=str(inp.get("name") or ""),
+            type=inp.get("type") if isinstance(inp.get("type"), str) else "",
+            index=index,
+            value_index=None,
+        )
+        for index, inp in enumerate(sg.get("inputs") or [])
+        if isinstance(inp, dict)
+    ]
+
+
+def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
+    """A linear cap for malformed definition DAGs with exponentially many paths."""
+    definitions = {id(definition): definition for definition in defs.values() if isinstance(definition, dict)}
+    definitions.setdefault(id(root), root)
+    graph_size = 0
+    for definition in definitions.values():
+        graph_size += 1
+        for field_name in ("inputs", "nodes", "links"):
+            values = definition.get(field_name)
+            graph_size += len(values) if isinstance(values, list) else 0
+    return max(1, graph_size) * (_MAX_NESTED_PROMOTION_DEPTH + 1)
+
+
 def promoted_inputs(
-    sg: dict, defs: dict[str, dict], depth: int = 0, _stack: tuple[int, ...] = ()
+    sg: dict,
+    defs: dict[str, dict],
+    depth: int = 0,
+    _stack: tuple[int, ...] = (),
+    _memo: dict[tuple[int, int, tuple[int, ...]], list[PromotedInput]] | None = None,
+    _budget: list[int] | None = None,
 ) -> list[PromotedInput]:
     """Every declared input of definition ``sg`` in declaration order, with the
     host value slot each widget-backed one owns — the frontend's own rule
@@ -108,7 +140,23 @@ def promoted_inputs(
     ``_stack`` holds the definitions already being walked: a target that
     resolves to one of them is a cycle (a definition cannot contain itself),
     so it is treated as the plain node it must be rather than recursed into —
-    recursing fans out once per linked input per level and never finishes."""
+    recursing fans out once per linked input per level and never finishes.
+    ``_memo`` keeps repeated fan-out through the same definition and traversal
+    context linear without changing those cycle semantics. ``_budget`` also
+    bounds distinct ancestry paths in a malformed definition DAG, proportional
+    to the serialized definition graph rather than its path count."""
+    if _memo is None:
+        _memo = {}
+    if _budget is None:
+        _budget = [_promotion_visit_limit(defs, sg)]
+    memo_key = (id(sg), depth, _stack)
+    if memo_key in _memo:
+        return _memo[memo_key]
+    if _budget[0] <= 0:
+        capped = _unpromoted_inputs(sg)
+        _memo[memo_key] = capped
+        return capped
+    _budget[0] -= 1
     _stack = (*_stack, id(sg))
     inner = {str(n.get("id")): n for n in sg.get("nodes") or [] if isinstance(n, dict)}
     # Only hashable ids can be looked up; a malformed (list/dict) id is skipped
@@ -154,7 +202,9 @@ def promoted_inputs(
                 # carries a widget marker when promoted, but the concrete
                 # widget lives deeper — resolve through its own promotion.
                 if depth < _MAX_NESTED_PROMOTION_DEPTH:
-                    inner_by_name = {p.name: p for p in promoted_inputs(inner_def, defs, depth + 1, _stack)}
+                    inner_by_name = {
+                        p.name: p for p in promoted_inputs(inner_def, defs, depth + 1, _stack, _memo, _budget)
+                    }
                     inner_pi = inner_by_name.get(str(entry.get("name")))
                     if inner_pi is not None and inner_pi.is_widget:
                         source = (str(target.get("id")), str(entry.get("name")), None, True)
@@ -182,6 +232,7 @@ def promoted_inputs(
             )
         )
         value_index += 1
+    _memo[memo_key] = out
     return out
 
 
