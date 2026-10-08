@@ -15,6 +15,8 @@ seedance, ideogram?"). Neither is a typo:
 
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 
 from comfy_cli.command.generate import spec
@@ -196,6 +198,18 @@ def test_model_hint_searches_later_enum_fields_and_uses_their_real_flag(monkeypa
     assert hint is not None
     assert "--model-name <id>" in hint, hint
     assert "--model <id>" not in hint, hint
+
+
+def test_extract_enum_memoizes_shared_schema_branches():
+    schema: dict = {"enum": ["example-model-v1"]}
+    depth = 32
+    for _ in range(depth):
+        schema = {"anyOf": [schema, schema]}
+
+    with mock.patch.object(spec, "_extract_enum", wraps=spec._extract_enum) as extract:
+        assert spec._extract_enum(schema) == ["example-model-v1"]
+
+    assert extract.call_count <= depth * 2 + 1
 
 
 def test_model_hint_skips_an_excessively_deep_ref_chain(monkeypatch):

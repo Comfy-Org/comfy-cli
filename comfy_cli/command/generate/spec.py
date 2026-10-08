@@ -425,7 +425,7 @@ def get_endpoint(endpoint_id: str) -> Endpoint:
     raise SpecError(_unknown_endpoint_message(endpoint_id))
 
 
-def _extract_enum(prop: dict[str, Any]) -> list[str] | None:
+def _extract_enum(prop: dict[str, Any], _memo: dict[int, list[str] | None] | None = None) -> list[str] | None:
     """Pull a string enum out of a resolved property schema — directly, from
     ``items`` (array-typed fields), or from ``anyOf``/``oneOf``/``allOf``
     variants. ``anyOf``/``oneOf`` branches are unioned (a spec may split the
@@ -433,17 +433,30 @@ def _extract_enum(prop: dict[str, Any]) -> list[str] | None:
     constraint must hold). Numeric members are coerced to their string form so
     an unquoted YAML value like ``3.5`` isn't silently dropped. Returns None
     when no non-empty string enum is found."""
+    if _memo is None:
+        _memo = {}
+    memo_key = id(prop)
+    if memo_key in _memo:
+        return _memo[memo_key]
+    # A resolved schema is a shared DAG. Mark this object before descending so
+    # repeated branches are linear and a malformed object cycle is harmless.
+    _memo[memo_key] = None
+
+    def finish(value: list[str] | None) -> list[str] | None:
+        _memo[memo_key] = value
+        return value
+
     enum = prop.get("enum")
     if isinstance(enum, list):
         values = [str(v) if isinstance(v, int | float) and not isinstance(v, bool) else v for v in enum]
         values = [v for v in values if isinstance(v, str)]
         if values:
-            return values
+            return finish(values)
     items = prop.get("items")
     if isinstance(items, dict):
-        found = _extract_enum(items)
+        found = _extract_enum(items, _memo)
         if found:
-            return found
+            return finish(found)
     for key in ("anyOf", "oneOf"):
         variants = prop.get(key)
         if not isinstance(variants, list):
@@ -451,19 +464,19 @@ def _extract_enum(prop: dict[str, Any]) -> list[str] | None:
         merged: list[str] = []
         for variant in variants:
             if isinstance(variant, dict):
-                found = _extract_enum(variant)
+                found = _extract_enum(variant, _memo)
                 if found:
                     merged.extend(v for v in found if v not in merged)
         if merged:
-            return merged
+            return finish(merged)
     all_of = prop.get("allOf")
     if isinstance(all_of, list):
-        branch_enums = [e for v in all_of if isinstance(v, dict) if (e := _extract_enum(v))]
+        branch_enums = [e for v in all_of if isinstance(v, dict) if (e := _extract_enum(v, _memo))]
         if branch_enums:
             intersected = [v for v in branch_enums[0] if all(v in b for b in branch_enums[1:])]
             if intersected:
-                return intersected
-    return None
+                return finish(intersected)
+    return finish(None)
 
 
 def model_enum(endpoint_id: str, field: str = "model") -> list[str] | None:
