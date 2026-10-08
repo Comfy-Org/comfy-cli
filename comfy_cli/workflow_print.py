@@ -299,11 +299,11 @@ def _broken_links(nodes: list[dict], links: list[Any], qualify: Any = str) -> tu
     broken: dict[str, str] = {}
     rest: list = []
     nodes_by_id = {str(n.get("id")): n for n in nodes}
-    holders_by_link: dict[str, tuple[dict, dict]] = {}
+    holders_by_link: dict[str, list[tuple[dict, int, dict]]] = {}
     for node in nodes:
-        for inp in node.get("inputs") or []:
+        for slot, inp in enumerate(node.get("inputs") or []):
             if isinstance(inp, dict) and inp.get("link") is not None:
-                holders_by_link.setdefault(str(inp["link"]), (node, inp))
+                holders_by_link.setdefault(str(inp["link"]), []).append((node, slot, inp))
 
     def holder_of(link_id: Any, tgt: dict | None) -> str | None:
         for inp in (tgt or {}).get("inputs") or []:
@@ -319,22 +319,42 @@ def _broken_links(nodes: list[dict], links: list[Any], qualify: Any = str) -> tu
         src_node = nodes_by_id.get(str(src_id))
         tgt_node = nodes_by_id.get(str(tgt_id))
         effective_tgt_id = tgt_id
-        if tgt_node is None:
+        effective_tgt_slot = tgt_slot
+        locations = holders_by_link.get(str(link_id), [])
+        holder = next(
+            (
+                location
+                for location in locations
+                if str(location[0].get("id")) == str(tgt_id) and location[1] == tgt_slot
+            ),
+            next(
+                (location for location in locations if str(location[0].get("id")) == str(tgt_id)),
+                next(iter(locations), None),
+            ),
+        )
+        target_inputs = tgt_node.get("inputs") if tgt_node is not None else None
+        declared_input = (
+            target_inputs[tgt_slot]
+            if isinstance(target_inputs, list) and _is_slot_index(tgt_slot) and 0 <= tgt_slot < len(target_inputs)
+            else None
+        )
+        declared_holds = isinstance(declared_input, dict) and str(declared_input.get("link")) == str(link_id)
+        if holder is not None and not declared_holds:
+            tgt_node, effective_tgt_slot, _holder_input = holder
+            effective_tgt_id = tgt_node.get("id")
+        elif tgt_node is None:
             # A row's target can drift while another node's input still holds
             # its id. Leave that case for ``_stale_input_slot_links`` to
             # retarget; only an entirely unheld row feeds nothing.
-            holder = holders_by_link.get(str(link_id))
             if holder is None:
                 warnings.append(
                     f"link {link_id} targets missing node {qualify(tgt_id)}; it feeds nothing and was ignored"
                 )
                 continue
-            tgt_node = holder[0]
-            effective_tgt_id = tgt_node.get("id")
         why = None
         if src_node is None:
             why = f"its source node {qualify(src_id)} does not exist"
-        elif not _is_slot_index(src_slot) or not _is_slot_index(tgt_slot):
+        elif not _is_slot_index(src_slot) or not _is_slot_index(effective_tgt_slot):
             why = "it has a non-integer slot"
         else:
             outputs = src_node.get("outputs")
@@ -426,6 +446,17 @@ def _stale_input_slot_links(
                 )
             continue
         if not _is_slot_index(tgt_slot):
+            where = f"link {link_id} has non-integer input slot {tgt_slot!r} on node {qualify(tgt_id)}"
+            if canonical is not None:
+                holder_id, holder_slot, holder = canonical
+                retargeted[str(link_id)] = (holder_id, holder_slot)
+                warnings.append(
+                    f"{where}; rendered through input {str(holder.get('name') or '')!r} on node "
+                    f"{qualify(holder_id)}, which holds it"
+                )
+            else:
+                ignored.add(str(link_id))
+                warnings.append(f"{where}; no input holds it, so it feeds nothing and was ignored")
             continue
 
         inputs = tgt_node.get("inputs")

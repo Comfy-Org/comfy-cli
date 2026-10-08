@@ -1386,6 +1386,29 @@ def test_link_row_is_retargeted_to_the_input_that_holds_it(sd15_graph):
     assert "rendered through input 'samples' on node 3" in res.warnings[0]
 
 
+@pytest.mark.parametrize(
+    ("declared_target", "declared_slot"),
+    [(999, "bad"), (999, -1), (2, "bad")],
+)
+def test_actual_holder_recovers_missing_or_malformed_declared_targets(sd15_graph, declared_target, declared_slot):
+    wf = _stale_slot_workflow([7, 1, 0, declared_target, declared_slot, "LATENT"])
+    wf["links"] = [[7, 1, 0, declared_target, declared_slot, "LATENT"]]
+    wf["nodes"][1]["inputs"][0]["link"] = None
+    wf["nodes"].append(
+        _node(
+            3,
+            "VAEDecode",
+            inputs=[{"name": "samples", "type": "LATENT", "link": 7}, {"name": "vae", "link": None}],
+        )
+    )
+
+    res = render_py(wf, sd15_graph)
+
+    assert "samples=empty_latent_image" in next(line for line in res.source.splitlines() if "# 3" in line)
+    assert any("rendered through input 'samples' on node 3, which holds it" in warning for warning in res.warnings)
+    assert not any("BROKEN link 7" in warning for warning in res.warnings)
+
+
 def test_duplicate_link_holder_preserves_the_real_cycle():
     wf = _mini(
         [
