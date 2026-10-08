@@ -1418,6 +1418,19 @@ def test_typed_duplicate_link_rows_are_rejected():
         render_py(wf, None)
 
 
+def test_short_malformed_row_does_not_conflict_with_a_complete_link():
+    wf = _mini(
+        [_node(1, "Source", outputs=[{"name": "value"}]), _node(2, "Target", inputs=[{"name": "x", "link": 7}])],
+        [],
+    )
+    wf["links"] = [[7, True], [7, 1, 0, 2, 0]]
+
+    res = render_py(wf, None)
+
+    assert "target = Target(x=source" in res.source
+    assert "ignoring malformed link row [7, True]" in res.warnings
+
+
 def test_workflow_fields_cannot_spoof_normalisation_markers():
     node = _node(1, "Example")
     node["_workflow_print_nonlist_inputs"] = True

@@ -182,7 +182,7 @@ def _dedupe_identical_links(links: list[Any]) -> list[Any]:
     seen: dict[str, tuple[Any, ...]] = {}
     out: list[Any] = []
     for link in links:
-        if not isinstance(link, list) or not link:
+        if not isinstance(link, list) or len(link) < 5:
             out.append(link)
             continue
         link_id = str(link[0])
@@ -234,7 +234,7 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
     seen_links: dict[str, list] = {}
     reported_link_dupes: set[str] = set()
     for link in links:
-        if not isinstance(link, list) or not link:
+        if not isinstance(link, list) or len(link) < 5:
             continue
         link_id = link[0]
         normalized_link_id = str(link_id)
