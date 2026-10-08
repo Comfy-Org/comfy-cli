@@ -334,6 +334,13 @@ def test_internal_error_scrubber_drops_a_credential_split_at_the_input_cap():
     assert scrubbed.endswith("…")
 
 
+def test_internal_error_scrubber_keeps_a_long_compact_diagnostic():
+    scrubbed = _internal_error_message(RuntimeError("x" * 5_000))
+    assert len(scrubbed) == 500
+    assert scrubbed.startswith("RuntimeError: " + "x" * 100)
+    assert scrubbed.endswith("…")
+
+
 def test_internal_error_scrubber_preserves_text_after_an_unquoted_value():
     scrubbed = _internal_error_message(RuntimeError("bad option 'token=abc' given; retry later"))
     assert "abc" not in scrubbed
