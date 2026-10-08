@@ -7,7 +7,7 @@ import zipfile
 import pytest
 
 from comfy_cli import file_utils
-from comfy_cli.file_utils import atomic_write_bytes, atomic_write_text
+from comfy_cli.file_utils import atomic_write_bytes, atomic_write_text, cache_dir
 
 
 def test_zip_files_respects_comfyignore(tmp_path, monkeypatch):
@@ -524,3 +524,51 @@ def test_cleanup_stale_tmp_files_matches_a_real_atomic_write_temp(tmp_path, monk
 
     assert file_utils.cleanup_stale_tmp_files(workdir) == 1
     assert not leftover.exists()
+
+
+def test_cache_dir_prefers_comfy_cache_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMFY_CACHE_DIR", str(tmp_path / "explicit"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    assert cache_dir() == tmp_path / "explicit"
+
+
+def test_cache_dir_expands_user_in_comfy_cache_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("COMFY_CACHE_DIR", "~/cc")
+    assert cache_dir() == tmp_path / "cc"
+
+
+def test_cache_dir_falls_back_to_xdg(tmp_path, monkeypatch):
+    monkeypatch.delenv("COMFY_CACHE_DIR", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    assert cache_dir() == tmp_path / "xdg" / "comfy-cli"
+
+
+def test_cache_dir_defaults_to_home_dot_cache(tmp_path, monkeypatch):
+    monkeypatch.delenv("COMFY_CACHE_DIR", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert cache_dir() == tmp_path / ".cache" / "comfy-cli"
+
+
+def test_cache_dir_blank_comfy_cache_dir_falls_through(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMFY_CACHE_DIR", "   ")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    assert cache_dir() == tmp_path / "xdg" / "comfy-cli"
+
+
+def test_cache_dir_resolves_relative_comfy_cache_dir_against_cwd(tmp_path, monkeypatch):
+    """A relative override must not resolve differently in every process — a
+    detached background refresher launches its child from inside the cache
+    dir itself, so a relative value there would nest a second tree under it."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COMFY_CACHE_DIR", "relative-cache")
+    assert cache_dir() == tmp_path / "relative-cache"
+
+
+def test_cache_dir_survives_unresolvable_home(monkeypatch):
+    """`pathlib.Path.expanduser` raises when the home dir can't be determined;
+    `os.path.expanduser` returns the path unchanged instead, so this must not
+    raise."""
+    monkeypatch.setenv("COMFY_CACHE_DIR", "~nosuchuser1234/cache")
+    cache_dir()

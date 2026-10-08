@@ -66,17 +66,24 @@ def _broken_pipe_swallowed_by_click() -> bool:
     """Report whether the `SystemExit` we just caught is click's EPIPE bail-out.
 
     click's `BaseCommand.main` handles EPIPE itself: it swaps `sys.stdout` and
-    `sys.stderr` for `click.utils.PacifyFlushWrapper` and raises
-    `SystemExit(1)`. So on the common path a broken pipe never reaches us as a
-    `BrokenPipeError` at all, and the exit 1 is otherwise indistinguishable
-    from a genuine command failure. That wrapper — which click installs in this
-    branch and nowhere else — is the one reliable in-process signal.
+    `sys.stderr` for a `PacifyFlushWrapper` and raises `SystemExit(1)`. So on
+    the common path a broken pipe never reaches us as a `BrokenPipeError` at
+    all, and the exit 1 is otherwise indistinguishable from a genuine command
+    failure. That wrapper — which click installs in this branch and nowhere
+    else — is the one reliable in-process signal.
+
+    The class is matched by name and owning package because there is no single
+    class to point at: typer >= 0.24 runs on a vendored click, so the wrapper the
+    CLI actually meets is `typer._click.utils.PacifyFlushWrapper` rather than the
+    one in the installed `click`, and click 8.5 renamed its own copy to a private
+    name whose public alias warns on access. The package test keeps a same-named
+    class from anywhere else — `my_click_adapter.PacifyFlushWrapper` — out, since
+    a false positive here reports a failed command as a success.
     """
-    try:
-        from click.utils import PacifyFlushWrapper
-    except ImportError:  # pragma: no cover — click ships as a typer dependency
+    cls = type(sys.stdout)
+    if cls.__name__.removeprefix("_") != "PacifyFlushWrapper":
         return False
-    return isinstance(sys.stdout, PacifyFlushWrapper)
+    return cls.__module__.partition(".")[0] in ("click", "typer")
 
 
 def _flush_stdout(*, unwinding: bool) -> bool:
@@ -127,7 +134,10 @@ def main() -> None:
         # `BrokenPipeError` reaching here is stdout dying outside that guard.
         _exit_quietly_on_broken_pipe()
     except SystemExit as exc:
-        if _broken_pipe_swallowed_by_click():
+        # `exc.code == 1` narrows the shortcut to the only code click's EPIPE
+        # branch raises, so no other exit status can be laundered into a 0 by a
+        # stdout that merely looks pacified.
+        if exc.code == 1 and _broken_pipe_swallowed_by_click():
             _exit_quietly_on_broken_pipe()
         # stdout is block-buffered when it is a pipe, so the write that actually
         # lands on the closed reader is frequently the interpreter's shutdown

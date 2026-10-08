@@ -159,7 +159,7 @@ class TestDetectViaNvidiaSmiResolvesBinaryPath:
         mock_run.assert_not_called()
 
     def test_rejects_binary_planted_in_cwd(self, tmp_path):
-        """The BE-3434 vector: an ``nvidia-smi`` sitting directly in the CWD is
+        """The attack vector: an ``nvidia-smi`` sitting directly in the CWD is
         never executed."""
         planted = tmp_path / "nvidia-smi"
         planted.write_text("")

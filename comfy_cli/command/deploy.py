@@ -1,0 +1,589 @@
+"""Deployment lifecycle commands."""
+
+import urllib.error
+from collections.abc import Callable
+from dataclasses import replace
+from pathlib import Path
+from typing import Annotated, NoReturn
+
+import typer
+
+from comfy_cli import tracking
+from comfy_cli.builder_api import BuilderAuthError
+from comfy_cli.command import deploy_cancel as _deploy_cancel
+from comfy_cli.command import deploy_lifecycle as _deploy_lifecycle
+from comfy_cli.command import deploy_ls as _deploy_ls
+from comfy_cli.command import deploy_read as _deploy_read
+from comfy_cli.command import deploy_refs as _deploy_refs
+from comfy_cli.command import deploy_rename as _deploy_rename
+from comfy_cli.command import deploy_rollback as _deploy_rollback
+from comfy_cli.command import deploy_run as _deploy_run
+from comfy_cli.command.build_paths import BuildSpecNotFoundError
+from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject
+from comfy_cli.command.deploy_compute import prompt_gpu as _prompt_gpu
+from comfy_cli.command.deploy_compute import prompt_region as _prompt_region
+from comfy_cli.command.deploy_progress import DeployWatchReporter
+from comfy_cli.command.deploy_promote import promote as _promote
+from comfy_cli.command.deploy_resolve import DeployResolveError, deployment_id_for
+from comfy_cli.command.deploy_runtime import MOVE_WATCH_SECONDS, DeployWatchLostError, terminal_status_error
+from comfy_cli.command.deploy_runtime import command_clients as _command_clients
+from comfy_cli.command.deploy_runtime import exit_watch_lost as _exit_watch_lost
+from comfy_cli.command.deploy_runtime import poll_deployment as _poll_deployment
+from comfy_cli.command.deploy_runtime import render_spec_error as _render_spec_error
+from comfy_cli.command.deploy_runtime import resolved_up_request as _resolved_up_request
+from comfy_cli.command.deploy_runtime import sleep as _sleep
+from comfy_cli.command.deploy_status import run_status as _run_status
+from comfy_cli.command.deploy_types import ComputeRequiredError, MoveResult, move_settled, watched_move
+from comfy_cli.command.deploy_types import UpRequest as UpRequest
+from comfy_cli.command.deploy_types import (
+    required_string as _required_string,
+)
+from comfy_cli.command.deploy_up import (
+    _IDEMPOTENCY_NAMESPACE as _IDEMPOTENCY_NAMESPACE,
+)
+from comfy_cli.command.deploy_up import (
+    MoveFailedError,
+    MoveOutcomes,
+    MoveReplacedError,
+    _render_result,
+    ends_terminal,
+    estimate_line,
+    finish_move,
+    landed_result,
+    move_line,
+    move_text,
+    reconcile_up,
+    release_or_id,
+    replaced_message,
+    warn_status,
+)
+from comfy_cli.command.deploy_up import (
+    _idempotency_key as _idempotency_key,
+)
+from comfy_cli.command.deploy_up import (
+    _soft_deleted_generation as _soft_deleted_generation,
+)
+from comfy_cli.deploy_api_errors import DeployAPIError
+from comfy_cli.http import ResponseTooLarge
+from comfy_cli.interaction import require_option
+from comfy_cli.output import get_renderer
+
+app = typer.Typer(no_args_is_help=True, help="Create and manage serverless deployments.")
+refs_app = typer.Typer(no_args_is_help=True, help="Inspect deployment reference catalogs.")
+app.add_typer(refs_app, name="refs")
+DeployPath = Annotated[
+    str | None,
+    typer.Argument(help="ComfyUI install directory or build spec path. Default: the current directory."),
+]
+DeploymentOption = Annotated[
+    str | None,
+    typer.Option(
+        "--deployment",
+        help=(
+            "Select this deployment by name or id. As <build>/<name>, it needs no Build's folder, "
+            "except for status, and up without --release."
+        ),
+    ),
+]
+
+
+def _require_paired_bounds(renderer, minimum: int | None, maximum: int | None) -> None:
+    """Refuse one worker bound without the other.
+
+    The service measures an omitted bound against the effective default the
+    provider applies (``min``->0, ``max``->1), not against the stored value, so
+    ``--min 3`` alone is compared to a ceiling of 1 and refused — against a
+    limit nobody set, on a deployment that legitimately stores no bounds because
+    the web UI created it. Naming both is the only shape that means what it
+    says, and refusing here says so in the user's own vocabulary rather than
+    relaying a 400 about a `max` they never typed.
+    """
+    supplied = [flag for flag, value in (("--min", minimum), ("--max", maximum)) if value is not None]
+    if len(supplied) != 1:
+        return
+    missing = "--max" if supplied[0] == "--min" else "--min"
+    renderer.error(
+        code="deploy_missing_input",
+        message=f"{supplied[0]} requires {missing}: worker bounds are set as a pair.",
+        details={"missing": [missing]},
+    )
+    raise typer.Exit(code=1)
+
+
+@app.command("run", help="Submit an API-format workflow to a ready deployment.")
+@tracking.track_command("deploy")
+def run_cmd(
+    ctx: typer.Context,
+    path: DeployPath = None,
+    workflow: Annotated[str | None, typer.Option("--workflow", help="API-format workflow JSON file.")] = None,
+    deployment_id: DeploymentOption = None,
+    wait: Annotated[bool, typer.Option("--wait/--no-wait", help="Wait for the job and download outputs.")] = True,
+    output_dir: Annotated[Path, typer.Option("--output-dir", help="Directory for completed outputs.")] = Path(
+        "outputs"
+    ),
+    timeout: Annotated[float | None, typer.Option("--timeout", min=0.001, help="Maximum wait in seconds.")] = None,
+    no_upload: Annotated[bool, typer.Option("--no-upload", help="Fail when a local asset is not deduped.")] = False,
+    asset_root: Annotated[
+        list[Path] | None,
+        typer.Option("--asset-root", help="Extra directory workflow inputs may name files inside. Repeatable."),
+    ] = None,
+) -> None:
+    _deploy_run.run_deploy(
+        ctx,
+        _deploy_run.DeployRunRequest(
+            path,
+            workflow,
+            deployment_id,
+            wait,
+            output_dir,
+            timeout,
+            no_upload,
+            tuple(asset_root or ()),
+        ),
+    )
+
+
+@app.command("scale", help="Edit a deployment's worker bounds or stopped compute configuration.")
+@tracking.track_command("deploy")
+def scale_cmd(
+    path: DeployPath = None,
+    deployment_id: DeploymentOption = None,
+    minimum: Annotated[
+        int | None, typer.Option("--min", min=0, max=20, help="Minimum warm workers. Requires --max.")
+    ] = None,
+    maximum: Annotated[
+        int | None, typer.Option("--max", min=1, max=20, help="Maximum workers. Requires --min.")
+    ] = None,
+    gpu: Annotated[str | None, typer.Option("--gpu", help="GPU class; deployment must be stopped.")] = None,
+    region: Annotated[str | None, typer.Option("--region", help="Region; deployment must be stopped.")] = None,
+) -> None:
+    _require_paired_bounds(get_renderer(), minimum, maximum)
+    target = _deploy_read.ReadRequest(path, deployment_id)
+    _deploy_lifecycle.run_scale(_deploy_lifecycle.ScaleRequest(target, minimum, maximum, gpu, region))
+
+
+@app.command("stop", help="Pause a deployment while retaining its endpoint and staged models.")
+@tracking.track_command("deploy")
+def stop_cmd(path: DeployPath = None, deployment_id: DeploymentOption = None) -> None:
+    _deploy_lifecycle.run_stop(_deploy_read.ReadRequest(path, deployment_id))
+
+
+@app.command("start", help="Resume a stopped or failed deployment.")
+@tracking.track_command("deploy")
+def start_cmd(path: DeployPath = None, deployment_id: DeploymentOption = None) -> None:
+    _deploy_lifecycle.run_start(_deploy_read.ReadRequest(path, deployment_id))
+
+
+@app.command("delete", help="Enqueue teardown and soft-delete a deployment record.")
+@tracking.track_command("deploy")
+def delete_cmd(
+    ctx: typer.Context,
+    path: DeployPath = None,
+    deployment_id: DeploymentOption = None,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
+) -> None:
+    _deploy_lifecycle.run_delete(_deploy_read.ReadRequest(path, deployment_id), yes=yes, ctx=ctx)
+
+
+@refs_app.command("compute", help="List deployable regions and GPU classes with availability.")
+@tracking.track_command("deploy")
+def refs_compute_cmd(
+    region: Annotated[str | None, typer.Option("--region", help="Filter to one region.")] = None,
+) -> None:
+    _deploy_refs.run_compute(region)
+
+
+@app.command("ls", help="List deployments for this Build, or the whole workspace.")
+@tracking.track_command("deploy")
+def ls_cmd(
+    path: DeployPath = None,
+    include_deleted: Annotated[bool, typer.Option("--all", "-a", help="Include deleted deployments.")] = False,
+    workspace: Annotated[bool, typer.Option("--workspace", help="List every Build's deployments.")] = False,
+    status: Annotated[str | None, typer.Option("--status", help="Filter by deployment status server-side.")] = None,
+    limit: Annotated[int, typer.Option("--limit", min=1, max=100, help="Maximum visible deployments.")] = 20,
+) -> None:
+    _deploy_ls.run_ls(_deploy_ls.ListRequest(path, include_deleted, workspace, status, limit))
+
+
+@app.command("show", help="Show one deployment's raw control-plane record.")
+@tracking.track_command("deploy")
+def show_cmd(path: DeployPath = None, deployment_id: DeploymentOption = None) -> None:
+    _deploy_read.run_show(_deploy_read.ReadRequest(path, deployment_id))
+
+
+@app.command("logs", help="Show one deployment's captured ComfyUI log snapshot.")
+@tracking.track_command("deploy")
+def logs_cmd(path: DeployPath = None, deployment_id: DeploymentOption = None) -> None:
+    _deploy_read.run_logs(_deploy_read.ReadRequest(path, deployment_id))
+
+
+@app.command("events", help="Show one deployment's status events in server order.")
+@tracking.track_command("deploy")
+def events_cmd(
+    path: DeployPath = None,
+    deployment_id: DeploymentOption = None,
+    release: Annotated[
+        str | None,
+        typer.Option(
+            "--release",
+            help="Only the events of this release's copy: a version such as v5, or a release id.",
+        ),
+    ] = None,
+) -> None:
+    _deploy_read.run_events(_deploy_read.ReadRequest(path, deployment_id), release)
+
+
+@app.command("status", help="Report deployment health, release freshness, and serving activity for this Build.")
+@tracking.track_command("deploy")
+def status_cmd(
+    path: Annotated[
+        str | None,
+        typer.Argument(help="ComfyUI install directory or build spec path. Default: the current directory."),
+    ] = None,
+    deployment_id: DeploymentOption = None,
+    # `status` answers a question and exits; watching is the caller asking to
+    # stay, so here it stays opt-in. `up` starts the wait, so there it is on.
+    watch: Annotated[bool, typer.Option("--watch", help="Poll until the deployment reaches a terminal state.")] = False,
+) -> None:
+    _run_status(path, deployment_id=deployment_id, watch=watch)
+
+
+def _watch(renderer, client, deployment_id: str, *, outcomes: MoveOutcomes | None, on_abandon) -> JsonObject:
+    """Follow the deployment until it settles, or until the move ``outcomes`` reads does."""
+    moving = outcomes.move.release_id if outcomes is not None else None
+    reporter = DeployWatchReporter(renderer, deployment_id)
+    settled = move_settled(outcomes) if outcomes is not None else None
+    limit = MOVE_WATCH_SECONDS if moving is not None else None
+    try:
+        return _poll_deployment(
+            client, deployment_id, _sleep, reporter.snapshot, reporter.unanswered, settled=settled, limit=limit
+        )
+    except KeyboardInterrupt:
+        reporter.interrupted()
+        on_abandon(reporter.last)
+        raise typer.Exit(code=130) from None
+    except DeployWatchLostError as error:
+        reporter.close()
+        on_abandon(None)
+        if moving is None:
+            _exit_watch_lost(renderer, error)
+        # `status --watch` ends at ready, which a deployment being moved already is.
+        hint = (
+            f"run `comfy deploy show --deployment {deployment_id}`: the move has landed once it shows no pendingUpdate "
+            f"and releaseId {moving}"
+        )
+        _exit_watch_lost(renderer, error, hint)
+    finally:
+        reporter.close()
+
+
+def _render_move_failed(renderer, error: MoveFailedError) -> NoReturn:
+    renderer.error(
+        code="deploy_update_failed",
+        message=str(error),
+        details={
+            "deployment_id": error.deployment_id,
+            "release_id": error.release["id"],
+            "serving_release_id": error.serving_release_id,
+            "status": error.status,
+        },
+    )
+    raise typer.Exit(code=1) from error
+
+
+def _render_move_replaced(renderer, builder, error: MoveReplacedError) -> NoReturn:
+    replacing_id = error.replacing_release_id
+    replacing = release_or_id(builder, replacing_id) if isinstance(replacing_id, str) else {"id": replacing_id}
+    renderer.error(
+        code="deploy_update_replaced",
+        message=replaced_message(error.deployment_id, error.release, replacing),
+        hint=f"run `comfy deploy status --deployment {error.deployment_id}` to see the update that replaced it",
+        details={
+            "deployment_id": error.deployment_id,
+            "release_id": error.release["id"],
+            "replacing_release_id": replacing_id,
+        },
+    )
+    raise typer.Exit(code=1) from error
+
+
+def _warn_unapplied_bounds(renderer, result) -> None:
+    if result.pending_bounds is None:
+        return
+    deployment_id = _required_string(result.deployment, "id")
+    renderer.warn(
+        "--min and --max were not applied: they wait for the update to land.",
+        hint=f"run `comfy deploy scale --deployment {deployment_id} --min <n> --max <n>` once it lands",
+    )
+
+
+@app.command("up", help="Create or reconcile a deployment for the selected Build release.")
+@tracking.track_command("deploy")
+def up_cmd(
+    ctx: typer.Context,
+    path: Annotated[
+        str | None,
+        typer.Argument(help="ComfyUI install directory or build spec path. Default: the current directory."),
+    ] = None,
+    gpu: Annotated[str | None, typer.Option("--gpu", help="GPU class for a new deployment.")] = None,
+    region: Annotated[str | None, typer.Option("--region", help="Region for a new deployment.")] = None,
+    minimum: Annotated[
+        int | None,
+        typer.Option(
+            "--min", min=0, max=20, help="Minimum warm workers. Requires --max. Default: keep the current value, or 0."
+        ),
+    ] = None,
+    maximum: Annotated[
+        int | None,
+        typer.Option(
+            "--max",
+            min=1,
+            max=20,
+            help="Maximum workers. Requires --min. Default: keep the current value, else 1.",
+        ),
+    ] = None,
+    release: Annotated[str | None, typer.Option("--release", help="Deploy this release id.")] = None,
+    deployment_id: DeploymentOption = None,
+    create: Annotated[
+        bool,
+        typer.Option(
+            "--create",
+            help="Add a new deployment on this release instead of updating the Build's existing one.",
+        ),
+    ] = False,
+    name: Annotated[
+        str | None,
+        typer.Option(
+            "--name",
+            help="Name the deployment this creates. Default: production for a Build's first, else deployment-N.",
+        ),
+    ] = None,
+    # Watching is what someone who just asked for a deployment wants: the command
+    # that starts a several-minute wait should say how the wait is going. Ctrl-C
+    # and --no-watch both leave the deploy running and print how to re-attach.
+    watch: Annotated[
+        bool,
+        typer.Option(
+            "--watch/--no-watch",
+            help="Follow the deployment until it settles. Use --no-watch to return as soon as it is accepted.",
+        ),
+    ] = True,
+) -> None:
+    renderer = get_renderer()
+    _require_paired_bounds(renderer, minimum, maximum)
+    try:
+        builder, client = _command_clients()
+        request = replace(
+            _resolved_up_request(builder, path, release),
+            gpu=gpu,
+            region=region,
+            minimum=minimum,
+            maximum=maximum,
+            deployment_id=deployment_id,
+            create=create,
+            name=name,
+            watch=watch,
+        )
+        try:
+            result = reconcile_up(builder, client, request)
+        except ComputeRequiredError:
+            missing = [name for name, value in (("--gpu", gpu), ("--region", region)) if value is None]
+            selected_gpu = require_option(
+                "--gpu",
+                gpu,
+                prompt_fn=lambda: _prompt_gpu(client),
+                error_code="deploy_missing_input",
+                missing=missing,
+                ctx=ctx,
+            )
+            selected_region = require_option(
+                "--region",
+                region,
+                prompt_fn=lambda: _prompt_region(client, selected_gpu),
+                error_code="deploy_missing_input",
+                missing=missing,
+                ctx=ctx,
+            )
+            result = reconcile_up(builder, client, replace(request, gpu=selected_gpu, region=selected_region))
+        if result.estimate is not None and renderer.is_pretty():
+            renderer.info(estimate_line(result.estimate))
+        if watch:
+            watched_id = _required_string(result.deployment, "id")
+            moving = result.previous_release is not None and result.changed
+            if moving and renderer.is_pretty():
+                renderer.info(move_line(result, watched_id))
+
+            def abandoned(last: JsonObject | None) -> None:
+                # The deploy runs on the service's side and never needed this
+                # process: report where it had got to, and leave it be.
+                _warn_unapplied_bounds(renderer, result)
+                if last is not None:
+                    _render_result(renderer, replace(result, deployment=last, pending_bounds=None), watch=False)
+
+            move = watched_move(result.release, result.previous_release, result.deployment) if moving else None
+            outcomes = MoveOutcomes(client, watched_id, move) if move is not None else None
+            watched = _watch(renderer, client, watched_id, outcomes=outcomes, on_abandon=abandoned)
+            result = finish_move(client, result, watched, outcomes) if outcomes else replace(result, deployment=watched)
+        _render_result(renderer, result, watch=watch)
+    except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:
+        _render_spec_error(renderer, error)
+        raise typer.Exit(code=1) from error
+    except DeployResolveError as error:
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
+        raise typer.Exit(code=1) from error
+    except MoveFailedError as error:
+        _render_move_failed(renderer, error)
+    except MoveReplacedError as error:
+        _render_move_replaced(renderer, builder, error)
+    except DeployAPIError as error:
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
+        raise typer.Exit(code=1) from error
+    except BuilderAuthError as error:
+        renderer.error(code="deploy_not_signed_in", message=str(error))
+        raise typer.Exit(code=1) from error
+    except (ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError) as error:
+        renderer.error(code="deploy_server_error", message=str(error))
+        raise typer.Exit(code=1) from error
+
+
+@app.command("promote", help="Move TARGET onto the release SOURCE serves, keeping TARGET's id and URL.")
+@tracking.track_command("deploy")
+def promote_cmd(
+    source: Annotated[
+        str, typer.Argument(help="Deployment name or id, or <build>/<name>, whose release TARGET should serve.")
+    ],
+    target: Annotated[str, typer.Argument(help="Deployment name or id, or <build>/<name>, to move.")],
+    watch: Annotated[
+        bool,
+        typer.Option("--watch/--no-watch", help="Follow TARGET until the move lands or fails."),
+    ] = True,
+) -> None:
+    def start(builder, client) -> MoveResult:
+        source_id = deployment_id_for(builder, client, source)
+        return _promote(builder, client, source_id, deployment_id_for(builder, client, target))
+
+    _run_move(start, "promote", watch)
+
+
+@app.command("rollback", help="Move a deployment back to an earlier release, keeping its id and URL.")
+@tracking.track_command("deploy")
+def rollback_cmd(
+    path: DeployPath = None,
+    deployment_id: DeploymentOption = None,
+    to: Annotated[
+        str | None,
+        typer.Option(
+            "--to",
+            help="The release to return to, as v5, 5 or a release id. Default: the release before the current one.",
+        ),
+    ] = None,
+    watch: Annotated[
+        bool,
+        typer.Option("--watch/--no-watch", help="Follow the deployment until the rollback lands or fails."),
+    ] = True,
+) -> None:
+    request = _deploy_rollback.RollbackRequest(path, deployment_id, to)
+    _run_move(lambda builder, client: _deploy_rollback.rollback(builder, client, request), "rollback", watch)
+
+
+@app.command("cancel", help="End the update a deployment waits on; it keeps serving the release it serves.")
+@tracking.track_command("deploy")
+def cancel_cmd(path: DeployPath = None, deployment_id: DeploymentOption = None) -> None:
+    _deploy_cancel.run_cancel(_deploy_cancel.CancelRequest(path, deployment_id))
+
+
+@app.command("rename", help="Give a deployment a new name, keeping its id and URL.")
+@tracking.track_command("deploy")
+def rename_cmd(
+    args: Annotated[
+        list[str],
+        typer.Argument(
+            metavar="[PATH] NAME",
+            help="The new name, after the Build's folder or spec path. Default folder: the current directory.",
+        ),
+    ],
+    deployment_id: DeploymentOption = None,
+) -> None:
+    if len(args) > 2:
+        raise typer.BadParameter("rename takes the new name, and at most a folder before it", param_hint="[PATH] NAME")
+    path = args[0] if len(args) == 2 else None
+    _deploy_rename.run_rename(_deploy_rename.RenameRequest(path, deployment_id, args[-1]))
+
+
+@app.command("history", help="List the releases a deployment ran, newest first, with what moved it.")
+@tracking.track_command("deploy")
+def history_cmd(path: DeployPath = None, deployment_id: DeploymentOption = None) -> None:
+    _deploy_read.run_history(_deploy_read.ReadRequest(path, deployment_id))
+
+
+def _run_move(start: Callable[..., MoveResult], command: str, watch: bool) -> None:
+    """Send a move, follow it as `up` follows one, and report where it left the deployment."""
+    renderer = get_renderer()
+    try:
+        builder, client = _command_clients()
+        result = start(builder, client)
+        if watch and result.changed:
+            # A move that landed at once is said once, after the watch confirms it.
+            if result.waiting and renderer.is_pretty():
+                renderer.info(_moved_text(result))
+
+            def abandoned(last: JsonObject | None) -> None:
+                if last is not None:
+                    _render_move(renderer, replace(result, deployment=last), command=command, watch=False)
+
+            deployment_id = _required_string(result.deployment, "id")
+            outcomes = MoveOutcomes(
+                client, deployment_id, watched_move(result.release, result.previous_release, result.deployment)
+            )
+            watched = _watch(renderer, client, deployment_id, outcomes=outcomes, on_abandon=abandoned)
+            result = landed_result(result, watched, outcomes)
+        _render_move(renderer, result, command=command, watch=watch)
+    except (BuildSpecNotFoundError, BuildSpecInvalidError) as error:
+        _render_spec_error(renderer, error)
+        raise typer.Exit(code=1) from error
+    except DeployResolveError as error:
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
+        raise typer.Exit(code=1) from error
+    except MoveFailedError as error:
+        _render_move_failed(renderer, error)
+    except MoveReplacedError as error:
+        _render_move_replaced(renderer, builder, error)
+    except DeployAPIError as error:
+        renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
+        raise typer.Exit(code=1) from error
+    except BuilderAuthError as error:
+        renderer.error(code="deploy_not_signed_in", message=str(error))
+        raise typer.Exit(code=1) from error
+    except (ResponseTooLarge, TimeoutError, urllib.error.URLError, KeyError) as error:
+        renderer.error(code="deploy_server_error", message=str(error))
+        raise typer.Exit(code=1) from error
+
+
+def _moved_text(result: MoveResult) -> str:
+    deployment_id = _required_string(result.deployment, "id")
+    return move_text(deployment_id, result.deployment, result.release, result.previous_release, result.changed)
+
+
+def _render_move(renderer, result: MoveResult, *, command: str, watch: bool) -> None:
+    deployment_id = _required_string(result.deployment, "id")
+    status = _required_string(result.deployment, "status")
+    if renderer.is_pretty():
+        renderer.success(_moved_text(result))
+    # A move that changed nothing leaves the deployment as it found it, so its
+    # status is reported rather than judged.
+    warn_status(renderer, deployment_id, status, watch=watch and result.changed)
+    if not result.changed and status in {"stopped", "failed"}:
+        renderer.info(
+            f"Deployment {deployment_id} is {status}.",
+            hint=f"run `comfy deploy start --deployment {deployment_id}` to serve it",
+        )
+    terminal = result.changed and ends_terminal(result.deployment, status, moving=True)
+    renderer.emit(
+        result.payload(),
+        command=f"deploy {command}",
+        changed=result.changed,
+        ok=not terminal,
+        error=terminal_status_error(deployment_id, status) if terminal else None,
+    )
+    if terminal:
+        raise typer.Exit(code=1)

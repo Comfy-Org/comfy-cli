@@ -1,52 +1,23 @@
+import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import webbrowser
+from collections.abc import Iterator
 from typing import Annotated
 
-import questionary
+import click
 import typer
 from rich.console import Console
 
 from comfy_cli import cancellation, constants, env_checker, logging, tracking, ui, utils
 from comfy_cli import where as where_module
+from comfy_cli._lazy import LazyCommand, LazyModule, LazySubcommand, LazyTyperGroup
 from comfy_cli._safe_exec import resolve_required_binary
-from comfy_cli.auth import command as auth_command
 from comfy_cli.caller import stream_is_tty
-from comfy_cli.cloud import command as cloud_command
-from comfy_cli.command import (
-    code_search,
-    custom_nodes,
-    pr_command,
-)
-from comfy_cli.command import generate as generate_command
-from comfy_cli.command import install as install_inner
-from comfy_cli.command import (
-    jobs as jobs_command,
-)
-from comfy_cli.command import (
-    nodes as nodes_command,
-)
-from comfy_cli.command import preview as preview_command
-from comfy_cli.command import (
-    project as project_command,
-)
-from comfy_cli.command import run as run_inner
-from comfy_cli.command import run_cli as run_cli_inner
-from comfy_cli.command import (
-    templates as templates_command,
-)
-from comfy_cli.command import transfer as transfer_inner
-from comfy_cli.command import (
-    workflow as workflow_command,
-)
-from comfy_cli.command.custom_nodes.cm_cli_util import normalize_cm_cli_exit_code
-from comfy_cli.command.install import validate_optional_version, validate_version
-from comfy_cli.command.launch import launch as launch_command
-from comfy_cli.command.launch import logs as logs_command
-from comfy_cli.command.models import models as models_command
-from comfy_cli.command.models import search as models_search_command
+from comfy_cli.command.version_validators import validate_optional_version, validate_version
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.constants import GPU_OPTION, CUDAVersion, ROCmVersion
 from comfy_cli.cuda_detect import DEFAULT_CUDA_TAG, detect_cuda_driver_version, resolve_cuda_wheel
@@ -56,13 +27,253 @@ from comfy_cli.help_json import build_help_json
 from comfy_cli.host_port import report_usage_error, validate_host
 from comfy_cli.output import Renderer, get_renderer, rprint, set_renderer
 from comfy_cli.resolve_python import resolve_workspace_python
-from comfy_cli.skills import command as skill_command
-from comfy_cli.standalone import StandalonePython
 from comfy_cli.uv import DependencyCompiler, ensure_pip
 from comfy_cli.workspace_manager import WorkspaceManager, check_comfy_repo
 
+# Deferred imports. These modules are only needed inside the command bodies
+# below, and together they were most of the CLI's startup import graph. The
+# proxies keep the flat module-level names so `patch("comfy_cli.cmdline.run_inner.execute")`
+# and friends keep working; see comfy_cli/_lazy.py. Subcommand *groups* are
+# deferred separately via the table at the bottom of this file.
+install_inner = LazyModule("comfy_cli.command.install")
+run_inner = LazyModule("comfy_cli.command.run")
+run_cli_inner = LazyModule("comfy_cli.command.run_cli")
+transfer_inner = LazyModule("comfy_cli.command.transfer")
+custom_nodes = LazyModule("comfy_cli.command.custom_nodes")
+
 logging.setup_logging()
-app = typer.Typer()
+
+
+def _click_error_is(error: BaseException, name: str) -> bool:
+    """Whether ``error`` is click's ``name`` exception, from either copy of click.
+
+    typer >= 0.24 runs on a vendored click, so ``isinstance`` against the
+    installed ``click`` is false for every exception typer raises and a usage
+    error would leave the ``--json`` stream with no terminating envelope at all.
+    Walking the MRO by class name and owning package covers both copies, and
+    keeps the subclass matching ``isinstance`` gave.
+    """
+    return any(
+        cls.__name__ == name and cls.__module__.partition(".")[0] in ("click", "typer") for cls in type(error).__mro__
+    )
+
+
+def _emit_usage_error_envelope(error: click.UsageError, args: list[str] | None = None) -> None:
+    """Write the terminating ``ok:false`` envelope for a click parse failure.
+
+    Click validates argv before any command body runs, so these never reached a
+    ``renderer.error`` call site and left stdout empty — indistinguishable, to a
+    JSON consumer, from a transport failure. The caller re-raises, so click still
+    prints its panel and still exits 2; only stdout changes.
+
+    The sibling for errors raised *inside* a command body is
+    ``host_port.report_usage_error``.
+    """
+    renderer = get_renderer()
+    if not renderer.is_json():
+        # Click resolves the subcommand BEFORE the root callback runs, so an
+        # unknown command fails while the renderer is still the pretty default.
+        # The root options did parse, so re-run the decision from their values.
+        renderer = Renderer.resolve(version=ConfigManager().get_cli_version(), **_output_flags(error.ctx, args))
+    # Pretty mode already gets click's panel; rendering again would double it.
+    if not renderer.is_json() or renderer._envelope_emitted:
+        return
+    path = _command_path(error.ctx)
+    invocation = f"comfy {path}".strip()
+    details: dict[str, object] = {"command": invocation, "exit_code": error.exit_code}
+    if _click_error_is(error, "NoSuchOption"):
+        details["option"] = error.option_name
+        if error.possibilities:
+            details["did_you_mean"] = list(error.possibilities)
+    renderer.error(
+        code="usage_error",
+        message=error.format_message(),
+        hint=f"run `{invocation} --help` for the accepted arguments and options",
+        details=details,
+        exit_code=error.exit_code,
+        command=path,
+    )
+
+
+def _output_flags(ctx: click.Context | None, args: list[str] | None = None) -> dict[str, bool]:
+    """The root ``--json`` / ``--json-stream`` / ``--no-json`` values, as parsed.
+
+    Read off the root context, not ``sys.argv``, so an in-process caller is
+    answered about ITS arguments. An unknown ROOT option is the exception: it
+    raises inside ``parse_args`` before click binds a parameter, leaving
+    ``ctx.params`` empty, so ``args`` is the only record of what was asked for.
+    """
+    while ctx is not None and ctx.parent is not None:
+        ctx = ctx.parent
+    params = ctx.params if ctx is not None else {}
+    if not params:
+        supplied = args if args is not None else sys.argv[1:]
+        params = {
+            "json_output": "--json" in supplied,
+            "json_stream": "--json-stream" in supplied,
+            "no_json": "--no-json" in supplied,
+        }
+    return {
+        "json_flag": bool(params.get("json_output")),
+        "json_stream_flag": bool(params.get("json_stream")),
+        "no_json_flag": bool(params.get("no_json")),
+    }
+
+
+def _command_path(ctx: click.Context | None) -> str:
+    """The subcommand path, root excluded — ``build release show``.
+
+    Not ``ctx.command_path``: that leads with ``info_name``, which is however the
+    CLI was launched, so it would not match the ``command`` on the success line.
+    """
+    names: list[str] = []
+    while ctx is not None and ctx.parent is not None:
+        if ctx.info_name:
+            names.append(ctx.info_name)
+        ctx = ctx.parent
+    return " ".join(reversed(names))
+
+
+def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | None) -> None:
+    """Write the terminating ``ok:false`` envelope for an exception no command caught.
+
+    `workflow set-widget` could escape with a Python
+    traceback and no envelope. Edit commands catch only ``ValueError``, and
+    nothing above them did anything with the rest. A ``--json`` caller then sees
+    a stack dump and an empty stdout, indistinguishable from a transport failure.
+    The caller re-raises, so the traceback still reaches stderr for debugging
+    and the exit code stays 1. Pretty mode is left exactly as it was.
+    """
+    try:
+        renderer = get_renderer()
+        if not renderer.is_json():
+            # The root callback installs the renderer, so a crash in it (or
+            # before it) still sees the pretty default. The root flags did
+            # parse, so decide the mode from them. No version lookup: that
+            # lookup is one of the things that can have crashed.
+            renderer = Renderer.resolve(command=_command_path(ctx), **_output_flags(ctx))
+        if not renderer.is_json() or renderer._envelope_emitted:
+            return
+        command = getattr(renderer, "command", None) or _command_path(ctx)
+        renderer.error(
+            code="internal_error",
+            message=_internal_error_message(error),
+            details={
+                "exception": type(error).__name__,
+                "command": f"comfy {command}".strip(),
+                "traceback": _traceback_tail(error),
+            },
+            exit_code=1,
+            command=command,
+        )
+    except Exception:  # noqa: BLE001 — never mask the original crash
+        pass
+
+
+#: The envelope goes to stdout, i.e. into a model's context, where the raw
+#: traceback on stderr never went. So the exception text is capped and scrubbed
+#: of the secret shapes an exception message plausibly carries: a URL query
+#: string (`?api_key=...`), a bearer token, an `Authorization:` header value
+#: (scheme and credential together), `key=value` / `key: value` token pairs,
+#: and `user:pass@` userinfo.
+_INTERNAL_ERROR_MESSAGE_CAP = 500
+_SECRET_PATTERNS = (
+    (re.compile(r"(https?://[^\s?#'\"]+)\?[^\s'\"]*", re.IGNORECASE), r"\1?***"),
+    (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]+", re.IGNORECASE), r"\1***"),
+    # An `Authorization:` value is `<scheme> <credential>` for ANY scheme
+    # (Basic, Bearer, Token, Digest with its quoted comma-separated params,
+    # ...), so scheme and credential are masked as one value. A quoted value
+    # (a dict repr) is masked up to its MATCHING quote, so the other quote
+    # kind inside it (Digest's response="...") is covered, and an escaped
+    # quote (a JSON-encoded value) does not end it; an unquoted header
+    # line is masked to the end of the line, quotes included. Both shapes are
+    # ONE alternation applied in one pass, so each value is masked exactly
+    # once: as two passes, the unquoted one re-matched the quoted one's output
+    # and swallowed the headers after it.
+    (
+        re.compile(
+            r"((?:proxy-)?authorization[\"']?\s*[:=]\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n]+)",
+            re.IGNORECASE,
+        ),
+        lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
+    ),
+    (
+        re.compile(
+            r"((?:api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password)"
+            r"[\"']?\s*[:=]\s*[\"']?)(?!Bearer\b)[^\s&\"',;]+",
+            re.IGNORECASE,
+        ),
+        r"\1***",
+    ),
+    (re.compile(r"(://)[^\s/@'\"]+@"), r"\1***@"),
+)
+
+
+def _internal_error_message(error: BaseException) -> str:
+    text = f"{type(error).__name__}: {error}"
+    for pattern, repl in _SECRET_PATTERNS:
+        text = pattern.sub(repl, text)
+    if len(text) > _INTERNAL_ERROR_MESSAGE_CAP:
+        text = text[: _INTERNAL_ERROR_MESSAGE_CAP - 1] + "…"
+    return text
+
+
+def _traceback_tail(error: BaseException, frames: int = 3) -> list[str]:
+    """The innermost ``frames`` frames as ``file:line:func`` — enough to locate
+    the crash from the envelope alone, with no source text (which can hold
+    literals the caller should not see)."""
+    import traceback
+
+    tail = traceback.extract_tb(error.__traceback__)[-frames:]
+    return [f"{os.path.basename(f.filename)}:{f.lineno}:{f.name}" for f in tail]
+
+
+def _is_click_control_flow(error: BaseException) -> bool:
+    """Click/typer's own exceptions (usage errors, ``typer.Exit``, ``Abort``) —
+    they already carry their exit semantics and are not crashes."""
+    return any(_click_error_is(error, name) for name in ("ClickException", "Exit", "Abort"))
+
+
+@contextlib.contextmanager
+def _usage_errors_as_envelopes(args: list[str] | None = None, ctx: click.Context | None = None) -> Iterator[None]:
+    try:
+        yield
+    except Exception as error:
+        if _click_error_is(error, "UsageError"):
+            _emit_usage_error_envelope(error, args)
+        elif ctx is not None and not _is_click_control_flow(error):
+            _emit_internal_error_envelope(error, ctx)
+        raise
+
+
+class _RootGroup(LazyTyperGroup):
+    """Root click group. Subcommand groups are declared in ``lazy_subcommands``
+    (assigned at the bottom of this module) and imported on first use.
+
+    ``make_context`` and ``invoke`` are both wrapped so a usage error anywhere in
+    the tree ends the ``--json`` stream with an envelope: the first covers
+    root-level argv, the second every nested command, since click builds a
+    subcommand's context inside the parent group's ``invoke``.
+    """
+
+    def make_context(self, info_name, args, parent=None, **kwargs):
+        # A COPY, taken before parsing: click's parser consumes `args` IN PLACE,
+        # so by the time the error propagates the original is empty.
+        with _usage_errors_as_envelopes(list(args)):
+            return super().make_context(info_name, args, parent=parent, **kwargs)
+
+    def invoke(self, ctx: click.Context):
+        # `ctx` turns on the crash envelope too: every command body runs inside
+        # this call, so an exception no command caught ends `--json` with an
+        # `internal_error` envelope instead of an empty stdout.
+        with _usage_errors_as_envelopes(ctx=ctx):
+            return super().invoke(ctx)
+
+
+app = typer.Typer(cls=_RootGroup)
+# The lazy builders below pass this to typer's command/group factories; read it
+# off the root app rather than assuming typer's default.
+_RootGroup.pretty_exceptions_short = app.pretty_exceptions_short
 workspace_manager = WorkspaceManager()
 
 console = Console()
@@ -692,7 +903,7 @@ def _refresh_node_id_cache() -> None:
         rprint(f"[yellow]Failed to update node id cache: {e}[/yellow]")
 
 
-@app.command(help="Update ComfyUI Environment [all|comfy|cli]")
+@app.command(help="Update ComfyUI Environment \\[all|comfy|cli]. To update custom nodes, use `comfy node update`.")
 @tracking.track_command()
 def update(
     target: str = typer.Argument(
@@ -781,6 +992,8 @@ def update(
             # `cm-cli update all` is non-atomic — packs that did update stayed updated — so
             # refresh the id cache exactly as the no-flag path below does before bailing out.
             _refresh_node_id_cache()
+            from comfy_cli.command.custom_nodes.cm_cli_util import normalize_cm_cli_exit_code
+
             code = normalize_cm_cli_exit_code(e.returncode)
             get_renderer().error(
                 code="update_custom_nodes_failed",
@@ -962,6 +1175,27 @@ def run(
             ),
         ),
     ] = False,
+    workflow_id: Annotated[
+        str | None,
+        typer.Option(
+            "--workflow-id",
+            show_default=False,
+            help="Cloud workflow entity id to associate this run with (enables draft auto-save on run).",
+        ),
+    ] = None,
+    no_watch: Annotated[
+        bool,
+        typer.Option(
+            "--no-watch",
+            show_default=False,
+            help=(
+                "Suppress the detached background watcher subprocess for non-blocking "
+                "runs (equivalent to setting COMFY_NO_WATCH=1). Agentic callers with "
+                "their own job-wait loop don't need a second process polling in the "
+                "background; it just holds onto credentials after the parent exits."
+            ),
+        ),
+    ] = False,
     allow_spend: Annotated[
         bool,
         typer.Option(
@@ -985,6 +1219,8 @@ def run(
     # would mislabel any envelope emitted before *this* run routes (e.g.
     # `where_invalid`). Start every invocation unrouted.
     renderer.where = None
+    if no_watch:
+        os.environ["COMFY_NO_WATCH"] = "1"
 
     try:
         if api_key:
@@ -1010,6 +1246,10 @@ def run(
         # only fills the fallback (``where or self.where``) that error() and
         # emit() resolve against.
         renderer.where = decision.target.value
+        # Record the RESOLVED routing target so submission analytics can tell a
+        # cloud run from a local one even when --where was defaulted (the raw
+        # `where` kwarg is None then). Rides on the execution_success/_error events.
+        _track_props["target"] = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
 
         # Default for --notify: on when a human is at the terminal, off for
         # agents (they shouldn't get surprise side-channel processes they didn't
@@ -1056,6 +1296,10 @@ def run(
         if decision.target is where_module.WhereTarget.CLOUD:
             where_module.cloud_preflight_or_exit()
             # Cloud path uses HTTPS + Bearer auth; host/port aren't applicable.
+            # NOTE: do NOT `return` here — falling through to the try's `else`
+            # is what fires `execution_success`. An early return skipped it, so
+            # successful cloud submissions emitted `execution_start` but never
+            # `execution_success` (local runs were unaffected).
             run_inner.execute_cloud(
                 workflow,
                 wait=wait,
@@ -1063,6 +1307,7 @@ def run(
                 timeout=timeout,
                 notify=effective_notify,
                 print_prompt=print_prompt,
+                workflow_id=workflow_id,
                 preloaded=preloaded,
                 allow_spend=allow_spend,
             )
@@ -1141,7 +1386,7 @@ def run(
 def validate(
     workflow: Annotated[
         str,
-        typer.Option(help="Path to the API-format workflow JSON file."),
+        typer.Option(help="Path to the workflow JSON file (API format or a frontend/canvas graph)."),
     ],
     where: Annotated[
         str | None,
@@ -1482,6 +1727,8 @@ def launch(
         ),
     ] = None,
 ):
+    from comfy_cli.command.launch import launch as launch_command
+
     launch_command(background, extra, frontend_pr)
 
 
@@ -1507,6 +1754,8 @@ def logs(
         ),
     ] = None,
 ):
+    from comfy_cli.command.launch import logs as logs_command
+
     logs_command(tail=tail, where=where, port=port)
 
 
@@ -1850,6 +2099,10 @@ def feedback(
             else str(usability_satisfaction_score),
         },
     )
+    # Imported lazily: questionary pulls in prompt_toolkit (~50ms) and is only
+    # needed on this interactive feedback path.
+    import questionary
+
     if (
         sent
         and questionary.confirm("Do you want to provide additional feature-specific feedback on our GitHub page?").ask()
@@ -1898,7 +2151,10 @@ def dependency():
     depComp.install_deps()
 
 
-@app.command(help="Download a standalone Python interpreter and dependencies based on an existing comfyui workspace")
+@app.command(
+    help="Download a standalone Python interpreter and dependencies based on an existing comfyui workspace. "
+    "This bundles an interpreter; it does not update ComfyUI or custom nodes."
+)
 @tracking.track_command()
 def standalone(
     cli_spec: Annotated[
@@ -1937,6 +2193,8 @@ def standalone(
         ),
     ] = False,
 ):
+    from comfy_cli.standalone import StandalonePython
+
     comfy_path, _ = workspace_manager.get_workspace_path()
 
     platform = utils.get_os() if platform is None else platform
@@ -1951,58 +2209,85 @@ def standalone(
         sty.to_tarball()
 
 
-generate_command.register_with(app)
-app.add_typer(
-    models_command.app,
-    name="model",
-    help="Manage the model files in this workspace — download, list, remove. (Search/discovery lives under `comfy models`.)",
-)
-app.add_typer(
-    models_search_command.app,
-    name="models",
-    help="Discover models — folders, files, and the cloud asset catalog.",
-)
-app.add_typer(custom_nodes.app, name="node", help="Manage custom nodes.")
-app.add_typer(nodes_command.app, name="nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories).")
-app.add_typer(templates_command.app, name="templates", help="Browse the Comfy workflow-template gallery.")
-app.command(
-    "run-template",
-    help=(
-        "Fetch a gallery template, fill its parameterized inputs (--param KEY=VALUE), "
-        "and run it to completion on local ComfyUI. Paid partner-API templates require --allow-spend."
+# Subcommands imported on first use: three top-level commands whose modules
+# are heavy, then every subcommand group. Order matters: it is the order
+# `comfy --help` lists them in (after the commands defined above), so a new
+# entry goes where it should appear, not at the end.
+_RootGroup.lazy_subcommands = {
+    # `generate` registers itself (its command is a closure); see register_with.
+    "generate": LazyCommand("comfy_cli.command.generate", register="register_with"),
+    "run-template": LazyCommand(
+        "comfy_cli.command.templates",
+        attr="run_template_cmd",
+        help=(
+            "Fetch a gallery template, fill its parameterized inputs (--param KEY=VALUE), "
+            "and run it to completion on local ComfyUI. Paid partner-API templates require --allow-spend."
+        ),
     ),
-)(templates_command.run_template_cmd)
-app.add_typer(workflow_command.app, name="workflow", help="Slot-based editing of frontend-format ComfyUI workflows.")
-app.command(
-    "preview",
-    help="Render a previewable PNG from a media file (image → thumb, video → contact sheet, audio → waveform).",
-)(preview_command.preview_cmd)
-app.add_typer(custom_nodes.manager_app, name="manager", help="Manage ComfyUI-Manager.")
-
-app.add_typer(pr_command.app, name="pr-cache", help="Manage PR cache.")
-
-app.add_typer(code_search.app, name="code-search", help="Search code across ComfyUI repositories.")
-app.add_typer(code_search.app, name="cs", hidden=True)
-
-app.add_typer(tracking.app, name="tracking", help="Manage analytics tracking settings.")
-app.add_typer(cloud_command.app, name="cloud", help="Comfy Cloud — sign in, route commands, inspect session.")
-app.add_typer(auth_command.app, name="auth", help="Manage API tokens for model hosts (Civitai, Hugging Face).")
-app.add_typer(jobs_command.app, name="jobs", help="List, inspect, and live-watch ComfyUI prompts.")
-app.add_typer(project_command.app, name="project", help="Project conventions: init and status.")
-app.add_typer(
-    project_command.assets_app,
-    name="assets",
-    help="Push project assets to the run target (local or cloud) and track them in the lock.",
-)
-app.add_typer(
-    skill_command.app,
-    name="skills",
-    help="Install the bundled comfy agent skills into Claude Code, Cursor, Aider, and any AGENTS.md-aware tool.",
-)
-# Keep the singular alias for backward compat
-app.add_typer(skill_command.app, name="skill", hidden=True)
-
-# Hidden: the detached watcher subprocess spawned by `comfy run` when async.
-from comfy_cli.command import job_watcher as _job_watcher  # noqa: E402
-
-app.add_typer(_job_watcher.app, name="_watch", hidden=True)
+    "preview": LazyCommand(
+        "comfy_cli.command.preview",
+        attr="preview_cmd",
+        help="Render a previewable PNG from a media file (image → thumb, video → contact sheet, audio → waveform).",
+    ),
+    # The `model` noun owns BOTH the local-filesystem ops (download/remove/list)
+    # and the backend/cloud discovery leaves (list-folders/list-folder/search/
+    # show) — `models.py` merges the latter in from `search.py` at import time.
+    # `models` (plural) is a hidden, deprecated alias for the discovery leaves
+    # only, built alongside them in `search.py` so resolving it stays lazy —
+    # see the `deprecated_alias_app` built there.
+    "model": LazySubcommand(
+        "comfy_cli.command.models.models",
+        help="Manage models — local files on disk plus backend/cloud discovery.",
+    ),
+    "models": LazySubcommand(
+        "comfy_cli.command.models.search",
+        attr="deprecated_alias_app",
+        hidden=True,
+    ),
+    "node": LazySubcommand("comfy_cli.command.custom_nodes", help="Manage custom nodes."),
+    "nodes": LazySubcommand(
+        "comfy_cli.command.nodes", help="Introspect ComfyUI node classes (inputs, outputs, categories)."
+    ),
+    "templates": LazySubcommand("comfy_cli.command.templates", help="Browse the Comfy workflow-template gallery."),
+    "knowledge": LazySubcommand(
+        "comfy_cli.command.knowledge",
+        help="Inspect the curated model-knowledge bundle: status, resolve an alias, ranked picks per capability.",
+    ),
+    "workflow": LazySubcommand(
+        "comfy_cli.command.workflow", help="Slot-based editing of frontend-format ComfyUI workflows."
+    ),
+    "manager": LazySubcommand(
+        "comfy_cli.command.custom_nodes",
+        attr="manager_app",
+        help="Enable/disable and configure ComfyUI-Manager (lifecycle, not updates).",
+    ),
+    "pr-cache": LazySubcommand("comfy_cli.command.pr_command", help="Manage PR cache."),
+    "code-search": LazySubcommand("comfy_cli.command.code_search", help="Search code across ComfyUI repositories."),
+    "cs": LazySubcommand("comfy_cli.command.code_search", hidden=True),
+    "tracking": LazySubcommand("comfy_cli.tracking", help="Manage analytics tracking settings."),
+    "cloud": LazySubcommand("comfy_cli.cloud.command", help="Comfy Cloud — sign in, route commands, inspect session."),
+    "auth": LazySubcommand("comfy_cli.auth.command", help="Manage API tokens for model hosts (Civitai, Hugging Face)."),
+    "jobs": LazySubcommand("comfy_cli.command.jobs", help="List, inspect, and live-watch ComfyUI prompts."),
+    "build": LazySubcommand(
+        "comfy_cli.command.build", help="Package a local ComfyUI environment into a serverless build."
+    ),
+    "deploy": LazySubcommand("comfy_cli.command.deploy", help="Create and manage serverless deployments."),
+    "project": LazySubcommand("comfy_cli.command.project", help="Project conventions: init and status."),
+    "assets": LazySubcommand(
+        "comfy_cli.command.project",
+        attr="assets_app",
+        help="Push project assets to the run target (local or cloud) and track them in the lock.",
+    ),
+    "agent": LazySubcommand(
+        "comfy_cli.agent.command",
+        help="The local comfy agent: what it may reach, and how to let it reach more.",
+    ),
+    "skills": LazySubcommand(
+        "comfy_cli.skills.command",
+        help="Install the comfy agent skills into Claude Code, Cursor, Aider, and any AGENTS.md-aware tool.",
+    ),
+    # Keep the singular alias for backward compat
+    "skill": LazySubcommand("comfy_cli.skills.command", hidden=True),
+    # Hidden: the detached watcher subprocess spawned by `comfy run` when async.
+    "_watch": LazySubcommand("comfy_cli.command.job_watcher", hidden=True),
+}

@@ -166,7 +166,7 @@ def check_mention(
             resolved = f"{resolved} {token}"
             continue
         if subs:
-            # A group with no such subcommand: this is the BE-2996 auth-login
+            # A group with no such subcommand: this is the auth-login
             # bug — the word reads as a subcommand but is really an unparsed
             # positional the group will reject.
             return Violation(mention=mention, resolved=resolved, unknown_token=token)

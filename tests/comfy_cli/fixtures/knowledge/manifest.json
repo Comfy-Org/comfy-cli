@@ -1,0 +1,10 @@
+{
+  "files": {
+    "knowledge.json": {
+      "bytes": 15404,
+      "sha256": "5c3b5efdae0c5b4b3d2e3479255066f1088c57bc1abc12a2a449a3ee0526e83f"
+    }
+  },
+  "schema_version": 1,
+  "version": "0.1.0-fixture"
+}

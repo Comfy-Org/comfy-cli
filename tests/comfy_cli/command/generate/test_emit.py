@@ -4,12 +4,22 @@ API-format workflow shape.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app as cli_app
-from comfy_cli.command.generate import emit, spec
+from comfy_cli.command.generate import emit, schema, spec
+from comfy_cli.cql.engine import Graph
+
+# Recorded object_info for the partner nodes MODEL_NODE_MAP targets, snapshotted
+# from the cloud catalog. Used to enforce NodeSpec's completeness contract: the
+# emitted node must carry EVERY widget input, optional section included (a
+# schema-`optional` input may still be positionally required by execute()).
+PARTNER_OBJECT_INFO = json.loads(
+    (Path(__file__).parent / "fixtures" / "partner_nodes_object_info.json").read_text(encoding="utf-8")
+)
 
 
 @pytest.fixture(autouse=True)
@@ -29,15 +39,20 @@ def runner():
 def test_build_flux_text_to_image_class_type_and_params():
     wf = emit.build_workflow("flux-2", {"prompt": "a fox", "width": 512})
     # partner node is "1"
-    assert wf["1"]["class_type"] == "Flux2ProImageNode"
+    assert wf["1"]["class_type"] == "Flux2ImageNode"
     assert wf["1"]["inputs"]["prompt"] == "a fox"
+    # Width and height are sub-widgets of the `model` dynamic combo, so they are
+    # addressed through it. The selector itself has to be in the emitted inputs
+    # or the sub-widgets it exposes do not exist yet.
+    assert wf["1"]["inputs"]["model"] == "Flux.2 [pro]"
     # user override applied, fixed default preserved for unset params
-    assert wf["1"]["inputs"]["width"] == 512
-    assert wf["1"]["inputs"]["height"] == 768
+    assert wf["1"]["inputs"]["model.width"] == 512
+    assert wf["1"]["inputs"]["model.height"] == 768
     # save node references the partner output
-    save = [n for n in wf.values() if n["class_type"] == "SaveImage"]
+    save = [n for n in wf.values() if n["class_type"] == "SaveImageAdvanced"]
     assert len(save) == 1
     assert save[0]["inputs"]["images"] == ["1", 0]
+    assert save[0]["inputs"]["format"] == "png"
 
 
 def test_build_nano_banana_wires_load_image():
@@ -65,6 +80,90 @@ def test_build_kling_i2v_class_and_start_frame():
     assert wf["1"]["class_type"] == "KlingImage2VideoNode"
     loader_id = next(k for k, v in wf.items() if v["class_type"] == "LoadImage")
     assert wf["1"]["inputs"]["start_frame"] == [loader_id, 0]
+
+
+def test_build_seedance_fills_execute_required_defaults():
+    """Regression: ByteDanceImageToVideoNode declares seed/camera_fixed/watermark
+    `optional=True` in its schema but its execute() takes them WITHOUT Python
+    defaults — omitting them validates cleanly and then fails the run with
+    "missing 3 required positional arguments" (observed live on cloud). The
+    emitter must always write them."""
+    wf = emit.build_workflow(
+        "seedance",
+        {"prompt": "drift", "image": "frame.png", "model": "seedance-1-0-lite-i2v-250428"},
+    )
+    inputs = wf["1"]["inputs"]
+    assert inputs["seed"] == 0
+    assert inputs["camera_fixed"] is False
+    assert inputs["watermark"] is False
+    assert inputs["generate_audio"] is False
+
+
+def test_build_seedance_proxy_flag_spellings_reach_node_inputs():
+    """The generate proxy flags are --ratio/--camerafixed; the node inputs are
+    aspect_ratio/camera_fixed. User-passed values must not be dropped."""
+    wf = emit.build_workflow(
+        "seedance",
+        {"prompt": "drift", "image": "frame.png", "ratio": "9:16", "camerafixed": True, "watermark": True},
+    )
+    inputs = wf["1"]["inputs"]
+    assert inputs["aspect_ratio"] == "9:16"
+    assert inputs["camera_fixed"] is True
+    assert inputs["watermark"] is True
+
+
+@pytest.mark.parametrize("model", sorted(emit.MODEL_NODE_MAP))
+def test_emitted_node_covers_every_widget_input(model):
+    """Completeness contract (see NodeSpec docstring): for every model the
+    emitter supports, the emitted partner node must contain ALL of the node's
+    widget (non-link) inputs — required AND optional — plus every required link
+    input. Schema-`optional` does not imply optional-at-execute for V3 nodes,
+    so any absent widget input is a potential run-time crash."""
+    ns = emit.MODEL_NODE_MAP[model]
+    graph = Graph.from_object_info(PARTNER_OBJECT_INFO)
+    meta = graph.node(ns.node_class)
+    assert meta is not None, f"{ns.node_class} missing from the fixture snapshot — refresh it"
+
+    values = {"prompt": "p"}
+    if ns.image_params:
+        values[next(iter(ns.image_params))] = "img.png"
+    wf = emit.build_workflow(model, values)
+    inputs = wf["1"]["inputs"]
+
+    for port in meta.inputs:
+        if port.is_link:
+            if port.required:
+                assert port.name in inputs, f"{model}: required link input {port.name!r} not wired"
+            continue
+        assert port.name in inputs, (
+            f"{model}: widget input {port.name!r} missing from the emitted node — "
+            f"schema-optional inputs may still be positionally required at execute() "
+            f"time; add a default to MODEL_NODE_MAP[{model!r}].fixed"
+        )
+
+
+@pytest.mark.parametrize("model", sorted(emit.MODEL_NODE_MAP))
+def test_deprecated_mapped_node_must_declare_its_exemption(model):
+    """The mapping is hand-written, so nothing notices a class ComfyUI has since
+    deprecated — this emitter shipped `Flux2ProImageNode` workflows for exactly
+    that reason. `deprecated_ok` has to match the recorded catalog in both directions:
+    set it when the class is deprecated (a deliberate, commented exemption), drop
+    it when the class is live (so a stale flag cannot outlive its migration)."""
+    ns = emit.MODEL_NODE_MAP[model]
+    meta = Graph.from_object_info(PARTNER_OBJECT_INFO).node(ns.node_class)
+    assert meta is not None, f"{ns.node_class} missing from the fixture snapshot — refresh it"
+
+    if meta.deprecated:
+        assert ns.deprecated_ok, (
+            f"{model}: {ns.node_class} is deprecated in the catalog. Either map the alias to the "
+            f"replacement class, or set deprecated_ok=True on MODEL_NODE_MAP[{model!r}] with a "
+            f"comment naming the ticket that takes it off."
+        )
+    else:
+        assert not ns.deprecated_ok, (
+            f"{model}: {ns.node_class} is not deprecated, so drop deprecated_ok from "
+            f"MODEL_NODE_MAP[{model!r}] — the emitter should not carry a blanket exemption."
+        )
 
 
 def test_unknown_model_lists_supported():
@@ -100,9 +199,8 @@ def test_build_flux_ultra_folds_width_height_into_aspect_ratio():
     # the node takes an aspect ratio, not w/h — the two flags fold into it
     assert wf["1"]["inputs"]["aspect_ratio"] == "1024:768"
     assert wf["1"]["inputs"]["prompt"] == "a fox"
-    # the Ultra node's own default, unlike Flux2Pro's True
     assert wf["1"]["inputs"]["prompt_upsampling"] is False
-    save = [n for n in wf.values() if n["class_type"] == "SaveImage"]
+    save = [n for n in wf.values() if n["class_type"] == "SaveImageAdvanced"]
     assert len(save) == 1
     assert save[0]["inputs"]["images"] == ["1", 0]
 
@@ -126,6 +224,115 @@ def test_build_flux_ultra_only_height_errors_instead_of_dropping_it():
     assert "--width" in str(ei.value) and "--height" in str(ei.value)
 
 
+def test_emit_refuses_a_flag_the_node_cannot_carry():
+    """A proxy flag with no matching node input cannot reach an emitted
+    workflow, so dropping it in silence hands back a graph that ignores what the
+    user asked for. `prompt_upsampling` is the live case: the bfl/flux-2-pro
+    proxy takes it, Flux2ImageNode has no such input."""
+    with pytest.raises(emit.EmitError) as ei:
+        emit.build_workflow("flux-2", {"prompt": "a fox", "prompt_upsampling": True})
+    msg = str(ei.value)
+    assert "--prompt_upsampling" in msg
+    assert "Flux2ImageNode" in msg
+    assert "Drop that flag" in msg
+    # The remedy has to be in the message, or the user is left guessing.
+    assert "without --emit-workflow" in msg
+
+
+def test_emit_names_every_unsupported_flag_at_once():
+    """Reporting one at a time turns a single fix into a guessing loop."""
+    with pytest.raises(emit.EmitError) as ei:
+        emit.build_workflow("flux-2", {"prompt": "p", "safety_tolerance": 2, "output_format": "jpeg"})
+    msg = str(ei.value)
+    assert "--output_format" in msg and "--safety_tolerance" in msg
+    assert "Drop those flags" in msg
+
+
+def test_emit_error_blames_the_mapping_when_the_node_has_the_input():
+    """Flux2ImageNode does take reference images (`model.images`); the flux-2
+    entry just does not wire `--input_image` into it. The message must not claim
+    the node lacks an input it has."""
+    with pytest.raises(emit.EmitError) as ei:
+        emit.build_workflow("flux-2", {"prompt": "p", "input_image": "ref.png"})
+    msg = str(ei.value)
+    assert "does not map --input_image onto Flux2ImageNode" in msg
+    assert "no matching input" not in msg
+
+
+# Flags `--emit-workflow` refuses per alias because MODEL_NODE_MAP does not wire
+# them. The CLI used to drop every one of these in silence, and the cloud agent's
+# generate_workflow tool can pass any of them. Wiring a flag removes it here.
+EMIT_REFUSED_FLAGS = {
+    "flux-2": [
+        "input_image",
+        "input_image_2",
+        "input_image_3",
+        "input_image_4",
+        "input_image_5",
+        "input_image_6",
+        "input_image_7",
+        "input_image_8",
+        "input_image_9",
+        "output_format",
+        "prompt_upsampling",
+        "safety_tolerance",
+    ],
+    "flux-ultra": ["guidance_scale", "negative_prompt", "num_images", "num_inference_steps"],
+    "kling-i2v": [
+        "callback_url",
+        "camera_control",
+        "dynamic_masks",
+        "element_list",
+        "external_task_id",
+        "image_tail",
+        "multi_prompt",
+        "multi_shot",
+        "shot_type",
+        "sound",
+        "static_mask",
+        "watermark_info",
+    ],
+    "nano-banana": [],
+    "seedance": ["fps", "return_last_frame"],
+}
+
+
+@pytest.mark.parametrize("model", sorted(emit.MODEL_NODE_MAP))
+def test_emit_refused_flags_per_alias(model):
+    ns = emit.MODEL_NODE_MAP[model]
+    refused = []
+    for flag in schema.flags_for(spec.get_endpoint(spec.resolve_alias(model))):
+        values = {flag.name: "x"}
+        if ns.aspect_from_wh and flag.name in ("width", "height"):
+            values = {"width": 16, "height": 9}
+        try:
+            emit.build_workflow(model, values)
+        except emit.EmitError as e:
+            assert f"--{flag.name}" in str(e)
+            refused.append(flag.name)
+    assert sorted(refused) == EMIT_REFUSED_FLAGS.get(model)
+
+
+def test_emit_treats_a_none_value_as_not_given():
+    """The scalar loop already skips None, so the unmapped-flag check must too."""
+    wf = emit.build_workflow("flux-2", {"prompt": "p", "prompt_upsampling": None})
+    assert "prompt_upsampling" not in wf["1"]["inputs"]
+
+
+def test_emit_does_not_mistake_a_fixed_default_for_a_user_flag():
+    """`values` carries only what argv held, so NodeSpec.fixed entries that have
+    no param_map flag (flux-2's `model` selector) must not trip the check."""
+    wf = emit.build_workflow("flux-2", {"prompt": "p"})
+    assert wf["1"]["inputs"]["model"] == "Flux.2 [pro]"
+
+
+def test_emit_still_accepts_the_aspect_ratio_width_height_pair():
+    """flux-ultra folds width/height into `aspect_ratio` rather than mapping
+    them, so the check has to treat them as handled for that shape."""
+    wf = emit.build_workflow("flux-ultra", {"prompt": "p", "width": 16, "height": 9})
+    assert wf["1"]["inputs"]["aspect_ratio"] == "16:9"
+
+
 def test_emitted_workflow_is_api_format_node_ids_are_strings():
     wf = emit.build_workflow("flux-2", {"prompt": "p"})
     for k, node in wf.items():
@@ -134,7 +341,48 @@ def test_emitted_workflow_is_api_format_node_ids_are_strings():
         assert "inputs" in node
 
 
+def test_is_supported_answers_for_alias_and_canonical_id():
+    """The flag `generate list` exposes must agree with what `build_workflow`
+    accepts — alias or the canonical endpoint id the alias resolves to."""
+    assert emit.is_supported("flux-2") is True
+    assert emit.is_supported(spec.resolve_alias("flux-2")) is True
+    assert emit.is_supported("flux-pro") is False
+    assert emit.is_supported("bfl/flux-pro-1.1/generate") is False
+    assert emit.is_supported("no-such-model") is False
+
+
+def test_unsupported_model_raises_a_typed_error_carrying_the_supported_list():
+    with pytest.raises(emit.UnsupportedModelError) as ei:
+        emit.build_workflow("flux-pro", {"prompt": "x"})
+    assert ei.value.model == "flux-pro"
+    assert ei.value.supported == emit.supported_models()
+    assert isinstance(ei.value, emit.EmitError)  # callers catching the base still work
+
+
 # ─── CLI integration ──────────────────────────────────────────────────────
+
+
+def test_cli_emit_unsupported_model_has_its_own_error_code(runner, tmp_path, monkeypatch):
+    """`--emit-workflow` on `flux-pro` → `emit_workflow_failed`
+    "--emit-workflow does not support model 'flux-pro'. Supported: …". The
+    umbrella code also covers bad params and unwritable paths, so the agent
+    could not tell "pick another model" from "fix your arguments". Now it is
+    its own code, with the supported aliases as data, not prose."""
+    monkeypatch.delenv("COMFY_API_KEY", raising=False)
+    monkeypatch.setenv("COMFY_OUTPUT", "json")
+    out = tmp_path / "wf.json"
+    r = runner.invoke(cli_app, ["generate", "flux-pro", "--prompt", "x", "--emit-workflow", str(out)])
+    assert r.exit_code == 1
+    lines = [ln for ln in r.stdout.splitlines() if ln.strip().startswith("{")]
+    env = json.loads(lines[-1])
+    assert env["ok"] is False
+    err = env["error"]
+    assert err["code"] == "emit_workflow_unsupported_model"
+    assert err["details"]["model"] == "flux-pro"
+    assert err["details"]["supported"] == emit.supported_models()
+    assert err["details"]["suggested"][0] == "flux-2"
+    assert "generate list" in err["hint"]
+    assert not out.exists()
 
 
 def test_cli_emit_writes_file_no_api_key(runner, tmp_path, monkeypatch):
@@ -148,7 +396,7 @@ def test_cli_emit_writes_file_no_api_key(runner, tmp_path, monkeypatch):
     assert r.exit_code == 0, r.stdout
     assert out.is_file()
     wf = json.loads(out.read_text())
-    assert wf["1"]["class_type"] == "Flux2ProImageNode"
+    assert wf["1"]["class_type"] == "Flux2ImageNode"
     assert wf["1"]["inputs"]["prompt"] == "a cat"
 
 
@@ -220,5 +468,30 @@ def test_cli_emit_output_prefix(runner, tmp_path, monkeypatch):
     )
     assert r.exit_code == 0, r.stdout
     wf = json.loads(out.read_text())
-    save = next(n for n in wf.values() if n["class_type"] == "SaveImage")
+    save = next(n for n in wf.values() if n["class_type"] == "SaveImageAdvanced")
     assert save["inputs"]["filename_prefix"] == "myfox"
+
+
+def test_build_workflow_single_element_list_unwraps():
+    wf = emit.build_workflow("nano-banana", {"prompt": "p", "image": ["ref.jpg"]})
+    loaders = [n for n in wf.values() if n["class_type"] == "LoadImage"]
+    assert len(loaders) == 1
+    assert not any(n["class_type"] == "ImageBatch" for n in wf.values())
+
+
+def test_build_workflow_two_images_chains_imagebatch():
+    wf = emit.build_workflow("nano-banana", {"prompt": "p", "image": ["a.jpg", "b.jpg"]})
+    loaders = {i: n for i, n in wf.items() if n["class_type"] == "LoadImage"}
+    batches = {i: n for i, n in wf.items() if n["class_type"] == "ImageBatch"}
+    assert len(loaders) == 2 and len(batches) == 1
+    ((batch_id, batch),) = batches.items()
+    assert {batch["inputs"]["image1"][0], batch["inputs"]["image2"][0]} == set(loaders)
+    assert wf["1"]["inputs"]["images"] == [batch_id, 0]
+
+
+def test_build_workflow_three_images_chains_two_batches():
+    wf = emit.build_workflow("nano-banana", {"prompt": "p", "image": ["a.jpg", "b.jpg", "c.jpg"]})
+    batches = [i for i, n in wf.items() if n["class_type"] == "ImageBatch"]
+    assert len(batches) == 2
+    # terminal batch feeds the partner node
+    assert wf["1"]["inputs"]["images"][0] in batches

@@ -7,20 +7,18 @@ on:
     paths:
       - "comfy_cli/**"
       - "!comfy_cli/test_**"
-      - "!.github/**"
-      - "!tests/**"
-      - "!.coveragerc"
-      - "!.gitignore"
+      # Changes to the e2e suite or to this job must run the job itself.
+      - "tests/e2e/**"
+      - ".github/workflows/run-on-gpu.yml"
   pull_request:
     branches:
       - main
     paths:
       - "comfy_cli/**"
       - "!comfy_cli/test_**"
-      - "!.github/**"
-      - "!tests/**"
-      - "!.coveragerc"
-      - "!.gitignore"
+      # Changes to the e2e suite or to this job must run the job itself.
+      - "tests/e2e/**"
+      - ".github/workflows/run-on-gpu.yml"
 
 permissions:
   contents: read
@@ -35,6 +33,16 @@ jobs:
       fail-fast: false
       matrix:
         os: [linux]
+    env:
+      # ComfyUI pins comfyui_manager==4.2.2 (manager_requirements.txt). Its
+      # uv-compile conflict parser keeps only stderr lines containing "error"
+      # or "conflict". Since uv 0.12.14, `uv pip compile` reports a failed
+      # resolution as "error: No solution found ..." followed by indented
+      # "cause:" lines, so 4.2.2 keeps just the header line, which names no
+      # packages, and cm_cli no longer prints "Conflicting packages (by node
+      # pack):". Manager 4.3 ("Fix uv conflict attribution") keeps the cause
+      # lines. Remove this once ComfyUI's manager_requirements.txt is >= 4.3.
+      MANAGER_OVERRIDE: "4.3"
 
     steps:
       - name: Check out code

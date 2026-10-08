@@ -33,22 +33,22 @@ class TestFormatPythonVersion:
 
 
 class TestCheckComfyServerRunning:
-    @patch("comfy_cli.env_checker.requests.get")
+    @patch("requests.get")
     def test_server_running(self, mock_get):
         mock_get.return_value.status_code = 200
         assert check_comfy_server_running() is True
 
-    @patch("comfy_cli.env_checker.requests.get")
+    @patch("requests.get")
     def test_server_not_running(self, mock_get):
         mock_get.side_effect = requests.exceptions.ConnectionError()
         assert check_comfy_server_running() is False
 
-    @patch("comfy_cli.env_checker.requests.get")
+    @patch("requests.get")
     def test_non_200_status(self, mock_get):
         mock_get.return_value.status_code = 500
         assert check_comfy_server_running() is False
 
-    @patch("comfy_cli.env_checker.requests.get")
+    @patch("requests.get")
     def test_custom_port_and_host(self, mock_get):
         mock_get.return_value.status_code = 200
         check_comfy_server_running(port=9999, host="0.0.0.0")
@@ -58,13 +58,13 @@ class TestCheckComfyServerRunning:
         # alter user-visible "is the server up?" behaviour on slow hosts.
         assert mock_get.call_args.kwargs["timeout"] == 5.0
 
-    @patch("comfy_cli.env_checker.requests.get")
+    @patch("requests.get")
     def test_caller_can_override_timeout(self, mock_get):
         mock_get.return_value.status_code = 200
         check_comfy_server_running(port=8188, host="127.0.0.1", timeout=42)
         assert mock_get.call_args.kwargs["timeout"] == 42
 
-    @patch("comfy_cli.env_checker.requests.get")
+    @patch("requests.get")
     def test_bare_ipv6_host_is_bracketed_in_probe_url(self, mock_get):
         # A bare IPv6 literal must be bracketed or the probe URL is malformed
         # (``http://::1:8189/history``) and the server always reads as "down".
@@ -72,7 +72,7 @@ class TestCheckComfyServerRunning:
         check_comfy_server_running(port=8189, host="::1")
         assert mock_get.call_args.args == ("http://[::1]:8189/history",)
 
-    @patch("comfy_cli.env_checker.requests.get")
+    @patch("requests.get")
     def test_already_bracketed_ipv6_host_is_not_double_bracketed(self, mock_get):
         # Callers that pre-bracket (e.g. host_port.resolve_host_port) must not
         # yield ``http://[[::1]]:8189``.

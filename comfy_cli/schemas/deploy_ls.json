@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_ls.json",
+  "title": "comfy deploy ls --json data payload",
+  "type": "object",
+  "required": ["deployments"],
+  "additionalProperties": false,
+  "properties": {
+    "deployments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "createdAt",
+          "id",
+          "name",
+          "releaseId",
+          "status",
+          "updatedAt"
+        ],
+        "additionalProperties": true,
+        "properties": {
+          "computeConfig": {"type": ["object", "null"]},
+          "createdAt": {"type": "string", "format": "date-time"},
+          "deletedAt": {"type": ["string", "null"], "format": "date-time"},
+          "deletedBy": {"type": ["string", "null"]},
+          "endpointUrl": {"type": ["string", "null"]},
+          "id": {"type": "string", "minLength": 1},
+          "name": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "description": "The deployment's name, unique among its Build's live deployments; null where it has none or comfy-deploy does not serve names yet."
+          },
+          "releaseId": {"type": "string", "minLength": 1},
+          "releaseVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The version of the release the deployment serves. Present when the list is one Build's; absent under --workspace, where rows span Builds."
+          },
+          "status": {
+            "enum": ["queued", "provisioning", "starting", "ready", "unhealthy", "stopping", "stop_failed", "stopped", "failed"]
+          },
+          "updatedAt": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  }
+}

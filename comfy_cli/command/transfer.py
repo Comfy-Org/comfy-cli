@@ -588,7 +588,15 @@ def _copy_local_one(url: str, idx: int, local_source: Path, local_path: Path, re
         raise typer.Exit(code=1)
 
 
-def _stream_http_one(url: str, idx: int, local_path: Path, auth_hdrs: dict[str, str], renderer) -> None:
+def _stream_http_one(
+    url: str,
+    idx: int,
+    local_path: Path,
+    auth_hdrs: dict[str, str],
+    renderer,
+    *,
+    opener: urllib.request.OpenerDirector | None = None,
+) -> None:
     """Stream one HTTP(S) output into ``local_path`` via a verified part-file.
 
     Extracted verbatim from ``execute_download``'s per-URL loop: the
@@ -617,7 +625,8 @@ def _stream_http_one(url: str, idx: int, local_path: Path, auth_hdrs: dict[str, 
     # transfer dies.
     part_path: Path | None = None
     try:
-        with _DOWNLOAD_OPENER.open(req, timeout=_DOWNLOAD_TIMEOUT_S) as resp:
+        selected_opener = _DOWNLOAD_OPENER if opener is None else opener
+        with selected_opener.open(req, timeout=_DOWNLOAD_TIMEOUT_S) as resp:
             expected = _declared_content_length(resp)
             if expected is not None and expected > _MAX_DOWNLOAD_BYTES:
                 renderer.error(

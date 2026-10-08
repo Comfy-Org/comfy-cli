@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_init.json",
+  "title": "comfy build init --json data payload",
+  "description": "A spec's definition comes from one of three sources. `source` says which: `scan` reads the local install and carries the full scan report, while `snapshot` and `workflow` take the definition verbatim from the builder's importer and carry the advisories it reported instead. An imported source also carries the path it read, under a key of the same name.",
+  "type": "object",
+  "required": ["spec_file", "name", "source", "count", "custom_node_count", "definition"],
+  "additionalProperties": true,
+  "$defs": {
+    "scannedDefinition": {
+      "type": "object",
+      "required": ["schema", "models", "customNodes", "pipDependencies", "environment"],
+      "additionalProperties": true,
+      "properties": {
+        "schema": {"type": "string"},
+        "baseComfyVersion": {"type": "string"},
+        "pipDependencies": {"type": "string"},
+        "environment": {"type": "object"},
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type", "filename", "localPath", "sha256", "sizeBytes", "source"],
+            "additionalProperties": true,
+            "properties": {
+              "type": {"type": "string"},
+              "filename": {"type": "string"},
+              "localPath": {"type": "string"},
+              "sha256": {"type": "string"},
+              "sizeBytes": {"type": "integer"},
+              "source": {"type": "string"}
+            }
+          }
+        },
+        "customNodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "localPath", "source"],
+            "additionalProperties": true,
+            "properties": {
+              "name": {"type": "string"},
+              "localPath": {"type": "string"},
+              "repository": {"type": ["string", "null"]},
+              "gitRef": {"type": ["string", "null"]},
+              "localDigest": {"type": "string"},
+              "localSizeBytes": {"type": "integer"},
+              "source": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
+  },
+  "properties": {
+    "spec_file": {"type": "string"},
+    "name": {"type": "string"},
+    "source": {"enum": ["scan", "snapshot", "workflow"]},
+    "snapshot": {"type": "string"},
+    "workflow": {"type": "string"},
+    "advisories": {"type": "array", "items": {"type": "string"}},
+    "models_dir": {"type": "string"},
+    "custom_nodes_dir": {"type": ["string", "null"]},
+    "base_comfy_version": {"type": ["string", "null"]},
+    "pip_captured": {"const": true},
+    "environment": {"type": "object"},
+    "count": {"type": "integer"},
+    "custom_node_count": {"type": "integer"},
+    "total_bytes": {"type": "integer"},
+    "skipped_symlinks": {
+      "description": "Symlinks excluded from a packaged custom node; present only when packaging skipped at least one. `location` points into this payload's definition, `localPath` names the node under custom_nodes/, and `member` is the symlink's path inside that node.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["location", "localPath", "member"],
+        "additionalProperties": false,
+        "properties": {
+          "location": {"type": "string", "minLength": 1},
+          "localPath": {"type": "string", "minLength": 1},
+          "member": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "definition": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "if": {"required": ["source"], "properties": {"source": {"const": "scan"}}},
+      "then": {
+        "required": ["models_dir", "pip_captured", "environment", "total_bytes"],
+        "properties": {"definition": {"$ref": "#/$defs/scannedDefinition"}}
+      }
+    },
+    {
+      "if": {"required": ["source"], "properties": {"source": {"const": "snapshot"}}},
+      "then": {"required": ["snapshot", "advisories"]}
+    },
+    {
+      "if": {"required": ["source"], "properties": {"source": {"const": "workflow"}}},
+      "then": {"required": ["workflow", "advisories"]}
+    }
+  ]
+}

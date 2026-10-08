@@ -540,7 +540,7 @@ class TestIsApiNodeRows:
 
 
 class TestPath:
-    """`comfy nodes path` — the envelope an agent plans a graph off (BE-6857)."""
+    """`comfy nodes path` — the envelope an agent plans a graph off."""
 
     @pytest.fixture
     def patched_loader(self, monkeypatch: pytest.MonkeyPatch):

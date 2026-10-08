@@ -1,3 +1,4 @@
+import functools
 import json
 import logging
 import os
@@ -10,8 +11,6 @@ import zipfile
 from collections.abc import Callable
 from http import HTTPStatus
 
-import httpx
-import requests
 from pathspec import PathSpec
 
 from comfy_cli import constants, ui
@@ -20,6 +19,27 @@ from comfy_cli.http import DEFAULT_HTTP_TIMEOUT, DOWNLOAD_TIMEOUT
 from comfy_cli.output.sanitize import sanitize_value
 
 logger = logging.getLogger(__name__)
+
+
+def cache_dir() -> pathlib.Path:
+    """comfy-cli's per-user cache root.
+
+    ``COMFY_CACHE_DIR`` wins; else ``$XDG_CACHE_HOME/comfy-cli``; else ``~/.cache/comfy-cli``.
+
+    Both env vars are resolved with ``os.path.expanduser`` (never raises, unlike
+    ``pathlib.Path.expanduser``, when the home directory can't be determined —
+    e.g. no ``HOME`` and no passwd entry, routine in a container) and made
+    absolute, so the result doesn't depend on the calling process's cwd. That
+    matters because a relative override would otherwise resolve differently in
+    every process — including a background refresher that launches its child
+    from inside this very directory.
+    """
+    explicit = os.environ.get("COMFY_CACHE_DIR", "").strip()
+    if explicit:
+        return pathlib.Path(os.path.abspath(os.path.expanduser(explicit)))
+    base = os.environ.get("XDG_CACHE_HOME", "").strip() or os.path.expanduser("~/.cache")
+    return pathlib.Path(os.path.abspath(os.path.expanduser(base))) / "comfy-cli"
+
 
 # ---------------------------------------------------------------------------
 # Atomic writes — the write policy
@@ -296,6 +316,10 @@ def check_unauthorized(url: str, headers: dict | None = None) -> bool:
     Returns:
         bool: True if the response status code is 401, False otherwise.
     """
+    # Imported lazily: requests costs ~30ms to import and this module is on
+    # the import path of every CLI invocation.
+    import requests
+
     try:
         with requests.get(
             url, headers=headers, allow_redirects=True, stream=True, timeout=DEFAULT_HTTP_TIMEOUT
@@ -447,13 +471,6 @@ _VALID_DOWNLOADERS = {"httpx", "aria2"}
 
 _DOWNLOAD_MAX_RETRIES = 3
 _DOWNLOAD_RETRY_BACKOFF = 2  # seconds multiplier
-_DOWNLOAD_TIMEOUT = httpx.Timeout(10.0, read=300.0)
-_TRANSIENT_EXCEPTIONS = (
-    httpx.TimeoutException,
-    httpx.NetworkError,
-    httpx.ProtocolError,
-    httpx.ProxyError,
-)
 # HTTP statuses that typically indicate a transient server-side or rate-limit
 # problem worth retrying with backoff. Auth/not-found/redirect statuses stay
 # out of this set so they fail fast.
@@ -469,7 +486,25 @@ class _TransientHTTPStatusError(Exception):
         super().__init__(f"HTTP {status_code}: {reason}")
 
 
-_RETRIABLE_EXCEPTIONS = _TRANSIENT_EXCEPTIONS + (_TransientHTTPStatusError,)
+# Built on first use, not at import: httpx costs 11 ms warm to import, more on
+# a cold cache, and most importers of this module only want ``atomic_write_*``.
+@functools.cache
+def _download_timeout():
+    import httpx
+
+    return httpx.Timeout(10.0, read=300.0)
+
+
+@functools.cache
+def _transient_exceptions() -> tuple[type[BaseException], ...]:
+    import httpx
+
+    return (httpx.TimeoutException, httpx.NetworkError, httpx.ProtocolError, httpx.ProxyError)
+
+
+@functools.cache
+def _retriable_exceptions() -> tuple[type[BaseException], ...]:
+    return (*_transient_exceptions(), _TransientHTTPStatusError)
 
 
 def _cleanup_partial(filepath: pathlib.Path) -> None:
@@ -663,6 +698,8 @@ def cleanup_stale_tmp_files(
 
 def _friendly_network_error(exc: Exception) -> str:
     """Return a user-friendly description of a network error."""
+    import httpx
+
     if isinstance(exc, _TransientHTTPStatusError):
         try:
             phrase = HTTPStatus(exc.status_code).phrase
@@ -720,11 +757,13 @@ def _download_file_httpx(
     deliberate exception: a :class:`KeyboardInterrupt` leaves it in place so
     :func:`download_file` can ask the user whether to keep the partial.
     """
-    with httpx.stream("GET", url, follow_redirects=True, headers=headers, timeout=_DOWNLOAD_TIMEOUT) as response:
+    import httpx
+
+    with httpx.stream("GET", url, follow_redirects=True, headers=headers, timeout=_download_timeout()) as response:
         if response.status_code != 200:
             try:
                 error_body = response.read()
-            except _TRANSIENT_EXCEPTIONS:
+            except _transient_exceptions():
                 error_body = ""
             status_reason = guess_status_code_reason(response.status_code, error_body)
             if response.status_code in _RETRIABLE_STATUSES:
@@ -835,6 +874,8 @@ def download_file(
     if downloader == "aria2":
         return _download_file_aria2(url, local_filepath, headers, progress_callback)
 
+    import httpx
+
     last_exc: Exception | None = None
     state: dict = {"file_opened": False, "part_path": None}
 
@@ -844,7 +885,7 @@ def download_file(
         try:
             _download_file_httpx(url, local_filepath, headers, state=state, progress_callback=progress_callback)
             return
-        except _RETRIABLE_EXCEPTIONS as exc:
+        except _retriable_exceptions() as exc:
             last_exc = exc
             # The temp file this attempt was writing is already gone (the helper
             # unlinks it on the way out) and the destination was never touched, so
@@ -1047,6 +1088,8 @@ def zip_files(zip_filename, includes=None):
 
 
 def upload_file_to_signed_url(signed_url: str, file_path: str):
+    import requests  # deferred; see check_unauthorized
+
     with open(file_path, "rb") as f:
         headers = {"Content-Type": "application/zip"}
         response = requests.put(signed_url, data=f, headers=headers, timeout=DOWNLOAD_TIMEOUT)

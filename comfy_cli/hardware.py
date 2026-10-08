@@ -18,8 +18,6 @@ import os
 import platform
 import subprocess
 
-import psutil
-
 from comfy_cli import _safe_exec, cuda_detect
 
 logger = logging.getLogger(__name__)
@@ -295,6 +293,10 @@ def _detect_gpu(system: str, machine: str, cpu: str | None) -> dict | None:
 
 def _detect_ram_bytes() -> int | None:
     try:
+        # Lazy: psutil costs more to import than the rest of this module put
+        # together, and only RAM detection needs it.
+        import psutil
+
         return int(psutil.virtual_memory().total)
     except Exception:
         logger.debug("RAM detection failed", exc_info=True)

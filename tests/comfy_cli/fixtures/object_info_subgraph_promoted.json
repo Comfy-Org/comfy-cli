@@ -1,0 +1,3479 @@
+{
+ "AudioConcat": {
+  "input": {
+   "required": {
+    "audio1": [
+     "AUDIO",
+     {}
+    ],
+    "audio2": [
+     "AUDIO",
+     {}
+    ],
+    "direction": [
+     "COMBO",
+     {
+      "default": "after",
+      "multiselect": false,
+      "options": [
+       "after",
+       "before"
+      ]
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "audio1",
+    "audio2",
+    "direction"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "AUDIO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "AUDIO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "AudioConcat",
+  "display_name": "Concatenate Audio",
+  "python_module": "comfy_extras.nodes_audio",
+  "category": "audio",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "join audio",
+   "combine audio",
+   "append audio"
+  ],
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "BatchImagesNode": {
+  "input": {
+   "required": {
+    "images": [
+     "COMFY_AUTOGROW_V3",
+     {
+      "template": {
+       "input": {
+        "required": {
+         "image": [
+          "IMAGE",
+          {}
+         ]
+        }
+       },
+       "prefix": "image",
+       "min": 1,
+       "max": 50
+      }
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "images"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "IMAGE"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "BatchImagesNode",
+  "display_name": "Batch Images",
+  "python_module": "comfy_extras.nodes_post_processing",
+  "category": "image/batch",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "batch",
+   "image batch",
+   "batch images",
+   "combine images",
+   "merge images",
+   "stack images"
+  ],
+  "essentials_category": "Image Tools",
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "ByteDance2ReferenceNodeV2": {
+  "input": {
+   "required": {
+    "model": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "options": [
+       {
+        "key": "Seedance 2.5",
+        "inputs": {
+         "required": {
+          "prompt": [
+           "STRING",
+           {
+            "default": "",
+            "multiline": true
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "default": "720p",
+            "multiselect": false,
+            "options": [
+             "480p",
+             "720p",
+             "1080p"
+            ]
+           }
+          ],
+          "ratio": [
+           "COMBO",
+           {
+            "default": "16:9",
+            "multiselect": false,
+            "options": [
+             "16:9",
+             "4:3",
+             "1:1",
+             "3:4",
+             "9:16",
+             "21:9",
+             "adaptive"
+            ]
+           }
+          ],
+          "duration": [
+           "INT",
+           {
+            "default": 5,
+            "min": 4,
+            "max": 30,
+            "step": 1,
+            "display": "slider"
+           }
+          ],
+          "generate_audio": [
+           "BOOLEAN",
+           {
+            "default": true
+           }
+          ],
+          "task_type": [
+           "COMBO",
+           {
+            "default": "auto",
+            "multiselect": false,
+            "options": [
+             "auto",
+             "reference",
+             "edit",
+             "extend"
+            ]
+           }
+          ],
+          "output_format": [
+           "COMBO",
+           {
+            "default": "mp4",
+            "multiselect": false,
+            "options": [
+             "mp4"
+            ]
+           }
+          ],
+          "reference_images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9",
+              "image_10",
+              "image_11",
+              "image_12",
+              "image_13",
+              "image_14",
+              "image_15",
+              "image_16",
+              "image_17",
+              "image_18",
+              "image_19",
+              "image_20",
+              "image_21",
+              "image_22",
+              "image_23",
+              "image_24",
+              "image_25",
+              "image_26",
+              "image_27",
+              "image_28",
+              "image_29",
+              "image_30"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_videos": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_video": [
+                "VIDEO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "video_1",
+              "video_2",
+              "video_3",
+              "video_4",
+              "video_5",
+              "video_6",
+              "video_7",
+              "video_8",
+              "video_9",
+              "video_10"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_audios": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_audio": [
+                "AUDIO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "audio_1",
+              "audio_2",
+              "audio_3",
+              "audio_4",
+              "audio_5",
+              "audio_6",
+              "audio_7",
+              "audio_8",
+              "audio_9",
+              "audio_10"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_assets": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_asset": [
+                "STRING",
+                {
+                 "forceInput": true,
+                 "multiline": false
+                }
+               ]
+              }
+             },
+             "names": [
+              "asset_1",
+              "asset_2",
+              "asset_3",
+              "asset_4",
+              "asset_5",
+              "asset_6",
+              "asset_7",
+              "asset_8",
+              "asset_9",
+              "asset_10",
+              "asset_11",
+              "asset_12",
+              "asset_13",
+              "asset_14",
+              "asset_15",
+              "asset_16",
+              "asset_17",
+              "asset_18",
+              "asset_19",
+              "asset_20",
+              "asset_21",
+              "asset_22",
+              "asset_23",
+              "asset_24",
+              "asset_25",
+              "asset_26",
+              "asset_27",
+              "asset_28",
+              "asset_29",
+              "asset_30"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         },
+         "optional": {
+          "auto_downscale": [
+           "BOOLEAN",
+           {
+            "default": true
+           }
+          ],
+          "auto_upscale": [
+           "BOOLEAN",
+           {
+            "advanced": true,
+            "default": false
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "Seedance 2.0",
+        "inputs": {
+         "required": {
+          "prompt": [
+           "STRING",
+           {
+            "default": "",
+            "multiline": true
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "480p",
+             "720p",
+             "1080p",
+             "4k"
+            ]
+           }
+          ],
+          "ratio": [
+           "COMBO",
+           {
+            "default": "adaptive",
+            "multiselect": false,
+            "options": [
+             "16:9",
+             "4:3",
+             "1:1",
+             "3:4",
+             "9:16",
+             "21:9",
+             "adaptive"
+            ]
+           }
+          ],
+          "duration": [
+           "INT",
+           {
+            "default": 7,
+            "min": 4,
+            "max": 15,
+            "step": 1,
+            "display": "slider"
+           }
+          ],
+          "generate_audio": [
+           "BOOLEAN",
+           {
+            "default": true
+           }
+          ],
+          "reference_images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_videos": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_video": [
+                "VIDEO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "video_1",
+              "video_2",
+              "video_3"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_audios": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_audio": [
+                "AUDIO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "audio_1",
+              "audio_2",
+              "audio_3"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_assets": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_asset": [
+                "STRING",
+                {
+                 "forceInput": true,
+                 "multiline": false
+                }
+               ]
+              }
+             },
+             "names": [
+              "asset_1",
+              "asset_2",
+              "asset_3",
+              "asset_4",
+              "asset_5",
+              "asset_6",
+              "asset_7",
+              "asset_8",
+              "asset_9"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         },
+         "optional": {
+          "auto_downscale": [
+           "BOOLEAN",
+           {
+            "default": true
+           }
+          ],
+          "auto_upscale": [
+           "BOOLEAN",
+           {
+            "advanced": true,
+            "default": false
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "Seedance 2.0 Fast",
+        "inputs": {
+         "required": {
+          "prompt": [
+           "STRING",
+           {
+            "default": "",
+            "multiline": true
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "480p",
+             "720p"
+            ]
+           }
+          ],
+          "ratio": [
+           "COMBO",
+           {
+            "default": "adaptive",
+            "multiselect": false,
+            "options": [
+             "16:9",
+             "4:3",
+             "1:1",
+             "3:4",
+             "9:16",
+             "21:9",
+             "adaptive"
+            ]
+           }
+          ],
+          "duration": [
+           "INT",
+           {
+            "default": 7,
+            "min": 4,
+            "max": 15,
+            "step": 1,
+            "display": "slider"
+           }
+          ],
+          "generate_audio": [
+           "BOOLEAN",
+           {
+            "default": true
+           }
+          ],
+          "reference_images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_videos": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_video": [
+                "VIDEO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "video_1",
+              "video_2",
+              "video_3"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_audios": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_audio": [
+                "AUDIO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "audio_1",
+              "audio_2",
+              "audio_3"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_assets": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_asset": [
+                "STRING",
+                {
+                 "forceInput": true,
+                 "multiline": false
+                }
+               ]
+              }
+             },
+             "names": [
+              "asset_1",
+              "asset_2",
+              "asset_3",
+              "asset_4",
+              "asset_5",
+              "asset_6",
+              "asset_7",
+              "asset_8",
+              "asset_9"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         },
+         "optional": {
+          "auto_downscale": [
+           "BOOLEAN",
+           {
+            "default": true
+           }
+          ],
+          "auto_upscale": [
+           "BOOLEAN",
+           {
+            "advanced": true,
+            "default": false
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "Seedance 2.0 Mini",
+        "inputs": {
+         "required": {
+          "prompt": [
+           "STRING",
+           {
+            "default": "",
+            "multiline": true
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "480p",
+             "720p"
+            ]
+           }
+          ],
+          "ratio": [
+           "COMBO",
+           {
+            "default": "adaptive",
+            "multiselect": false,
+            "options": [
+             "16:9",
+             "4:3",
+             "1:1",
+             "3:4",
+             "9:16",
+             "21:9",
+             "adaptive"
+            ]
+           }
+          ],
+          "duration": [
+           "INT",
+           {
+            "default": 7,
+            "min": 4,
+            "max": 15,
+            "step": 1,
+            "display": "slider"
+           }
+          ],
+          "generate_audio": [
+           "BOOLEAN",
+           {
+            "default": true
+           }
+          ],
+          "reference_images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_videos": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_video": [
+                "VIDEO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "video_1",
+              "video_2",
+              "video_3"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_audios": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_audio": [
+                "AUDIO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "audio_1",
+              "audio_2",
+              "audio_3"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_assets": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_asset": [
+                "STRING",
+                {
+                 "forceInput": true,
+                 "multiline": false
+                }
+               ]
+              }
+             },
+             "names": [
+              "asset_1",
+              "asset_2",
+              "asset_3",
+              "asset_4",
+              "asset_5",
+              "asset_6",
+              "asset_7",
+              "asset_8",
+              "asset_9"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         },
+         "optional": {
+          "auto_downscale": [
+           "BOOLEAN",
+           {
+            "default": true
+           }
+          ],
+          "auto_upscale": [
+           "BOOLEAN",
+           {
+            "advanced": true,
+            "default": false
+           }
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "default": 0,
+      "min": 0,
+      "max": 2147483647,
+      "step": 1,
+      "control_after_generate": true,
+      "display": "number"
+     }
+    ],
+    "watermark": [
+     "BOOLEAN",
+     {
+      "advanced": true,
+      "default": false
+     }
+    ]
+   },
+   "hidden": {
+    "auth_token_comfy_org": [
+     "AUTH_TOKEN_COMFY_ORG"
+    ],
+    "api_key_comfy_org": [
+     "API_KEY_COMFY_ORG"
+    ],
+    "unique_id": [
+     "UNIQUE_ID"
+    ],
+    "comfy_usage_source": [
+     "COMFY_USAGE_SOURCE"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "model",
+    "seed",
+    "watermark"
+   ],
+   "hidden": [
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "unique_id",
+    "comfy_usage_source"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VIDEO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "ByteDance2ReferenceNodeV2",
+  "display_name": "ByteDance Seedance 2.5 Reference to Video",
+  "python_module": "comfy_api_nodes.nodes_bytedance",
+  "category": "partner/video/ByteDance",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": true,
+  "price_badge": {
+   "engine": "jsonata",
+   "depends_on": {
+    "widgets": [
+     {
+      "name": "model",
+      "type": "COMFY_DYNAMICCOMBO_V3"
+     },
+     {
+      "name": "model.resolution",
+      "type": "COMBO"
+     },
+     {
+      "name": "model.ratio",
+      "type": "COMBO"
+     },
+     {
+      "name": "model.duration",
+      "type": "INT"
+     },
+     {
+      "name": "model.task_type",
+      "type": "COMBO"
+     }
+    ],
+    "inputs": [],
+    "input_groups": [
+     "model.reference_videos"
+    ]
+   },
+   "expr": "\n(\n  $m := widgets.model;\n  $res := $lookup(widgets, \"model.resolution\");\n  $ratio := $lookup(widgets, \"model.ratio\");\n  $dur := $lookup(widgets, \"model.duration\");\n  $auto := $lookup(widgets, \"model.task_type\") = \"edit\";\n  $hasVideo := $exists(inputGroups) and $lookup(inputGroups, \"model.reference_videos\") > 0;\n  $ready := $type($m) = \"string\" and $type($res) = \"string\" and ($auto or $type($dur) = \"number\");\n  $ready ? (\n    $contains($m, \"2.5\") ? (\n      $is480 := $res = \"480p\";\n      $is1080 := $res = \"1080p\";\n      $perFrame := $ratio = \"1:1\"  ? ($is480 ? 400      : $is1080 ? 2025      : 900) :\n                   $ratio = \"4:3\"  ? ($is480 ? 411.25   : $is1080 ? 2028      : 905.6719) :\n                   $ratio = \"3:4\"  ? ($is480 ? 411.25   : $is1080 ? 2028      : 905.6719) :\n                   $ratio = \"21:9\" ? ($is480 ? 418.5    : $is1080 ? 2037.9648 : 904.3945) :\n                                     ($is480 ? 400.3125 : $is1080 ? 2025      : 900);\n      $price := $is1080\n        ? ($hasVideo ? 0.01001 : 0.016731)\n        : ($hasVideo ? 0.009152 : 0.015301);\n      $costFor := function($d) { $floor($perFrame * (24 * $d + 1)) / 1000 * $price };\n      $lo := $costFor($auto ? 4 : $dur);\n      $hi := $costFor(($auto ? 30 : $dur) + ($hasVideo ? 30 : 0));\n      $lo = $hi\n        ? {\"type\": \"usd\", \"usd\": $lo, \"format\": {\"approximate\": true}}\n        : {\"type\": \"range_usd\", \"min_usd\": $lo, \"max_usd\": $hi, \"format\": {\"approximate\": true}}\n    ) : (\n      $rate := $res = \"4k\"    ? 195200 :\n               $res = \"1080p\" ? 48800 :\n               $res = \"720p\"  ? 21600 : 10044;\n      $noVideoPrice := $res = \"4k\"    ? 0.00572 :\n                       $res = \"1080p\" ? 0.011011 :\n                       $contains($m, \"mini\") ? 0.005005 :\n                       $contains($m, \"fast\") ? 0.008008 : 0.01001;\n      $videoPrice := $res = \"4k\"    ? 0.003432 :\n                     $res = \"1080p\" ? 0.006721 :\n                     $contains($m, \"mini\") ? 0.003003 :\n                     $contains($m, \"fast\") ? 0.004719 : 0.006149;\n      $hasVideo\n        ? {\"type\": \"range_usd\",\n           \"min_usd\": $ceil($dur * 5 / 3) * $rate * $videoPrice / 1000,\n           \"max_usd\": (15 + $dur) * $rate * $videoPrice / 1000,\n           \"format\": {\"approximate\": true}}\n        : {\"type\": \"usd\", \"usd\": $dur * $rate * $noVideoPrice / 1000,\n           \"format\": {\"approximate\": true}}\n    )\n  ) : undefined\n)\n"
+  },
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "CLIPLoader": {
+  "input": {
+   "required": {
+    "clip_name": [
+     [
+      "clip-vit-large-patch14/put_clip__clip-vit-large-patch14.safetensors",
+      "gemma_3_12b_it_hf/put_text_encoders__gemma_3_12b_it_hf.safetensors",
+      "put_text_encoders.safetensors",
+      "siglip-so400m-patch14-384/put_clip__siglip-so400m-patch14-384.safetensors"
+     ]
+    ],
+    "type": [
+     [
+      "stable_diffusion",
+      "stable_cascade",
+      "sd3",
+      "stable_audio",
+      "mochi",
+      "ltxv",
+      "pixart",
+      "cosmos",
+      "lumina2",
+      "wan",
+      "hidream",
+      "chroma",
+      "ace",
+      "omnigen2",
+      "qwen_image",
+      "hunyuan_image",
+      "flux2",
+      "ovis",
+      "longcat_image",
+      "cogvideox",
+      "lens",
+      "pixeldit",
+      "ideogram4",
+      "boogu",
+      "krea2",
+      "joyimage",
+      "mage",
+      "minimax"
+     ]
+    ]
+   },
+   "optional": {
+    "device": [
+     [
+      "default",
+      "cpu"
+     ],
+     {
+      "advanced": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "clip_name",
+    "type"
+   ],
+   "optional": [
+    "device"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "CLIP"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "CLIP"
+  ],
+  "name": "CLIPLoader",
+  "display_name": "Load CLIP",
+  "python_module": "nodes",
+  "category": "model/loaders",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": [],
+  "description": ""
+ },
+ "CLIPTextEncode": {
+  "input": {
+   "required": {
+    "text": [
+     "STRING",
+     {
+      "multiline": true,
+      "dynamicPrompts": true
+     }
+    ],
+    "clip": [
+     "CLIP",
+     {}
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "text",
+    "clip"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "CONDITIONING"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "CONDITIONING"
+  ],
+  "name": "CLIPTextEncode",
+  "display_name": "CLIP Text Encode (Prompt)",
+  "python_module": "nodes",
+  "category": "model/conditioning",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "output_tooltips": [
+   "A conditioning containing the embedded text used to guide the diffusion model."
+  ],
+  "search_aliases": [
+   "text",
+   "prompt",
+   "text prompt",
+   "positive prompt",
+   "negative prompt",
+   "encode text",
+   "text encoder",
+   "encode prompt"
+  ],
+  "description": ""
+ },
+ "ComfySwitchNode": {
+  "input": {
+   "required": {
+    "switch": [
+     "BOOLEAN",
+     {}
+    ],
+    "on_false": [
+     "COMFY_MATCHTYPE_V3",
+     {
+      "lazy": true,
+      "template": {
+       "template_id": "switch",
+       "allowed_types": "*"
+      }
+     }
+    ],
+    "on_true": [
+     "COMFY_MATCHTYPE_V3",
+     {
+      "lazy": true,
+      "template": {
+       "template_id": "switch",
+       "allowed_types": "*"
+      }
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "switch",
+    "on_false",
+    "on_true"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "COMFY_MATCHTYPE_V3"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "output"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": [
+   "switch"
+  ],
+  "name": "ComfySwitchNode",
+  "display_name": "If/Else Switch",
+  "python_module": "comfy_extras.nodes_logic",
+  "category": "utilities/logic",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": true,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "if",
+   "then",
+   "switch",
+   "conditional",
+   "branch"
+  ],
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "ConditioningZeroOut": {
+  "input": {
+   "required": {
+    "conditioning": [
+     "CONDITIONING"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "conditioning"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "CONDITIONING"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "CONDITIONING"
+  ],
+  "name": "ConditioningZeroOut",
+  "display_name": "Conditioning Zero Out",
+  "python_module": "nodes",
+  "category": "model/conditioning/transform",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": [
+   "null conditioning",
+   "clear conditioning"
+  ],
+  "description": ""
+ },
+ "CreateVideo": {
+  "input": {
+   "required": {
+    "images": [
+     "IMAGE",
+     {}
+    ],
+    "fps": [
+     "FLOAT",
+     {
+      "default": 30.0,
+      "min": 1.0,
+      "max": 120.0,
+      "step": 1.0
+     }
+    ]
+   },
+   "optional": {
+    "audio": [
+     "AUDIO",
+     {}
+    ],
+    "bit_depth": [
+     "COMBO",
+     {
+      "default": "auto",
+      "multiselect": false,
+      "options": [
+       "auto",
+       8,
+       10
+      ]
+     }
+    ],
+    "color_space": [
+     "COMBO",
+     {
+      "default": "sRGB",
+      "multiselect": false,
+      "options": [
+       "sRGB",
+       "HDR",
+       "HDR PQ"
+      ]
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "images",
+    "fps"
+   ],
+   "optional": [
+    "audio",
+    "bit_depth",
+    "color_space"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VIDEO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "CreateVideo",
+  "display_name": "Create Video",
+  "python_module": "comfy_extras.nodes_video",
+  "category": "video",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "images to video"
+  ],
+  "essentials_category": "Video Tools",
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "EmptyAudio": {
+  "input": {
+   "required": {
+    "duration": [
+     "FLOAT",
+     {
+      "default": 60.0,
+      "min": 0.0,
+      "max": 18446744073709551615,
+      "step": 0.01
+     }
+    ],
+    "sample_rate": [
+     "INT",
+     {
+      "advanced": true,
+      "default": 44100,
+      "min": 1,
+      "max": 192000
+     }
+    ],
+    "channels": [
+     "INT",
+     {
+      "advanced": true,
+      "default": 2,
+      "min": 1,
+      "max": 2
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "duration",
+    "sample_rate",
+    "channels"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "AUDIO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "AUDIO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "EmptyAudio",
+  "display_name": "Empty Audio",
+  "python_module": "comfy_extras.nodes_audio",
+  "category": "audio",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "blank audio"
+  ],
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "EmptyMiniMaxMusic3LatentAudio": {
+  "input": {
+   "required": {
+    "seconds": [
+     "FLOAT",
+     {
+      "default": 120.0,
+      "min": 0.04,
+      "max": 360.0,
+      "step": 0.04
+     }
+    ],
+    "batch_size": [
+     "INT",
+     {
+      "default": 1,
+      "min": 1,
+      "max": 4096
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "seconds",
+    "batch_size"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "LATENT"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "LATENT"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "EmptyMiniMaxMusic3LatentAudio",
+  "display_name": "Empty MiniMax Music3 Latent Audio",
+  "python_module": "comfy_extras.nodes_minimax_music",
+  "category": "model/latent/minimax music",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "EmptySD3LatentImage": {
+  "input": {
+   "required": {
+    "width": [
+     "INT",
+     {
+      "default": 1024,
+      "min": 16,
+      "max": 16384,
+      "step": 16
+     }
+    ],
+    "height": [
+     "INT",
+     {
+      "default": 1024,
+      "min": 16,
+      "max": 16384,
+      "step": 16
+     }
+    ],
+    "batch_size": [
+     "INT",
+     {
+      "default": 1,
+      "min": 1,
+      "max": 4096
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "width",
+    "height",
+    "batch_size"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "LATENT"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "LATENT"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "EmptySD3LatentImage",
+  "display_name": null,
+  "python_module": "comfy_extras.nodes_sd3",
+  "category": "model/latent/stable diffusion",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "GetImageSize": {
+  "input": {
+   "required": {
+    "image": [
+     "IMAGE",
+     {}
+    ]
+   },
+   "hidden": {
+    "unique_id": [
+     "UNIQUE_ID"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "image"
+   ],
+   "hidden": [
+    "unique_id"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "INT",
+   "INT",
+   "INT"
+  ],
+  "output_is_list": [
+   false,
+   false,
+   false
+  ],
+  "output_name": [
+   "width",
+   "height",
+   "batch_size"
+  ],
+  "output_tooltips": [
+   null,
+   null,
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "GetImageSize",
+  "display_name": "Get Image Size",
+  "python_module": "comfy_extras.nodes_images",
+  "category": "image",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "dimensions",
+   "resolution",
+   "image info"
+  ],
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "GetVideoComponents": {
+  "input": {
+   "required": {
+    "video": [
+     "VIDEO",
+     {}
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "video"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE",
+   "AUDIO",
+   "FLOAT",
+   "COMBO",
+   "COMBO"
+  ],
+  "output_is_list": [
+   false,
+   false,
+   false,
+   false,
+   false
+  ],
+  "output_name": [
+   "images",
+   "audio",
+   "fps",
+   "bit_depth",
+   "color_space"
+  ],
+  "output_tooltips": [
+   null,
+   null,
+   null,
+   null,
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "GetVideoComponents",
+  "display_name": "Get Video Components",
+  "python_module": "comfy_extras.nodes_video",
+  "category": "video",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "extract frames",
+   "split video",
+   "video to images",
+   "demux"
+  ],
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "KSampler": {
+  "input": {
+   "required": {
+    "model": [
+     "MODEL",
+     {}
+    ],
+    "seed": [
+     "INT",
+     {
+      "default": 0,
+      "min": 0,
+      "max": 18446744073709551615,
+      "control_after_generate": true
+     }
+    ],
+    "steps": [
+     "INT",
+     {
+      "default": 20,
+      "min": 1,
+      "max": 10000
+     }
+    ],
+    "cfg": [
+     "FLOAT",
+     {
+      "default": 8.0,
+      "min": 0.0,
+      "max": 100.0,
+      "step": 0.1,
+      "round": 0.01
+     }
+    ],
+    "sampler_name": [
+     [
+      "euler",
+      "euler_cfg_pp",
+      "euler_ancestral",
+      "euler_ancestral_cfg_pp",
+      "heun",
+      "heunpp2",
+      "exp_heun_2_x0",
+      "exp_heun_2_x0_sde",
+      "dpm_2",
+      "dpm_2_ancestral",
+      "lms",
+      "dpm_fast",
+      "dpm_adaptive",
+      "dpmpp_2s_ancestral",
+      "dpmpp_2s_ancestral_cfg_pp",
+      "dpmpp_sde",
+      "dpmpp_sde_gpu",
+      "dpmpp_2m",
+      "dpmpp_2m_cfg_pp",
+      "dpmpp_2m_sde",
+      "dpmpp_2m_sde_gpu",
+      "dpmpp_2m_sde_heun",
+      "dpmpp_2m_sde_heun_gpu",
+      "dpmpp_3m_sde",
+      "dpmpp_3m_sde_gpu",
+      "ddpm",
+      "lcm",
+      "ipndm",
+      "ipndm_v",
+      "deis",
+      "res_multistep",
+      "res_multistep_cfg_pp",
+      "res_multistep_ancestral",
+      "res_multistep_ancestral_cfg_pp",
+      "gradient_estimation",
+      "gradient_estimation_cfg_pp",
+      "er_sde",
+      "seeds_2",
+      "seeds_3",
+      "sa_solver",
+      "sa_solver_pece",
+      "ddim",
+      "uni_pc",
+      "uni_pc_bh2",
+      "legacy_rk",
+      "rk",
+      "rk_beta",
+      "deis_3m_ode",
+      "deis_2m_ode",
+      "deis_3m",
+      "deis_2m",
+      "res_6s_ode",
+      "res_5s_ode",
+      "res_3s_ode",
+      "res_2s_ode",
+      "res_3m_ode",
+      "res_2m_ode",
+      "res_6s",
+      "res_5s",
+      "res_3s",
+      "res_2s",
+      "res_3m",
+      "res_2m"
+     ],
+     {}
+    ],
+    "scheduler": [
+     [
+      "simple",
+      "sgm_uniform",
+      "karras",
+      "exponential",
+      "ddim_uniform",
+      "beta",
+      "normal",
+      "linear_quadratic",
+      "kl_optimal",
+      "bong_tangent",
+      "beta57"
+     ],
+     {}
+    ],
+    "positive": [
+     "CONDITIONING",
+     {}
+    ],
+    "negative": [
+     "CONDITIONING",
+     {}
+    ],
+    "latent_image": [
+     "LATENT",
+     {}
+    ],
+    "denoise": [
+     "FLOAT",
+     {
+      "default": 1.0,
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "model",
+    "seed",
+    "steps",
+    "cfg",
+    "sampler_name",
+    "scheduler",
+    "positive",
+    "negative",
+    "latent_image",
+    "denoise"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "LATENT"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "LATENT"
+  ],
+  "name": "KSampler",
+  "display_name": "KSampler",
+  "python_module": "nodes",
+  "category": "model/sampling",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "output_tooltips": [
+   "The denoised latent."
+  ],
+  "search_aliases": [
+   "sampler",
+   "sample",
+   "generate",
+   "denoise",
+   "diffuse",
+   "txt2img",
+   "img2img"
+  ],
+  "description": ""
+ },
+ "LoadVideo": {
+  "input": {
+   "required": {
+    "file": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": [
+       "bedroom.mp4"
+      ],
+      "video_upload": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "file"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VIDEO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "LoadVideo",
+  "display_name": "Load Video",
+  "python_module": "comfy_extras.nodes_video",
+  "category": "video",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "import video",
+   "open video",
+   "video file"
+  ],
+  "essentials_category": "Basics",
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "MiniMaxMusic3TextEncode": {
+  "input": {
+   "required": {
+    "clip": [
+     "CLIP",
+     {}
+    ],
+    "caption": [
+     "STRING",
+     {
+      "multiline": true,
+      "dynamicPrompts": true
+     }
+    ],
+    "lyrics": [
+     "STRING",
+     {
+      "multiline": true,
+      "dynamicPrompts": true
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "default": 0,
+      "min": 0,
+      "max": 18446744073709551615,
+      "control_after_generate": true
+     }
+    ],
+    "max_duration": [
+     "FLOAT",
+     {
+      "default": 120.0,
+      "min": 0.04,
+      "max": 360.0,
+      "step": 0.04
+     }
+    ],
+    "cfg_scale": [
+     "FLOAT",
+     {
+      "advanced": true,
+      "default": 1.5,
+      "min": 0.0,
+      "max": 100.0,
+      "step": 0.1,
+      "round": 0.01
+     }
+    ],
+    "top_k": [
+     "INT",
+     {
+      "advanced": true,
+      "default": 50,
+      "min": 1,
+      "max": 16384
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "clip",
+    "caption",
+    "lyrics",
+    "seed",
+    "max_duration",
+    "cfg_scale",
+    "top_k"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "CONDITIONING",
+   "FLOAT"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_name": [
+   "CONDITIONING",
+   "seconds"
+  ],
+  "output_tooltips": [
+   null,
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "MiniMaxMusic3TextEncode",
+  "display_name": "MiniMax Music3 Text Encode",
+  "python_module": "comfy_extras.nodes_minimax_music",
+  "category": "model/conditioning/minimax music",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "ModelSamplingAuraFlow": {
+  "input": {
+   "required": {
+    "model": [
+     "MODEL"
+    ],
+    "shift": [
+     "FLOAT",
+     {
+      "default": 1.73,
+      "min": 0.0,
+      "max": 100.0,
+      "step": 0.01
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "model",
+    "shift"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "MODEL"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "MODEL"
+  ],
+  "name": "ModelSamplingAuraFlow",
+  "display_name": "ModelSamplingAuraFlow",
+  "python_module": "comfy_extras.nodes_model_advanced",
+  "category": "model/patch",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": [],
+  "description": ""
+ },
+ "PrimitiveBoolean": {
+  "input": {
+   "required": {
+    "value": [
+     "BOOLEAN",
+     {}
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "value"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "BOOLEAN"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "BOOLEAN"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "PrimitiveBoolean",
+  "display_name": "Boolean",
+  "python_module": "comfy_extras.nodes_primitive",
+  "category": "utilities/primitive",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "PrimitiveFloat": {
+  "input": {
+   "required": {
+    "value": [
+     "FLOAT",
+     {
+      "min": -9223372036854775807,
+      "max": 9223372036854775807,
+      "step": 0.1
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "value"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "FLOAT"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "FLOAT"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "PrimitiveFloat",
+  "display_name": "Float",
+  "python_module": "comfy_extras.nodes_primitive",
+  "category": "utilities/primitive",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "PrimitiveInt": {
+  "input": {
+   "required": {
+    "value": [
+     "INT",
+     {
+      "min": -9223372036854775807,
+      "max": 9223372036854775807,
+      "control_after_generate": "fixed"
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "value"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "INT"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "INT"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "PrimitiveInt",
+  "display_name": "Int",
+  "python_module": "comfy_extras.nodes_primitive",
+  "category": "utilities/primitive",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "PrimitiveStringMultiline": {
+  "input": {
+   "required": {
+    "value": [
+     "STRING",
+     {
+      "multiline": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "value"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "STRING"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "STRING"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "PrimitiveStringMultiline",
+  "display_name": "Text (Multiline)",
+  "python_module": "comfy_extras.nodes_primitive",
+  "category": "utilities/primitive",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "text",
+   "string",
+   "text multiline",
+   "string multiline",
+   "text box",
+   "prompt"
+  ],
+  "essentials_category": "Basics",
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "ResizeAndPadImage": {
+  "input": {
+   "required": {
+    "image": [
+     "IMAGE",
+     {}
+    ],
+    "target_width": [
+     "INT",
+     {
+      "default": 512,
+      "min": 1,
+      "max": 16384,
+      "step": 1
+     }
+    ],
+    "target_height": [
+     "INT",
+     {
+      "default": 512,
+      "min": 1,
+      "max": 16384,
+      "step": 1
+     }
+    ],
+    "padding_color": [
+     "COMBO",
+     {
+      "advanced": true,
+      "multiselect": false,
+      "options": [
+       "white",
+       "black"
+      ]
+     }
+    ],
+    "interpolation": [
+     "COMBO",
+     {
+      "advanced": true,
+      "multiselect": false,
+      "options": [
+       "area",
+       "bicubic",
+       "nearest-exact",
+       "bilinear",
+       "lanczos"
+      ]
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "image",
+    "target_width",
+    "target_height",
+    "padding_color",
+    "interpolation"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "IMAGE"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "ResizeAndPadImage",
+  "display_name": "Resize And Pad Image",
+  "python_module": "comfy_extras.nodes_images",
+  "category": "image/transform",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "fit to size"
+  ],
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "ResolutionSelector": {
+  "input": {
+   "required": {
+    "aspect_ratio": [
+     "COMBO",
+     {
+      "default": "1:1 (Square)",
+      "multiselect": false,
+      "options": [
+       "1:1 (Square)",
+       "2:3 (Portrait Photo)",
+       "3:2 (Photo)",
+       "3:4 (Portrait Standard)",
+       "4:3 (Standard)",
+       "9:16 (Portrait Widescreen)",
+       "16:9 (Widescreen)",
+       "21:9 (Ultrawide)"
+      ]
+     }
+    ],
+    "megapixels": [
+     "FLOAT",
+     {
+      "default": 1.0,
+      "min": 0.1,
+      "max": 16.0,
+      "step": 0.1
+     }
+    ],
+    "multiple": [
+     "INT",
+     {
+      "advanced": true,
+      "default": 8,
+      "min": 8,
+      "max": 128,
+      "step": 4
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "aspect_ratio",
+    "megapixels",
+    "multiple"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "INT",
+   "INT"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_name": [
+   "width",
+   "height"
+  ],
+  "output_tooltips": [
+   "Calculated width in pixels multiplied by the selected multiple.",
+   "Calculated height in pixels multiplied by the selected multiple."
+  ],
+  "output_matchtypes": null,
+  "name": "ResolutionSelector",
+  "display_name": "Resolution Selector",
+  "python_module": "comfy_extras.nodes_resolution",
+  "category": "utilities",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "SaveAudioAdvanced": {
+  "input": {
+   "required": {
+    "audio": [
+     "AUDIO",
+     {}
+    ],
+    "filename_prefix": [
+     "STRING",
+     {
+      "default": "audio/ComfyUI",
+      "multiline": false
+     }
+    ],
+    "format": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "options": [
+       {
+        "key": "flac",
+        "inputs": {
+         "required": {}
+        }
+       },
+       {
+        "key": "mp3",
+        "inputs": {
+         "required": {
+          "quality": [
+           "COMBO",
+           {
+            "default": "V0",
+            "multiselect": false,
+            "options": [
+             "V0",
+             "128k",
+             "320k"
+            ]
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "opus",
+        "inputs": {
+         "required": {
+          "quality": [
+           "COMBO",
+           {
+            "default": "128k",
+            "multiselect": false,
+            "options": [
+             "64k",
+             "96k",
+             "128k",
+             "192k",
+             "320k"
+            ]
+           }
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "hidden": {
+    "prompt": [
+     "PROMPT"
+    ],
+    "extra_pnginfo": [
+     "EXTRA_PNGINFO"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "audio",
+    "filename_prefix",
+    "format"
+   ],
+   "hidden": [
+    "prompt",
+    "extra_pnginfo"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "AUDIO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "audio"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "SaveAudioAdvanced",
+  "display_name": "Save Audio (Advanced)",
+  "python_module": "comfy_extras.nodes_audio",
+  "category": "audio",
+  "output_node": true,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "save audio",
+   "export audio",
+   "output audio",
+   "write audio",
+   "flac",
+   "mp3",
+   "opus"
+  ],
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "SaveImage": {
+  "input": {
+   "required": {
+    "images": [
+     "IMAGE",
+     {}
+    ],
+    "filename_prefix": [
+     "STRING",
+     {
+      "default": "ComfyUI"
+     }
+    ]
+   },
+   "hidden": {
+    "prompt": "PROMPT",
+    "extra_pnginfo": "EXTRA_PNGINFO"
+   }
+  },
+  "input_order": {
+   "required": [
+    "images",
+    "filename_prefix"
+   ],
+   "hidden": [
+    "prompt",
+    "extra_pnginfo"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "images"
+  ],
+  "name": "SaveImage",
+  "display_name": "Save Image",
+  "python_module": "nodes",
+  "category": "image",
+  "output_node": true,
+  "has_intermediate_output": false,
+  "search_aliases": [
+   "save",
+   "save image",
+   "export image",
+   "output image",
+   "write image",
+   "download"
+  ],
+  "essentials_category": "Basics",
+  "description": ""
+ },
+ "SaveVideo": {
+  "input": {
+   "required": {
+    "video": [
+     "VIDEO",
+     {}
+    ],
+    "filename_prefix": [
+     "STRING",
+     {
+      "default": "video/ComfyUI",
+      "multiline": false
+     }
+    ],
+    "format": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "options": [
+       {
+        "key": "auto",
+        "inputs": {
+         "required": {
+          "codec": [
+           "COMFY_DYNAMICCOMBO_V3",
+           {
+            "options": [
+             {
+              "key": "auto",
+              "inputs": {
+               "required": {}
+              }
+             },
+             {
+              "key": "h264",
+              "inputs": {
+               "required": {},
+               "optional": {
+                "encoding": [
+                 "COMFY_DYNAMICCOMBO_V3",
+                 {
+                  "display_name": "encoding mode",
+                  "options": [
+                   {
+                    "key": "auto",
+                    "inputs": {
+                     "required": {}
+                    }
+                   },
+                   {
+                    "key": "re-encode",
+                    "inputs": {
+                     "required": {
+                      "crf": [
+                       "FLOAT",
+                       {
+                        "default": 23.0,
+                        "min": 0.0,
+                        "max": 51.0,
+                        "step": 1.0
+                       }
+                      ]
+                     }
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              }
+             },
+             {
+              "key": "av1",
+              "inputs": {
+               "required": {},
+               "optional": {
+                "encoding": [
+                 "COMFY_DYNAMICCOMBO_V3",
+                 {
+                  "display_name": "encoding mode",
+                  "options": [
+                   {
+                    "key": "auto",
+                    "inputs": {
+                     "required": {}
+                    }
+                   },
+                   {
+                    "key": "re-encode",
+                    "inputs": {
+                     "required": {
+                      "crf": [
+                       "FLOAT",
+                       {
+                        "default": 30.0,
+                        "min": 0.0,
+                        "max": 63.0,
+                        "step": 1.0
+                       }
+                      ]
+                     }
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              }
+             }
+            ]
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "mp4",
+        "inputs": {
+         "required": {
+          "codec": [
+           "COMFY_DYNAMICCOMBO_V3",
+           {
+            "options": [
+             {
+              "key": "auto",
+              "inputs": {
+               "required": {}
+              }
+             },
+             {
+              "key": "h264",
+              "inputs": {
+               "required": {},
+               "optional": {
+                "encoding": [
+                 "COMFY_DYNAMICCOMBO_V3",
+                 {
+                  "display_name": "encoding mode",
+                  "options": [
+                   {
+                    "key": "auto",
+                    "inputs": {
+                     "required": {}
+                    }
+                   },
+                   {
+                    "key": "re-encode",
+                    "inputs": {
+                     "required": {
+                      "crf": [
+                       "FLOAT",
+                       {
+                        "default": 23.0,
+                        "min": 0.0,
+                        "max": 51.0,
+                        "step": 1.0
+                       }
+                      ]
+                     }
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              }
+             },
+             {
+              "key": "av1",
+              "inputs": {
+               "required": {},
+               "optional": {
+                "encoding": [
+                 "COMFY_DYNAMICCOMBO_V3",
+                 {
+                  "display_name": "encoding mode",
+                  "options": [
+                   {
+                    "key": "auto",
+                    "inputs": {
+                     "required": {}
+                    }
+                   },
+                   {
+                    "key": "re-encode",
+                    "inputs": {
+                     "required": {
+                      "crf": [
+                       "FLOAT",
+                       {
+                        "default": 30.0,
+                        "min": 0.0,
+                        "max": 63.0,
+                        "step": 1.0
+                       }
+                      ]
+                     }
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              }
+             }
+            ]
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "mkv",
+        "inputs": {
+         "required": {
+          "codec": [
+           "COMFY_DYNAMICCOMBO_V3",
+           {
+            "options": [
+             {
+              "key": "auto",
+              "inputs": {
+               "required": {}
+              }
+             },
+             {
+              "key": "h264",
+              "inputs": {
+               "required": {},
+               "optional": {
+                "encoding": [
+                 "COMFY_DYNAMICCOMBO_V3",
+                 {
+                  "display_name": "encoding mode",
+                  "options": [
+                   {
+                    "key": "auto",
+                    "inputs": {
+                     "required": {}
+                    }
+                   },
+                   {
+                    "key": "re-encode",
+                    "inputs": {
+                     "required": {
+                      "crf": [
+                       "FLOAT",
+                       {
+                        "default": 23.0,
+                        "min": 0.0,
+                        "max": 51.0,
+                        "step": 1.0
+                       }
+                      ]
+                     }
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              }
+             },
+             {
+              "key": "av1",
+              "inputs": {
+               "required": {},
+               "optional": {
+                "encoding": [
+                 "COMFY_DYNAMICCOMBO_V3",
+                 {
+                  "display_name": "encoding mode",
+                  "options": [
+                   {
+                    "key": "auto",
+                    "inputs": {
+                     "required": {}
+                    }
+                   },
+                   {
+                    "key": "re-encode",
+                    "inputs": {
+                     "required": {
+                      "crf": [
+                       "FLOAT",
+                       {
+                        "default": 30.0,
+                        "min": 0.0,
+                        "max": 63.0,
+                        "step": 1.0
+                       }
+                      ]
+                     }
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              }
+             }
+            ]
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "webm",
+        "inputs": {
+         "required": {
+          "codec": [
+           "COMFY_DYNAMICCOMBO_V3",
+           {
+            "options": [
+             {
+              "key": "auto",
+              "inputs": {
+               "required": {}
+              }
+             },
+             {
+              "key": "av1",
+              "inputs": {
+               "required": {},
+               "optional": {
+                "encoding": [
+                 "COMFY_DYNAMICCOMBO_V3",
+                 {
+                  "display_name": "encoding mode",
+                  "options": [
+                   {
+                    "key": "auto",
+                    "inputs": {
+                     "required": {}
+                    }
+                   },
+                   {
+                    "key": "re-encode",
+                    "inputs": {
+                     "required": {
+                      "crf": [
+                       "FLOAT",
+                       {
+                        "default": 30.0,
+                        "min": 0.0,
+                        "max": 63.0,
+                        "step": 1.0
+                       }
+                      ]
+                     }
+                    }
+                   }
+                  ]
+                 }
+                ]
+               }
+              }
+             }
+            ]
+           }
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "optional": {
+    "codec": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "hidden": true,
+      "options": [
+       {
+        "key": "auto",
+        "inputs": {
+         "required": {}
+        }
+       },
+       {
+        "key": "h264",
+        "inputs": {
+         "required": {},
+         "optional": {
+          "encoding": [
+           "COMFY_DYNAMICCOMBO_V3",
+           {
+            "display_name": "encoding mode",
+            "options": [
+             {
+              "key": "auto",
+              "inputs": {
+               "required": {}
+              }
+             },
+             {
+              "key": "re-encode",
+              "inputs": {
+               "required": {
+                "crf": [
+                 "FLOAT",
+                 {
+                  "default": 23.0,
+                  "min": 0.0,
+                  "max": 51.0,
+                  "step": 1.0
+                 }
+                ]
+               }
+              }
+             }
+            ]
+           }
+          ]
+         }
+        }
+       },
+       {
+        "key": "av1",
+        "inputs": {
+         "required": {},
+         "optional": {
+          "encoding": [
+           "COMFY_DYNAMICCOMBO_V3",
+           {
+            "display_name": "encoding mode",
+            "options": [
+             {
+              "key": "auto",
+              "inputs": {
+               "required": {}
+              }
+             },
+             {
+              "key": "re-encode",
+              "inputs": {
+               "required": {
+                "crf": [
+                 "FLOAT",
+                 {
+                  "default": 30.0,
+                  "min": 0.0,
+                  "max": 63.0,
+                  "step": 1.0
+                 }
+                ]
+               }
+              }
+             }
+            ]
+           }
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "hidden": {
+    "prompt": [
+     "PROMPT"
+    ],
+    "extra_pnginfo": [
+     "EXTRA_PNGINFO"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "video",
+    "filename_prefix",
+    "format"
+   ],
+   "optional": [
+    "codec"
+   ],
+   "hidden": [
+    "prompt",
+    "extra_pnginfo"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "video"
+  ],
+  "output_tooltips": [
+   "The input video, unchanged."
+  ],
+  "output_matchtypes": null,
+  "name": "SaveVideo",
+  "display_name": "Save Video",
+  "python_module": "comfy_extras.nodes_video",
+  "category": "video",
+  "output_node": true,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "export video"
+  ],
+  "essentials_category": "Basics",
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "SeedNode": {
+  "input": {
+   "required": {
+    "seed": [
+     "INT",
+     {
+      "min": 0,
+      "max": 9223372036854775807,
+      "control_after_generate": "fixed"
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "seed"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "INT"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "seed"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "SeedNode",
+  "display_name": "Seed",
+  "python_module": "comfy_extras.nodes_seed",
+  "category": "utilities",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "seed",
+   "random"
+  ],
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "UNETLoader": {
+  "input": {
+   "required": {
+    "unet_name": [
+     [
+      "put_diffusion_models.safetensors"
+     ]
+    ],
+    "weight_dtype": [
+     [
+      "default",
+      "fp8_e4m3fn",
+      "fp8_e4m3fn_fast",
+      "fp8_e5m2"
+     ],
+     {
+      "advanced": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "unet_name",
+    "weight_dtype"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "MODEL"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "MODEL"
+  ],
+  "name": "UNETLoader",
+  "display_name": "Load Diffusion Model",
+  "python_module": "nodes",
+  "category": "model/loaders",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": [],
+  "description": ""
+ },
+ "VAEDecode": {
+  "input": {
+   "required": {
+    "samples": [
+     "LATENT",
+     {}
+    ],
+    "vae": [
+     "VAE",
+     {}
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "samples",
+    "vae"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "IMAGE"
+  ],
+  "name": "VAEDecode",
+  "display_name": "VAE Decode",
+  "python_module": "nodes",
+  "category": "model/latent",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "output_tooltips": [
+   "The decoded image."
+  ],
+  "search_aliases": [
+   "decode",
+   "decode latent",
+   "latent to image",
+   "render latent"
+  ],
+  "description": ""
+ },
+ "VAEDecodeAudio": {
+  "input": {
+   "required": {
+    "samples": [
+     "LATENT",
+     {}
+    ],
+    "vae": [
+     "VAE",
+     {}
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "samples",
+    "vae"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "AUDIO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "AUDIO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "VAEDecodeAudio",
+  "display_name": "VAE Decode Audio",
+  "python_module": "comfy_extras.nodes_audio",
+  "category": "model/latent",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "latent to audio"
+  ],
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "VAEDecodeAudioTiled": {
+  "input": {
+   "required": {
+    "samples": [
+     "LATENT",
+     {}
+    ],
+    "vae": [
+     "VAE",
+     {}
+    ],
+    "tile_size": [
+     "INT",
+     {
+      "default": 512,
+      "min": 32,
+      "max": 8192,
+      "step": 8
+     }
+    ],
+    "overlap": [
+     "INT",
+     {
+      "default": 64,
+      "min": 0,
+      "max": 1024,
+      "step": 8
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "samples",
+    "vae",
+    "tile_size",
+    "overlap"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "AUDIO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "AUDIO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "VAEDecodeAudioTiled",
+  "display_name": "VAE Decode Audio (Tiled)",
+  "python_module": "comfy_extras.nodes_audio",
+  "category": "model/latent",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "latent to audio"
+  ],
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "VAELoader": {
+  "input": {
+   "required": {
+    "vae_name": [
+     [
+      "put_vae.safetensors",
+      "pixel_space"
+     ]
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "vae_name"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VAE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VAE"
+  ],
+  "name": "VAELoader",
+  "display_name": "Load VAE",
+  "python_module": "nodes",
+  "category": "model/loaders",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": [],
+  "description": ""
+ },
+ "Video Slice": {
+  "input": {
+   "required": {
+    "video": [
+     "VIDEO",
+     {}
+    ],
+    "start_time": [
+     "FLOAT",
+     {
+      "default": 0.0,
+      "min": -100000.0,
+      "max": 100000.0,
+      "step": 0.001
+     }
+    ],
+    "duration": [
+     "FLOAT",
+     {
+      "default": 0.0,
+      "min": 0.0,
+      "step": 0.001
+     }
+    ],
+    "strict_duration": [
+     "BOOLEAN",
+     {
+      "default": false
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "video",
+    "start_time",
+    "duration",
+    "strict_duration"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VIDEO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "Video Slice",
+  "display_name": "Trim Video",
+  "python_module": "comfy_extras.nodes_video",
+  "category": "video",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "trim video duration",
+   "skip first frames",
+   "frame load cap",
+   "start time"
+  ],
+  "essentials_category": "Video Tools",
+  "has_intermediate_output": false,
+  "description": ""
+ }
+}

@@ -497,12 +497,12 @@ class TestExecuteErrorHandling:
             mock_exec.connect.assert_called_once()
             mock_exec.queue.assert_called_once()
             mock_exec.watch_execution.assert_called_once()
-            # The run WebSocket must be closed on the success path (BE-3404) —
+            # The run WebSocket must be closed on the success path —
             # the finally-block _safe_close, not left open until teardown.
             mock_exec.ws.close.assert_called_once()
 
     def test_websocket_closed_on_watch_failure(self, workflow_file):
-        # BE-3404: the finally-block close also fires when watch_execution
+        # The finally-block close also fires when watch_execution
         # raises, so a mid-run error doesn't linger the server-side session.
         with (
             patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
@@ -590,7 +590,7 @@ class TestExecuteErrorHandling:
 
 class TestWaitStateFile:
     """`comfy run --wait` writes the jobs state file at SUBMIT time, not only
-    on success (BE-4750) — so a server that dies mid-run still leaves an
+    on success — so a server that dies mid-run still leaves an
     on-disk record of the prompt that was in flight, and the emitted error
     names it."""
 
@@ -667,7 +667,7 @@ class TestWaitStateFile:
 
     def test_submit_time_record_carries_watcher_identity(self, workflow_file):
         """The foreground --wait process IS the watcher, and the submit-time
-        record says so (BE-6641): pid + create_time stamped exactly like the
+        record says so: pid + create_time stamped exactly like the
         detached watcher's, so a --wait process killed from outside leaves a
         record the stale-watcher reap can finalize instead of a permanent
         phantom `running`."""
@@ -1006,7 +1006,7 @@ class TestWaitStateFile:
 
 class TestCloudWaitWatcherStamp:
     """Cloud `--wait` polls from the foreground with no watcher subprocess, so
-    the submit-time record stamps THIS process as the watcher (BE-6641) — an
+    the submit-time record stamps THIS process as the watcher — an
     external kill then leaves a non-terminal record with a dead pid, which
     `jobs ls`'s stale-watcher reap finalizes as `watcher_crashed`. Every
     in-process exit writes a terminal record the reap ignores."""
@@ -1292,8 +1292,12 @@ class TestPartialExecutionDiff:
 
 
 class TestResolvePartnerCredential:
-    """The credential the local submit can inject into ``extra_data`` so a
-    partner-API node finds it. Precedence session > env > stored key.
+    """The credential a submit injects into ``extra_data`` so a partner-API node
+    finds it. Precedence session > env > stored key.
+
+    One resolver for both submit paths (``comfy_cli.credentials``): the local
+    exec path ran this chain while ``deploy run`` ran one that ignored the
+    session entirely.
 
     The OAuth session is refreshed when possible (``refresh=True``) but never
     cleared from this best-effort path (``allow_clear=False``): access tokens
@@ -1304,10 +1308,133 @@ class TestResolvePartnerCredential:
     exercised end-to-end in ``tests/comfy_cli/test_credentials.py``.
     """
 
+    @pytest.fixture(autouse=True)
+    def _no_ambient_keys(self, monkeypatch: pytest.MonkeyPatch):
+        """No ambient credential may leak in from the developer's shell.
+
+        All three, not just the two API keys: leaving COMFY_CLOUD_AUTH_TOKEN set
+        would let the forwarded-bearer case pass by accident, and leaving it
+        unset in the fixture would let a resolver that DROPPED it pass too.
+        """
+        for name in ("COMFY_API_KEY", "COMFY_CLOUD_API_KEY", "COMFY_CLOUD_AUTH_TOKEN"):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_uses_the_forwarded_bearer_when_there_is_no_session(self, monkeypatch: pytest.MonkeyPatch):
+        """COMFY_CLOUD_AUTH_TOKEN is how a trusted caller — the cloud agent
+        forwarding a validated token — authenticates without an interactive
+        login. `purpose="partner"` skips it, so a resolver that only consulted
+        that purpose would silently stop honouring a credential the local path
+        already worked with."""
+        monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN", "forwarded-bearer")
+        from comfy_cli.auth import store as auth_store
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() == ("auth_token_comfy_org", "forwarded-bearer")
+
+    def test_the_forwarded_bearer_outranks_every_ambient_key(self, monkeypatch: pytest.MonkeyPatch):
+        """A token forwarded for THIS request must not lose to a key that
+        happens to be configured on the machine: the run would authenticate as a
+        different account and spend that account's credits. Same rule the module
+        applies to a live session — only a deliberate per-call value outranks a
+        request-scoped credential."""
+        monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN", "forwarded-bearer")
+        monkeypatch.setenv("COMFY_API_KEY", "partner-key")
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "cloud-key")
+        from comfy_cli.auth import store as auth_store
+        from comfy_cli.target import CLOUD_API_KEY_PROVIDER
+
+        record = MagicMock()
+        record.key = "stored-key"
+        monkeypatch.setattr(auth_store, "get", lambda name: record if name == CLOUD_API_KEY_PROVIDER else None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() == ("auth_token_comfy_org", "forwarded-bearer")
+
+    def test_a_live_session_outranks_the_forwarded_bearer(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN", "forwarded-bearer")
+        from comfy_cli.auth import store as auth_store
+        from comfy_cli.cloud import oauth
+
+        session = MagicMock()
+        session.is_expired.return_value = False
+        session.access_token = "live-session"
+        session.base_url = "https://cloud.comfy.org"
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: session)
+        assert _resolve_partner_credential() == ("auth_token_comfy_org", "live-session")
+
+    def test_the_forwarded_bearer_outranks_the_cloud_api_key(self, monkeypatch: pytest.MonkeyPatch):
+        """Same order the `purpose="cloud"` chain uses: bearer, then env key."""
+        monkeypatch.setenv("COMFY_CLOUD_AUTH_TOKEN", "forwarded-bearer")
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "cloud-key")
+        from comfy_cli.auth import store as auth_store
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() == ("auth_token_comfy_org", "forwarded-bearer")
+
     def _no_session(self, monkeypatch: pytest.MonkeyPatch):
         from comfy_cli.cloud import oauth
 
         monkeypatch.setattr(oauth, "ensure_fresh_session", lambda **kw: None)
+
+    def test_prefers_the_partner_env_var_over_the_cloud_one(self, monkeypatch: pytest.MonkeyPatch):
+        """One resolver now serves both submit paths, and each had read only one
+        of the two vars: local read ``COMFY_CLOUD_API_KEY``, ``deploy run`` read
+        ``COMFY_API_KEY``. Both are honoured so neither path loses a credential
+        it already worked with, and the partner-purpose var — the one ComfyUI
+        itself reads — wins when both are set."""
+        monkeypatch.setenv("COMFY_API_KEY", "partner-key")
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "cloud-key")
+        from comfy_cli.auth import store as auth_store
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() == ("api_key_comfy_org", "partner-key")
+
+    def test_uses_the_partner_env_var_alone(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("COMFY_API_KEY", "  partner-key  ")
+        from comfy_cli.auth import store as auth_store
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() == ("api_key_comfy_org", "partner-key")
+
+    def test_the_cloud_env_key_outranks_the_stored_key(self, monkeypatch: pytest.MonkeyPatch):
+        """An env var is a value the caller set for THIS invocation; the stored
+        key is machine state. Resolving the partner env var and the stored key
+        together — as one `find_api_key` call does — lets the stored key win over
+        the OTHER env var, and the run then authenticates as, and bills, an
+        account the caller did not choose."""
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "invocation-key")
+        from comfy_cli.auth import store as auth_store
+        from comfy_cli.target import CLOUD_API_KEY_PROVIDER
+
+        record = MagicMock()
+        record.key = "stored-key"
+        monkeypatch.setattr(auth_store, "get", lambda name: record if name == CLOUD_API_KEY_PROVIDER else None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() == ("api_key_comfy_org", "invocation-key")
+
+    def test_the_stored_key_is_used_when_no_env_var_is_set(self, monkeypatch: pytest.MonkeyPatch):
+        from comfy_cli.auth import store as auth_store
+        from comfy_cli.target import CLOUD_API_KEY_PROVIDER
+
+        record = MagicMock()
+        record.key = "stored-key"
+        monkeypatch.setattr(auth_store, "get", lambda name: record if name == CLOUD_API_KEY_PROVIDER else None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() == ("api_key_comfy_org", "stored-key")
+
+    def test_a_whitespace_only_cloud_key_is_absent_not_a_credential(self, monkeypatch: pytest.MonkeyPatch):
+        """``find_api_key(purpose="cloud")`` passes ambient values verbatim, so
+        padding would otherwise reach a partner header."""
+        monkeypatch.setenv("COMFY_CLOUD_API_KEY", "   ")
+        from comfy_cli.auth import store as auth_store
+
+        monkeypatch.setattr(auth_store, "get", lambda _: None)
+        self._no_session(monkeypatch)
+        assert _resolve_partner_credential() is None
 
     def test_uses_env_var_when_no_session(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("COMFY_CLOUD_API_KEY", "env-key-123")
@@ -1334,7 +1461,7 @@ class TestResolvePartnerCredential:
 
     def test_refreshes_and_uses_oauth_token(self, monkeypatch: pytest.MonkeyPatch):
         """A signed-in user whose access token lapsed gets a REFRESHED token
-        here — the whole point of BE-3361 — rather than being skipped and
+        here — the whole point of the refresh fix — rather than being skipped and
         hitting ``partner_node_requires_credential``."""
         monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
         from comfy_cli.auth import store as auth_store
@@ -1379,7 +1506,7 @@ class TestResolvePartnerCredential:
     def test_stale_session_from_transient_failure_falls_through(self, monkeypatch: pytest.MonkeyPatch):
         """A transient refresh failure returns the STALE (expired) session; it
         fails its own expiry check and the resolver falls through — unchanged
-        from the pre-BE-3361 behavior on a network flake."""
+        from the earlier behavior on a network flake."""
         monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
         from comfy_cli.auth import store as auth_store
         from comfy_cli.cloud import oauth
@@ -1665,7 +1792,7 @@ class TestPartnerNodesDetectedTelemetry:
         assert events[0]["partner_node_count"] == 1
 
     def test_does_not_fire_when_the_spend_gate_refuses(self, tmp_path, monkeypatch):
-        """Documents the one funnel this event does NOT cover: the BE-4326 spend
+        """Documents the one funnel this event does NOT cover: the spend
         gate refuses before any credential resolution (so a refusal never
         triggers a network OAuth refresh), and ``credential_present`` depends on
         that resolution — so a run declined for lack of ``--allow-spend`` emits
@@ -1868,8 +1995,8 @@ class TestPartnerNodesDetectedTelemetry:
 
 
 class TestExecuteSpendGate:
-    """`comfy run` gates partner-API (paid) workflows on `--allow-spend`
-    (BE-4326), mirroring `comfy run-template`'s spend gate. A partner-node
+    """`comfy run` gates partner-API (paid) workflows on `--allow-spend`,
+    mirroring `comfy run-template`'s spend gate. A partner-node
     workflow must not silently spend Comfy credits: machine mode fails closed
     with `spend_consent_required`; a TTY prompts; consent (flag or "yes") lets
     the run proceed to the credential path unchanged. Partner-free workflows
@@ -2027,7 +2154,7 @@ class TestExecuteSpendGate:
 
 
 class TestSpendGateStdinAndMarkup:
-    """Robustness of the interactive spend prompt (BE-4326): a missing/closed
+    """Robustness of the interactive spend prompt: a missing/closed
     stdin must fall through to the fail-closed machine-mode error rather than
     crash, and partner class_type names must not be interpreted as Rich markup."""
 
@@ -2367,6 +2494,42 @@ class TestExecuteCloudAutoConvert:
         submitted_args, _ = mock_client.submit_prompt.call_args
         assert submitted_args[0] == self.CONVERTED
 
+    def test_ui_workflow_conversion_honors_object_info_file_env(
+        self, ui_workflow_file, fake_target, tmp_path, monkeypatch
+    ):
+        """Both cloud object_info loads on this path (UI→API conversion, then
+        preflight-validate) are routed through resilient_load_object_info, so
+        COMFY_OBJECT_INFO_FILE — a pre-warmed/baked catalog an agent host
+        provides — must be read with NO live /object_info fetch at all."""
+        from comfy_cli.comfy_client import SubmitResult
+        from comfy_cli.command.run import execute_cloud
+
+        dump_path = tmp_path / "object_info.json"
+        # `output_node: True`: preflight now rejects a prompt with zero output
+        # nodes (prompt_no_outputs), and this fixture is about the catalog SOURCE,
+        # not about validation — so give the catalog an output node.
+        dump_path.write_text(json.dumps({"KSampler": {"output_node": True}}))
+        monkeypatch.setenv("COMFY_OBJECT_INFO_FILE", str(dump_path))
+
+        mock_client = MagicMock()
+        mock_client.submit_prompt.return_value = SubmitResult(prompt_id="prompt-env", number=1, node_errors={})
+
+        def _network_fetch_should_not_run(**_kwargs):
+            raise AssertionError("network object_info fetch should not run with COMFY_OBJECT_INFO_FILE set")
+
+        with (
+            patch("comfy_cli.target.resolve_target", return_value=fake_target),
+            patch("comfy_cli.command.run.convert_ui_to_api", return_value=self.CONVERTED) as mock_convert,
+            patch("comfy_cli.cql.engine._load_from_target", side_effect=_network_fetch_should_not_run),
+            patch("comfy_cli.comfy_client.Client", return_value=mock_client),
+            patch("comfy_cli.command.run._spawn_watcher"),
+        ):
+            execute_cloud(ui_workflow_file, wait=False)
+
+        assert mock_convert.called
+        submitted_args, _ = mock_client.submit_prompt.call_args
+        assert submitted_args[0] == self.CONVERTED
+
     def test_ui_workflow_conversion_failure_surfaces_conversion_error(self, ui_workflow_file, fake_target):
         from comfy_cli.command.run import execute_cloud
         from comfy_cli.workflow_to_api import WorkflowConversionError
@@ -2402,8 +2565,8 @@ class TestExecuteCloudAutoConvert:
 
 
 class TestExecuteCloudSpendGate:
-    """The cloud submit also bills partner-API nodes server-side, so BE-4326
-    applies the same consent gate there. Detection is fail-open (empty cloud
+    """The cloud submit also bills partner-API nodes server-side, so the same
+    consent gate applies there. Detection is fail-open (empty cloud
     object_info → no gate), and the gate fires before cloud auth/submit."""
 
     PARTNER_WF = {"1": {"class_type": "Veo3VideoGenerationNode", "inputs": {"prompt": "x"}}}
@@ -2851,6 +3014,11 @@ class TestLocalExecuteItemMapAndGroupedOutputs:
         mock_exec.output_entries = []
         mock_exec.cached_node_ids = []
         mock_exec.executed_node_ids = []
+        # `_emit_queued` hands these to `json.dumps` in NDJSON mode. Unstubbed
+        # MagicMocks make its `default` hook recurse forever on `isoformat`,
+        # retaining every child mock — ~28GB, and the OOM killed the suite.
+        mock_exec.validation_warnings = []
+        mock_exec.workflow_manifest.return_value = []
         return mock_exec
 
     def _run(self, workflow_file, mock_exec, *, wait, extra_patches=()):
@@ -2976,6 +3144,14 @@ class TestRunJournal:
         with (
             patch("comfy_cli.target.resolve_target", return_value=fake_target),
             patch("comfy_cli.cql.engine._load_from_target", return_value={}),
+            # `execute_cloud` reaches object_info through the RESILIENT loader,
+            # not `engine._load_from_target` directly. Patching only the latter
+            # left the loader's own cache/refresh/stale-fallback path live, so
+            # this test performed a real cloud fetch — ~9s in isolation, and an
+            # indefinite hang once an earlier test in the file had populated the
+            # credential/cache state it depends on. Stub the loader itself so the
+            # test is hermetic regardless of which path the implementation picks.
+            patch("comfy_cli.cql.loader.resilient_load_object_info", return_value={}),
             patch("comfy_cli.comfy_client.Client", return_value=mock_client),
             patch("comfy_cli.command.run._spawn_watcher"),
         ):

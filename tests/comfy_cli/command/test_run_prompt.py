@@ -1,4 +1,4 @@
-"""Integration/smoke tests for `comfy run --prompt`/`--set` (BE-2535).
+"""Integration/smoke tests for `comfy run --prompt`/`--set`.
 
 The injector is unit-tested offline in
 ``tests/comfy_cli/cql/test_default_workflow.py``. These tests prove the wiring:
@@ -156,7 +156,7 @@ class TestRunCliWiring:
 
 class TestRuntimeCheckpointResolutionLocal:
     """Wiring: `execute` resolves the bundled default's checkpoint against the
-    server's object_info before submit (BE-2994)."""
+    server's object_info before submit."""
 
     def _run_local(self, preloaded, object_info, patch_pprint=False):
         stack = [
@@ -218,7 +218,7 @@ class TestRuntimeCheckpointResolutionLocal:
 class TestCheckpointResolutionEmptyEnumByTarget:
     """`_resolve_default_checkpoint_or_exit` hard-errors on an empty enum only
     for the local target; Comfy Cloud provisions models per-job so it fails
-    open (BE-2994)."""
+    open."""
 
     def test_local_empty_enum_hard_errors(self):
         from comfy_cli.command.run.preflight import _resolve_default_checkpoint_or_exit

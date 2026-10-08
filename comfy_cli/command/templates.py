@@ -30,8 +30,8 @@ from typing import Annotated, Any
 
 import typer
 
-from comfy_cli import tracking
-from comfy_cli.file_utils import atomic_write_bytes
+from comfy_cli import knowledge, tracking, workflow_ops
+from comfy_cli.file_utils import atomic_write_bytes, cache_dir
 from comfy_cli.http import ResponseTooLarge, plain_urlopen, read_capped
 from comfy_cli.output import get_renderer, rprint
 
@@ -80,9 +80,8 @@ _REFRESH_DEBOUNCE_SECONDS = 60.0
 
 
 def _cache_path() -> Path:
-    """Where the gallery index lives on disk. XDG-respecting."""
-    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return Path(base) / "comfy-cli" / "gallery" / "index.json"
+    """Where the gallery index lives on disk."""
+    return cache_dir() / "gallery" / "index.json"
 
 
 def _fetch_gallery(url: str = GALLERY_URL, timeout: float = 15.0) -> bytes:
@@ -124,7 +123,7 @@ def _load_gallery(
     its own filtering on top.
 
     A cache older than ``GALLERY_TTL_SECONDS`` is served immediately and
-    revalidated in the background (stale-while-revalidate, BE-3427): a stale
+    revalidated in the background (stale-while-revalidate): a stale
     cache is returned right away and a detached subprocess re-fetches it for
     the *next* invocation, so an offline/firewalled machine never blocks on the
     15s fetch timeout on every call. An explicit ``--refresh`` (or a genuinely
@@ -325,7 +324,7 @@ def _refresh_cwd() -> str | None:
 def _spawn_background_refresh() -> bool:
     """Kick off a detached subprocess that re-fetches the gallery index.
 
-    Serve-stale-while-revalidate (BE-3427): the caller has already returned the
+    Serve-stale-while-revalidate: the caller has already returned the
     stale cache, so this revalidation must never block or delay process exit —
     a firewalled machine would otherwise hang on the 15s fetch timeout on every
     invocation past the TTL. We spawn a fully detached ``comfy templates
@@ -358,7 +357,17 @@ def _spawn_background_refresh() -> bool:
     # *non-atomic* config.ini rewrite — racing the foreground process and risking
     # a corrupt config. `_refresh-cache` is contractually 'no telemetry,
     # best-effort', so opt the child out of consent entirely.
-    child_env = {**os.environ, "COMFY_NO_TELEMETRY": "1", "DO_NOT_TRACK": "1"}
+    # Pin the child to the cache dir *this* process resolved, not a raw
+    # `COMFY_CACHE_DIR` value: the child's cwd is `_refresh_cwd()`, already
+    # inside that dir, so re-resolving a relative override there would nest a
+    # second cache tree under the first and the foreground cache would never
+    # see the refresh.
+    child_env = {
+        **os.environ,
+        "COMFY_CACHE_DIR": str(cache_dir()),
+        "COMFY_NO_TELEMETRY": "1",
+        "DO_NOT_TRACK": "1",
+    }
 
     kwargs: dict[str, Any] = dict(
         stdout=subprocess.DEVNULL,
@@ -568,6 +577,14 @@ def ls_cmd(
         bool,
         typer.Option("--refresh", help="Re-fetch index.json from GitHub before listing."),
     ] = False,
+    select: Annotated[
+        str | None,
+        typer.Option(
+            "--select",
+            show_default=False,
+            help="Project the payload: dot path (rows.0.name), wildcard (rows.#.name), comma multi-select.",
+        ),
+    ] = None,
 ):
     renderer = get_renderer()
 
@@ -587,6 +604,7 @@ def ls_cmd(
 
     rows = _flatten_templates(cats)
     total = len(rows)
+    all_names = {r["name"] for r in rows}
     rows = [
         r
         for r in rows
@@ -631,6 +649,11 @@ def ls_cmd(
         ],
     }
 
+    if select is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select, command="templates ls")
+
     if renderer.is_pretty():
         from rich.table import Table
 
@@ -652,6 +675,15 @@ def ls_cmd(
             renderer.console().print(tbl)
             tail = f" (of {matched} matched, {total} in gallery)" if (matched != len(rows) or matched != total) else ""
             rprint(f"[dim]{len(rows)} template(s){tail}[/dim]")
+    knowledge.attach(
+        payload,
+        command="templates ls",
+        queries=[x for x in (tag, name_sub, model) if x],
+        templates=[r["name"] for r in rows],
+        catalog_templates=all_names,
+        thin=(matched == 0),
+        qualified=any(payload["filters"].values()),
+    )
     renderer.emit(payload, command="templates ls")
 
 
@@ -708,7 +740,9 @@ def show_cmd(
         if match["description"]:
             rprint("")
             rprint(match["description"])
-    renderer.emit({"template": match}, command="templates show")
+    payload = {"template": match}
+    knowledge.attach(payload, command="templates show", templates=[name], catalog_templates={r["name"] for r in rows})
+    renderer.emit(payload, command="templates show")
 
 
 @app.command("refresh", help="Re-download templates/index.json into the local cache.")
@@ -798,6 +832,40 @@ def _workflow_node_count(workflow: Any) -> int | None:
     return len(workflow)
 
 
+def _resolve_template_models(wf: Any, input_path: str | None) -> dict[str, Any]:
+    """Check a fetched template's model files against an OFFLINE catalog.
+
+    Only with ``--input`` or ``COMFY_OBJECT_INFO_FILE``: a plain fetch stays
+    one network read. A file the catalog lacks becomes its unique
+    same-model, other-precision sibling (``model_substitutions``); one with no
+    such sibling is reported with its closest options (``unavailable_models``)
+    so the caller knows before ``validate`` does. A catalog that fails to load
+    is reported, never fatal: the fetch itself succeeded.
+    """
+    if not isinstance(wf, dict) or not (input_path or os.environ.get("COMFY_OBJECT_INFO_FILE")):
+        return {}
+    from comfy_cli.cql.engine import Graph
+    from comfy_cli.cql.loader import resilient_load_object_info
+    from comfy_cli.model_variants import resolve_workflow_models
+
+    try:
+        graph = Graph.from_object_info(resilient_load_object_info(input_path=input_path))
+    except Exception as e:  # noqa: BLE001 — a missing catalog only skips the check
+        return {"model_check_skipped": f"could not load object_info: {e}"}
+    subs, unavailable = resolve_workflow_models(wf, graph)
+    notes: dict[str, Any] = {}
+    if subs:
+        notes["model_substitutions"] = subs
+    if unavailable:
+        notes["unavailable_models"] = unavailable
+        notes["unavailable_models_hint"] = (
+            "these model files are not installed here and no other precision of them is, so this template will "
+            "fail validate as fetched; `did_you_mean` names the closest installed files, but a different file is "
+            "a different model: pick another template, or tell the user which model is missing"
+        )
+    return notes
+
+
 def _fetch_template_workflow(name: str, *, timeout: float = 15.0) -> bytes:
     """Pull a single template's workflow JSON from the canonical GitHub raw URL."""
     url = _TEMPLATE_WORKFLOW_URL.format(name=urllib.parse.quote(name, safe=""))
@@ -831,6 +899,33 @@ def fetch_cmd(
         bool,
         typer.Option("--refresh", help="Re-fetch the gallery index from GitHub before resolving."),
     ] = False,
+    emit_ops: Annotated[
+        bool,
+        typer.Option(
+            "--emit-ops",
+            help=(
+                "Also emit `ops`: the stamped op batch that turns the file being replaced INTO this "
+                "template (delete_node + add_node + connect, frozen vocabulary). Replays through a merge "
+                "consumer AND is a legal `comfy workflow apply --ops` batch. Omitted, with `ops_skipped` "
+                "saying why, for templates the vocabulary cannot express (subgraphs, groups)."
+            ),
+        ),
+    ] = False,
+    actor: Annotated[str, typer.Option("--actor", help="Op author id for --emit-ops (CRDT stamping).")] = "cli",
+    base_version: Annotated[
+        int, typer.Option("--base-version", help="Draft version the emitted ops are stamped against.")
+    ] = 0,
+    input_path: Annotated[
+        str | None,
+        typer.Option(
+            "--input",
+            show_default=False,
+            help=(
+                "object_info JSON to check the template's model files against (default: COMFY_OBJECT_INFO_FILE). "
+                "A file the server lacks is swapped for the one same-model file in another precision, if there is one."
+            ),
+        ),
+    ] = None,
 ):
     renderer = get_renderer()
 
@@ -898,6 +993,22 @@ def fetch_cmd(
         )
         raise typer.Exit(code=1) from e
 
+    # The graph this fetch is REPLACING, read before the write clobbers it —
+    # `--emit-ops` needs it to emit the delete_node half of the batch. Only read
+    # when asked: an unparseable file at the target is not an error for a plain
+    # fetch (it is about to be overwritten), so it must not become one here.
+    previous: dict[str, Any] = {}
+    if emit_ops and out:
+        try:
+            loaded = json.loads(Path(out).expanduser().read_text(encoding="utf-8"))
+            previous = loaded if isinstance(loaded, dict) else {}
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            previous = {}
+
+    model_notes = _resolve_template_models(wf, input_path)
+    if model_notes.get("model_substitutions"):
+        body = json.dumps(wf, ensure_ascii=False, indent=2).encode("utf-8")
+
     if out:
         out_path = Path(out).expanduser()
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -921,15 +1032,231 @@ def fetch_cmd(
         "out": target_repr,
         "bytes": len(body),
         "node_count": _workflow_node_count(wf),
+        **model_notes,
     }
     if not out:
         # No file was written, so the JSON envelope is the only place the caller
         # can get the workflow — emit() owns stdout in JSON mode, so without this
         # the fetch would produce nothing but metadata.
         payload["workflow"] = wf
+    if emit_ops:
+        # A bulk writer that emits ops stops being a whole-document replacement:
+        # the consumer folds the batch into the document it already has, so the
+        # replaced canvas keeps ONE identity and an attributed history instead of
+        # being re-seeded (op-vocabulary-v1 §8.6). Failure is NOT fatal — the
+        # fetch itself succeeded and the file is written; the consumer falls back
+        # to whatever it did before ops existed, and `ops_skipped` says why.
+        try:
+            payload["ops"] = workflow_ops.replace_ops(previous, wf, actor=actor, base_version=base_version)
+        except workflow_ops.NotExpressibleError as e:
+            payload["ops_skipped"] = str(e)
     if renderer.is_pretty() and out:
         rprint(f"[green]✓[/green] wrote {len(body):,} bytes ({payload['node_count']} nodes) to {target_repr}")
     renderer.emit(payload, command="templates fetch")
+
+
+# ---------------------------------------------------------------------------
+# templates get — resolve by ls filters + fetch in ONE call
+# ---------------------------------------------------------------------------
+
+# The ONLY filter vocabulary `get --where` accepts: exactly the `templates ls`
+# flags, mapped onto the same `_matches` kwargs — no new query language. Keep
+# this in lockstep with `_matches`' signature.
+_GET_FILTER_KEYS = {
+    "type": "type_",
+    "category": "category",
+    "tag": "tag",
+    "model": "model",
+    "provider": "provider",
+    "name": "name_sub",
+}
+
+
+def _parse_get_filters(renderer, where: list[str]) -> dict[str, str | None]:
+    """Parse repeatable ``--where key=value`` pairs into `_matches` kwargs.
+
+    Strict: a pair without ``=``, an empty/unknown key, or no filters at all is
+    an error — a filterless `get` is just `ls`, and would always be ambiguous.
+    """
+    filters: dict[str, str | None] = {v: None for v in _GET_FILTER_KEYS.values()}
+    valid = ", ".join(sorted(_GET_FILTER_KEYS))
+    if not where:
+        renderer.error(
+            code="template_filter_invalid",
+            message="`templates get` needs at least one --where filter to resolve a single template",
+            hint=f"pass --where key=value (repeatable); keys: {valid} — same semantics as `templates ls`",
+        )
+        raise typer.Exit(code=1)
+    for raw in where:
+        key, sep, value = raw.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            renderer.error(
+                code="template_filter_invalid",
+                message=f"--where must be key=value, got {raw!r}",
+                hint=f"keys: {valid} — e.g. --where type=video --where tag=API",
+            )
+            raise typer.Exit(code=1)
+        if key not in _GET_FILTER_KEYS:
+            renderer.error(
+                code="template_filter_invalid",
+                message=f"unknown --where key {key!r}",
+                hint=f"keys: {valid} — same semantics as the `templates ls` flags",
+                details={"key": key, "valid_keys": sorted(_GET_FILTER_KEYS)},
+            )
+            raise typer.Exit(code=1)
+        filters[_GET_FILTER_KEYS[key]] = value
+    return filters
+
+
+def _get_near_misses(rows: list[dict[str, Any]], filters: dict[str, str | None]) -> list[dict[str, Any]]:
+    """Leave-one-out suggestions for a zero-match filter set: for each active
+    filter, what would have matched with that one filter dropped. Reuses
+    `_matches` verbatim, so the suggestions obey exactly the ls semantics."""
+    active = {k: v for k, v in filters.items() if v is not None}
+    key_by_kwarg = {v: k for k, v in _GET_FILTER_KEYS.items()}
+    near: list[dict[str, Any]] = []
+    if len(active) < 2 and "name_sub" not in active:
+        # With a single non-name filter there is nothing useful to relax against.
+        return near
+    for dropped in active:
+        relaxed = dict(filters)
+        relaxed[dropped] = None
+        names = [r["name"] for r in rows if _matches(r, **relaxed)][:5]
+        if names:
+            near.append({"without": key_by_kwarg[dropped], "names": names})
+    return near
+
+
+@app.command(
+    "get",
+    help=(
+        "Resolve ONE template by `templates ls` filters and fetch its workflow in the same call. "
+        "Filters are repeatable `--where key=value` pairs (keys: type, category, tag, model, "
+        "provider, name — identical semantics to the `templates ls` flags). Errors when zero "
+        "or more than one template matches."
+    ),
+)
+@tracking.track_command("templates")
+def get_cmd(
+    where: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--where",
+            "-w",
+            metavar="KEY=VALUE",
+            show_default=False,
+            help="Filter (repeatable): type=…, category=…, tag=…, model=…, provider=…, name=…",
+        ),
+    ] = None,
+    gallery_path: Annotated[
+        str | None,
+        typer.Option("--gallery", show_default=False, help="Path to a local index.json (skips the cache + fetch)."),
+    ] = None,
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Re-fetch the gallery index from GitHub before resolving."),
+    ] = False,
+):
+    """Fuse `templates ls` (find) + `templates fetch` (get) into one hop.
+
+    Agent loops typically run ls → fetch with the name copied verbatim; `get`
+    resolves the same filter predicates and, when exactly ONE template matches,
+    returns its workflow in the same envelope `fetch` uses.
+    """
+    renderer = get_renderer()
+    filters = _parse_get_filters(renderer, list(where or []))
+
+    try:
+        cats = _load_gallery(gallery_path, refresh=refresh)
+    except _GALLERY_LOAD_ERRORS as e:
+        renderer.error(code="gallery_load_failed", message=str(e))
+        raise typer.Exit(code=1) from e
+
+    rows = _flatten_templates(cats)
+    matched = [r for r in rows if _matches(r, **filters)]
+    shown_filters = {k: filters[v] for k, v in _GET_FILTER_KEYS.items()}
+
+    if not matched:
+        near = _get_near_misses(rows, filters)
+        near_hint = "; ".join(f"drop {n['without']}= to match {', '.join(n['names'])}" for n in near[:2])
+        renderer.error(
+            code="template_not_found",
+            message=f"no template matches {shown_filters}",
+            hint=near_hint or "relax a filter, or browse with `comfy templates ls`",
+            details={"filters": shown_filters, "near_misses": near},
+        )
+        raise typer.Exit(code=1)
+
+    if len(matched) > 1:
+        candidates = [
+            {
+                "name": r["name"],
+                "title": r["title"],
+                "output_type": r["output_type"],
+                "tags": r["tags"],
+                "models": r["models"],
+            }
+            for r in matched[:10]
+        ]
+        renderer.error(
+            code="template_ambiguous",
+            message=f"{len(matched)} templates match {shown_filters}; `get` needs exactly one",
+            hint="add another --where filter (e.g. name=<substring>) to narrow to a single template",
+            details={"filters": shown_filters, "matched": len(matched), "candidates": candidates},
+        )
+        raise typer.Exit(code=1)
+
+    match = matched[0]
+    name = match["name"]
+
+    # From here down this is `fetch` with no --out: same fetch helper, same
+    # error envelopes, workflow riding in the envelope (or pretty stdout).
+    try:
+        body = _fetch_template_workflow(name)
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, RuntimeError, ResponseTooLarge) as e:
+        status = getattr(e, "code", None)
+        renderer.error(
+            code="template_fetch_failed",
+            message=f"failed to fetch workflow for {name!r}: {e}",
+            hint=(
+                "the gallery index references a template whose workflow JSON "
+                "is missing upstream — report at "
+                "https://github.com/Comfy-Org/workflow_templates/issues"
+                if status == 404
+                else "check network connectivity"
+            ),
+            details={"status": status} if status else None,
+        )
+        raise typer.Exit(code=1) from e
+
+    try:
+        wf = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        renderer.error(
+            code="template_workflow_invalid_json",
+            message=f"upstream returned non-JSON for {name!r}: {e}",
+            hint="report at https://github.com/Comfy-Org/workflow_templates/issues",
+        )
+        raise typer.Exit(code=1) from e
+
+    payload = {
+        "name": name,
+        "title": match["title"],
+        "output_type": match["output_type"],
+        "filters": shown_filters,
+        "bytes": len(body),
+        "node_count": _workflow_node_count(wf),
+        "workflow": wf,
+    }
+    if renderer.is_pretty():
+        # Pipeable, exactly like `fetch` with no --out.
+        import sys
+
+        sys.stdout.write(body.decode("utf-8"))
+        sys.stdout.write("\n")
+    knowledge.attach(payload, command="templates get", templates=[name], catalog_templates={r["name"] for r in rows})
+    renderer.emit(payload, command="templates get")
 
 
 # ---------------------------------------------------------------------------
@@ -946,9 +1273,8 @@ def _template_workflow_cache_path(name: str) -> Path:
     ``quote(..., safe="")`` turns any ``/`` or ``..`` segment into ``%2F``/``..``
     with no path separators, keeping the file strictly inside ``gallery/templates``.
     """
-    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
     safe_name = urllib.parse.quote(name, safe="")
-    return Path(base) / "comfy-cli" / "gallery" / "templates" / f"{safe_name}.json"
+    return cache_dir() / "gallery" / "templates" / f"{safe_name}.json"
 
 
 def _iter_workflow_nodes(wf: dict[str, Any]):
@@ -1046,7 +1372,7 @@ def _list_local_folder(target, folder: str) -> list[str] | None:
     # Reuse the exact target/URL plumbing `comfy models list-folder` uses.
     from comfy_cli.command.models.search import _http_get_json, _models_path_parts
 
-    url = target.url(*_models_path_parts(target), folder)
+    url = target.url(*_models_path_parts(target), urllib.parse.quote(folder, safe=""))
     try:
         data = _http_get_json(url, target)
     except urllib.error.HTTPError as e:
@@ -1089,6 +1415,158 @@ def _compute_verdict(*, api_dependent: bool, missing: list, required_count: int,
     return "unknown" if loaderish else "runnable"
 
 
+class TemplateCheckError(Exception):
+    """A template-check failure, carrying the fields of its error envelope."""
+
+    def __init__(self, code: str, message: str, *, hint: str | None = None, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.hint = hint
+        self.details = details
+
+
+def _gallery_rows(gallery_path: str | None, *, refresh: bool) -> list[dict[str, Any]]:
+    try:
+        cats = _load_gallery(gallery_path, refresh=refresh, background_ok=False)
+    except _GALLERY_LOAD_ERRORS as e:
+        raise TemplateCheckError("gallery_load_failed", str(e)) from e
+    return _flatten_templates(cats)
+
+
+def _template_workflow(
+    name: str, rows: list[dict[str, Any]], *, refresh: bool
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Resolve ``name`` against the gallery ``rows`` and return ``(row, workflow)``,
+    reading the workflow JSON from the per-template cache or fetching it."""
+    match = next((r for r in rows if r["name"] == name), None)
+    if match is None:
+        lower = name.lower()
+        close = [r["name"] for r in rows if lower in r["name"].lower()][:5]
+        raise TemplateCheckError(
+            "template_not_found",
+            f"no template named {name!r} in the gallery",
+            hint="try `comfy templates ls --name <substring>` to search",
+            details={"close_matches": close},
+        )
+
+    cache_path = _template_workflow_cache_path(name)
+    body: bytes | None = None
+    if not refresh and cache_path.exists():
+        try:
+            body = cache_path.read_bytes()
+        except OSError:
+            body = None
+    if body is None:
+        try:
+            body = _fetch_template_workflow(name)
+        except (urllib.error.URLError, OSError, RuntimeError, ResponseTooLarge) as e:
+            status = getattr(e, "code", None)
+            raise TemplateCheckError(
+                "template_fetch_failed",
+                f"failed to fetch workflow for {name!r}: {e}",
+                hint=(
+                    "the gallery index references a template whose workflow JSON "
+                    "is missing upstream — report at "
+                    "https://github.com/Comfy-Org/workflow_templates/issues"
+                    if status == 404
+                    else "check network connectivity"
+                ),
+                details={"status": status} if status else None,
+            ) from e
+        # Write atomically: a truncated file (interrupted write / full disk) would
+        # otherwise be trusted by the read path above on the next non-refresh run
+        # and fail `template_workflow_invalid_json` until the user passed --refresh.
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = cache_path.parent / f"{cache_path.name}.{os.getpid()}.tmp"
+            try:
+                tmp_path.write_bytes(body)
+                os.replace(tmp_path, cache_path)
+            except OSError:
+                tmp_path.unlink(missing_ok=True)
+                raise
+        except OSError:
+            pass  # a non-writable cache dir must not fail the check
+
+    try:
+        wf = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
+        raise TemplateCheckError(
+            "template_workflow_invalid_json",
+            f"template workflow for {name!r} is not valid JSON: {e}",
+            hint="re-run with --refresh to re-fetch, or report upstream",
+        ) from e
+    if not isinstance(wf, dict):
+        raise TemplateCheckError(
+            "template_workflow_invalid_json",
+            f"template workflow for {name!r} is not a JSON object",
+            hint="re-run with --refresh to re-fetch, or report upstream",
+        )
+    return match, wf
+
+
+def _match_local_models(
+    required: list[dict[str, str]], listings: dict[str, list[str] | None]
+) -> tuple[list[str], list[dict[str, str]], list[str]]:
+    """Split ``required`` into ``(present, missing, warnings)`` against the local
+    server's model folders, matching by basename.
+
+    ``listings`` caches each folder's listing by directory, so a caller checking
+    several templates lists a shared folder once.
+    """
+    warnings: list[str] = []
+    present: list[str] = []
+    missing: list[dict[str, str]] = []
+    if not required:
+        return present, missing, warnings
+
+    from comfy_cli.command.models.search import _is_walkable_folder_name
+    from comfy_cli.target import resolve_target
+
+    target = resolve_target(where="local")
+    try:
+        for directory in dict.fromkeys(req["directory"] for req in required):
+            if not _is_walkable_folder_name(directory):
+                # Not addressable as a `/models/<folder>` segment — treat as absent.
+                listings[directory] = None
+                warnings.append(
+                    f"model directory {directory!r} isn't a valid model folder — its files are reported missing"
+                )
+                continue
+            if directory not in listings:
+                listings[directory] = _list_local_folder(target, directory)
+            if listings[directory] is None:
+                warnings.append(
+                    f"model folder {directory!r} not found on the local server "
+                    f"(custom-node folder?) — its files are reported missing"
+                )
+    except ResponseTooLarge as e:
+        raise TemplateCheckError(
+            code="model_listing_too_large",
+            message=f"a local model folder listing is over the response size cap: {e}",
+            hint="check that the server on this host:port is ComfyUI",
+        ) from e
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise TemplateCheckError(
+            "server_not_running",
+            f"local ComfyUI server is unreachable, cannot check installed models: {e}",
+            hint="run `comfy launch` to start a local server",
+        ) from e
+
+    for req in required:
+        listing = listings.get(req["directory"])
+        # Normalize BOTH sides: a model ref may itself carry a subfolder
+        # (e.g. ``SDXL/model.safetensors``, as ComfyUI loader widgets emit),
+        # so compare basenames on the required side too.
+        req_base = _basename(req["name"])
+        if listing and any(_basename(entry) == req_base for entry in listing):
+            present.append(req["name"])
+        else:
+            missing.append(dict(req))
+    return present, missing, warnings
+
+
 @app.command(
     "check",
     help=(
@@ -1111,87 +1589,15 @@ def check_cmd(
         typer.Option("--refresh", help="Re-fetch the gallery index AND the template workflow before checking."),
     ] = False,
 ):
-    from comfy_cli.target import resolve_target
-
     renderer = get_renderer()
 
-    # 1. Resolve the name against the gallery index (same affordance as `fetch`).
+    # 1-2. Resolve the name against the gallery index (same affordance as `fetch`)
+    #      and read the per-template workflow JSON from cache or fetch it.
     try:
-        cats = _load_gallery(gallery_path, refresh=refresh)
-    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
-        renderer.error(code="gallery_load_failed", message=str(e))
+        match, wf = _template_workflow(name, _gallery_rows(gallery_path, refresh=refresh), refresh=refresh)
+    except TemplateCheckError as e:
+        renderer.error(code=e.code, message=e.message, hint=e.hint, details=e.details)
         raise typer.Exit(code=1) from e
-
-    rows = _flatten_templates(cats)
-    match = next((r for r in rows if r["name"] == name), None)
-    if match is None:
-        lower = name.lower()
-        close = [r["name"] for r in rows if lower in r["name"].lower()][:5]
-        renderer.error(
-            code="template_not_found",
-            message=f"no template named {name!r} in the gallery",
-            hint="try `comfy templates ls --name <substring>` to search",
-            details={"close_matches": close},
-        )
-        raise typer.Exit(code=1)
-
-    # 2. Fetch (or read from cache) the per-template workflow JSON.
-    cache_path = _template_workflow_cache_path(name)
-    body: bytes | None = None
-    if not refresh and cache_path.exists():
-        try:
-            body = cache_path.read_bytes()
-        except OSError:
-            body = None
-    if body is None:
-        try:
-            body = _fetch_template_workflow(name)
-        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as e:
-            status = getattr(e, "code", None)
-            renderer.error(
-                code="template_fetch_failed",
-                message=f"failed to fetch workflow for {name!r}: {e}",
-                hint=(
-                    "the gallery index references a template whose workflow JSON "
-                    "is missing upstream — report at "
-                    "https://github.com/Comfy-Org/workflow_templates/issues"
-                    if status == 404
-                    else "check network connectivity"
-                ),
-                details={"status": status} if status else None,
-            )
-            raise typer.Exit(code=1) from e
-        # Write atomically: a truncated file (interrupted write / full disk) would
-        # otherwise be trusted by the read path above on the next non-refresh run
-        # and fail `template_workflow_invalid_json` until the user passed --refresh.
-        try:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = cache_path.parent / f"{cache_path.name}.{os.getpid()}.tmp"
-            try:
-                tmp_path.write_bytes(body)
-                os.replace(tmp_path, cache_path)
-            except OSError:
-                tmp_path.unlink(missing_ok=True)
-                raise
-        except OSError:
-            pass  # a non-writable cache dir must not fail the check
-
-    try:
-        wf = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        renderer.error(
-            code="template_workflow_invalid_json",
-            message=f"template workflow for {name!r} is not valid JSON: {e}",
-            hint="re-run with --refresh to re-fetch, or report upstream",
-        )
-        raise typer.Exit(code=1) from e
-    if not isinstance(wf, dict):
-        renderer.error(
-            code="template_workflow_invalid_json",
-            message=f"template workflow for {name!r} is not a JSON object",
-            hint="re-run with --refresh to re-fetch, or report upstream",
-        )
-        raise typer.Exit(code=1)
 
     # 3. Model requirements (top-level + subgraph walk) and node class types.
     required = _collect_model_requirements(wf)
@@ -1222,47 +1628,11 @@ def check_cmd(
 
     # 5. Installed intersection: list each distinct folder once on the local server
     #    and match required files by basename.
-    warnings: list[str] = []
-    present: list[str] = []
-    missing: list[dict[str, str]] = []
-    distinct_dirs = list(dict.fromkeys(req["directory"] for req in required))
-    if required:
-        target = resolve_target(where="local")
-        listings: dict[str, list[str] | None] = {}
-        try:
-            for directory in distinct_dirs:
-                if not directory or ".." in directory or "/" in directory or "\\" in directory:
-                    # Not addressable as a `/models/<folder>` segment — treat as absent.
-                    listings[directory] = None
-                    warnings.append(
-                        f"model directory {directory!r} isn't a valid model folder — its files are reported missing"
-                    )
-                    continue
-                folder_files = _list_local_folder(target, directory)
-                listings[directory] = folder_files
-                if folder_files is None:
-                    warnings.append(
-                        f"model folder {directory!r} not found on the local server "
-                        f"(custom-node folder?) — its files are reported missing"
-                    )
-        except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as e:
-            renderer.error(
-                code="server_not_running",
-                message=f"local ComfyUI server is unreachable, cannot check installed models: {e}",
-                hint="run `comfy launch` to start a local server",
-            )
-            raise typer.Exit(code=1) from e
-
-        for req in required:
-            listing = listings.get(req["directory"])
-            # Normalize BOTH sides: a model ref may itself carry a subfolder
-            # (e.g. ``SDXL/model.safetensors``, as ComfyUI loader widgets emit),
-            # so compare basenames on the required side too.
-            req_base = _basename(req["name"])
-            if listing and any(_basename(entry) == req_base for entry in listing):
-                present.append(req["name"])
-            else:
-                missing.append(dict(req))
+    try:
+        present, missing, warnings = _match_local_models(required, {})
+    except TemplateCheckError as e:
+        renderer.error(code=e.code, message=e.message, hint=e.hint, details=e.details)
+        raise typer.Exit(code=1) from e
 
     # 6. Custom nodes are report-only in v1 (surfaced verbatim, not verified).
     custom_nodes_required = list(match.get("requires_custom_nodes") or [])
@@ -1415,7 +1785,7 @@ def _enforce_spend_gate(
 
     Returns None when the run may proceed (no paid signals, --allow-spend, or
     an interactive yes); raises typer.Exit(1) otherwise. Behavior is the
-    BE-4113 gate moved verbatim out of run_template_cmd.
+    spend gate moved verbatim out of run_template_cmd.
     """
     import sys
 
@@ -1744,7 +2114,7 @@ def run_template_cmd(
             for w in warnings:
                 rprint(f"  [yellow]warning:[/yellow] {w}")
 
-    # -- Spend gate (BE-4113): partner-API nodes spend Comfy credits. Require
+    # -- Spend gate: partner-API nodes spend Comfy credits. Require
     # explicit consent before submitting anything that would burn them.
     _enforce_spend_gate(
         renderer,
@@ -1772,7 +2142,7 @@ def run_template_cmd(
             api_key=api_key,
             # run-template's own spend gate (above) has already consented (or
             # found no paid nodes), so forward consent to avoid a second gate in
-            # execute() (BE-4326). run-template's gate is strictly stronger — it
+            # execute(). run-template's gate is strictly stronger — it
             # also inspects gallery signals — and has already run.
             allow_spend=True,
         )

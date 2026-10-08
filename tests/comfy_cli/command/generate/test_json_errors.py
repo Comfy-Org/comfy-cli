@@ -58,7 +58,7 @@ def _sole_envelope(result) -> dict:
     return env
 
 
-# ─── the BE-4571 case: a flag token where the model alias belongs ────────
+# ─── the flag-token case: a flag token where the model alias belongs ────────
 
 
 def test_json_flag_shaped_target_emits_target_required_envelope(runner):

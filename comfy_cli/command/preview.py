@@ -146,6 +146,49 @@ def _ffprobe(path: Path, ffprobe_bin: str) -> dict:
     return json.loads(proc.stdout or "{}")
 
 
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"}
+_AUDIO_EXTS = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".opus"}
+_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".flv", ".wmv", ".mpg", ".mpeg", ".ts", ".mts", ".3gp"}
+
+
+def _bundled_ffmpeg() -> str | None:
+    """The static ffmpeg bundled with imageio-ffmpeg, if that package is installed.
+
+    PATH resolution (and the CWD-planting refusal) is
+    :func:`comfy_cli._safe_exec.resolve_required_binary`'s job; this is only the
+    fallback for a box with no system ffmpeg, which is what `pip install
+    imageio-ffmpeg` exists to provide. The path comes from an installed
+    distribution rather than a PATH/CWD search, so it is not subject to the
+    planting attack the guard defends against.
+    """
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:  # noqa: BLE001 — package absent or no bundled build for this platform
+        return None
+
+
+def _classify_by_ext(path: Path) -> dict:
+    """Fallback classification when ffprobe is unavailable (e.g. only the
+    imageio-ffmpeg static ffmpeg is present): pick kind from the extension.
+
+    An unrecognized extension is ``"unknown"`` (not blindly ``"video"``) so a
+    non-media file still yields the clean ``preview_unsupported_media`` envelope
+    instead of being handed to ffmpeg and failing with a raw ffmpeg error — the
+    same outcome the ffprobe path produces for a file with no media stream."""
+    ext = path.suffix.lower()
+    if ext in _IMAGE_EXTS:
+        kind = "image"
+    elif ext in _AUDIO_EXTS:
+        kind = "audio"
+    elif ext in _VIDEO_EXTS:
+        kind = "video"
+    else:
+        kind = "unknown"
+    return {"kind": kind, "width": None, "height": None, "fps": None, "duration": None, "has_audio": None}
+
+
 @tracking.track_command("preview")
 def preview_cmd(
     file: Annotated[Path, typer.Argument(help="Image, video, or audio file to preview.")],
@@ -169,13 +212,16 @@ def preview_cmd(
     # than executing it.
     try:
         ffmpeg_bin = resolve_required_binary("ffmpeg")
-        ffprobe_bin = resolve_required_binary("ffprobe")
     except BinaryNotFoundError as exc:
-        if exc.is_absent:
+        # Absent from PATH: fall back to imageio-ffmpeg's bundled build before
+        # giving up. An UNTRUSTED match still errors — falling back there would
+        # let a planted binary downgrade us into a different code path.
+        ffmpeg_bin = _bundled_ffmpeg() if exc.is_absent else None
+        if ffmpeg_bin is None and exc.is_absent:
             renderer.error(
                 code="ffmpeg_unavailable",
-                message="ffmpeg/ffprobe not found on PATH — `comfy preview` needs them.",
-                hint="install ffmpeg (e.g. `brew install ffmpeg` / `apt install ffmpeg`)",
+                message="ffmpeg not found on PATH — `comfy preview` needs it to render.",
+                hint="install ffmpeg (`brew install ffmpeg` / `apt install ffmpeg`) or `pip install imageio-ffmpeg`",
             )
         else:
             # Installed, but the match was refused. Saying "install ffmpeg" here
@@ -187,13 +233,35 @@ def preview_cmd(
                 message=str(exc),
                 hint="run `comfy preview` from a directory that does not contain an ffmpeg/ffprobe binary",
             )
-        raise typer.Exit(code=1) from None
+        if ffmpeg_bin is None:
+            raise typer.Exit(code=1) from None
 
+    # ffprobe is OPTIONAL: the imageio-ffmpeg static build ships ffmpeg without
+    # it. Resolve it under the same trust rule — an untrusted match is still
+    # refused, because falling back there would defeat the planting guard — but a
+    # genuinely absent ffprobe degrades to extension classification and still
+    # renders, which is what the pip-installed path depends on.
     try:
-        info = classify_streams(_ffprobe(file, ffprobe_bin))
-    except (RuntimeError, json.JSONDecodeError) as e:
-        renderer.error(code="preview_failed", message=f"Could not probe {file}: {e}")
-        raise typer.Exit(code=1) from e
+        ffprobe_bin = resolve_required_binary("ffprobe")
+    except BinaryNotFoundError as exc:
+        if not exc.is_absent:
+            renderer.error(
+                code="ffmpeg_untrusted",
+                message=str(exc),
+                hint="run `comfy preview` from a directory that does not contain an ffmpeg/ffprobe binary",
+            )
+            raise typer.Exit(code=1) from None
+        ffprobe_bin = None
+
+    if ffprobe_bin:
+        try:
+            info = classify_streams(_ffprobe(file, ffprobe_bin))
+        except (RuntimeError, json.JSONDecodeError) as e:
+            renderer.error(code="preview_failed", message=f"Could not probe {file}: {e}")
+            raise typer.Exit(code=1) from e
+    else:
+        info = _classify_by_ext(file)
+
     if info["kind"] == "unknown":
         renderer.error(
             code="preview_unsupported_media",

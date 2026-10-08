@@ -95,12 +95,12 @@ _CLOUD_FILES_LORAS = [
 ]
 
 
-# A local install as BE-4733 found it: the interesting models (flux, ltx) live
+# A local install as the bug report found it: the interesting models (flux, ltx) live
 # OUTSIDE `checkpoints`, spread across diffusion_models / loras / vae.
 _LOCAL_SEARCH_FOLDERS = ["checkpoints", "diffusion_models", "loras", "vae"]
 
 _LOCAL_FILES_BY_FOLDER: dict[str, list[dict[str, Any]]] = {
-    # BE-5619: real checkpoint filenames — the separators (`_`, `-`, `.`) and the
+    # Real checkpoint filenames — the separators (`_`, `-`, `.`) and the
     # word order are what a whole-string substring match cannot cope with.
     "checkpoints": [
         {"name": "sd_xl_base_1.0.safetensors", "pathIndex": 0},
@@ -545,12 +545,12 @@ class TestSearch:
         _patch_urlopen(monkeypatch, _local_routes())
         env = _run(["search", "--text", "flux", "--where", "local"], capsys)
         names = [r["name"] for r in env["data"]["rows"]]
-        # BE-4733: flux lives in diffusion_models, not checkpoints — it must still be found.
+        # Flux lives in diffusion_models, not checkpoints — it must still be found.
         assert names == ["flux1-dev.safetensors"]
         assert env["data"]["rows"][0]["type"] == "diffusion_models"
 
     def test_local_text_matches_across_folders(self, local_target, monkeypatch, capsys):
-        """BE-4733: every on-disk ltx* file is returned, whatever folder it lives in."""
+        """Every on-disk ltx* file is returned, whatever folder it lives in."""
         _patch_urlopen(monkeypatch, _local_routes())
         env = _run(["search", "--text", "ltx", "--where", "local"], capsys)
         rows = env["data"]["rows"]
@@ -577,7 +577,7 @@ class TestSearch:
         ],
     )
     def test_local_text_is_token_and_separator_insensitive(self, local_target, monkeypatch, capsys, query):
-        """BE-5619: multi-word queries match `sd_xl_base_1.0.safetensors`.
+        """Multi-word queries match `sd_xl_base_1.0.safetensors`.
 
         None of these exist as a contiguous substring of the filename — the old
         whole-string test returned nothing for every one of them.
@@ -605,7 +605,7 @@ class TestSearch:
         the `x`/`l` seam. Deliberate: the squashed pass is what makes `sdxl` find
         `sd_xl_...`, and the same collapse cannot distinguish a seam from a real
         word boundary. Over-returning on a short token is the acceptable side of
-        this trade — under-returning is the bug BE-4733 reported.
+        this trade — under-returning is the reported bug.
         """
         _patch_urlopen(monkeypatch, _local_routes())
         env = _run(["search", "--text", "xl", "--where", "local"], capsys)

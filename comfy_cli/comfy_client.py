@@ -13,6 +13,7 @@ local-only.
 from __future__ import annotations
 
 import json
+import math
 import random
 import re
 import time
@@ -35,11 +36,13 @@ from comfy_cli.http import assert_safe_url as _assert_safe_url
 from comfy_cli.target import Target
 
 # Transient HTTP failures during polling should back off and retry, not abort.
-# 429 (rate limit) is retried for any method — the request was rejected, not
-# processed, so even a POST is safe to repeat. Transient 5xx is retried for
-# GET only, since a 5xx on a POST may have partially applied (double-submit).
+# Only idempotent requests are retried in-request, for 429 and transient 5xx
+# alike: neither status proves a POST had no effect, and repeating a submit
+# that did go through would queue a second job. A throttled POST surfaces its
+# 429 (with Retry-After) to the caller instead.
 _MAX_TRANSIENT_RETRIES = 4
 _RETRYABLE_5XX = {502, 503, 504}
+_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 # Poll-level resilience for wait_for_completion: a sustained 429 storm (or a
 # plain 500, which the in-request layer never retries) must not abort a wait
@@ -66,16 +69,36 @@ def _redact(text: str) -> str:
 
 
 def _parse_retry_after(headers: Any) -> float | None:
-    """Parse a ``Retry-After`` header (seconds form) to a float, else None."""
+    """Parse a ``Retry-After`` header to seconds, else None.
+
+    Both RFC 9110 forms: delta-seconds, or an HTTP-date (converted to the
+    seconds remaining from now; a date already past is 0). A non-finite or
+    negative delay is None: it would reach ``time.sleep`` (which raises on
+    it) and the JSON envelope (which would carry a bare NaN/Infinity).
+    """
     if headers is None:
         return None
     value = headers.get("Retry-After")
     if value is None:
         return None
     try:
-        return float(value)
+        seconds = float(value)
     except (TypeError, ValueError):
+        pass
+    else:
+        return seconds if math.isfinite(seconds) and seconds >= 0 else None
+    from datetime import datetime, timezone
+    from email.utils import parsedate_to_datetime
+
+    try:
+        when = parsedate_to_datetime(str(value))
+    except (TypeError, ValueError, IndexError):
         return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return float(max(0, round((when - datetime.now(timezone.utc)).total_seconds())))
 
 
 class HTTPError(Exception):
@@ -294,9 +317,8 @@ class Client:
                     timeout=timeout,
                     _retried=True,
                 )
-            # Transient: back off and retry. 429 for any method (rejected, not
-            # processed); 5xx for idempotent GETs only.
-            retryable = e.code == 429 or (e.code in _RETRYABLE_5XX and method == "GET")
+            # Transient: back off and retry, for idempotent requests only.
+            retryable = method.upper() in _IDEMPOTENT_METHODS and (e.code == 429 or e.code in _RETRYABLE_5XX)
             if retryable and _attempt < _MAX_TRANSIENT_RETRIES:
                 time.sleep(self._retry_delay(e, _attempt))
                 return self._request(
@@ -324,10 +346,15 @@ class Client:
         *,
         timeout: float | None = None,
         extra_data: dict | None = None,
+        workflow_id: str | None = None,
     ) -> SubmitResult:
         """POST {prefix}/prompt — submit a workflow for execution.
 
         Caller may pass ``extra_data`` (merged into the request, not overwritten).
+        For cloud submissions, ``workflow_id`` (the cloud workflow entity id) is
+        forwarded as a top-level ``workflow_id`` field so the server can associate
+        the job with an existing workflow and auto-promote a draft on run. Omitted
+        from the body entirely when unset.
         For cloud submissions, the user's OAuth token is injected as
         ``auth_token_comfy_org`` so partner-API nodes (BFL Flux Pro, Gemini
         Nano Banana, etc.) can call out to comfy.org — matching what the web
@@ -354,6 +381,10 @@ class Client:
                     merged_extra.setdefault("api_key_comfy_org", self.target.api_key)
             if merged_extra:
                 request_payload["extra_data"] = merged_extra
+            # Cloud workflow entity id: associate this job with an existing
+            # workflow (auto-promotes a draft on run). Only sent when provided.
+            if workflow_id:
+                request_payload["workflow_id"] = workflow_id
             return request_payload
 
         resp = self._request("POST", ("prompt",), body_factory=payload, timeout=timeout)
@@ -571,7 +602,7 @@ def extract_output_entries(record: dict) -> list[dict]:
     outputs. This deliberately covers keys beyond the classic
     ``images/gifs/videos/audio/files`` — notably SaveGLB's ``"3d"`` key and
     the cloud worker's singular ``"video"`` key — so 3D/mesh jobs resolve
-    instead of returning ``download_no_outputs`` (BE-4417). The ``"animated"``
+    instead of returning ``download_no_outputs``. The ``"animated"``
     key is skipped explicitly to match core semantics (it emits ``(True,)``
     boolean flags, not file entries).
 

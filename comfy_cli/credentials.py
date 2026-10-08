@@ -8,6 +8,10 @@ lives here exactly once:
 
     explicit flag → live OAuth session → purpose env var → stored key
 
+``comfy build`` and ``comfy deploy`` are the one exception, key-first, because
+comfy-builder and comfy-deploy swap a key at ingest on every request: see
+:func:`platform_api_key`.
+
 Two *purposes* exist and their credentials are NOT interchangeable:
 
 - ``"cloud"``   — the Comfy Cloud platform API (Bearer / ``X-API-Key`` on
@@ -40,6 +44,15 @@ if TYPE_CHECKING:
 # store. Testing-only path; the canonical sign-in is OAuth.
 # (Re-exported by ``comfy_cli.target`` for back-compat.)
 CLOUD_API_KEY_PROVIDER = "comfy-cloud-api-key"
+
+# Env var carrying a pre-obtained Comfy Cloud Bearer token (a Firebase/Cloud
+# JWT). Unlike ``COMFY_CLOUD_API_KEY`` (sent as ``X-API-Key``), this is sent as
+# ``Authorization: Bearer``. It exists so a trusted caller that already holds
+# the user's validated token — e.g. the cloud agent forwarding the request's
+# ``X-Comfy-Token`` — can authenticate as that user without an interactive
+# ``comfy cloud login`` session. It is NOT refreshed client-side; the server
+# validates it at request time (and a 401 surfaces normally).
+CLOUD_BEARER_ENV_VAR = "COMFY_CLOUD_AUTH_TOKEN"
 
 Purpose = Literal["cloud", "partner"]
 
@@ -88,6 +101,20 @@ def get_session(*, refresh: bool = True, force: bool = False, allow_clear: bool 
     return auth_store.get_cloud_session()
 
 
+def refreshed_access_token(rejected: str | None) -> str | None:
+    """Force the shared refresh after a server 401, and return the new access token.
+
+    Returns ``None`` when the refresh produced no token or the same one the
+    server just refused, so the caller surfaces the 401 rather than retrying a
+    token already known to fail. A fatal refresh clears the stored session, and
+    the 401 then carries the usual sign-in guidance.
+    """
+    session = get_session(refresh=True, force=True)
+    if session is None or not session.access_token or session.access_token == rejected:
+        return None
+    return session.access_token
+
+
 def find_api_key(*, purpose: Purpose) -> Credential | None:
     """Locate an ambient API key for ``purpose``: env var → stored key.
 
@@ -117,6 +144,60 @@ def find_api_key(*, purpose: Purpose) -> Credential | None:
     return None
 
 
+def platform_api_key() -> Credential | None:
+    """The workspace API key ``comfy build`` and ``comfy deploy`` send in place of a sign-in, or ``None``.
+
+    Key-first, unlike :func:`resolve_cloud_credential`: comfy-builder and
+    comfy-deploy take the key in ``X-API-Key`` and swap it at ingest, so a CI job
+    holding only a key needs no sign-in. In precedence order:
+
+    1. ``COMFY_CLOUD_API_KEY``, whatever sign-in is stored, since a caller sets it
+       for the run in hand;
+    2. the stored ``comfy cloud set-key`` key, only when no sign-in is stored,
+       because set-key saved it as a fallback and it must not move a signed-in
+       person into the key's workspace.
+
+    Values are stripped, since they go into a header. Never refreshes the sign-in.
+    """
+    import os
+
+    env_var = _PURPOSES["cloud"][0]
+    env_value = (os.environ.get(env_var) or "").strip()
+    if env_value:
+        return Credential(kind="api_key", value=env_value, source=f"env:{env_var}")
+    if get_session(refresh=False) is not None:
+        return None
+
+    from comfy_cli.auth import store as auth_store
+
+    record = auth_store.get(CLOUD_API_KEY_PROVIDER)
+    stored = (getattr(record, "key", None) or "").strip() if record is not None else ""
+    if stored:
+        return Credential(kind="api_key", value=stored, source=f"stored:{CLOUD_API_KEY_PROVIDER}")
+    return None
+
+
+def refused_key_hint(key: Credential) -> str:
+    """What to do once a server refuses a :func:`platform_api_key`, naming where the key came from."""
+    if key.source.startswith("env:"):
+        where = f"the workspace API key in {key.source.removeprefix('env:')}"
+    else:
+        where = "the workspace API key saved by `comfy cloud set-key`"
+    return f"{where} was refused; replace it with a valid key"
+
+
+def cloud_bearer_env_token() -> str | None:
+    """Return a forwarded Comfy Cloud Bearer token from the environment, or None.
+
+    Reads ``COMFY_CLOUD_AUTH_TOKEN`` (see :data:`CLOUD_BEARER_ENV_VAR`). Cloud-only
+    — it authenticates as the token's user via ``Authorization: Bearer``.
+    """
+    import os
+
+    tok = os.environ.get(CLOUD_BEARER_ENV_VAR)
+    return tok.strip() if tok and tok.strip() else None
+
+
 def resolve_cloud_credential(
     *,
     purpose: Purpose,
@@ -136,8 +217,11 @@ def resolve_cloud_credential(
        ``base_url`` is given, a session minted for a *different* base URL is
        skipped (replay-guard: never send a token to a host the user didn't
        authenticate against).
-    3. The purpose's env var (``COMFY_CLOUD_API_KEY`` / ``COMFY_API_KEY``).
-    4. The stored ``comfy-cloud-api-key`` key (``comfy cloud set-key``).
+    3. (cloud only) A forwarded Bearer token in ``COMFY_CLOUD_AUTH_TOKEN``,
+       sent as ``Authorization: Bearer`` — the trusted-caller path (see
+       :data:`CLOUD_BEARER_ENV_VAR`).
+    4. The purpose's env var (``COMFY_CLOUD_API_KEY`` / ``COMFY_API_KEY``).
+    5. The stored ``comfy-cloud-api-key`` key (``comfy cloud set-key``).
 
     ``allow_clear=False`` is forwarded into :func:`get_session` (and on to
     ``ensure_fresh_session``) so a fatal refresh error on THIS call does not
@@ -159,4 +243,73 @@ def resolve_cloud_credential(
     ):
         return Credential(kind="oauth", value=session.access_token, source="session")
 
+    if purpose == "cloud":
+        env_bearer = cloud_bearer_env_token()
+        if env_bearer:
+            return Credential(kind="oauth", value=env_bearer, source=f"env:{CLOUD_BEARER_ENV_VAR}")
+
     return find_api_key(purpose=purpose)
+
+
+def resolve_partner_credential() -> tuple[str, str] | None:
+    """The ``extra_data`` credential partner-API nodes authenticate with.
+
+    Returns ``(field, value)`` — ``auth_token_comfy_org`` for a session,
+    ``api_key_comfy_org`` for a key — or ``None`` when nothing is configured.
+    Shared by the local exec and ``deploy run`` submit paths, so it consults
+    every source either one already read. In precedence order:
+
+    1. a live OAuth session;
+    2. ``COMFY_CLOUD_AUTH_TOKEN`` (:data:`CLOUD_BEARER_ENV_VAR`), forwarded by a
+       trusted caller instead of an interactive login;
+    3. ``COMFY_API_KEY``, then ``COMFY_CLOUD_API_KEY``;
+    4. the stored ``comfy cloud set-key`` key.
+
+    Best-effort: the session is refreshed when possible, but ``allow_clear=False``
+    keeps a fatal refresh error from logging the user out from under a foreground
+    command, and any unexpected error falls through to a network-free read of the
+    env and stored keys rather than aborting the run.
+    """
+    try:
+        cloud = resolve_cloud_credential(purpose="cloud", refresh=True, allow_clear=False)
+    except Exception:  # noqa: BLE001 — best-effort: never abort a run on a refresh hiccup
+        cloud = resolve_cloud_credential(purpose="cloud", refresh=False, allow_clear=False)
+    # A request-scoped credential outranks every ambient key, or the run
+    # authenticates as the wrong account and spends its credits.
+    if cloud is not None and cloud.kind == "oauth":
+        return ("auth_token_comfy_org", cloud.value)
+    key_credential = _partner_api_key()
+    if key_credential is None:
+        return None
+    return ("api_key_comfy_org", key_credential.value)
+
+
+def keyed_partner_credential(workspace_key: str) -> tuple[str, str]:
+    """The partner-node credential for a job running on ``workspace_key``.
+
+    The job runs in the key's workspace, so its partner nodes take that key
+    rather than a sign-in's token, unless ``COMFY_API_KEY`` names a partner key
+    on purpose. Network-free, unlike :func:`resolve_partner_credential`.
+    """
+    import os
+
+    partner = (os.environ.get(_PURPOSES["partner"][0]) or "").strip()
+    return ("api_key_comfy_org", partner or workspace_key)
+
+
+def _partner_api_key() -> Credential | None:
+    """The API key half of :func:`resolve_partner_credential`: env vars, then stored.
+
+    Both env vars are read here rather than through two :func:`find_api_key`
+    calls: that function checks *its* env var and then the stored key, so the
+    first call would let machine state win over the second env var.
+    """
+    import os
+
+    # Stripped, and whitespace-only treated as absent: the "cloud" env var passes
+    # ambient values verbatim, and padding would reach a partner auth header.
+    for env_var in (_PURPOSES["partner"][0], _PURPOSES["cloud"][0]):
+        value = (os.environ.get(env_var) or "").strip()
+        if value:
+            return Credential(kind="api_key", value=value, source=f"env:{env_var}")
+    return find_api_key(purpose="partner")

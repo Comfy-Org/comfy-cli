@@ -44,7 +44,7 @@ import semver
 from comfy_cli._safe_exec import resolve_required_binary
 from comfy_cli.command.pack_scan import iter_pack_dirs as _iter_pack_dirs
 from comfy_cli.command.pack_scan import read_pyproject as _read_pyproject
-from comfy_cli.file_utils import atomic_write_text
+from comfy_cli.file_utils import atomic_write_text, cache_dir
 from comfy_cli.registry import RegistryAPI
 
 CACHE_TTL_SECONDS = 3600  # 1 hour
@@ -67,9 +67,8 @@ _VERSION_ASSIGN_RE = re.compile(
 
 
 def _cache_path() -> Path:
-    """Where the latest-version cache lives. XDG-respecting."""
-    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return Path(base) / "comfy-cli" / "outdated.json"
+    """Where the latest-version cache lives."""
+    return cache_dir() / "outdated.json"
 
 
 def _load_cache() -> dict[str, Any]:

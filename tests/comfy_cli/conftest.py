@@ -36,6 +36,18 @@ def _reset_renderer_singleton():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_ambient_api_keys(monkeypatch):
+    """Clear the API keys a developer or CI shell may export.
+
+    ``comfy build`` and ``comfy deploy`` send ``COMFY_CLOUD_API_KEY`` ahead of any
+    sign-in, so a key left in the shell would turn every signed-out test into a
+    keyed one. A test that needs a key sets it itself.
+    """
+    monkeypatch.delenv("COMFY_CLOUD_API_KEY", raising=False)
+    monkeypatch.delenv("COMFY_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_config_path(tmp_path, monkeypatch):
     """Redirect the CLI's config dir to a per-test tmp path.
 
@@ -47,6 +59,8 @@ def _isolate_config_path(tmp_path, monkeypatch):
     mid-session because tests were clobbering them.
     """
     from comfy_cli import constants
+    from comfy_cli.config_manager import ConfigManager
+    from comfy_cli.utils import reset_singleton_for_testing
 
     fake_root = tmp_path / "comfy-cli-config"
     fake_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -54,7 +68,32 @@ def _isolate_config_path(tmp_path, monkeypatch):
     # whichever ``get_os()`` resolves to lands in our tmp dir.
     for k in list(constants.DEFAULT_CONFIG.keys()):
         monkeypatch.setitem(constants.DEFAULT_CONFIG, k, str(fake_root))
+    # ConfigManager is a @singleton that reads the config dir once, at
+    # construction — so repointing the dir alone leaves the FIRST test's
+    # in-memory config serving every later one. Any test that runs the CLI
+    # entrypoint writes `setup_nudged` into it, which then breaks the
+    # onboarding tests' "fresh config" premise hundreds of tests later.
+    reset_singleton_for_testing(ConfigManager)
     yield fake_root
+    reset_singleton_for_testing(ConfigManager)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_object_info_cache_dir(tmp_path, monkeypatch):
+    """Redirect the ``object_info`` disk cache to a per-test tmp dir.
+
+    ``resilient_load_object_info`` (comfy_cli.cql.loader) reads/writes
+    ``~/.cache/comfy-cli/object_info-*.json`` (or ``$XDG_CACHE_HOME``) as a
+    side effect of every cache-first fetch. Now that `comfy run`'s UI-convert
+    and preflight-validate call sites route through it too, any test that
+    exercises those paths would otherwise read stale state from — or write
+    real dumps into — the developer's actual cache directory.
+    """
+    fake = tmp_path / "comfy-cli-cache"
+    fake.mkdir(mode=0o700, parents=True, exist_ok=True)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(fake))
+    monkeypatch.delenv("COMFY_CACHE_DIR", raising=False)
+    yield fake
 
 
 @pytest.fixture(autouse=True)

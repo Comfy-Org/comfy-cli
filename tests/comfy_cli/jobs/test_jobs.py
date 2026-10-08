@@ -49,6 +49,34 @@ _HISTORY_FIXTURE = {
 }
 
 
+@pytest.mark.parametrize(
+    "updated_at",
+    [
+        pytest.param("2026-08-28T03:26:09+00:00", id="what-state-files-write-today"),
+        pytest.param("2026-08-28T03:26:09Z", id="bare-z"),
+        pytest.param("2026-08-28T03:26:09.43745Z", id="zero-trimmed-fraction"),
+    ],
+)
+def test_a_dated_terminal_row_never_sinks_to_the_epoch_zero_floor(updated_at: str):
+    """0.0 doubles as "undated", so a stamp the parser cannot read sorts the row
+    below every dated one — right where ``jobs ls`` takes its ``[:limit]`` slice
+    and drops a fresh completion."""
+    assert jobs_mod._parse_epoch(updated_at) > 0.0
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(None, id="missing"),
+        pytest.param("", id="empty"),
+        pytest.param("not-a-timestamp", id="unparsable"),
+        pytest.param(1234, id="not-even-a-string"),
+    ],
+)
+def test_an_unreadable_updated_at_falls_back_to_the_floor(value: object):
+    assert jobs_mod._parse_epoch(value) == 0.0
+
+
 def test_gather_jobs_combines_queue_and_history(monkeypatch: pytest.MonkeyPatch):
     def fake_get(url, timeout=10.0):
         if url.endswith("/queue"):
@@ -464,7 +492,7 @@ class TestStatusServerUpNoRecord:
 
     This is what the documented crash recovery ("relaunch, then check")
     produces: a fresh ComfyUI answers the port with an empty history, so the
-    live snapshot comes back None. Before BE-4749 that unconditionally emitted
+    live snapshot comes back None. Previously that unconditionally emitted
     `prompt_not_found` and discarded the `server_died` verdict already sitting
     on disk.
     """
@@ -886,7 +914,7 @@ def test_orphaned_flag_filters_to_watcher_crashed(monkeypatch):
 
 def test_reap_finalizes_nonterminal_record_with_dead_watcher_pid(monkeypatch):
     """A `running` record carrying a dead pid + that pid's REAL create_time —
-    what a `comfy run --wait` killed from outside now leaves behind (BE-6641)
+    what a `comfy run --wait` killed from outside now leaves behind
     — is flipped by the reap to `error`/`watcher_crashed`, surfaces under
     `--orphaned`, and the pid pair is cleared in the rewritten file."""
     import psutil
@@ -1736,7 +1764,7 @@ def test_jobs_cancel_cloud_404_surfaces_prompt_not_found(monkeypatch: pytest.Mon
 @pytest.mark.parametrize("code", [401, 403])
 def test_jobs_cancel_cloud_auth_failure_surfaces_cloud_unauthorized(monkeypatch: pytest.MonkeyPatch, code: int):
     """An expired/insufficient session cancelling a cloud job surfaces the
-    actionable ``cloud_unauthorized`` code (shared envelope handler, BE-3266) —
+    actionable ``cloud_unauthorized`` code (shared envelope handler) —
     not the generic ``cloud_http_error`` it produced before the two call sites
     were unified."""
     import io
@@ -2127,6 +2155,57 @@ def test_poll_cloud_once_records_in_progress_as_running():
     assert state.status == "running"
     assert state.status in job_watcher._KNOWN_INFLIGHT_STATUSES
     assert state.status not in jobs_state.TERMINAL_STATUSES
+
+
+class _RaisingCloudClient:
+    def __init__(self, exc):
+        self._exc = exc
+
+    def get_job_status(self, prompt_id):
+        raise self._exc
+
+
+@pytest.mark.parametrize(("retry_after", "expected"), [(12.0, 12), (1.5, 1.5), (None, None)])
+def test_poll_cloud_once_maps_exhausted_429_to_cloud_rate_limited(retry_after, expected):
+    """Once the client gives up retrying a 429, the watcher must record the same
+    `cloud_rate_limited` envelope the foreground commands emit, with the prompt
+    id and the server's Retry-After, not a generic `watcher_poll_error`."""
+    from comfy_cli import jobs_state
+    from comfy_cli.comfy_client import HTTPError
+    from comfy_cli.command import job_watcher
+
+    client = _RaisingCloudClient(HTTPError(429, "Too Many Requests", retry_after=retry_after))
+    state = jobs_state.new(prompt_id="pid-429", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=client) is False
+    assert state.status not in jobs_state.TERMINAL_STATUSES
+    assert state.error is not None
+    assert state.error["code"] == "cloud_rate_limited"
+    assert state.error["hint"]
+    details = state.error["details"]
+    assert details["prompt_id"] == "pid-429"
+    assert details["status"] == 429
+    if expected is None:
+        assert "retry_after" not in details
+    else:
+        assert details["retry_after"] == expected
+
+
+@pytest.mark.parametrize("exc_factory", [lambda: _http_error(500), lambda: ConnectionResetError("reset")])
+def test_poll_cloud_once_keeps_watcher_poll_error_for_other_failures(exc_factory):
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+
+    state = jobs_state.new(prompt_id="pid", client_id="c", workflow="w", where="cloud")
+    assert job_watcher._poll_cloud_once(state, client=_RaisingCloudClient(exc_factory())) is False
+    assert state.error is not None
+    assert state.error["code"] == "watcher_poll_error"
+    assert state.error["details"] == {}
+
+
+def _http_error(status):
+    from comfy_cli.comfy_client import HTTPError
+
+    return HTTPError(status, "boom")
 
 
 def test_retryable_error_is_classified_everywhere_the_other_failures_are():
@@ -3472,7 +3551,7 @@ def _run_local_watch(monkeypatch, capsys, *, messages, prompt_id="pid-w", argv_e
 
 
 def test_watch_streams_events_and_reports_completed_nodes(monkeypatch, capsys):
-    """The BE-6856 regression, end to end: a multi-node job must produce MORE
+    """The regression, end to end: a multi-node job must produce MORE
     THAN ONE NDJSON line during the watch, and the terminal envelope's
     `completed_nodes` must list the nodes that ran."""
     from comfy_cli import jobs_state
@@ -4539,3 +4618,22 @@ def test_jobs_schema_empty_base_url_does_not_buy_the_host_port_exemption():
 
     # A real cloud payload is untouched by either guard.
     validator.validate({"prompt_id": "p", "status": "completed", "base_url": "https://api.comfy.example"})
+
+
+def test_poll_cloud_once_clears_a_recorded_rate_limit_on_the_next_good_poll():
+    """`run --wait` leaves a poll 429 as a non-terminal record carrying
+    `cloud_rate_limited`; the next successful status poll must clear it."""
+    from comfy_cli import jobs_state
+    from comfy_cli.command import job_watcher
+    from comfy_cli.command._cloud_errors import rate_limited_error
+
+    state = jobs_state.new(prompt_id="pid-429", client_id="c", workflow="w", where="cloud")
+    state.error = rate_limited_error("poll", 3.0, {"prompt_id": "pid-429"})
+
+    class _Ok:
+        def get_job_status(self, prompt_id):
+            return {"status": "in_progress"}
+
+    assert job_watcher._poll_cloud_once(state, client=_Ok()) is False
+    assert state.error is None
+    assert state.status not in jobs_state.TERMINAL_STATUSES

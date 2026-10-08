@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_status.json",
+  "title": "comfy deploy status --json data payload",
+  "type": "object",
+  "required": ["build", "deployment", "release", "serving"],
+  "additionalProperties": false,
+  "properties": {
+    "build": {
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1}
+      }
+    },
+    "deployment": {
+      "type": ["object", "null"],
+      "required": ["id", "name", "status", "endpointUrl", "computeConfig", "stopReason", "error"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "name": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "The deployment's name, unique among its Build's live deployments; null where it has none or comfy-deploy does not serve names yet."
+        },
+        "status": {
+          "enum": ["queued", "provisioning", "starting", "ready", "unhealthy", "stopping", "stop_failed", "stopped", "failed"]
+        },
+        "endpointUrl": {"type": ["string", "null"], "minLength": 1},
+        "computeConfig": {
+          "type": "object",
+          "required": ["gpuClass", "region"],
+          "additionalProperties": false,
+          "properties": {
+            "gpuClass": {"type": "string", "minLength": 1},
+            "region": {"type": "string", "minLength": 1},
+            "min": {"type": "integer", "minimum": 0},
+            "max": {"type": "integer", "minimum": 1}
+          }
+        },
+        "stopReason": {"enum": [null, "user", "credits", "policy"]},
+        "error": {"type": ["string", "null"], "minLength": 1}
+      }
+    },
+    "release": {
+      "type": ["object", "null"],
+      "required": ["id", "version", "behind", "latestDeployable"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "integer", "minimum": 1},
+        "behind": {"type": "boolean"},
+        "latestDeployable": {
+          "type": ["object", "null"],
+          "required": ["id", "version"],
+          "additionalProperties": false,
+          "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "version": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
+    "update": {
+      "type": "object",
+      "description": "The update the deployment waits on, present only while one waits: the release it moves to once that release's copy is ready, the copy's status, when it was asked, and its kind (update or rollback; read an unknown value as an update).",
+      "required": ["release", "status", "since", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "release": {
+          "type": "object",
+          "required": ["id"],
+          "additionalProperties": false,
+          "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "version": {"type": "integer", "minimum": 1}
+          }
+        },
+        "status": {"type": "string", "minLength": 1},
+        "since": {"type": "string", "format": "date-time"},
+        "kind": {"type": "string", "minLength": 1}
+      }
+    },
+    "serving": {
+      "type": ["object", "null"],
+      "required": ["capacity", "jobsInQueue", "sampledAt"],
+      "additionalProperties": false,
+      "properties": {
+        "capacity": {
+          "type": "object",
+          "description": "Workers by what they can do, the same on every GPU provider: ready can take a job now, busy is running one, starting is coming up.",
+          "required": ["ready", "busy", "starting"],
+          "additionalProperties": false,
+          "properties": {
+            "ready": {"type": "integer", "minimum": 0},
+            "busy": {"type": "integer", "minimum": 0},
+            "starting": {"type": "integer", "minimum": 0}
+          }
+        },
+        "workers": {
+          "description": "Deprecated: the GPU provider's own worker counts, present while the deploy service still sends them. Read capacity instead.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "idle": {"type": "integer", "minimum": 0},
+            "initializing": {"type": "integer", "minimum": 0},
+            "ready": {"type": "integer", "minimum": 0},
+            "running": {"type": "integer", "minimum": 0},
+            "throttled": {"type": "integer", "minimum": 0},
+            "unhealthy": {"type": "integer", "minimum": 0}
+          }
+        },
+        "jobsInQueue": {"type": "integer", "minimum": 0},
+        "sampledAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "progress": {
+      "type": "object",
+      "description": "Where a deployment that is coming up has got to, exactly as the deploy service sent it. Present only while the status is provisioning or starting; absent otherwise, and from a service that does not send it. The byte fields, bytesPerSecond and etaSeconds are present only while step is staging_models. bytesTotal is absent for a release whose models were never measured and 0 when every model is already in place. New fields may appear.",
+      "required": ["step"],
+      "additionalProperties": true,
+      "properties": {
+        "step": {"type": "string", "description": "staging_models, creating_endpoint or waiting_for_worker today; read an unknown value as a step name."},
+        "modelsDone": {"type": "integer", "minimum": 0},
+        "modelsTotal": {"type": "integer", "minimum": 0},
+        "bytesDone": {"type": "integer", "minimum": 0},
+        "bytesTotal": {"type": "integer", "minimum": 0},
+        "bytesTotalIsFloor": {"type": "boolean"},
+        "currentModel": {"type": "string"},
+        "bytesPerSecond": {"type": "integer", "minimum": 0},
+        "etaSeconds": {"type": "integer", "minimum": 0},
+        "attempt": {"type": "integer", "minimum": 1},
+        "startedAt": {"type": "string", "format": "date-time", "description": "When this attempt of the step began. How long the step has run is measured from here."},
+        "updatedAt": {"type": "string", "format": "date-time", "description": "When the service last wrote this object. It advances every few seconds in every step, so it says how fresh the sample is, not how long the step has run."}
+      }
+    }
+  }
+}

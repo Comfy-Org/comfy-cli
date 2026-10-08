@@ -663,3 +663,85 @@ class TestFullIntegration:
 
         assert ws_type == WorkspaceType.DEFAULT
         assert path == str(comfy_dir)
+
+
+class TestLazyResolution:
+    """``workspace_path``/``workspace_type`` resolve on first read, not in ``entry()``."""
+
+    def test_path_is_none_before_setup(self):
+        """``_make_manager`` cannot reset the singleton, so ask for a genuinely fresh one."""
+        from comfy_cli.utils import reset_singleton_for_testing
+        from comfy_cli.workspace_manager import WorkspaceManager
+
+        reset_singleton_for_testing(WorkspaceManager)
+        mgr = WorkspaceManager()
+        assert mgr.workspace_path is None
+        assert mgr.workspace_type is None
+
+    def test_setup_does_not_probe(self):
+        mgr = _make_manager()
+        with patch("comfy_cli.workspace_manager.check_comfy_repo", side_effect=AssertionError("probed")):
+            mgr.setup_workspace_manager()
+
+    def test_first_read_resolves_once(self):
+        mgr = _make_manager()
+        mgr.setup_workspace_manager()
+        with patch.object(mgr, "get_workspace_path", return_value=("/ws", WorkspaceType.DEFAULT)) as resolve:
+            assert mgr.workspace_path == "/ws"
+            assert mgr.workspace_type == WorkspaceType.DEFAULT
+            assert mgr.workspace_path == "/ws"
+        assert resolve.call_count == 1
+
+    def test_second_setup_discards_the_cached_path(self):
+        """``comfy install`` re-runs setup with the freshly created repo dir."""
+        mgr = _make_manager()
+        mgr.setup_workspace_manager(specified_workspace="/first")
+        assert mgr.workspace_path == "/first"
+        mgr.setup_workspace_manager(specified_workspace="/second")
+        assert mgr.workspace_path == "/second"
+
+
+class TestWorkspaceFreeCommands:
+    """Commands that never read the workspace must not pay for the git probe."""
+
+    @staticmethod
+    def _invoke(args):
+        from typer.testing import CliRunner
+
+        import comfy_cli.workspace_manager as workspace_manager_module
+        from comfy_cli.cmdline import app
+
+        with patch.object(
+            workspace_manager_module, "check_comfy_repo", side_effect=AssertionError("workspace was probed")
+        ):
+            return CliRunner().invoke(app, args)
+
+    @pytest.mark.parametrize("command", [["knowledge", "status"], ["cloud", "status"]])
+    def test_no_workspace_probe(self, command):
+        result = self._invoke(["--json", *command])
+        assert not isinstance(result.exception, AssertionError), result.exception
+
+    def test_which_still_resolves_the_workspace(self):
+        from typer.testing import CliRunner
+
+        import comfy_cli.workspace_manager as workspace_manager_module
+        from comfy_cli.cmdline import app
+
+        with patch.object(workspace_manager_module, "check_comfy_repo", return_value=(True, "/sentinel/ComfyUI")):
+            result = CliRunner().invoke(app, ["--json", "which"])
+
+        assert result.exit_code == 0, result.output
+        assert "/sentinel/ComfyUI" in result.output
+
+    def test_gitpython_is_not_imported(self):
+        import subprocess
+        import sys
+
+        source = (
+            "import sys\n"
+            "from typer.testing import CliRunner\n"
+            "from comfy_cli.cmdline import app\n"
+            "CliRunner().invoke(app, ['--json', 'knowledge', 'status'])\n"
+            "assert 'git' not in sys.modules, 'GitPython was imported'\n"
+        )
+        subprocess.run([sys.executable, "-c", source], check=True, capture_output=True, timeout=120)

@@ -47,6 +47,7 @@ from comfy_cli.host_port import resolve_host_port as _resolve_host_port
 from comfy_cli.http import ResponseTooLarge, authed_urlopen, plain_urlopen, read_capped
 from comfy_cli.output import get_renderer
 from comfy_cli.output.sanitize import sanitize, sanitize_markup
+from comfy_cli.utils import parse_rfc3339
 from comfy_cli.where import cloud_preflight_or_exit
 
 if TYPE_CHECKING:
@@ -455,12 +456,20 @@ def _gather_local_state_files(*, limit: int, orphaned_only: bool = False, where:
 
 
 def _parse_epoch(ts: str | None) -> float:
-    """Parse an ISO ``updated_at`` to epoch seconds; 0.0 if missing/unparseable."""
-    if not ts:
+    """Parse an ISO ``updated_at`` to epoch seconds; 0.0 if missing/unparseable.
+
+    Shares the wire parser rather than calling ``fromisoformat`` directly, whose
+    Python 3.10 spelling rejects a bare ``Z`` and any sub-second precision but 3
+    or 6 digits. State files are stamped whole-second UTC, so nothing written
+    today needs the wider grammar — but a row that did hit it would silently
+    sort to epoch 0, below every dated one, exactly where ``jobs ls`` slices its
+    ``[:limit]`` and drops a fresh completion.
+    """
+    if not isinstance(ts, str) or not ts:
         return 0.0
     try:
-        return datetime.fromisoformat(ts).timestamp()
-    except (ValueError, TypeError):
+        return parse_rfc3339(ts).timestamp()
+    except ValueError:
         return 0.0
 
 
@@ -1887,7 +1896,7 @@ def _resolve_watch_client_id(host: str, port: int, prompt_id: str) -> str | None
     if isinstance(q, dict):
         for key in ("queue_running", "queue_pending"):
             for entry in q.get(key) or []:
-                # (number, prompt_id, prompt, extra_data, outputs_to_execute)
+                # entry layout: number, prompt_id, prompt, extra_data, outputs_to_execute
                 if isinstance(entry, list) and len(entry) > 3 and entry[1] == prompt_id:
                     cid = _client_id_from_extra_data(entry[3])
                     if cid:
@@ -2541,7 +2550,7 @@ def _cloud_status_snapshot(prompt_id: str) -> dict | None:
     # `execution_error` left on a retried-then-succeeded job would otherwise
     # fabricate an `error` row on a green one. `canceled` is spelled out
     # alongside `_ERROR_STATUSES` because the state map above deliberately
-    # leaves cloud's one-l spelling unmapped (BE-6612).
+    # leaves cloud's one-l spelling unmapped.
     failed = state in _ERROR_STATUSES or state == "canceled"
     # The structured record wins over `error_message` when the server sent
     # one: a deployment that fills `error_message` with a short generic string

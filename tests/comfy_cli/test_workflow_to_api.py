@@ -1211,6 +1211,53 @@ class TestWildcardInputType:
         assert "anything" not in result["1"]["inputs"]
 
 
+class TestMixedCaseLinkType:
+    """A socket type without a registered frontend widget is a connection,
+    whatever its letter case. ``VHS_LoadVideo.meta_batch`` (type
+    ``VHS_BatchManager``) sits before the ``format`` widget; giving it a
+    ``widgets_values`` slot shifted ``format="None"`` into ``meta_batch`` and
+    the node crashed on the worker (`'str' object has no attribute 'inputs'`,
+    117 failed cloud jobs in 30 days)."""
+
+    OI = {
+        "VHS_LoadVideo": {
+            "input": {
+                "required": {
+                    "video": [["clip.mp4"]],
+                    "select_every_nth": ["INT", {"default": 1}],
+                },
+                "optional": {
+                    "meta_batch": ["VHS_BatchManager"],
+                    "format": [["None", "AnimateDiff"], {"default": "AnimateDiff"}],
+                },
+            },
+            "input_order": {"required": ["video", "select_every_nth"], "optional": ["meta_batch", "format"]},
+            "output_node": True,
+            "output": ["IMAGE"],
+        },
+    }
+
+    def test_mixed_case_link_socket_owns_no_widget_slot(self):
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "VHS_LoadVideo",
+                    "mode": 0,
+                    "inputs": [{"name": "meta_batch", "type": "VHS_BatchManager", "link": None}],
+                    "outputs": [],
+                    "widgets_values": ["clip.mp4", 1, "None"],
+                }
+            ],
+            "links": [],
+        }
+
+        inputs = convert_ui_to_api(workflow, self.OI)["1"]["inputs"]
+
+        assert "meta_batch" not in inputs
+        assert inputs["format"] == "None"
+
+
 class TestImplicitSeedCompanion:
     """The frontend's ``useIntWidget`` composable adds a
     ``control_after_generate`` companion widget for inputs named ``seed`` or
@@ -1253,6 +1300,20 @@ class TestImplicitSeedCompanion:
             "input_order": {"required": ["value", "label"]},
             "output_node": True,
             "display_name": "RegularInt",
+        },
+        # A seed-substring INT (unflagged, no real companion) immediately followed
+        # by a COMBO that legitimately lists a control keyword among its options.
+        "SeedThenCombo": {
+            "input": {
+                "required": {
+                    "variation_seed": ["INT", {"default": 0}],
+                    "mode": [["fixed", "auto", "manual"], {}],
+                    "strength": ["FLOAT", {"default": 1.0}],
+                }
+            },
+            "input_order": {"required": ["variation_seed", "mode", "strength"]},
+            "output_node": True,
+            "display_name": "SeedThenCombo",
         },
     }
 
@@ -1331,6 +1392,118 @@ class TestImplicitSeedCompanion:
         result = convert_ui_to_api(workflow, self.OI)
         assert result["1"]["inputs"]["value"] == 99
         assert result["1"]["inputs"]["label"] == "randomize"
+
+    def test_seed_does_not_steal_next_combos_control_keyword_value(self):
+        # `variation_seed` is a seed-substring INT with NO real companion; the
+        # NEXT widget is a COMBO whose legitimate saved value is "fixed" (one of
+        # its own options). The converter must keep "fixed" as the combo's value
+        # rather than consuming it as a phantom control_after_generate marker
+        # (which would drop it and shift `strength` into the wrong slot).
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "SeedThenCombo",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": [7, "fixed", 0.5],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, self.OI)
+        assert result["1"]["inputs"] == {"variation_seed": 7, "mode": "fixed", "strength": 0.5}
+
+
+class TestNonExactSeedLegacyCompanion:
+    """The frontend adds an implicit ``control_after_generate`` companion only
+    for an INT named exactly ``seed``/``noise_seed`` (``useIntWidget``), and the
+    cql engine reserves a slot on the same rule. After an unflagged
+    ``image_seed``/``texture_seed`` (or a dotted ``model.seed`` sub-input) there
+    is no companion, so a following ``"fixed"`` is normally the next widget's
+    real value. Older CLIs did write a stray marker after such seeds, so the
+    converter still drops one, but only when the next widget could not hold it.
+    """
+
+    @staticmethod
+    def _convert(schema_inputs: dict, widgets_values: list) -> dict:
+        object_info = {
+            "N": {
+                "input": {"required": schema_inputs},
+                "input_order": {"required": list(schema_inputs)},
+                "output_node": True,
+                "display_name": "N",
+            }
+        }
+        workflow = {
+            "nodes": [{"id": 1, "type": "N", "inputs": [], "outputs": [], "widgets_values": widgets_values, "mode": 0}],
+            "links": [],
+        }
+        return convert_ui_to_api(workflow, object_info)["1"]["inputs"]
+
+    def test_string_widget_value_fixed_after_image_seed_is_preserved(self):
+        inputs = self._convert(
+            {
+                "image_seed": ["INT", {"default": 0}],
+                "style": ["STRING", {}],
+                "steps": ["INT", {"default": 20}],
+            },
+            [5, "fixed", 30],
+        )
+        assert inputs == {"image_seed": 5, "style": "fixed", "steps": 30}
+
+    def test_legacy_stray_fixed_after_texture_seed_before_int_is_consumed(self):
+        inputs = self._convert(
+            {
+                "texture_seed": ["INT", {"default": 0}],
+                "steps": ["INT", {"default": 20}],
+            },
+            [5, "fixed", 30],
+        )
+        assert inputs == {"texture_seed": 5, "steps": 30}
+
+    def test_legacy_stray_fixed_after_texture_seed_before_float_is_consumed(self):
+        inputs = self._convert(
+            {
+                "texture_seed": ["INT", {"default": 0}],
+                "strength": ["FLOAT", {"default": 1.0}],
+            },
+            [5, "randomize", 0.5],
+        )
+        assert inputs == {"texture_seed": 5, "strength": 0.5}
+
+    def test_exact_seed_still_strips_before_string(self):
+        # The frontend really adds the companion after ``seed``, so the marker
+        # is dropped even though the next widget is a STRING.
+        inputs = self._convert(
+            {"seed": ["INT", {"default": 0}], "style": ["STRING", {}]},
+            [5, "fixed", "watercolor"],
+        )
+        assert inputs == {"seed": 5, "style": "watercolor"}
+
+    def test_exact_noise_seed_still_strips_before_string(self):
+        inputs = self._convert(
+            {"noise_seed": ["INT", {"default": 0}], "style": ["STRING", {}]},
+            [5, "increment", "watercolor"],
+        )
+        assert inputs == {"noise_seed": 5, "style": "watercolor"}
+
+    def test_dotted_sub_seed_does_not_eat_following_top_level_string(self):
+        # ``model.seed`` is the last sub-input; the widget after it is the
+        # top-level STRING, whose saved value happens to be "fixed".
+        inputs = self._convert(
+            {
+                "model": [
+                    "COMFY_DYNAMICCOMBO_V3",
+                    {"options": [{"key": "fast", "inputs": {"required": {"seed": ["INT", {"default": 0}]}}}]},
+                ],
+                "style": ["STRING", {}],
+                "steps": ["INT", {"default": 20}],
+            },
+            ["fast", 7, "fixed", 30],
+        )
+        assert inputs == {"model": "fast", "model.seed": 7, "style": "fixed", "steps": 30}
 
 
 class TestNodeNameForSAndRAlias:
@@ -1957,7 +2130,7 @@ class TestDynamicComboAfterControlMarker:
         assert inputs["shape.side"] == 10.0
 
     def test_dynamic_combo_sub_seed_strips_implicit_control_marker(self):
-        # BE-3370 review: an INT ``seed``/``noise_seed`` *sub-input* of a
+        # An INT ``seed``/``noise_seed`` *sub-input* of a
         # dynamic combo relies on the frontend's implicit companion, but its
         # dotted name (``model.seed``) never matched the leaf-name check, so the
         # trailing control marker was kept as a real value and shifted every
@@ -2014,7 +2187,7 @@ class TestDynamicComboAfterControlMarker:
     def test_unresolved_selector_warns(self, caplog):
         import logging
 
-        # BE-3370 review: a selector value that matches no option key leaves the
+        # A selector value that matches no option key leaves the
         # option's sub-input slots unconsumed, silently shifting later widgets.
         # We can't recover the alignment, but the mismatch must not be silent.
         object_info = {
@@ -2051,7 +2224,7 @@ class TestDynamicComboAfterControlMarker:
         assert any("matched no option" in rec.message for rec in caplog.records)
 
     def test_deeply_nested_dynamic_combos_do_not_recurse_forever(self, caplog):
-        # BE-3370 review: an unbounded chain of nested COMFY_*COMBO* sub-inputs
+        # An unbounded chain of nested COMFY_*COMBO* sub-inputs
         # must degrade to a warning, not an uncaught RecursionError that aborts
         # the whole conversion. Build a self-referential option chain deeper
         # than _MAX_DYNAMIC_COMBO_DEPTH.
@@ -2093,6 +2266,206 @@ class TestDynamicComboAfterControlMarker:
             result = convert_ui_to_api(workflow, object_info)  # must not raise
         assert "1" in result
         assert any("exceeded depth" in rec.message for rec in caplog.records)
+
+
+class TestSeedControlMarkerOffByOne:
+    """Regression for the partner-node seed + ``control_after_generate``
+    off-by-one that made ``validate`` (which lowers the graph via
+    ``convert_ui_to_api``) read a downstream widget as the stray control
+    token — most visibly a Gemini / Nano Banana node whose
+    ``response_modalities`` was read as ``"fixed"``.
+
+    Two independent gaps produced the same symptom:
+
+    1. A seed-like INT input whose name isn't literally ``seed``/``noise_seed``
+       and whose schema omits the ``control_after_generate`` flag (Rodin3D's
+       ``Seed``, Tripo's ``image_seed``/``model_seed``/``texture_seed``,
+       ``rand_seed``, ``noise_seed_sde``, ``variation_seed``, ...). The old
+       exact-name implicit heuristic missed these, so the ``"fixed"`` marker
+       survived and shifted every later widget by one.
+
+    2. A dynamic combo (``COMFY_DYNAMICCOMBO_V3``) positioned *before* the seed
+       (GeminiNanoBanana2V2 / "Nano Banana 2") whose option carries a
+       connection-only (non-widget) sub-input. The span walk over-counted the
+       combo, reached the seed at the wrong index, and left the marker in
+       place — landing ``"fixed"`` on the ``response_modalities`` widget that
+       immediately follows the seed.
+    """
+
+    def test_non_canonical_seed_name_strips_control_marker(self):
+        # Seed-like INT named ``image_seed`` (Tripo style), unflagged, followed
+        # by a control marker and then a downstream COMBO. Before the fix the
+        # marker survived and ``response_modalities`` read "fixed".
+        object_info = {
+            "PartnerImageNode": {
+                "input": {
+                    "required": {
+                        "prompt": ["STRING", {"multiline": True}],
+                        "image_seed": ["INT", {"default": 42}],  # no control_after_generate flag
+                        "response_modalities": [["IMAGE", "IMAGE+TEXT"], {}],
+                    }
+                },
+                "input_order": {"required": ["prompt", "image_seed", "response_modalities"]},
+                "output_node": True,
+                "display_name": "Partner Image",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "PartnerImageNode",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": ["a cat", 12345, "fixed", "IMAGE"],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        inputs = result["1"]["inputs"]
+        assert inputs["image_seed"] == 12345
+        assert inputs["response_modalities"] == "IMAGE"  # not "fixed"
+        assert "fixed" not in inputs.values()
+
+    def test_nano_banana_pro_flagged_seed_still_strips(self):
+        # GeminiImage2Node / "Nano Banana Pro" shape: plain COMBO model, seed
+        # carries control_after_generate. This already worked; pin it.
+        object_info = {
+            "GeminiImage2Node": {
+                "input": {
+                    "required": {
+                        "prompt": ["STRING", {"multiline": True}],
+                        "model": [["gemini-2.5-flash-image"], {}],
+                        "seed": ["INT", {"default": 42, "control_after_generate": True}],
+                        "aspect_ratio": [["auto", "1:1"], {}],
+                        "resolution": [["1K", "2K"], {}],
+                        "response_modalities": [["IMAGE", "IMAGE+TEXT"], {}],
+                    }
+                },
+                "input_order": {
+                    "required": ["prompt", "model", "seed", "aspect_ratio", "resolution", "response_modalities"]
+                },
+                "output_node": True,
+                "display_name": "Nano Banana Pro (Google Gemini Image)",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "GeminiImage2Node",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": ["a cat", "gemini-2.5-flash-image", 999, "fixed", "auto", "1K", "IMAGE"],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        inputs = result["1"]["inputs"]
+        assert inputs["seed"] == 999
+        assert inputs["response_modalities"] == "IMAGE"
+        assert "fixed" not in inputs.values()
+
+    def test_dynamic_combo_before_seed_with_nonwidget_subinput(self):
+        # GeminiNanoBanana2V2 / "Nano Banana 2" shape: dynamic ``model`` combo
+        # precedes the seed and its option has a connection-only sub-input
+        # (``images`` -> IMAGE) that carries no widget value. ``response_modalities``
+        # sits right after the seed, so before the fix the stray control marker
+        # landed on it. The non-widget sub-input must not consume a value slot.
+        object_info = {
+            "GeminiNanoBanana2V2": {
+                "input": {
+                    "required": {
+                        "prompt": ["STRING", {"multiline": True}],
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {
+                                        "key": "nb2",
+                                        "inputs": {
+                                            "required": {
+                                                "aspect_ratio": [["auto", "16:9"], {}],
+                                                "resolution": [["1K", "2K"], {}],
+                                                "thinking_level": [["MINIMAL", "HIGH"], {}],
+                                                "images": ["IMAGE", {}],  # connection-only, no widget value
+                                            }
+                                        },
+                                    }
+                                ]
+                            },
+                        ],
+                        "seed": ["INT", {"default": 42, "control_after_generate": True}],
+                        "response_modalities": [["IMAGE", "IMAGE+TEXT"], {}],
+                    }
+                },
+                "input_order": {"required": ["prompt", "model", "seed", "response_modalities"]},
+                "output_node": True,
+                "display_name": "Nano Banana 2",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "GeminiNanoBanana2V2",
+                    "inputs": [],
+                    "outputs": [],
+                    # prompt, model_key, aspect_ratio, resolution, thinking_level,
+                    # seed, control_marker, response_modalities
+                    "widgets_values": ["a cat", "nb2", "auto", "1K", "HIGH", 999, "fixed", "IMAGE"],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        inputs = result["1"]["inputs"]
+        assert inputs["seed"] == 999
+        assert inputs["response_modalities"] == "IMAGE"  # not "fixed"
+        assert inputs["model"] == "nb2"
+        assert inputs["model.aspect_ratio"] == "auto"
+        assert inputs["model.resolution"] == "1K"
+        assert inputs["model.thinking_level"] == "HIGH"
+        assert "fixed" not in inputs.values()
+
+    def test_non_seed_int_before_control_keyword_not_stripped(self):
+        # Safety net: a non-seed INT (``steps``) followed by a COMBO whose value
+        # is literally "fixed" must NOT be treated as a control companion.
+        object_info = {
+            "PlainNode": {
+                "input": {
+                    "required": {
+                        "steps": ["INT", {"default": 20}],
+                        "mode": [["fixed", "auto"], {}],
+                    }
+                },
+                "input_order": {"required": ["steps", "mode"]},
+                "output_node": True,
+                "display_name": "Plain",
+            }
+        }
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "PlainNode",
+                    "inputs": [],
+                    "outputs": [],
+                    "widgets_values": [20, "fixed"],
+                    "mode": 0,
+                }
+            ],
+            "links": [],
+        }
+        result = convert_ui_to_api(workflow, object_info)
+        inputs = result["1"]["inputs"]
+        assert inputs["steps"] == 20
+        assert inputs["mode"] == "fixed"  # preserved, not eaten as a control marker
 
 
 class TestDynamicPrompts:
@@ -2419,3 +2792,221 @@ class TestSeedreamDynamicCombo:
 
         assert "model.images" not in inputs
         assert "fixed" not in inputs.values()
+
+
+class TestLoad3DInjectedButtonSlots:
+    """The LOAD_3D custom widget injects three button slots before its own.
+
+    ``getCustomWidgets().LOAD_3D`` (frontend ``src/extensions/core/load3d.ts``)
+    adds ``upload 3d model`` / ``upload extra resources`` / ``clear`` button
+    widgets — serialized as the literal values ``"upload3dmodel"``,
+    ``"uploadExtraResources"``, ``"clear"`` — and only when the node already
+    carries a ``model_file`` widget, which is why ``Preview3DAdvanced`` and the
+    other ``model_3d``-fed viewers get none. They are constructed BEFORE the
+    LOAD_3D component widget, so they sit between ``model_file`` and the
+    declared DOM-widget input rather than trailing it. Walking the schema
+    positionally without them read the three button values into ``image``,
+    ``width`` and ``height``; the real captured shape is the one asserted here
+    (``api_hunyuan3d_model2uv.json`` and three sibling templates).
+    """
+
+    @pytest.fixture
+    def object_info_3d(self):
+        def load3d(dom_name):
+            return {
+                "input": {
+                    "required": {
+                        "model_file": ["COMBO", {"options": ["none"], "file_upload": True}],
+                        dom_name: ["LOAD_3D", {}],
+                        "width": ["INT", {"default": 1024}],
+                        "height": ["INT", {"default": 1024}],
+                    }
+                },
+                "input_order": {"required": ["model_file", dom_name, "width", "height"]},
+                "output": ["IMAGE"],
+                "output_name": ["image"],
+            }
+
+        return {
+            "Load3D": load3d("image"),
+            "Load3DAdvanced": load3d("viewport_state"),
+            # model_3d is a LINK input, so the frontend finds no model_file
+            # widget and injects no buttons: this node's LOAD_3D slot is the
+            # one right after nothing at all.
+            "Preview3DAdvanced": {
+                "input": {
+                    "required": {
+                        "model_3d": ["MESH"],
+                        "viewport_state": ["LOAD_3D", {}],
+                        "width": ["INT", {"default": 1024}],
+                    }
+                },
+                "input_order": {"required": ["model_3d", "viewport_state", "width"]},
+                "output": [],
+            },
+        }
+
+    def _workflow(self, node_type, widgets_values):
+        return {
+            "nodes": [
+                {
+                    "id": 13,
+                    "type": node_type,
+                    "inputs": [],
+                    "outputs": [],
+                    "mode": 0,
+                    "widgets_values": widgets_values,
+                }
+            ],
+            "links": [],
+        }
+
+    def test_load3d_button_values_do_not_become_input_values(self, object_info_3d):
+        # Verbatim from api_hunyuan3d_model2uv.json node 13.
+        ui = self._workflow("Load3D", ["toy.glb", "upload3dmodel", "uploadExtraResources", "clear", "", 1024, 1024])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "toy.glb", "image": "", "width": 1024, "height": 1024}
+
+    def test_advanced_variant_skips_the_same_three_slots(self, object_info_3d):
+        ui = self._workflow(
+            "Load3DAdvanced", ["motor.fbx", "upload3dmodel", "uploadExtraResources", "clear", "", 800, 600]
+        )
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "motor.fbx", "viewport_state": "", "width": 800, "height": 600}
+
+    def test_link_fed_viewer_has_no_buttons_to_skip(self, object_info_3d):
+        # No model_file widget -> no injected buttons. Skipping three slots
+        # here would eat this node's only two values.
+        ui = self._workflow("Preview3DAdvanced", ["", 512])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"viewport_state": "", "width": 512}
+
+    def test_a_workflow_saved_without_the_buttons_still_maps_in_order(self, object_info_3d):
+        # The skip is gated on the literal button values, so a shape written
+        # before the extension existed (or by a non-frontend producer) keeps
+        # its straight positional mapping instead of losing three values.
+        ui = self._workflow("Load3D", ["toy.glb", "", 1024, 1024])
+        inputs = convert_ui_to_api(ui, object_info_3d)["13"]["inputs"]
+        assert inputs == {"model_file": "toy.glb", "image": "", "width": 1024, "height": 1024}
+
+
+class TestSocketlessInputsOwnTheirSlot:
+    """``socketless: true`` hides the input SOCKET, not the widget.
+
+    ``litegraphService`` skips adding an input socket for such an input and
+    renders the widget as usual, so the value is serialized positionally like
+    any other — real templates prove it (``ColorToRGBInt ["#ffffff"]``,
+    ``Painter ["p.png", 1024, 1024, "#000000"]``). Reading the type as a link
+    left the slot unconsumed and the input was then refilled from the schema
+    default, so a colour the user picked came back as the default: a value the
+    server accepts and renders wrong.
+    """
+
+    @pytest.fixture
+    def object_info_socketless(self):
+        return {
+            "ImageCropToMask": {
+                "input": {
+                    "required": {
+                        "images": ["IMAGE"],
+                        "width": ["INT", {"default": 1024}],
+                        "background": ["COLOR", {"default": "#000000", "socketless": True}],
+                    }
+                },
+                "input_order": {"required": ["images", "width", "background"]},
+                "output": ["IMAGE"],
+            },
+            # socketless AND forceInput: the explicit demotion wins, so this
+            # one really is a link and owns no slot.
+            "CropByBBoxes": {
+                "input": {
+                    "required": {
+                        "images": ["IMAGE"],
+                        "width": ["INT", {"default": 64}],
+                        "bboxes": ["BOUNDING_BOX", {"socketless": True, "forceInput": True}],
+                    }
+                },
+                "input_order": {"required": ["images", "width", "bboxes"]},
+                "output": ["IMAGE"],
+            },
+        }
+
+    def _node(self, node_type, widgets_values):
+        return {
+            "nodes": [
+                {
+                    "id": 2,
+                    "type": node_type,
+                    "inputs": [{"name": "images", "link": None}],
+                    "outputs": [],
+                    "mode": 0,
+                    "widgets_values": widgets_values,
+                }
+            ],
+            "links": [],
+        }
+
+    def test_a_chosen_socketless_value_is_not_replaced_by_the_default(self, object_info_socketless):
+        ui = self._node("ImageCropToMask", [1024, "#ff0000"])
+        assert convert_ui_to_api(ui, object_info_socketless)["2"]["inputs"]["background"] == "#ff0000"
+
+    def test_force_input_still_demotes_a_socketless_input_to_a_link(self, object_info_socketless):
+        # Only one widget value, for `width`: if bboxes ate a slot the walk
+        # would be short one and width would go missing.
+        ui = self._node("CropByBBoxes", [64])
+        inputs = convert_ui_to_api(ui, object_info_socketless)["2"]["inputs"]
+        assert inputs["width"] == 64
+        assert "bboxes" not in inputs
+
+
+class TestSocketlessInputAbsentFromASavedWorkflow:
+    """A socketless widget the saved workflow never persisted still has to
+    reach the prompt.
+
+    The frontend builds the prompt from LIVE widget state, not from
+    `widgets_values`, so an ImageCompare saved as `widgets_values: []`
+    still submits a `compare_view`. Converting it without one produces a
+    prompt the server refuses outright — verified live:
+    `required_input_missing: compare_view`, and the key is accepted with any
+    value once present (null included). 40 of the 517 shipped templates end
+    in one of these.
+    """
+
+    @pytest.fixture
+    def object_info_compare(self):
+        return {
+            "ImageCompare": {
+                "input": {
+                    "required": {"compare_view": ["IMAGECOMPARE", {"socketless": True}]},
+                    "optional": {"image_a": ["IMAGE", {}]},
+                },
+                "input_order": {"required": ["compare_view"], "optional": ["image_a"]},
+                "output": [],
+                "output_node": True,
+            },
+            "ColorNode": {
+                "input": {"required": {"color": ["COLOR", {"socketless": True, "default": "#ffffff"}]}},
+                "input_order": {"required": ["color"]},
+                "output": ["INT"],
+            },
+        }
+
+    def _one(self, node_type, widgets_values, object_info):
+        ui = {
+            "nodes": [
+                {"id": 5, "type": node_type, "inputs": [], "outputs": [], "mode": 0, "widgets_values": widgets_values}
+            ],
+            "links": [],
+        }
+        return convert_ui_to_api(ui, object_info)["5"]["inputs"]
+
+    def test_a_socketless_input_with_no_declared_default_is_still_emitted(self, object_info_compare):
+        inputs = self._one("ImageCompare", [], object_info_compare)
+        assert "compare_view" in inputs
+        assert inputs["compare_view"] is None
+
+    def test_a_socketless_input_with_a_default_uses_it(self, object_info_compare):
+        assert self._one("ColorNode", [], object_info_compare)["color"] == "#ffffff"
+
+    def test_a_saved_value_still_wins_over_the_placeholder(self, object_info_compare):
+        assert self._one("ColorNode", ["#123456"], object_info_compare)["color"] == "#123456"

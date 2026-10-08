@@ -5,11 +5,21 @@ from __future__ import annotations
 import io
 import json
 import re
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
 
 import pytest
 
 from comfy_cli.caller import Caller
-from comfy_cli.output.renderer import OutputMode, Renderer, get_renderer, reset_renderer_for_testing, set_renderer
+from comfy_cli.output.renderer import (
+    OutputMode,
+    Renderer,
+    _json_default,
+    get_renderer,
+    reset_renderer_for_testing,
+    set_renderer,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -86,19 +96,32 @@ def test_envelope_shape_on_success():
     assert env["where"] is None
 
 
-def test_emit_ok_false_carries_data():
+def test_emit_ok_false_carries_data_and_names_the_verdict():
     """`validate` on an invalid workflow emits its structured payload as data
-    but with ok=False, so the envelope agrees with the exit code."""
+    AND an error block, so the envelope agrees with the exit code and a consumer
+    branching on `error.code` can read the failure it is being told about."""
     stream = io.StringIO()
     r = _resolve()
     r.mode = OutputMode.JSON
     r.machine_stream = stream
     r.command = "validate"
-    r.emit({"valid": False, "error_count": 2}, ok=False)
+    verdict = {"code": "workflow_unknown_nodes", "message": "workflow has 2 validation error(s)"}
+    r.emit({"valid": False, "error_count": 2}, ok=False, error=verdict)
     env = json.loads(stream.getvalue().strip())
     assert env["ok"] is False
     assert env["data"] == {"valid": False, "error_count": 2}
-    assert env["error"] is None  # the verdict rides in data, not error
+    assert env["error"] == verdict
+
+
+def test_emit_refuses_a_not_ok_envelope_with_no_error():
+    """`{"ok": false, "error": null}` says a command failed and refuses to say
+    how — unreadable by construction for every consumer, which all branch on
+    `error.code`. Three commands emitted it before this guard."""
+    r = _resolve()
+    r.mode = OutputMode.JSON
+    r.machine_stream = io.StringIO()
+    with pytest.raises(AssertionError, match="must carry an error block"):
+        r.emit({"valid": False}, ok=False)
 
 
 def test_envelope_shape_on_error():
@@ -293,7 +316,7 @@ def test_get_renderer_default_is_pretty():
 
 
 # ---------------------------------------------------------------------------
-# Control-sequence sanitizing at the pretty boundary (BE-4794)
+# Control-sequence sanitizing at the pretty boundary
 # ---------------------------------------------------------------------------
 
 _EVIL = "job \x1b[2Jevil"
@@ -563,3 +586,98 @@ class TestWritesTolerateADeadMachineStream:
         r = self._dead_stdout_renderer(monkeypatch, Fussy())
         with pytest.raises(TypeError):
             r.emit({"hello": "world"})
+
+
+class TestJsonDefault:
+    def test_a_non_string_isoformat_does_not_loop(self):
+        class FakeStamp:
+            def isoformat(self):
+                return self  # a Mock or a bad stub does exactly this
+
+        assert json.dumps({"when": FakeStamp()}, default=_json_default)
+
+    def test_a_real_isoformat_is_still_used(self):
+        assert _json_default(datetime(2026, 8, 23, tzinfo=timezone.utc)) == "2026-08-23T00:00:00+00:00"
+
+    def test_a_path_becomes_its_string(self):
+        assert _json_default(Path("/tmp/x")) == "/tmp/x"
+
+    def test_an_enum_wrapping_an_opaque_value_is_coerced(self):
+        class Wrapping(Enum):
+            OPAQUE = object()
+
+        assert _json_default(Wrapping.OPAQUE).startswith("<object object")
+
+    def test_the_hook_runs_once_per_value(self):
+        """Single-pass is the whole guarantee: json re-enters the hook for
+        anything it still cannot encode, so one re-entry per value is the same
+        defect as an endless one, caught earlier."""
+
+        class Wrapping(Enum):
+            OPAQUE = object()
+
+        class BadStamp:
+            def isoformat(self):
+                return self
+
+        seen = []
+
+        def counted(obj):
+            seen.append(obj)
+            return _json_default(obj)
+
+        json.dumps({"e": Wrapping.OPAQUE, "s": BadStamp(), "p": Path("/tmp/x")}, default=counted)
+        assert len(seen) == 3
+
+    def test_a_container_value_stays_a_container(self):
+        class Shaped(Enum):
+            LIST = [1, 2]
+            DICT = {"a": 1}
+            TUPLE = (1, 2)
+
+        assert json.dumps(Shaped.LIST, default=_json_default) == "[1, 2]"
+        assert json.dumps(Shaped.DICT, default=_json_default) == '{"a": 1}'
+        assert json.dumps(Shaped.TUPLE, default=_json_default) == "[1, 2]"
+
+    def test_a_nested_enum_unwraps_to_its_innermost_value(self):
+        class Inner(Enum):
+            MEMBER = "leaf"
+
+        class Outer(Enum):
+            MEMBER = Inner.MEMBER
+
+        assert _json_default(Outer.MEMBER) == "leaf"
+
+    def test_a_self_referencing_enum_does_not_loop(self):
+        class Looped(Enum):
+            MEMBER = "placeholder"
+
+        Looped.MEMBER._value_ = Looped.MEMBER
+        assert _json_default(Looped.MEMBER) == str(Looped.MEMBER)
+
+
+def test_progress_event_streams_on_stdout_under_ndjson(capsys):
+    r = _resolve(json_stream_flag=True)
+    r.progress_event("upload_progress", bytes_done=5)
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"schema": "event/1", "type": "upload_progress", "bytes_done": 5}
+    assert captured.err == ""
+
+
+def test_progress_event_goes_to_stderr_under_json_so_stdout_stays_one_envelope(capsys):
+    """A caller whose stdout is a pipe resolves to JSON mode without asking for
+    a stream. It still has to hear about a long transfer, and stdout is spoken
+    for: exactly one envelope."""
+    r = _resolve(json_flag=True)
+    r.progress_event("upload_progress", bytes_done=5)
+    r.emit({"uploaded": 1}, command="build push")
+    captured = capsys.readouterr()
+    assert json.loads(captured.err) == {"schema": "event/1", "type": "upload_progress", "bytes_done": 5}
+    assert json.loads(captured.out)["type"] == "envelope"
+
+
+def test_progress_event_is_silent_in_pretty_mode(capsys):
+    r = _resolve()
+    r.progress_event("upload_progress", bytes_done=5)
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == ""

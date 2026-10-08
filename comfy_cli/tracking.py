@@ -82,11 +82,38 @@ _SENSITIVE_SUFFIXES = ("_token", "_api_key", "_secret", "_password")
 # `token` is the publish PAT; `changelog` is bulky free text with no analytics
 # value beyond its presence. `key` is the bare `--key` option carrying the Comfy
 # Cloud API key (e.g. `cloud set-key`, auth store). `prompt` (the `comfy run
-# --prompt` positive prompt) and `set_overrides` (the `--set` field=value list)
-# are verbatim user content — like `changelog`, we keep the presence but never
-# ship the text. Sensitive values become "<redacted>" (the key is kept so we can
-# still tell the option was supplied).
-_SENSITIVE_EXACT = frozenset({"api_key", "key", "token", "password", "secret", "changelog", "prompt", "set_overrides"})
+# --prompt` positive prompt), `set_overrides` (the `--set` field=value list) and
+# `capability` (`knowledge pick` takes the user's own phrasing) are verbatim user
+# content — like `changelog`, we keep the presence but never ship the text.
+# Search terms have one channel and it is not this one: `knowledge.log_query`
+# ships them clipped, under `knowledge_query`, where curation reads them.
+# Sensitive values become "<redacted>" (the key is kept so we can still tell the
+# option was supplied).
+# `from_` (the retired `--from`), `from_snapshot` (`comfy build init/update
+# --from-snapshot`) and `workflow` (every `--workflow` option, on every command
+# that takes one) are local filesystem paths naming the user's home directory
+# and their install layout, with no analytics value beyond having been supplied.
+# `_scrub_value` cannot help here: it only strips credentials out of URLs and
+# returns a bare path verbatim by design, so a path is only ever redacted by
+# being named here. Any future path-valued option typed `str` (rather than
+# `Path`, which `_is_trackable` drops wholesale) must be added here too.
+_SENSITIVE_EXACT = frozenset(
+    {
+        "api_key",
+        "key",
+        "token",
+        "password",
+        "secret",
+        "changelog",
+        "prompt",
+        "set_overrides",
+        "from_",
+        "from_snapshot",
+        "from_workflow",
+        "workflow",
+        "capability",
+    }
+)
 
 
 def _is_sensitive(name: str) -> bool:
@@ -324,16 +351,16 @@ class MixpanelProvider:
 
             # mixpanel-python's default Consumer uses request_timeout=None → an
             # unbounded, synchronous requests.post, so a blackholed telemetry
-            # endpoint (accepts TCP, never responds) hangs whichever thread sends
-            # (BE-3354/BE-3403). Sends now happen on the worker below rather than
+            # endpoint (accepts TCP, never responds) hangs whichever thread sends.
+            # Sends now happen on the worker below rather than
             # the caller's thread, so this bound caps how long ONE send can occupy
             # the queue — and with it, how much of the atexit drain's shared 5s
             # deadline a single in-flight event can consume. retry_limit=1
             # (default is 4 with backoff) keeps a blackholed send to a single ~10s
             # attempt instead of ~40s+ across retries.
             self.client = Mixpanel(token, consumer=MixpanelConsumer(request_timeout=10, retry_limit=1))
-            # Dispatch is queue-and-drain so track() never blocks the caller
-            # (BE-5868): @track_command fires its event *before* running the
+            # Dispatch is queue-and-drain so track() never blocks the caller:
+            # @track_command fires its event *before* running the
             # wrapped command body, and `run` fires execution_start before
             # submitting the workflow, so an inline send put a synchronous HTTP
             # round-trip on the hot path of every consented invocation.
@@ -348,7 +375,7 @@ class MixpanelProvider:
             self._drained = threading.Condition()
             # daemon=True with NO atexit hook of our own, and no shutdown
             # sentinel: `_flush_all_providers` is the single bounded shutdown
-            # drain path (BE-3403), and the worker just dies with the process.
+            # drain path, and the worker just dies with the process.
             # Constructed lazily on the first dispatched event (`_get_providers`
             # is only reached from `_dispatch`), so a run that sends nothing —
             # `comfy --help`, shell completion, no consent — never starts it.
@@ -471,14 +498,14 @@ class PostHogProvider:
         # max_retries/timeout tighten the consumer drain budget from the posthog
         # 7.x defaults (3 × 15s ≈ 50s worst case) to ~21s, so the atexit flush
         # can't linger on a blackholed endpoint after the terminal envelope is
-        # already on stdout (BE-3354/BE-3403).
+        # already on stdout.
         self.client = Posthog(project_api_key=token, host=host, disable_geoip=False, max_retries=1, timeout=10)
         # Posthog's constructor registers its own atexit.register(self.join),
         # which runs self.join() synchronously on the main thread at shutdown —
         # independently of _flush_all_providers and NOT bounded by its daemon
         # deadline. Against a blackholed endpoint that join can still block ~21s
         # after the terminal envelope is on stdout, defeating this change. Drop it
-        # so our bounded flush is the only shutdown drain path (BE-3403).
+        # so our bounded flush is the only shutdown drain path.
         atexit.unregister(self.client.join)
         self.enabled = True
 
@@ -705,9 +732,67 @@ def filter_command_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Runs of a ``track_command`` command that have started and not yet sent
+# ``command_finished``, innermost last. ``flush_for_hard_exit`` finishes them,
+# because ``os._exit`` skips the wrapper's ``finally``.
+_OpenCommand = tuple[dict[str, Any], float]
+_open_commands: list[_OpenCommand] = []
+
+
+def _exit_code_of(exit_: typer.Exit | SystemExit) -> int:
+    if isinstance(exit_, typer.Exit):
+        return exit_.exit_code
+    # SystemExit(None) ends with 0 and SystemExit("message") with 1, as Python does.
+    if exit_.code is None:
+        return 0
+    return exit_.code if isinstance(exit_.code, int) else 1
+
+
+# What `cmdline.main` exits with once a KeyboardInterrupt reaches it.
+_CTRL_C_EXIT_CODE = 130
+
+
+def _record_exit(finished: dict[str, Any], code: int) -> None:
+    # A zero exit is a normal end and carries no code; only a non-zero one names it.
+    if code == 0:
+        finished["outcome"] = "ok"
+    else:
+        finished.update(outcome="exit", exit_code=code)
+
+
+def _finish(run: _OpenCommand) -> None:
+    """Send ``command_finished`` for ``run`` once, whichever of the wrapper's
+    ``finally`` and ``flush_for_hard_exit`` gets there first."""
+    for index in range(len(_open_commands) - 1, -1, -1):
+        if _open_commands[index] is run:
+            del _open_commands[index]
+            break
+    else:
+        return
+    finished, started = run
+    finished["seconds"] = round(time.monotonic() - started, 3)
+    track_event("command_finished", properties=finished)
+
+
 def track_command(sub_command: str | None = None):
     """
-    A decorator factory that logs the command function name and selected arguments when it's called.
+    A decorator factory that records a command run as two events: the command's
+    own event when it starts, as before, and ``command_finished`` when it ends.
+
+    The start event is unchanged, so every count that reads it stays a count of
+    commands, and a long-running command (``launch``, ``run``) is still counted the
+    moment it starts rather than when, or whether, it exits. ``command_finished``
+    carries ``command``, ``seconds`` and ``outcome``: ``ok`` for a normal return or
+    a zero exit, ``exit`` for a non-zero ``typer.Exit`` or ``SystemExit`` (with
+    ``exit_code``), and ``error`` for an exception (with ``error_type``, the class
+    name only: a message can carry a path or a credential). Ctrl-C is an ``exit``
+    with ``exit_code`` 130 whether the command catches it or lets
+    ``KeyboardInterrupt`` through, since the entry point turns the latter into 130
+    too. The exception or exit then propagates as before. A command that ends in
+    ``os._exit`` finishes through ``flush_for_hard_exit``, which must be given the
+    code; a negative code there is a child the command waited on being killed by
+    that signal, recorded as ``killed`` with ``signal``. A command that never
+    ends has a start row and no finish row, which is itself the answer.
     """
 
     def decorator(func):
@@ -718,7 +803,26 @@ def track_command(sub_command: str | None = None):
             logging.debug(f"Tracking command: {command_name} with arguments: {filtered_kwargs}")
             track_event(command_name, properties=filtered_kwargs)
 
-            return func(*args, **kwargs)
+            run: _OpenCommand = ({"command": command_name}, time.monotonic())
+            _open_commands.append(run)
+            try:
+                result = func(*args, **kwargs)
+            except (typer.Exit, SystemExit) as exit_:
+                _record_exit(run[0], _exit_code_of(exit_))
+                raise
+            except KeyboardInterrupt:
+                # The entry point (`cmdline.main`) turns it into exit 130, so the
+                # run ends the way a command that caught Ctrl-C itself ends.
+                _record_exit(run[0], _CTRL_C_EXIT_CODE)
+                raise
+            except BaseException as error:
+                run[0].update(outcome="error", error_type=type(error).__name__)
+                raise
+            else:
+                run[0]["outcome"] = "ok"
+                return result
+            finally:
+                _finish(run)
 
         return wrapper
 
@@ -818,7 +922,7 @@ def _flush_all_providers() -> None:
         return
     # Telemetry is best-effort by contract: a blackholed endpoint (accepts TCP,
     # never responds) must never let this atexit hook wedge every consumer of the
-    # CLI's stdout after the terminal envelope is already emitted (BE-3329/BE-3403).
+    # CLI's stdout after the terminal envelope is already emitted.
     # Start every provider's flush in a daemon thread, then join them all against
     # a SINGLE shared deadline so total exit delay stays ~5s regardless of how
     # many providers there are (a per-provider join would make it 5s × N).
@@ -847,24 +951,39 @@ def _flush_all_providers() -> None:
             # to the user's stderr *after* the terminal envelope. That is the one
             # thing this module refuses to do for a telemetry failure. It was
             # unreachable for Mixpanel while flush() was a no-op; it isn't now
-            # that flush() actually drains a queue (BE-5868).
+            # that flush() actually drains a queue.
             logging.debug(f"telemetry flush timed out for {type(provider).__name__}; dropping in-flight events")
 
 
-def flush_for_hard_exit() -> None:
+def flush_for_hard_exit(exit_code: int | None = None) -> None:
     """Drain telemetry before an `os._exit`, which skips atexit handlers.
+
+    ``os._exit`` also skips ``track_command``'s ``finally``, so given the code
+    the process is about to exit with, every command still running is finished
+    with it first; without it, a background ``comfy launch`` that started fine
+    would have a start row and no finish, the same as one that was killed.
 
     `comfy launch` terminates through `os._exit` on both its background-success
     and failure paths, so `_flush_all_providers` never runs there. That was
     harmless while MixpanelProvider sent inline from `track()` — the `launch`
     event was already delivered before the command body ran. Now that dispatch is
-    queue-and-drain (BE-5868) the event is still sitting in the queue at that
+    queue-and-drain the event is still sitting in the queue at that
     point, so those paths have to drain explicitly or drop it every time.
 
     Bounded by the same `_FLUSH_DEADLINE_SECONDS` budget as the atexit hook, and
     best-effort: nothing it does may keep the caller from exiting.
     """
     try:
+        if exit_code is not None:
+            for run in reversed(list(_open_commands)):
+                if exit_code < 0:
+                    # A subprocess return code: the child `comfy launch` waited on
+                    # was killed by signal -code (`comfy stop` sends SIGKILL), which
+                    # is how the server ended, not a failure of the launcher.
+                    run[0].update(outcome="killed", signal=-exit_code)
+                else:
+                    _record_exit(run[0], exit_code)
+                _finish(run)
         _flush_all_providers()
     except BaseException:  # noqa: BLE001  # pragma: no cover - defensive
         pass

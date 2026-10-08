@@ -1,7 +1,7 @@
 """Offline unit tests for the bundled default text2img workflow injector.
 
 No server, no object_info, no apply_slots — the injector is a pure direct
-API-format write over the pinned graph (BE-2535).
+API-format write over the pinned graph.
 """
 
 from __future__ import annotations

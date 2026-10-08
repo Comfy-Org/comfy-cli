@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_release_show.json",
+  "title": "comfy build release show --json data payload",
+  "description": "One release's per-target build status, as returned by GET /v1/build-versions/{id}.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "id": {"type": "string"},
+    "status": {"type": "string"},
+    "artifactCounts": {"type": "object", "additionalProperties": true}
+  }
+}

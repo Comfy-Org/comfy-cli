@@ -156,8 +156,10 @@ def _has_cloud_credentials() -> bool:
     is clearly the configured backend; preflight surfaces the expiry), so this
     deliberately doesn't use ``resolve_cloud_credential``.
     """
-    from comfy_cli.credentials import find_api_key, get_session
+    from comfy_cli.credentials import cloud_bearer_env_token, find_api_key, get_session
 
+    if cloud_bearer_env_token() is not None:
+        return True
     if find_api_key(purpose="cloud") is not None:
         return True
     return get_session(refresh=False) is not None
@@ -186,6 +188,7 @@ def cloud_preflight() -> CloudError | None:
     """Return an error envelope payload if the cloud path can't proceed.
 
     Accepts either auth path:
+      - ``COMFY_CLOUD_AUTH_TOKEN`` env var (forwarded Bearer token), OR
       - ``COMFY_CLOUD_API_KEY`` env var, OR
       - persisted ``comfy-cloud-api-key`` provider record, OR
       - active OAuth session (valid + non-expired).
@@ -194,10 +197,13 @@ def cloud_preflight() -> CloudError | None:
       - Nothing configured     → ``cloud_not_configured``
       - OAuth session expired  → ``cloud_unauthorized``
     """
-    from comfy_cli.credentials import find_api_key, get_session
+    from comfy_cli.credentials import cloud_bearer_env_token, find_api_key, get_session
 
-    # API key path — no expiry check, key is either valid or it isn't (server
-    # tells us at request time).
+    # Forwarded Bearer token (trusted-caller path) or ambient API key — no
+    # expiry check, the value is either valid or it isn't (server tells us at
+    # request time).
+    if cloud_bearer_env_token() is not None:
+        return None
     if find_api_key(purpose="cloud") is not None:
         return None
 

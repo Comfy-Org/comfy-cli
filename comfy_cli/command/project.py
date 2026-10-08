@@ -87,6 +87,11 @@ def _assets_callback():
     """
 
 
+from comfy_cli.command.assets_library import app as _assets_library_app  # noqa: E402
+
+assets_app.add_typer(_assets_library_app, name="library")
+
+
 # The marker `comfy project init` writes — deliberately literal and minimal.
 # The where default is resolved at init time (flag, else auto-detect) so a
 # local-only machine never gets a project that routes every command to cloud.

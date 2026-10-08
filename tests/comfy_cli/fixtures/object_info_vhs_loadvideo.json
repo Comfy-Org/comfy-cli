@@ -1,0 +1,447 @@
+{
+ "VHS_LoadVideo": {
+  "input": {
+   "required": {
+    "video": [
+     [
+      "bedroom.mp4"
+     ]
+    ],
+    "force_rate": [
+     "FLOAT",
+     {
+      "default": 0,
+      "min": 0,
+      "max": 60,
+      "step": 1,
+      "disable": 0
+     }
+    ],
+    "custom_width": [
+     "INT",
+     {
+      "default": 0,
+      "min": 0,
+      "max": 8192,
+      "disable": 0
+     }
+    ],
+    "custom_height": [
+     "INT",
+     {
+      "default": 0,
+      "min": 0,
+      "max": 8192,
+      "disable": 0
+     }
+    ],
+    "frame_load_cap": [
+     "INT",
+     {
+      "default": 0,
+      "min": 0,
+      "max": 9007199254740991,
+      "step": 1,
+      "disable": 0
+     }
+    ],
+    "skip_first_frames": [
+     "INT",
+     {
+      "default": 0,
+      "min": 0,
+      "max": 9007199254740991,
+      "step": 1
+     }
+    ],
+    "select_every_nth": [
+     "INT",
+     {
+      "default": 1,
+      "min": 1,
+      "max": 9007199254740991,
+      "step": 1
+     }
+    ]
+   },
+   "optional": {
+    "meta_batch": [
+     "VHS_BatchManager"
+    ],
+    "vae": [
+     "VAE"
+    ],
+    "format": [
+     [
+      "None",
+      "AnimateDiff",
+      "Mochi",
+      "LTXV",
+      "Hunyuan",
+      "Cosmos",
+      "Wan"
+     ],
+     {
+      "default": "AnimateDiff",
+      "formats": {
+       "None": {},
+       "AnimateDiff": {
+        "target_rate": 8,
+        "dim": [
+         8,
+         0,
+         512,
+         512
+        ]
+       },
+       "Mochi": {
+        "target_rate": 24,
+        "dim": [
+         16,
+         0,
+         848,
+         480
+        ],
+        "frames": [
+         6,
+         1
+        ]
+       },
+       "LTXV": {
+        "target_rate": 24,
+        "dim": [
+         32,
+         0,
+         768,
+         512
+        ],
+        "frames": [
+         8,
+         1
+        ]
+       },
+       "Hunyuan": {
+        "target_rate": 24,
+        "dim": [
+         16,
+         0,
+         848,
+         480
+        ],
+        "frames": [
+         4,
+         1
+        ]
+       },
+       "Cosmos": {
+        "target_rate": 24,
+        "dim": [
+         16,
+         0,
+         1280,
+         704
+        ],
+        "frames": [
+         8,
+         1
+        ]
+       },
+       "Wan": {
+        "target_rate": 16,
+        "dim": [
+         8,
+         0,
+         832,
+         480
+        ],
+        "frames": [
+         4,
+         1
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "hidden": {
+    "force_size": "STRING",
+    "unique_id": "UNIQUE_ID"
+   }
+  },
+  "input_order": {
+   "required": [
+    "video",
+    "force_rate",
+    "custom_width",
+    "custom_height",
+    "frame_load_cap",
+    "skip_first_frames",
+    "select_every_nth"
+   ],
+   "optional": [
+    "meta_batch",
+    "vae",
+    "format"
+   ],
+   "hidden": [
+    "force_size",
+    "unique_id"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE",
+   "INT",
+   "AUDIO",
+   "VHS_VIDEOINFO"
+  ],
+  "output_is_list": [
+   false,
+   false,
+   false,
+   false
+  ],
+  "output_name": [
+   "IMAGE",
+   "frame_count",
+   "audio",
+   "video_info"
+  ],
+  "name": "VHS_LoadVideo",
+  "display_name": "Load Video (Upload) \ud83c\udfa5\ud83c\udd65\ud83c\udd57\ud83c\udd62",
+  "python_module": "custom_nodes.comfyui-videohelpersuite",
+  "category": "Video Helper Suite \ud83c\udfa5\ud83c\udd65\ud83c\udd57\ud83c\udd62",
+  "output_node": false,
+  "has_intermediate_output": false
+ },
+ "LoadVideo": {
+  "input": {
+   "required": {
+    "file": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": [
+       "bedroom.mp4"
+      ],
+      "video_upload": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "file"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VIDEO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "LoadVideo",
+  "display_name": "Load Video",
+  "python_module": "comfy_extras.nodes_video",
+  "category": "video",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "essentials_category": "Basics",
+  "has_intermediate_output": false
+ },
+ "LoadImage": {
+  "input": {
+   "required": {
+    "image": [
+     [
+      "beach.jpg",
+      "eth3d.png",
+      "example.png",
+      "example_image.jpg",
+      "groceries.jpg",
+      "image.png",
+      "middlebury.jpg"
+     ],
+     {
+      "image_upload": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "image"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE",
+   "MASK"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_name": [
+   "IMAGE",
+   "MASK"
+  ],
+  "name": "LoadImage",
+  "display_name": "Load Image",
+  "python_module": "nodes",
+  "category": "image",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "essentials_category": "Basics"
+ },
+ "LoadImageMask": {
+  "input": {
+   "required": {
+    "image": [
+     [
+      "beach.jpg",
+      "eth3d.png",
+      "example.png",
+      "example_image.jpg",
+      "groceries.jpg",
+      "image.png",
+      "middlebury.jpg"
+     ],
+     {
+      "image_upload": true
+     }
+    ],
+    "channel": [
+     [
+      "alpha",
+      "red",
+      "green",
+      "blue"
+     ]
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "image",
+    "channel"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "MASK"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "MASK"
+  ],
+  "name": "LoadImageMask",
+  "display_name": "Load Image (as Mask)",
+  "python_module": "nodes",
+  "category": "image",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "essentials_category": "Image Tools"
+ },
+ "ImageOnlyCheckpointLoader": {
+  "input": {
+   "required": {
+    "ckpt_name": [
+     [
+      "dynamicrafter/controlnet/put_checkpoints__dynamicrafter__controlnet.safetensors",
+      "dynamicrafter/put_checkpoints__dynamicrafter.safetensors",
+      "put_checkpoints.safetensors"
+     ]
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "ckpt_name"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "MODEL",
+   "CLIP_VISION",
+   "VAE"
+  ],
+  "output_is_list": [
+   false,
+   false,
+   false
+  ],
+  "output_name": [
+   "MODEL",
+   "CLIP_VISION",
+   "VAE"
+  ],
+  "name": "ImageOnlyCheckpointLoader",
+  "display_name": "Load Checkpoint Image Only (img2vid model)",
+  "python_module": "comfy_extras.nodes_video_model",
+  "category": "model/loaders",
+  "output_node": false,
+  "has_intermediate_output": false
+ },
+ "SaveImage": {
+  "input": {
+   "required": {
+    "images": [
+     "IMAGE",
+     {}
+    ],
+    "filename_prefix": [
+     "STRING",
+     {
+      "default": "ComfyUI"
+     }
+    ]
+   },
+   "hidden": {
+    "prompt": "PROMPT",
+    "extra_pnginfo": "EXTRA_PNGINFO"
+   }
+  },
+  "input_order": {
+   "required": [
+    "images",
+    "filename_prefix"
+   ],
+   "hidden": [
+    "prompt",
+    "extra_pnginfo"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "images"
+  ],
+  "name": "SaveImage",
+  "display_name": "Save Image",
+  "python_module": "nodes",
+  "category": "image",
+  "output_node": true,
+  "has_intermediate_output": false,
+  "essentials_category": "Basics"
+ }
+}

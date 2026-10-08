@@ -2,7 +2,8 @@
 
 UX contract:
 - Pretty mode produces output byte-identical to the pre-Phase-1 CLI.
-- JSON mode produces a single envelope on stdout (intermediate messages → stderr).
+- JSON mode produces a single envelope on stdout (intermediate messages → stderr,
+  and so do ``progress_event`` lines, as JSON).
 - NDJSON mode produces one JSON event per line on stdout; the final envelope is
   the last line.
 - Errors carry a stable ``code`` and a ``hint``. The hint is rendered as a
@@ -11,6 +12,7 @@ UX contract:
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import sys
@@ -251,6 +253,8 @@ class Renderer:
         where: str | None = None,
         changed: bool | None = None,
         ok: bool = True,
+        error: Mapping[str, Any] | None = None,
+        extra: Mapping[str, Any] | None = None,
     ) -> None:
         """Emit the final envelope. In pretty mode this is a no-op (data was
         already shown by ``print``/``success``/etc).
@@ -259,8 +263,18 @@ class Renderer:
         carry a structured result *and* a negative verdict (e.g. ``validate``
         on an invalid workflow, which still emits its error/warning payload as
         data) pass ``ok=False`` so the envelope's ``ok`` agrees with the
-        process exit code.
+        process exit code — and, with it, an ``error`` block naming the verdict.
+        ``ok=False`` without one is refused: every consumer branches on
+        ``error.code``, so ``{"ok": false, "error": null}`` is unreadable.
+
+        ``extra`` merges additional top-level fields into the envelope
+        (additive-optional under envelope/1, e.g. ``--select``'s
+        ``selected_bytes``/``total_bytes``). Core envelope keys are never
+        overridden; when ``extra`` is absent the envelope is byte-identical to
+        an emit without it.
         """
+        if not ok and not error:
+            raise AssertionError("a not-ok envelope must carry an error block naming the failure")
         if self.is_pretty():
             return
         if self._envelope_emitted:
@@ -272,8 +286,11 @@ class Renderer:
             data=data,
             where=where or self.where,
             changed=changed,
-            error=None,
+            error=error,
         )
+        if extra:
+            for key, value in extra.items():
+                envelope.setdefault(key, value)
         self._write_json_line(envelope)
         self._envelope_emitted = True
 
@@ -351,6 +368,22 @@ class Renderer:
         self.event(type, **fields)
         return True
 
+    def progress_event(self, type: str, **fields: Any) -> None:
+        """Emit one event line about work still in flight, in either JSON mode.
+
+        ``event`` is silent outside NDJSON mode, which is right for a stream a
+        consumer asked for and wrong for progress: a caller that resolved to
+        single-envelope JSON mode only because its stdout is a pipe (every agent)
+        would sit through a multi-GB upload with nothing to read. So in NDJSON
+        mode this is ``event``; in JSON mode the same ``event/1`` line goes to
+        stderr, which keeps stdout the single envelope the contract promises.
+        Pretty mode renders its own progress and emits nothing here.
+        """
+        if self.is_pretty():
+            return
+        payload = {"schema": EVENT_SCHEMA, "type": type, **fields}
+        self._write_json_line(payload, stream=None if self.is_stream() else sys.stderr)
+
     # ----- internals -----
 
     def _envelope(
@@ -379,11 +412,42 @@ class Renderer:
             env["changed"] = changed
         return env
 
-    def _write_json_line(self, payload: Mapping[str, Any]) -> None:
-        line = json.dumps(payload, default=_json_default, ensure_ascii=False)
-        stream = self.machine_stream
+    def _write_json_line(self, payload: Mapping[str, Any], *, stream: TextIO | None = None) -> None:
+        if stream is None:
+            stream = self.machine_stream
+        # Readers of this stream decode it as UTF-8. A legacy code page that
+        # CAN encode a character is the dangerous case — no UnicodeEncodeError
+        # fires (the clause below never runs) and the line goes out as bytes
+        # that are not valid UTF-8: cp1252 spells an em-dash 0x97, and the
+        # comfy-agent stored "no output nodes � the server will reject it"
+        # for every validate failure on Windows. Escaping whenever the stream
+        # is not UTF-8 keeps those envelopes readable on a UTF-8 terminal and
+        # decodable everywhere else.
+        is_utf8 = _is_utf8_stream(stream)
+        line = json.dumps(payload, default=_json_default, ensure_ascii=not is_utf8)
         try:
-            stream.write(line + "\n")
+            # Escaping to ASCII is not enough on a stream that re-encodes it: a
+            # UTF-16 wrapper turns even pure ASCII into two-byte sequences, and
+            # a reader decoding this stream as UTF-8 cannot parse it at all.
+            # Write through the binary buffer instead, after flushing whatever
+            # the text wrapper still holds so the two stay in order.
+            buffer = getattr(stream, "buffer", None)
+            if not is_utf8 and buffer is not None:
+                stream.flush()
+                buffer.write((line + "\n").encode("utf-8"))
+                buffer.flush()
+                return
+            try:
+                stream.write(line + "\n")
+            except UnicodeEncodeError:
+                # A redirected stdout on Windows is cp1252 (or another legacy
+                # code page), and a payload with a character outside it — the
+                # "→" in a skill description, a model name — raised here. As a
+                # ValueError it fell into the clause below and the envelope
+                # silently vanished: the comfy-agent's skill import saw zero
+                # packs on Windows. JSON can spell every character in ASCII,
+                # so the same envelope is written escaped instead.
+                stream.write(json.dumps(payload, default=_json_default, ensure_ascii=True) + "\n")
             stream.flush()
         except (AttributeError, ValueError):
             # Resolving to JSON mode against an unusable stdout must not merely
@@ -412,19 +476,51 @@ class Renderer:
         return self._exit_code
 
 
-def _json_default(obj: Any) -> Any:
-    # Best-effort JSON coercion for common non-serializable types.
-    from pathlib import Path
+def _is_utf8_stream(stream: TextIO | None) -> bool:
+    """Whether text written to ``stream`` comes out as UTF-8 bytes.
 
-    if isinstance(obj, Path):
-        return str(obj)
-    if isinstance(obj, Enum):
-        return obj.value
+    ``TextIO.encoding`` is the declared type, but this is still read with
+    ``getattr``: ``machine_stream`` is assignable, and the things callers
+    assign (a ``StringIO``, a test double) have no encoding at all. Such a
+    stream re-encodes nothing, so it counts as UTF-8 — escaping would only make
+    its text harder to read, and no bytes reach a decoder anyway.
+
+    The name is resolved through ``codecs.lookup`` rather than compared, so
+    every alias the platform may report lands correctly — ``utf8``, ``UTF-8``,
+    ``utf_8`` and Windows' ``cp65001`` all normalise to ``utf-8``. A name no
+    codec claims falls to "not UTF-8", which only ever escapes more.
+    """
+    encoding = getattr(stream, "encoding", None)
+    if not encoding:
+        return True
+    try:
+        return codecs.lookup(encoding).name == "utf-8"
+    except (LookupError, TypeError):
+        return False
+
+
+def _json_default(obj: Any) -> Any:
+    """Coerce one unserializable value to a JSON-native one.
+
+    json feeds anything this returns straight back in when it still cannot
+    encode it, so a hook that returns another opaque object re-enters once per
+    hop and one that keeps producing new objects never terminates at all. The
+    tail coercion is what holds that off: every return is either a scalar json
+    encodes directly or a container it walks itself. A container's members are
+    values of their own, so each costs at most one further hook call, and a
+    container that contains itself trips json's own circular-reference check.
+    """
+    seen: set[int] = set()
+    while isinstance(obj, Enum) and id(obj) not in seen:
+        seen.add(id(obj))
+        obj = obj.value
     if hasattr(obj, "isoformat"):
         try:
-            return obj.isoformat()
+            obj = obj.isoformat()
         except Exception:  # noqa: BLE001
             pass
+    if isinstance(obj, str | int | float | None | list | dict | tuple):
+        return obj
     return str(obj)
 
 

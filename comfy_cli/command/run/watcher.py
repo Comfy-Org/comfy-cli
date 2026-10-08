@@ -8,12 +8,31 @@ once the watcher takes over.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
 from comfy_cli.output.sanitize import sanitize_markup
+
+
+def _no_watch_requested() -> bool:
+    """``COMFY_NO_WATCH=1`` (or any other truthy value) suppresses the
+    detached watcher subprocess entirely.
+
+    This is the env kill switch for agentic callers: the cloud agent has its
+    own native job-wait (Redis pub/sub + a reconcile GET) and has no use for
+    a second, credential-holding, ``start_new_session=True`` process that
+    outlives the parent and polls the jobs API for up to 6h. Checked as an
+    env var (rather than threaded through every call site) so a host can set
+    it once in the subprocess's environment without touching argv; ``comfy
+    run --no-watch`` sets the same variable for interactive use.
+    """
+    value = os.environ.get("COMFY_NO_WATCH")
+    if value is None:
+        return False
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def _tail_state_file(prompt_id: str, *, seconds: float = 8.0) -> None:
@@ -88,8 +107,11 @@ def _spawn_watcher(
     callers can find it there if needed.
 
     Returns ``True`` on success, ``False`` if the subprocess could not be
-    spawned.
+    spawned — or if suppressed entirely via ``COMFY_NO_WATCH=1``
+    (see ``_no_watch_requested``).
     """
+    if _no_watch_requested():
+        return False
     argv = [sys.executable, "-m", "comfy_cli", "_watch", "_watch-job", prompt_id, "--where", where]
     if host:
         argv += ["--host", host]

@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -217,6 +218,28 @@ class TestDetectHardwareNeverRaises:
         assert hw["os"] is None
         assert hw["arch"] is None
         assert hw["gpu"] is None
+
+
+class TestDetectRamBytesImportFailure:
+    """The lazy ``import psutil`` in ``_detect_ram_bytes`` must live inside its
+    own ``try`` block, or a failed import escapes and breaks
+    ``detect_hardware``'s "never raises" contract."""
+
+    def test_psutil_import_failure_falls_back_to_none(self):
+        # Setting the sys.modules entry to None makes `import psutil` raise
+        # ImportError, whether or not psutil is actually installed.
+        with patch.dict(sys.modules, {"psutil": None}):
+            assert hardware._detect_ram_bytes() is None
+
+    def test_detect_hardware_survives_psutil_import_failure(self):
+        with (
+            patch.dict(sys.modules, {"psutil": None}),
+            patch.object(hardware, "_run", side_effect=TimeoutError("boom")),
+            patch.object(hardware.cuda_detect, "_load_libcuda", side_effect=OSError),
+        ):
+            hw = hardware.detect_hardware()
+
+        assert hw["ram_bytes"] is None
 
 
 class TestDetectGpuAmd:

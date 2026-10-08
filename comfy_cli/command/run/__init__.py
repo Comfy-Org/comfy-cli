@@ -24,9 +24,6 @@ from websocket import (  # noqa: F401 — patch target for tests (run.WebSocket)
 
 from comfy_cli import cancellation, execution_errors, jobs_state, tracking
 from comfy_cli.caller import stream_is_tty
-
-# Re-exports — names patched by tests live at this namespace.
-from comfy_cli.command.run.credentials import _resolve_partner_credential as _resolve_partner_credential
 from comfy_cli.command.run.execution import ExecutionProgress as ExecutionProgress
 from comfy_cli.command.run.execution import WorkflowExecution as WorkflowExecution
 from comfy_cli.command.run.execution import _safe_close as _safe_close
@@ -46,6 +43,9 @@ from comfy_cli.command.run.preflight import _resolve_default_checkpoint_or_exit 
 from comfy_cli.command.run.preflight import fetch_object_info as fetch_object_info
 from comfy_cli.command.run.watcher import _spawn_watcher as _spawn_watcher
 from comfy_cli.command.run.watcher import _tail_state_file as _tail_state_file
+
+# Re-exports — names patched by tests live at this namespace.
+from comfy_cli.credentials import resolve_partner_credential as _resolve_partner_credential
 from comfy_cli.env_checker import check_comfy_server_running
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
@@ -106,16 +106,16 @@ def _stdin_is_interactive() -> bool:
     ``pythonw`` contexts ``sys.stdin`` can be ``None``, closed, or backed by a
     revoked file descriptor. Treat every such case as non-interactive so the
     spend gate falls through to the fail-closed machine-mode error instead of
-    raising an uncontrolled exception (BE-4326). Delegates to the shared
+    raising an uncontrolled exception. Delegates to the shared
     fail-safe probe so stdin and stdout are guarded identically.
     """
     return stream_is_tty(getattr(sys, "stdin", None))
 
 
 def _spend_gate(renderer, partner_nodes: list[str], allow_spend: bool, *, details: dict) -> None:
-    """Consent interlock for partner-API (paid) nodes (BE-4326).
+    """Consent interlock for partner-API (paid) nodes.
 
-    Mirrors the ``comfy run-template`` gate (BE-4113): a workflow that embeds
+    Mirrors the ``comfy run-template`` gate: a workflow that embeds
     partner-API nodes (Veo/Kling/BFL/Gemini/…) spends Comfy credits when it
     runs, so require explicit consent before submitting. A no-op when there are
     no partner nodes or ``--allow-spend`` was passed, so partner-free runs are
@@ -232,8 +232,8 @@ def execute(
     renderer = get_renderer()
 
     # `preloaded` short-circuits file loading: an in-memory API-format graph
-    # (e.g. the `comfy run --prompt` injected default) is handed straight in as
-    # (workflow_dict, display_name, is_ui, checkpoint_user_set). Everything
+    # (e.g. the `comfy run --prompt` injected default) is handed straight in as a
+    # workflow_dict / display_name / is_ui / checkpoint_user_set tuple. Everything
     # downstream is unchanged; `checkpoint_user_set` gates runtime checkpoint
     # resolution for the bundled default (skip it when the user pinned one).
     raw_workflow, workflow_name, is_ui, checkpoint_user_set = _load_workflow_or_exit(renderer, workflow, preloaded)
@@ -333,7 +333,7 @@ def execute(
         return
 
     partner_nodes = _detect_partner_nodes(workflow, object_info)
-    # Spend gate (BE-4326): partner-API nodes spend Comfy credits. Require
+    # Spend gate: partner-API nodes spend Comfy credits. Require
     # explicit consent before resolving a credential or submitting. Fires
     # BEFORE _resolve_partner_credential() below so a refusal never triggers a
     # network OAuth refresh. Detection stays fail-open (object_info == {} → no
@@ -358,7 +358,7 @@ def execute(
         # turned away are still counted: that funnel is exactly what the metric
         # is for, and `credential_present: False` marks them. class_types are
         # node names, not PII — the same data `workflow_unknown_nodes` reports.
-        # It does sit AFTER the BE-4326 spend gate, so a run refused for lack of
+        # It does sit AFTER the spend gate, so a run refused for lack of
         # `--allow-spend` emits no event: the gate deliberately precedes any
         # credential resolution (a refusal must not trigger a network OAuth
         # refresh), and `credential_present` needs that resolution. The
@@ -960,6 +960,7 @@ def execute_cloud(
     timeout: int = 600,
     notify: bool = False,
     print_prompt: bool = False,
+    workflow_id: str | None = None,
     preloaded: tuple[dict, str, bool, bool] | None = None,
     allow_spend: bool = False,
 ):
@@ -972,6 +973,7 @@ def execute_cloud(
     (the ``comfy run --prompt`` injected default), mirroring :func:`execute`.
     """
     from comfy_cli.comfy_client import Client, HTTPError, Unauthenticated, _group_outputs
+    from comfy_cli.command._cloud_errors import emit_status_error
     from comfy_cli.target import resolve_target
 
     renderer = get_renderer()
@@ -989,12 +991,15 @@ def execute_cloud(
         # exporter and `comfy templates fetch`) have to be lowered to the API
         # shape before submit. We do it client-side using the cloud snapshot
         # of object_info — the cloud server has no /workflow/convert endpoint.
-        from comfy_cli.cql.engine import _load_from_target
+        # Routed through resilient_load_object_info so COMFY_OBJECT_INFO_FILE
+        # (a pre-warmed/baked catalog, e.g. from an agent host) is honored
+        # before falling back to a live multi-MB /object_info fetch.
+        from comfy_cli.cql.loader import resilient_load_object_info
 
         if renderer.is_pretty():
             pprint("[yellow]Detected UI-format workflow, converting to API format…[/yellow]")
         try:
-            object_info = cloud_object_info = _load_from_target(mode="cloud")
+            object_info = cloud_object_info = resilient_load_object_info(mode="cloud")
         except Exception as e:  # noqa: BLE001
             renderer.error(
                 code="cql_no_graph",
@@ -1047,6 +1052,12 @@ def execute_cloud(
     # Already fetched above when the workflow arrived in UI format.
     if cloud_object_info is None:
         try:
+            # Deliberately `_load_from_target`, not `resilient_load_object_info`:
+            # the resilient loader resolves a Target to build its cache key, and
+            # the spend gate below must fire before ANY cloud credential is
+            # resolved — `test_cloud_partner_node_machine_mode_fails_closed`
+            # pins that. Trade-off: COMFY_OBJECT_INFO_FILE is honored on the
+            # UI-conversion path above but not on this API-format fallback.
             from comfy_cli.cql.engine import _load_from_target
 
             cloud_object_info = _load_from_target(mode="cloud")
@@ -1085,7 +1096,7 @@ def execute_cloud(
     # Pre-submit validation via pure-Python CQL engine.
     _preflight_validate(renderer, parsed_workflow, cloud_object_info, target_label="cloud", where="cloud")
 
-    # Spend gate (BE-4326): the cloud also bills partner-API nodes, so apply the
+    # Spend gate: the cloud also bills partner-API nodes, so apply the
     # same consent interlock as the local path before authenticating/submitting.
     # Fail-open on detection (empty cloud object_info → no gate), and fire before
     # Client() so a refusal never triggers cloud auth.
@@ -1121,18 +1132,28 @@ def execute_cloud(
     try:
         if not wait and renderer.is_pretty():
             with renderer.console().status("[cyan]Submitting to Comfy Cloud…", spinner="dots"):
-                submit = client.submit_prompt(parsed_workflow, client_id)
+                submit = client.submit_prompt(parsed_workflow, client_id, workflow_id=workflow_id)
         else:
-            submit = client.submit_prompt(parsed_workflow, client_id)
+            submit = client.submit_prompt(parsed_workflow, client_id, workflow_id=workflow_id)
     except Unauthenticated as e:
         renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
         raise typer.Exit(code=1) from e
     except HTTPError as e:
-        renderer.error(
-            code="cloud_http_error",
+        emit_status_error(
+            renderer,
+            status=e.status,
+            retry_after=e.retry_after,
+            operation="submit",
             message=f"Cloud server rejected the workflow (HTTP {e.status}): {e.message}",
             hint="check the workflow is valid and the cloud server has the required nodes",
             details={"status": e.status, "body": e.body[:2000]},
+            # A 429 alone does not prove the submit had no effect, and the
+            # client never repeats a submit on its own. Look for the job before
+            # re-running so one that did get through is not queued twice.
+            rate_limited_next_step=(
+                "check `comfy jobs ls --where cloud` for this job before re-running, "
+                "so a submit that did go through is not queued twice"
+            ),
         )
         raise typer.Exit(code=1) from e
 
@@ -1294,13 +1315,35 @@ def execute_cloud(
             renderer.error(code="cloud_unauthorized", message=str(e), hint="run: comfy cloud login")
             raise typer.Exit(code=1) from e
         except HTTPError as e:
-            state.status = "error"
-            state.error = {"code": "cloud_http_error", "message": str(e)}
+            follow_up = (
+                f"follow the job already submitted with `comfy jobs watch {submit.prompt_id} --where cloud`;"
+                " do not re-run, that would submit a second job"
+            )
+            if e.status == 429:
+                # Throttled polling says nothing about the job, which was
+                # accepted and may still be running. Leave the record
+                # non-terminal, like the detached watcher does, so the next
+                # successful status poll finishes it and clears this error.
+                # The outer handler drops our watcher stamp on the way out, so
+                # the stale-watcher reap won't call it crashed.
+                from comfy_cli.command._cloud_errors import rate_limited_error
+
+                state.error = rate_limited_error(
+                    "poll", e.retry_after, {"prompt_id": submit.prompt_id}, next_step=follow_up
+                )
+            else:
+                state.status = "error"
+                state.error = {"code": "cloud_http_error", "message": str(e)}
             jobs_state.write(state)
-            renderer.error(
-                code="cloud_http_error",
+            emit_status_error(
+                renderer,
+                status=e.status,
+                retry_after=e.retry_after,
+                operation="poll",
                 message=f"Cloud server error while polling (HTTP {e.status}): {e.message}",
+                hint=None,
                 details={"status": e.status, "prompt_id": submit.prompt_id},
+                rate_limited_next_step=follow_up,
             )
             raise typer.Exit(code=1) from e
         except KeyboardInterrupt:

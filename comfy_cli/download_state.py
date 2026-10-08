@@ -68,6 +68,7 @@ change further; agents can stop polling.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -175,6 +176,177 @@ def request_cancel(path: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+# Destination claims live in their own subdirectory of the (owner-only) state
+# dir rather than next to the user's model files: a claim is our bookkeeping,
+# not something a user should find in `models/loras`, and `list_all` globs
+# `*.json` at the top level so the subdirectory stays invisible to every verb.
+CLAIMS_DIRNAME = "claims"
+
+# Private staging suffix for `acquire_claim`'s write-then-link publish. Never
+# matched by the `*.claim` readers; leftovers (a SIGKILL between write and link)
+# are swept by `prune` once they are old enough to be provably dead.
+CLAIM_TMP_SUFFIX = ".tmp"
+
+# How old a `.claim.*.tmp` staging file must be before `prune` treats it as a
+# crashed acquire's leftover rather than an acquire in progress. An acquire
+# holds its temp file for milliseconds; an hour is comfortably conservative.
+CLAIM_TMP_MAX_AGE_S = 60 * 60
+
+
+def claims_dir(workspace: Path) -> Path:
+    """Return ``<workspace>/.comfy-downloads/claims`` and ensure it exists, owner-only."""
+    base = state_dir(workspace) / CLAIMS_DIRNAME
+    base.mkdir(parents=True, exist_ok=True, mode=STATE_DIR_MODE)
+    if sys.platform != "win32":
+        # Same reason as `state_dir`: mkdir's mode is masked by the umask and
+        # the directory may predate this code.
+        with contextlib.suppress(OSError):
+            base.chmod(STATE_DIR_MODE)
+    return base
+
+
+def claim_filename(dest_key: str) -> str:
+    """The claim file name for a destination key.
+
+    Hashed rather than derived from the path: a destination is an arbitrary
+    absolute path, and a claim named after one would hit the filesystem's name
+    length limit and its separator rules. The key is expected to be already
+    canonicalized by the caller (``models._dest_key``), so two spellings of one
+    destination hash to one file.
+    """
+    return f"{hashlib.sha256(dest_key.encode('utf-8')).hexdigest()}.claim"
+
+
+def claim_path(workspace: Path, dest_key: str) -> Path:
+    """The claim path for ``dest_key`` under ``workspace``, creating ``claims/``."""
+    return claims_dir(workspace) / claim_filename(dest_key)
+
+
+def claim_marker_for(state_file: Path, dest_key: str) -> Path:
+    """The claim that pairs with a state file addressed by path.
+
+    The worker is handed ``--state <file>`` and never re-resolves a workspace
+    (same reason as :func:`cancel_marker_for`), so it derives the claim from the
+    state file's own directory. Creates nothing - the worker only ever releases.
+    """
+    return Path(state_file).parent / CLAIMS_DIRNAME / claim_filename(dest_key)
+
+
+def acquire_claim(path: Path, *, download_id: str, dest: str) -> bool:
+    """Atomically create the claim at ``path``. False when it already exists.
+
+    The payload is written to a private sibling first and *published* with
+    ``os.link``, which fails ``EEXIST`` exactly like ``O_CREAT | O_EXCL`` does —
+    so file creation is still the atomic decider (exactly one of any number of
+    simultaneous submitters gets True, with no check-then-act window), but the
+    claim is never visible at ``path`` until its payload is complete. Creating
+    the file at ``path`` directly and writing into it afterwards would open a
+    window in which a colliding submitter reads an empty claim, calls it stale,
+    and unlinks a live winner. It also means a failed payload write (``ENOSPC``,
+    ``EIO``) publishes nothing: the temp file is removed and the ``OSError``
+    propagates with no orphan claim left at ``path``.
+
+    The temp name carries the pid and the download id, both unique to this
+    acquire, so concurrent submitters never collide on it; a leftover from a
+    SIGKILL mid-acquire is swept by :func:`prune`.
+
+    **Atomic publication depends on hard-link support.** ``os.link`` is the
+    thing that makes exactly one submitter win, and a filesystem without hard
+    links (exFAT, FAT32, some network and container mounts) fails it with
+    ``OSError`` — ``ENOTSUP``/``EOPNOTSUPP``/``EPERM``, or ``ERROR_NOT_SUPPORTED``
+    on Windows — rather than ``EEXIST``. That error is *not* a collision and is
+    not reported as one: it propagates, and no atomic lock was taken. The caller
+    is expected to degrade to its advisory guard and to say so
+    (:func:`comfy_cli.command.models.models._acquire_dest_claim`), because the
+    advisory guard re-scans rather than arbitrates — concurrent submitters can
+    race again on such a filesystem.
+
+    The payload records the ``download_id`` that owns the claim (the pointer a
+    later submitter follows to decide whether the claim is still live), the
+    destination for a human reading the directory, and when it was taken. No
+    url: a presigned url is a credential-shaped thing and the claim does not
+    need one.
+
+    Raises ``OSError`` for anything other than the collision - the caller
+    decides whether that is fatal.
+    """
+    payload = json.dumps(
+        {"download_id": download_id, "dest": str(dest), "created_at": _now_iso()},
+        indent=2,
+    ).encode("utf-8")
+    path = Path(path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{download_id}{CLAIM_TMP_SUFFIX}")
+    fd = os.open(str(tmp), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, STATE_FILE_MODE)
+    try:
+        try:
+            view = memoryview(payload)
+            while view:
+                view = view[os.write(fd, view) :]
+        finally:
+            os.close(fd)
+        if sys.platform != "win32":
+            # `os.open`'s mode is masked by the umask, exactly as `write_path`'s
+            # is. Fixed up before the link, so the published claim never appears
+            # with a looser mode.
+            with contextlib.suppress(OSError):
+                tmp.chmod(STATE_FILE_MODE)
+        try:
+            os.link(str(tmp), str(path))
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+
+def read_claim(path: Path) -> str | None:
+    """The ``download_id`` recorded in the claim at ``path``, or None.
+
+    None for every unreadable shape - absent, truncated mid-write, corrupt, or
+    carrying an id that could not name a state file. The caller treats all of
+    them as *stale*, which is the safe direction: a claim nobody can resolve
+    would otherwise wedge its destination forever, and the record it points at
+    (not the claim) is what actually proves a download is live.
+    """
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    download_id = payload.get("download_id")
+    if not isinstance(download_id, str) or not _SAFE_ID.match(download_id):
+        return None
+    return download_id
+
+
+def release_claim(path: Path, *, owner_id: str | None) -> bool:
+    """Drop the claim at ``path``, but only if ``owner_id`` still holds it.
+
+    The ownership check is what keeps a finishing worker from unlinking a claim
+    that is no longer its own: once our record goes terminal our claim reads
+    stale, so a competing submitter may clear it and create *its* own in the
+    window before we get here, and an unconditional unlink would delete a live
+    claim. Never raises - releasing is bookkeeping.
+
+    ``owner_id`` may be None, and the None case is load-bearing: an unreadable
+    claim makes :func:`read_claim` return None, so passing that None back here
+    means "unlink the claim nobody can read" — which is how a corrupt claim
+    file gets cleared instead of wedging its destination. Since claims are
+    published atomically (see :func:`acquire_claim`), an unreadable claim is
+    corrupt, not mid-write.
+    """
+    path = Path(path)
+    if read_claim(path) != owner_id:
+        return False
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True
 
 
 @dataclass
@@ -455,6 +627,46 @@ def _remove_record(path: Path) -> bool:
     return True
 
 
+def _sweep_claims(workspace: Path) -> None:
+    """Drop claims that no longer point at a live download, and dead temp files.
+
+    The liveness rule is the same one the submit path applies before clearing a
+    stale claim: a claim stays while its ``download_id`` resolves to a record
+    that is active after :func:`reconcile`, or whose worker process is still
+    provably alive (a terminal status does not prove the process is gone — a
+    cancelled worker may still be mid-write for a moment). The unlink goes
+    through :func:`release_claim` with the id we judged stale, so a claim that
+    changes hands between the read and the unlink is left alone.
+
+    Temp files are :func:`acquire_claim`'s private staging names; one only
+    survives a SIGKILL inside the milliseconds between write and publish, so
+    anything older than :data:`CLAIM_TMP_MAX_AGE_S` is a crashed acquire's
+    leftover. Best effort throughout, like the rest of :func:`prune`.
+    """
+    base = Path(workspace) / STATE_DIRNAME / CLAIMS_DIRNAME
+    try:
+        if not base.is_dir():
+            return
+        entries = sorted(base.iterdir())
+    except OSError:
+        return
+    tmp_cutoff = time.time() - CLAIM_TMP_MAX_AGE_S
+    for path in entries:
+        if path.name.endswith(CLAIM_TMP_SUFFIX):
+            with contextlib.suppress(OSError):
+                if path.stat().st_mtime < tmp_cutoff:
+                    path.unlink()
+            continue
+        if not path.name.endswith(".claim"):
+            continue
+        download_id = read_claim(path)
+        if download_id is not None:
+            record = read(workspace, download_id)
+            if record is not None and (reconcile(record).status in ACTIVE_STATUSES or worker_alive(record)):
+                continue
+        release_claim(path, owner_id=download_id)
+
+
 def prune(workspace: Path) -> int:
     """Drop finished download records that are stale or over the retention cap.
 
@@ -477,11 +689,26 @@ def prune(workspace: Path) -> int:
     An in-flight record (``starting``/``downloading``) is never touched at any
     age, and never counts toward — or is evicted by — the cap.
 
+    Also sweeps ``claims/`` (see :func:`_sweep_claims`): a claim is normally
+    released by its own worker, and a stranded one only self-clears on the next
+    submit *to the same destination*, so claims for destinations never
+    re-submitted would otherwise accumulate for the life of the workspace —
+    the same unbounded growth the record rules above exist to prevent. Swept
+    claims do not count toward the returned total, which stays "records
+    removed".
+
     Every step is best effort, exactly like :func:`write_path`'s OSError
     handling: a read-only state directory, a permissions problem, or a file a
     concurrent prune already removed must never raise into a download. Returns
     the number of records actually removed.
     """
+    # Suppressed here rather than inside the sweep: `_sweep_claims` guards its
+    # own directory walk, but it then calls `read`, which resolves the state
+    # directory (an `mkdir`) and only catches `ValueError`. That `OSError` would
+    # escape `prune` and land in a download, which is exactly what the contract
+    # above promises never happens.
+    with contextlib.suppress(OSError):
+        _sweep_claims(workspace)
     base = Path(workspace) / STATE_DIRNAME
     try:
         if not base.is_dir():

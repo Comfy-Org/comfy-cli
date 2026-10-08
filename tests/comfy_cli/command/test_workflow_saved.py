@@ -12,8 +12,10 @@ from __future__ import annotations
 import io
 import json
 import urllib.error
+from pathlib import Path
 from typing import Any
 
+import jsonschema
 import pytest
 import typer
 from typer.testing import CliRunner
@@ -33,6 +35,11 @@ def reset_singleton():
     reset_renderer_for_testing()
     yield
     reset_renderer_for_testing()
+
+
+_WORKFLOW_SCHEMA = json.loads(
+    (Path(__file__).resolve().parents[3] / "comfy_cli" / "schemas" / "workflow.json").read_text()
+)
 
 
 def _force_json_renderer():
@@ -307,6 +314,10 @@ class TestLocalGet:
         assert env["data"]["node_count"] is None
         assert any(w["code"] == "workflow_content_not_json" for w in env["data"].get("warnings", []))
         assert out.read_bytes() == b"<html>nope</html>"
+        # node_count: null must validate against the shared "workflow" schema
+        # (comfy workflow print resolves to the same schema and can also emit
+        # null) — regression guard for a schema that only allowed "integer".
+        jsonschema.Draft202012Validator(_WORKFLOW_SCHEMA).validate(env["data"])
 
     def test_non_utf8_body_does_not_crash(self, local_target, tmp_path, monkeypatch, capsys):
         # json.loads on non-UTF-8 bytes raises UnicodeDecodeError, not JSONDecodeError.
@@ -673,7 +684,7 @@ class TestDelete:
 
 
 # ---------------------------------------------------------------------------
-# unparseable 200 body — must surface a loud error, not empty/success (BE-3334)
+# unparseable 200 body — must surface a loud error, not empty/success
 # ---------------------------------------------------------------------------
 
 # A non-empty 200 body the client can't decode as JSON. Four shapes, all malformed:

@@ -48,7 +48,7 @@ import typer
 from rich import print as rprint
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
-from comfy_cli import constants, tracking, ui
+from comfy_cli import constants, knowledge, tracking, ui
 from comfy_cli.command.generate import adapters, client, emit, output, poll, schema, spec, upload
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.output.renderer import Renderer, get_renderer
@@ -284,7 +284,19 @@ def register_with(parent: typer.Typer) -> None:
 
 def _separate_meta_flags(extra_args: list[str]) -> tuple[list[str], dict[str, str | bool]]:
     """Pull run-level flags out of the user's argv tail."""
-    meta_names = {"download", "async", "json", "timeout", "api-key", "emit-workflow", "output-prefix", "yes"}
+    meta_names = {
+        "download",
+        "async",
+        "json",
+        "timeout",
+        "api-key",
+        "emit-workflow",
+        "emit-ops",
+        "actor",
+        "base-version",
+        "output-prefix",
+        "yes",
+    }
     meta: dict[str, str | bool] = {}
     remaining: list[str] = []
     i = 0
@@ -296,7 +308,7 @@ def _separate_meta_flags(extra_args: list[str]) -> tuple[list[str], dict[str, st
             if "=" in body:
                 body, raw = body.split("=", 1)
             if body in meta_names:
-                if body in {"async", "json", "yes"}:
+                if body in {"async", "json", "yes", "emit-ops"}:
                     meta[body] = True if raw is None else raw.lower() not in {"false", "0", "no"}
                     i += 1
                     continue
@@ -340,23 +352,14 @@ def _spinner() -> Progress:
 
 
 def _emit_result(result: poll.PollResult, *, request_id: str, download: str | None, as_json: bool) -> None:
-    if as_json:
-        # Honor --download in JSON mode too. Previously this returned before
-        # saving, so `--json --download` printed the URL but wrote no file,
-        # forcing callers to curl the URL by hand. Save first, then surface the
-        # local path alongside the raw response.
-        if download and result.status == "succeeded" and result.image_urls:
-            saved = output.save_urls(result.image_urls, download, request_id)
-            output.print_json({"result": result.raw, "saved": [str(p) for p in saved]})
-        else:
-            output.print_json(result.raw)
-        return
+    renderer = get_renderer()
+    # One failure path for every output mode, checked FIRST: a terminally
+    # failed job is never a result. In JSON/NDJSON modes it is an ok=false
+    # envelope with a registered code (the generate_result schema promises
+    # exactly that); in pretty mode it is a red line plus the partner's raw
+    # response. Either way the exit code is 1 — a consumer that trusts ``ok``
+    # (or the exit code) must never read a failure as success.
     if result.status != "succeeded":
-        # A terminal non-succeeded job is a FAILURE, not a result, so it owes the
-        # caller an envelope even though the success paths above deliberately
-        # bypass the renderer. (The `as_json` branch returned already: that is
-        # the command-local `--json` raw-response contract, left untouched.)
-        renderer = get_renderer()
         message = f"Job {result.status}: {result.error or 'unknown error'}"
         if renderer.is_json():
             renderer.error(
@@ -372,6 +375,31 @@ def _emit_result(result: poll.PollResult, *, request_id: str, download: str | No
             rprint(f"[bold red]{sanitize_markup(message)}[/bold red]")
             output.print_json(result.raw)
         raise typer.Exit(code=1)
+    if renderer.is_json() or as_json:
+        # Honor --download in machine modes too. Previously this returned
+        # before saving, so `--json --download` printed the URL but wrote no
+        # file, forcing callers to curl the URL by hand. Save first, then
+        # surface the local path alongside the response.
+        saved: list[str] = []
+        if download and result.image_urls:
+            saved = [str(p) for p in output.save_urls(result.image_urls, download, request_id)]
+        if renderer.is_json():
+            # JSON/NDJSON modes (the global ``--output json``, a redirected
+            # stdout, or the tail ``--json``) get the envelope/1 contract every
+            # other machine-readable command speaks: data.result wraps the
+            # partner payload, data.saved lists --download artifacts.
+            # Registered as COMMAND_SCHEMAS["comfy generate"] -> generate_result.json.
+            data: dict[str, Any] = {"result": result.raw}
+            if saved:
+                data["saved"] = saved
+            renderer.emit(data, ok=True, command="generate")
+            return
+        # Pretty mode with an explicit tail --json keeps the legacy raw blob.
+        if saved:
+            output.print_json({"result": result.raw, "saved": saved})
+        else:
+            output.print_json(result.raw)
+        return
     if download and result.image_urls:
         saved = output.save_urls(result.image_urls, download, request_id)
         output.print_urls(result.image_urls, request_id=request_id)
@@ -548,14 +576,95 @@ def _generate(model: str, extra_args: list[str]) -> None:
                 hint=f"Run `comfy generate schema {name}` for the full parameter list.",
             )
 
+        emit_ops_mode = bool(meta.get("emit-ops", False))
+        if emit_ops_mode and not emit_path:
+            _bail(
+                _track_error,
+                schema.SchemaError("--emit-ops requires --emit-workflow <path>"),
+                code="generate_bad_args",
+                message="--emit-ops requires --emit-workflow <path>: the op batch describes the workflow written there",
+                kind="schema",
+                hint="add --emit-workflow workflow.json",
+            )
         if emit_path:
             # Emit a runnable workflow that drives the partner *node* and return
             # — no proxy call, no API key required. The artifact is the result.
             name = gen_props["model_alias"] or ep.id
             prefix = meta.get("output-prefix") if isinstance(meta.get("output-prefix"), str) else "generate"
             renderer = get_renderer()
+            ops: list | None = None
+            from comfy_cli import workflow_ops
+
             try:
-                workflow = emit.write_workflow(name, values, Path(emit_path).expanduser(), output_prefix=prefix)
+                if emit_ops_mode:
+                    # FRONTEND-format file + a stamped replace_ops batch, so the
+                    # written graph is canvas-editable and a shared-document
+                    # consumer folds it in as attributed ops instead of a
+                    # wholesale replacement — same contract as
+                    # `templates fetch --emit-ops`. The graph loads through the
+                    # same resilient path every workflow edit verb uses
+                    # (COMFY_OBJECT_INFO_FILE honored, cache fallback).
+                    from comfy_cli.command.workflow import _get_graph
+
+                    actor = meta.get("actor") if isinstance(meta.get("actor"), str) else "cli"
+                    try:
+                        base_version = int(meta.get("base-version", 0))
+                    except (TypeError, ValueError) as e:
+                        _bail(
+                            _track_error,
+                            e,
+                            code="generate_bad_args",
+                            message=f"--base-version must be an integer, got {meta.get('base-version')!r}",
+                            kind="schema",
+                        )
+                    try:
+                        graph = _get_graph(None, None, None)
+                    except typer.Exit as e:
+                        # _get_graph already rendered cql_no_graph; only the
+                        # generate:error record is owed here, or generate:start
+                        # is left without its terminal event.
+                        _track_error("emit", e)
+                        raise
+                    workflow, ops = emit.write_frontend_workflow(
+                        name,
+                        values,
+                        Path(emit_path).expanduser(),
+                        graph,
+                        actor=actor,
+                        base_version=base_version,
+                        output_prefix=prefix,
+                    )
+                else:
+                    workflow = emit.write_workflow(name, values, Path(emit_path).expanduser(), output_prefix=prefix)
+            except emit.UnsupportedModelError as e:
+                # Its own code: the remedy is "pick another model", which is
+                # not what the umbrella `emit_workflow_failed` hint says, and
+                # the supported set travels as data rather than prose.
+                _track_error("emit", e)
+                renderer.error(
+                    code="emit_workflow_unsupported_model",
+                    message=str(e),
+                    hint=(
+                        "retry with the first alias in `details.suggested` (same kind of media), or any whose "
+                        "`emit_supported` is true in `comfy --json generate list` (`details.supported`); "
+                        "or call the model through the proxy without --emit-workflow"
+                    ),
+                    details={"model": e.model, "supported": e.supported, "suggested": e.suggested},
+                )
+                raise typer.Exit(code=1) from e
+            except workflow_ops.DeprecatedNodeType as e:
+                # Same envelope as `workflow add-node`: the remedy is a live
+                # class, which `details.replacement` names. The umbrella
+                # `emit_workflow_failed` hint would send the caller to check
+                # their params for a failure their params did not cause.
+                _track_error("emit", e)
+                renderer.error(
+                    code=e.code,
+                    message=str(e),
+                    hint=e.hint,
+                    details={"requested": e.class_type, "replacement": e.replacement, "model": name},
+                )
+                raise typer.Exit(code=1) from e
             except (emit.EmitError, OSError) as e:
                 _track_error("emit", e)
                 hint = (
@@ -569,14 +678,20 @@ def _generate(model: str, extra_args: list[str]) -> None:
                     hint=hint,
                 )
                 raise typer.Exit(code=1) from e
-            tracking.track_event("generate:emit", {**gen_props, "node_count": len(workflow)})
+            node_count = len(workflow["nodes"]) if emit_ops_mode else len(workflow)
+            tracking.track_event("generate:emit", {**gen_props, "node_count": node_count})
             if renderer.is_pretty():
                 rprint(f"[bold green]Wrote workflow:[/bold green] {emit_path}")
                 rprint(f"  run it: comfy run --workflow {emit_path}")
-            renderer.emit(
-                {"out": str(Path(emit_path).expanduser()), "model": name, "nodes": len(workflow)},
-                command="generate emit-workflow",
-            )
+            payload = {
+                "out": str(Path(emit_path).expanduser()),
+                "model": name,
+                "nodes": node_count,
+                "format": "frontend" if emit_ops_mode else "api",
+            }
+            if ops is not None:
+                payload["ops"] = ops
+            renderer.emit(payload, command="generate emit-workflow")
             return
 
         # Spend gate — a proxy call spends Comfy credits, so consent comes
@@ -805,6 +920,15 @@ def _model_record(e: spec.Endpoint) -> dict[str, object]:
         "category": e.category,
         "mode": "async" if e.polling else "sync",
         "summary": e.summary,
+        # Whether `--emit-workflow` has a partner-node mapping for this model.
+        # Most of the catalog is proxy-only; an agent that could not see this
+        # asked for a workflow it could never get (`emit_workflow_failed`).
+        "emit_supported": emit.is_supported(e.id),
+        # The class the row above would mint, or None when unmapped. Paired with
+        # `emit_supported` so a consumer outside this repo can check the
+        # hand-written mapping against a live catalog instead of taking the
+        # boolean on trust.
+        "node_class": emit.node_class_for(e.id),
     }
 
 
@@ -841,12 +965,29 @@ def _list_models(extra_args: list[str]) -> None:
     partner = _arg_value(clean, "--partner", "-p")
     category = _arg_value(clean, "--category", "--style", "-c")
     query = _arg_value(clean, "--query", "-q")
+    # `list`-only, deliberately NOT in `_separate_meta_flags`' meta_names: that
+    # set applies to every generate sub-action, and --select belongs to the
+    # four heavy read commands only (V1-011).
+    select_expr = _arg_value(clean, "--select")
     eps = spec.list_endpoints(partner=partner, category=category, query=query)
     payload = {
         "models": [_model_record(e) for e in eps],
         "count": len(eps),
         "filters": {"partner": partner, "category": category, "query": query},
     }
+    if select_expr is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select_expr, command="generate list")
+    knowledge.attach(
+        payload,
+        command="generate list",
+        queries=[query] if query else [],
+        models=[m["alias"] for m in payload["models"]],
+        brief=True,
+        thin=(not eps and bool(query)),
+        qualified=any(payload["filters"].values()),
+    )
     if renderer.is_pretty():
         if not eps:
             rprint("[yellow]No models match those filters.[/yellow]")
@@ -910,21 +1051,20 @@ def _schema(extra_args: list[str]) -> None:
         return
     flags = schema.flags_for(ep)
     name = spec.preferred_alias(ep.id) or ep.id
-    renderer.emit(
-        {
-            "model": name,
-            "id": ep.id,
-            "partner": ep.partner,
-            "category": ep.category,
-            "summary": ep.summary,
-            "mode": "async" if ep.polling else "sync",
-            "polling": ep.polling,
-            "content_type": ep.request_content_type,
-            "params": [_param_record(f) for f in flags],
-            "example": schema.example_invocation(ep, flags, display_name=name),
-        },
-        command="generate schema",
-    )
+    payload = {
+        "model": name,
+        "id": ep.id,
+        "partner": ep.partner,
+        "category": ep.category,
+        "summary": ep.summary,
+        "mode": "async" if ep.polling else "sync",
+        "polling": ep.polling,
+        "content_type": ep.request_content_type,
+        "params": [_param_record(f) for f in flags],
+        "example": schema.example_invocation(ep, flags, display_name=name),
+    }
+    knowledge.attach(payload, command="generate schema", queries=[clean[0], name])
+    renderer.emit(payload, command="generate schema")
 
 
 def _fetch_spec(url: str) -> httpx.Response:
@@ -1140,6 +1280,10 @@ def _print_top_help() -> None:
         '  comfy generate flux-2 --prompt "a fox" --emit-workflow flux.json   '
         "[dim]# write a runnable workflow instead of calling the proxy[/dim]"
     )
+    rprint(
+        '  comfy generate flux-2 --prompt "a fox" --emit-workflow flux.json --emit-ops [--actor ID] [--base-version N]'
+    )
+    rprint("      [dim]# frontend-format (canvas-editable) file plus a stamped op batch in the envelope[/dim]")
     rprint("")
     rprint("[bold]Actions:[/bold]")
     rprint("  comfy generate list                    Browse available models")

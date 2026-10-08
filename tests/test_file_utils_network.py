@@ -1285,3 +1285,22 @@ class TestDownloadNonRetriableHTTPError:
             download_file("http://example.com/model.bin", dest)
 
         assert not dest.exists()
+
+
+def test_knowledge_import_does_not_pull_httpx():
+    """``comfy_cli.knowledge`` wants only ``atomic_write_bytes`` from ``file_utils``.
+
+    httpx costs 11 ms warm to import, so it stays out of every command that never
+    downloads. ``-X importtime`` names each module that was actually imported.
+    """
+    import subprocess
+
+    proc = subprocess.run(
+        [sys.executable, "-X", "importtime", "-c", "import comfy_cli.knowledge"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )
+    imported = {line.rsplit("|", 1)[-1].strip() for line in proc.stderr.splitlines()}
+    assert "httpx" not in imported

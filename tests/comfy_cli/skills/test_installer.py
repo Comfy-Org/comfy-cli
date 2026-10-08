@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -12,13 +14,19 @@ from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_t
 from comfy_cli.skills import (
     RETIRED_SKILLS,
     bundled_skill_names,
+    default_skill_names,
+    frontmatter_description,
     install,
     plan_install,
     prune_retired,
+    readable_skill_names,
+    reference_skill_names,
     skill_content,
     uninstall,
 )
 from comfy_cli.skills.command import app
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _force_json_renderer():
@@ -42,17 +50,129 @@ def _force_json_renderer():
 def test_bundles_expected_skills():
     names = bundled_skill_names()
     assert "comfy" in names
-    assert "comfy-fragments" in names
     assert "comfy-debug" in names
     assert "comfy-relay" in names
+    assert "comfy-director" in names
+    assert "comfy-build" in names
+    assert "comfy-deploy" in names
 
 
 def test_bundled_skills_have_required_frontmatter():
-    for name in bundled_skill_names():
+    for name in readable_skill_names():
         text = skill_content(name)
         assert text.startswith("---\n"), f"{name}: missing frontmatter"
         assert f"name: {name}" in text, f"{name}: frontmatter name doesn't match"
         assert "description:" in text, f"{name}: frontmatter missing description"
+
+
+# ---------------------------------------------------------------------------
+# Reference skills: resolvable by `show`, never written by `install`
+# ---------------------------------------------------------------------------
+
+
+def test_reference_skills_are_readable():
+    """`comfy skills show <reference>` is the only way to reach the material."""
+    for name in reference_skill_names():
+        assert skill_content(name).strip(), f"{name}: resolved to empty content"
+
+
+def test_a_default_install_writes_no_reference_skill(tmp_path: Path):
+    """The whole point of the split.
+
+    A reference skill written to a target would sit in every agent's context on
+    every task — the cost this mechanism exists to avoid. This is the default
+    set, not an absolute bar: an explicit `skills=[<name>]` or a path token does
+    install one, and `test_uninstalling_a_reference_skill_by_name_is_accepted`
+    covers taking it back off. Checked across all three targets rather than one,
+    because each is written by a different code path.
+    """
+    results = install(scope="project", project_root=tmp_path)
+    written = {r.skill for r in results}
+    leaked = written & set(reference_skill_names())
+    assert not leaked, f"reference skills must not be installed, but install wrote: {sorted(leaked)}"
+
+    for name in reference_skill_names():
+        assert not (tmp_path / f".claude/skills/{name}/SKILL.md").exists()
+        assert not (tmp_path / f".cursor/rules/{name}.mdc").exists()
+    agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    for name in reference_skill_names():
+        assert f"<!-- {name}:start -->" not in agents
+
+
+def test_reference_skills_are_not_in_the_default_install_set():
+    """`default_skill_names()` is what install, uninstall, status and prune all
+    walk, so keeping reference skills out of it is what makes them uninstallable
+    by construction rather than by four separate filters."""
+    assert set(default_skill_names()).isdisjoint(reference_skill_names())
+
+
+def test_reference_skills_are_disjoint_from_retired():
+    """A name in both would be pruned from disk while still being served by
+    `show` — two subsystems disagreeing about whether it exists."""
+    assert set(RETIRED_SKILLS).isdisjoint(reference_skill_names())
+
+
+def test_every_reference_skill_is_cited_by_an_installed_skill():
+    """A reference skill nobody names is unreachable.
+
+    Only installed skills reach an agent's context, so the citation has to come
+    from one of those — a reference skill citing another would be a chain whose
+    first link nothing pulls.
+    """
+    corpus = "\n".join(skill_content(name) for name in bundled_skill_names())
+    for name in reference_skill_names():
+        assert name in corpus, f"{name} is never cited by an installed skill, so nothing would load it"
+
+
+def test_installing_a_reference_skill_by_name_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Refused with the command that does work, rather than silently accepted.
+
+    An agent that reaches for `--skill <reference>` has the right intent and the
+    wrong verb, so the refusal has to name `show` or it just looks like the
+    material is unavailable.
+
+    `install_cmd` takes its project root from `Path.cwd()`, which `CliRunner`
+    does not change, so the chdir is what makes the containment assertion mean
+    anything: without it a regression writes into the checkout being tested.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "AGENTS.md").touch()
+    target = reference_skill_names()[0]
+    runner = CliRunner()
+    result = runner.invoke(app, ["install", "--scope", "project", "--skill", target], catch_exceptions=False)
+
+    assert result.exit_code != 0
+    # Rich wraps the refusal inside a bordered panel, so the message is only a
+    # contiguous string once the borders and wrap points are collapsed away.
+    # The colour codes have to go with them: under a colour-enabled terminal the
+    # border carries its own escapes, which survive collapsing whitespace and
+    # land mid-phrase at exactly the wrap point this assertion spans.
+    flattened = " ".join(_ANSI_RE.sub("", result.output).replace("│", " ").split())
+    assert f"comfy skills show {target}" in flattened, result.output
+    assert not (tmp_path / f".claude/skills/{target}").exists()
+    assert not (tmp_path / f".cursor/rules/{target}.mdc").exists()
+    assert f"<!-- {target}:start -->" not in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+
+
+def test_uninstalling_a_reference_skill_by_name_is_accepted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The install-side refusal must not strand what an explicit install put down.
+
+    A reference skill only reaches disk when something asked for it by path or
+    through `install()`, and a bare `uninstall` walks `default_skill_names()`,
+    which excludes it — so naming it is the only route left. Refusing the name on
+    both verbs would leave the file there permanently.
+    """
+    monkeypatch.chdir(tmp_path)
+    name = reference_skill_names()[0]
+    install(scope="project", project_root=tmp_path, skills=[name], targets=["claude-code"])
+    installed = tmp_path / ".claude" / "skills" / name / "SKILL.md"
+    assert installed.exists(), "an explicit install() should have written the reference skill"
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["uninstall", "--scope", "project", "--skill", name], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    assert not installed.exists()
 
 
 def test_comfy_skill_content_has_required_sections():
@@ -77,10 +197,141 @@ def test_comfy_skill_covers_cloud_setup_and_routing():
         assert needle in text, f"comfy skill should mention {needle}"
 
 
-def test_comfy_fragments_skill_covers_composition():
-    text = skill_content("comfy-fragments")
-    for needle in ("workflow compose", "_fragment", "blueprint"):
-        assert needle in text, f"comfy-fragments skill should mention {needle}"
+def test_bundled_frontmatter_parses_as_yaml():
+    """Substring checks pass on frontmatter that no YAML parser will read.
+
+    Claude Code parses the block this writes to ``.claude/skills/<name>/SKILL.md``,
+    so an unquoted ``description`` carrying a ``": "`` loads here and fails there.
+    """
+    import yaml
+
+    for name in bundled_skill_names():
+        front = skill_content(name).split("---\n", 2)[1]
+        parsed = yaml.safe_load(front)
+        assert parsed["name"] == name, f"{name}: frontmatter name doesn't match"
+        assert parsed["description"].strip(), f"{name}: frontmatter description is empty"
+
+
+def test_quoted_description_reads_back_without_its_quotes():
+    """A description quoted to carry a ``": "`` must not render with the quotes."""
+    quoted = '---\nname: x\ndescription: "Do a thing with comfy-cli: turn it on."\n---\n\nBody.\n'
+    assert frontmatter_description(quoted) == "Do a thing with comfy-cli: turn it on."
+
+
+def test_bundled_description_reads_back_unquoted():
+    """The real value that broke, not a stand-in.
+
+    ``comfy-build``'s description is quoted in its frontmatter because it carries
+    a ``": "``. Dropping the YAML read would render those quotes to the user, and
+    a synthetic fixture would not notice.
+    """
+    desc = frontmatter_description(skill_content("comfy-build"))
+    assert desc.startswith("Build a custom ComfyUI environment"), desc
+    assert not desc.startswith('"'), "the frontmatter quotes leaked into the description"
+
+
+def test_installed_skill_file_parses_as_yaml(tmp_path: Path):
+    """Claude Code reads the file install() writes, not the one in the package."""
+    import yaml
+
+    install(scope="project", project_root=tmp_path, targets=["claude-code"])
+    for name in bundled_skill_names():
+        front = (tmp_path / f".claude/skills/{name}/SKILL.md").read_text(encoding="utf-8").split("---\n", 2)[1]
+        assert yaml.safe_load(front)["name"] == name
+
+
+def test_path_installed_skill_is_current_not_stale(tmp_path: Path):
+    """A skill with no bundled copy to compare against must not be stale for ever."""
+    name = "my-skill"
+    skill_dir = tmp_path / name
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Local.\n---\n\nLocal.\n", "utf-8")
+    target = tmp_path / "target"
+    target.mkdir()
+
+    install(scope="project", project_root=target, skills=[str(skill_dir)], targets=["claude-code"])
+
+    from comfy_cli.skills import _compute_skill_state, read_manifest
+
+    installed = target / ".claude" / "skills" / name / "SKILL.md"
+    assert _compute_skill_state(installed, name, read_manifest()) == "current"
+
+
+def test_one_unwritable_target_skips_only_itself(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """One failure skips one target; every other target still lands."""
+    import comfy_cli.skills as skills_pkg
+
+    def boom(path, content, *, skill_name):
+        raise OSError(f"[Errno 13] Permission denied: {path}")
+
+    monkeypatch.setattr(skills_pkg, "_write_cursor_rule", boom)
+
+    results = install(scope="project", project_root=tmp_path)
+    by_kind: dict[str, set[str]] = {}
+    for r in results:
+        by_kind.setdefault(r.kind, set()).add(r.action)
+
+    assert by_kind["cursor"] == {"skipped"}
+    assert by_kind["claude-code"] == {"wrote"}, "a failing cursor write must not abort the rest"
+    assert by_kind["agents-md"] == {"wrote"}
+    assert len([r for r in results if r.action == "skipped"]) == len(bundled_skill_names())
+
+
+def test_description_is_read_the_way_the_agent_host_reads_it():
+    """A ``#`` after a space opens a YAML comment, and the description stops there.
+
+    The regex this replaced returned the whole line, which disagreed with what
+    Claude Code and Cursor show, since both parse the frontmatter as YAML. Losing
+    the tail is the point: what ``comfy skills list`` prints is now what the agent
+    host actually got.
+    """
+    doc = "---\nname: x\ndescription: Costs 50% # careful with quotas\n---\n\nBody.\n"
+    assert frontmatter_description(doc) == "Costs 50%"
+
+
+def test_comfy_skill_routes_to_every_sibling():
+    """The driver skill tells an agent which siblings to skim, so it must name them all."""
+    text = skill_content("comfy")
+    for name in bundled_skill_names():
+        if name != "comfy":
+            assert f"`{name}`" in text, f"comfy skill should route to {name}"
+
+
+def test_comfy_build_skill_covers_the_build_group():
+    """The three verbs a build cannot be produced without: write the spec, send
+    it, cut it. `test_no_mentions_of_nonexistent_commands` resolves every
+    mention against the live Typer tree, so these two guards together mean the
+    skill names the real path and only the real path."""
+    text = skill_content("comfy-build")
+    for needle in ("comfy build init", "comfy build push", "comfy build release"):
+        assert needle in text, f"comfy-build skill should mention {needle}"
+
+
+def test_comfy_deploy_skill_covers_the_deploy_group():
+    """The verbs a deployment cannot be created, inspected, or ended without.
+
+    `stop` earns its place here rather than being one verb among many: a
+    deployment bills until something ends it, so a skill that can raise compute
+    and not give it back is the one shape of incompleteness that costs money.
+    `test_no_mentions_of_nonexistent_commands` resolves every mention against the
+    live Typer tree, so these two guards together mean the skill names the real
+    path and only the real path.
+    """
+    text = skill_content("comfy-deploy")
+    for needle in ("comfy deploy up", "comfy deploy run", "comfy deploy status", "comfy deploy stop"):
+        assert needle in text, f"comfy-deploy skill should mention {needle}"
+
+
+def test_build_and_deploy_skills_hand_off_to_each_other():
+    """Splitting one skill in two only works if each names the other.
+
+    The build skill stops at a green release and the deploy skill assumes one, so
+    the seam between them is the exact point an agent needs the pointer — and it
+    is invisible to `test_comfy_skill_routes_to_every_sibling`, which only checks
+    the driver skill.
+    """
+    assert "comfy-deploy" in skill_content("comfy-build"), "comfy-build should hand off to comfy-deploy"
+    assert "comfy-build" in skill_content("comfy-deploy"), "comfy-deploy should point back at comfy-build"
 
 
 def test_skill_content_rejects_unknown_name():
@@ -98,7 +349,7 @@ def test_plan_install_default_covers_every_skill_and_target(tmp_path: Path, monk
     monkeypatch.setenv("HOME", str(tmp_path))
     plans = plan_install(scope="user", project_root=tmp_path / "anywhere")
     skill_target_pairs = {(p.skill, p.kind) for p in plans}
-    expected = {(name, kind) for name in bundled_skill_names() for kind in ("claude-code", "cursor", "agents-md")}
+    expected = {(name, kind) for name in default_skill_names() for kind in ("claude-code", "cursor", "agents-md")}
     assert skill_target_pairs == expected
 
 
@@ -111,8 +362,8 @@ def test_plan_install_project_scope_paths(tmp_path: Path):
 
 
 def test_plan_install_filters_by_skill(tmp_path: Path):
-    plans = plan_install(scope="project", project_root=tmp_path, skills=["comfy", "comfy-fragments"])
-    assert {p.skill for p in plans} == {"comfy", "comfy-fragments"}
+    plans = plan_install(scope="project", project_root=tmp_path, skills=["comfy", "comfy-debug"])
+    assert {p.skill for p in plans} == {"comfy", "comfy-debug"}
 
 
 # ---------------------------------------------------------------------------
@@ -144,11 +395,11 @@ def test_install_one_skill_only(tmp_path: Path):
     install(scope="project", project_root=tmp_path, skills=["comfy-debug"])
     assert (tmp_path / ".claude/skills/comfy-debug/SKILL.md").exists()
     assert not (tmp_path / ".claude/skills/comfy/SKILL.md").exists()
-    assert not (tmp_path / ".claude/skills/comfy-fragments/SKILL.md").exists()
+    assert not (tmp_path / ".claude/skills/comfy-relay/SKILL.md").exists()
     agents = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
     assert "<!-- comfy-debug:start -->" in agents
     assert "<!-- comfy:start -->" not in agents
-    assert "<!-- comfy-fragments:start -->" not in agents
+    assert "<!-- comfy-relay:start -->" not in agents
 
 
 def test_install_is_idempotent_across_skills(tmp_path: Path):
@@ -565,3 +816,283 @@ def test_status_reports_stale_and_modified(tmp_path: Path, monkeypatch: pytest.M
         assert debug_row3["state"] == "stale"
     finally:
         reset_renderer_for_testing()
+
+
+# ---------------------------------------------------------------------------
+# Cursor rules carry the skill's own description
+# ---------------------------------------------------------------------------
+
+
+def test_cursor_rule_uses_the_skill_frontmatter_description(tmp_path: Path):
+    """Cursor decides whether to surface a rule from this line, so it has to be
+    the skill's real description rather than a generic label."""
+    install(scope="project", project_root=tmp_path, targets=["cursor"])
+
+    def _described(name: str) -> str:
+        rule = (tmp_path / f".cursor/rules/{name}.mdc").read_text(encoding="utf-8")
+        return json.loads(next(ln for ln in rule.splitlines() if ln.startswith("description:"))[len("description: ") :])
+
+    for name in bundled_skill_names():
+        assert _described(name) == frontmatter_description(skill_content(name))
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Build: a build, then deploy it.",
+        "#1 way to break YAML",
+        'Say "hello" to the parser',
+        "Costs 50% @ {runtime}: careful",
+    ],
+)
+def test_cursor_rule_frontmatter_parses_for_any_description(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, description: str
+):
+    """A skill's description is its own text, and a path-installed skill's is not
+    ours to constrain, so the rule has to stay loadable whatever it contains."""
+    yaml = pytest.importorskip("yaml")
+
+    skill_dir = tmp_path / "my-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: my-skill\ndescription: {description}\n---\n\nBody.\n", encoding="utf-8"
+    )
+    target = tmp_path / "target"
+    target.mkdir()
+
+    install(scope="project", project_root=target, skills=[str(skill_dir)], targets=["cursor"])
+
+    rule = (target / ".cursor/rules/my-skill.mdc").read_text(encoding="utf-8")
+    front = rule.split("---\n")[1]
+    assert yaml.safe_load(front)["description"] == description
+
+
+def test_cursor_description_falls_back_when_frontmatter_has_none(tmp_path: Path):
+    from comfy_cli.skills import _cursor_description_for
+
+    assert _cursor_description_for("x", "# no frontmatter\n") == "comfy CLI skill: x"
+
+
+# ---------------------------------------------------------------------------
+# Token resolution — the default set is names, never paths
+# ---------------------------------------------------------------------------
+
+
+def test_cwd_directory_named_like_a_skill_does_not_shadow_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Every ComfyUI checkout has a `comfy/` directory, and `comfy` is a skill.
+
+    Resolving the default set by path would make a plain install crash there, or
+    quietly install whatever that directory contained into the user's agent config.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "comfy").mkdir()
+    (tmp_path / "comfy" / "SKILL.md").write_text(
+        "---\nname: comfy\ndescription: Impostor.\n---\n\nNot the bundled skill.\n", encoding="utf-8"
+    )
+    target = tmp_path / "target"
+    target.mkdir()
+
+    results = install(scope="project", project_root=target, targets=["claude-code"])
+
+    assert all(r.action == "wrote" for r in results), [r for r in results if r.action != "wrote"]
+    installed = (target / ".claude/skills/comfy/SKILL.md").read_text(encoding="utf-8")
+    assert installed == skill_content("comfy")
+    assert "Impostor" not in installed
+
+
+def test_plan_and_install_agree_on_names(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Both go through one resolution, so a name can never appear in one and not the other."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "comfy").mkdir()
+    planned = {p.skill for p in plan_install(scope="project", project_root=tmp_path / "t")}
+    installed = {r.skill for r in install(scope="project", project_root=tmp_path / "t", dry_run=True)}
+    assert planned == installed == set(default_skill_names())
+
+
+def test_manifest_entry_carries_exactly_skill_sha_and_version(tmp_path: Path):
+    """The manifest row is these three fields and nothing else.
+
+    It used to grow a ``source`` key for a skill fetched from another repository.
+    Asserting the absence of that key would now pass for any input, so pin the
+    whole shape instead.
+    """
+    from comfy_cli.skills import read_manifest
+
+    name = "my-skill"
+    skill_dir = tmp_path / name
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Local.\n---\n\nLocal.\n", "utf-8")
+    target = tmp_path / "target"
+    target.mkdir()
+
+    install(scope="project", project_root=target, skills=[str(skill_dir)], targets=["claude-code"])
+
+    entry = read_manifest()[str(target / ".claude" / "skills" / name / "SKILL.md")]
+    assert set(entry) == {"skill", "sha256", "cli_version"}
+
+
+def test_description_is_read_from_frontmatter_only():
+    """A `description:` line in the body documents something else."""
+    body_only = "# No frontmatter\n\ndescription: not mine\n"
+    assert frontmatter_description(body_only) == ""
+
+    with_example = (
+        "---\nname: x\ndescription: The real one.\n---\n\n"
+        "Example config:\n\n```yaml\ndescription: an example, not this skill\n```\n"
+    )
+    assert frontmatter_description(with_example) == "The real one."
+
+
+# ---------------------------------------------------------------------------
+# Security: a path cannot take over a name the CLI ships
+# ---------------------------------------------------------------------------
+
+
+def _install_cli(monkeypatch, cwd: Path, *args: str):
+    """Run `comfy skills <args>` from `cwd` with the JSON renderer; return (result, last envelope)."""
+    monkeypatch.chdir(cwd)
+    _force_json_renderer()
+    try:
+        result = CliRunner().invoke(app, list(args))
+    finally:
+        reset_renderer_for_testing()
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    return result, json.loads(lines[-1]) if lines else None
+
+
+def _write_skill(path: Path, name: str, body: str = "Not the shipped skill.") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nname: {name}\ndescription: d.\n---\n{body}\n", encoding="utf-8")
+
+
+def _project(tmp_path: Path) -> Path:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "AGENTS.md").write_text("# mine\n", encoding="utf-8")
+    return root
+
+
+def _agent_files(root: Path) -> dict[str, str]:
+    return {
+        str(p.relative_to(root)): p.read_text(encoding="utf-8")
+        for p in sorted(root.rglob("*"))
+        if p.is_file() and p.name != "skills-manifest.json"
+    }
+
+
+@pytest.mark.parametrize(
+    ("layout", "name"),
+    [
+        ("notcomfy/SKILL.md", "comfy"),  # a file in a folder of another name
+        ("comfy", "comfy"),  # a folder carrying the shipped name
+        ("pins/SKILL.md", "comfy-build-pins"),  # a reference skill's name
+        ("evil/SKILL.md", "Comfy"),  # one folder with `comfy` on macOS and Windows
+    ],
+)
+def test_install_refuses_a_path_declaring_a_shipped_name(monkeypatch, tmp_path: Path, layout: str, name: str):
+    root = _project(tmp_path)
+    token = tmp_path / "src" / layout
+    _write_skill(token / "SKILL.md" if not layout.endswith(".md") else token, name)
+    before = _agent_files(root)
+
+    result, envelope = _install_cli(monkeypatch, root, "install", "--scope", "project", "--skill", str(token))
+
+    assert result.exit_code == 1, result.output
+    assert envelope["ok"] is False
+    assert envelope["error"]["code"] == "skill_invalid"
+    assert repr(name) in envelope["error"]["message"]
+    assert "comfy skills show" in envelope["error"]["hint"]
+    assert _agent_files(root) == before
+
+
+def test_install_api_refuses_a_path_declaring_a_shipped_name(tmp_path: Path):
+    """The library entry point holds the same line as the command."""
+    md = tmp_path / "notcomfy" / "SKILL.md"
+    _write_skill(md, "comfy")
+    with pytest.raises(ValueError, match="'comfy'"):
+        install(scope="project", project_root=tmp_path, skills=[str(md)], targets=["claude-code"])
+    assert not (tmp_path / ".claude").exists()
+
+
+def test_validate_refuses_a_path_declaring_a_shipped_name(monkeypatch, tmp_path: Path):
+    md = tmp_path / "notcomfy" / "SKILL.md"
+    _write_skill(md, "comfy")
+    result, envelope = _install_cli(monkeypatch, tmp_path, "validate", str(md))
+    assert result.exit_code == 1, result.output
+    assert envelope["error"]["code"] == "skill_invalid"
+    assert "comfy skills show" in envelope["error"]["hint"]
+
+
+def test_install_accepts_the_shipped_reference_skill_by_its_installed_path(monkeypatch, tmp_path: Path):
+    import comfy_cli.skills as skills_pkg
+
+    root = _project(tmp_path)
+    shipped = Path(skills_pkg.__file__).parent / "comfy-build-pins"
+    result, envelope = _install_cli(
+        monkeypatch, root, "install", "--scope", "project", "--target", "claude-code", "--skill", str(shipped)
+    )
+    assert result.exit_code == 0, result.output
+    installed = root / ".claude" / "skills" / "comfy-build-pins" / "SKILL.md"
+    assert installed.read_text(encoding="utf-8") == skill_content("comfy-build-pins")
+    # ...and so does the copy that install just wrote, passed back by its own folder.
+    result, _ = _install_cli(
+        monkeypatch, root, "install", "--scope", "project", "--target", "cursor", "--skill", str(installed.parent)
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_install_accepts_an_unedited_copy_of_a_shipped_skill_with_crlf(monkeypatch, tmp_path: Path):
+    root = _project(tmp_path)
+    copy = tmp_path / "src" / "comfy" / "SKILL.md"
+    copy.parent.mkdir(parents=True)
+    copy.write_bytes(skill_content("comfy").replace("\n", "\r\n").encode("utf-8"))
+    result, _ = _install_cli(
+        monkeypatch, root, "install", "--scope", "project", "--target", "claude-code", "--skill", str(copy)
+    )
+    assert result.exit_code == 0, result.output
+    assert (root / ".claude" / "skills" / "comfy" / "SKILL.md").exists()
+
+
+def test_install_accepts_an_own_name_by_folder_and_by_file(monkeypatch, tmp_path: Path):
+    root = _project(tmp_path)
+    folder = tmp_path / "src" / "my-skill"
+    _write_skill(folder / "SKILL.md", "my-skill")
+    loose = tmp_path / "loose" / "SKILL.md"
+    _write_skill(loose, "my-other-skill")
+    for token in (folder, loose):
+        result, _ = _install_cli(
+            monkeypatch, root, "install", "--scope", "project", "--target", "claude-code", "--skill", str(token)
+        )
+        assert result.exit_code == 0, result.output
+    assert (root / ".claude" / "skills" / "my-skill" / "SKILL.md").exists()
+    assert (root / ".claude" / "skills" / "my-other-skill" / "SKILL.md").exists()
+
+
+def test_uninstall_by_path_still_removes_an_edited_shipped_skill(monkeypatch, tmp_path: Path):
+    root = _project(tmp_path)
+    install(scope="project", project_root=root, skills=["comfy"])
+    installed = root / ".claude" / "skills" / "comfy"
+    _write_skill(installed / "SKILL.md", "comfy", body="Edited by the user.")
+
+    result, _ = _install_cli(monkeypatch, root, "uninstall", "--scope", "project", "--skill", str(installed))
+
+    assert result.exit_code == 0, result.output
+    assert not (installed / "SKILL.md").exists()
+    assert not (root / ".cursor" / "rules" / "comfy.mdc").exists()
+    assert "comfy" not in (root / "AGENTS.md").read_text(encoding="utf-8").split("# mine", 1)[1]
+
+
+def test_agent_permissions_skill_names_every_permanently_refused_host():
+    """The skill tells the model not to request these, because `approve` vets
+    with `vet_host` and refuses them: a request for one waits until denied. A
+    host added to `_REFUSED_HOSTS` without a line here would be requested."""
+    from comfy_cli.agent import _REFUSED_HOSTS
+
+    rows = [
+        line
+        for line in skill_content("comfy-agent-permissions").splitlines()
+        if line.startswith("|") and "do **not** call `request_host`" in line
+    ]
+    assert len(rows) == 1, "expected exactly one 'never request this host' row in the blocked-by table"
+    for host in _REFUSED_HOSTS:
+        assert host in rows[0], f"the row should name the refused host {host}"

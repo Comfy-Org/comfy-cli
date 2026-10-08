@@ -9,8 +9,8 @@ Story first, pictures second. Multi-shot AI films fail in the edit, not the
 render: beats that don't cause each other read as a montage wearing a story's
 clothes, no matter how good each clip looks.
 
-**REQUIRED BACKGROUND:** the `comfy` skill (CLI mechanics, workflow hierarchy)
-and `comfy-fragments` (composing multi-stage graphs). On any failed job,
+**REQUIRED BACKGROUND:** the `comfy` skill (CLI mechanics + the recipe path —
+`apply`/`capture`/`foreach` — for reusable multi-stage graphs). On any failed job,
 `comfy-debug`.
 
 ## Order of operations

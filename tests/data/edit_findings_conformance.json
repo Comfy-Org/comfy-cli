@@ -1,0 +1,119 @@
+{
+  "_comment": "Language-neutral conformance corpus for docs/edit-findings-v1.md. Each case is (object_info, class_type, widget, value) -> expected outcome. A consumer in any language replays these to confirm it agrees with the engine instead of re-deriving the semantics. Run by tests/comfy_cli/test_edit_findings_contract.py.",
+  "version": 1,
+  "object_info": {
+    "Loader": {
+      "input": {
+        "required": {
+          "ckpt_name": [["v1-5-pruned-emaonly.safetensors", "sd_xl_base_1.0.safetensors"]],
+          "steps": ["INT", { "default": 20, "min": 1, "max": 100 }],
+          "label": ["STRING", { "default": "" }]
+        }
+      },
+      "output": ["MODEL"],
+      "output_name": ["MODEL"],
+      "category": "loaders",
+      "display_name": "Loader",
+      "python_module": "nodes"
+    },
+    "EmptyEnumLoader": {
+      "input": { "required": { "unet_name": [[]] } },
+      "output": ["MODEL"],
+      "output_name": ["MODEL"],
+      "category": "loaders",
+      "display_name": "Empty Enum Loader",
+      "python_module": "nodes"
+    },
+    "Uploader": {
+      "input": { "required": { "image": [["sample.png"], { "image_upload": true }] } },
+      "output": ["IMAGE"],
+      "output_name": ["IMAGE"],
+      "category": "image",
+      "display_name": "Uploader",
+      "python_module": "nodes"
+    }
+  },
+  "cases": [
+    {
+      "name": "valid enum member applies cleanly",
+      "class_type": "Loader",
+      "widget": "ckpt_name",
+      "value": "sd_xl_base_1.0.safetensors",
+      "expect": { "fatal": false, "findings": [] }
+    },
+    {
+      "name": "unknown enum on a non-upload port is FATAL and names the operand",
+      "class_type": "Loader",
+      "widget": "ckpt_name",
+      "value": "sdxl_hallucinated.ckpt",
+      "expect": {
+        "fatal": true,
+        "code": "unknown_enum_value",
+        "severity": "error",
+        "value": "sdxl_hallucinated.ckpt",
+        "field": "ckpt_name",
+        "has_valid_options": true
+      }
+    },
+    {
+      "name": "near-miss typo carries engine-side suggestions",
+      "class_type": "Loader",
+      "widget": "ckpt_name",
+      "value": "sd_xl_base_1.0.safetensor",
+      "expect": {
+        "fatal": true,
+        "code": "unknown_enum_value",
+        "severity": "error",
+        "value": "sd_xl_base_1.0.safetensor",
+        "did_you_mean_contains": "sd_xl_base_1.0.safetensors"
+      }
+    },
+    {
+      "name": "declared-but-empty enum is FATAL (nothing installed)",
+      "class_type": "EmptyEnumLoader",
+      "widget": "unet_name",
+      "value": "anything.safetensors",
+      "expect": {
+        "fatal": true,
+        "code": "no_options_available",
+        "severity": "error",
+        "value": "anything.safetensors"
+      }
+    },
+    {
+      "name": "upload-backed port never enum-checks — a fresh upload is legitimately absent",
+      "class_type": "Uploader",
+      "widget": "image",
+      "value": "just-uploaded-9f2c.png",
+      "expect": { "fatal": false, "findings": [] }
+    },
+    {
+      "name": "numeric below catalog min is FATAL",
+      "class_type": "Loader",
+      "widget": "steps",
+      "value": 0,
+      "expect": { "fatal": true, "code": "below_min", "severity": "error", "value": 0 }
+    },
+    {
+      "name": "numeric above catalog max is FATAL",
+      "class_type": "Loader",
+      "widget": "steps",
+      "value": 999,
+      "expect": { "fatal": true, "code": "above_max", "severity": "error", "value": 999 }
+    },
+    {
+      "name": "in-range numeric is clean",
+      "class_type": "Loader",
+      "widget": "steps",
+      "value": 20,
+      "expect": { "fatal": false, "findings": [] }
+    },
+    {
+      "name": "unconstrained STRING is never enum-checked",
+      "class_type": "Loader",
+      "widget": "label",
+      "value": "anything at all",
+      "expect": { "fatal": false, "findings": [] }
+    }
+  ]
+}

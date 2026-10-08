@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_delete.json",
+  "title": "comfy deploy delete --json data payload",
+  "description": "Acknowledges queued teardown; the soft-deleted audit record is retained. A caller that could not confirm gets the `deploy_delete_needs_confirm` error instead of this payload.",
+  "type": "object",
+  "required": ["deploymentId", "accepted", "recordRetained"],
+  "additionalProperties": false,
+  "properties": {
+    "deploymentId": {"type": "string", "minLength": 1},
+    "accepted": {"const": true},
+    "recordRetained": {"const": true}
+  }
+}

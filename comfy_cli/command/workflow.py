@@ -85,7 +85,7 @@ def _load_workflow_or_fail(renderer, path: str) -> tuple[Path, dict[str, Any]]:
     return p, data
 
 
-def _get_graph(input_path: str | None, host: str | None, port: int | None, on_stale=None):
+def _get_graph(input_path: str | None, host: str | None, port: int | None, on_stale=None, where: str | None = None):
     """Build a Graph from the resolved object_info source.
 
     The live (non-``--input``) fetch goes through ``resilient_load_object_info``,
@@ -106,10 +106,12 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
         # Live fetch: resolve mode from global routing chain, then use resilient loader.
         from comfy_cli import where as where_module
 
-        # ``_or_exit``: this command has no per-command --where flag to fall
-        # back to, so a bad COMFY_WHERE / project / persisted where_default
-        # becomes a clean `where_invalid` envelope rather than a traceback.
-        decision = where_module.resolve_default_or_exit()
+        # Honor an explicit --where (threaded from the agent edit commands).
+        # ``resolve_default_or_exit`` is main's shared wrapper and emits exactly
+        # the ``where_invalid`` envelope this hand-rolled block used to build,
+        # and it takes the flag — so the branch keeps its --where threading and
+        # drops the duplicate error handling.
+        decision = where_module.resolve_default_or_exit(where)
         mode = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
         # Routing resolved — stamp it so the `cql_no_graph` envelope below names
         # the catalog these verbs annotated against, matching what `nodes` does
@@ -134,6 +136,27 @@ def _get_graph(input_path: str | None, host: str | None, port: int | None, on_st
             hint=e.details.get("hint", "pass --input <path>, or start the server with `comfy launch`"),
         )
         raise typer.Exit(code=1) from e
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write via tmp + rename so SIGINT mid-write can't leave a half-written file.
+
+    Branch-local helper: main removed the two call sites this served when it
+    reworked those paths, which took the definition with it, but the CRDT edit
+    commands in ``workflow_edit`` still write drafts through it.
+    """
+    import os
+
+    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _parse_value(raw: str) -> Any:
@@ -176,6 +199,14 @@ def slots_cmd(
         str,
         typer.Option("--id", show_default=False, help="Template ID label; cosmetic only — defaults to the filename."),
     ] = "",
+    select: Annotated[
+        str | None,
+        typer.Option(
+            "--select",
+            show_default=False,
+            help="Project the payload: dot path (slots.0.address), wildcard (slots.#.address), comma multi-select.",
+        ),
+    ] = None,
 ):
     renderer = get_renderer()
     p, workflow = _load_workflow_or_fail(renderer, file)
@@ -203,6 +234,11 @@ def slots_cmd(
         payload["warnings"] = [
             {"code": "object_info_stale", "message": f"served from cache ({_stale['source']}): {_stale['reason']}"}
         ]
+
+    if select is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select, command="workflow slots")
 
     if renderer.is_pretty():
         from rich.table import Table
@@ -573,6 +609,85 @@ def notes_cmd(
     renderer.emit(payload, command="workflow notes")
 
 
+@app.command(
+    "print", help="Render a workflow as one line of Python-like source per node, with a binding -> node id map."
+)
+@tracking.track_command("workflow")
+def print_cmd(
+    file: Annotated[str, typer.Argument(help="Frontend-format workflow JSON.")],
+    fmt: Annotated[str, typer.Option("--format", help="Output form. Only `py` today.")] = "py",
+    input_path: Annotated[
+        str | None,
+        typer.Option("--input", show_default=False, help="Offline object_info.json dump for widget names."),
+    ] = None,
+    host: Annotated[str | None, typer.Option("--host", show_default=False)] = None,
+    port: Annotated[int | None, typer.Option("--port", show_default=False)] = None,
+    where: Annotated[
+        str | None,
+        typer.Option("--where", show_default=False, help="Routing for the catalog fetch: local or cloud."),
+    ] = None,
+    select: Annotated[
+        str | None,
+        typer.Option("--select", show_default=False, help="Project the payload (see `comfy workflow slots --select`)."),
+    ] = None,
+):
+    """Read-only. Reuses the catalog for widget names; refuses (with every reason) anything it cannot print faithfully."""
+    from comfy_cli.workflow_print import PrintUnsupported, render_py
+
+    renderer = get_renderer()
+    if fmt != "py":
+        renderer.error(
+            code="workflow_print_unsupported",
+            message=f"unknown --format {fmt!r}; only `py` is supported",
+            details={"reasons": [f"format {fmt!r}"]},
+        )
+        raise typer.Exit(code=1)
+    p, workflow = _load_workflow_or_fail(renderer, file)
+    # Mirrors slots_cmd: a stale-cache fallback is a fact about the rendered
+    # widget names, so it has to reach the caller. `print`'s `warnings` is a
+    # list of plain strings (slots' is a list of objects), so it is reported
+    # as one, appended to whatever the printer itself warned about.
+    _stale: dict = {}
+    graph = _get_graph(
+        input_path,
+        host,
+        port,
+        on_stale=lambda key, err: _stale.update(source=key, reason=err),
+        where=where,
+    )
+    try:
+        res = render_py(workflow, graph)
+    except PrintUnsupported as e:
+        renderer.error(
+            code="workflow_print_unsupported",
+            message="workflow contains something `print` cannot render faithfully: " + "; ".join(e.reasons),
+            details={"reasons": e.reasons, "path": str(p)},
+        )
+        raise typer.Exit(code=1) from e
+    warnings = list(res.warnings)
+    if _stale:
+        warnings.append(f"object_info_stale: {_stale['source']}: {_stale['reason']}")
+    payload = {
+        "workflow": str(p),
+        "format": "py",
+        "source": res.source,
+        "bindings": res.bindings,
+        "node_count": res.node_count,
+        "skipped": res.skipped,
+        "warnings": warnings,
+    }
+    if select is not None:
+        from comfy_cli.selector import emit_selected
+
+        select_payload = _sanitize_selected_strings(payload) if renderer.is_pretty() else payload
+        return emit_selected(renderer, select_payload, select, command="workflow print")
+    if renderer.is_pretty():
+        typer.echo(_strip_terminal_controls(res.source), nl=False)
+        for w in warnings:
+            typer.echo(f"warning: {_strip_terminal_controls(w)}", err=True)
+    renderer.emit(payload, command="workflow print")
+
+
 # ---------------------------------------------------------------------------
 # Saved workflows — list, get, save, delete.
 # ---------------------------------------------------------------------------
@@ -690,6 +805,24 @@ def _strip_terminal_controls(text: str) -> str:
         if (ch in "\t\n" or 0x20 <= ord(ch) < 0x7F)
         or (ord(ch) >= 0xA0 and unicodedata.category(ch) not in _SPOOFING_CATEGORIES)
     )
+
+
+def _sanitize_selected_strings(value: Any) -> Any:
+    """Recursively strip terminal control chars from string leaves of a ``--select`` payload.
+
+    Only needed for pretty mode: ``emit_selected`` there can write a selected
+    bare string (or a JSON-pretty-printed slice) straight to the terminal, so
+    an escape sequence buried in a node title or widget value would reach the
+    terminal unescaped. JSON mode's encoder already escapes control chars, so
+    this is a no-op there and is never called for it.
+    """
+    if isinstance(value, str):
+        return _strip_terminal_controls(value)
+    if isinstance(value, dict):
+        return {k: _sanitize_selected_strings(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_selected_strings(v) for v in value]
+    return value
 
 
 def _reject_unsafe_workflow_key(renderer, key: str) -> str:
@@ -859,7 +992,7 @@ def _http_request(
 def _handle_cloud_http_error(renderer, e, *, operation: str, workflow_id: str | None = None) -> typer.Exit:
     """Map HTTP failures to envelope codes. Returns an Exit to ``raise from``.
 
-    Thin wrapper over the shared cloud-error mapper (BE-3266) that supplies the
+    Thin wrapper over the shared cloud-error mapper that supplies the
     ``workflow``-specific 404 envelope and the oversize/unparseable-response
     checks; everything else is shared with ``jobs``.
     """
@@ -1458,6 +1591,7 @@ def validate_api_workflow(
     port: int | None = None,
     input_path: str | None = None,
     command: str = "workflow validate",
+    full_options: bool = False,
 ) -> None:
     """Validate an API-format workflow without submitting it.
 
@@ -1479,18 +1613,26 @@ def validate_api_workflow(
     # Load workflow
     wf_path = Path(workflow).expanduser()
     if not wf_path.is_file():
-        renderer.error(code="workflow_not_found", message=f"Workflow file not found: {workflow}", hint="check the path")
+        renderer.error(
+            command=command,
+            code="workflow_not_found",
+            message=f"Workflow file not found: {workflow}",
+            hint="check the path",
+        )
         raise typer.Exit(code=1)
     try:
         wf_data = json.loads(wf_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
-        renderer.error(code="workflow_invalid_json", message=f"Invalid JSON: {e}", hint="re-export from ComfyUI")
+        renderer.error(
+            command=command, code="workflow_invalid_json", message=f"Invalid JSON: {e}", hint="re-export from ComfyUI"
+        )
         raise typer.Exit(code=1) from e
     except (OSError, UnicodeDecodeError) as e:
         # e.g. a non-UTF-8 file, permission denied, or a TOCTOU race if the file
         # vanished after the is_file() check above. Report structurally instead
         # of crashing with a raw traceback.
         renderer.error(
+            command=command,
             code="workflow_read_error",
             message=f"Unable to read workflow file: {e}",
             hint="check file permissions and encoding",
@@ -1498,7 +1640,10 @@ def validate_api_workflow(
         raise typer.Exit(code=1) from e
     if not isinstance(wf_data, dict):
         renderer.error(
-            code="workflow_not_api_format", message="Workflow must be a JSON object", hint="use File > Export (API)"
+            command=command,
+            code="workflow_not_api_format",
+            message="Workflow must be a JSON object",
+            hint="use File > Export (API)",
         )
         raise typer.Exit(code=1)
 
@@ -1515,6 +1660,7 @@ def validate_api_workflow(
     except ValueError as e:
         if where:
             renderer.error(
+                command=command,
                 code="where_invalid",
                 message=str(e),
                 hint="use `--where local` or `--where cloud`",
@@ -1534,7 +1680,7 @@ def validate_api_workflow(
     # `config.background` step validate would consult whatever answers on the
     # default port while `run` submits to the background server comfy-cli
     # launched on another one, making the verdict meaningless for the server
-    # that will actually execute the workflow (BE-6299). `resolve_target` does
+    # that will actually execute the workflow. `resolve_target` does
     # not consult `config.background` on purpose (other callers, e.g. transfer
     # and system, must not), so — as its docstring says — the callers that do
     # honor it resolve upstream, here.
@@ -1557,9 +1703,20 @@ def validate_api_workflow(
             host, port = resolve_host_port(host, port)
 
     try:
-        graph = Graph.load(mode=mode, input_path=input_path, host=host, port=port)
+        # Through the resilient loader — NOT a direct `Graph.load` — so validate
+        # honors the same chain as every other consumer: `--input` >
+        # COMFY_OBJECT_INFO_FILE > cloud TTL cache > live fetch (+forced-refresh
+        # retry) > stale cache. A direct load silently dropped the env-pinned
+        # offline catalog and every fallback for the one command an agent runs
+        # before every submit.
+        from comfy_cli.cql.loader import resilient_load_object_info
+
+        raw = resilient_load_object_info(mode=mode, host=host, port=port, input_path=input_path)
+        graph = Graph.from_object_info(raw)
+        graph._try_default_annotations()
     except LoadError as e:
         renderer.error(
+            command=command,
             code="cql_no_graph",
             message=str(e),
             hint=e.details.get("hint", "pass --input <object_info.json>, or start the server"),
@@ -1574,6 +1731,8 @@ def validate_api_workflow(
     # The converter reuses the object_info the graph was already built from
     # (`graph.object_info`), so offline `--input` works and no second fetch happens.
     converted_from_ui = False
+    link_errors: list[dict] = []
+    link_warnings: list[dict] = []
     if is_ui_workflow(wf_data):
         if renderer.is_pretty():
             rprint("[yellow]Detected UI-format workflow, converting to API format...[/yellow]")
@@ -1581,6 +1740,7 @@ def validate_api_workflow(
             converted = convert_ui_to_api(wf_data, graph.object_info)
         except WorkflowConversionError as e:
             renderer.error(
+                command=command,
                 code="workflow_not_api_format",
                 message=f"Workflow is a UI export that could not be converted to API format: {e}",
                 hint="use ComfyUI's 'File > Export (API)' to save as API format",
@@ -1588,6 +1748,7 @@ def validate_api_workflow(
             raise typer.Exit(code=1) from e
         except Exception as e:  # noqa: BLE001 — never leak a raw traceback to the agent flow
             renderer.error(
+                command=command,
                 code="conversion_crash",
                 message=f"Workflow conversion crashed unexpectedly: {type(e).__name__}: {e}",
                 hint="report this at https://github.com/Comfy-Org/comfy-cli/issues",
@@ -1596,15 +1757,44 @@ def validate_api_workflow(
             raise typer.Exit(code=1) from e
         if not converted:
             renderer.error(
+                command=command,
                 code="workflow_not_api_format",
                 message="Workflow is a UI export that converted to no executable nodes",
                 hint="use ComfyUI's 'File > Export (API)' to save as API format",
             )
             raise typer.Exit(code=1)
+        editable_ids = _editable_node_ids(wf_data)
+        from comfy_cli.link_integrity import broken_link_findings
+
+        # The lowering reads each input's own `link` and never a row's slots,
+        # so a broken row disappears in it; judge the canvas before it does.
+        link_errors, link_warnings = broken_link_findings(wf_data)
         wf_data = converted
         converted_from_ui = True
 
-    result = graph.validate_workflow(wf_data)
+    from comfy_cli.cql.engine import full_enum_options
+
+    with full_enum_options(full_options):
+        result = graph.validate_workflow(wf_data)
+
+    # When the caller handed us a CANVAS graph, they have never seen the
+    # flattened ids the lowering mints for subgraph interiors (`57:3`) — their
+    # edit surface (slots / set-widget) speaks `57/3`. Key every issue by the
+    # editable address so a validate error can be acted on directly; keep the
+    # raw API id alongside for anyone correlating with server node_errors. An
+    # already-API input skips this: its ids address the document as given.
+    if converted_from_ui:
+        for issue in (*result["errors"], *result["warnings"]):
+            nid = str(issue.get("node_id", ""))
+            editable = editable_ids.get(nid, nid.replace(":", "/") if ":" in nid else nid)
+            if editable != nid:
+                issue["api_node_id"] = nid
+                issue["node_id"] = editable
+    if link_errors or link_warnings:
+        result["errors"].extend(link_errors)
+        result["warnings"].extend(link_warnings)
+        if link_errors:
+            result["valid"] = False
 
     # Preview credit spend: partner-API (paid) nodes spend Comfy credits when the
     # workflow is run. This is the same detection `comfy run` uses (authoritative
@@ -1684,10 +1874,79 @@ def validate_api_workflow(
                 f"[yellow]⚠ uses partner-API (paid) nodes that spend Comfy credits: "
                 f"{', '.join(escape(n) for n in partner_nodes)}[/yellow]"
             )
-    renderer.emit(payload, command=command, ok=result["valid"])
+    renderer.emit(payload, command=command, ok=result["valid"], error=_invalid_workflow_error(result))
 
     if not result["valid"]:
         raise typer.Exit(code=1)
+
+
+def _invalid_workflow_error(result: dict[str, Any]) -> dict[str, Any] | None:
+    """The error block a failed verdict carries, or ``None`` for a valid graph.
+
+    ``data`` already holds every per-node error, but a consumer branches on
+    ``error.code``, and this envelope carried ``error: null``.
+
+    The hint is built from the errors themselves, as ``run.preflight`` does: the
+    registered hint names the class_type case only, which is wrong advice for a
+    shape mismatch.
+    """
+    if result["valid"]:
+        return None
+    errors = result["errors"]
+    hint_parts = []
+    for error in errors[:5]:
+        line = f"node {error.get('node_id') or '?'}: {error.get('message', '')}"
+        suggestions = error.get("suggestions") or []
+        # An enum message already names its closest options ("— closest: …").
+        if suggestions and "closest:" not in line:
+            line += f" (did you mean: {', '.join(str(s) for s in suggestions)}?)"
+        hint_parts.append(line)
+    # The code is a registered catch-all raised for every verdict, so it alone
+    # cannot tell a cycle from a missing input and a caller reading only
+    # `error.code` diagnoses all of them as "unknown nodes". The distinct codes
+    # go in the message, which carries no contract, in first-seen order.
+    seen_codes = list(dict.fromkeys(str(e.get("code")) for e in errors if e.get("code")))
+    summary = f"workflow has {len(errors)} validation error(s)"
+    if seen_codes:
+        summary += ": " + ", ".join(seen_codes[:5])
+    return {
+        "code": "workflow_unknown_nodes",
+        "message": summary,
+        "hint": "\n".join(hint_parts),
+        "details": {"errors": errors, "warnings": result["warnings"]},
+    }
+
+
+def _editable_node_ids(ui_workflow: dict) -> dict[str, str]:
+    """Map every API id UI→API lowering mints to the editable address of its node.
+
+    Lowering composes an interior node's id as ``<outer>:<inner>`` (nested:
+    ``<outer>:<mid>:<inner>``); the edit surface speaks ``<outer>/<inner>``. The
+    map is built from the canvas's real ids rather than by rewriting ``:`` —
+    a doc-host-inserted node's own id (``insert:<op>:root:node:13``) already
+    contains ``:`` and must come back verbatim.
+    """
+    from comfy_cli.cql.engine import _MAX_SUBGRAPH_DEPTH, _subgraph_defs_by_id
+
+    defs_by_id = _subgraph_defs_by_id(ui_workflow)
+    out: dict[str, str] = {}
+
+    def walk(nodes: list, api_prefix: str, edit_prefix: str, depth: int) -> None:
+        if depth > _MAX_SUBGRAPH_DEPTH:
+            return
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            nid = str(node.get("id", ""))
+            api_id = f"{api_prefix}:{nid}" if api_prefix else nid
+            edit_id = f"{edit_prefix}/{nid}" if edit_prefix else nid
+            out[api_id] = edit_id
+            sg = defs_by_id.get(str(node.get("type", "")))
+            if sg is not None:
+                walk(sg.get("nodes") or [], api_id, edit_id, depth + 1)
+
+    walk(ui_workflow.get("nodes") or [], "", "", 0)
+    return out
 
 
 @app.command(
@@ -1716,9 +1975,23 @@ def validate_cmd(
         str | None,
         typer.Option("--input", show_default=False, help="Path to a saved object_info JSON (offline mode)."),
     ] = None,
+    full_options: Annotated[
+        bool,
+        typer.Option(
+            "--full-options",
+            help="List every option of a rejected enum value as `valid_options`. By default an error names the "
+            "closest options and `option_count`, and carries the whole list only when it is short.",
+        ),
+    ] = False,
 ):
     validate_api_workflow(
-        workflow, where=where, host=host, port=port, input_path=input_path, command="workflow validate"
+        workflow,
+        where=where,
+        host=host,
+        port=port,
+        input_path=input_path,
+        command="workflow validate",
+        full_options=full_options,
     )
 
 
@@ -1740,3 +2013,44 @@ app.command(
     help="Project a workflow (template or API JSON) into a reusable fragment — the inverse of compose.",
 )(_wfrag.decompose_cmd)
 app.add_typer(_wfrag.fragment_app, name="fragment")
+
+
+# ---------------------------------------------------------------------------
+# Structured, CRDT-ready edit primitives (add-node / connect / set-widget /
+# delete). Implemented in workflow_edit.py; mounted here so the surface stays
+# under `comfy workflow`. Each emits a replayable op in `data.op`.
+# ---------------------------------------------------------------------------
+
+from comfy_cli.command import workflow_edit as _wedit  # noqa: E402
+
+app.command("insert-workflow", help="Insert a complete workflow; emits one insert_workflow op.")(
+    _wedit.insert_workflow_cmd
+)
+app.command("add-node", help="Add a node to the graph; emits an add_node op.")(_wedit.add_node_cmd)
+app.command("connect", help="Wire an output slot to an input slot; emits a connect op.")(_wedit.connect_cmd)
+app.command("set-widget", help="Set a widget by name (`<id>.<widget>`); emits a set_widget op.")(_wedit.set_widget_cmd)
+app.command(
+    "set-node-field",
+    help="Set or clear a durable node field (title/mode/flags.collapsed/flags.pinned); "
+    "emits a set_node_field op (PROPOSED, op-vocabulary-v1 §1.8).",
+)(_wedit.set_node_field_cmd)
+app.command("delete-node", help="Delete a node and its links; emits a delete_node op.")(_wedit.delete_cmd)
+app.command(
+    "delete-nodes",
+    help="Delete N nodes in one atomic write; emits one delete_node op per id (all-or-nothing).",
+)(_wedit.delete_nodes_cmd)
+app.command("clear", help="Remove every node, link, and group; emits one clear op.")(_wedit.clear_cmd)
+app.command(
+    "reset-doc",
+    help="Reset the document to the empty baseline — nodes, ids AND replay history. Requires --confirm.",
+)(_wedit.reset_doc_cmd)
+app.command("ls-nodes", help="List nodes (id/type/title) in a workflow file.")(_wedit.ls_nodes_cmd)
+app.command("apply", help="Apply a recipe / batch of edits in one pass; supports node aliases + --param.")(
+    _wedit.apply_cmd
+)
+app.command("capture", help="Project a workflow into a reusable recipe (the op-batch that rebuilds it).")(
+    _wedit.capture_cmd
+)
+app.command("foreach", help="Instantiate a recipe over N param-sets → N workflows (bulk generation).")(
+    _wedit.foreach_cmd
+)

@@ -896,13 +896,12 @@ def test_registry_pretty_mode_renders_the_warning_row(workspace, fake_pip, capsy
 
 
 def test_registry_flags_are_registered_on_the_deps_command():
-    import click
     import typer
 
     from comfy_cli.command.custom_nodes.command import app
 
     click_command = typer.main.get_command(app).commands["deps"]
-    opts = {opt for p in click_command.params if isinstance(p, click.Option) for opt in p.opts}
+    opts = {opt for p in click_command.params if p.param_type_name == "option" for opt in p.opts}
     assert {"--registry", "--refresh"} <= opts
 
 
