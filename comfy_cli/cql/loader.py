@@ -3,7 +3,8 @@
 This module is the resilient object_info cache/fetch wrapper.
 ``resilient_load_object_info`` wraps the engine's loaders
 (``comfy_cli.cql.engine._load_from_file`` / ``_load_from_target``) with a
-cache-first TTL gate, auto-caches every successful fetch per host, retries
+cache-first TTL gate (cloud targets only; local targets always fetch live),
+auto-caches every successful fetch per host, retries
 once after a token refresh on failure, and falls back to the cached dump
 (with a stderr warning) when the retry still fails.
 
