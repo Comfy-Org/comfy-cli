@@ -1106,7 +1106,11 @@ def _primitive_targets(sg: dict, primitive: dict) -> list[tuple[str, int]]:
     }
     outputs = primitive.get("outputs") or []
     listed = outputs[0].get("links") if outputs and isinstance(outputs[0], dict) else None
-    ordered = [links[i] for i in listed if i in links] if isinstance(listed, list) else []
+    ordered = (
+        [links[link_id] for link_id in listed if isinstance(link_id, (int, str)) and link_id in links]
+        if isinstance(listed, list)
+        else []
+    )
     if not ordered:
         ordered = [
             x
