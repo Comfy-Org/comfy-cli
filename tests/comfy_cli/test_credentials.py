@@ -373,6 +373,7 @@ class TestResolveAllowClear:
             )
 
         monkeypatch.setattr(oauth, "refresh_tokens", _flake)
+        monkeypatch.setattr(oauth.time, "sleep", lambda s: None)  # skip the in-lock retry backoff
         cred = resolve_cloud_credential(purpose="cloud", refresh=True, allow_clear=False)
         assert cred == Credential(kind="api_key", value="env-key", source="env:COMFY_CLOUD_API_KEY")
         assert auth_store.get_cloud_session() is not None  # stale session kept
