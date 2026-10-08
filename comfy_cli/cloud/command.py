@@ -403,10 +403,11 @@ def status_cmd(
         status_body = _billing_get(status_url, target)
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
-            from comfy_cli.command._cloud_errors import insufficient_scope_error
+            from comfy_cli.command._cloud_errors import insufficient_scope_error, read_unauthorized_body
 
+            scope_body, _ = read_unauthorized_body(e)
             scope_error = insufficient_scope_error(
-                e.code, _read_error_body(e), getattr(e, "headers", None), details={"url": status_url}
+                e.code, scope_body, getattr(e, "headers", None), details={"url": status_url}
             )
             if scope_error is not None:
                 renderer.error(**scope_error)

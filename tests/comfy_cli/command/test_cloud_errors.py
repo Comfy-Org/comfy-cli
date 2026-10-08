@@ -630,3 +630,44 @@ def test_cloud_http_handler_maps_insufficient_scope():
     assert call["details"]["required_scope"] == "comfy-cloud:secrets:write"
     # The server's own explanation stays inspectable.
     assert call["details"]["body"] == _SCOPE_BODY.decode()
+
+
+# A JSON body whose `insufficient_scope` field sits past the 1000-byte display cap.
+_LONG_SCOPE_BODY = (
+    b'{"detail":"' + b"x" * (2 * _MAX_ERROR_BODY_BYTES) + b'","error":"insufficient_scope: comfy-cloud:agent:write"}'
+)
+
+
+def test_403_scope_field_past_display_cap_is_detected():
+    renderer = _FakeRenderer()
+    _handle(renderer, _http_error(403, _LONG_SCOPE_BODY))
+
+    (call,) = renderer.calls
+    assert call["details"]["reason"] == "insufficient_scope"
+    assert call["details"]["required_scope"] == "comfy-cloud:agent:write"
+    # Only the rendered body is capped.
+    assert call["details"]["body"] == _LONG_SCOPE_BODY[:_MAX_ERROR_BODY_BYTES].decode()
+
+
+def test_cloud_http_handler_detects_scope_field_past_display_cap():
+    from comfy_cli.command.cloud_http import handle_cloud_http_error as workflow_handler
+
+    renderer = _FakeRenderer()
+    e = urllib.error.HTTPError("https://x/api/x", 403, "Forbidden", {}, io.BytesIO(_LONG_SCOPE_BODY))
+
+    workflow_handler(renderer, e, operation="save")
+
+    (call,) = renderer.calls
+    assert call["details"]["required_scope"] == "comfy-cloud:agent:write"
+    assert call["details"]["body"] == _LONG_SCOPE_BODY[:_MAX_ERROR_BODY_BYTES].decode()
+
+
+def test_unauthorized_body_read_is_bounded_for_detection():
+    from comfy_cli.command._cloud_errors import _MAX_SCOPE_BODY_BYTES, read_unauthorized_body
+
+    e = _http_error(403, b"A" * (5 * 1024 * 1024))
+
+    scope_body, body = read_unauthorized_body(e)
+
+    assert len(scope_body) == _MAX_SCOPE_BODY_BYTES
+    assert body == "A" * _MAX_ERROR_BODY_BYTES

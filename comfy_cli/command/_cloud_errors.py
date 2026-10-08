@@ -30,6 +30,10 @@ import typer
 # env-configurable, so a hostile or misbehaving endpoint must not be able to
 # OOM the CLI with an unbounded error response.
 _MAX_ERROR_BODY_BYTES = 1000
+# Cap on the 403 body read for ``insufficient_scope`` detection. A JSON body
+# cut at ``_MAX_ERROR_BODY_BYTES`` no longer parses, so detection reads more
+# than ``details.body`` shows — but still a bounded amount.
+_MAX_SCOPE_BODY_BYTES = 64 * 1024
 
 # A 401 is unambiguously an authentication failure. A 403 is not — it is also
 # how the server denies a forbidden resource, a quota, or an already-finished
@@ -180,6 +184,21 @@ def _read_error_body(e: urllib.error.HTTPError) -> str:
         return (e.read(_MAX_ERROR_BODY_BYTES) or b"").decode("utf-8", "replace")
     except Exception:
         return ""
+
+
+def read_unauthorized_body(e: urllib.error.HTTPError) -> tuple[str, str]:
+    """``(detection_body, display_body)`` for a 401/403, from one bounded read.
+
+    Scope detection gets up to ``_MAX_SCOPE_BODY_BYTES`` so a structured
+    ``insufficient_scope`` field past the display cap is still seen; only the
+    ``details.body`` slice is capped at ``_MAX_ERROR_BODY_BYTES``. Read
+    failures degrade to empty bodies, as in ``_read_error_body``.
+    """
+    try:
+        raw = e.read(_MAX_SCOPE_BODY_BYTES) or b""
+    except Exception:
+        raw = b""
+    return raw.decode("utf-8", "replace"), raw[:_MAX_ERROR_BODY_BYTES].decode("utf-8", "replace")
 
 
 def retry_after_from_headers(headers) -> float | None:
@@ -383,10 +402,9 @@ def handle_cloud_http_error(
                 details={**id_detail, "operation": operation, **(not_found_details or {})},
             )
         elif e.code in (401, 403):
-            details = {"status": e.code, "body": _read_error_body(e), "operation": operation, **id_detail}
-            scope_error = insufficient_scope_error(
-                e.code, details["body"], getattr(e, "headers", None), details=details
-            )
+            scope_body, body = read_unauthorized_body(e)
+            details = {"status": e.code, "body": body, "operation": operation, **id_detail}
+            scope_error = insufficient_scope_error(e.code, scope_body, getattr(e, "headers", None), details=details)
             if scope_error is not None:
                 renderer.error(**scope_error)
             else:
