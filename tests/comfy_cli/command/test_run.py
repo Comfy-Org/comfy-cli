@@ -74,6 +74,25 @@ def mock_execution(workflow):
     )
 
 
+class _FakeClock:
+    """Independent wall/monotonic clocks for ``watch_execution``'s silence budget."""
+
+    START = 1000.0
+
+    def __init__(self):
+        self.wall = self.mono = self.START
+
+    def advance(self, seconds):
+        self.wall += seconds
+        self.mono += seconds
+
+    def patched(self):
+        fake_time = MagicMock()
+        fake_time.time.side_effect = lambda: self.wall
+        fake_time.monotonic.side_effect = lambda: self.mono
+        return patch("comfy_cli.command.run.execution.time", fake_time)
+
+
 def _make_msg(msg_type, prompt_id, **data_fields):
     return json.dumps({"type": msg_type, "data": {"prompt_id": prompt_id, **data_fields}})
 
@@ -321,30 +340,45 @@ class TestWatchExecution:
         must still abort: once the WALL clock is past the silence budget, a
         recv timeout re-raises instead of hanging."""
         mock_execution.prompt_id = "p"
+        clock = _FakeClock()
         mock_ws = MagicMock()
-        # recv only ever times out (server silent / connection dead on wake).
-        mock_ws.recv.side_effect = WebSocketTimeoutException("timed out")
+
+        def recv():
+            # A ~999s sleep: the wall clock jumps, the monotonic one does not.
+            clock.wall += 999
+            raise WebSocketTimeoutException("timed out")
+
+        mock_ws.recv.side_effect = recv
         mock_execution.ws = mock_ws
 
-        # last_activity=1000, then a wake with the wall clock jumped ~999s.
-        times = iter([1000.0, 1999.0])
-        with patch("comfy_cli.command.run.execution.time.time", lambda: next(times)):
-            with pytest.raises(WebSocketTimeoutException):
-                mock_execution.watch_execution()
+        with clock.patched(), pytest.raises(WebSocketTimeoutException):
+            mock_execution.watch_execution()
+        assert mock_ws.recv.call_count == 1
 
     def test_recv_timeout_within_budget_keeps_waiting(self, mock_execution):
         """A poll-interval timeout BEFORE the wall-clock budget elapses must not
         abort — the loop keeps waiting for the server."""
         mock_execution.prompt_id = "p"
+        clock = _FakeClock()
         mock_ws = MagicMock()
-        mock_ws.recv.side_effect = [
-            WebSocketTimeoutException("poll tick"),  # 5s in — under the 30s budget
-            _make_msg("executing", "p", node=None),  # then the server finishes
-        ]
+        replies = iter(
+            [
+                WebSocketTimeoutException("poll tick"),  # 5s in — under the 30s budget
+                _make_msg("executing", "p", node=None),  # then the server finishes
+            ]
+        )
+
+        def recv():
+            clock.advance(5)
+            reply = next(replies)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        mock_ws.recv.side_effect = recv
         mock_execution.ws = mock_ws
 
-        times = iter([1000.0, 1005.0, 1005.0])
-        with patch("comfy_cli.command.run.execution.time.time", lambda: next(times)):
+        with clock.patched():
             mock_execution.watch_execution()  # returns normally, no raise
 
     def test_recv_poll_interval_is_capped(self, mock_execution):
@@ -358,6 +392,46 @@ class TestWatchExecution:
 
         mock_execution.watch_execution()
         mock_ws.settimeout.assert_called_once_with(30)
+
+    def test_abort_lands_on_requested_deadline(self, mock_execution):
+        """A budget that is not a multiple of the poll interval must abort at
+        the requested deadline, not round up to the next poll boundary."""
+        mock_execution.timeout = 45
+        mock_execution.prompt_id = "p"
+        clock = _FakeClock()
+        mock_ws = MagicMock()
+
+        def recv():
+            # A silent server: each recv blocks for its full socket timeout.
+            clock.advance(mock_ws.settimeout.call_args.args[0])
+            raise WebSocketTimeoutException("timed out")
+
+        mock_ws.recv.side_effect = recv
+        mock_execution.ws = mock_ws
+
+        with clock.patched(), pytest.raises(WebSocketTimeoutException):
+            mock_execution.watch_execution()
+        assert [c.args[0] for c in mock_ws.settimeout.call_args_list] == [30, 15]
+        assert clock.mono == pytest.approx(_FakeClock.START + 45)
+
+    def test_backward_wall_clock_step_cannot_extend_wait(self, mock_execution):
+        """A wall clock stepped BACKWARD (an NTP correction) must not keep the
+        loop waiting past --timeout: the monotonic elapsed time still counts."""
+        mock_execution.prompt_id = "p"
+        clock = _FakeClock()
+        mock_ws = MagicMock()
+
+        def recv():
+            clock.mono += mock_ws.settimeout.call_args.args[0]
+            clock.wall -= 1000
+            raise WebSocketTimeoutException("timed out")
+
+        mock_ws.recv.side_effect = recv
+        mock_execution.ws = mock_ws
+
+        with clock.patched(), pytest.raises(WebSocketTimeoutException):
+            mock_execution.watch_execution()
+        assert mock_ws.recv.call_count == 1
 
     def test_skips_other_prompt_messages(self, mock_execution):
         prompt_id = "my-prompt"

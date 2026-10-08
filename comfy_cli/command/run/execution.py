@@ -328,23 +328,32 @@ class WorkflowExecution:
         # (the caller reports ``ws_timeout`` — the server job is resumable via
         # ``comfy jobs status``) rather than stalling for as long as the machine
         # slept.
-        poll = min(self.timeout, _RECV_POLL_SECONDS) if self.timeout else self.timeout
-        self.ws.settimeout(poll)
-        last_activity = time.time()
+        #
+        # Silence is the LARGER of the wall and monotonic elapsed times: the
+        # monotonic one keeps a backward wall-clock step (an NTP correction)
+        # from stretching the wait past ``--timeout``.
+        if not self.timeout:
+            self.ws.settimeout(self.timeout)
+        wall_mark, mono_mark = time.time(), time.monotonic()
         while True:
+            if self.timeout:
+                silent_for = max(time.time() - wall_mark, time.monotonic() - mono_mark)
+                # Never poll past the remaining budget, so the abort lands on
+                # the requested deadline rather than the next poll boundary.
+                self.ws.settimeout(max(min(self.timeout - silent_for, _RECV_POLL_SECONDS), 0.001))
             try:
                 message = self.ws.recv()
             except WebSocketTimeoutException:
                 # No frame this poll interval. Give up only once the silence
                 # budget has elapsed in REAL time — a monotonic timer frozen by
                 # a sleep can no longer keep us waiting past it.
-                if time.time() - last_activity >= self.timeout:
+                if not self.timeout or max(time.time() - wall_mark, time.monotonic() - mono_mark) >= self.timeout:
                     raise
                 continue
-            # Any frame — even a non-text control/binary frame — proves the
-            # connection is live, so it resets the silence budget exactly as the
-            # per-``recv`` socket timeout used to.
-            last_activity = time.time()
+            # Any text or binary frame proves the connection is live, so it
+            # resets the silence budget. (``recv`` answers ping/pong control
+            # frames internally without returning, so those never reach here.)
+            wall_mark, mono_mark = time.time(), time.monotonic()
             if not isinstance(message, str):
                 continue
             try:

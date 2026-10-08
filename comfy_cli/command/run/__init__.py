@@ -665,21 +665,21 @@ def execute(
         # server that is down (or came back with no record of the prompt).
         if wait_state is not None:
             jobs_state.clear_watcher_identity(wait_state)
+        prompt_id = _submitted_prompt_id(execution)
+        hint, slept_line = _ws_timeout_guidance(prompt_id)
         if renderer.is_pretty():
             pprint(
                 f"[bold red]Error: WebSocket timed out after {timeout}s waiting for server response.[/bold red]\n"
-                "[yellow]For long-running workflows, increase the timeout: comfy run --workflow <file> --timeout 300[/yellow]\n"
-                "[yellow]If the machine slept mid-run, the job may still be running — check "
-                "`comfy jobs status <id>`. Keep long local batches awake with `caffeinate`.[/yellow]"
+                "[yellow]For long-running workflows, increase the timeout: comfy run --workflow <file> --timeout 300[/yellow]"
+                + slept_line
             )
         details = {"timeout": timeout}
-        prompt_id = _submitted_prompt_id(execution)
         if prompt_id is not None:
             details["prompt_id"] = prompt_id
         renderer.error(
             code="ws_timeout",
             message=f"WebSocket timed out after {timeout}s waiting for server response.",
-            hint="re-run with a larger --timeout (e.g. --timeout 300); if the machine slept, check `comfy jobs status <id>`",
+            hint=hint,
             details=details,
         )
         raise typer.Exit(code=1)
@@ -834,6 +834,23 @@ def _mark_watch_exit(state, exit_code, execution):
     state.status = "error"
     state.error = verdict
     return _write_state(state)
+
+
+def _ws_timeout_guidance(prompt_id: str | None) -> tuple[str, str]:
+    """``(hint, pretty_line)`` for a ``ws_timeout``.
+
+    `execution.connect()` raises the same timeout before anything is queued, so
+    the `comfy jobs status` pointer is only offered when a job actually exists.
+    """
+    hint = "re-run with a larger --timeout (e.g. --timeout 300)"
+    if prompt_id is None:
+        return hint, ""
+    hint += f"; if the machine slept, check `comfy jobs status {prompt_id}`"
+    pretty_line = (
+        "\n[yellow]If the machine slept mid-run, the job may still be running — check "
+        f"`comfy jobs status {prompt_id}`. Keep long local batches awake with `caffeinate` (macOS).[/yellow]"
+    )
+    return hint, pretty_line
 
 
 def _submitted_prompt_id(execution) -> str | None:
