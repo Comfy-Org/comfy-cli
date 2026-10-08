@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
+from comfy_cli import workflow_print
 from comfy_cli.cql.engine import Graph
 from comfy_cli.workflow_print import PrintUnsupported, binding_name, class_expr, py_literal, render_py
 
@@ -1494,6 +1496,26 @@ def test_typed_duplicate_link_rows_are_rejected():
     wf["links"] = [[7, 1, 0, 2, 0], [7, True, 0, 2, 0]]
     with pytest.raises(PrintUnsupported, match="duplicate link id 7"):
         render_py(wf, None)
+
+
+def test_duplicate_link_validation_normalizes_each_row_once():
+    rows = [[7, 1, index, 2, 0] for index in range(20)]
+    with mock.patch.object(
+        workflow_print, "_normalised_link_row", wraps=workflow_print._normalised_link_row
+    ) as normalize:
+        assert workflow_print._validate([], rows) == ["duplicate link id 7"]
+    assert normalize.call_count == len(rows)
+
+    definition_rows = [
+        {"id": 7, "origin_id": 1, "origin_slot": index, "target_id": 2, "target_slot": 0} for index in range(20)
+    ]
+    errors: list[str] = []
+    with mock.patch.object(
+        workflow_print, "_normalised_link_row", wraps=workflow_print._normalised_link_row
+    ) as normalize:
+        workflow_print._def_links({"links": definition_rows}, errors, [])
+    assert errors == ["duplicate link id 7"]
+    assert normalize.call_count == len(definition_rows)
 
 
 def test_short_malformed_row_does_not_conflict_with_a_complete_link():

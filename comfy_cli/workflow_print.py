@@ -231,23 +231,21 @@ def _validate(nodes: list[dict], links: list[list]) -> list[str]:
         else:
             seen_ids.add(nid)
 
-    seen_links: dict[str, list] = {}
+    seen_links: dict[str, tuple[Any, ...]] = {}
     reported_link_dupes: set[str] = set()
     for link in links:
         if not isinstance(link, list) or len(link) < 5:
             continue
         link_id = link[0]
         normalized_link_id = str(link_id)
+        normalized_row = _normalised_link_row(link)
         previous = seen_links.get(normalized_link_id)
         if previous is not None:
-            if (
-                _normalised_link_row(link) != _normalised_link_row(previous)
-                and normalized_link_id not in reported_link_dupes
-            ):
+            if normalized_link_id not in reported_link_dupes and normalized_row != previous:
                 reported_link_dupes.add(normalized_link_id)
                 reasons.append(f"duplicate link id {normalized_link_id}")
         else:
-            seen_links[normalized_link_id] = link
+            seen_links[normalized_link_id] = normalized_row
 
     return reasons
 
@@ -1411,6 +1409,7 @@ def _def_links(sg_def: dict, link_errors: list[str], link_warnings: list[str]) -
     """Normalise a definition's dict-shaped links into the array-tuple form
     used everywhere else: ``{str(link_id): (origin_id, origin_slot, target_id, target_slot)}``."""
     out: dict[str, tuple] = {}
+    normalized_by_id: dict[str, tuple[Any, ...]] = {}
     for link in sg_def.get("links") or []:
         if not isinstance(link, dict):
             continue
@@ -1420,13 +1419,16 @@ def _def_links(sg_def: dict, link_errors: list[str], link_warnings: list[str]) -
             continue
         row = (link.get("origin_id"), link.get("origin_slot"), link.get("target_id"), link.get("target_slot"))
         duplicate_error = f"duplicate link id {lid}"
+        normalized_id = str(lid)
+        normalized_row = _normalised_link_row((lid, *row))
         if (
-            str(lid) in out
-            and _normalised_link_row((lid, *out[str(lid)])) != _normalised_link_row((lid, *row))
+            normalized_id in out
             and duplicate_error not in link_errors
+            and normalized_by_id[normalized_id] != normalized_row
         ):
             link_errors.append(duplicate_error)
-        out[str(lid)] = row
+        out[normalized_id] = row
+        normalized_by_id[normalized_id] = normalized_row
     return out
 
 
