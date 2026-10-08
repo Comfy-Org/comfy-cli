@@ -367,6 +367,25 @@ def test_resolve_shares_cycle_free_targets_across_different_ref_ancestries():
     assert resolve.call_count <= 40 * 10
 
 
+def test_resolve_bounds_a_cyclic_diamond_across_different_ref_ancestries():
+    depth = 24
+    schemas: dict[str, dict] = {}
+    for level in range(depth):
+        schemas[f"S{level}"] = {
+            "anyOf": [
+                {"$ref": f"#/components/schemas/A{level}"},
+                {"$ref": f"#/components/schemas/B{level}"},
+            ]
+        }
+        schemas[f"A{level}"] = {"$ref": f"#/components/schemas/S{level + 1}"}
+        schemas[f"B{level}"] = {"$ref": f"#/components/schemas/S{level + 1}"}
+    schemas[f"S{depth}"] = {"$ref": "#/components/schemas/S0"}
+    raw = {"components": {"schemas": schemas}}
+
+    with pytest.raises(spec.SpecError, match="safe traversal limit"):
+        spec._resolve(raw, {"$ref": "#/components/schemas/S0"})
+
+
 def test_extract_enum_deduplicates_repeated_cached_branches_linearly():
     enum = {"enum": [f"model-{index}" for index in range(2_000)]}
     schema = {"anyOf": [enum] * 2_000}
