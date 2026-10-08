@@ -311,6 +311,14 @@ def test_internal_error_scrubber_marks_truncated_messages():
     assert scrubbed.endswith("…")
 
 
+def test_internal_error_scrubber_drops_a_credential_split_at_the_input_cap():
+    message = "Bearer " + "A" * 3_800 + " https://alice:" + "S" * 300 + "@example.com/x"
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "alice:" not in scrubbed
+    assert "S" * 20 not in scrubbed
+    assert scrubbed.endswith("…")
+
+
 def test_internal_error_scrubber_preserves_text_after_an_unquoted_value():
     scrubbed = _internal_error_message(RuntimeError("bad option 'token=abc' given; retry later"))
     assert "abc" not in scrubbed

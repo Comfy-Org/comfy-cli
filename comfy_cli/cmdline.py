@@ -338,6 +338,13 @@ def _internal_error_message(error: BaseException) -> str:
     raw_text = f"{type(error).__name__}: {detail}"
     scrub_input_truncated = len(raw_text) > _INTERNAL_ERROR_SCRUB_INPUT_CAP
     text = raw_text[:_INTERNAL_ERROR_SCRUB_INPUT_CAP]
+    if scrub_input_truncated:
+        # Do not leave an anchorless tail when the cap lands inside a URL,
+        # header, or token. Dropping the final partial token is safer than
+        # asking the scrubbers to recognize a value whose prefix was cut off.
+        partial = re.search(r"\s+\S*$", text)
+        if partial is not None:
+            text = text[: partial.start()]
     text = _scrub_secret_constructors(text)
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
