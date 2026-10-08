@@ -117,7 +117,34 @@ def validate_host(host: str) -> str:
         if any(c.isspace() or ord(c) < 0x20 or ord(c) == 0x7F for c in candidate):
             raise typer.BadParameter(f"invalid host: {host!r} (contains whitespace or control characters)")
     _reject_embedded_port(host)
+    _reject_stray_brackets(host)
+    # The URL layer IDNA-encodes the host before connecting; a value it can't
+    # encode (an empty or over-long label, say) would otherwise escape as a
+    # raw ``UnicodeError`` traceback rather than a usage error.
+    try:
+        host.encode("idna")
+    except UnicodeError:
+        raise typer.BadParameter(f"invalid host: {host!r} (not a valid hostname)") from None
     return host
+
+
+def _reject_stray_brackets(host: str) -> None:
+    """Reject ``[``/``]`` anywhere but around a genuine IPv6 literal.
+
+    ``_reject_embedded_port`` only inspects colon-bearing hosts, so a
+    colon-free ``'[localhost]'`` or ``'a]b'`` slipped through and then made
+    ``urllib.parse.urlsplit`` raise ``ValueError("Invalid IPv6 URL")`` — an
+    uncaught traceback instead of a usage error.
+    """
+    if "[" not in host and "]" not in host:
+        return
+    if host.startswith("[") and host.endswith("]"):
+        try:
+            ipaddress.IPv6Address(host[1:-1])
+            return
+        except ValueError:
+            pass
+    raise typer.BadParameter(f"invalid host: {host!r} (brackets are only valid around an IPv6 literal)")
 
 
 def _reject_embedded_port(host: str) -> None:
