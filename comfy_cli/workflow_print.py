@@ -323,7 +323,7 @@ def _broken_links(nodes: list[dict], links: list[Any], qualify: Any = str) -> tu
             (
                 location
                 for location in locations
-                if str(location[0].get("id")) == str(tgt_id) and location[1] == tgt_slot
+                if str(location[0].get("id")) == str(tgt_id) and _is_slot_index(tgt_slot) and location[1] == tgt_slot
             ),
             next(
                 (location for location in locations if str(location[0].get("id")) == str(tgt_id)),
@@ -414,7 +414,11 @@ def _stale_input_slot_links(
         link_id, src_id, src_slot, tgt_id, tgt_slot = link[0], link[1], link[2], link[3], link[4]
         locations = holders_by_link.get(str(link_id), [])
         canonical = next(
-            (location for location in locations if str(location[0]) == str(tgt_id) and location[1] == tgt_slot),
+            (
+                location
+                for location in locations
+                if str(location[0]) == str(tgt_id) and _is_slot_index(tgt_slot) and location[1] == tgt_slot
+            ),
             next(
                 (location for location in locations if str(location[0]) == str(tgt_id)),
                 next(iter(locations), None),

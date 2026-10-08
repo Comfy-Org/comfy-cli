@@ -1412,6 +1412,26 @@ def test_actual_holder_recovers_missing_or_malformed_declared_targets(sd15_graph
     assert not any("BROKEN link 7" in warning for warning in res.warnings)
 
 
+@pytest.mark.parametrize("malformed_slot", [True, False, 0.0])
+def test_malformed_target_slot_does_not_exact_match_a_holder(malformed_slot):
+    nodes = [_node(1, "A", outputs=[{"name": "out", "links": [7]}])]
+    nodes.append(
+        _node(
+            2,
+            "B",
+            inputs=[{"name": "first", "link": 7}, {"name": "second", "link": 7}],
+        )
+    )
+
+    warnings, _ignored, retargeted, dependencies = workflow_print._stale_input_slot_links(
+        nodes, [[7, 1, 0, 2, malformed_slot, "*"]]
+    )
+
+    assert retargeted == {"7": (2, 0)}
+    assert dependencies == {"7": [(2, 0), (2, 1)]}
+    assert any("non-integer input slot" in warning for warning in warnings)
+
+
 def test_duplicate_link_holder_preserves_the_real_cycle():
     wf = _mini(
         [
