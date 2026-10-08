@@ -13,6 +13,7 @@
         "required": [
           "createdAt",
           "id",
+          "name",
           "releaseId",
           "status",
           "updatedAt"
@@ -25,6 +26,11 @@
           "deletedBy": {"type": ["string", "null"]},
           "endpointUrl": {"type": ["string", "null"]},
           "id": {"type": "string", "minLength": 1},
+          "name": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "description": "The deployment's name, unique among its Build's live deployments; null where it has none or comfy-deploy does not serve names yet."
+          },
           "releaseId": {"type": "string", "minLength": 1},
           "releaseVersion": {
             "type": "integer",

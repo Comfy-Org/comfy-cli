@@ -17,6 +17,10 @@ history.
 
 ### Added
 
+- `comfy deploy ls` leads each row with the deployment's name, and `comfy
+  deploy status` reports `Deployment production (dep-…): ready`. `ls` prints
+  `-` for a deployment with no name and `status` its id alone, and `--json`
+  carries `name`, null where there is none.
 - `comfy deploy rollback [--to vN]` moves a deployment back to an earlier
   release, keeping its id and URL, and follows the move as `up` does; `comfy
   deploy history` lists the releases a deployment ran, newest first, with what

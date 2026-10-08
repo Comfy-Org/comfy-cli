@@ -246,6 +246,24 @@ def required_string(value: JsonObject, key: str) -> str:
     return field
 
 
+def deployment_name(deployment: JsonObject) -> str | None:
+    """The deployment's name, or None for an unnamed one.
+
+    comfy-deploy omits an unset name, and one that predates names sends none.
+    A name is only ever shown, so a malformed one reads as none rather than
+    failing the command that shows it.
+    """
+    name = deployment.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def deployment_label(deployment: JsonObject) -> str:
+    """``name (id)`` as a sentence names a deployment, or the id alone for an unnamed one."""
+    deployment_id = required_string(deployment, "id")
+    name = deployment_name(deployment)
+    return deployment_id if name is None else f"{name} ({deployment_id})"
+
+
 def required_int(value: JsonObject, key: str) -> int:
     field = value.get(key)
     if not isinstance(field, int) or isinstance(field, bool):

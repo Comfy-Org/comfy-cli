@@ -338,3 +338,57 @@ def test_a_workspace_row_without_a_release_still_lists(tmp_path: Path, monkeypat
     # Then the row prints with no release column
     assert result.exit_code == 0, result.stderr
     assert "other-live  ready" in result.stdout
+
+
+def test_each_row_leads_with_the_deployments_name(tmp_path: Path, monkeypatch) -> None:
+    # Given production, staging, and one deployment from before names
+    rows = [
+        {**_summary("dep-a1", "release-5"), "name": "production"},
+        {**_summary("dep-b2", "release-5"), "name": "staging"},
+        {**_summary("dep-c3", "release-5"), "name": None},
+    ]
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([rows]))
+
+    # When
+    result = _invoke_pretty(str(write_spec(tmp_path)))
+
+    # Then the name comes first and the id stays beside it
+    assert result.exit_code == 0, result.stderr
+    assert "production  dep-a1  ready  v5" in result.stdout
+    assert "staging  dep-b2  ready  v5" in result.stdout
+    assert "-  dep-c3  ready  v5" in result.stdout
+
+
+@pytest.mark.parametrize("name", ["prod [/]", "eu[red]x", "[link=http://evil]prod[/link]"])
+def test_a_name_holding_markup_prints_as_written(tmp_path: Path, monkeypatch, name: str) -> None:
+    # Given
+    rows = [{**_summary("dep-a1", "release-5"), "name": name}]
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([rows]))
+
+    # When
+    result = _invoke_pretty(str(write_spec(tmp_path)))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert f"{name}  dep-a1  ready  v5" in result.stdout
+
+
+def test_json_rows_carry_a_name_null_where_comfy_deploy_sent_none(tmp_path: Path, monkeypatch) -> None:
+    # Given a named row, one with no name field, and two whose name is malformed
+    rows = [
+        {**_summary("dep-a1", "release-5"), "name": "production"},
+        _summary("dep-c3", "release-5"),
+        {**_summary("dep-d4", "release-5"), "name": ""},
+        {**_summary("dep-e5", "release-5"), "name": 5},
+    ]
+    _install_clients(monkeypatch, FakeBuilder(), PagedDeploy([rows]))
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then a name that is not one reads as none, as status reads it
+    assert result.exit_code == 0, result.stderr
+    names = {row["id"]: row["name"] for row in _deployments(result)}
+    assert names == {"dep-a1": "production", "dep-c3": None, "dep-d4": None, "dep-e5": None}
+    schema = json.loads((Path(__file__).parents[3] / "comfy_cli" / "schemas" / "deploy_ls.json").read_text())
+    jsonschema.Draft202012Validator(schema).validate(_payload(result))
