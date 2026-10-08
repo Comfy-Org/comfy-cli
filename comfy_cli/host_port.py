@@ -125,6 +125,15 @@ def validate_host(host: str) -> str:
         host.encode("idna")
     except UnicodeError:
         raise typer.BadParameter(f"invalid host: {host!r} (not a valid hostname)") from None
+    # IDNA encoding is not a URL-parser pass: ``urlsplit`` NFKC-normalizes the
+    # netloc and rejects a fullwidth ``／`` (it folds to ``/``) that IDNA lets
+    # through, so check the URL the callers will build as well.
+    from comfy_cli.env_checker import _bracket_host
+
+    try:
+        urllib.parse.urlsplit(f"http://{_bracket_host(host)}:{DEFAULT_PORT}/")
+    except ValueError:
+        raise typer.BadParameter(f"invalid host: {host!r} (not a valid hostname)") from None
     return host
 
 

@@ -535,7 +535,12 @@ def test_validate_host_rejects_stray_brackets(host):
         validate_host(host)
 
 
-@pytest.mark.parametrize("host", ["a" * 64 + ".example", "a..b"])
+@pytest.mark.parametrize("host", ["a" * 64 + ".example", "a..b", "example\uff0ftest", "example\uff1ftest"])
 def test_validate_host_rejects_unencodable_hostnames(host):
     with pytest.raises(typer.BadParameter, match="not a valid hostname"):
         validate_host(host)
+
+
+@pytest.mark.parametrize("host", ["::1", "[::1]", "localhost", "127.0.0.1", "b\u00fccher.example"])
+def test_validate_host_accepts_url_parseable_hosts(host):
+    assert validate_host(host) == host
