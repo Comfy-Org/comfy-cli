@@ -1265,6 +1265,7 @@ def test_malformed_definition_boundary_slots_warn_and_drop(sd15_graph):
     assert "invalid target slot -1; it was ignored" in warnings
     assert "invalid source slot '0'; it was ignored" in warnings
     assert "invalid output-boundary slot -1; it was ignored" in warnings
+    assert "rendered through input 'samples'" not in warnings
 
 
 def test_definition_input_proxy_uses_raw_slot_positions(sd15_graph):
