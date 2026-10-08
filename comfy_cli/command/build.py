@@ -56,6 +56,7 @@ from comfy_cli.command.build_diff import (
 from comfy_cli.command.build_digest_cache import ModelDigestCache
 from comfy_cli.command.build_package import NodePackageError, package_node
 from comfy_cli.command.build_paths import (
+    SPEC_SUFFIXES,
     BuildPaths,
     BuildSpecNotFoundError,
     InstallOverrides,
@@ -3024,30 +3025,69 @@ def _newest_release_id(renderer, client, build_id: str) -> str:
     return release_id
 
 
-def _release_or_path(renderer, release: str | None, path: str | None) -> tuple[str | None, str | None]:
+def _path_shaped(value: str) -> bool:
+    """Whether ``value`` is spelled like a path, whatever is on disk.
+
+    `.` and `..`, anything with a path separator, and a `.yaml`/`.json` name (the
+    suffixes `resolve_build_paths` reads as a spec file) can never be one release
+    id, so they are classified by spelling alone, like `build_paths` classifies
+    PATH: one argument means one thing whether or not it exists.
+    """
+    separators = {"/", os.sep, os.altsep} - {None}
+    return (
+        value in {".", ".."}
+        or any(separator in value for separator in separators)
+        or Path(value).suffix in SPEC_SUFFIXES
+    )
+
+
+def _release_or_path(
+    renderer, release: str | None, path: str | None, build_id: str | None
+) -> tuple[str | None, str | None]:
     """Split the read verbs' ``[RELEASE] [PATH]`` into what the caller meant.
 
     Every sibling verb (`release create`, `release ls`, `build show`, `deploy
     up`) takes a path first, defaulting to `.`, so `release show .` is the
     natural thing to type. Read as a release id, `.` reached the builder as
     `GET /v1/releases/.`, the dot segment collapsed onto the collection, and
-    the caller got an opaque 302. A first argument that names an existing file
-    or directory, with no PATH after it, is that path.
+    the caller got an opaque 302.
 
-    Whatever id is left is refused when it is blank or only dots, for the reason
-    `release_delete` gives: `quote(safe="")` leaves a dot segment alone, so it
-    can never name one release. Refused here, above the client, so the first
-    envelope is the actionable one rather than a sign-in prompt.
+    So with no PATH after it, RELEASE is a path when it looks like one: spelled
+    like a path (`_path_shaped`), or a bare name of a folder that holds a build
+    spec. A bare name that merely matches some file or folder in the cwd stays a
+    release id: the builder's failure text tells callers to run `comfy build
+    release logs <versionId> --target ...` with no PATH. A path-shaped RELEASE
+    with no spec behind it fails as `build_spec_not_found` here, before any
+    request, rather than travelling to the builder as an id (unless `--id`
+    names the Build, when PATH is never read).
+
+    Whatever id is left is refused when it is blank, only dots, or holds a path
+    separator: the read client joins it into the URL unencoded (`Target.url`
+    only strips slashes off the ends), so a dot segment aims the read at the
+    collection or its parent and a separator at another route. Refused here,
+    above the client, so the first envelope is the actionable one rather than a
+    sign-in prompt.
     """
     if release is None:
         return None, path
-    if path is None and os.path.exists(release):
-        return None, release
+    if path is None and release.strip():
+        spec_file = resolve_build_paths(release, require_spec=False).spec_file
+        if spec_file.is_file():
+            return None, release
+        if _path_shaped(release):
+            if build_id is not None:
+                # `--id` picks the Build, and PATH is never read then, so a
+                # path with no spec behind it is as harmless here as it is
+                # after the release id.
+                return None, release
+            error = BuildSpecNotFoundError(spec_file)
+            renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
+            raise typer.Exit(code=1)
     release = release.strip()
-    if not release or set(release) == {"."}:
+    if not release or set(release) == {"."} or _path_shaped(release):
         renderer.error(
             code="build_missing_input",
-            message="RELEASE must name one release, not an empty or dot-only path segment.",
+            message="RELEASE must name one release, not a path, a blank or a dot-only path segment.",
             hint="pass the release id shown by `comfy build release ls`, or only a build path to read its newest release",
             details={"invalid": [release]},
         )
@@ -3193,14 +3233,20 @@ def release_ls(
 def release_show(
     ctx: typer.Context,
     release: Annotated[
-        str | None, typer.Argument(help="Release id, or a build path. Default: the current Build's newest release.")
+        str | None,
+        typer.Argument(
+            help="Release id, or a build path (`.`, one with a `/`, or a folder holding comfy-build.yaml). "
+            "Default: the current Build's newest release."
+        ),
     ] = None,
-    path: Annotated[str | None, typer.Argument(help="Build spec path used when RELEASE is omitted.")] = None,
+    path: Annotated[
+        str | None, typer.Argument(help="Build spec path used when RELEASE is omitted or is itself a path.")
+    ] = None,
     build_id: Annotated[str | None, typer.Option("--id", help="Resolve the newest release from this Build id.")] = None,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
-    release, path = _release_or_path(renderer, release, path)
+    release, path = _release_or_path(renderer, release, path, build_id)
     client = _builder_client(renderer, builder_url)
     release_id = _selected_release_id(renderer, client, _BuildScope(ctx, path, build_id), release)
     detail = _builder_call(renderer, lambda: client.get_release(release_id))
@@ -3214,9 +3260,15 @@ def release_show(
 def release_logs(
     ctx: typer.Context,
     release: Annotated[
-        str | None, typer.Argument(help="Release id, or a build path. Default: the current Build's newest release.")
+        str | None,
+        typer.Argument(
+            help="Release id, or a build path (`.`, one with a `/`, or a folder holding comfy-build.yaml). "
+            "Default: the current Build's newest release."
+        ),
     ] = None,
-    path: Annotated[str | None, typer.Argument(help="Build spec path used when RELEASE is omitted.")] = None,
+    path: Annotated[
+        str | None, typer.Argument(help="Build spec path used when RELEASE is omitted or is itself a path.")
+    ] = None,
     target: Annotated[
         str | None,
         typer.Option("--target", help=f"Target whose log to read, as {TARGET_FORM} (e.g. linux/nvidia)."),
@@ -3226,7 +3278,7 @@ def release_logs(
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
-    release, path = _release_or_path(renderer, release, path)
+    release, path = _release_or_path(renderer, release, path, build_id)
     target_value = require_option(
         "--target",
         target,
@@ -3440,14 +3492,20 @@ def model_dirs_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
 def release_manifest(
     ctx: typer.Context,
     release: Annotated[
-        str | None, typer.Argument(help="Release id, or a build path. Default: the current Build's newest release.")
+        str | None,
+        typer.Argument(
+            help="Release id, or a build path (`.`, one with a `/`, or a folder holding comfy-build.yaml). "
+            "Default: the current Build's newest release."
+        ),
     ] = None,
-    path: Annotated[str | None, typer.Argument(help="Build spec path used when RELEASE is omitted.")] = None,
+    path: Annotated[
+        str | None, typer.Argument(help="Build spec path used when RELEASE is omitted or is itself a path.")
+    ] = None,
     build_id: Annotated[str | None, typer.Option("--id", help="Resolve the newest release from this Build id.")] = None,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
-    release, path = _release_or_path(renderer, release, path)
+    release, path = _release_or_path(renderer, release, path, build_id)
     client = _builder_client(renderer, builder_url)
     release_id = _selected_release_id(renderer, client, _BuildScope(ctx, path, build_id), release)
     manifest = _builder_call(renderer, lambda: client.get_release_manifest(release_id))

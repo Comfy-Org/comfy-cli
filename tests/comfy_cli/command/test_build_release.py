@@ -909,9 +909,10 @@ def test_a_build_path_before_the_release_reads_that_build_from_anywhere(
 def test_a_read_verb_refuses_an_id_that_names_no_release_before_it_reaches_the_builder(
     workspace: Path, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str, release_id: str
 ) -> None:
-    """With PATH given as well, a dot-only RELEASE cannot be the path, and
-    `quote(safe="")` leaves a dot segment alone, so it aims the read at the
-    collection or its parent. The empty `calls` is the load-bearing half."""
+    """With PATH given as well, a dot-only RELEASE cannot be the path, and the
+    read client joins the id into the URL unencoded, so a dot segment aims the
+    read at the collection or its parent. The empty `calls` is the load-bearing
+    half."""
     # Given
     calls = _recording_builder(monkeypatch)
 
@@ -932,6 +933,154 @@ def test_a_release_id_that_names_no_path_still_reaches_the_builder(workspace: Pa
     # Then
     assert result.exit_code == 0, result.stderr
     assert client.calls == [{"method": "get_release", "id": "release-3"}]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize("kind", ["folder", "file"])
+def test_a_release_id_that_matches_a_name_in_the_cwd_still_reaches_the_builder(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str, kind: str
+) -> None:
+    """The builder's failure text tells a caller to run `comfy build release
+    logs <versionId> --target ...` with no PATH. A file or folder that happens
+    to share that name, and holds no build spec, must not turn the id into a
+    path."""
+    # Given
+    if kind == "folder":
+        (workspace / "rel-abc").mkdir()
+    else:
+        (workspace / "rel-abc").write_text("notes")
+    client.statuses = [{"id": "rel-abc", "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], "rel-abc", *verb[1:])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [(read, "rel-abc")]
+
+
+def test_a_bare_folder_name_that_holds_a_build_spec_is_the_build_path(workspace: Path, client: ReleaseBuilder) -> None:
+    # Given
+    write_spec(make_workspace(workspace / "other"), build_id="build-2", revision="revision-1", models=[], nodes=[])
+    client.releases = [{"id": "release-9", "version": 9}]
+    client.statuses = [{"id": "release-9", "status": "complete"}]
+
+    # When
+    result = invoke_release("show", "other")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.calls == [
+        {"method": "list_releases", "id": "build-2"},
+        {"method": "get_release", "id": "release-9"},
+    ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize(
+    "missing",
+    [
+        pytest.param("./typo-dir", id="dot-slash"),
+        pytest.param("../other-build", id="parent"),
+        pytest.param("typo-dir/.", id="trailing-dot"),
+        pytest.param("typo-dir/", id="trailing-slash"),
+        pytest.param("typo.yaml", id="spec-file"),
+    ],
+)
+def test_a_path_shaped_release_that_names_no_spec_is_refused_before_it_reaches_the_builder(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str, missing: str
+) -> None:
+    """The read client joins the id into the URL unencoded, so `./typo-dir`
+    resolved to `GET /v1/releases/typo-dir` and `../other-build` climbed out of
+    the collection. A RELEASE shaped like a path is a path, and a path with no
+    spec behind it fails the way every other build verb does."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+
+    # When
+    result = invoke_release(verb[0], missing, *verb[1:])
+
+    # Then
+    error = envelope(result)["error"]
+    assert (result.exit_code, error["code"], calls) == (1, "build_spec_not_found", [])
+    assert Path(error["details"]["path"]).is_absolute()
+
+
+def test_a_path_shaped_release_with_no_spec_is_ignored_when_id_names_the_build(
+    tmp_path: Path, client: ReleaseBuilder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--id` picks the Build and PATH is never read, as with `release ls . --id`."""
+    # Given
+    monkeypatch.chdir(tmp_path)
+    client.releases = [{"id": "release-6", "version": 6}]
+    client.statuses = [{"id": "release-6", "status": "complete"}]
+
+    # When
+    result = invoke_release("show", ".", "--id", "build-9")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert client.calls == [
+        {"method": "list_releases", "id": "build-9"},
+        {"method": "get_release", "id": "release-6"},
+    ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+def test_a_path_shaped_release_with_a_spec_is_the_build_path(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str
+) -> None:
+    # Given
+    client.releases = [{"id": "release-4", "version": 4}]
+    client.statuses = [{"id": "release-4", "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], "./comfy-build.yaml", *verb[1:])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [
+        ("list_releases", "build-1"),
+        (read, "release-4"),
+    ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+def test_a_release_id_followed_by_a_path_reaches_the_builder_as_the_id(
+    workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str
+) -> None:
+    # Given
+    client.statuses = [{"id": "release-5", "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], "release-5", ".", *verb[1:])
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [(read, "release-5")]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+@pytest.mark.parametrize(
+    "release_id",
+    [
+        pytest.param("./typo-dir", id="dot-slash"),
+        pytest.param("rel-abc/logs", id="nested"),
+    ],
+)
+def test_a_path_shaped_release_followed_by_a_path_is_refused_before_it_reaches_the_builder(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str, release_id: str
+) -> None:
+    """With PATH given, RELEASE is the id; one with a path separator cannot name
+    a single release, and unencoded it would aim the read at another route."""
+    # Given
+    calls = _recording_builder(monkeypatch)
+
+    # When
+    result = invoke_release(verb[0], release_id, ".", *verb[1:])
+
+    # Then
+    assert (result.exit_code, envelope(result)["error"]["code"], calls) == (1, "build_missing_input", [])
 
 
 def test_delete_uses_one_stripped_release_id_for_the_prompt_the_url_and_the_payload(
