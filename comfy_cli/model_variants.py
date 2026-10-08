@@ -19,6 +19,7 @@ folder, two candidate precisions) is not a match.
 
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any
 
@@ -163,27 +164,20 @@ def resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dic
     carries the same filename as a promoted value, and the ``properties.models``
     download list, follow the rewrite.
     """
-    # Promoted values are updated after their interior model selector. Validate
-    # that traversal before mutating either place, so a bounded malformed DAG
-    # returns a structured failure without leaving a half-rewritten workflow.
-    needs_promoted_rename = any(
-        sg_id is not None
-        and any(
-            value not in {str(option) for option in port.enum_values}
-            and precision_sibling(value, list(port.enum_values)) is not None
-            for _key, port, _field, value in _model_widgets(node, graph)
-        )
-        for node, sg_id in _workflow_nodes(workflow)
-    )
-    if needs_promoted_rename:
-        from comfy_cli.cql.promoted import PromotionTraversalLimitError, defs_by_id, promoted_inputs
+    from comfy_cli.cql.promoted import PromotionTraversalLimitError
 
-        defs = defs_by_id(workflow)
-        try:
-            for definition in {id(value): value for value in defs.values()}.values():
-                promoted_inputs(definition, defs)
-        except PromotionTraversalLimitError as exc:
-            raise ModelVariantResolutionError(str(exc)) from exc
+    candidate = copy.deepcopy(workflow)
+    try:
+        result = _resolve_workflow_models(candidate, graph)
+    except PromotionTraversalLimitError as exc:
+        raise ModelVariantResolutionError(str(exc)) from exc
+    workflow.clear()
+    workflow.update(candidate)
+    return result
+
+
+def _resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dict]]:
+    """Transactional implementation for :func:`resolve_workflow_models`."""
 
     subs: list[dict] = []
     unavailable: list[dict] = []

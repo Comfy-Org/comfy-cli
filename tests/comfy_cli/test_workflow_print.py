@@ -1279,13 +1279,13 @@ def test_malformed_definition_boundary_slots_warn_and_drop(sd15_graph):
 
     res = render_py(wf, sd15_graph)
 
-    assert "IN.samples" not in res.source
-    assert "OUT.IMAGE = None" in res.source
+    assert "IN.samples" in res.source
+    assert "OUT.IMAGE = None" not in res.source
     warnings = "\n".join(res.warnings)
-    assert "invalid input-boundary slot '0'; it was ignored" in warnings
+    assert "input link 1 declares boundary slot '0' but is listed under input slot 0" in warnings
     assert "invalid target slot -1; it was ignored" in warnings
     assert "invalid source slot '0'; it was ignored" in warnings
-    assert "invalid output-boundary slot -1; it was ignored" in warnings
+    assert "output link 4 declares boundary slot -1 but is listed under output slot 0" in warnings
     assert "rendered through input 'samples'" not in warnings
 
 
@@ -1327,7 +1327,7 @@ def test_output_proxy_target_slot_out_of_range_is_dropped(sd15_graph):
     res = render_py(wf, graph)
 
     assert "OUT.out4" not in res.source
-    assert any("references output slot 4, but the definition has 3 outputs; it was ignored" in w for w in res.warnings)
+    assert any("declares boundary slot 4 but is listed under output slot" in w for w in res.warnings)
 
 
 def test_in_range_unheld_definition_input_proxy_link_is_ignored():
@@ -1515,6 +1515,65 @@ def test_malformed_graph_containers_are_reported_not_crashed():
     assert "workflow: ignoring non-list links block" in res.warnings
     assert "workflow: ignoring non-list groups block" in res.warnings
     assert "workflow: ignoring non-list subgraphs block" in res.warnings
+
+
+def test_definition_non_list_link_ids_are_reported_and_treated_as_empty():
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    wf = _mini([_node(10, subgraph_id)], [])
+    wf["definitions"] = {
+        "subgraphs": [
+            {
+                "id": subgraph_id,
+                "inputs": [{"name": "value", "type": "STRING", "linkIds": 1}],
+                "outputs": [{"name": "result", "type": "STRING", "linkIds": "2"}],
+                "nodes": [],
+                "links": [],
+            }
+        ]
+    }
+
+    res = render_py(wf, None)
+
+    assert f"subgraph {subgraph_id}: input slot 0 has non-list linkIds; treated as empty" in res.warnings
+    assert f"subgraph {subgraph_id}: output slot 0 has non-list linkIds; treated as empty" in res.warnings
+
+
+def test_definition_boundary_link_membership_wins_over_stale_row_slots():
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    definition = {
+        "id": subgraph_id,
+        "name": "Boundary membership",
+        "inputs": [
+            {"name": "wrong", "type": "STRING", "linkIds": []},
+            {"name": "right", "type": "STRING", "linkIds": [1]},
+        ],
+        "outputs": [
+            {"name": "wrong_out", "type": "STRING", "linkIds": []},
+            {"name": "right_out", "type": "STRING", "linkIds": [2]},
+        ],
+        "nodes": [
+            _node(
+                7,
+                "Example",
+                inputs=[{"name": "value", "type": "STRING", "link": 1}],
+                outputs=[{"name": "result", "type": "STRING", "links": [2]}],
+            )
+        ],
+        "links": [
+            {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0},
+            {"id": 2, "origin_id": 7, "origin_slot": 0, "target_id": -20, "target_slot": 0},
+        ],
+    }
+    wf = _mini([_node(10, subgraph_id)], [])
+    wf["definitions"] = {"subgraphs": [definition]}
+
+    res = render_py(wf, None)
+
+    assert "value=IN.right" in res.source
+    assert "OUT.right_out = " in res.source
+    warnings = "\n".join(res.warnings)
+    assert "input link 1 declares boundary slot 0 but is listed under input slot 1" in warnings
+    assert "output link 2 declares boundary slot 0 but is listed under output slot 1" in warnings
 
 
 def test_null_link_id_is_warned_and_dropped(sd15_graph):

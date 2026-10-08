@@ -798,6 +798,31 @@ class TestMalformedInputHardening:
                     },
                 },
             ),
+            (
+                "subgraph_linkIds_scalar",
+                {
+                    "nodes": [
+                        {
+                            "id": 1,
+                            "type": "11111111-2222-3333-4444-555555555555",
+                            "inputs": [],
+                            "outputs": [],
+                        }
+                    ],
+                    "links": [],
+                    "definitions": {
+                        "subgraphs": [
+                            {
+                                "id": "11111111-2222-3333-4444-555555555555",
+                                "nodes": [],
+                                "links": [],
+                                "inputs": [{"name": "x", "linkIds": 1}],
+                                "outputs": [],
+                            }
+                        ]
+                    },
+                },
+            ),
         ]
         for _label, workflow in cases:
             # Should not raise — each malformed link is silently skipped.

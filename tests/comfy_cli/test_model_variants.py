@@ -367,13 +367,40 @@ class TestResolveWorkflowModels:
                 "widgets_values": ["minimax_h3_video_vae_int8_convrot.safetensors"],
             }
         )
-        workflow = {"nodes": [], "definitions": {"subgraphs": list(definitions.values())}}
+        workflow = {
+            "nodes": [{"id": 100, "type": "left-0", "widgets_values": []}],
+            "definitions": {"subgraphs": list(definitions.values())},
+        }
         before = copy.deepcopy(workflow)
 
         with pytest.raises(ModelVariantResolutionError, match="input traversal"):
             resolve_workflow_models(workflow, graph)
 
         assert workflow == before
+
+    def test_unrelated_definition_is_not_preflighted(self, graph, monkeypatch):
+        from comfy_cli.cql import promoted
+
+        wf = _template()
+        wf["definitions"]["subgraphs"].append({"id": "unrelated", "inputs": [], "nodes": [], "links": []})
+        original = promoted.promoted_inputs
+        visited: list[str] = []
+
+        def guarded(definition, definitions, *args, **kwargs):
+            definition_id = str(definition.get("id"))
+            visited.append(definition_id)
+            if definition_id == "unrelated":
+                raise promoted.PromotionTraversalLimitError("unrelated definition was traversed")
+            return original(definition, definitions, *args, **kwargs)
+
+        monkeypatch.setattr(promoted, "promoted_inputs", guarded)
+
+        substitutions, unavailable = resolve_workflow_models(wf, graph)
+
+        assert substitutions
+        assert unavailable
+        assert "sg-1" in visited
+        assert "unrelated" not in visited
 
 
 # ---------------------------------------------------------------------------

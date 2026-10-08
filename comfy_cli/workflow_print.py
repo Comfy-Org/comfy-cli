@@ -303,12 +303,6 @@ def _broken_links(nodes: list[dict], links: list[Any], qualify: Any = str) -> tu
             if isinstance(inp, dict) and inp.get("link") is not None:
                 holders_by_link.setdefault(str(inp["link"]), []).append((node, slot, inp))
 
-    def holder_of(link_id: Any, tgt: dict | None) -> str | None:
-        for inp in (tgt or {}).get("inputs") or []:
-            if isinstance(inp, dict) and inp.get("link") is not None and str(inp["link"]) == str(link_id):
-                return str(inp.get("name") or "")
-        return None
-
     for link in links:
         if not isinstance(link, list) or len(link) < 5:
             warnings.append(f"ignoring malformed link row {link!r}")
@@ -362,7 +356,7 @@ def _broken_links(nodes: list[dict], links: list[Any], qualify: Any = str) -> tu
             rest.append(link)
             continue
         broken[str(link_id)] = why
-        name = holder_of(link_id, tgt_node)
+        name = str(holder[2].get("name") or "") if holder is not None else None
         into = (
             f"input {name!r} of node {qualify(effective_tgt_id)}"
             if name is not None
@@ -1414,6 +1408,7 @@ def _def_links(sg_def: dict, link_errors: list[str], link_warnings: list[str]) -
     used everywhere else: ``{str(link_id): (origin_id, origin_slot, target_id, target_slot)}``."""
     out: dict[str, tuple] = {}
     normalized_by_id: dict[str, tuple[Any, ...]] = {}
+    reported_duplicate_ids: set[str] = set()
     for link in sg_def.get("links") or []:
         if not isinstance(link, dict):
             continue
@@ -1427,9 +1422,10 @@ def _def_links(sg_def: dict, link_errors: list[str], link_warnings: list[str]) -
         normalized_row = _normalised_link_row((lid, *row))
         if (
             normalized_id in out
-            and duplicate_error not in link_errors
+            and normalized_id not in reported_duplicate_ids
             and normalized_by_id[normalized_id] != normalized_row
         ):
+            reported_duplicate_ids.add(normalized_id)
             link_errors.append(duplicate_error)
         out[normalized_id] = row
         normalized_by_id[normalized_id] = normalized_row
@@ -1621,9 +1617,34 @@ def _render_definition_block(
     interior_by_id = {str(node.get("id")): node for node in interior_nodes}
     definition_inputs = sg_def.get("inputs") or []
     definition_outputs = sg_def.get("outputs") or []
+    input_slot_by_link: dict[str, int] = {}
+    output_slot_by_link: dict[str, int] = {}
+    for slot, entry in enumerate(definition_inputs):
+        link_ids = entry.get("linkIds") if isinstance(entry, dict) else None
+        for link_id in link_ids if isinstance(link_ids, list) else []:
+            input_slot_by_link.setdefault(str(link_id), slot)
+    for slot, entry in enumerate(definition_outputs):
+        link_ids = entry.get("linkIds") if isinstance(entry, dict) else None
+        for link_id in link_ids if isinstance(link_ids, list) else []:
+            output_slot_by_link.setdefault(str(link_id), slot)
     for lid, (oid, oslot, tid, tslot) in all_links.items():
         from_input_proxy = str(oid) == _PROXY_IN
         to_output_proxy = str(tid) == _PROXY_OUT
+        listed_input_slot = input_slot_by_link.get(str(lid))
+        if from_input_proxy and listed_input_slot is not None and oslot != listed_input_slot:
+            state.warnings.append(
+                f"subgraph {def_id}: input link {lid} declares boundary slot {oslot!r} but is listed under "
+                f"input slot {listed_input_slot}; the listed input was used"
+            )
+            oslot = listed_input_slot
+        listed_output_slot = output_slot_by_link.get(str(lid))
+        if to_output_proxy and listed_output_slot is not None and tslot != listed_output_slot:
+            state.warnings.append(
+                f"subgraph {def_id}: output link {lid} declares boundary slot {tslot!r} but is listed under "
+                f"output slot {listed_output_slot}; the listed output was used"
+            )
+            tslot = listed_output_slot
+        all_links[lid] = (oid, oslot, tid, tslot)
         if from_input_proxy:
             if not _is_slot_index(oslot) or oslot < 0:
                 boundary_ignored.add(str(lid))
@@ -1868,6 +1889,21 @@ def _render_py(workflow: dict, graph: Graph | None) -> PrintResult:
                 value = subgraph.get(field)
                 if value is not None and not isinstance(value, list):
                     subgraph = {**subgraph, field: [], marker: True}
+            for field in ("inputs", "outputs"):
+                entries = subgraph.get(field) or []
+                sanitized_entries: list[Any] = []
+                for index, entry in enumerate(entries):
+                    if (
+                        isinstance(entry, dict)
+                        and entry.get("linkIds") is not None
+                        and not isinstance(entry.get("linkIds"), list)
+                    ):
+                        warnings.append(
+                            f"subgraph {subgraph_id}: {field[:-1]} slot {index} has non-list linkIds; treated as empty"
+                        )
+                        entry = {**entry, "linkIds": []}
+                    sanitized_entries.append(entry)
+                subgraph = {**subgraph, field: sanitized_entries}
             interior = _normalise_node_inputs([node for node in raw_interior if isinstance(node, dict)], None)
             interior = _normalise_node_outputs(interior, None)
             normalised = {**subgraph, "nodes": interior}

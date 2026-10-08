@@ -415,10 +415,10 @@ def _expand_one_subgraph(
         internal_link_map[old_id] = link
 
     input_targets: dict[int, list[tuple[Any, int]]] = {}
-    from comfy_cli.cql.promoted import _link_holders, held_link_targets
+    from comfy_cli.cql.promoted import _link_holders, _listed_link_ids, held_link_targets
 
     holders = _link_holders(sg_def)
-    target_cache: dict[str, tuple[tuple[dict, int, dict], ...]] = {}
+    target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
     target_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS]
 
     for idx, in_def in enumerate(sg_def.get("inputs") or []):
@@ -426,7 +426,7 @@ def _expand_one_subgraph(
             continue
         targets = []
         seen_targets: set[tuple[str, int]] = set()
-        for lid in in_def.get("linkIds") or []:
+        for lid in _listed_link_ids(in_def):
             if target_budget[0] <= 0:
                 raise WorkflowConversionError("subgraph input expansion exceeded its safe limit")
             target_budget[0] -= 1
@@ -458,7 +458,7 @@ def _expand_one_subgraph(
     for idx, out_def in enumerate(sg_def.get("outputs") or []):
         if not isinstance(out_def, dict):
             continue
-        for lid in out_def.get("linkIds") or []:
+        for lid in _listed_link_ids(out_def):
             if not _is_link_id(lid):
                 continue
             link = internal_link_map.get(lid)
@@ -530,7 +530,9 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
 
     node_input_updates: dict[str, dict[int, int]] = {}
     resolution_memo: dict[tuple[str, str], list[tuple[Any, Any]]] = {}
-    resolution_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS]
+    # Plain link rows cost one unit each; the fixed reserve is for actual
+    # boundary fan-out beyond that serialized baseline.
+    resolution_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + len(links)]
     updated: list = []
     for link in links:
         if not isinstance(link, (list, tuple)) or len(link) < 6:
@@ -597,7 +599,11 @@ def _resolve_subgraph_input_all(
         _budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS]
     memo_key = (node_id_str, repr(slot))
     if memo_key in _memo:
-        return _memo[memo_key]
+        result = _memo[memo_key]
+        if len(result) > _budget[0]:
+            raise WorkflowConversionError("subgraph input resolution exceeded its safe limit")
+        _budget[0] -= len(result)
+        return result
     if _budget[0] <= 0:
         raise WorkflowConversionError("subgraph input resolution exceeded its safe limit")
     _budget[0] -= 1
@@ -607,9 +613,12 @@ def _resolve_subgraph_input_all(
     if not mapping:
         return [(node_id_str, slot)]
 
+    if not ((isinstance(slot, int) and not isinstance(slot, bool)) or isinstance(slot, str)):
+        return [(node_id_str, slot)]
+
     sg_input_idx = slot
     outer_map = ctx.outer_to_input_idx.get(node_id_str)
-    if outer_map and isinstance(slot, (int, str)) and slot in outer_map:
+    if outer_map and slot in outer_map:
         sg_input_idx = outer_map[slot]
 
     targets = mapping.get(sg_input_idx)

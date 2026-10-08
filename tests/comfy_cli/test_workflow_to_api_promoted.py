@@ -184,7 +184,42 @@ def test_nested_duplicate_input_holders_resolve_once_per_level():
     remaining = budget[0]
     second = workflow_to_api._resolve_subgraph_input_all("root", 0, ctx, _memo=memo, _budget=budget)
     assert second is first
-    assert budget[0] == remaining
+    assert budget[0] == remaining - len(first)
+
+
+@pytest.mark.parametrize("slot", [[], {}, True])
+def test_malformed_subgraph_target_slots_are_left_unresolved(slot):
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.input_targets["root"] = {0: [(7, 0)], 1: [(8, 0)]}
+
+    assert workflow_to_api._resolve_subgraph_input_all("root", slot, ctx) == [("root", slot)]
+
+
+def test_plain_links_do_not_consume_the_subgraph_fanout_reserve():
+    count = workflow_to_api._MAX_RESOLVED_SUBGRAPH_INPUTS + 1
+    links = [[index, "source", 0, "plain", 0, "*"] for index in range(count)]
+    ctx = workflow_to_api._SubgraphCtx()
+    # Make the rewrite path live while leaving every serialized row plain.
+    ctx.input_targets["unrelated-subgraph"] = {0: [(7, 0)]}
+
+    assert workflow_to_api._rewrite_links_for_subgraphs(links, ctx, []) == links
+
+
+def test_subgraph_expansion_uses_boundary_link_membership_not_stale_row_slots():
+    definition = {
+        "inputs": [{"name": "wrong", "linkIds": []}, {"name": "right", "linkIds": [1]}],
+        "outputs": [{"name": "wrong_out", "linkIds": []}, {"name": "right_out", "linkIds": [2]}],
+        "nodes": [{"id": 7, "type": "Example", "inputs": [{"name": "value", "link": 1}], "outputs": []}],
+        "links": [
+            {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0},
+            {"id": 2, "origin_id": 7, "origin_slot": 0, "target_id": -20, "target_slot": 0},
+        ],
+    }
+
+    _nodes, _links, input_targets, output_sources = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
+
+    assert input_targets == {1: [(7, 0)]}
+    assert output_sources == {(7, 0): 1}
 
 
 def test_subgraph_input_resolution_fails_closed_at_materialization_cap():
