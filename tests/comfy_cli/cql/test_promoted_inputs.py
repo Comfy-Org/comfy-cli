@@ -113,6 +113,36 @@ def test_unheld_boundary_row_does_not_promote_a_widget():
     assert item.value_index is None
 
 
+def test_every_promotion_resolver_skips_an_unheld_row_before_a_live_one():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [1, 2]}],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "PromptNode",
+                "inputs": [{"name": "stale", "type": "STRING", "widget": {"name": "stale"}, "link": None}],
+            },
+            {
+                "id": 8,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": 2}],
+            },
+        ],
+        "links": [
+            {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0},
+            {"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0},
+        ],
+    }
+    definitions = {"sg": sg}
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert item.source_node == "8"
+    assert promoted._promotion_source(sg, sg["inputs"][0], definitions) == ("8", "prompt")
+    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["8"], "prompt")]
+
+
 # --------------------------------------------------------------------------- #
 # reads: host value wins, interior is the fallback
 # --------------------------------------------------------------------------- #
