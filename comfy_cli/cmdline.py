@@ -182,7 +182,7 @@ def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | Non
 _INTERNAL_ERROR_MESSAGE_CAP = 500
 _INTERNAL_ERROR_SCRUB_INPUT_CAP = _INTERNAL_ERROR_MESSAGE_CAP * 8
 _SECRET_KEY_PATTERN = (
-    r"(?:proxy-)?authorization|auth|api[ _-]?key|key|token|access[ _-]?token|refresh[ _-]?token|secret|password|"
+    r"(?:proxy-)?authorization|auth|api[ _-]?key|token|access[ _-]?token|refresh[ _-]?token|secret|password|"
     r"session(?:[ _-]?(?:id|key))?|sid|sig|signature|(?:set-)?cookies?"
 )
 _SECRET_KEY_QUALIFIER = (
@@ -190,8 +190,11 @@ _SECRET_KEY_QUALIFIER = (
     r"auth|key|id|token|secret|credentials?|cookies?|session|value|private|public|signing|oauth|jwt"
 )
 _SECRET_ASSIGNMENT_KEY_PATTERN = (
-    rf"(?<![\w-])(?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})"
+    rf"(?<![\w-])(?:"
+    rf"(?:[\w-]+[_-])key(?:[_-](?:{_SECRET_KEY_QUALIFIER})(?:[_-](?:{_SECRET_KEY_QUALIFIER}))*)?"
+    rf"|(?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})"
     rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})(?:[_-](?:{_SECRET_KEY_QUALIFIER}))*)?"
+    rf")"
 )
 _SECRET_CONSTRUCTOR_START = re.compile(
     rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
@@ -283,6 +286,51 @@ def _scrub_secret_containers(text: str) -> str:
             return "".join(chunks)
         cursor = index
         search_from = index
+    if not chunks:
+        return text
+    chunks.append(text[cursor:])
+    return "".join(chunks)
+
+
+_SECRET_QUOTED_START = re.compile(
+    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
+    r"(?P<wrapper>[bBuUrR]{0,2})(?P<quote>[\"'])",
+    re.IGNORECASE,
+)
+
+
+def _scrub_secret_quoted_values(text: str) -> str:
+    """Mask a quoted secret through its matching quote, including newlines."""
+    chunks: list[str] = []
+    cursor = 0
+    search_from = 0
+    while match := _SECRET_QUOTED_START.search(text, search_from):
+        quote = match.group("quote")
+        index = match.end()
+        escaped = False
+        while index < len(text):
+            char = text[index]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                break
+            index += 1
+        chunks.extend(
+            (
+                text[cursor : match.start()],
+                match.group("prefix"),
+                match.group("wrapper"),
+                quote,
+                "***",
+            )
+        )
+        if index >= len(text):
+            return "".join(chunks)
+        chunks.append(quote)
+        cursor = index + 1
+        search_from = cursor
     if not chunks:
         return text
     chunks.append(text[cursor:])
@@ -394,14 +442,15 @@ def _internal_error_message(error: BaseException) -> str:
     scrub_input_truncated = len(raw_text) > _INTERNAL_ERROR_SCRUB_INPUT_CAP
     text = raw_text[:_INTERNAL_ERROR_SCRUB_INPUT_CAP]
     if scrub_input_truncated:
-        # Do not leave an anchorless tail when the cap lands inside a URL,
-        # header, or token. Dropping the final partial token is safer than
-        # asking the scrubbers to recognize a value whose prefix was cut off.
-        partial = re.search(r"\s+\S*$", text)
-        if partial is not None and partial.start() >= len(text) - _INTERNAL_ERROR_MESSAGE_CAP:
-            text = text[: partial.start()]
+        # A userinfo scrub needs its closing ``@``. If the input cap removed
+        # that anchor, drop the incomplete credential token before earlier
+        # scrubbers contract the message and pull it into the visible prefix.
+        partial_userinfo = re.search(r"\s+https?://[^\s/@:]+:[^@\s]*$", text, re.IGNORECASE)
+        if partial_userinfo is not None:
+            text = text[: partial_userinfo.start()]
     text = _scrub_secret_constructors(text)
     text = _scrub_secret_containers(text)
+    text = _scrub_secret_quoted_values(text)
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
     if len(text) > _INTERNAL_ERROR_MESSAGE_CAP:
