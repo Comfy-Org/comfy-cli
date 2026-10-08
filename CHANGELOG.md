@@ -17,6 +17,12 @@ history.
 
 ### Added
 
+- Every command that takes `--deployment`, and both arguments of `comfy deploy
+  promote`, take a deployment's name as well as its id: `--deployment staging`
+  in a Build's folder, or `--deployment flux-pipeline/staging`, the Build given
+  by its name or id, which needs no folder except for `status`, and `up`
+  without `--release`. A name no live deployment holds is refused with the
+  names held (`deploy_name_not_found`).
 - `comfy deploy ls` leads each row with the deployment's name, and `comfy
   deploy status` reports `Deployment production (dep-…): ready`. `ls` prints
   `-` for a deployment with no name and `status` its id alone, and `--json`

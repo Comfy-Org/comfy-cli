@@ -14,6 +14,7 @@ from comfy_cli.command.deploy_resolve import (
     AmbiguousDeploymentError,
     BuilderReleaseClient,
     UnrelatedDeploymentError,
+    deployment_id_for,
     select_deployment,
 )
 from comfy_cli.command.deploy_runtime import terminal_status_error
@@ -454,6 +455,9 @@ def reconcile_up(builder: BuilderReleaseClient, client: DeployUpClient, request:
         if request.deployment_id is not None:
             raise DeployAPIError("deploy_bad_request", "--create makes a new deployment, so it takes no --deployment")
     else:
+        if request.deployment_id is not None:
+            named = deployment_id_for(builder, client, request.deployment_id, build_id=request.build_id)
+            request = replace(request, deployment_id=named)
         candidates = build_deployments(deployments, releases)
         target = _move_target(client, candidates, request, release_id)
         if target is not None and target[0].get("releaseId") != release_id:
