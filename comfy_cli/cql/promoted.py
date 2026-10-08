@@ -1639,27 +1639,47 @@ def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) 
     if inp is None:
         single = deepest_source(sg, pi, defs)
         return [single] if single is not None else []
-    return _boundary_targets(sg, inp, defs, 0)
+    return _boundary_targets(
+        sg,
+        inp,
+        defs,
+        0,
+        _memo={},
+        _budget=[_promotion_visit_limit(defs, sg)],
+    )
 
 
 def _boundary_targets(
-    sg: dict, inp: dict, defs: dict[str, dict], depth: int, _stack: tuple[int, ...] = ()
+    sg: dict,
+    inp: dict,
+    defs: dict[str, dict],
+    depth: int,
+    _stack: tuple[int, ...] = (),
+    _memo: dict[tuple[int, int, int, tuple[int, ...]], list[tuple[list[str], str]]] | None = None,
+    _budget: list[int] | None = None,
 ) -> list[tuple[list[str], str]]:
     if depth > _MAX_NESTED_PROMOTION_DEPTH:
         return []
+    if _memo is None:
+        _memo = {}
+    if _budget is None:
+        _budget = [_promotion_visit_limit(defs, sg)]
+    memo_key = (id(sg), id(inp), depth, _stack)
+    if memo_key in _memo:
+        return _memo[memo_key]
+    if _budget[0] <= 0:
+        raise PromotionTraversalLimitError("promoted widget boundary traversal exceeded its safe limit")
+    _budget[0] -= 1
     _stack = (*_stack, id(sg))
     links = {x.get("id"): x for x in sg.get("links") or [] if isinstance(x, dict)}
+    holders = _link_holders(sg)
     out: list[tuple[list[str], str]] = []
     for link_id in inp.get("linkIds") or []:
         link = links.get(link_id) if isinstance(link_id, (int, str)) else None
-        target = _inner_node(sg, link.get("target_id")) if link is not None else None
-        if target is None:
+        held = held_link_target(sg, link_id, link, holders) if link is not None else None
+        if held is None:
             continue
-        entries = target.get("inputs") or []
-        slot = link.get("target_slot")
-        entry = entries[slot] if isinstance(slot, int) and 0 <= slot < len(entries) else None
-        if not isinstance(entry, dict) or not _entry_holds_link(entry, link_id):
-            continue
+        target, _slot, entry = held
         tid = str(target.get("id"))
         inner_def = _nested_definition(target, defs, _stack)
         if inner_def is not None:
@@ -1672,12 +1692,18 @@ def _boundary_targets(
                 None,
             )
             if inner_inp is not None:
-                out.extend(
-                    ([tid, *path], w) for path, w in _boundary_targets(inner_def, inner_inp, defs, depth + 1, _stack)
-                )
+                nested = _boundary_targets(inner_def, inner_inp, defs, depth + 1, _stack, _memo, _budget)
+                if len(nested) > _budget[0]:
+                    raise PromotionTraversalLimitError("promoted widget boundary traversal exceeded its safe limit")
+                _budget[0] -= len(nested)
+                out.extend(([tid, *path], widget) for path, widget in nested)
             continue
         marker = entry.get("widget")
         if marker:
+            if _budget[0] <= 0:
+                raise PromotionTraversalLimitError("promoted widget boundary traversal exceeded its safe limit")
+            _budget[0] -= 1
             widget = marker.get("name") if isinstance(marker, dict) else None
             out.append(([tid], str(widget or entry.get("name"))))
+    _memo[memo_key] = out
     return out
