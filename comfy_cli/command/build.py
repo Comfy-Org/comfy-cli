@@ -56,6 +56,7 @@ from comfy_cli.command.build_diff import (
 from comfy_cli.command.build_digest_cache import ModelDigestCache
 from comfy_cli.command.build_package import NodePackageError, package_node
 from comfy_cli.command.build_paths import (
+    SPEC_SUFFIXES,
     BuildPaths,
     BuildSpecNotFoundError,
     InstallOverrides,
@@ -2521,6 +2522,10 @@ _BUILDER_REFUSALS: Final = {
         "code": "build_in_use",
         "message": "a deployment still references one of this build's releases",
     },
+    "BUILD_LIMIT": {
+        "code": "build_limit",
+        "message": "the workspace already holds as many builds as its limit allows, counting every member's builds",
+    },
 }
 
 #: A hostile endpoint can be reached through the env-configurable base URL, so
@@ -2706,7 +2711,7 @@ def _report_builder_error(
                     details=details,
                 )
                 return
-        # All three refusals are 409 in the builder's contract and nothing else
+        # Every refusal in the table is 409 in the builder's contract and nothing else
         # sends them, so a mapped code under any other status came from something
         # that is not the builder and must not be answered with its remediation.
         refusal = _BUILDER_REFUSALS.get(builder_error) if e.code == 409 else None
@@ -2938,7 +2943,7 @@ def _resolve_build_id(renderer, client, scope: _BuildScope) -> str:
     )
 
 
-@app.command("ls", help="List the workspace's builds.")
+@app.command("ls", help="List the builds you can see: your own, or every member's on enterprise.")
 @tracking.track_command("build")
 def ls_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
     renderer = get_renderer()
@@ -3018,6 +3023,108 @@ def _newest_release_id(renderer, client, build_id: str) -> str:
         )
         raise typer.Exit(code=1)
     return release_id
+
+
+def _path_shaped(value: str) -> bool:
+    """Whether ``value`` is spelled like a path, whatever is on disk.
+
+    `.` and `..`, anything with a path separator, and a `.yaml`/`.json` name (the
+    suffixes `resolve_build_paths` reads as a spec file) can never be one release
+    id, so they are classified by spelling alone, like `build_paths` classifies
+    PATH: one argument means one thing whether or not it exists.
+    """
+    separators = {"/", os.sep, os.altsep} - {None}
+    return (
+        value in {".", ".."}
+        or any(separator in value for separator in separators)
+        or Path(value).suffix in SPEC_SUFFIXES
+    )
+
+
+def _spec_behind(release: str, *, path_shaped: bool) -> tuple[Path | None, bool]:
+    """The spec file RELEASE names when read as a PATH, and whether it is there.
+
+    Runs on every RELEASE given without a PATH, ids included, so for a bare
+    name it never raises: `Path.is_file` only swallows "not found", and an id
+    over 255 characters (file name too long), one naming a folder the caller
+    cannot read (`PermissionError`) or a `~name` with no such user
+    (`expanduser` raises `RuntimeError`) would otherwise fail the read with a
+    traceback. Any of those is "no spec here"; the spec path is ``None`` when it
+    cannot even be resolved.
+
+    A ``path_shaped`` RELEASE is a path whatever is on disk, so an error from
+    looking at its spec file raises, as it does for the same path given as
+    PATH (`release ls locked/`): a spec in a folder the caller cannot read is
+    there, and must not be reported as missing.
+    """
+    try:
+        spec_file = resolve_build_paths(release, require_spec=False).spec_file
+    except (OSError, ValueError, RuntimeError):
+        return None, False
+    if path_shaped:
+        return spec_file, spec_file.is_file()
+    try:
+        return spec_file, spec_file.is_file()
+    except (OSError, ValueError):
+        return spec_file, False
+
+
+def _release_or_path(
+    renderer, release: str | None, path: str | None, build_id: str | None
+) -> tuple[str | None, str | None]:
+    """Split the read verbs' ``[RELEASE] [PATH]`` into what the caller meant.
+
+    Every sibling verb (`release create`, `release ls`, `build show`, `deploy
+    up`) takes a path first, defaulting to `.`, so `release show .` is the
+    natural thing to type. Read as a release id, `.` reached the builder as
+    `GET /v1/releases/.`, the dot segment collapsed onto the collection, and
+    the caller got an opaque 302.
+
+    So with no PATH after it, RELEASE is a path when it looks like one: spelled
+    like a path (`_path_shaped`), or a bare name of a folder that holds a build
+    spec. A bare name that merely matches some file or folder in the cwd stays a
+    release id: the builder's failure text tells callers to run `comfy build
+    release logs <versionId> --target ...` with no PATH. A path-shaped RELEASE
+    with no spec behind it fails as `build_spec_not_found` here, before any
+    request, rather than travelling to the builder as an id (unless `--id`
+    names the Build, when PATH is never read, so it is not probed either).
+
+    Whatever id is left is refused when it is blank, only dots, or holds a path
+    separator: the read client joins it into the URL unencoded (`Target.url`
+    only strips slashes off the ends), so a dot segment aims the read at the
+    collection or its parent and a separator at another route. Refused here,
+    above the client, so the first envelope is the actionable one rather than a
+    sign-in prompt.
+    """
+    if release is None:
+        return None, path
+    if path is None and release.strip():
+        path_shaped = _path_shaped(release)
+        if path_shaped and build_id is not None:
+            # `--id` picks the Build, and PATH is never read then, so a path
+            # is as harmless here as it is after the release id. Checked
+            # before the probe, which raises on a path it cannot look at.
+            return None, release
+        spec_file, has_spec = _spec_behind(release, path_shaped=path_shaped)
+        if has_spec:
+            return None, release
+        if path_shaped:
+            if spec_file is not None:
+                error = BuildSpecNotFoundError(spec_file)
+                renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)
+                raise typer.Exit(code=1)
+            # No spec path to report (`~nosuchuser/x` names no home folder),
+            # so it falls to the path-shaped refusal below.
+    release = release.strip()
+    if not release or set(release) == {"."} or _path_shaped(release):
+        renderer.error(
+            code="build_missing_input",
+            message="RELEASE must name one release, not a path, a blank or a dot-only path segment.",
+            hint="pass the release id shown by `comfy build release ls`, or only a build path to read its newest release",
+            details={"invalid": [release]},
+        )
+        raise typer.Exit(code=1)
+    return release, path
 
 
 def _selected_release_id(renderer, client, scope: _BuildScope, release: str | None) -> str:
@@ -3158,13 +3265,20 @@ def release_ls(
 def release_show(
     ctx: typer.Context,
     release: Annotated[
-        str | None, typer.Argument(help="Release id. Default: the current Build's newest release.")
+        str | None,
+        typer.Argument(
+            help="Release id, or a build path (`.`, one with a `/`, or a folder holding comfy-build.yaml). "
+            "Default: the current Build's newest release."
+        ),
     ] = None,
-    path: Annotated[str | None, typer.Argument(help="Build spec path used when RELEASE is omitted.")] = None,
+    path: Annotated[
+        str | None, typer.Argument(help="Build spec path used when RELEASE is omitted or is itself a path.")
+    ] = None,
     build_id: Annotated[str | None, typer.Option("--id", help="Resolve the newest release from this Build id.")] = None,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
+    release, path = _release_or_path(renderer, release, path, build_id)
     client = _builder_client(renderer, builder_url)
     release_id = _selected_release_id(renderer, client, _BuildScope(ctx, path, build_id), release)
     detail = _builder_call(renderer, lambda: client.get_release(release_id))
@@ -3178,9 +3292,15 @@ def release_show(
 def release_logs(
     ctx: typer.Context,
     release: Annotated[
-        str | None, typer.Argument(help="Release id. Default: the current Build's newest release.")
+        str | None,
+        typer.Argument(
+            help="Release id, or a build path (`.`, one with a `/`, or a folder holding comfy-build.yaml). "
+            "Default: the current Build's newest release."
+        ),
     ] = None,
-    path: Annotated[str | None, typer.Argument(help="Build spec path used when RELEASE is omitted.")] = None,
+    path: Annotated[
+        str | None, typer.Argument(help="Build spec path used when RELEASE is omitted or is itself a path.")
+    ] = None,
     target: Annotated[
         str | None,
         typer.Option("--target", help=f"Target whose log to read, as {TARGET_FORM} (e.g. linux/nvidia)."),
@@ -3190,6 +3310,7 @@ def release_logs(
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
+    release, path = _release_or_path(renderer, release, path, build_id)
     target_value = require_option(
         "--target",
         target,
@@ -3403,13 +3524,20 @@ def model_dirs_cmd(builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None):
 def release_manifest(
     ctx: typer.Context,
     release: Annotated[
-        str | None, typer.Argument(help="Release id. Default: the current Build's newest release.")
+        str | None,
+        typer.Argument(
+            help="Release id, or a build path (`.`, one with a `/`, or a folder holding comfy-build.yaml). "
+            "Default: the current Build's newest release."
+        ),
     ] = None,
-    path: Annotated[str | None, typer.Argument(help="Build spec path used when RELEASE is omitted.")] = None,
+    path: Annotated[
+        str | None, typer.Argument(help="Build spec path used when RELEASE is omitted or is itself a path.")
+    ] = None,
     build_id: Annotated[str | None, typer.Option("--id", help="Resolve the newest release from this Build id.")] = None,
     builder_url: Annotated[str | None, _BUILDER_URL_OPT] = None,
 ):
     renderer = get_renderer()
+    release, path = _release_or_path(renderer, release, path, build_id)
     client = _builder_client(renderer, builder_url)
     release_id = _selected_release_id(renderer, client, _BuildScope(ctx, path, build_id), release)
     manifest = _builder_call(renderer, lambda: client.get_release_manifest(release_id))

@@ -54,6 +54,10 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy build refs model-dirs": "build_refs_model_dirs",
     "comfy build blob ls": "build_blob_ls",
     "comfy deploy up": "deploy_up",
+    "comfy deploy promote": "deploy_promote",
+    "comfy deploy rollback": "deploy_rollback",
+    "comfy deploy rename": "deploy_rename",
+    "comfy deploy history": "deploy_history",
     "comfy deploy status": "deploy_status",
     "comfy deploy ls": "deploy_ls",
     "comfy deploy show": "deploy_show",
@@ -220,6 +224,8 @@ STREAM_EVENT_SCHEMAS: dict[str, str] = {
     # the deployment coming up; same rule about stderr
     "comfy deploy up": "deploy_progress_event",
     "comfy deploy status": "deploy_progress_event",
+    "comfy deploy promote": "deploy_progress_event",
+    "comfy deploy rollback": "deploy_progress_event",
 }
 
 

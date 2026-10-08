@@ -1245,8 +1245,9 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "build_release_not_found",
-        "A `comfy build release show`, `logs`, or `manifest` command omitted RELEASE, but the current Build "
-        "has no release to select. `details.buildId` names the Build whose exhaustive release list was empty.",
+        "A `comfy build release show`, `logs`, or `manifest` command was asked for a Build's newest release "
+        "(RELEASE omitted, or given as a build path such as `.`), but that Build has no release to select. "
+        "`details.buildId` names the Build whose exhaustive release list was empty.",
         "run `comfy build release create --target <os>/<gpu>` first, or pass an existing RELEASE id",
     ),
     ErrorCode(
@@ -1339,6 +1340,20 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "written into the spec on disk before the refusal.",
         "delete a release with `comfy build release delete`, or delete a whole build to give up every "
         "release it holds, then cut again",
+    ),
+    ErrorCode(
+        "build_limit",
+        "The builder refused to create a build because the workspace already holds as many builds as its "
+        "limit allows. The limit counts every member's builds, while `comfy build ls` lists only your own "
+        "outside the enterprise plan, so a full workspace can show a short or empty list. `message` is the "
+        "builder's own wording, read as text and never parsed. `comfy build push` reaches this code when "
+        "neither the spec nor `--id` names a build, so it creates one; `details` carries the status and the "
+        "raw body. The spec's files were uploaded "
+        "and their ids written into the spec on disk before the refusal, so a retry once there is room "
+        "uploads nothing twice.",
+        "teammates' builds count but `comfy build ls` lists only yours outside the enterprise plan: delete "
+        "one with `comfy build delete --id <build>`, which takes its releases too, or ask a teammate to "
+        "delete one, then push again",
     ),
     ErrorCode(
         "build_release_in_use",
@@ -1438,9 +1453,11 @@ REGISTRY: tuple[ErrorCode, ...] = (
     ),
     ErrorCode(
         "deploy_ambiguous_deployment",
-        "Deployment resolution found multiple rows tied at the highest status rank and newest creation time. "
-        "`details.candidateIds` lists every indistinguishable deployment id.",
-        "pass `--deployment <id>` to select one deployment explicitly",
+        "Deployment resolution found multiple rows tied at the highest status rank and newest creation time, "
+        "or `comfy deploy up`, with deployment updates on, `rollback` or `rename`, given no `--deployment`, found "
+        "more than one deployment of the Build to act on. `details.candidateIds` lists every candidate deployment "
+        "id, and on `up`, `rollback` and `rename` `details.candidates` lists each one's id, name, release and status.",
+        "pass `--deployment <name|id>` to select one deployment explicitly",
     ),
     ErrorCode(
         "deploy_unrelated_deployment",
@@ -1449,6 +1466,47 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "only those on the release it is reconciling, so an id can be refused by one and accepted by the other. "
         "`details.candidateIds` lists the ids that are in scope, and `details.deploymentId` echoes the one asked for.",
         "pick one of `details.candidateIds`, which lists every deployment this command can act on -- or when that list is empty, drop `--deployment` to let the command pick or create one",
+    ),
+    ErrorCode(
+        "deploy_name_not_found",
+        "`--deployment`, or an argument of `comfy deploy promote`, named a deployment by a name no live deployment "
+        "of the Build holds. `details.names` lists the names the Build's live deployments hold, and "
+        "`details.buildId` says which Build was searched. An empty list means none of them has a name, because "
+        "they predate names or comfy-deploy does not serve names yet, or the Build has no live deployment.",
+        "pick one of `details.names`, or pass the deployment's id",
+    ),
+    ErrorCode(
+        "deploy_build_not_found",
+        "comfy-cli could not tell which Build a deployment name belongs to: `<build>/<name>` named a Build no "
+        "Build in the workspace has as its name or id, or a bare name was given outside any Build's folder.",
+        "run the command from the Build's folder, or name the Build as `<build>/<name>`; `comfy build ls` lists "
+        "each Build's name and id",
+    ),
+    ErrorCode(
+        "deploy_ambiguous_build",
+        "`<build>/<name>` named a Build by a name two or more Builds share, since a Build's name is not unique in "
+        "a workspace. `details.buildIds` lists each Build with that name.",
+        "name the Build by its id, as `<build id>/<name>`",
+    ),
+    ErrorCode(
+        "deploy_invalid_name",
+        "`comfy deploy up --name` or `comfy deploy rename` was given a name comfy-deploy would refuse. A name is 1 "
+        "to 40 lowercase letters, digits and hyphens, starting and ending with a letter or digit, and never "
+        "starting with `dep-`. "
+        "comfy-cli refuses it before calling comfy-deploy, so nothing was created or renamed.",
+        "pick a name such as `staging` or `canary-2`",
+    ),
+    ErrorCode(
+        "deploy_name_taken",
+        "comfy-deploy refused a name another live deployment of the same Build holds, on `up --name` or `rename`. "
+        "`details.name` echoes it.",
+        "pick another name, or rename that deployment first with `comfy deploy rename`",
+    ),
+    ErrorCode(
+        "deploy_names_unavailable",
+        "`comfy deploy rename` reached a comfy-deploy that does not serve deployment names yet: it refused the "
+        "rename as a request it does not know, or answered without the name. Nothing was renamed.",
+        "wait until comfy-deploy serves names; until then a deployment is reached by its id",
     ),
     ErrorCode(
         "deploy_missing_input",
@@ -1522,18 +1580,44 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "reports only `failed` and `stop_failed`, since a `stopped` deployment is a normal thing to be "
         "asked about; `comfy deploy up` adds `stopped` (with or without `--watch`), because a deployment it was "
         "asked to bring up and that is stopped did not come up, and `unhealthy`, because one that came up and "
-        "then degraded is billing without serving and `up` does not change it.",
+        "then degraded is billing without serving and `up` does not change it. `comfy deploy promote` and "
+        "`comfy deploy rollback` judge a deployment they moved as `up` does, and report one they left unchanged "
+        "without judging it.",
         "for `failed`, inspect `comfy deploy logs` and redeploy with `comfy deploy up`; for `stop_failed`, "
         "re-run `comfy deploy stop` -- it may still be billing; for `stopped`, `comfy deploy start`; for "
         "`unhealthy`, inspect `comfy deploy logs`, or `comfy deploy stop` to stop billing",
     ),
     ErrorCode(
         "deploy_watch_lost",
-        "The deploy control plane left the reads of a watch (`comfy deploy up`, `comfy deploy status --watch`) "
-        "unanswered, with an HTTP 5xx or no response, for the whole retry window of about a minute. Only the watch "
+        "The deploy control plane left the reads of a watch (`comfy deploy up`, `promote`, `rollback`, "
+        "`comfy deploy status --watch`) unanswered, with an HTTP 5xx or no response, for the whole retry window "
+        "of about a minute, or `up`, `promote` or `rollback` followed a move onto another release for an hour "
+        "without it landing. Only the watch "
         "ended: the deployment's outcome is unknown and it may still be coming up. The exit code is 75, not 1, so a "
         "script can tell this from a deployment that failed. `details.deployment_id` names the deployment.",
-        "re-attach with `comfy deploy status --deployment <id> --watch` once the deploy service answers again",
+        "re-attach with `comfy deploy status --deployment <id> --watch` once the deploy service answers again; "
+        "after a move, read `comfy deploy show --deployment <id>` instead: the move has landed once it shows no "
+        "pendingUpdate and its releaseId is the release asked for",
+    ),
+    ErrorCode(
+        "deploy_update_failed",
+        "`comfy deploy up`, `promote` or `rollback` moved a deployment onto another release, and the watch saw "
+        "the move fail: the new release's copy failed to come up, or the service dropped the update. The "
+        "deployment keeps its id and URL and still serves the release it served before. "
+        "`details.serving_release_id` names that release and `details.release_id` the one that failed.",
+        "inspect `comfy deploy events --deployment <id>`, which covers the new release's copy; `logs` shows the "
+        "release still serving",
+    ),
+    ErrorCode(
+        "deploy_updates_unavailable",
+        "The command needs deployment updates, which are not on for this workspace yet: the deployment "
+        "carries no `revision`. `comfy deploy promote` and `rollback` need it to move a deployment in place, "
+        "`history` needs it to list the releases a deployment ran, and `comfy deploy events --release` needs it, "
+        "since only there does each event say which release made it. "
+        "`details.deployment_id` names the deployment that was read.",
+        "for `events --release`, run it without `--release`; for `history`, read `comfy deploy events`; for "
+        "`promote` or `rollback`, run the hint's `comfy deploy up --create --release <id>` to start a separate "
+        "deployment on that release",
     ),
     ErrorCode(
         "deploy_delete_needs_confirm",

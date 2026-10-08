@@ -177,7 +177,9 @@ class DeployClient:
         compute_config: dict,
         *,
         idempotency_key: str | None = None,
+        name: str | None = None,
     ) -> dict:
+        """Start a deployment of the release. Without ``name``, comfy-deploy names it."""
         if not release_id.strip():
             raise bad_request("releaseId is required")
         _validate_compute_config(compute_config)
@@ -189,7 +191,11 @@ class DeployClient:
                 operation="create",
                 parts=("deployments",),
                 method="POST",
-                body={"releaseId": release_id, "computeConfig": compute_config},
+                body={
+                    "releaseId": release_id,
+                    "computeConfig": compute_config,
+                    **({"name": name} if name is not None else {}),
+                },
                 headers=headers,
             )
         )
@@ -232,6 +238,43 @@ class DeployClient:
     def update_deployment(self, deployment_id: str, compute_config: dict) -> dict:
         _validate_compute_config(compute_config)
         return self._patch("scale", ("deployments", deployment_id), {"computeConfig": compute_config})
+
+    def rename_deployment(self, deployment_id: str, name: str) -> dict:
+        """Give the deployment a new name, unique among its Build's live deployments, and nothing else."""
+        return self._patch("rename", ("deployments", deployment_id), {"name": name})
+
+    def move_deployment(self, deployment_id: str, base_revision: int, release_id: str) -> dict:
+        """Point the deployment at another release of its Build, keeping its id and URL.
+
+        ``base_revision`` is the revision the caller read, so a change made
+        since is refused rather than undone.
+        """
+        body = {"baseRevision": base_revision, "releaseId": release_id}
+        return self._patch("move", ("deployments", deployment_id), body)
+
+    def promote_deployment(self, deployment_id: str, base_revision: int, from_deployment_id: str) -> dict:
+        """Point the deployment at the release another deployment serves, keeping its id and URL.
+
+        The service resolves which release that is, so the caller never races
+        the source moving. ``base_revision`` is as for a move.
+        """
+        body = {"baseRevision": base_revision, "fromDeploymentId": from_deployment_id}
+        return self._patch("move", ("deployments", deployment_id), body)
+
+    def rollback_deployment(self, deployment_id: str, base_revision: int, to_revision: int | None = None) -> dict:
+        """Point the deployment back at an earlier revision's release, keeping its id and URL.
+
+        The service picks the revision before the current one unless
+        ``to_revision`` names another. ``base_revision`` is as for a move.
+        """
+        body: dict = {"baseRevision": base_revision}
+        if to_revision is not None:
+            body["toRevision"] = to_revision
+        return self._post("move", ("deployments", deployment_id, "rollback"), body)
+
+    def get_deployment_revisions(self, deployment_id: str) -> dict:
+        """GET /v1/deployments/{id}/revisions: every revision, oldest first."""
+        return self._get("revisions", ("deployments", deployment_id, "revisions"))
 
     def delete_deployment(self, deployment_id: str) -> None:
         self._delete("delete", ("deployments", deployment_id))

@@ -8,14 +8,34 @@
   "properties": {
     "deployment": {
       "type": "object",
-      "required": ["id", "status", "created"],
+      "required": ["id", "name", "status", "created"],
       "additionalProperties": false,
       "properties": {
         "id": {"type": "string", "minLength": 1},
+        "name": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "The deployment's name, unique among its Build's live deployments; null where it has none or comfy-deploy does not serve names yet."
+        },
         "status": {
           "enum": ["queued", "provisioning", "starting", "ready", "unhealthy", "stopping", "stop_failed", "stopped", "failed"]
         },
-        "created": {"type": "boolean"}
+        "created": {"type": "boolean"},
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The deployment's revision. Present only when deployment updates are on for the workspace."
+        }
+      }
+    },
+    "previousRelease": {
+      "description": "Present only when this run moved an existing deployment onto `release`: the release it served before.",
+      "type": "object",
+      "required": ["id", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "integer", "minimum": 1}
       }
     },
     "release": {

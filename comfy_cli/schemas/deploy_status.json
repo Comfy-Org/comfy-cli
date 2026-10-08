@@ -17,10 +17,15 @@
     },
     "deployment": {
       "type": ["object", "null"],
-      "required": ["id", "status", "endpointUrl", "computeConfig", "stopReason", "error"],
+      "required": ["id", "name", "status", "endpointUrl", "computeConfig", "stopReason", "error"],
       "additionalProperties": false,
       "properties": {
         "id": {"type": "string", "minLength": 1},
+        "name": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "The deployment's name, unique among its Build's live deployments; null where it has none or comfy-deploy does not serve names yet."
+        },
         "status": {
           "enum": ["queued", "provisioning", "starting", "ready", "unhealthy", "stopping", "stop_failed", "stopped", "failed"]
         },
@@ -57,6 +62,26 @@
             "version": {"type": "integer", "minimum": 1}
           }
         }
+      }
+    },
+    "update": {
+      "type": "object",
+      "description": "The update the deployment waits on, present only while one waits: the release it moves to once that release's copy is ready, the copy's status, when it was asked, and its kind (update or rollback; read an unknown value as an update).",
+      "required": ["release", "status", "since", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "release": {
+          "type": "object",
+          "required": ["id"],
+          "additionalProperties": false,
+          "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "version": {"type": "integer", "minimum": 1}
+          }
+        },
+        "status": {"type": "string", "minLength": 1},
+        "since": {"type": "string", "format": "date-time"},
+        "kind": {"type": "string", "minLength": 1}
       }
     },
     "serving": {
