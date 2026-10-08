@@ -278,6 +278,7 @@ def test_a_crash_in_the_root_callback_still_emits_the_envelope(monkeypatch, work
         ('body={\\"password\\": \\"a\\nb\\"}', "a\\nb", "body="),
         (r"password=C:\Users\bob", r"Users\bob", "password="),
         ("GET https://alice:p@ssword@example.com/x failed", "p@ssword", "example.com/x"),
+        ("GET https://user:pa,ss@example.com/x failed", "pa,ss", "example.com/x"),
     ],
 )
 def test_internal_error_scrubber_handles_reviewed_secret_shapes(message, secret, kept):
