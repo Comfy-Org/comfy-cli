@@ -46,7 +46,7 @@ class _Recorder:
     """Stands in for the shared ``request_json`` seam, recording each request.
 
     Answers with one superset envelope so every method's own response parsing
-    still runs (``create_build`` reads ``id``, ``create_release`` reads
+    still runs (``create_build_response`` returns the build, ``create_release`` reads
     ``releaseId``/``statusUrl``, the list reads take their own key).
 
     ``releaseId``/``releases`` are the post-#770 spellings and ``buildVersionId``/
@@ -111,7 +111,7 @@ class Wire:
 # produced it, and is asserted GONE so this table cannot pass un-renamed code.
 _WIRE = [
     Wire(
-        new_name="create_build",
+        new_name="create_build_response",
         legacy_name="create_distribution",
         args=("n", {"models": [], "customNodes": []}),
         http_method="POST",
@@ -119,7 +119,7 @@ _WIRE = [
         body={"name": "n", "definition": {"models": [], "customNodes": []}},
     ),
     Wire(
-        new_name="create_build",
+        new_name="create_build_response",
         legacy_name="create_distribution",
         args=("n", {"models": []}, "a description"),
         http_method="POST",

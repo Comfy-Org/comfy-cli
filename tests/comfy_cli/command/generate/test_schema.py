@@ -112,7 +112,7 @@ def _string_array_flag():
 
 
 def test_coerce_string_array_accepts_bare_value():
-    # prod: --image 'Linked profile pic.jpeg' (spaces, no JSON) must not error
+    # a single file name with spaces (no JSON) must not error
     assert schema._coerce(_string_array_flag(), "Linked profile pic.jpeg") == ["Linked profile pic.jpeg"]
 
 

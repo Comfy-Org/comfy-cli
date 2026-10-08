@@ -425,6 +425,15 @@ def read_capped(resp, url: str, *, max_bytes: int = MAX_RESPONSE_BYTES) -> bytes
     return raw
 
 
+def encode_json_body(body: dict) -> bytes:
+    """The exact bytes ``request_json`` sends for ``body``.
+
+    Public so a caller that must bound its request size measures the same
+    encoding that goes on the wire, rather than a copy that could drift.
+    """
+    return json.dumps(body).encode("utf-8")
+
+
 def request_json(
     url: str,
     target,
@@ -457,7 +466,7 @@ def request_json(
     auth_headers = target_auth_headers(target)
     if auth_headers:
         assert_safe_url(url)
-    data = json.dumps(body).encode("utf-8") if body is not None else None
+    data = encode_json_body(body) if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     for k, v in (headers or {}).items():
         req.add_header(k, v)

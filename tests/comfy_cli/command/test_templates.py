@@ -673,19 +673,22 @@ def test_check_basename_match_against_subfoldered_listing(gallery_file, tmp_path
     assert env["data"]["models"]["present"] == ["v1-5-pruned-emaonly.safetensors"]
 
 
-def test_check_server_down_surfaces_server_not_running(gallery_file, tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "exc, code", [("url_error", "server_not_running"), (ResponseTooLarge("too big"), "model_listing_too_large")]
+)
+def test_check_listing_failure_surfaces_its_error_code(gallery_file, tmp_path, monkeypatch, exc, code):
     import urllib.error
 
     _force_json_renderer()
     _no_local_server(monkeypatch)
     _stub_template_workflow_fetch(monkeypatch, json.dumps(_TOP_LEVEL_WF).encode())
-    _stub_folder_listing(monkeypatch, urllib.error.URLError("connection refused"))
+    _stub_folder_listing(monkeypatch, urllib.error.URLError("connection refused") if exc == "url_error" else exc)
 
     result = _run_check(gallery_file, "image_z_image", tmp_path, monkeypatch)
     assert result.exit_code != 0
     env = _envelope(result.output)
     assert env["ok"] is False
-    assert env["error"]["code"] == "server_not_running"
+    assert env["error"]["code"] == code
 
 
 def test_check_unknown_template_surfaces_template_not_found(gallery_file, tmp_path, monkeypatch):
@@ -806,17 +809,61 @@ def test_check_api_source_stays_index_when_object_info_finds_nothing(gallery_fil
     assert env["data"]["api"]["api_nodes"] == []
 
 
-def test_check_invalid_utf8_workflow_surfaces_invalid_json(gallery_file, tmp_path, monkeypatch):
-    # Invalid UTF-8 in the cached/fetched body raises UnicodeDecodeError (not a
-    # subclass of JSONDecodeError) — it must be caught as a clean error, not crash.
+@pytest.mark.parametrize("body", [b"\xff\xfe not valid utf-8", b"[" * 100_000], ids=["non_utf8", "deep_nesting"])
+def test_check_invalid_utf8_workflow_surfaces_invalid_json(gallery_file, tmp_path, monkeypatch, body):
+    # Invalid UTF-8 raises UnicodeDecodeError and deep nesting raises RecursionError,
+    # neither a JSONDecodeError — both must be caught as a clean error, not crash.
     _force_json_renderer()
     _no_local_server(monkeypatch)
-    _stub_template_workflow_fetch(monkeypatch, b"\xff\xfe not valid utf-8")
+    _stub_template_workflow_fetch(monkeypatch, body)
 
     result = _run_check(gallery_file, "image_z_image", tmp_path, monkeypatch)
     assert result.exit_code != 0
     env = _envelope(result.output)
     assert env["error"]["code"] == "template_workflow_invalid_json"
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("template workflow fetch failed: HTTP 204"), ResponseTooLarge("big")])
+def test_check_non_200_or_over_cap_workflow_surfaces_fetch_failed(gallery_file, tmp_path, monkeypatch, exc):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _stub_template_workflow_fetch(monkeypatch, exc)
+
+    result = _run_check(gallery_file, "image_z_image", tmp_path, monkeypatch)
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["error"]["code"] == "template_fetch_failed"
+
+
+def test_check_wrong_shape_gallery_surfaces_gallery_load_failed(tmp_path, monkeypatch):
+    _force_json_renderer()
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"error": "rate limited"}')
+
+    result = _run_check(str(bad), "image_z_image", tmp_path, monkeypatch)
+    assert result.exit_code != 0
+    env = _envelope(result.output)
+    assert env["error"]["code"] == "gallery_load_failed"
+
+
+def test_local_folder_listing_encodes_the_folder_as_one_segment(monkeypatch):
+    from comfy_cli.command.models import search
+    from comfy_cli.target import Target
+
+    urls = []
+    monkeypatch.setattr(search, "_http_get_json", lambda url, target: urls.append(url) or [])
+    target = Target(kind="local", base_url="http://127.0.0.1:8188")
+    templates_cmd._list_local_folder(target, "checkpoints#x")
+    assert urls == ["http://127.0.0.1:8188/models/checkpoints%23x"]
+
+
+def test_match_local_models_lists_a_folder_with_dots_inside_its_name(monkeypatch):
+    _stub_folder_listing(monkeypatch, {"model..v2": ["a.safetensors"]})
+    monkeypatch.setattr("comfy_cli.target.resolve_target", lambda **_kw: None)
+    present, missing, warnings = templates_cmd._match_local_models(
+        [{"name": "a.safetensors", "directory": "model..v2", "url": ""}], {}
+    )
+    assert (present, missing, warnings) == (["a.safetensors"], [], [])
 
 
 # ---------------------------------------------------------------------------
@@ -1520,7 +1567,7 @@ def test_ls_self_heals_from_a_cache_poisoned_by_an_older_build(cache_file, monke
 
 
 # ---------------------------------------------------------------------------
-# templates ls --local-only / --runnable  (BE-3377)
+# templates ls --local-only / --runnable
 # ---------------------------------------------------------------------------
 
 
@@ -1715,3 +1762,150 @@ def test_check_template_helper_is_pure_over_shared_listings():
     assert res_missing["verdict"] == "missing-models"
     assert res_missing["models"]["missing"][0]["name"] == "v1-5-pruned-emaonly.safetensors"
     assert any("checkpoints" in w for w in res_missing["warnings"])
+
+
+def test_ls_runnable_unparseable_cache_is_refetched_and_bad_body_not_cached(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    cache_path = templates_cmd._template_workflow_cache_path("image_z_image")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(b"<html>truncated")
+    fetches = _count_workflow_fetches(monkeypatch)
+    _count_folder_listings(monkeypatch, {})
+
+    result = CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--runnable"])
+    assert result.exit_code == 0, result.output
+    # The poisoned cache entry is a miss: re-fetched, and the good body replaces it.
+    assert fetches["names"] == ["image_z_image"]
+    assert _envelope(result.output)["data"]["rows"][0]["verdict"] == "runnable"
+    assert json.loads(cache_path.read_bytes()) == {"nodes": []}
+
+    # A fetched body that doesn't parse is reported but never cached.
+    cache_path.unlink()
+    _force_json_renderer()
+    _count_workflow_fetches(monkeypatch, body_by_name={"image_z_image": b'{"error": "rate limited"}'})
+    result = CliRunner().invoke(templates_cmd.app, ["ls", "--gallery", gallery_file, "--runnable"])
+    assert result.exit_code == 0, result.output
+    assert _envelope(result.output)["data"]["rows"][0]["verdict"] == "unknown"
+    assert not cache_path.exists()
+
+
+def test_check_unparseable_cache_is_refetched(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    cache_path = templates_cmd._template_workflow_cache_path("image_z_image")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_bytes(b"[1, 2")
+    fetches = _count_workflow_fetches(monkeypatch)
+
+    result = CliRunner().invoke(templates_cmd.app, ["check", "--gallery", gallery_file, "image_z_image"])
+    assert result.exit_code == 0, result.output
+    assert fetches["count"] == 1
+    assert _envelope(result.output)["data"]["verdict"] == "runnable"
+
+
+def test_check_object_without_nodes_is_invalid_not_runnable(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _stub_template_workflow_fetch(monkeypatch, b"{}")
+
+    result = _run_check(gallery_file, "image_z_image", tmp_path, monkeypatch)
+    assert result.exit_code != 0
+    assert _envelope(result.output)["error"]["code"] == "template_workflow_invalid_json"
+
+
+def test_check_template_unavailable_node_class_is_unknown_not_runnable():
+    from comfy_cli.cql import engine
+
+    graph = engine.Graph.from_object_info({"KSampler": {"input": {}, "output": [], "output_name": []}})
+    row = {"name": "local_x", "title": "X", "tags": []}
+    wf = {
+        "nodes": [
+            {"id": 1, "type": "KSampler"},
+            {"id": 2, "type": "Note"},  # UI-only, never in object_info
+            {"id": 3, "type": "sg-uuid-1"},  # subgraph instance
+            {"id": 4, "type": "SomeCustomNode"},
+        ],
+        "definitions": {"subgraphs": [{"id": "sg-uuid-1", "nodes": []}]},
+    }
+    res = templates_cmd._check_template(row, wf, {}, graph=graph)
+    assert res["verdict"] == "unknown"
+    assert any("SomeCustomNode" in w and "Note" not in w and "sg-uuid-1" not in w for w in res["warnings"])
+
+    # Without object_info nothing can be said about node availability.
+    assert templates_cmd._check_template(row, wf, {})["verdict"] == "runnable"
+
+
+def test_ls_runnable_dedupes_shared_folder_warnings_and_flags_missing_object_info(tmp_path, monkeypatch):
+    fixture = [
+        {
+            "moduleName": "default",
+            "category": "GEN",
+            "title": "Image",
+            "type": "image",
+            "templates": [
+                {"name": "local_a", "title": "A", "tags": [], "models": []},
+                {"name": "local_b", "title": "B", "tags": [], "models": []},
+            ],
+        }
+    ]
+    gf = tmp_path / "idx.json"
+    gf.write_text(json.dumps(fixture))
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    wf = json.dumps(_TOP_LEVEL_WF).encode()
+    _count_workflow_fetches(monkeypatch, body_by_name={"local_a": wf, "local_b": wf})
+    _count_folder_listings(monkeypatch, {})  # checkpoints 404s
+
+    result = _run_ls(str(gf), tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 0, result.output
+    warnings = _envelope(result.output)["data"]["warnings"]
+    assert len(warnings) == len(set(warnings))
+    assert sum("checkpoints" in w for w in warnings) == 1
+    assert any("object_info unavailable" in w for w in warnings)
+
+
+def test_ls_runnable_folder_http_error_degrades_to_missing(gallery_file, tmp_path, monkeypatch):
+    import urllib.error
+
+    _force_json_renderer()
+    _no_local_server(monkeypatch)
+    _count_workflow_fetches(monkeypatch, body_by_name={"image_z_image": json.dumps(_TOP_LEVEL_WF).encode()})
+    _stub_folder_listing(monkeypatch, urllib.error.HTTPError("x", 500, "Server Error", {}, None))
+
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--runnable"])
+    assert result.exit_code == 0, result.output
+    data = _envelope(result.output)["data"]
+    assert data["rows"][0]["verdict"] == "missing-models"
+    assert any("HTTP 500" in w for w in data["warnings"])
+
+
+def test_ls_local_only_reports_prefilter_drop(gallery_file, tmp_path, monkeypatch):
+    _force_json_renderer()
+    result = _run_ls(gallery_file, tmp_path, monkeypatch, ["--local-only"])
+    assert result.exit_code == 0, result.output
+    data = _envelope(result.output)["data"]
+    assert data["matched"] == 3
+    assert data["local_only_dropped"] == 2
+
+
+def test_ls_pretty_table_escapes_gallery_markup(tmp_path, monkeypatch):
+    fixture = [
+        {
+            "moduleName": "default",
+            "category": "GEN",
+            "title": "Image",
+            "type": "image",
+            "templates": [{"name": "local_a", "title": "Bad [/bold] title", "tags": ["[red]x"], "models": []}],
+        }
+    ]
+    gf = tmp_path / "idx.json"
+    gf.write_text(json.dumps(fixture))
+    r = _force_json_renderer()
+    r.mode = OutputMode.PRETTY
+
+    result = _run_ls(str(gf), tmp_path, monkeypatch, ["--local-only"])
+    assert result.exit_code == 0, result.output
+    assert "[/bold]" in result.output

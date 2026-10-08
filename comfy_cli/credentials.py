@@ -8,6 +8,10 @@ lives here exactly once:
 
     explicit flag → live OAuth session → purpose env var → stored key
 
+``comfy build`` and ``comfy deploy`` are the one exception, key-first, because
+comfy-builder and comfy-deploy swap a key at ingest on every request: see
+:func:`platform_api_key`.
+
 Two *purposes* exist and their credentials are NOT interchangeable:
 
 - ``"cloud"``   — the Comfy Cloud platform API (Bearer / ``X-API-Key`` on
@@ -97,6 +101,20 @@ def get_session(*, refresh: bool = True, force: bool = False, allow_clear: bool 
     return auth_store.get_cloud_session()
 
 
+def refreshed_access_token(rejected: str | None) -> str | None:
+    """Force the shared refresh after a server 401, and return the new access token.
+
+    Returns ``None`` when the refresh produced no token or the same one the
+    server just refused, so the caller surfaces the 401 rather than retrying a
+    token already known to fail. A fatal refresh clears the stored session, and
+    the 401 then carries the usual sign-in guidance.
+    """
+    session = get_session(refresh=True, force=True)
+    if session is None or not session.access_token or session.access_token == rejected:
+        return None
+    return session.access_token
+
+
 def find_api_key(*, purpose: Purpose) -> Credential | None:
     """Locate an ambient API key for ``purpose``: env var → stored key.
 
@@ -124,6 +142,48 @@ def find_api_key(*, purpose: Purpose) -> Credential | None:
             return Credential(kind="api_key", value=candidate, source=f"stored:{provider}")
 
     return None
+
+
+def platform_api_key() -> Credential | None:
+    """The workspace API key ``comfy build`` and ``comfy deploy`` send in place of a sign-in, or ``None``.
+
+    Key-first, unlike :func:`resolve_cloud_credential`: comfy-builder and
+    comfy-deploy take the key in ``X-API-Key`` and swap it at ingest, so a CI job
+    holding only a key needs no sign-in. In precedence order:
+
+    1. ``COMFY_CLOUD_API_KEY``, whatever sign-in is stored, since a caller sets it
+       for the run in hand;
+    2. the stored ``comfy cloud set-key`` key, only when no sign-in is stored,
+       because set-key saved it as a fallback and it must not move a signed-in
+       person into the key's workspace.
+
+    Values are stripped, since they go into a header. Never refreshes the sign-in.
+    """
+    import os
+
+    env_var = _PURPOSES["cloud"][0]
+    env_value = (os.environ.get(env_var) or "").strip()
+    if env_value:
+        return Credential(kind="api_key", value=env_value, source=f"env:{env_var}")
+    if get_session(refresh=False) is not None:
+        return None
+
+    from comfy_cli.auth import store as auth_store
+
+    record = auth_store.get(CLOUD_API_KEY_PROVIDER)
+    stored = (getattr(record, "key", None) or "").strip() if record is not None else ""
+    if stored:
+        return Credential(kind="api_key", value=stored, source=f"stored:{CLOUD_API_KEY_PROVIDER}")
+    return None
+
+
+def refused_key_hint(key: Credential) -> str:
+    """What to do once a server refuses a :func:`platform_api_key`, naming where the key came from."""
+    if key.source.startswith("env:"):
+        where = f"the workspace API key in {key.source.removeprefix('env:')}"
+    else:
+        where = "the workspace API key saved by `comfy cloud set-key`"
+    return f"{where} was refused; replace it with a valid key"
 
 
 def cloud_bearer_env_token() -> str | None:
@@ -222,6 +282,19 @@ def resolve_partner_credential() -> tuple[str, str] | None:
     if key_credential is None:
         return None
     return ("api_key_comfy_org", key_credential.value)
+
+
+def keyed_partner_credential(workspace_key: str) -> tuple[str, str]:
+    """The partner-node credential for a job running on ``workspace_key``.
+
+    The job runs in the key's workspace, so its partner nodes take that key
+    rather than a sign-in's token, unless ``COMFY_API_KEY`` names a partner key
+    on purpose. Network-free, unlike :func:`resolve_partner_credential`.
+    """
+    import os
+
+    partner = (os.environ.get(_PURPOSES["partner"][0]) or "").strip()
+    return ("api_key_comfy_org", partner or workspace_key)
 
 
 def _partner_api_key() -> Credential | None:

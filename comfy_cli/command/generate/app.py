@@ -645,10 +645,11 @@ def _generate(model: str, extra_args: list[str]) -> None:
                     code="emit_workflow_unsupported_model",
                     message=str(e),
                     hint=(
-                        "choose a model whose `emit_supported` is true in `comfy --json generate list` "
-                        "(see `details.supported`), or call the model through the proxy without --emit-workflow"
+                        "retry with the first alias in `details.suggested` (same kind of media), or any whose "
+                        "`emit_supported` is true in `comfy --json generate list` (`details.supported`); "
+                        "or call the model through the proxy without --emit-workflow"
                     ),
-                    details={"model": e.model, "supported": e.supported},
+                    details={"model": e.model, "supported": e.supported, "suggested": e.suggested},
                 )
                 raise typer.Exit(code=1) from e
             except workflow_ops.DeprecatedNodeType as e:

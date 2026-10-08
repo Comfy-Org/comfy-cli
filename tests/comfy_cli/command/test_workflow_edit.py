@@ -16,8 +16,10 @@ import copy
 import json
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from comfy_cli import workflow_ops
@@ -225,7 +227,7 @@ def _object_info_with_inputcount() -> dict[str, Any]:
     present so an unrelated node with a coincidental ``foo_1`` input is never
     misclassified. Bare 1-based keys (``image_3``) are the CORRECT wire
     address for this family — unlike autogrow's dotted ``base.elemN`` — which
-    is exactly what prod agents were sending and the CLI wrongly refused.
+    is exactly what agents send and the CLI used to wrongly refuse.
     """
     info = copy.deepcopy(_object_info())
     info["ImageBatchMulti"] = {
@@ -529,6 +531,80 @@ def _run(args: list[str], capsys) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+class TestInsertWorkflow:
+    def test_reads_template_from_stdin_when_path_is_dash(self, monkeypatch, tmp_path):
+        workflow = _write(tmp_path, {"nodes": [], "links": [], "groups": []})
+        template = {"nodes": [{"id": 12, "type": "ServerValidatedNode"}], "links": [], "groups": []}
+        renderer = _force_json_renderer()
+        transport = Mock()
+        monkeypatch.setattr(renderer, "emit", transport)
+
+        result = CliRunner().invoke(
+            workflow_cmd.app,
+            ["insert-workflow", str(workflow), "-"],
+            input=json.dumps(template),
+            standalone_mode=False,
+        )
+
+        assert result.exit_code == 0
+        assert transport.call_args.args[0]["op"]["workflow"] == template
+
+    def test_transmits_op_once_through_renderer(self, monkeypatch, tmp_path):
+        workflow = _write(tmp_path, {"nodes": [], "links": [], "groups": []})
+        template = _write(tmp_path, {"nodes": [], "links": [], "groups": []}, "template.json")
+        original = workflow.read_text(encoding="utf-8")
+        renderer = _force_json_renderer()
+        transport = Mock()
+        monkeypatch.setattr(renderer, "emit", transport)
+
+        result = CliRunner().invoke(
+            workflow_cmd.app,
+            ["insert-workflow", str(workflow), str(template), "--actor", "agent", "--base-version", "4"],
+            standalone_mode=False,
+        )
+
+        assert result.exit_code == 0
+        transport.assert_called_once()
+        payload = transport.call_args.args[0]
+        assert transport.call_args.kwargs == {"command": "workflow insert-workflow", "changed": False}
+        assert payload["workflow"] == str(workflow)
+        assert payload["base_version"] == 4
+        assert payload["wrote"] is None
+        assert payload["op"]["op"] == "insert_workflow"
+        assert payload["op"]["actor"] == "agent"
+        assert payload["op"]["stamp"] == [4, "agent"]
+        assert payload["op"]["workflow"] == {"nodes": [], "links": [], "groups": []}
+        assert workflow.read_text(encoding="utf-8") == original
+
+    def test_stdout_is_not_offered_for_emit_only_command(self):
+        result = CliRunner().invoke(workflow_cmd.app, ["insert-workflow", "--help"])
+
+        assert result.exit_code == 0
+        assert "emit-only" in result.output
+        assert "file is not modified" in result.output
+        assert "--stdout" not in result.output
+        assert "--in-place" not in result.output
+
+    def test_command_is_discoverable_in_schema_and_bundled_skill(self):
+        from comfy_cli.discovery import COMMAND_SCHEMAS
+
+        skill = Path(workflow_edit.__file__).parent.parent / "skills" / "comfy" / "SKILL.md"
+
+        assert COMMAND_SCHEMAS["comfy workflow insert-workflow"] == "workflow"
+        assert "insert-workflow" in skill.read_text(encoding="utf-8")
+
+    def test_local_validation_error_is_reported(self, tmp_path, capsys):
+        workflow = _write(tmp_path, {"nodes": [], "links": []})
+        template = _write(tmp_path, {"links": []}, "template.json")
+        _force_json_renderer()
+
+        with pytest.raises(typer.Exit) as exc:
+            workflow_edit.insert_workflow_cmd(str(workflow), str(template))
+
+        assert exc.value.exit_code == 1
+        assert "missing required field: nodes" in capsys.readouterr().out
+
+
 class TestAddNode:
     def test_adds_node_and_emits_op(self, patched_graph, tmp_path, capsys):
         path = _write(tmp_path, _base_workflow())
@@ -602,6 +678,18 @@ class TestAddNode:
         wf, op = workflow_ops.add_node(wf, g, "KSampler", pos=[400, 200])
         assert wf["nodes"][-1]["pos"] == [400, 200]
         assert op["pos"] == [400, 200]
+
+    def test_add_node_can_set_title_at_creation(self):
+        """Applying a title when creating a node should show the requested
+        title immediately, not the node's default class-derived title."""
+        g = _graph()
+        wf = {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0}
+        wf, op = workflow_ops.add_node(wf, g, "KSampler", title="My Sampler")
+        node = wf["nodes"][-1]
+        assert node.get("title") == "My Sampler"
+        # The op is the unit of replay (P1 fidelity) — a title set at
+        # creation must be frozen into it, not just the local node dict.
+        assert op.get("title") == "My Sampler"
 
     def test_add_node_size_reflects_widget_count(self):
         """Size is estimated from the node's real inputs/outputs/widgets, not
@@ -1009,8 +1097,8 @@ class TestConnect:
         """A dotted autogrow target that is not the next sequential slot — an index gap
         (images.image2), a doubled prefix (images.images.image0), a stray element
         (images.foo), or a trailing dot — is rejected with the fix, not silently grown
-        into a key the server cannot map. Regression: prod connects mis-addressed
-        autogrow slots and the CLI grew bogus inputs that failed only at submit time."""
+        into a key the server cannot map. Regression: connects that mis-addressed
+        autogrow slots made the CLI grow bogus inputs that failed only at submit time."""
         path = _write(tmp_path, {"nodes": [], "links": [], "last_node_id": 0, "last_link_id": 0})
         src = _run(["add-node", str(path), "VAEDecode"], capsys)["data"]["op"]["node_id"]
         batch = _run(["add-node", str(path), "BatchImagesNode"], capsys)["data"]["op"]["node_id"]
@@ -1119,8 +1207,8 @@ class TestConnect:
     def test_inputcount_family_bare_key_grows_and_bumps_count(self):
         """kijai ``inputcount`` family (ImageBatchMulti et al.): bare 1-based
         ``image_3`` IS the correct wire address (unlike autogrow's dotted
-        ``base.elemN``) — prod agents sent exactly this and the CLI wrongly
-        refused it. Growing the slot must ALSO bump the ``inputcount`` widget
+        ``base.elemN``) — agents send exactly this and the CLI used to wrongly
+        refuse it. Growing the slot must ALSO bump the ``inputcount`` widget
         to N, or the node never reads the new slot at runtime. Detection
         signal pinned against ImageBatchMulti's real object_info entry (see
         ``_object_info_with_inputcount``): a required INT ``inputcount``
@@ -1263,11 +1351,11 @@ class TestClear:
         on_disk = json.loads(path.read_text())
         assert on_disk["nodes"] == [] and on_disk["links"] == [] and on_disk["groups"] == []
 
-    # Prod (Langfuse 2026-08-26): `generate --emit-workflow` left an API-format
-    # draft in the tab's scratch file; `apply_ops` then `clear_canvas` both
-    # failed `workflow_not_frontend_format`, and the agent had to abandon the
-    # tab. Clearing discards the content, so its format cannot be a reason to
-    # refuse — the empty document that results is frontend-format regardless.
+    # `generate --emit-workflow` can leave an API-format draft in a tab's
+    # scratch file; `apply_ops` then `clear_canvas` both failed
+    # `workflow_not_frontend_format`, leaving the tab unusable. Clearing
+    # discards the content, so its format cannot be a reason to refuse — the
+    # empty document that results is frontend-format regardless.
     _API_DRAFT = {
         "1": {"class_type": "GeminiImageNode", "inputs": {"prompt": "a fox", "seed": 1}},
         "2": {"class_type": "SaveImage", "inputs": {"images": ["1", 0], "filename_prefix": "generate"}},

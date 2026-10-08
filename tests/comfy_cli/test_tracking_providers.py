@@ -54,15 +54,18 @@ def tracking_with_two_providers(tmp_path):
 
 
 def _posthog_capture_kwargs(client_mock):
-    """Return the last ``capture(...)`` keyword arguments as a dict."""
-    args, kwargs = client_mock.capture.call_args
+    """Return the first ``capture(...)`` keyword arguments as a dict: the event the
+    test sent, or for a decorated command its own event rather than the
+    ``command_finished`` that follows it."""
+    args, kwargs = client_mock.capture.call_args_list[0]
     if "event" not in kwargs and args:
         kwargs = {"event": args[0], **kwargs}
     return kwargs
 
 
 def _mixpanel_track_kwargs(mp_provider):
-    """Drain the Mixpanel worker, then return the last ``track(...)`` kwargs.
+    """Drain the Mixpanel worker, then return the first ``track(...)`` kwargs (a
+    decorated command's own event; ``command_finished`` follows it).
 
     ``MixpanelProvider`` dispatches through a bounded queue drained by a daemon
     worker, so the send has not necessarily happened by the time
@@ -70,7 +73,7 @@ def _mixpanel_track_kwargs(mp_provider):
     a ``flush()`` first.
     """
     mp_provider.flush()
-    _, kwargs = mp_provider.client.track.call_args
+    _, kwargs = mp_provider.client.track.call_args_list[0]
     return kwargs
 
 
@@ -570,12 +573,14 @@ class TestHardExitDrain:
 
         calls = []
         with (
-            patch.object(tracking_mod, "flush_for_hard_exit", side_effect=lambda: calls.append("drain")),
+            patch.object(tracking_mod, "flush_for_hard_exit", side_effect=lambda code: calls.append(("drain", code))),
             patch.object(launch_mod.os, "_exit", side_effect=lambda code: calls.append(("exit", code))),
         ):
             launch_mod._hard_exit(3)
 
-        assert calls == ["drain", ("exit", 3)], "telemetry must be drained before the process is torn down"
+        assert calls == [("drain", 3), ("exit", 3)], (
+            "telemetry must be drained before the process is torn down, and told the code so the running command finishes with it"
+        )
 
     def test_launch_exits_even_if_the_drain_raises(self):
         import comfy_cli.tracking as tracking_mod

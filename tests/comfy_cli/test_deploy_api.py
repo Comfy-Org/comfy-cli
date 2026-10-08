@@ -235,6 +235,65 @@ def test_every_operation_status_pair_has_the_required_mapping(monkeypatch, case:
     assert failure.calls == 1
 
 
+class _UnreadableBody(io.RawIOBase):
+    """An error body whose read fails in transport, after the status line came."""
+
+    def __init__(self, failure: Exception) -> None:
+        self.failure = failure
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        raise self.failure
+
+
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(401, "deploy_not_signed_in"), (403, "deploy_forbidden"), (404, "deploy_not_found"), (503, "deploy_server_error")],
+)
+@pytest.mark.parametrize(
+    "failure",
+    [
+        lambda: TimeoutError("timed out"),
+        lambda: ConnectionResetError(54, "Connection reset by peer"),
+        lambda: http.client.IncompleteRead(b'{"error"', 64),
+    ],
+    ids=["timeout", "connection_reset", "incomplete_read"],
+)
+def test_an_error_whose_body_cannot_be_read_maps_by_its_status_alone(monkeypatch, status, code, failure):
+    """The status is known before the body is read, so a body that stalls or is
+    cut off must not hide it: the error maps as if the body were empty."""
+
+    # Given
+    def refused(url, target, **kwargs):
+        raise urllib.error.HTTPError(url, status, "Refused", http.client.HTTPMessage(), _UnreadableBody(failure()))
+
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", refused)
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        DeployClient(_BASE_URL, "jwt-token").get_deployment("dep-1")
+
+    # Then
+    assert exc_info.value.code == code
+    assert exc_info.value.status == status
+    assert exc_info.value.details == {"operation": "get", "status": status}
+
+
+def test_an_oversized_error_body_is_still_refused_rather_than_ignored(monkeypatch):
+    # Given a 404 whose body is past the cap, which the reader refuses on purpose
+    def refused(url, target, **kwargs):
+        payload = io.BytesIO(b"x" * (_MAX_JSON + 1))
+        raise urllib.error.HTTPError(url, 404, "Not Found", http.client.HTTPMessage(), payload)
+
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", refused)
+
+    # When / Then
+    with pytest.raises(ResponseTooLarge):
+        DeployClient(_BASE_URL, "jwt-token").get_deployment("dep-1")
+
+
 @pytest.mark.parametrize("operation", ["create", "scale", "start"])
 def test_structural_400_is_bad_request_not_compute_unavailable(monkeypatch, operation: str):
     # Given
@@ -486,3 +545,17 @@ def test_public_pagination_primitives_do_not_expose_the_raw_cursor():
 
     # Then
     assert all("after" not in signature.parameters for signature in signatures)
+
+
+def test_a_stale_revision_keeps_the_server_code_beside_deploy_conflict(monkeypatch):
+    # Given
+    monkeypatch.setattr("comfy_cli.deploy_api.request_json", _HTTPFailure(409, "the deployment changed"))
+    client = DeployClient(_BASE_URL, "jwt-token")
+
+    # When
+    with pytest.raises(DeployAPIError) as exc_info:
+        client.move_deployment("dep-1", 3, "v2")
+
+    # Then
+    assert exc_info.value.code == "deploy_conflict"
+    assert exc_info.value.details["server_code"] == "SERVER_CODE"

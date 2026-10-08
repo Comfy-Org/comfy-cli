@@ -1,12 +1,12 @@
 """``generate --emit-ops``: the emitter expressed as the frozen op vocabulary.
 
 Why: ``--emit-workflow`` writes an API-format file, which the canvas and
-every edit tool refuse (``workflow_not_frontend_format`` — 48 refusals in one
-staging day), and which the CRDT write path cannot attribute (no ops). Instead
-of converting API→frontend after the fact — a second implementation of widget
-order and layout — the emitter mints the graph as add_node/set_widget/connect
-specs and lets ``workflow_ops.apply_specs`` materialize the frontend workflow,
-exactly the machinery every hand edit already uses. One answer, not two.
+every edit tool refuse (``workflow_not_frontend_format``), and which the CRDT
+write path cannot attribute (no ops). Instead of converting API→frontend after
+the fact — a second implementation of widget order and layout — the emitter
+mints the graph as add_node/set_widget/connect specs and lets
+``workflow_ops.apply_specs`` materialize the frontend workflow, exactly the
+machinery every hand edit already uses. One answer, not two.
 
 The round-trip test is the contract: lowering the materialized frontend
 workflow back to API format must reproduce the semantics of the API graph
@@ -42,18 +42,19 @@ CORE_OBJECT_INFO = {
         "display_name": "Load Image",
         "category": "image",
     },
-    "SaveImage": {
+    "SaveImageAdvanced": {
         "input": {
             "required": {
                 "images": ["IMAGE"],
                 "filename_prefix": ["STRING", {"default": "ComfyUI"}],
+                "format": [["png", "exr", "avif"], {"default": "png"}],
             }
         },
-        "input_order": {"required": ["images", "filename_prefix"]},
-        "output": [],
-        "output_name": [],
-        "name": "SaveImage",
-        "display_name": "Save Image",
+        "input_order": {"required": ["images", "filename_prefix", "format"]},
+        "output": ["IMAGE"],
+        "output_name": ["images"],
+        "name": "SaveImageAdvanced",
+        "display_name": "Save Image (Advanced)",
         "category": "image",
     },
     "SaveVideo": {
@@ -140,7 +141,11 @@ def test_ops_shape_for_an_image_edit_model():
         "adds, then widgets, then connects — every endpoint exists before it is referenced"
     )
     adds = [s for s in specs if s["op"] == "add_node"]
-    assert {s["class_type"] for s in adds} == {"LoadImage", "GeminiImageNode", "SaveImage"}
+    assert {s["class_type"] for s in adds} == {
+        "LoadImage",
+        "GeminiImageNode",
+        "SaveImageAdvanced",
+    }
     assert all(s.get("as") for s in adds), "every add declares an alias for later specs to reference"
     prompts = [s for s in specs if s["op"] == "set_widget" and s["widget"] == "prompt"]
     assert len(prompts) == 1 and prompts[0]["value"] == "add sunglasses"
@@ -160,7 +165,7 @@ def test_allow_deprecated_is_read_from_the_spec_not_stamped_on_everything():
 
     flux = adds("flux-2", {"prompt": "a fox"})
     assert flux["Flux2ImageNode"] is False, "a live partner class carries no exemption"
-    assert flux["SaveImage"] is False, "a live core class carries no exemption"
+    assert flux["SaveImageAdvanced"] is False, "a live core class carries no exemption"
 
     gemini = adds("nano-banana", {"prompt": "p", "image": ["a.png", "b.png"]})
     assert gemini["GeminiImageNode"] is False, "a partner class that is not deprecated gets no exemption"
@@ -274,7 +279,7 @@ def test_ops_roundtrip_with_no_image_params():
     assert got["Flux2ImageNode"]["model"] == "Flux.2 [pro]"
     assert got["Flux2ImageNode"]["model.width"] == 512
     assert got["Flux2ImageNode"]["model.height"] == 768
-    assert got["SaveImage"]["images"] == ("link", "Flux2ImageNode")
+    assert got["SaveImageAdvanced"]["images"] == ("link", "Flux2ImageNode")
 
 
 def test_ops_set_a_combo_selector_before_its_sub_widgets_whatever_the_dict_order():
@@ -489,3 +494,25 @@ def test_emitted_workflow_accepts_a_later_edit_stamped_below_its_base_version(tm
     assert edited.exit_code == 0, edited.output
     lowered = convert_ui_to_api(json.loads(out.read_text()), _object_info())
     assert _api_by_class(lowered)["GeminiImageNode"]["prompt"] == "EDITED", "the edit was discarded by a stale stamp"
+
+
+def test_write_frontend_workflow_materializes_nano_banana_pro_from_the_nightly_input(tmp_path):
+    """Pin for an agent failure: a generate call with these args got
+    `emit_workflow_failed` — "'gemini-3-pro-image-preview' not in 1 known
+    options for model — closest: gemini-2.5-flash-image" — because emit built
+    GeminiImageNode. #921 routes that model to GeminiImage2Node; this replays
+    that input through the same frontend (canvas-ops) path."""
+    wf, ops = emit.write_frontend_workflow(
+        "nano-banana",
+        {
+            "prompt": "Redraw this character as 16-bit pixel art.",
+            "image": "abababababababababababababababababababababababababababababababab.gif",
+            "model": "gemini-3-pro-image-preview",
+        },
+        tmp_path / "workflow.json",
+        _graph(),
+        actor="agent",
+    )
+    assert ops
+    partner = next(n for n in wf["nodes"] if n["type"] == "GeminiImage2Node")
+    assert "gemini-3-pro-image-preview" in partner["widgets_values"]

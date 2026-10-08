@@ -74,6 +74,12 @@ The server validated the workflow and rejected nodes. The full per-node error ma
 - `404` returning XML `<AuthenticationRequired>` → wrong path. Real ComfyUI endpoints on cloud live under `/api/*`; everything else hits the CDN catch-all.
 - `503` → check the Comfy Cloud dashboard or server logs for deployment health.
 
+### `cloud_rate_limited` (HTTP 429 from cloud)
+Throttling is not a verdict on the workflow, so do not edit it. Wait `details.retry_after` seconds (when present; otherwise a few seconds). A 429 does not by itself prove a submit had no effect, so before re-running `comfy run`, check `comfy jobs ls --where cloud` for the job. A 429 while `--wait` polls means the job was already submitted: follow it with `comfy jobs watch <prompt_id> --where cloud` instead of re-running.
+
+### `cloud_payment_required` (HTTP 402, or a legacy typed 429, from cloud)
+The cloud refused the submit because the account's plan does not allow the run: free generations used up, a subscription required, or a partner node or model that needs a paid plan (`details.reason`, when the server sent a type). The cloud answers this with HTTP 402; older deployments sent a 429 whose body type is a plan refusal, so `details.status` is 402 or 429. Either way it is not throttling and not a problem with the workflow, and nothing was queued. Do not retry or edit the workflow: tell the user the server's message (`message`, `details.body`).
+
 ### `cloud_timeout`
 `cloud_timeout` — the run went **silent** for `--timeout` seconds (default 120). `comfy run --timeout` is a per-event-silence deadline on both local and cloud: it resets whenever the job reports progress, so a workflow streaming progress can run indefinitely. Wall-clock limits exist only on `comfy jobs watch --max-wait` (default 600s, cloud). Recovery: re-run with a larger `--timeout`, or submit async and `comfy jobs watch <id>`.
 ```
@@ -99,6 +105,15 @@ The CLI needs an `object_info.json` to query against. Two options:
 comfy launch                                        # then re-run the nodes command
 comfy --json nodes ls --produces IMAGE --input /path/to/object_info.json
 ```
+
+### `internal_error`
+The command crashed on an exception it did not handle. This is a comfy-cli
+bug, not a bad input. `details.exception` names the type and
+`details.traceback` lists the innermost `file:line:func` frames. The full
+traceback is on stderr. Re-read the file or state before retrying, because the
+crash may have happened after a write. If the same call crashes again, take
+another route (e.g. `set-slot` instead of `set-widget`, or a different address
+form) and report the envelope as a bug. Do not retry it in a loop.
 
 ### `comfy generate` is partially machine-readable
 `comfy generate` is partially machine-readable: `generate <model> --json` and
