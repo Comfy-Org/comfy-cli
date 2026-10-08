@@ -185,7 +185,7 @@ _SECRET_KEY_PATTERN = (
     r"(?:proxy-)?authorization|api[_-]?key|token|access[_-]?token|refresh[_-]?token|secret|password|"
     r"session(?:[_-]?(?:id|key))?|sid|sig|signature|(?:set-)?cookie"
 )
-_SECRET_ASSIGNMENT_KEY_PATTERN = rf"(?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})(?:[_-][\w-]+)?"
+_SECRET_ASSIGNMENT_KEY_PATTERN = rf"(?<![\w-])(?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})(?:[_-][\w-]+)?"
 _SECRET_PATTERNS = (
     (re.compile(r"(https?://[^\s?#'\"]+)\?[^\s'\"]*", re.IGNORECASE), r"\1?***"),
     (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]+", re.IGNORECASE), r"\1***"),
