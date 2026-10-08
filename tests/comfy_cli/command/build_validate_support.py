@@ -49,6 +49,9 @@ class ResolveRecorder:
         self.calls: list[JsonObject] = []
 
     def __call__(self, url, target, *, method="GET", body: JsonObject | None = None, timeout=30.0, max_bytes):
+        # Read before the local checks; not recorded, so the counts stay the lookups'.
+        if (method, url) == ("GET", "https://builder.test/v1/model-directories"):
+            return 200, {"directories": ["checkpoints", "loras"]}
         assert url == "https://builder.test/v1/models/resolve"
         assert body is not None
         self.calls.append({"method": method, "body": body})

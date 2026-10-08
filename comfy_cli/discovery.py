@@ -44,6 +44,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy build release show": "build_release_show",
     "comfy build release logs": "build_release_logs",
     "comfy build release manifest": "build_release_manifest",
+    "comfy build release delete": "build_release_delete",
     "comfy build validate": "build_validate",
     "comfy build delete": "build_delete",
     "comfy build update": "build_update",
@@ -53,6 +54,10 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy build refs model-dirs": "build_refs_model_dirs",
     "comfy build blob ls": "build_blob_ls",
     "comfy deploy up": "deploy_up",
+    "comfy deploy promote": "deploy_promote",
+    "comfy deploy rollback": "deploy_rollback",
+    "comfy deploy rename": "deploy_rename",
+    "comfy deploy history": "deploy_history",
     "comfy deploy status": "deploy_status",
     "comfy deploy ls": "deploy_ls",
     "comfy deploy show": "deploy_show",
@@ -97,9 +102,11 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow notes": "workflow",
     "comfy workflow print": "workflow",
     # structured edit primitives + recipes (CRDT op-based authoring)
+    "comfy workflow insert-workflow": "workflow",
     "comfy workflow add-node": "workflow",
     "comfy workflow connect": "workflow",
     "comfy workflow set-widget": "workflow",
+    "comfy workflow set-node-field": "workflow",
     "comfy workflow delete-node": "workflow",
     "comfy workflow delete-nodes": "workflow",
     "comfy workflow ls-nodes": "workflow",
@@ -117,6 +124,10 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow fragment ls": "workflow",
     "comfy workflow fragment show": "workflow",
     "comfy workflow fragment validate": "workflow",
+    # the local comfy agent's approvals
+    "comfy agent permissions": "agent",
+    "comfy agent allow": "agent",
+    "comfy agent deny": "agent",
     # skill management
     "comfy skills install": "skill",
     "comfy skills uninstall": "skill",
@@ -208,6 +219,13 @@ COMMAND_SCHEMAS: dict[str, str] = {
 STREAM_EVENT_SCHEMAS: dict[str, str] = {
     "comfy run": "run_event",
     "comfy jobs watch": "run_event",
+    # upload progress; under plain --json the same lines go to stderr
+    "comfy build push": "build_push_event",
+    # the deployment coming up; same rule about stderr
+    "comfy deploy up": "deploy_progress_event",
+    "comfy deploy status": "deploy_progress_event",
+    "comfy deploy promote": "deploy_progress_event",
+    "comfy deploy rollback": "deploy_progress_event",
 }
 
 

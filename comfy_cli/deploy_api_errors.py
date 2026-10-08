@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 from typing import Final
@@ -54,6 +55,30 @@ STATUS_ERRORS: Final = {
     ("scale", 409): _IMMUTABLE_COMPUTE,
     ("scale", 429): _QUOTA_EXCEEDED,
     ("scale", 500): _SERVER_ERROR,
+    ("move", 400): _BAD_REQUEST,
+    ("move", 401): _NOT_SIGNED_IN,
+    ("move", 402): _PAYMENT_REQUIRED,
+    ("move", 403): _FORBIDDEN,
+    ("move", 404): _NOT_FOUND,
+    ("move", 409): _CONFLICT,
+    ("move", 429): _QUOTA_EXCEEDED,
+    ("move", 500): _SERVER_ERROR,
+    ("rename", 400): _BAD_REQUEST,
+    ("rename", 401): _NOT_SIGNED_IN,
+    ("rename", 402): _PAYMENT_REQUIRED,
+    ("rename", 403): _FORBIDDEN,
+    ("rename", 404): _NOT_FOUND,
+    ("rename", 409): _CONFLICT,
+    ("rename", 429): _QUOTA_EXCEEDED,
+    ("rename", 500): _SERVER_ERROR,
+    ("revisions", 400): _BAD_REQUEST,
+    ("revisions", 401): _NOT_SIGNED_IN,
+    ("revisions", 402): _PAYMENT_REQUIRED,
+    ("revisions", 403): _FORBIDDEN,
+    ("revisions", 404): _NOT_FOUND,
+    ("revisions", 409): _CONFLICT,
+    ("revisions", 429): _QUOTA_EXCEEDED,
+    ("revisions", 500): _SERVER_ERROR,
     ("delete", 400): _BAD_REQUEST,
     ("delete", 401): _NOT_SIGNED_IN,
     ("delete", 402): _PAYMENT_REQUIRED,
@@ -102,6 +127,14 @@ STATUS_ERRORS: Final = {
     ("compute", 409): _CONFLICT,
     ("compute", 429): _QUOTA_EXCEEDED,
     ("compute", 500): _SERVER_ERROR,
+    ("estimate", 400): _BAD_REQUEST,
+    ("estimate", 401): _NOT_SIGNED_IN,
+    ("estimate", 402): _PAYMENT_REQUIRED,
+    ("estimate", 403): _FORBIDDEN,
+    ("estimate", 404): _NOT_FOUND,
+    ("estimate", 409): _CONFLICT,
+    ("estimate", 429): _QUOTA_EXCEEDED,
+    ("estimate", 500): _SERVER_ERROR,
 }
 
 
@@ -157,7 +190,14 @@ _CONTEXTUAL_ERRORS: Final = {
 
 
 def _error_body(error: urllib.error.HTTPError, url: str) -> tuple[str | None, str | None]:
-    raw = read_capped(error, url, max_bytes=_MAX_JSON)
+    # The status line has already come, so a body that stalls or is cut off
+    # maps by that status alone rather than escaping as a bare transport error:
+    # a 404 must not pass for a service that is down. `ResponseTooLarge` is
+    # neither, and still propagates.
+    try:
+        raw = read_capped(error, url, max_bytes=_MAX_JSON)
+    except (OSError, http.client.HTTPException):
+        return None, None
     if not raw:
         return None, None
     try:

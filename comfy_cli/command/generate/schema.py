@@ -154,7 +154,7 @@ def _coerce(flag: FlagDef, raw: str) -> Any:
             return [Path(p).expanduser() for p in parsed]
         if flag.kind == "array" and flag.item_kind == "string" and not raw.lstrip().startswith("["):
             # Callers naturally pass a single path/value or a comma list for a
-            # string array (prod: --image 'Linked profile pic.jpeg'); demanding
+            # string array (e.g. --image 'my photo.jpeg'); demanding
             # JSON here only manufactures failures. Explicit JSON ('[' prefix)
             # still takes the strict path below.
             items = [p.strip() for p in raw.split(",") if p.strip()]

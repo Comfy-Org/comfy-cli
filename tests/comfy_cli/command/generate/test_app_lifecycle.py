@@ -209,6 +209,14 @@ class TestGenerateExecutionHappyPath:
 
 
 class TestGenerateExecutionErrorPaths:
+    def test_emit_ops_without_emit_workflow_emits_generate_error_with_kind_schema(self, runner, captured_events):
+        r = runner.invoke(cli_app, ["generate", "nano-banana", "--prompt", "x", "--emit-ops"])
+        assert r.exit_code == 1
+
+        err_props = _props(captured_events, "generate:error")
+        assert len(err_props) == 1, "generate:start needs its terminal generate:error"
+        assert err_props[0]["error_kind"] == "schema"
+
     def test_api_error_emits_generate_error_with_kind_api(self, runner, captured_events, api_key, monkeypatch):
         resp = httpx.Response(401, json={"message": "Invalid token"})
         monkeypatch.setattr(gen_app.client.httpx, "post", lambda *a, **kw: resp)

@@ -1,8 +1,8 @@
 """Tests for ``comfy nodes widget-catalog`` (the widget-catalog producer).
 
-WHY THIS COMMAND EXISTS: the CRDT doc host (cloud ``services/agent/dochost``)
-and the applier (``@comfyorg/comfy-multi-player``) convert between the CRDT
-doc's NAME-keyed widget maps and the workflow JSON's POSITIONAL
+WHY THIS COMMAND EXISTS: the CRDT doc host and the applier
+(``@comfyorg/comfy-multi-player``) convert between the CRDT doc's NAME-keyed
+widget maps and the workflow JSON's POSITIONAL
 ``widgets_values`` array. That conversion needs one derived projection of
 ``object_info`` — ``{types: {<class_type>: {widget_order, autogrow_templates}}}``
 — and the widget order it needs is exactly what ``cql.engine.Graph`` already

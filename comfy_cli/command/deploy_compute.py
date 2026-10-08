@@ -39,6 +39,10 @@ def prompt_region(client: DeployUpClient, gpu_class: str) -> str | None:
         region_id = region.get("region")
         if available and isinstance(region_id, str):
             label = region.get("label")
-            choices.append({"name": label if isinstance(label, str) else region_id, "value": region_id})
+            name = label if isinstance(label, str) else region_id
+            level = region.get("level")
+            # A wider location sells the same card as the datacenter under it, so
+            # the level is what tells the two choices apart.
+            choices.append({"name": f"{name} ({level})" if isinstance(level, str) else name, "value": region_id})
     selected = prompt_select("Region", choices)
     return selected if isinstance(selected, str) else None

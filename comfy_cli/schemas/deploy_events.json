@@ -17,8 +17,23 @@
         "properties": {
           "at": {"type": "string", "format": "date-time"},
           "message": {"type": ["string", "null"]},
-          "status": {"type": "string", "minLength": 1}
+          "status": {"type": "string", "minLength": 1},
+          "releaseId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The release whose copy made this transition; sent only where the workspace has deployment updates."
+          }
         }
+      }
+    },
+    "release": {
+      "type": "object",
+      "description": "The release `--release` named, present only with that option; `events` then holds only that release's events. `version` is absent for a release the Build no longer lists.",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "integer", "minimum": 1}
       }
     }
   }
