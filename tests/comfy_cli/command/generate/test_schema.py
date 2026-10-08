@@ -13,7 +13,7 @@ def test_flags_for_bfl_classifies_types():
     assert flags["width"].kind == "integer"
     assert flags["prompt_upsampling"].kind == "boolean"
     assert flags["output_format"].kind == "enum"
-    assert flags["output_format"].enum == ["jpeg", "png"]
+    assert flags["output_format"].enum == ["jpeg", "png", "webp"]
 
 
 def test_flags_for_multipart_finds_binary_fields():
@@ -65,10 +65,13 @@ def test_parse_args_rejects_bad_int():
 
 
 def test_parse_args_missing_required():
+    # `prompt` is the endpoint's only required field — `width`/`height` carry
+    # server-side defaults and are optional — so omitting it is what trips the
+    # check.
     ep = spec.get_endpoint("bfl/flux-pro-1.1/generate")
     flags = schema.flags_for(ep)
     with pytest.raises(schema.SchemaError, match="Missing required"):
-        schema.parse_args(flags, ["--prompt", "a"])
+        schema.parse_args(flags, ["--width", "1", "--height", "1"])
 
 
 def test_parse_args_enum_value_validated():

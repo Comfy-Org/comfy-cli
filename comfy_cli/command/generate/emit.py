@@ -261,6 +261,12 @@ MODEL_NODE_MAP: dict[str, NodeSpec] = {
         param_map={
             "prompt": "prompt",
             "seed": "seed",
+            # The endpoint takes these directly (no width/height); each is the
+            # same-named widget on the node.
+            "aspect_ratio": "aspect_ratio",
+            "raw": "raw",
+            "prompt_upsampling": "prompt_upsampling",
+            "image_prompt_strength": "image_prompt_strength",
         },
         # `image_prompt_strength` is schema-optional but positionally required by
         # execute(); the emitted node must carry every widget input. Default from

@@ -211,7 +211,7 @@ def test_generate_unknown_model(runner, api_key):
 
 
 def test_generate_missing_required(runner, api_key):
-    r = runner.invoke(cli_app, ["generate", "flux-pro", "--prompt", "x"])
+    r = runner.invoke(cli_app, ["generate", "flux-pro", "--width", "1", "--height", "1"])
     assert r.exit_code == 1
     assert "Missing required" in r.stdout
 
@@ -319,14 +319,14 @@ def test_generate_download_no_urls(runner, api_key, monkeypatch):
     assert "no image urls" in r.stdout.lower()
 
 
-# ─── generate: sync binary response (Stability returns bytes) ────────────
+# ─── generate: sync binary response (a partner returning raw bytes) ──────
 
 
 def test_generate_binary_response_with_download(runner, api_key, tmp_path, monkeypatch):
     resp = httpx.Response(200, content=b"\x89PNGfake", headers={"content-type": "image/png"})
     monkeypatch.setattr(gen_app.client.httpx, "post", lambda *a, **kw: resp)
     download = str(tmp_path / "ultra.png")
-    r = runner.invoke(cli_app, ["generate", "stability-ultra", "--prompt", "x", "--download", download])
+    r = runner.invoke(cli_app, ["generate", "dalle", "--prompt", "x", "--download", download])
     assert r.exit_code == 0, r.stdout
     assert Path(download).exists()
 
@@ -334,7 +334,7 @@ def test_generate_binary_response_with_download(runner, api_key, tmp_path, monke
 def test_generate_binary_response_no_download(runner, api_key, monkeypatch):
     resp = httpx.Response(200, content=b"\x89PNGfake", headers={"content-type": "image/png"})
     monkeypatch.setattr(gen_app.client.httpx, "post", lambda *a, **kw: resp)
-    r = runner.invoke(cli_app, ["generate", "stability-ultra", "--prompt", "x"])
+    r = runner.invoke(cli_app, ["generate", "dalle", "--prompt", "x"])
     assert r.exit_code == 0
     assert "nothing saved" in r.stdout
 
