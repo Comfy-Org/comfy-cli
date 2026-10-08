@@ -120,6 +120,7 @@ class FakeDeploy:
         self.move_calls: list[tuple[str, int, str]] = []
         self.promote_calls: list[tuple[str, int, str]] = []
         self.rollback_calls: list[tuple[str, int, int | None]] = []
+        self.cancel_calls: list[str] = []
         # Each deployment's revisions, oldest first, as the service lists them.
         self.revisions: dict[str, list[JsonObject]] = {}
         # Raised by the next worker-bounds edit, when set.
@@ -281,6 +282,24 @@ class FakeDeploy:
             reply["kind"] = "rollback"
             if isinstance(moved.get("pendingUpdate"), dict):
                 reply["pendingUpdate"] = {**moved["pendingUpdate"], "kind": "rollback"}
+            return reply
+
+    def cancel_pending_update(self, deployment_id: str) -> JsonObject:
+        with self._lock:
+            self.cancel_calls.append(deployment_id)
+            row = self.rows[deployment_id]
+            pending = row.get("pendingUpdate")
+            if not isinstance(pending, dict):
+                raise DeployAPIError(
+                    "deploy_conflict", "no update is waiting", status=409, details={"server_code": "NO_PENDING_UPDATE"}
+                )
+            row["pendingUpdate"] = None
+            reply = copy.deepcopy(row)
+            reply["cancelledUpdate"] = {
+                "releaseId": pending["releaseId"],
+                "baseRevision": pending["baseRevision"],
+                "kind": pending.get("kind", "update"),
+            }
             return reply
 
     def get_deployment_events(self, deployment_id: str) -> JsonObject:

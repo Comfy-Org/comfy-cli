@@ -57,6 +57,7 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy deploy promote": "deploy_promote",
     "comfy deploy rollback": "deploy_rollback",
     "comfy deploy rename": "deploy_rename",
+    "comfy deploy cancel": "deploy_cancel",
     "comfy deploy history": "deploy_history",
     "comfy deploy status": "deploy_status",
     "comfy deploy ls": "deploy_ls",

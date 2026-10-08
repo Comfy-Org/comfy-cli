@@ -37,6 +37,8 @@ class DeployUpClient(Protocol):
 
     def get_deploy_estimate(self, release_id: str, gpu_class: str, region: str) -> JsonObject: ...
 
+    def get_deployment_revisions(self, deployment_id: str) -> JsonObject: ...
+
 
 @dataclass(frozen=True, slots=True)
 class UpRequest:
@@ -141,48 +143,114 @@ def optional_revision(deployment: JsonObject) -> int | None:
 NOT_MOVABLE: Final = frozenset({"stopping", "stop_failed"})
 
 
-def move_settled(release_id: str) -> Callable[[JsonObject], bool]:
-    """When a watch on a move can stop: the move landed, its copy failed, or two
-    reads that say anything about it show it dropped, with no read between them
-    showing it waiting. Each watch takes its own, since it counts.
+@dataclass(frozen=True, slots=True)
+class WatchedMove:
+    """The move a watch follows: the release it moves to, the one the
+    deployment served before, and the revision it was asked from, where the
+    move's reply names one."""
+
+    release_id: str
+    previous_id: str | None
+    base: int | None
+
+
+def watched_move(release: JsonObject, previous: JsonObject | None, reply: JsonObject) -> WatchedMove:
+    """The move to ``release`` from ``previous``, as the service's ``reply`` to it says it waits."""
+    pending = reply.get("pendingUpdate")
+    base = pending.get("baseRevision") if isinstance(pending, dict) else None
+    return WatchedMove(
+        required_string(release, "id"),
+        (previous or {}).get("id"),
+        base if isinstance(base, int) and not isinstance(base, bool) else None,
+    )
+
+
+def move_settled(outcome: Callable[[JsonObject], str | None]) -> Callable[[JsonObject], bool]:
+    """When a watch on a move can stop, given each read's ``outcome``: the move
+    landed or its copy failed, or two reads that say anything about it show it
+    replaced or dropped, with no read between them showing it waiting. Each
+    watch takes its own, since it counts.
 
     The service assembles a read from several queries, so one that straddles
-    the move landing can show the old release with nothing waiting, which is
-    how a dropped move reads too; the next read shows where it landed.
+    a change can show the old release with nothing waiting, which is how a
+    dropped move reads too, or still show an update a newer move has just
+    replaced; the next read shows where the deployment went.
     """
-    dropped_reads = 0
+    ended_reads = 0
 
     def settled(snapshot: JsonObject) -> bool:
-        nonlocal dropped_reads
-        outcome = move_outcome(snapshot, release_id)
-        if outcome == "dropped":
-            dropped_reads += 1
-            return dropped_reads >= 2
-        if outcome == "unknown":
+        nonlocal ended_reads
+        found = outcome(snapshot)
+        if found in ("dropped", "replaced"):
+            ended_reads += 1
+            return ended_reads >= 2
+        if found in ("unknown", "past"):
             return False
-        dropped_reads = 0
-        return outcome is not None
+        ended_reads = 0
+        return found is not None
 
     return settled
 
 
-def move_outcome(snapshot: JsonObject, release_id: str) -> str | None:
-    """``landed``, ``failed``, ``dropped``, ``unknown``, or ``None`` while the move to ``release_id`` still waits.
+def move_outcome(snapshot: JsonObject, move: WatchedMove, after_base: str | None = None) -> str | None:
+    """``landed``, ``failed``, ``replaced``, ``dropped``, ``past``, ``unknown``, or ``None`` while ``move`` still waits.
 
     It lands when the deployment serves the release and nothing waits. It
-    failed when the copy it waits on failed, and it dropped when nothing waits
-    any more and the deployment serves another release: the service dropped
-    the move, or another change overtook it. A read with no revision is
-    ``unknown`` unless it already shows the release, since the service leaves
-    revision and pendingUpdate out whenever its rollout check fails.
+    failed when the copy it waits on failed. A newer update replaced it when
+    the update waiting is to another release from the same base, or when
+    nothing waits and the deployment serves, at the revision after the base,
+    a release that is neither this move's nor the one it served before: a
+    newer move onto a ready release it kept lands at once. It dropped when
+    nothing waits and the deployment still serves that earlier release: the
+    service dropped the move, a cancel ended it, or a move back to it did.
+
+    It went ``past`` when the deployment has gone beyond the revision after
+    the base, a later update waiting or a later revision serving another
+    release. That alone does not say this move made that revision: a cancel
+    leaves the revision where it was, so a later move takes it. ``after_base``,
+    the release the deployment's history shows at that revision, settles it:
+    landed where it is this move's release, replaced otherwise.
+
+    A read with no revision is ``unknown`` unless it already shows the
+    release, since the service leaves revision and pendingUpdate out whenever
+    its rollout check fails.
     """
     pending = snapshot.get("pendingUpdate")
     if isinstance(pending, dict):
+        waiting = pending.get("releaseId")
+        if isinstance(waiting, str) and waiting != move.release_id:
+            asked = pending.get("baseRevision")
+            if move.base is not None and isinstance(asked, int) and asked > move.base:
+                return _went_past(move, after_base)
+            return "replaced"
         return "failed" if pending.get("status") == "failed" else None
     serving = snapshot.get("releaseId")
-    if optional_revision(snapshot) is None:
-        return "landed" if serving == release_id else "unknown"
-    return "landed" if serving == release_id else "dropped"
+    revision = optional_revision(snapshot)
+    if revision is None:
+        return "landed" if serving == move.release_id else "unknown"
+    if serving == move.release_id:
+        return "landed"
+    if move.base is not None and revision > move.base + 1:
+        return _went_past(move, after_base)
+    if move.previous_id is not None and serving != move.previous_id:
+        return "replaced"
+    return "dropped"
+
+
+def _went_past(move: WatchedMove, after_base: str | None) -> str:
+    if after_base is None:
+        return "past"
+    return "landed" if after_base == move.release_id else "replaced"
+
+
+def revision_release(revisions: object, revision: int) -> str | None:
+    """The release the deployment's history shows at ``revision``, if it lists one."""
+    if not isinstance(revisions, list):
+        return None
+    for item in revisions:
+        if isinstance(item, dict) and item.get("revision") == revision and isinstance(item.get("releaseId"), str):
+            return item["releaseId"]
+    return None
 
 
 def move_changed(moved: JsonObject, base_revision: int, release_id: str, previous_id: str) -> bool:

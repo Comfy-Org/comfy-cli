@@ -191,7 +191,7 @@ def test_deploy_run_is_registered_with_the_complete_option_surface() -> None:
     } <= option_names("run")
 
 
-def test_deploy_tree_is_exactly_the_sixteen_designed_commands() -> None:
+def test_deploy_tree_is_exactly_the_seventeen_designed_commands() -> None:
     # Given / When
     command = typer.main.get_command(deploy.app)
     assert hasattr(command, "commands"), command
@@ -204,6 +204,7 @@ def test_deploy_tree_is_exactly_the_sixteen_designed_commands() -> None:
         "rollback",
         "rename",
         "history",
+        "cancel",
         "status",
         "ls",
         "show",
