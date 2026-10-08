@@ -1,0 +1,1033 @@
+{
+ "LoadImage": {
+  "input": {
+   "required": {
+    "image": [
+     [
+      "beach.jpg",
+      "eth3d.png",
+      "example.png",
+      "example_image.jpg",
+      "groceries.jpg",
+      "image.png",
+      "middlebury.jpg"
+     ],
+     {
+      "image_upload": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "image"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE",
+   "MASK"
+  ],
+  "output_is_list": [
+   false,
+   false
+  ],
+  "output_name": [
+   "IMAGE",
+   "MASK"
+  ],
+  "name": "LoadImage",
+  "display_name": "Load Image",
+  "python_module": "nodes",
+  "category": "image",
+  "output_node": false,
+  "has_intermediate_output": false,
+  "search_aliases": [
+   "load image",
+   "open image",
+   "import image",
+   "image input",
+   "upload image",
+   "read image",
+   "image loader"
+  ],
+  "essentials_category": "Basics",
+  "description": ""
+ },
+ "LoadVideo": {
+  "input": {
+   "required": {
+    "file": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": [
+       "bedroom.mp4"
+      ],
+      "video_upload": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "file"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VIDEO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "LoadVideo",
+  "display_name": "Load Video",
+  "python_module": "comfy_extras.nodes_video",
+  "category": "video",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "import video",
+   "open video",
+   "video file"
+  ],
+  "essentials_category": "Basics",
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "LoadAudio": {
+  "input": {
+   "required": {
+    "audio": [
+     "COMBO",
+     {
+      "multiselect": false,
+      "options": [
+       "bedroom.mp4"
+      ],
+      "audio_upload": true
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "audio"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "AUDIO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "AUDIO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "LoadAudio",
+  "display_name": "Load Audio",
+  "python_module": "comfy_extras.nodes_audio",
+  "category": "audio",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "import audio",
+   "open audio",
+   "audio file"
+  ],
+  "essentials_category": "Audio",
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "GeminiNanoBanana2V2": {
+  "input": {
+   "required": {
+    "prompt": [
+     "STRING",
+     {
+      "default": "",
+      "multiline": true
+     }
+    ],
+    "model": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "options": [
+       {
+        "key": "Nano Banana 2 (Gemini 3.1 Flash Image)",
+        "inputs": {
+         "required": {
+          "aspect_ratio": [
+           "COMBO",
+           {
+            "default": "auto",
+            "multiselect": false,
+            "options": [
+             "auto",
+             "1:1",
+             "2:3",
+             "3:2",
+             "3:4",
+             "4:3",
+             "4:5",
+             "5:4",
+             "9:16",
+             "16:9",
+             "21:9",
+             "1:4",
+             "4:1",
+             "8:1",
+             "1:8"
+            ]
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "1K",
+             "2K",
+             "4K"
+            ]
+           }
+          ],
+          "thinking_level": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "MINIMAL",
+             "HIGH"
+            ]
+           }
+          ],
+          "images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9",
+              "image_10",
+              "image_11",
+              "image_12",
+              "image_13",
+              "image_14"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         },
+         "optional": {
+          "files": [
+           "GEMINI_INPUT_FILES",
+           {}
+          ]
+         }
+        }
+       },
+       {
+        "key": "Nano Banana 2 Lite",
+        "inputs": {
+         "required": {
+          "aspect_ratio": [
+           "COMBO",
+           {
+            "default": "auto",
+            "multiselect": false,
+            "options": [
+             "auto",
+             "1:1",
+             "2:3",
+             "3:2",
+             "3:4",
+             "4:3",
+             "4:5",
+             "5:4",
+             "9:16",
+             "16:9",
+             "21:9",
+             "1:4",
+             "4:1",
+             "8:1",
+             "1:8"
+            ]
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "1K"
+            ]
+           }
+          ],
+          "thinking_level": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "MINIMAL",
+             "HIGH"
+            ]
+           }
+          ],
+          "images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9",
+              "image_10",
+              "image_11",
+              "image_12",
+              "image_13",
+              "image_14"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         },
+         "optional": {
+          "files": [
+           "GEMINI_INPUT_FILES",
+           {}
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "default": 42,
+      "min": 0,
+      "max": 18446744073709551615,
+      "control_after_generate": true
+     }
+    ],
+    "response_modalities": [
+     "COMBO",
+     {
+      "advanced": true,
+      "multiselect": false,
+      "options": [
+       "IMAGE",
+       "IMAGE+TEXT"
+      ]
+     }
+    ]
+   },
+   "optional": {
+    "system_prompt": [
+     "STRING",
+     {
+      "advanced": true,
+      "default": "You are an expert image-generation engine. You must ALWAYS produce an image.\nInterpret all user input\u2014regardless of format, intent, or abstraction\u2014as literal visual directives for image composition.\nIf a prompt is conversational or lacks specific visual details, you must creatively invent a concrete visual scenario that depicts the concept.\nPrioritize generating the visual representation above any text, formatting, or conversational requests.",
+      "multiline": true
+     }
+    ],
+    "temperature": [
+     "FLOAT",
+     {
+      "advanced": true,
+      "default": 1.0,
+      "min": 0.0,
+      "max": 2.0,
+      "step": 0.01
+     }
+    ],
+    "top_p": [
+     "FLOAT",
+     {
+      "advanced": true,
+      "default": 0.95,
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01
+     }
+    ]
+   },
+   "hidden": {
+    "auth_token_comfy_org": [
+     "AUTH_TOKEN_COMFY_ORG"
+    ],
+    "api_key_comfy_org": [
+     "API_KEY_COMFY_ORG"
+    ],
+    "unique_id": [
+     "UNIQUE_ID"
+    ],
+    "comfy_usage_source": [
+     "COMFY_USAGE_SOURCE"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "prompt",
+    "model",
+    "seed",
+    "response_modalities"
+   ],
+   "optional": [
+    "system_prompt",
+    "temperature",
+    "top_p"
+   ],
+   "hidden": [
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "unique_id",
+    "comfy_usage_source"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE",
+   "STRING",
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false,
+   false,
+   false
+  ],
+  "output_name": [
+   "IMAGE",
+   "STRING",
+   "thought_image"
+  ],
+  "output_tooltips": [
+   null,
+   null,
+   "First image from the model's thinking process. Only available with thinking_level HIGH and IMAGE+TEXT modality."
+  ],
+  "output_matchtypes": null,
+  "name": "GeminiNanoBanana2V2",
+  "display_name": "Nano Banana 2",
+  "python_module": "comfy_api_nodes.nodes_gemini",
+  "category": "partner/image/Gemini",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": true,
+  "price_badge": {
+   "engine": "jsonata",
+   "depends_on": {
+    "widgets": [
+     {
+      "name": "model",
+      "type": "COMFY_DYNAMICCOMBO_V3"
+     },
+     {
+      "name": "model.resolution",
+      "type": "COMBO"
+     }
+    ],
+    "inputs": [],
+    "input_groups": []
+   },
+   "expr": "\n                (\n                  $contains(widgets.model, \"lite\")\n                    ? {\"type\":\"usd\",\"usd\": 0.0408, \"format\":{\"suffix\":\"/Image\",\"approximate\":true}}\n                    : (\n                        $r := $lookup(widgets, \"model.resolution\");\n                        $prices := {\"1k\": 0.0835, \"2k\": 0.1217, \"4k\": 0.1848};\n                        {\"type\":\"usd\",\"usd\": $lookup($prices, $r), \"format\":{\"suffix\":\"/Image\",\"approximate\":true}}\n                      )\n                )\n                "
+  },
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "MinimaxHailuo03ReferenceNode": {
+  "input": {
+   "required": {
+    "model": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "options": [
+       {
+        "key": "MiniMax H3",
+        "inputs": {
+         "required": {
+          "prompt": [
+           "STRING",
+           {
+            "default": "",
+            "multiline": true
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "768P",
+             "2K"
+            ]
+           }
+          ],
+          "ratio": [
+           "COMBO",
+           {
+            "default": "adaptive",
+            "multiselect": false,
+            "options": [
+             "adaptive",
+             "16:9",
+             "4:3",
+             "1:1",
+             "3:4",
+             "9:16",
+             "21:9"
+            ]
+           }
+          ],
+          "duration": [
+           "INT",
+           {
+            "default": 5,
+            "min": 4,
+            "max": 15,
+            "step": 1,
+            "display": "slider"
+           }
+          ],
+          "reference_images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3",
+              "image_4",
+              "image_5",
+              "image_6",
+              "image_7",
+              "image_8",
+              "image_9"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_videos": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_video": [
+                "VIDEO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "video_1",
+              "video_2",
+              "video_3"
+             ],
+             "min": 0
+            }
+           }
+          ],
+          "reference_audios": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "reference_audio": [
+                "AUDIO",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "audio_1",
+              "audio_2",
+              "audio_3"
+             ],
+             "min": 0
+            }
+           }
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "default": 42,
+      "min": 0,
+      "max": 4294967295,
+      "step": 1,
+      "control_after_generate": true,
+      "display": "number"
+     }
+    ],
+    "watermark": [
+     "BOOLEAN",
+     {
+      "advanced": true,
+      "default": false
+     }
+    ]
+   },
+   "hidden": {
+    "auth_token_comfy_org": [
+     "AUTH_TOKEN_COMFY_ORG"
+    ],
+    "api_key_comfy_org": [
+     "API_KEY_COMFY_ORG"
+    ],
+    "unique_id": [
+     "UNIQUE_ID"
+    ],
+    "comfy_usage_source": [
+     "COMFY_USAGE_SOURCE"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "model",
+    "seed",
+    "watermark"
+   ],
+   "hidden": [
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "unique_id",
+    "comfy_usage_source"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "VIDEO"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "VIDEO"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "MinimaxHailuo03ReferenceNode",
+  "display_name": "MiniMax H3 Reference to Video",
+  "python_module": "comfy_api_nodes.nodes_minimax",
+  "category": "partner/video/MiniMax",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": true,
+  "price_badge": {
+   "engine": "jsonata",
+   "depends_on": {
+    "widgets": [
+     {
+      "name": "model.resolution",
+      "type": "COMBO"
+     },
+     {
+      "name": "model.duration",
+      "type": "INT"
+     }
+    ],
+    "inputs": [],
+    "input_groups": [
+     "model.reference_images",
+     "model.reference_videos"
+    ]
+   },
+   "expr": "\n                (\n                  $dur := $lookup(widgets, \"model.duration\");\n                  $rate := $lookup(widgets, \"model.resolution\") = \"768p\" ? 0.1287 : 0.1859;\n                  $imgsRaw := $lookup(inputGroups, \"model.reference_images\");\n                  $imgs := $imgsRaw ? $imgsRaw : 0;\n                  $vidsRaw := $lookup(inputGroups, \"model.reference_videos\");\n                  $vids := $vidsRaw ? $vidsRaw : 0;\n                  $base := $dur * $rate + ($imgs > 5 ? ($imgs - 5) * 0.0572 : 0);\n                  $vids > 0\n                    ? {\"type\": \"range_usd\", \"min_usd\": $base + $vids * 2 * $rate,\n                       \"max_usd\": $base + 15 * $rate, \"format\": {\"approximate\": true}}\n                    : {\"type\": \"usd\", \"usd\": $base}\n                )\n                "
+  },
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "BatchImagesNode": {
+  "input": {
+   "required": {
+    "images": [
+     "COMFY_AUTOGROW_V3",
+     {
+      "template": {
+       "input": {
+        "required": {
+         "image": [
+          "IMAGE",
+          {}
+         ]
+        }
+       },
+       "prefix": "image",
+       "min": 1,
+       "max": 50
+      }
+     }
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "images"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "IMAGE"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "BatchImagesNode",
+  "display_name": "Batch Images",
+  "python_module": "comfy_extras.nodes_post_processing",
+  "category": "image/batch",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": false,
+  "price_badge": null,
+  "search_aliases": [
+   "batch",
+   "image batch",
+   "batch images",
+   "combine images",
+   "merge images",
+   "stack images"
+  ],
+  "essentials_category": "Image Tools",
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "GrokImageEditNodeV2": {
+  "input": {
+   "required": {
+    "prompt": [
+     "STRING",
+     {
+      "default": "",
+      "multiline": true
+     }
+    ],
+    "model": [
+     "COMFY_DYNAMICCOMBO_V3",
+     {
+      "options": [
+       {
+        "key": "grok-imagine-image-2.0",
+        "inputs": {
+         "required": {
+          "images": [
+           "COMFY_AUTOGROW_V3",
+           {
+            "template": {
+             "input": {
+              "required": {
+               "image": [
+                "IMAGE",
+                {}
+               ]
+              }
+             },
+             "names": [
+              "image_1",
+              "image_2",
+              "image_3"
+             ],
+             "min": 1
+            }
+           }
+          ],
+          "resolution": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "1K",
+             "2K"
+            ]
+           }
+          ],
+          "number_of_images": [
+           "INT",
+           {
+            "default": 1,
+            "min": 1,
+            "max": 10,
+            "step": 1,
+            "display": "number"
+           }
+          ],
+          "quality": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "medium",
+             "low"
+            ]
+           }
+          ],
+          "aspect_ratio": [
+           "COMBO",
+           {
+            "multiselect": false,
+            "options": [
+             "auto",
+             "1:1",
+             "2:3",
+             "3:2",
+             "3:4",
+             "4:3",
+             "9:16",
+             "16:9",
+             "9:19.5",
+             "19.5:9",
+             "9:20",
+             "20:9",
+             "1:2",
+             "2:1"
+            ]
+           }
+          ]
+         }
+        }
+       }
+      ]
+     }
+    ],
+    "seed": [
+     "INT",
+     {
+      "default": 0,
+      "min": 0,
+      "max": 2147483647,
+      "step": 1,
+      "control_after_generate": true,
+      "display": "number"
+     }
+    ]
+   },
+   "hidden": {
+    "auth_token_comfy_org": [
+     "AUTH_TOKEN_COMFY_ORG"
+    ],
+    "api_key_comfy_org": [
+     "API_KEY_COMFY_ORG"
+    ],
+    "unique_id": [
+     "UNIQUE_ID"
+    ],
+    "comfy_usage_source": [
+     "COMFY_USAGE_SOURCE"
+    ]
+   }
+  },
+  "input_order": {
+   "required": [
+    "prompt",
+    "model",
+    "seed"
+   ],
+   "hidden": [
+    "auth_token_comfy_org",
+    "api_key_comfy_org",
+    "unique_id",
+    "comfy_usage_source"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "IMAGE"
+  ],
+  "output_tooltips": [
+   null
+  ],
+  "output_matchtypes": null,
+  "name": "GrokImageEditNodeV2",
+  "display_name": "Grok Image Edit",
+  "python_module": "comfy_api_nodes.nodes_grok",
+  "category": "partner/image/Grok",
+  "output_node": false,
+  "deprecated": false,
+  "experimental": false,
+  "dev_only": false,
+  "api_node": true,
+  "price_badge": {
+   "engine": "jsonata",
+   "depends_on": {
+    "widgets": [
+     {
+      "name": "model",
+      "type": "COMFY_DYNAMICCOMBO_V3"
+     },
+     {
+      "name": "model.resolution",
+      "type": "COMBO"
+     },
+     {
+      "name": "model.number_of_images",
+      "type": "INT"
+     },
+     {
+      "name": "model.quality",
+      "type": "COMBO"
+     }
+    ],
+    "inputs": [],
+    "input_groups": []
+   },
+   "expr": "\n                (\n                  $is20 := widgets.model = \"grok-imagine-image-2.0\";\n                  $isPro := $contains(widgets.model, \"pro\");\n                  $res := $lookup(widgets, \"model.resolution\");\n                  $n := $lookup(widgets, \"model.number_of_images\");\n                  $is1k := $res = \"1k\";\n                  $rate := $is20\n                    ? ($lookup(widgets, \"model.quality\") = \"low\"\n                        ? ($is1k ? 0.04 : 0.06)\n                        : ($is1k ? 0.06 : 0.08))\n                    : (widgets.model = \"grok-imagine-image-quality\"\n                        ? ($is1k ? 0.05 : 0.07)\n                        : ($isPro ? 0.07 : 0.02));\n                  $base := ($is20 or widgets.model = \"grok-imagine-image-quality\") ? 0.01 : 0.002;\n                  $output := $rate * $n;\n                  $isPro\n                    ? {\"type\":\"usd\",\"usd\": $base + $output}\n                    : {\"type\":\"range_usd\",\"min_usd\": $base + $output, \"max_usd\": 3 * $base + $output}\n                )\n                "
+  },
+  "search_aliases": null,
+  "essentials_category": null,
+  "has_intermediate_output": false,
+  "description": ""
+ },
+ "SaveImage": {
+  "input": {
+   "required": {
+    "images": [
+     "IMAGE",
+     {}
+    ],
+    "filename_prefix": [
+     "STRING",
+     {
+      "default": "ComfyUI"
+     }
+    ]
+   },
+   "hidden": {
+    "prompt": "PROMPT",
+    "extra_pnginfo": "EXTRA_PNGINFO"
+   }
+  },
+  "input_order": {
+   "required": [
+    "images",
+    "filename_prefix"
+   ],
+   "hidden": [
+    "prompt",
+    "extra_pnginfo"
+   ]
+  },
+  "is_input_list": false,
+  "output": [
+   "IMAGE"
+  ],
+  "output_is_list": [
+   false
+  ],
+  "output_name": [
+   "images"
+  ],
+  "name": "SaveImage",
+  "display_name": "Save Image",
+  "python_module": "nodes",
+  "category": "image",
+  "output_node": true,
+  "has_intermediate_output": false,
+  "search_aliases": [
+   "save",
+   "save image",
+   "export image",
+   "output image",
+   "write image",
+   "download"
+  ],
+  "essentials_category": "Basics",
+  "description": ""
+ }
+}

@@ -1,7 +1,7 @@
-"""Execution lifecycle tests for ``comfy run`` (MAR-52).
+"""Execution lifecycle tests for ``comfy run``.
 
 The CLI's ``run`` command historically emitted a single ``run`` event via the
-``@track_command()`` decorator. Post-MAR-52 it manually emits
+``@track_command()`` decorator. It now manually emits
 ``execution_start`` / ``execution_success`` / ``execution_error`` against the
 canonical PRD §5.1 schema, with ``mixpanel_name="run"`` on the start event to
 preserve Mixpanel-side continuity for the 219K/week legacy stream.
@@ -69,7 +69,7 @@ class TestRunHappyPath:
         assert start_kwargs["mixpanel_name"] == "run"
         assert success_kwargs["mixpanel_name"] is None
 
-    def test_properties_carry_workflow_and_other_kwargs(self, runner, tracked_run):
+    def test_properties_carry_kwargs_with_the_workflow_path_redacted(self, runner, tracked_run):
         from comfy_cli.cmdline import app
 
         with patch("comfy_cli.cmdline.run_inner.execute"):
@@ -92,7 +92,7 @@ class TestRunHappyPath:
 
         for name, props in _events(tracked_run):
             if name == "execution_start":
-                assert props["workflow"] == "wf.json"
+                assert props["workflow"] == "<redacted>"
                 assert props["timeout"] == 60
                 assert props["host"] == "1.2.3.4"
                 assert props["port"] == 9000
@@ -111,6 +111,70 @@ class TestRunHappyPath:
         for name, props in _events(tracked_run):
             assert props.get("api_key") == "<redacted>", f"{name} leaked api_key={props.get('api_key')!r}"
             assert "sk-supersecret" not in str(props)
+
+
+class TestRunCloudTarget:
+    """``--where cloud`` must be analytics-equivalent to the local target.
+
+    The cloud branch used to `return` straight out of the `try` suite, and
+    Python skips a try's ``else:`` clause on `return` — so ``execution_success``
+    never fired for a cloud run (only `--print-prompt` got it by accident, via
+    the ``except typer.Exit`` handler, back when it raised ``Exit(0)``).
+    """
+
+    def test_cloud_submit_emits_execution_start_then_success(self, runner, tracked_run, monkeypatch):
+        from comfy_cli.cmdline import app
+
+        monkeypatch.setattr("comfy_cli.where.cloud_preflight_or_exit", lambda *a, **kw: None)
+        with patch("comfy_cli.cmdline.run_inner.execute_cloud") as mock_cloud:
+            mock_cloud.return_value = None
+            result = runner.invoke(app, ["run", "--workflow", "wf.json", "--where", "cloud"])
+
+        assert result.exit_code == 0, f"stdout={result.output!r} exc={result.exception!r}"
+        assert mock_cloud.called
+        assert _event_names(tracked_run) == ["execution_start", "execution_success"]
+
+    def test_cloud_print_prompt_emits_execution_success(self, runner, tracked_run, monkeypatch):
+        # execute_cloud()'s --print-prompt branch returns rather than raising
+        # Exit(0); the success event must still land.
+        from comfy_cli.cmdline import app
+
+        monkeypatch.setattr("comfy_cli.where.cloud_preflight_or_exit", lambda *a, **kw: None)
+        with patch("comfy_cli.cmdline.run_inner.execute_cloud") as mock_cloud:
+            mock_cloud.return_value = None
+            result = runner.invoke(app, ["run", "--workflow", "wf.json", "--where", "cloud", "--print-prompt"])
+
+        assert result.exit_code == 0, f"stdout={result.output!r} exc={result.exception!r}"
+        assert mock_cloud.call_args.kwargs["print_prompt"] is True
+        assert _event_names(tracked_run) == ["execution_start", "execution_success"]
+
+    def test_cloud_failure_still_emits_execution_error_only(self, runner, tracked_run, monkeypatch):
+        from comfy_cli.cmdline import app
+
+        monkeypatch.setattr("comfy_cli.where.cloud_preflight_or_exit", lambda *a, **kw: None)
+        with patch("comfy_cli.cmdline.run_inner.execute_cloud") as mock_cloud:
+            mock_cloud.side_effect = typer.Exit(code=1)
+            result = runner.invoke(app, ["run", "--workflow", "wf.json", "--where", "cloud"])
+
+        assert result.exit_code == 1
+        names = _event_names(tracked_run)
+        assert "execution_error" in names
+        assert "execution_success" not in names
+
+    def test_cloud_target_does_not_resolve_host_port(self, runner, tracked_run, monkeypatch):
+        # host/port aren't applicable to the HTTPS+Bearer cloud path; the
+        # if/else must keep that resolution off the cloud branch.
+        from comfy_cli.cmdline import app
+
+        monkeypatch.setattr("comfy_cli.where.cloud_preflight_or_exit", lambda *a, **kw: None)
+        with (
+            patch("comfy_cli.cmdline.run_inner.execute_cloud"),
+            patch("comfy_cli.host_port.resolve_host_port") as mock_resolve,
+        ):
+            result = runner.invoke(app, ["run", "--workflow", "wf.json", "--where", "cloud"])
+
+        assert result.exit_code == 0, f"stdout={result.output!r} exc={result.exception!r}"
+        assert not mock_resolve.called
 
 
 class TestRunFailurePath:
@@ -157,3 +221,41 @@ class TestRunFailurePath:
 
         assert result.exit_code == 0
         assert _event_names(tracked_run) == ["execution_start", "execution_success"]
+
+
+class TestRunCloudLifecycle:
+    """Cloud submissions must emit the SAME start→success lifecycle as local.
+
+    Regression: the cloud branch `return`ed after `execute_cloud`, skipping the
+    try's `else` — so a successful cloud run fired `execution_start` but never
+    `execution_success`. Local runs (which fall through) were unaffected.
+    """
+
+    def test_cloud_success_emits_start_then_success(self, runner, tracked_run, monkeypatch):
+        from comfy_cli.cmdline import app
+
+        monkeypatch.setattr("comfy_cli.cmdline.where_module.cloud_preflight_or_exit", lambda: None)
+        with patch("comfy_cli.cmdline.run_inner.execute_cloud") as mock_cloud:
+            mock_cloud.return_value = None
+            result = runner.invoke(app, ["run", "--workflow", "wf.json", "--where", "cloud"])
+
+        assert result.exit_code == 0, f"stdout={result.output!r} exc={result.exception!r}"
+        assert _event_names(tracked_run) == ["execution_start", "execution_success"]
+        mock_cloud.assert_called_once()
+
+    def test_resolved_target_rides_on_terminal_events(self, runner, tracked_run, monkeypatch):
+        """The resolved routing target (cloud vs local) is recorded so a
+        submission is attributable even when --where was defaulted."""
+        from comfy_cli.cmdline import app
+
+        monkeypatch.setattr("comfy_cli.cmdline.where_module.cloud_preflight_or_exit", lambda: None)
+        with patch("comfy_cli.cmdline.run_inner.execute_cloud"):
+            runner.invoke(app, ["run", "--workflow", "wf.json", "--where", "cloud"])
+        cloud_success = next(props for name, props in _events(tracked_run) if name == "execution_success")
+        assert cloud_success.get("target") == "cloud"
+
+        tracked_run.clear()
+        with patch("comfy_cli.cmdline.run_inner.execute"):
+            runner.invoke(app, ["run", "--workflow", "wf.json", "--where", "local"])
+        local_success = next(props for name, props in _events(tracked_run) if name == "execution_success")
+        assert local_success.get("target") == "local"

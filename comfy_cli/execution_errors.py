@@ -30,6 +30,43 @@ _TRANSIENT_AUTH_MARKER = "please login first to use this node"
 # How many trailing traceback frames survive into envelope details.
 _TRACEBACK_TAIL_FRAMES = 2
 
+# Fields of a server ``execution_error`` record that must never reach an error
+# envelope: ``current_inputs`` is the failing node's widget values, which
+# routinely carry API keys and other user secrets. JSON mode engages
+# automatically for non-TTY output, so an unredacted record lands verbatim in
+# CI logs and agent transcripts.
+_SECRET_RECORD_KEYS = frozenset({"current_inputs"})
+
+
+def redact_record(record: Any) -> Any:
+    """Drop the ``execution_error`` fields that may carry user secrets.
+
+    Non-dict input is returned unchanged — callers pass whatever the server
+    sent, and only the object dialect has fields to redact.
+    """
+    if not isinstance(record, dict):
+        return record
+    return {k: v for k, v in record.items() if k not in _SECRET_RECORD_KEYS}
+
+
+def trim_record(record: Any) -> Any:
+    """:func:`redact_record` plus the traceback capped at its tail frames.
+
+    What an *envelope* may carry: the same two-frame budget
+    :func:`classify` applies to ``details["traceback_tail"]``. The full server
+    traceback stays reachable via ``comfy --json jobs status <prompt_id>``,
+    which is the documented place for it.
+    """
+    if not isinstance(record, dict):
+        return record
+    out = redact_record(record)
+    tb = out.get("traceback")
+    if isinstance(tb, str):
+        tb = [tb]
+    if isinstance(tb, (list, tuple)) and len(tb) > _TRACEBACK_TAIL_FRAMES:
+        out["traceback"] = [str(frame) for frame in tb[-_TRACEBACK_TAIL_FRAMES:]]
+    return out
+
 
 def parse_error_message(raw: Any) -> dict[str, Any]:
     """Normalize a job-failure payload into flat fields.
@@ -65,6 +102,13 @@ def parse_error_message(raw: Any) -> dict[str, Any]:
     }
     tb = data.get("traceback") or []
     if isinstance(tb, str):
+        tb = [tb]
+    elif not isinstance(tb, (list, tuple)):
+        # A server that serves `traceback` as a scalar or an object must not
+        # take the caller down: `tb[-2:]` raises TypeError on a non-sequence,
+        # and `job_watcher._poll_cloud_once` guards only the HTTP fetch — the
+        # detached watcher would die mid-poll and strand the state file in a
+        # non-terminal status forever.
         tb = [tb]
     if tb:
         out["traceback_tail"] = [str(frame) for frame in tb[-_TRACEBACK_TAIL_FRAMES:]]

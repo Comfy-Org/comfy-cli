@@ -23,10 +23,12 @@ possible (``--json`` or no TTY).
 
 from __future__ import annotations
 
+import logging
 import sys
 import uuid
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, NoReturn
 
 import httpx
 import typer
@@ -38,13 +40,19 @@ import typer
 # stderr whenever stdout isn't a TTY, leaving stdout empty -- so `comfy generate
 # ... > out.txt` would write an empty file. Migrate only once `generate` emits
 # envelopes via the renderer.
+#
+# That rationale covers *results* only. FAILURES go through `_fail` below, which
+# emits an `envelope/1` error whenever the global renderer is in JSON /
+# JSON-stream mode -- an envelope-consuming caller must never get exit 1 with a
+# blank stdout.
 from rich import print as rprint
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
-from comfy_cli import constants, tracking, ui
+from comfy_cli import constants, knowledge, tracking, ui
 from comfy_cli.command.generate import adapters, client, emit, output, poll, schema, spec, upload
 from comfy_cli.config_manager import ConfigManager
 from comfy_cli.output.renderer import Renderer, get_renderer
+from comfy_cli.output.sanitize import sanitize_markup
 
 _HELP = "Generate images via ComfyUI partner nodes (Flux, Ideogram, DALL·E, Recraft, Stability, …)."
 
@@ -53,6 +61,164 @@ _CONTEXT_SETTINGS = {
     "ignore_unknown_options": True,
     "help_option_names": [],
 }
+
+_TARGET_REQUIRED_MSG = (
+    "`comfy generate` requires a partner model alias as its first argument "
+    '(e.g. `comfy generate flux-pro --prompt "a cat on the moon"`); it is a cloud/partner '
+    "verb that spends credits."
+)
+_TARGET_REQUIRED_HINT = (
+    "Run `comfy generate list` to see model aliases. For local text-to-image, use `comfy run-template` instead."
+)
+
+
+def _fail(
+    *,
+    code: str,
+    message: str,
+    hint: str | None = None,
+    details: Mapping[str, Any] | None = None,
+    legacy_json: bool = False,
+    pretty: str | None = None,
+) -> None:
+    r"""Report a `generate` failure through whichever channel the caller asked for.
+
+    - Global `--json` / `--json-stream` (and any non-TTY stdout, which the
+      renderer already resolves to JSON) → exactly one `envelope/1` error on
+      stdout with a stable `code`. Without this an envelope-consuming caller
+      (comfy-local-mcp, scripts, agents) sees exit 1 with nothing to read.
+    - `legacy_json` → the command-local `--json` error object. The `error` key
+      is byte-compatible with what those paths already emitted; `code` is added
+      (additively — the `_consent` unknown-action and `_schema` usage/unknown-model
+      paths previously emitted `error` alone) so a machine caller on the local
+      flag gets the same stable identifier the envelope carries.
+    - Otherwise → the historical rich-red line (plus a dim hint line where the
+      path already printed one), so pretty/TTY output is unchanged.
+
+    The default pretty line runs `message` (and `hint`) through `sanitize_markup`:
+    several call sites interpolate server-controlled text (an `ApiError`'s body, a
+    response preview, a partner's failure reason). Markup escaping alone is not
+    enough for remote text — it stops a bracketed token from being read as a tag
+    (which would swallow the text or raise `MarkupError`), but `\x1b` survives it,
+    so a CSI/OSC sequence would reach the terminal and could clear the screen or
+    repaint earlier lines to spoof CLI output. `sanitize_markup` strips the escape
+    bytes *and* escapes markup; see `comfy_cli.output.sanitize` (#614), which this
+    module must call explicitly because `generate` prints via a bare `rich.print`
+    rather than through `Renderer`.
+
+    A caller-supplied `pretty` is passed through verbatim: it is explicitly
+    pre-formatted markup and is responsible for sanitizing its own interpolations
+    (the two that carry remote text do).
+
+    The JSON/NDJSON paths above deliberately do NOT sanitize: `json.dumps` encodes
+    `\x1b` as a `\u` escape already, and stripping there would mutate the data
+    agents parse.
+
+    ``hint`` is only passed where pretty mode already printed that second line;
+    everywhere else `renderer.error` falls back to the code's registered hint,
+    which keeps pretty output identical while JSON callers still get navigation.
+
+    Keyword-only on purpose: ``tests/comfy_cli/output/test_error_code_registry.py``
+    scans for literal ``code="…"`` kwargs to pin every raised code against
+    :mod:`comfy_cli.error_codes`, and a positional first argument would be
+    invisible to it.
+    """
+    renderer = get_renderer()
+    if renderer.is_json():
+        renderer.error(code=code, message=message, hint=hint, details=details)
+        return
+    if legacy_json:
+        output.print_json({"error": message, "code": code})
+        return
+    rprint(pretty if pretty is not None else f"[bold red]{sanitize_markup(message)}[/bold red]")
+    if hint:
+        rprint(f"[dim]{sanitize_markup(hint)}[/dim]")
+
+
+def _transport_code(exc: BaseException) -> str:
+    """`generate_network_error` for a transport failure, `generate_api_error` for
+    an HTTP/API-level one — the two arrive together on most call sites.
+
+    `httpx.HTTPStatusError` subclasses `HTTPError` but is *not* a transport
+    failure: the request reached the server and came back non-2xx (e.g.
+    `upload_remote_url`'s `raise_for_status` on a 404 source URL). Calling that
+    a network error would tell automation to check connectivity and retry, which
+    is exactly the wrong move for a 4xx.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return "generate_api_error"
+    return "generate_network_error" if isinstance(exc, httpx.HTTPError) else "generate_api_error"
+
+
+def _notice(markup: str, *, err: bool) -> None:
+    """Print a human-facing Rich line to stdout, or to stderr when stdout is the
+    machine channel."""
+    if err:
+        get_renderer().stderr_console().print(markup)
+    else:
+        rprint(markup)
+
+
+def _track_kind(exc: BaseException) -> str:
+    """Tracking bucket matching `_transport_code` — an HTTP-status failure is an
+    API error, not a network one."""
+    return "network" if _transport_code(exc) == "generate_network_error" else "api"
+
+
+def _bail(
+    track_error: Callable[[str, BaseException], None],
+    exc: BaseException,
+    *,
+    code: str,
+    message: str,
+    kind: str,
+    hint: str | None = None,
+    details: Mapping[str, Any] | None = None,
+    legacy_json: bool = False,
+    pretty: str | None = None,
+) -> NoReturn:
+    """Report a failure, record its `generate:error`, and exit 1 — in that order.
+
+    Every error branch in `_generate` owes the same three steps, and each one is
+    load-bearing: skipping the tracking call orphans the `generate:start` fired
+    at entry, and returning instead of raising falls through into the success
+    path. Ten branches spelled that out identically; owning the order here makes
+    it a property of the helper rather than of ten copies.
+
+    `track_error` is a parameter rather than a module-level function because the
+    tracker closes over `_generate`'s mutable `gen_props` — `model_alias`,
+    `partner`, `async` and `has_download` are filled in as they become known, so
+    the payload has to be read at raise time.
+
+    `code` is keyword-only for the same reason `_fail`'s is:
+    ``tests/comfy_cli/output/test_error_code_registry.py`` scans call sites for
+    literal ``code="…"`` kwargs to pin every raised code against
+    :mod:`comfy_cli.error_codes`, and a positional first argument would be
+    invisible to it. `_fail`'s remaining keyword-only options (`hint`, `details`,
+    `legacy_json`, `pretty`) are re-declared here rather than forwarded through a
+    `**kwargs`, so a misspelled option is a type error at the call site instead of
+    a `TypeError` raised inside `_fail` on an error-only path — which would
+    replace the intended exit-1 envelope with a traceback.
+
+    Tracking is best-effort, so it runs guarded: a telemetry failure (a malformed
+    `enable_tracking` making `config_manager.get_bool` raise, say) must not cost
+    the caller the exit this helper's `NoReturn` promises. Without the guard the
+    exception escapes into `_generate`'s outer `except Exception`, which tracks
+    again and re-raises — an unhandled traceback with no envelope on stdout.
+
+    The exit is chained (`from exc`) so the original failure stays reachable at
+    every site. Three of the collapsed sites chained explicitly; the rest raised
+    from inside an `except` block, where `__context__` carried the cause
+    implicitly. The explicit `from` earns its keep at the poll site, which reports
+    from `if poll_error is not None:` after the spinner's `with` has exited — no
+    exception is in flight there, so nothing would chain without it.
+    """
+    _fail(code=code, message=message, hint=hint, details=details, legacy_json=legacy_json, pretty=pretty)
+    try:
+        track_error(kind, exc)
+    except Exception as track_exc:
+        logging.warning(f"Failed to record generate:error: {track_exc}")
+    raise typer.Exit(code=1) from exc
 
 
 def register_with(parent: typer.Typer) -> None:
@@ -75,6 +241,18 @@ def register_with(parent: typer.Typer) -> None:
         if target is None or target in {"-h", "--help"}:
             _print_top_help()
             raise typer.Exit(code=0)
+        if target.startswith("-"):
+            # `ignore_unknown_options` lets a flag token slide into the model-alias
+            # positional, so `comfy generate --prompt=x` used to die deep inside
+            # `spec.get_endpoint` as an "unknown model". Fail here instead, at the
+            # earliest point, with an actionable message.
+            _fail(
+                code="generate_target_required",
+                message=_TARGET_REQUIRED_MSG,
+                hint=_TARGET_REQUIRED_HINT,
+                details={"received": target},
+            )
+            raise typer.Exit(code=1)
         extra = list(ctx.args)
         if target == "list":
             tracking.track_event("generate:list")
@@ -106,7 +284,19 @@ def register_with(parent: typer.Typer) -> None:
 
 def _separate_meta_flags(extra_args: list[str]) -> tuple[list[str], dict[str, str | bool]]:
     """Pull run-level flags out of the user's argv tail."""
-    meta_names = {"download", "async", "json", "timeout", "api-key", "emit-workflow", "output-prefix", "yes"}
+    meta_names = {
+        "download",
+        "async",
+        "json",
+        "timeout",
+        "api-key",
+        "emit-workflow",
+        "emit-ops",
+        "actor",
+        "base-version",
+        "output-prefix",
+        "yes",
+    }
     meta: dict[str, str | bool] = {}
     remaining: list[str] = []
     i = 0
@@ -118,7 +308,7 @@ def _separate_meta_flags(extra_args: list[str]) -> tuple[list[str], dict[str, st
             if "=" in body:
                 body, raw = body.split("=", 1)
             if body in meta_names:
-                if body in {"async", "json", "yes"}:
+                if body in {"async", "json", "yes", "emit-ops"}:
                     meta[body] = True if raw is None else raw.lower() not in {"false", "0", "no"}
                     i += 1
                     continue
@@ -162,21 +352,54 @@ def _spinner() -> Progress:
 
 
 def _emit_result(result: poll.PollResult, *, request_id: str, download: str | None, as_json: bool) -> None:
-    if as_json:
-        # Honor --download in JSON mode too. Previously this returned before
-        # saving, so `--json --download` printed the URL but wrote no file,
-        # forcing callers to curl the URL by hand. Save first, then surface the
-        # local path alongside the raw response.
-        if download and result.status == "succeeded" and result.image_urls:
-            saved = output.save_urls(result.image_urls, download, request_id)
-            output.print_json({"result": result.raw, "saved": [str(p) for p in saved]})
+    renderer = get_renderer()
+    # One failure path for every output mode, checked FIRST: a terminally
+    # failed job is never a result. In JSON/NDJSON modes it is an ok=false
+    # envelope with a registered code (the generate_result schema promises
+    # exactly that); in pretty mode it is a red line plus the partner's raw
+    # response. Either way the exit code is 1 — a consumer that trusts ``ok``
+    # (or the exit code) must never read a failure as success.
+    if result.status != "succeeded":
+        message = f"Job {result.status}: {result.error or 'unknown error'}"
+        if renderer.is_json():
+            renderer.error(
+                code="generate_job_failed",
+                message=message,
+                details={"status": result.status, "response": result.raw},
+            )
+        else:
+            # `result.error` is the partner's own text. `sanitize_markup` (not a bare
+            # `escape`) because it is remote: escaping alone stops a bracketed token
+            # from being parsed as Rich markup but passes `\x1b` straight through,
+            # letting the partner clear the screen or repaint earlier lines (#614).
+            rprint(f"[bold red]{sanitize_markup(message)}[/bold red]")
+            output.print_json(result.raw)
+        raise typer.Exit(code=1)
+    if renderer.is_json() or as_json:
+        # Honor --download in machine modes too. Previously this returned
+        # before saving, so `--json --download` printed the URL but wrote no
+        # file, forcing callers to curl the URL by hand. Save first, then
+        # surface the local path alongside the response.
+        saved: list[str] = []
+        if download and result.image_urls:
+            saved = [str(p) for p in output.save_urls(result.image_urls, download, request_id)]
+        if renderer.is_json():
+            # JSON/NDJSON modes (the global ``--output json``, a redirected
+            # stdout, or the tail ``--json``) get the envelope/1 contract every
+            # other machine-readable command speaks: data.result wraps the
+            # partner payload, data.saved lists --download artifacts.
+            # Registered as COMMAND_SCHEMAS["comfy generate"] -> generate_result.json.
+            data: dict[str, Any] = {"result": result.raw}
+            if saved:
+                data["saved"] = saved
+            renderer.emit(data, ok=True, command="generate")
+            return
+        # Pretty mode with an explicit tail --json keeps the legacy raw blob.
+        if saved:
+            output.print_json({"result": result.raw, "saved": saved})
         else:
             output.print_json(result.raw)
         return
-    if result.status != "succeeded":
-        rprint(f"[bold red]Job {result.status}: {result.error or 'unknown error'}[/bold red]")
-        output.print_json(result.raw)
-        raise typer.Exit(code=1)
     if download and result.image_urls:
         saved = output.save_urls(result.image_urls, download, request_id)
         output.print_urls(result.image_urls, request_id=request_id)
@@ -221,19 +444,34 @@ def _confirm_spend(*, model_name: str, assume_yes: bool, as_json: bool) -> None:
     if assume_yes or _spend_auto_confirmed():
         return
     if as_json or not _stdin_is_tty():
+        # `--json`/no-TTY: no prompt is answerable, so fail closed.
         msg = (
             f"`comfy generate {model_name}` spends Comfy credits and no consent was given. "
             "Re-run with --yes, or persist consent with `comfy generate consent always`."
         )
-        if as_json:
-            output.print_json({"error": msg, "code": "spend_consent_required"})
-        else:
-            rprint(f"[bold red]{msg}[/bold red]")
+        _fail(code="spend_consent_required", message=msg, legacy_json=as_json)
         raise SpendNotConfirmed(msg)
-    rprint(f"[bold]{model_name}[/bold] runs via the partner API and [bold]spends Comfy credits[/bold].")
-    rprint("[dim]Skip this prompt with --yes; persist always-proceed with `comfy generate consent always`.[/dim]")
-    if not typer.confirm("Proceed?", default=False):
-        rprint("Canceled — no credits were spent.")
+    # A TTY stdin but a machine stdout (`comfy generate … | jq`) is a real
+    # combination, and the prompt is human I/O: written to a piped stdout it is
+    # invisible to the person being asked — they see a silent hang — and it
+    # splices human text ahead of whatever JSON the caller is parsing. Route the
+    # notice and the prompt to stderr in that case; a TTY user reads them
+    # exactly as before (same terminal) and stdout stays parseable. Pretty mode
+    # is untouched.
+    to_err = get_renderer().is_json()
+    _notice(f"[bold]{model_name}[/bold] runs via the partner API and [bold]spends Comfy credits[/bold].", err=to_err)
+    _notice(
+        "[dim]Skip this prompt with --yes; persist always-proceed with `comfy generate consent always`.[/dim]",
+        err=to_err,
+    )
+    if not typer.confirm("Proceed?", default=False, err=to_err):
+        # Reachable with a TTY stdin but a redirected (JSON-mode) stdout, so the
+        # decline still owes the caller an envelope rather than a bare line.
+        _fail(
+            code="spend_consent_required",
+            message="Canceled — no credits were spent.",
+            pretty="Canceled — no credits were spent.",
+        )
         raise SpendNotConfirmed("user declined the spend confirmation prompt")
 
 
@@ -244,16 +482,13 @@ def _consent(extra_args: list[str]) -> None:
     try:
         clean, meta = _separate_meta_flags(extra_args)
     except schema.SchemaError as e:
-        rprint(f"[bold red]{e}[/bold red]")
+        _fail(code="generate_bad_args", message=str(e))
         raise typer.Exit(code=1)
     as_json = bool(meta.get("json", False))
     action = clean[0] if clean and not clean[0].startswith("-") else "show"
     if action not in {"show", "always", "ask"}:
         msg = f"Unknown consent action {action!r}. Usage: comfy generate consent [show|always|ask]"
-        if as_json:
-            output.print_json({"error": msg})
-        else:
-            rprint(f"[bold red]{msg}[/bold red]")
+        _fail(code="generate_bad_args", message=msg, legacy_json=as_json)
         raise typer.Exit(code=1)
     if action == "always":
         ConfigManager().set(constants.CONFIG_KEY_SPEND_AUTO_CONFIRM, "true")
@@ -305,9 +540,9 @@ def _generate(model: str, extra_args: list[str]) -> None:
         try:
             ep = spec.get_endpoint(model)
         except spec.SpecError as e:
-            rprint(f"[bold red]{e}[/bold red]")
-            _track_error("schema", e)
-            raise typer.Exit(code=1)
+            _bail(
+                _track_error, e, code="generate_unknown_model", message=str(e), kind="schema", details={"model": model}
+            )
 
         gen_props["model_alias"] = spec.preferred_alias(ep.id)
         gen_props["partner"] = getattr(ep, "partner", None)
@@ -315,9 +550,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
         try:
             remaining, meta = _separate_meta_flags(extra_args)
         except schema.SchemaError as e:
-            rprint(f"[bold red]{e}[/bold red]")
-            _track_error("schema", e)
-            raise typer.Exit(code=1)
+            _bail(_track_error, e, code="generate_bad_args", message=str(e), kind="schema")
 
         do_async = bool(meta.get("async", False))
         download = meta.get("download") if isinstance(meta.get("download"), str) else None
@@ -333,20 +566,105 @@ def _generate(model: str, extra_args: list[str]) -> None:
             # they want.
             values = schema.parse_args(flags, remaining, require_all=not emit_path)
         except schema.SchemaError as e:
-            rprint(f"[bold red]{e}[/bold red]")
             name = gen_props["model_alias"] or ep.id
-            rprint(f"[dim]Run `comfy generate schema {name}` for the full parameter list.[/dim]")
-            _track_error("schema", e)
-            raise typer.Exit(code=1)
+            _bail(
+                _track_error,
+                e,
+                code="generate_bad_args",
+                message=str(e),
+                kind="schema",
+                hint=f"Run `comfy generate schema {name}` for the full parameter list.",
+            )
 
+        emit_ops_mode = bool(meta.get("emit-ops", False))
+        if emit_ops_mode and not emit_path:
+            _bail(
+                _track_error,
+                schema.SchemaError("--emit-ops requires --emit-workflow <path>"),
+                code="generate_bad_args",
+                message="--emit-ops requires --emit-workflow <path>: the op batch describes the workflow written there",
+                kind="schema",
+                hint="add --emit-workflow workflow.json",
+            )
         if emit_path:
             # Emit a runnable workflow that drives the partner *node* and return
             # — no proxy call, no API key required. The artifact is the result.
             name = gen_props["model_alias"] or ep.id
             prefix = meta.get("output-prefix") if isinstance(meta.get("output-prefix"), str) else "generate"
             renderer = get_renderer()
+            ops: list | None = None
+            from comfy_cli import workflow_ops
+
             try:
-                workflow = emit.write_workflow(name, values, Path(emit_path).expanduser(), output_prefix=prefix)
+                if emit_ops_mode:
+                    # FRONTEND-format file + a stamped replace_ops batch, so the
+                    # written graph is canvas-editable and a shared-document
+                    # consumer folds it in as attributed ops instead of a
+                    # wholesale replacement — same contract as
+                    # `templates fetch --emit-ops`. The graph loads through the
+                    # same resilient path every workflow edit verb uses
+                    # (COMFY_OBJECT_INFO_FILE honored, cache fallback).
+                    from comfy_cli.command.workflow import _get_graph
+
+                    actor = meta.get("actor") if isinstance(meta.get("actor"), str) else "cli"
+                    try:
+                        base_version = int(meta.get("base-version", 0))
+                    except (TypeError, ValueError) as e:
+                        _bail(
+                            _track_error,
+                            e,
+                            code="generate_bad_args",
+                            message=f"--base-version must be an integer, got {meta.get('base-version')!r}",
+                            kind="schema",
+                        )
+                    try:
+                        graph = _get_graph(None, None, None)
+                    except typer.Exit as e:
+                        # _get_graph already rendered cql_no_graph; only the
+                        # generate:error record is owed here, or generate:start
+                        # is left without its terminal event.
+                        _track_error("emit", e)
+                        raise
+                    workflow, ops = emit.write_frontend_workflow(
+                        name,
+                        values,
+                        Path(emit_path).expanduser(),
+                        graph,
+                        actor=actor,
+                        base_version=base_version,
+                        output_prefix=prefix,
+                    )
+                else:
+                    workflow = emit.write_workflow(name, values, Path(emit_path).expanduser(), output_prefix=prefix)
+            except emit.UnsupportedModelError as e:
+                # Its own code: the remedy is "pick another model", which is
+                # not what the umbrella `emit_workflow_failed` hint says, and
+                # the supported set travels as data rather than prose.
+                _track_error("emit", e)
+                renderer.error(
+                    code="emit_workflow_unsupported_model",
+                    message=str(e),
+                    hint=(
+                        "retry with the first alias in `details.suggested` (same kind of media), or any whose "
+                        "`emit_supported` is true in `comfy --json generate list` (`details.supported`); "
+                        "or call the model through the proxy without --emit-workflow"
+                    ),
+                    details={"model": e.model, "supported": e.supported, "suggested": e.suggested},
+                )
+                raise typer.Exit(code=1) from e
+            except workflow_ops.DeprecatedNodeType as e:
+                # Same envelope as `workflow add-node`: the remedy is a live
+                # class, which `details.replacement` names. The umbrella
+                # `emit_workflow_failed` hint would send the caller to check
+                # their params for a failure their params did not cause.
+                _track_error("emit", e)
+                renderer.error(
+                    code=e.code,
+                    message=str(e),
+                    hint=e.hint,
+                    details={"requested": e.class_type, "replacement": e.replacement, "model": name},
+                )
+                raise typer.Exit(code=1) from e
             except (emit.EmitError, OSError) as e:
                 _track_error("emit", e)
                 hint = (
@@ -360,14 +678,20 @@ def _generate(model: str, extra_args: list[str]) -> None:
                     hint=hint,
                 )
                 raise typer.Exit(code=1) from e
-            tracking.track_event("generate:emit", {**gen_props, "node_count": len(workflow)})
+            node_count = len(workflow["nodes"]) if emit_ops_mode else len(workflow)
+            tracking.track_event("generate:emit", {**gen_props, "node_count": node_count})
             if renderer.is_pretty():
                 rprint(f"[bold green]Wrote workflow:[/bold green] {emit_path}")
                 rprint(f"  run it: comfy run --workflow {emit_path}")
-            renderer.emit(
-                {"out": str(Path(emit_path).expanduser()), "model": name, "nodes": len(workflow)},
-                command="generate emit-workflow",
-            )
+            payload = {
+                "out": str(Path(emit_path).expanduser()),
+                "model": name,
+                "nodes": node_count,
+                "format": "frontend" if emit_ops_mode else "api",
+            }
+            if ops is not None:
+                payload["ops"] = ops
+            renderer.emit(payload, command="generate emit-workflow")
             return
 
         # Spend gate — a proxy call spends Comfy credits, so consent comes
@@ -387,39 +711,49 @@ def _generate(model: str, extra_args: list[str]) -> None:
         try:
             api_key = client.resolve_api_key(meta.get("api-key") if isinstance(meta.get("api-key"), str) else None)
         except client.ApiError as e:
-            rprint(f"[bold red]{e}[/bold red]")
-            _track_error("api", e)
-            raise typer.Exit(code=1)
+            _bail(_track_error, e, code="generate_api_error", message=str(e), kind="api")
 
         timeout_raw = meta.get("timeout", "300")
         try:
             timeout = float(timeout_raw) if isinstance(timeout_raw, str) else 300.0
         except ValueError as e:
-            rprint(f"[bold red]--timeout: expected number, got {timeout_raw!r}[/bold red]")
-            _track_error("schema", e)
-            raise typer.Exit(code=1)
+            _bail(
+                _track_error,
+                e,
+                code="generate_timeout_invalid",
+                message=f"--timeout: expected number, got {timeout_raw!r}",
+                kind="schema",
+            )
 
         try:
             _apply_upload_transforms(values, flags, ep, api_key)
         except (client.ApiError, httpx.HTTPError) as e:
-            rprint(f"[bold red]Upload failed: {e}[/bold red]")
-            _track_error("upload", e)
-            raise typer.Exit(code=1)
+            _bail(_track_error, e, code=_transport_code(e), message=f"Upload failed: {e}", kind="upload")
 
         request_id = str(uuid.uuid4())[:8]
         try:
             resp = client.send_request(ep, values, flags, api_key, timeout=timeout)
         except httpx.HTTPError as e:
-            rprint(f"[bold red]Network error contacting {spec.base_url()}: {e}[/bold red]")
-            _track_error("network", e)
-            raise typer.Exit(code=1) from e
+            _bail(
+                _track_error,
+                e,
+                code="generate_network_error",
+                message=f"Network error contacting {spec.base_url()}: {e}",
+                kind="network",
+            )
 
         try:
             client.raise_for_status(resp)
         except client.ApiError as e:
-            rprint(f"[bold red]API error {e.status}[/bold red]\n{e.body}")
-            _track_error("api", e)
-            raise typer.Exit(code=1) from e
+            _bail(
+                _track_error,
+                e,
+                code="generate_api_error",
+                message=f"API error {e.status}",
+                kind="api",
+                details={"status": e.status, "body": e.body},
+                pretty=f"[bold red]API error {e.status}[/bold red]\n{sanitize_markup(e.body)}",
+            )
 
         if resp.headers.get("content-type", "").startswith("image/"):
             if download:
@@ -435,10 +769,16 @@ def _generate(model: str, extra_args: list[str]) -> None:
         try:
             body = resp.json()
         except ValueError as e:
-            rprint("[bold red]Unexpected non-JSON response.[/bold red]")
-            rprint(resp.text[:500])
-            _track_error("non_json_response", e)
-            raise typer.Exit(code=1)
+            preview = resp.text[:500]
+            _bail(
+                _track_error,
+                e,
+                code="generate_api_error",
+                message="Unexpected non-JSON response.",
+                kind="non_json_response",
+                details={"body_preview": preview},
+                pretty=f"[bold red]Unexpected non-JSON response.[/bold red]\n{sanitize_markup(preview)}",
+            )
 
         if ep.polling:
             job_id = poll.extract_job_id(ep.polling, body) or request_id
@@ -464,6 +804,7 @@ def _generate(model: str, extra_args: list[str]) -> None:
                 return
 
             poller = poll.get_poller(ep.polling)
+            poll_error: client.ApiError | httpx.HTTPError | None = None
             with _spinner() as prog:
                 task = prog.add_task(f"Generating with {name} (job {job_id})", total=None)
 
@@ -479,8 +820,20 @@ def _generate(model: str, extra_args: list[str]) -> None:
                         create_path=ep.path,
                     )
                 except (client.ApiError, httpx.HTTPError) as e:
-                    _track_error("network" if isinstance(e, httpx.HTTPError) else "api", e)
-                    raise typer.Exit(code=1) from e
+                    poll_error = e
+            if poll_error is not None:
+                # The spinner is transient, so without this the run ended with a
+                # bare exit 1 and an empty screen in EVERY mode. Reported AFTER
+                # the `with` exits: inside it a transient Progress is still
+                # auto-refreshing on stdout, so on a TTY the envelope would come
+                # out interleaved with spinner control codes.
+                _bail(
+                    _track_error,
+                    poll_error,
+                    code=_transport_code(poll_error),
+                    message=f"Job {job_id} failed while polling: {poll_error}",
+                    kind=_track_kind(poll_error),
+                )
             try:
                 _emit_result(result, request_id=job_id, download=download, as_json=as_json)
                 tracking.track_event("generate:success", gen_props)
@@ -567,6 +920,15 @@ def _model_record(e: spec.Endpoint) -> dict[str, object]:
         "category": e.category,
         "mode": "async" if e.polling else "sync",
         "summary": e.summary,
+        # Whether `--emit-workflow` has a partner-node mapping for this model.
+        # Most of the catalog is proxy-only; an agent that could not see this
+        # asked for a workflow it could never get (`emit_workflow_failed`).
+        "emit_supported": emit.is_supported(e.id),
+        # The class the row above would mint, or None when unmapped. Paired with
+        # `emit_supported` so a consumer outside this repo can check the
+        # hand-written mapping against a live catalog instead of taking the
+        # boolean on trust.
+        "node_class": emit.node_class_for(e.id),
     }
 
 
@@ -592,17 +954,40 @@ def _param_record(f: schema.FlagDef) -> dict[str, object]:
 
 def _list_models(extra_args: list[str]) -> None:
     """`comfy generate list` — show available models with their short aliases."""
-    clean, meta = _separate_meta_flags(extra_args)
+    try:
+        clean, meta = _separate_meta_flags(extra_args)
+    except schema.SchemaError as e:
+        # e.g. `comfy generate list --download` (meta flag with no value) — this
+        # used to escape as an unhandled SchemaError traceback.
+        _fail(code="generate_bad_args", message=str(e))
+        raise typer.Exit(code=1)
     renderer = _renderer_for(meta)
     partner = _arg_value(clean, "--partner", "-p")
     category = _arg_value(clean, "--category", "--style", "-c")
     query = _arg_value(clean, "--query", "-q")
+    # `list`-only, deliberately NOT in `_separate_meta_flags`' meta_names: that
+    # set applies to every generate sub-action, and --select belongs to the
+    # four heavy read commands only (V1-011).
+    select_expr = _arg_value(clean, "--select")
     eps = spec.list_endpoints(partner=partner, category=category, query=query)
     payload = {
         "models": [_model_record(e) for e in eps],
         "count": len(eps),
         "filters": {"partner": partner, "category": category, "query": query},
     }
+    if select_expr is not None:
+        from comfy_cli.selector import emit_selected
+
+        return emit_selected(renderer, payload, select_expr, command="generate list")
+    knowledge.attach(
+        payload,
+        command="generate list",
+        queries=[query] if query else [],
+        models=[m["alias"] for m in payload["models"]],
+        brief=True,
+        thin=(not eps and bool(query)),
+        qualified=any(payload["filters"].values()),
+    )
     if renderer.is_pretty():
         if not eps:
             rprint("[yellow]No models match those filters.[/yellow]")
@@ -625,14 +1010,18 @@ def _list_models(extra_args: list[str]) -> None:
 
 def _schema(extra_args: list[str]) -> None:
     """`comfy generate schema <model>` — show params for a model (fal-style)."""
-    clean, meta = _separate_meta_flags(extra_args)
+    try:
+        clean, meta = _separate_meta_flags(extra_args)
+    except schema.SchemaError as e:
+        _fail(code="generate_bad_args", message=str(e))
+        raise typer.Exit(code=1)
     renderer = _renderer_for(meta)
     if not clean or clean[0].startswith("-"):
         if renderer.is_pretty():
             rprint("[bold red]Usage: comfy generate schema <model>[/bold red]")
         else:
             renderer.error(
-                code="missing_argument",
+                code="generate_bad_args",
                 message="Usage: comfy generate schema <model>",
                 hint="pass a model alias, e.g. `comfy generate schema flux-pro` "
                 "(run `comfy generate list` to see them)",
@@ -643,10 +1032,14 @@ def _schema(extra_args: list[str]) -> None:
         ep = spec.get_endpoint(clean[0])
     except spec.SpecError as e:
         if renderer.is_pretty():
-            rprint(f"[bold red]{e}[/bold red]")
+            # The message embeds `clean[0]` verbatim, so `comfy generate schema
+            # '[/bold]'` reached Rich as an unbalanced closing tag and died with a
+            # MarkupError traceback and empty stdout — the exact failure this
+            # module's `_fail` path exists to prevent.
+            rprint(f"[bold red]{sanitize_markup(e)}[/bold red]")
         else:
             renderer.error(
-                code="generate_model_unknown",
+                code="generate_unknown_model",
                 message=str(e),
                 hint="run `comfy generate list` to see the available model aliases",
                 details={"requested": clean[0]},
@@ -658,21 +1051,20 @@ def _schema(extra_args: list[str]) -> None:
         return
     flags = schema.flags_for(ep)
     name = spec.preferred_alias(ep.id) or ep.id
-    renderer.emit(
-        {
-            "model": name,
-            "id": ep.id,
-            "partner": ep.partner,
-            "category": ep.category,
-            "summary": ep.summary,
-            "mode": "async" if ep.polling else "sync",
-            "polling": ep.polling,
-            "content_type": ep.request_content_type,
-            "params": [_param_record(f) for f in flags],
-            "example": schema.example_invocation(ep, flags, display_name=name),
-        },
-        command="generate schema",
-    )
+    payload = {
+        "model": name,
+        "id": ep.id,
+        "partner": ep.partner,
+        "category": ep.category,
+        "summary": ep.summary,
+        "mode": "async" if ep.polling else "sync",
+        "polling": ep.polling,
+        "content_type": ep.request_content_type,
+        "params": [_param_record(f) for f in flags],
+        "example": schema.example_invocation(ep, flags, display_name=name),
+    }
+    knowledge.attach(payload, command="generate schema", queries=[clean[0], name])
+    renderer.emit(payload, command="generate schema")
 
 
 def _fetch_spec(url: str) -> httpx.Response:
@@ -698,7 +1090,7 @@ def _refresh() -> None:
             fetched_from = fallback
             r = _fetch_spec(fallback)
     except httpx.HTTPError as e:
-        rprint(f"[bold red]Failed to fetch {fetched_from}: {e}[/bold red]")
+        _fail(code="generate_network_error", message=f"Failed to fetch {fetched_from}: {e}")
         raise typer.Exit(code=1)
 
     # Validate before caching so a 200-with-garbage response never poisons the
@@ -708,7 +1100,7 @@ def _refresh() -> None:
     try:
         spec.validate_spec_text(body)
     except spec.SpecError as e:
-        rprint(f"[bold red]Refusing to cache spec from {fetched_from}: {e}[/bold red]")
+        _fail(code="generate_spec_invalid", message=f"Refusing to cache spec from {fetched_from}: {e}")
         raise typer.Exit(code=1)
 
     path = spec.write_cache(body)
@@ -720,24 +1112,27 @@ def _upload(extra_args: list[str]) -> None:
     try:
         remaining, meta = _separate_meta_flags(extra_args)
     except schema.SchemaError as e:
-        rprint(f"[bold red]{e}[/bold red]")
+        _fail(code="generate_bad_args", message=str(e))
         raise typer.Exit(code=1)
     # `remaining` already excludes recognized --meta flags AND their values, so
     # `comfy generate upload --api-key KEY ./img.png` correctly resolves to "./img.png".
     if not remaining:
-        rprint("[bold red]Usage: comfy generate upload <file-or-url> [--json][/bold red]")
+        _fail(
+            code="generate_bad_args",
+            message="Usage: comfy generate upload <file-or-url> [--json]",
+        )
         raise typer.Exit(code=1)
     target = remaining[0]
     try:
         api_key = client.resolve_api_key(meta.get("api-key") if isinstance(meta.get("api-key"), str) else None)
     except client.ApiError as e:
-        rprint(f"[bold red]{e}[/bold red]")
+        _fail(code="generate_api_error", message=str(e))
         raise typer.Exit(code=1)
     as_json = bool(meta.get("json", False))
     try:
         result = upload.upload_target(target, api_key)
     except (client.ApiError, httpx.HTTPError) as e:
-        rprint(f"[bold red]Upload failed: {e}[/bold red]")
+        _fail(code=_transport_code(e), message=f"Upload failed: {e}")
         raise typer.Exit(code=1)
     if as_json:
         output.print_json(
@@ -795,52 +1190,76 @@ def _apply_upload_transforms(values: dict, flags: list[schema.FlagDef], endpoint
 
 def _resume(extra_args: list[str]) -> None:
     if len(extra_args) < 2 or extra_args[0].startswith("-") or extra_args[1].startswith("-"):
-        rprint("[bold red]Usage: comfy generate resume <model> <job_id> [--download PATH] [--json][/bold red]")
+        _fail(
+            code="generate_bad_args",
+            message="Usage: comfy generate resume <model> <job_id> [--download PATH] [--json]",
+        )
         raise typer.Exit(code=1)
     model, job_id = extra_args[0], extra_args[1]
     tail = extra_args[2:]
     try:
         ep = spec.get_endpoint(model)
     except spec.SpecError as e:
-        rprint(f"[bold red]{e}[/bold red]")
+        _fail(code="generate_unknown_model", message=str(e), details={"model": model})
         raise typer.Exit(code=1)
     if not ep.polling:
-        rprint(f"[bold red]{model} is a sync model; nothing to resume.[/bold red]")
+        _fail(
+            code="generate_bad_args", message=f"{model} is a sync model; nothing to resume.", details={"model": model}
+        )
         raise typer.Exit(code=1)
     try:
         _, meta = _separate_meta_flags(tail)
     except schema.SchemaError as e:
-        rprint(f"[bold red]{e}[/bold red]")
+        _fail(code="generate_bad_args", message=str(e))
         raise typer.Exit(code=1)
     try:
         api_key = client.resolve_api_key(meta.get("api-key") if isinstance(meta.get("api-key"), str) else None)
     except client.ApiError as e:
-        rprint(f"[bold red]{e}[/bold red]")
+        _fail(code="generate_api_error", message=str(e))
         raise typer.Exit(code=1)
-    timeout = float(meta.get("timeout") or 300.0) if isinstance(meta.get("timeout"), str) else 300.0
+    timeout_raw = meta.get("timeout")
+    try:
+        # Same guard as the submit path: an unguarded `float()` here let
+        # `generate resume <model> <job> --timeout nope` escape `main()` (which
+        # only traps KeyboardInterrupt/typer.Exit/SystemExit) as a traceback —
+        # exit 1 with a blank stdout, the exact failure this change removes.
+        timeout = float(timeout_raw or 300.0) if isinstance(timeout_raw, str) else 300.0
+    except ValueError:
+        _fail(code="generate_timeout_invalid", message=f"--timeout: expected number, got {timeout_raw!r}")
+        raise typer.Exit(code=1)
     download = meta.get("download") if isinstance(meta.get("download"), str) else None
     as_json = bool(meta.get("json", False))
 
     try:
         initial = poll.build_synthetic_initial(ep.polling, job_id, base_url=spec.base_url())
     except client.ApiError as e:
-        rprint(f"[bold red]{e}[/bold red]")
+        _fail(code="generate_api_error", message=str(e))
         raise typer.Exit(code=1)
 
     poller = poll.get_poller(ep.polling)
+    poll_error: client.ApiError | httpx.HTTPError | None = None
     with _spinner() as prog:
         task = prog.add_task(f"Resuming job {job_id}", total=None)
 
         def _on_progress(p: float) -> None:
             prog.update(task, description=f"Job {job_id} ({p * 100:.0f}%)")
 
-        result = poller(
-            initial,
-            api_key=api_key,
-            timeout=timeout,
-            on_progress=_on_progress,
-            create_path=ep.path,
-        )
+        try:
+            result = poller(
+                initial,
+                api_key=api_key,
+                timeout=timeout,
+                on_progress=_on_progress,
+                create_path=ep.path,
+            )
+        except (client.ApiError, httpx.HTTPError) as e:
+            poll_error = e
+    if poll_error is not None:
+        # Same transient-spinner trap as the submit path: an unhandled poll
+        # failure here used to surface as a raw traceback, and reporting it
+        # inside the `with` would interleave the envelope with the live spinner.
+        _fail(code=_transport_code(poll_error), message=f"Job {job_id} failed while polling: {poll_error}")
+        raise typer.Exit(code=1) from poll_error
     _emit_result(result, request_id=job_id, download=download, as_json=as_json)
 
 
@@ -861,6 +1280,10 @@ def _print_top_help() -> None:
         '  comfy generate flux-2 --prompt "a fox" --emit-workflow flux.json   '
         "[dim]# write a runnable workflow instead of calling the proxy[/dim]"
     )
+    rprint(
+        '  comfy generate flux-2 --prompt "a fox" --emit-workflow flux.json --emit-ops [--actor ID] [--base-version N]'
+    )
+    rprint("      [dim]# frontend-format (canvas-editable) file plus a stamped op batch in the envelope[/dim]")
     rprint("")
     rprint("[bold]Actions:[/bold]")
     rprint("  comfy generate list                    Browse available models")

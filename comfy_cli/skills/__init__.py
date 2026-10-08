@@ -12,16 +12,8 @@ The point: instead of running an MCP server, one command teaches every agent
 on the box how to drive ``comfy`` directly. This is the productized form of
 the agent-first CLI.
 
-Bundled skills (4 total):
-
-- ``comfy``          — the primary driver skill (command surface, output
-                       contract, routing, discovery, execution, and all
-                       domain patterns: image, video, audio, cloud, edit,
-                       condition, pipeline)
-- ``comfy-fragments``— typed reusable workflow fragments + YAML blueprint
-                       composition (build large pipelines from small pieces)
-- ``comfy-debug``    — debugging skill for when workflows fail or jobs hang
-- ``comfy-relay``    — what to put in chat while driving the CLI
+Every skill is **bundled** — shipped in this package's tree, versioned with
+the CLI release. See ``BUNDLED_SKILLS``. ``comfy skills list`` names them all.
 """
 
 from __future__ import annotations
@@ -36,6 +28,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Literal
 
+from comfy_cli.file_utils import atomic_write_text
+
 # Where the bundled skills live. Each tuple is (skill_name, package_subdir).
 # ``skill_name`` is the public identifier used in AGENTS.md fences and as the
 # subdir name in installed targets. ``package_subdir`` is the local resource
@@ -49,16 +43,41 @@ _SKILL_FILE = "SKILL.md"
 # name). The bundled skills must satisfy their own convention.
 BUNDLED_SKILLS: tuple[tuple[str, str], ...] = (
     ("comfy", "comfy"),
-    ("comfy-fragments", "comfy-fragments"),
     ("comfy-debug", "comfy-debug"),
     ("comfy-relay", "comfy-relay"),
     ("comfy-director", "comfy-director"),
+    ("comfy-build", "comfy-build"),
+    ("comfy-deploy", "comfy-deploy"),
+    ("comfy-custom-nodes", "comfy-custom-nodes"),
+)
+
+
+# Reference skills: resolvable by `comfy skills show`, and deliberately outside
+# `default_skill_names()`, so no plain `install` writes one. A parent skill cites
+# one by name so its depth loads on demand instead of sitting in every agent's
+# context on every task. An explicit request, a path to the CLI's own copy or
+# `skills=` here, still installs one, and `uninstall` accepts these names so it
+# can come back off.
+#
+# This exists because the usual progressive-disclosure pattern — a short
+# SKILL.md pointing at sibling `references/*.md` — cannot work here. Only
+# `SKILL.md` is ever read (see `skill_content`), and two of the three install
+# targets are single files with no directory to hold a sibling: a relative
+# pointer would resolve in this repo and dangle on every machine that installed
+# it. Routing through the CLI keeps the loader and the shipped artifact the same
+# thing.
+REFERENCE_SKILLS: tuple[tuple[str, str], ...] = (
+    ("comfy-build-authoring", "comfy-build-authoring"),
+    ("comfy-build-pins", "comfy-build-pins"),
+    ("comfy-build-failures", "comfy-build-failures"),
+    ("comfy-deploy-failures", "comfy-deploy-failures"),
+    ("comfy-agent-permissions", "comfy-agent-permissions"),
 )
 
 
 # Skills we used to bundle and have since folded into the consolidated `comfy`
 # skill. `install()` prunes any of these left behind on disk so machines that
-# installed an older bundle converge to the current 4 on the next install.
+# installed an older bundle converge to the current set on the next install.
 RETIRED_SKILLS: tuple[str, ...] = (
     "comfy-image",
     "comfy-video",
@@ -74,11 +93,20 @@ def bundled_skill_names() -> tuple[str, ...]:
     return tuple(name for name, _ in BUNDLED_SKILLS)
 
 
+def reference_skill_names() -> tuple[str, ...]:
+    return tuple(name for name, _ in REFERENCE_SKILLS)
+
+
+def readable_skill_names() -> tuple[str, ...]:
+    """Every bundled name ``skill_content`` resolves, installed or not."""
+    return bundled_skill_names() + reference_skill_names()
+
+
 def _resolve_subdir(skill_name: str) -> str:
-    for name, subdir in BUNDLED_SKILLS:
+    for name, subdir in (*BUNDLED_SKILLS, *REFERENCE_SKILLS):
         if name == skill_name:
             return subdir
-    raise ValueError(f"unknown bundled skill {skill_name!r}; choices: {', '.join(n for n, _ in BUNDLED_SKILLS)}")
+    raise ValueError(f"unknown bundled skill {skill_name!r}; choices: {', '.join(readable_skill_names())}")
 
 
 TargetKind = Literal["claude-code", "cursor", "agents-md"]
@@ -177,6 +205,34 @@ def load_skill_source(token: str) -> SkillSource:
     return SkillSource(name=name, content=content, bundled=False)
 
 
+class ShippedSkillNameError(ValueError):
+    """A path-loaded skill claims a name the CLI ships."""
+
+
+SHIPPED_NAME_HINT = "give the skill a `name:` of its own; `comfy skills show <name>` prints the shipped one"
+
+
+def refuse_shipped_name(src: SkillSource, origin: str) -> None:
+    """Raise ShippedSkillNameError when a path-loaded skill claims a name the CLI ships.
+
+    The install target is named from the frontmatter, so without this a file
+    declaring ``name: comfy`` overwrites the shipped driver skill in every agent.
+    Names compare case-folded, since ``Comfy`` and ``comfy`` are one folder on
+    macOS and Windows. The shipped text itself still passes, which keeps a path
+    to the CLI's own copy of a reference skill working. Uninstall never calls
+    this: removing a shipped skill overwrites nothing.
+    """
+    if src.bundled:
+        return
+    shipped = next((n for n in readable_skill_names() if n.casefold() == src.name.casefold()), None)
+    if shipped is None or src.content == skill_content(shipped):
+        return
+    raise ShippedSkillNameError(
+        f"{origin}: frontmatter name {src.name!r} is the skill {shipped!r} that comfy-cli ships, "
+        "and a path cannot replace it"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Install manifest — provenance and staleness tracking
 # ---------------------------------------------------------------------------
@@ -199,11 +255,7 @@ def read_manifest() -> dict:
 
 def write_manifest(manifest: dict) -> None:
     """Atomically write the manifest (tmp + rename so a SIGINT can't corrupt it)."""
-    path = manifest_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_text(manifest_path(), json.dumps(manifest, indent=2))
 
 
 def _sha256(text: str) -> str:
@@ -278,8 +330,11 @@ def _compute_skill_state(path: Path, skill_name: str, manifest: dict) -> SkillSt
 
     manifest_sha = entry.get("sha256", "")
     if file_sha == manifest_sha:
-        # File matches what was installed (user hasn't edited), but bundled moved on.
-        return "stale"
+        # Matches what was installed, so the user hasn't edited it. For a bundled
+        # skill that means the bundle moved on; for a path-installed one, with no
+        # local copy to compare against, it is simply current, and calling it
+        # stale would leave it permanently stale.
+        return "stale" if bundled_sha is not None else "current"
 
     # File differs from both manifest and bundled — user edited it.
     return "modified"
@@ -309,26 +364,51 @@ def _resolve_paths(*, skill_name: str, scope: Scope, project_root: Path) -> dict
     }
 
 
-def _normalize_skills(skills: Sequence[str] | None) -> list[SkillSource]:
-    """Resolve a sequence of skill tokens into SkillSource objects.
+def default_skill_names() -> tuple[str, ...]:
+    """Every skill an argument-free install writes: the bundled set."""
+    return bundled_skill_names()
 
-    Tokens that look like paths are resolved via ``load_skill_source``; plain
-    names are validated against the bundled set.  ``None`` / empty defaults to
-    all bundled skills.
+
+def _looks_like_path(token: str) -> bool:
+    return os.sep in token or token.startswith((".", "~")) or Path(token).expanduser().exists()
+
+
+@dataclass(frozen=True)
+class _ResolvedSkill:
+    """One skill to install, resolved from a token."""
+
+    name: str
+    content: str | None = None  # None when not fetched
+
+
+def _resolve(skills: Sequence[str] | None, *, fetch: bool, refuse_shipped: bool = False) -> list[_ResolvedSkill]:
+    """Resolve skill tokens once, so planning and installing cannot disagree.
+
+    With ``fetch=False`` content stays None. That is all planning and ``status``
+    need.
+
+    The default set is resolved by name and never as a path. A directory in the
+    working directory can share a skill's name, which every ComfyUI checkout
+    does, and it must not shadow the bundled skill or abort the install.
     """
     if not skills:
-        return [SkillSource(name=name, content=skill_content(name), bundled=True) for name, _ in BUNDLED_SKILLS]
-    out: list[SkillSource] = []
-    for s in skills:
-        p = Path(s).expanduser()
-        looks_like_path = os.sep in s or s.startswith((".", "~")) or p.exists()
-        if looks_like_path:
+        return [_resolve_named(name, fetch=fetch) for name in default_skill_names()]
+    out: list[_ResolvedSkill] = []
+    for token in skills:
+        if _looks_like_path(token):
             # Raises ValueError on invalid path skills — caller handles.
-            out.append(load_skill_source(s))
+            src = load_skill_source(token)
+            if refuse_shipped:
+                refuse_shipped_name(src, token)
+            out.append(_ResolvedSkill(name=src.name, content=src.content if fetch else None))
         else:
-            _resolve_subdir(s)  # validates bundled name; raises ValueError on unknown
-            out.append(SkillSource(name=s, content=skill_content(s), bundled=True))
+            out.append(_resolve_named(token, fetch=fetch))
     return out
+
+
+def _resolve_named(name: str, *, fetch: bool) -> _ResolvedSkill:
+    _resolve_subdir(name)  # validates bundled name; raises ValueError on unknown
+    return _ResolvedSkill(name=name, content=skill_content(name) if fetch else None)
 
 
 def plan_install(
@@ -340,16 +420,18 @@ def plan_install(
 ) -> list[TargetPlan]:
     """Return a TargetPlan per (skill, target) pair.
 
-    Default skills: all bundled. Default targets: all three. Default scope: user.
+    Default skills: every bundled one. Default targets: all three. Default
+    scope: user.
     """
     root = project_root or Path.cwd()
     plans: list[TargetPlan] = []
-    for source in _normalize_skills(skills):
-        all_paths = _resolve_paths(skill_name=source.name, scope=scope, project_root=root)
+    for resolved in _resolve(skills, fetch=False):
+        name = resolved.name
+        all_paths = _resolve_paths(skill_name=name, scope=scope, project_root=root)
         kinds: list[TargetKind] = list(targets) if targets else list(all_paths.keys())
         for kind in kinds:
             path = all_paths[kind]
-            plans.append(TargetPlan(skill=source.name, kind=kind, scope=scope, path=path, exists=path.exists()))
+            plans.append(TargetPlan(skill=name, kind=kind, scope=scope, path=path, exists=path.exists()))
     return plans
 
 
@@ -368,46 +450,33 @@ def install(
     """
     root = project_root or Path.cwd()
     results: list[TargetResult] = []
-    sources = _normalize_skills(skills)
-    # Build a per-name content map so path-based skills carry their own content.
-    content_map: dict[str, str] = {src.name: src.content for src in sources}
-    plans = plan_install(scope=scope, targets=targets, skills=skills, project_root=root)
-    for plan in plans:
-        if dry_run:
-            results.append(
-                TargetResult(
-                    skill=plan.skill,
-                    kind=plan.kind,
-                    scope=plan.scope,
-                    path=plan.path,
-                    action="would_write",
+    for resolved in _resolve(skills, fetch=True, refuse_shipped=True):
+        all_paths = _resolve_paths(skill_name=resolved.name, scope=scope, project_root=root)
+        kinds: list[TargetKind] = list(targets) if targets else list(all_paths.keys())
+        for kind in kinds:
+            path = all_paths[kind]
+            if dry_run:
+                results.append(
+                    TargetResult(skill=resolved.name, kind=kind, scope=scope, path=path, action="would_write")
                 )
-            )
-            continue
-        try:
-            content = content_map[plan.skill]
-            if plan.kind == "claude-code":
-                _write_claude_skill(plan.path, content)
-                _record_installed(plan.path, plan.skill, content)
-            elif plan.kind == "cursor":
-                _write_cursor_rule(plan.path, content, skill_name=plan.skill)
-                _record_installed(plan.path, plan.skill, content)
-            elif plan.kind == "agents-md":
-                _upsert_agents_md_block(plan.path, content, skill_name=plan.skill)
-            results.append(
-                TargetResult(skill=plan.skill, kind=plan.kind, scope=plan.scope, path=plan.path, action="wrote")
-            )
-        except OSError as e:
-            results.append(
-                TargetResult(
-                    skill=plan.skill,
-                    kind=plan.kind,
-                    scope=plan.scope,
-                    path=plan.path,
-                    action="skipped",
-                    reason=str(e),
+                continue
+            content = resolved.content or ""
+            try:
+                if kind == "claude-code":
+                    _write_claude_skill(path, content)
+                    _record_installed(path, resolved.name, content)
+                elif kind == "cursor":
+                    _write_cursor_rule(path, content, skill_name=resolved.name)
+                    _record_installed(path, resolved.name, content)
+                elif kind == "agents-md":
+                    _upsert_agents_md_block(path, content, skill_name=resolved.name)
+                results.append(TargetResult(skill=resolved.name, kind=kind, scope=scope, path=path, action="wrote"))
+            except OSError as e:
+                results.append(
+                    TargetResult(
+                        skill=resolved.name, kind=kind, scope=scope, path=path, action="skipped", reason=str(e)
+                    )
                 )
-            )
     return results
 
 
@@ -577,47 +646,74 @@ def _backup_if_user_edited(path: Path, expected_content: str) -> Path | None:
     return bak
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Write via tmp + rename so a SIGINT mid-write can't leave the file empty."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
-    try:
-        tmp.write_text(content, encoding="utf-8")
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
-
-
 def _write_claude_skill(path: Path, content: str) -> None:
     _backup_if_user_edited(path, content)
-    _atomic_write_text(path, content)
+    atomic_write_text(path, content)
 
 
-def _cursor_description_for(skill_name: str) -> str:
-    return {
-        "comfy": "comfy CLI for ComfyUI workflows, models, node-graph queries, image/video/audio generation, cloud, and pipeline orchestration.",
-        "comfy-fragments": "Typed reusable workflow fragments + YAML blueprint composition: build large pipelines from small tested pieces via comfy CLI.",
-        "comfy-debug": "Debugging skill for the comfy CLI: failed workflows, hung jobs, error envelopes.",
-        "comfy-relay": "What to put in chat while driving the comfy CLI: show artifacts, surface results, truncation rules.",
-    }.get(skill_name, f"comfy CLI skill: {skill_name}")
+def frontmatter_description(content: str) -> str:
+    """The skill's ``description:`` from its frontmatter, whitespace-collapsed, or "".
+
+    Searches the frontmatter block alone. A ``description:`` line in the body,
+    inside a YAML example say, documents something else.
+
+    Read as YAML rather than as a line, so a description quoted to carry a
+    ``": "`` gives back its value and not its quotes. The regex stays as the
+    fallback for frontmatter YAML rejects, and for frontmatter it reads as
+    something other than a string: ``description: #1 way to break YAML`` parses
+    fine and yields None. Either is still worth a description here, because this
+    feeds ``comfy skills list`` and the Cursor rule.
+    """
+    if not content.startswith("---\n"):
+        return ""
+    _, _, rest = content.partition("---\n")
+    front, _, _ = rest.partition("---\n")
+
+    import yaml
+
+    try:
+        parsed = yaml.safe_load(front)
+    except Exception:
+        # Not just YAMLError: a deeply nested document raises RecursionError, which
+        # would otherwise escape into install() and abort it between two targets.
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get("description"), str):
+        return " ".join(parsed["description"].split())
+
+    m = _FRONTMATTER_DESC_RE.search(front)
+    return " ".join(m.group(1).split()) if m and m.group(1).strip() else ""
+
+
+def _cursor_description_for(skill_name: str, content: str) -> str:
+    """The Cursor rule's description, taken from the skill's own frontmatter.
+
+    Cursor decides whether to surface a rule from this line, so it has to say
+    what the skill is for. Reading it from the skill means one description per
+    skill rather than a second copy here that goes stale — which the copy this
+    replaced had already done, having never gained an entry for a skill added
+    after it was written.
+    """
+    return frontmatter_description(content) or f"comfy CLI skill: {skill_name}"
 
 
 def _write_cursor_rule(path: Path, content: str, *, skill_name: str) -> None:
     body = _strip_frontmatter(content)
-    rule = f'---\ndescription: {_cursor_description_for(skill_name)}\nglobs: "**/*"\nalwaysApply: false\n---\n\n{body}'
+    # Quote the description: a path-installed skill's text is not ours to
+    # constrain. An unquoted `Build: a thing` or a leading `#`
+    # is a YAML parse error, so Cursor drops a rule that installed fine. A JSON
+    # string is a valid YAML double-quoted scalar, and the description is already
+    # whitespace-collapsed to one line.
+    description = json.dumps(_cursor_description_for(skill_name, content), ensure_ascii=False)
+    rule = f'---\ndescription: {description}\nglobs: "**/*"\nalwaysApply: false\n---\n\n{body}'
     _backup_if_user_edited(path, rule)
-    _atomic_write_text(path, rule)
+    atomic_write_text(path, rule)
 
 
 def _upsert_agents_md_block(path: Path, content: str, *, skill_name: str) -> None:
     start, end = _agents_fence(skill_name)
     block = f"\n{start}\n{content}\n{end}\n"
     if not path.exists():
-        _atomic_write_text(path, block.lstrip("\n"))
+        atomic_write_text(path, block.lstrip("\n"))
         return
     existing = path.read_text(encoding="utf-8")
     if start in existing and end in existing:
@@ -626,7 +722,7 @@ def _upsert_agents_md_block(path: Path, content: str, *, skill_name: str) -> Non
         new = before.rstrip() + "\n\n" + block.lstrip("\n") + after.lstrip("\n")
     else:
         new = existing.rstrip() + "\n" + block
-    _atomic_write_text(path, new)
+    atomic_write_text(path, new)
 
 
 def _remove_agents_md_block(path: Path, *, skill_name: str) -> bool:

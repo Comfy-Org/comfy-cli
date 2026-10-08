@@ -4,6 +4,10 @@ Thin wrappers over ComfyUI's own ``GET /system_stats`` and ``POST /free``
 endpoints (routed through :class:`comfy_cli.comfy_client.Client`, cloud or
 local via ``resolve_target``), so agents can read VRAM state and free it
 without any direct HTTP.
+
+Both entry points stamp ``renderer.where`` from the resolved target right
+after ``resolve_target``, so every envelope they emit — the unreachable-server
+errors especially — names the backend the command routed to.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ from typing import Any
 import typer
 
 from comfy_cli.comfy_client import Client, HTTPError
+from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.target import resolve_target
 
 
@@ -47,10 +52,14 @@ def _render_stats_pretty(renderer, stats: dict[str, Any]) -> None:
     for dev in devices:
         if not isinstance(dev, dict):
             continue
+        # Device name/type/index are whatever `/system_stats` reported, and
+        # `Table.add_row` parses markup in a `str` cell. The two byte columns
+        # are built by `_humanize_bytes`, which only ever emits digits and a
+        # unit, so they carry nothing to escape.
         tbl.add_row(
-            str(dev.get("name", "?")),
-            str(dev.get("type", "?")),
-            str(dev.get("index", "?")),
+            sanitize_markup(dev.get("name", "?")),
+            sanitize_markup(dev.get("type", "?")),
+            sanitize_markup(dev.get("index", "?")),
             _humanize_bytes(dev.get("vram_free")),
             _humanize_bytes(dev.get("vram_total")),
         )
@@ -59,7 +68,9 @@ def _render_stats_pretty(renderer, stats: dict[str, Any]) -> None:
     system = stats.get("system") or {}
     ram_free = _humanize_bytes(system.get("ram_free"))
     ram_total = _humanize_bytes(system.get("ram_total"))
-    version = system.get("comfyui_version", "?")
+    # Same payload, same hazard one line further on: this f-string IS markup,
+    # and `Renderer.print` hands it to `rich.print` without escaping anything.
+    version = sanitize_markup(system.get("comfyui_version", "?"))
     renderer.print(f"[dim]RAM: {ram_free} / {ram_total} free — ComfyUI {version}[/dim]")
 
 
@@ -88,6 +99,7 @@ def _handle_unreachable(renderer, e: Exception, *, target, operation: str) -> No
 def system_stats_execute(renderer, *, where: str | None = None) -> None:
     """Entry point wired from ``comfy system-stats`` in cmdline.py."""
     target = resolve_target(where=where)
+    renderer.where = target.kind
     client = Client(target)
     try:
         stats = client.get_system_stats()
@@ -117,6 +129,7 @@ def free_execute(
 ) -> None:
     """Entry point wired from ``comfy free`` in cmdline.py."""
     target = resolve_target(where=where)
+    renderer.where = target.kind
     client = Client(target)
     try:
         client.post_free(unload_models=unload_models, free_memory=free_memory)

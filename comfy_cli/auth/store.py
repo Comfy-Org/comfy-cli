@@ -17,7 +17,6 @@ import json
 import os
 import re
 import secrets
-from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -111,6 +110,9 @@ def _read_all(path: Path) -> dict[str, Any]:
 
 def _write_all(path: Path, payload: dict[str, Any]) -> None:
     """Atomic write with 0600 mode from inception.
+
+    Deliberately not ``file_utils.atomic_write_text`` — see the write-policy note
+    in ``comfy_cli/file_utils.py`` (tier 1, secrets).
 
     The tmp file is opened with ``O_CREAT|O_EXCL`` and explicit mode 0o600 so
     the secrets are never world-readable, even briefly, even on systems with a
@@ -209,10 +211,6 @@ def remove(provider: str) -> bool:
         del data["providers"][provider]
         _write_all(path, data)
     return True
-
-
-def known_providers() -> Iterable[str]:
-    return SUPPORTED_PROVIDERS
 
 
 # ---------------------------------------------------------------------------

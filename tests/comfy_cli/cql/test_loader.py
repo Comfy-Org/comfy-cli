@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
-from comfy_cli.cql import loader
 from comfy_cli.cql.errors import CQLRuntimeError
-from comfy_cli.cql.loader import _load_from_server, load_graph, normalize
+from comfy_cli.cql.loader import normalize
 
 OBJECT_INFO = {
     "KSampler": {
@@ -97,53 +94,6 @@ def test_normalize_preshaped_graph_pass_through():
     assert g["nodes"][0]["name"] == "Foo"
 
 
-def test_load_graph_from_file(tmp_path):
-    p = tmp_path / "object_info.json"
-    p.write_text(json.dumps(OBJECT_INFO))
-    g = load_graph(input_path=str(p))
-    assert {n["name"] for n in g["nodes"]} == {"KSampler", "CheckpointLoaderSimple"}
-
-
-def test_load_graph_missing_source_raises():
-    with pytest.raises(CQLRuntimeError):
-        load_graph()
-
-
-def test_load_graph_bad_json(tmp_path):
-    p = tmp_path / "broken.json"
-    p.write_text("{ not json")
-    with pytest.raises(CQLRuntimeError):
-        load_graph(input_path=str(p))
-
-
 def test_normalize_rejects_garbage():
     with pytest.raises(CQLRuntimeError):
         normalize({"foo": 1, "bar": "baz"})
-
-
-class _FakeResp:
-    def __init__(self, payload: bytes):
-        self._payload = payload
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-    def read(self, _n=None):
-        return self._payload
-
-
-def test_load_from_server_refuses_non_loopback_host():
-    # SSRF guard: a public host must never be fetched by the local loader.
-    with pytest.raises(CQLRuntimeError, match="non-loopback"):
-        _load_from_server("example.com", 8188, timeout=0.1)
-
-
-def test_load_from_server_accepts_loopback(monkeypatch):
-    # 127.0.0.1 passes the guard and proceeds to the fetch (mocked here).
-    payload = json.dumps(OBJECT_INFO).encode("utf-8")
-    monkeypatch.setattr(loader._LOADER_OPENER, "open", lambda *a, **k: _FakeResp(payload))
-    g = _load_from_server("127.0.0.1", 8188, timeout=0.1)
-    assert {n["name"] for n in g["nodes"]} == {"KSampler", "CheckpointLoaderSimple"}

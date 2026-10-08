@@ -45,6 +45,23 @@ _UNSAFE_HOST_CHARS = frozenset("/@?#[]")
 # invoked at several sites per command doesn't spam identical warnings.
 _warned: set[str] = set()
 
+# A recorded background server's host is the ``--listen`` value ComfyUI *bound*
+# to, not an address to connect to. ``--listen 0.0.0.0`` / ``::`` means "every
+# interface"; as a destination a wildcard is not a real address — Windows
+# refuses to connect to it outright, and the object_info fetch's loopback guard
+# (``cql.engine._load_from_target``) rejects it as a non-loopback local host, so
+# passing it through turns a perfectly reachable background server into a hard
+# failure. Map it to the loopback of the same family, which is what the operator
+# meant and what every other caller of the record already assumes.
+_WILDCARD_BIND_HOSTS = {"0.0.0.0": DEFAULT_HOST, "::": "::1", "[::]": "::1"}
+
+
+def _connectable_bind_host(host: str | None) -> str | None:
+    """Canonicalize a wildcard *bind* address into a connectable loopback one."""
+    if host is None:
+        return None
+    return _WILDCARD_BIND_HOSTS.get(host.strip(), host)
+
 
 def parse_local_url(value: str) -> tuple[str, int | None]:
     """Parse a local ComfyUI address into ``(host, port)``.
@@ -184,11 +201,13 @@ def resolve_local_host_port(
     no ``--host`` still picks up the env var's host, and vice-versa.
 
     ``background`` is the persisted ``ConfigManager().background`` tuple
-    (``(host, port)``) or ``None``. The returned host is *raw* (unbracketed);
+    (``(host, port)``) or ``None``; its host is a *bind* address, so a wildcard
+    (``0.0.0.0`` / ``::``) is canonicalized to the matching loopback — see
+    :func:`_connectable_bind_host`. The returned host is *raw* (unbracketed);
     callers building a URL bracket IPv6 literals themselves.
     """
     env_host, env_port = _env_local_host_port(env)
-    bg_host = background[0] if background else None
+    bg_host = _connectable_bind_host(background[0]) if background else None
     bg_port = background[1] if background else None
     resolved_host = host or env_host or bg_host or DEFAULT_HOST
     resolved_port = port or env_port or bg_port or DEFAULT_PORT

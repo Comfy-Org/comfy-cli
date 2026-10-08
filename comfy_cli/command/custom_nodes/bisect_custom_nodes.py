@@ -8,7 +8,6 @@ from typing import Annotated, Literal, NamedTuple
 import typer
 
 from comfy_cli.command.custom_nodes.cm_cli_util import execute_cm_cli
-from comfy_cli.command.launch import launch as launch_command
 
 bisect_app = typer.Typer()
 
@@ -194,6 +193,10 @@ def good():
     else:
         new_state.save()
         typer.echo(new_state)
+        # Imported at call time: launch.py imports this package's cm_cli_util, so a
+        # module-level import here is a cycle that breaks whoever imports launch first.
+        from comfy_cli.command.launch import launch as launch_command
+
         launch_command(background=False, extra=state.launch_args)
 
 
@@ -213,6 +216,10 @@ def bad():
     else:
         new_state.save()
         typer.echo(new_state)
+        # Imported at call time: launch.py imports this package's cm_cli_util, so a
+        # module-level import here is a cycle that breaks whoever imports launch first.
+        from comfy_cli.command.launch import launch as launch_command
+
         launch_command(background=False, extra=state.launch_args)
 
 

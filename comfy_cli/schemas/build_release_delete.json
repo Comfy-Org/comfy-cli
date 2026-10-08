@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/build_release_delete.json",
+  "title": "comfy build release delete --json data payload",
+  "type": "object",
+  "required": ["releaseId", "deleted"],
+  "additionalProperties": true,
+  "properties": {
+    "releaseId": {"type": "string", "description": "The deleted release's id."},
+    "deleted": {"type": "boolean"}
+  }
+}

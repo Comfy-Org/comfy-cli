@@ -4,16 +4,26 @@ The unlock: instead of running an MCP server, this command teaches every
 agent on the machine how to call ``comfy`` natively. One file per skill,
 three targets, zero protocol.
 
-Bundled skills (5 total) — see ``comfy skills list`` for descriptions:
+Bundled skills (6 total) — see ``comfy skills list`` for descriptions:
 
   - ``comfy``           — the consolidated driver skill (command surface,
                           output contract, routing, discovery, execution,
                           image, video, audio, cloud, edit, condition, pipeline)
-  - ``comfy-fragments`` — typed reusable workflow fragments + YAML blueprint composition
   - ``comfy-debug``     — debugging when workflows fail or jobs hang
   - ``comfy-relay``     — what to put in chat while driving the CLI
   - ``comfy-director``  — narrative multi-shot video production (screenplay,
                           continuity, audio design, conform discipline)
+  - ``comfy-build``     — building a custom ComfyUI environment on the developer
+                          platform, versioned with this CLI release
+  - ``comfy-deploy``    — running a Build release as a serverless deployment:
+                          compute choice, worker bounds, submitting workflows,
+                          and what keeps costing money
+
+Reference skills (``REFERENCE_SKILLS``) are the other half: ``show`` resolves
+them and no default install writes them, so a parent skill can cite one by name
+and load its depth only on the tasks that need it. A bare name passed to
+``install`` is redirected to ``show``; a path to the CLI's own copy, or a
+direct ``install()`` call, still writes one, and ``uninstall <name>`` removes it.
 """
 
 from __future__ import annotations
@@ -23,16 +33,24 @@ from typing import Annotated, Literal
 
 import typer
 
-from comfy_cli import tracking
+from comfy_cli import knowledge, tracking
 from comfy_cli.output import get_renderer, rprint
 from comfy_cli.skills import (
     BUNDLED_SKILLS,
+    REFERENCE_SKILLS,
+    SHIPPED_NAME_HINT,
+    ShippedSkillNameError,
     TargetKind,
     _compute_skill_state,
-    bundled_skill_names,
+    _looks_like_path,
+    default_skill_names,
+    frontmatter_description,
     load_skill_source,
     plan_install,
     read_manifest,
+    readable_skill_names,
+    reference_skill_names,
+    refuse_shipped_name,
     skill_content,
 )
 from comfy_cli.skills import (
@@ -71,27 +89,50 @@ def _kinds(targets: list[str] | None) -> list[TargetKind] | None:
     return valid
 
 
-def _validate_skills(skills: list[str] | None) -> list[str] | None:
+def _validate_skills(skills: list[str] | None, *, refuse_reference: bool = True) -> list[str] | None:
+    """Validate ``--skill`` tokens for install or uninstall.
+
+    ``refuse_reference`` is the asymmetry between the two verbs. A bare
+    reference name passed to ``install`` is nearly always the right intent with
+    the wrong verb, so it is redirected to ``show`` rather than written. The
+    same name passed to ``uninstall`` is unambiguous — it can only mean a file
+    already on disk — so it is accepted. Refusing there would strand anything
+    an explicit install had put down, which is the one case where naming it is
+    the only way to remove it.
+    """
     if not skills:
         return None
-    import os
-
     renderer = get_renderer()
-    known = bundled_skill_names()
+    known = default_skill_names() if refuse_reference else readable_skill_names()
     for s in skills:
-        p = Path(s).expanduser()
-        looks_like_path = os.sep in s or s.startswith((".", "~")) or p.exists()
-        if looks_like_path:
+        if _looks_like_path(s):
             # Path-based token: validate it eagerly so we fail fast before any writes.
+            # A path is an explicit request, including for the CLI's own copy of a
+            # reference skill, so it is honoured rather than redirected (see the
+            # branch below). Install refuses a path claiming a shipped name; uninstall
+            # (refuse_reference=False) accepts one, since removing overwrites nothing.
             try:
-                load_skill_source(s)
+                src = load_skill_source(s)
+                if refuse_reference:
+                    refuse_shipped_name(src, s)
             except ValueError as e:
                 renderer.error(
                     code="skill_invalid",
                     message=str(e),
-                    hint="a skill is a directory named after the skill containing SKILL.md with `name:` and `description:` frontmatter; check with `comfy skills validate <path>`",
+                    hint=SHIPPED_NAME_HINT
+                    if isinstance(e, ShippedSkillNameError)
+                    else "a skill is a directory named after the skill containing SKILL.md with `name:` and `description:` frontmatter; check with `comfy skills validate <path>`",
                 )
                 raise typer.Exit(code=1) from e
+        elif refuse_reference and s in reference_skill_names():
+            # A nudge, not a boundary: the reach is for the material, not for a
+            # file that would then sit in every agent's context on every task.
+            # Anyone who does want it installed passes the CLI's own copy by path,
+            # or calls `install()`.
+            raise typer.BadParameter(
+                f"{s!r} is a reference skill, which is read on demand rather than installed; "
+                f"run `comfy skills show {s}` to read it"
+            )
         elif s not in known:
             raise typer.BadParameter(f"unknown skill {s!r}; choices: {', '.join(known)}")
     return skills
@@ -139,7 +180,8 @@ def install_cmd(
         list[str] | None,
         typer.Option(
             "--skill",
-            help="Install only the named skill(s). Repeatable. Default: all bundled skills (see `comfy skills list`).",
+            help=f"Install only the named skill(s). Repeatable. Default: all {len(default_skill_names())} "
+            "(see `comfy skills list`).",
         ),
     ] = None,
     dry_run: Annotated[
@@ -160,6 +202,10 @@ def install_cmd(
         r for r in _prune_retired(scope=s, targets=kinds, dry_run=dry_run, project_root=cwd) if r.action != "absent"
     ]
     results = prune_results + _install(scope=s, targets=kinds, skills=skills, dry_run=dry_run, project_root=cwd)
+    if not dry_run:
+        # The skills being written are what reads the bundle; this is the one
+        # command whose whole job is setting that up, so it pays for the fetch.
+        knowledge.refresh_if_stale()
 
     if renderer.is_pretty():
         from rich.console import Group
@@ -191,6 +237,12 @@ def install_cmd(
 
         header = Text(f"{title_word} · {s} scope", style="dim")
         body = Group(header, Text(""), tbl)
+        # One line per skipped target: every remaining skip is a per-path OSError,
+        # so two targets of one skill fail with two different reasons and the table
+        # has nowhere to put either.
+        for r in results:
+            if r.action == "skipped" and r.reason:
+                body = Group(body, Text(f"{r.skill} ({r.kind}) skipped: {r.reason}", style="yellow"))
         if not dry_run and any(r.action == "wrote" for r in results):
             body = Group(
                 body,
@@ -219,14 +271,18 @@ def uninstall_cmd(
     target: Annotated[list[str] | None, typer.Option("--target")] = None,
     skill: Annotated[
         list[str] | None,
-        typer.Option("--skill", help="Uninstall only the named skill(s). Default: all bundled."),
+        typer.Option(
+            "--skill",
+            help="Uninstall only the named skill(s), including a reference skill something "
+            "installed explicitly. Default: all bundled.",
+        ),
     ] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ):
     renderer = get_renderer()
     s = _scope(scope)
     kinds = _kinds(target)
-    skills = _validate_skills(skill)
+    skills = _validate_skills(skill, refuse_reference=False)
     results = _uninstall(scope=s, targets=kinds, skills=skills, dry_run=dry_run, project_root=Path.cwd())
 
     if renderer.is_pretty():
@@ -267,51 +323,66 @@ def uninstall_cmd(
     )
 
 
-_LIST_HELP = "List the bundled skills (" + ", ".join(name for name, _ in BUNDLED_SKILLS) + ")."
+_LIST_HELP = (
+    "List the skills `comfy skills install` writes ("
+    + ", ".join(default_skill_names())
+    + "), plus the reference skills `comfy skills show` reads on demand."
+)
+
+
+def _skill_rows(catalog: tuple[tuple[str, str], ...]) -> list[dict]:
+    return [{"name": name, "description": frontmatter_description(skill_content(name))} for name, _ in catalog]
+
+
+def _skill_table(rows: list[dict], *, heading: str):
+    from rich.table import Table
+
+    tbl = Table(
+        show_header=True,
+        header_style="bold magenta",
+        border_style="dim",
+        pad_edge=False,
+        expand=True,
+        title=heading,
+        title_justify="left",
+    )
+    tbl.add_column("Skill", style="bold cyan", no_wrap=True)
+    tbl.add_column("Description", style="white", overflow="fold")
+    for r in rows:
+        tbl.add_row(r["name"], r["description"])
+    return tbl
 
 
 @app.command("list", help=_LIST_HELP)
 @tracking.track_command("skill")
 def list_cmd():
     renderer = get_renderer()
-    rows = []
-    for name, _subdir in BUNDLED_SKILLS:
-        # Pull the description out of the SKILL.md frontmatter, if any.
-        text = skill_content(name)
-        desc = ""
-        if text.startswith("---\n"):
-            _, _, rest = text.partition("---\n")
-            front, _, _ = rest.partition("---\n")
-            for line in front.splitlines():
-                if line.startswith("description:"):
-                    desc = line.split(":", 1)[1].strip()
-                    break
-        rows.append({"name": name, "description": desc})
+    rows = _skill_rows(BUNDLED_SKILLS)
+    reference_rows = _skill_rows(REFERENCE_SKILLS)
 
     if renderer.is_pretty():
-        from rich.table import Table
+        from rich.console import Group
 
-        tbl = Table(
-            show_header=True,
-            header_style="bold magenta",
-            border_style="dim",
-            pad_edge=False,
-            expand=True,
+        _print_skill_panel(
+            "skill list",
+            Group(
+                _skill_table(rows, heading="Installed by `comfy skills install`"),
+                "",
+                _skill_table(reference_rows, heading="Read on demand with `comfy skills show <name>`"),
+            ),
         )
-        tbl.add_column("Skill", style="bold cyan", no_wrap=True)
-        tbl.add_column("Description", style="white", overflow="fold")
-        for r in rows:
-            tbl.add_row(r["name"], r["description"])
-        _print_skill_panel("skill list", tbl)
-    renderer.emit({"skills": rows}, command="skill list")
+    renderer.emit({"skills": rows, "reference_skills": reference_rows}, command="skill list")
 
 
-@app.command("show", help="Print a bundled SKILL.md to stdout (default: comfy).")
+@app.command("show", help="Print a bundled or reference SKILL.md to stdout (default: comfy).")
 @tracking.track_command("skill")
 def show_cmd(
     name: Annotated[
         str,
-        typer.Argument(help="Which bundled skill to print (see `comfy skills list` for the full set)."),
+        typer.Argument(
+            help="Which skill to print — any installed skill, or a reference skill a parent cites "
+            "(see `comfy skills list` for both)."
+        ),
     ] = "comfy",
 ):
     renderer = get_renderer()
@@ -389,11 +460,14 @@ def validate_cmd(
     renderer = get_renderer()
     try:
         src = load_skill_source(path)
+        refuse_shipped_name(src, path)
     except ValueError as e:
         renderer.error(
             code="skill_invalid",
             message=str(e),
-            hint="a skill is a directory named after the skill containing SKILL.md with `name:` and `description:` frontmatter",
+            hint=SHIPPED_NAME_HINT
+            if isinstance(e, ShippedSkillNameError)
+            else "a skill is a directory named after the skill containing SKILL.md with `name:` and `description:` frontmatter",
         )
         raise typer.Exit(code=1) from e
     payload = {"valid": True, "name": src.name, "bundled": src.bundled, "path": path}

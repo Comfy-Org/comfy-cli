@@ -24,6 +24,3 @@ class CQLRuntimeError(Exception):
 
     def __str__(self) -> str:  # pragma: no cover - trivial
         return self.runtime_message
-
-    def as_details(self) -> dict[str, Any]:
-        return {**self.details, "runtime_message": self.runtime_message}

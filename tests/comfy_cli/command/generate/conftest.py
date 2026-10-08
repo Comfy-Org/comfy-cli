@@ -5,7 +5,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _auto_confirm_spend():
-    """Pre-authorize the credit-spend gate (BE-4103) for generate tests.
+    """Pre-authorize the credit-spend gate for generate tests.
 
     Most tests in this package exercise behavior *downstream* of the consent
     interlock, and under CliRunner there is no TTY — without this, every

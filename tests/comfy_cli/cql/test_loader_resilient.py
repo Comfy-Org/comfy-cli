@@ -43,6 +43,8 @@ def _isolated_cache(tmp_path, monkeypatch):
     """Point the cache dir at a throwaway tmp dir for every test."""
     cache_root = tmp_path / "cache"
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache_root))
+    # Don't let a developer's TTL override leak into the tests.
+    monkeypatch.delenv(loader.OBJECT_INFO_TTL_ENV, raising=False)
     # Make the host-key resolution deterministic and I/O-free.
     monkeypatch.setattr(loader, "_resolve_host_key", lambda mode, host, port: "https://test.comfy.org")
     return cache_root
@@ -182,6 +184,9 @@ def test_persistent_failure_falls_back_to_cache_with_warning(monkeypatch):
     import comfy_cli.cql.engine as engine
 
     _fake_refresh(monkeypatch)
+    # Disable the cache-first TTL gate so the freshly-seeded cache does not
+    # short-circuit the fetch — this test exercises the *failure* fallback.
+    monkeypatch.setenv(loader.OBJECT_INFO_TTL_ENV, "0")
 
     # Seed the cache with a (stale) dump.
     loader.write_object_info_cache("https://test.comfy.org", STALE_OBJECT_INFO)
@@ -204,6 +209,7 @@ def test_connection_error_also_falls_back_to_cache(monkeypatch):
     import comfy_cli.cql.engine as engine
 
     _fake_refresh(monkeypatch)
+    monkeypatch.setenv(loader.OBJECT_INFO_TTL_ENV, "0")
     loader.write_object_info_cache("https://test.comfy.org", STALE_OBJECT_INFO)
 
     def _offline(**kw):

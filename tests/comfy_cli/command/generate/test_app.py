@@ -83,7 +83,7 @@ def test_list_partner_filter(runner):
 
 
 def test_list_json_emits_parseable_models(runner):
-    """--json is an `envelope/1` on stdout, never a Rich table (BE-4933).
+    """--json is an `envelope/1` on stdout, never a Rich table.
     Full envelope/schema coverage lives in test_list_schema_envelope.py."""
     import json
 
@@ -132,7 +132,7 @@ def test_list_query_filter(runner):
 
 
 def test_list_no_matches(runner):
-    # --no-json pins pretty mode: CliRunner has no TTY, and since BE-4933 a
+    # --no-json pins pretty mode: CliRunner has no TTY, and a
     # non-TTY `generate list` resolves to the JSON envelope like every other
     # renderer-backed command.
     r = runner.invoke(cli_app, ["--no-json", "generate", "list", "--partner", "nonexistent"])
@@ -292,7 +292,9 @@ def test_generate_sync_with_download(runner, api_key, tmp_path, monkeypatch):
     monkeypatch.setattr(gen_app.client.httpx, "post", lambda *a, **kw: resp)
     monkeypatch.setattr("comfy_cli.command.generate.client.download_bytes", lambda *a, **kw: b"png-bytes")
     download = str(tmp_path / "out.png")
-    r = runner.invoke(cli_app, ["generate", "dalle", "--prompt", "x", "--download", download])
+    # --no-json pins pretty mode (CliRunner has no TTY, so the renderer would
+    # otherwise pick JSON and emit the envelope instead of the "Saved" line).
+    r = runner.invoke(cli_app, ["--no-json", "generate", "dalle", "--prompt", "x", "--download", download])
     assert r.exit_code == 0, r.stdout
     assert Path(download).exists()
     assert Path(download).read_bytes() == b"png-bytes"
@@ -312,7 +314,7 @@ def test_generate_json_flag(runner, api_key, monkeypatch):
 def test_generate_download_no_urls(runner, api_key, monkeypatch):
     resp = httpx.Response(200, json={"data": []})
     monkeypatch.setattr(gen_app.client.httpx, "post", lambda *a, **kw: resp)
-    r = runner.invoke(cli_app, ["generate", "dalle", "--prompt", "x", "--download", "/tmp/x.png"])
+    r = runner.invoke(cli_app, ["--no-json", "generate", "dalle", "--prompt", "x", "--download", "/tmp/x.png"])
     assert r.exit_code == 0
     assert "no image urls" in r.stdout.lower()
 
@@ -504,6 +506,77 @@ def test_refresh_invalid_body_exits_and_leaves_cache_untouched(runner, monkeypat
     assert r.exit_code == 1
     assert "Refusing to cache" in r.stdout
     assert cache.read_text(encoding="utf-8") == before  # untouched
+
+
+def test_refresh_fetches_openapi_path(runner, monkeypatch, tmp_path):
+    """Regression: comfy-api serves the spec at `<base_url>/openapi`
+    (JSON), not `/openapi.yml` (which 404s). Assert `_refresh()` hits `/openapi`."""
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def get(self, url, headers=None):
+            captured["url"] = url
+            # A JSON body, as comfy-api actually serves — must parse as YAML.
+            return httpx.Response(
+                200,
+                text='{"openapi": "3.0.2", "paths": {}}',
+                request=httpx.Request("GET", url),
+            )
+
+    monkeypatch.setattr(gen_app.httpx, "Client", FakeClient)
+    monkeypatch.setattr("comfy_cli.command.generate.spec._USER_CACHE", tmp_path / "openapi-cache.yml")
+
+    # Resolve the expected base_url BEFORE refresh writes the cache: reading it
+    # afterwards would repopulate the lru-cached spec from the freshly-written
+    # (minimal) tmp cache and leak that into later tests.
+    expected = gen_app.spec.base_url() + "/openapi"
+
+    r = runner.invoke(cli_app, ["generate", "refresh"])
+    assert r.exit_code == 0, r.stdout
+    assert captured["url"] == expected
+    assert not captured["url"].endswith("/openapi.yml")
+
+
+def test_refresh_rejects_non_spec_body(runner, monkeypatch, tmp_path):
+    """Regression: `/openapi` is followed through redirects and cached
+    for 7 days, so a non-spec 200 (HTML interstitial, redirect landing page, JSON
+    array/scalar) must be refused rather than poison the cache for a week."""
+    cache = tmp_path / "openapi-cache.yml"
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def get(self, url, headers=None):
+            # An HTML interstitial that parses (as YAML) to a plain string, not a mapping.
+            return httpx.Response(
+                200,
+                text="<html><body>Just a moment...</body></html>",
+                request=httpx.Request("GET", url),
+            )
+
+    monkeypatch.setattr(gen_app.httpx, "Client", FakeClient)
+    monkeypatch.setattr("comfy_cli.command.generate.spec._USER_CACHE", cache)
+
+    r = runner.invoke(cli_app, ["generate", "refresh"])
+    assert r.exit_code == 1, r.stdout
+    assert "Refusing to cache" in r.stdout
+    assert not cache.exists()  # nothing was persisted
 
 
 def test_refresh_network_failure(runner, monkeypatch):

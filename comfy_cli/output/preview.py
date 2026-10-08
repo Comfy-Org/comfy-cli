@@ -21,6 +21,8 @@ import tempfile
 import warnings
 from pathlib import Path
 
+from comfy_cli._safe_exec import resolve_binary
+
 # Suppress term-image's "not running in a terminal" warning — we handle
 # the TTY check ourselves before calling into term-image.
 warnings.filterwarnings("ignore", message=".*not running within a terminal.*", category=UserWarning)
@@ -64,6 +66,13 @@ def _show_video(path: Path) -> None:
 
 def _show_video_thumbnail(path: Path) -> None:
     """Extract the first frame via ffmpeg and display it."""
+    # ``resolve_binary`` — not the required variant — because this previewer's
+    # documented contract is to skip silently: a missing ffmpeg and one refused
+    # for resolving into the CWD degrade the same way, to no thumbnail.
+    ffmpeg_bin = resolve_binary("ffmpeg")
+    if ffmpeg_bin is None:
+        return
+
     tmp_path: str | None = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
@@ -71,7 +80,7 @@ def _show_video_thumbnail(path: Path) -> None:
 
         result = subprocess.run(  # noqa: S603
             [
-                "ffmpeg",
+                ffmpeg_bin,
                 "-i",
                 str(path),
                 "-vf",
@@ -101,10 +110,15 @@ def _show_video_thumbnail(path: Path) -> None:
 
 def _show_video_info(path: Path) -> None:
     """Show a Rich panel with video metadata via ffprobe."""
+    # See ``_show_video_thumbnail``: skip-silently is the contract here too.
+    ffprobe_bin = resolve_binary("ffprobe")
+    if ffprobe_bin is None:
+        return
+
     try:
         result = subprocess.run(  # noqa: S603
             [
-                "ffprobe",
+                ffprobe_bin,
                 "-v",
                 "quiet",
                 "-print_format",

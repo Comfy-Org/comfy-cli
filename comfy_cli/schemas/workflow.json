@@ -30,9 +30,35 @@
         }
       }
     },
+    "format": { "type": "string", "enum": ["py"], "description": "print: output form. Only `py` today." },
+    "source": { "type": "string", "description": "print: the rendered Python-like source, one line per node." },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "print: binding name -> node id. Interior subgraph nodes use qualified keys/ids, e.g. \"10/3/primitive_int\" -> \"10/3/6\"."
+    },
+    "node_count": { "type": ["integer", "null"], "minimum": 0, "description": "print: nodes that got a rendered line (top level + subgraph interiors). null for `comfy workflow get` on a non-JSON body." },
+    "skipped": {
+      "type": "array",
+      "description": "print: nodes not rendered as their own line. UI-only splicing nodes (reason \"spliced\", or \"inlined into <id>.<input>\" for a PrimitiveNode); notes, which are rendered as `#`-comments in `source` AND listed here with reason \"note\".",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "reason"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    },
     "applied": { "type": "array" },
     "warnings": { "type": "array" },
-    "wrote": { "type": "string" },
+    "wrote": { "type": ["string", "null"], "description": "file written, or null when nothing was written (set-slot --stdout)" },
+    "out": { "type": "string", "description": "set-slot: where the result went — \"stdout\" when --stdout returned it instead of writing the file" },
+    "workflow_json": { "type": "object", "description": "set-slot --stdout: the modified workflow itself (human mode prints it raw on stdout instead)" },
+    "variants": { "type": ["array", "null"], "description": "vary without --out-dir: the produced workflows (human mode prints them as NDJSON on stdout instead); null when they were written to --out-dir" },
+    "written": { "type": "array" },
+    "out_dir": { "type": ["string", "null"] },
     "variations_summary": { "type": "array" },
     "item_map": {
       "type": "object",

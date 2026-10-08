@@ -4,7 +4,6 @@ import os
 import subprocess
 import sys
 import time
-from importlib.metadata import metadata
 from pathlib import Path
 
 import requests
@@ -38,11 +37,6 @@ def check_for_newer_pypi_version(package_name, current_version):
     except requests.RequestException as e:
         logger.warning(f"Failed to check for updates: {e}")
         return False, current_version
-
-
-def get_version_from_pyproject():
-    package_metadata = metadata("comfy-cli")
-    return package_metadata["Version"]
 
 
 def upgrade_cli():

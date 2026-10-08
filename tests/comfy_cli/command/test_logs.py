@@ -9,6 +9,7 @@ workspace logfile and records its path.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import subprocess
@@ -286,16 +287,173 @@ def test_logs_pretty_honors_large_tail_past_line_cap(monkeypatch, tmp_path, caps
 
 
 def test_logs_pretty_writes_raw_lines(monkeypatch, tmp_path, capsys):
-    # Default renderer is pretty; log text with '[...]' must not be reinterpreted.
+    # Default renderer is pretty; log text with '[...]' must not be reinterpreted
+    # as Rich markup. Escape bytes ARE stripped (see the sanitization tests
+    # below), so this no longer pins the output byte-for-byte — but every
+    # bracketed run has to survive verbatim, including an unbalanced closer that
+    # would raise MarkupError from a markup-parsing sink.
     log = tmp_path / "comfyui_8188.log"
-    log.write_text("[INFO] hello [world]\nplain\n")
+    log.write_text("[INFO] hello [world]\n[####  ] 50%\n[/red]\nplain\n")
     monkeypatch.setattr(launch, "resolve_background_log_path", lambda port=None: (str(log), "recorded"))
 
     launch.logs(tail=10)
 
     out = capsys.readouterr().out
     assert "[INFO] hello [world]" in out
+    assert "[####  ] 50%" in out
+    assert "[/red]" in out
     assert "plain" in out
+
+
+# --------------------------------------------------------------------------- #
+# `comfy logs` pretty replay — terminal-control sanitization
+# --------------------------------------------------------------------------- #
+
+
+class _TtyStream(io.StringIO):
+    """A pretty sink that claims to be a terminal, for the SGR-reset gate."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+def _logs_pretty_out(monkeypatch, tmp_path, capsys, contents: str, *, tty: bool = False) -> str:
+    """Run pretty-mode ``logs()`` over ``contents`` and return what it printed.
+
+    ``tty=True`` swaps in a sink that reports ``isatty()``, which is what gates
+    the closing SGR resets — under pytest the captured stdout never is one.
+    """
+    log = tmp_path / "comfyui_8188.log"
+    log.write_text(contents)
+    monkeypatch.setattr(launch, "resolve_background_log_path", lambda port=None: (str(log), "recorded"))
+    if not tty:
+        launch.logs(tail=50)
+        return capsys.readouterr().out
+
+    renderer = Renderer.resolve(
+        is_stdout_tty=True,
+        env={},
+        caller=Caller(kind="user", agentic=False, source_env=None),
+    )
+    renderer.mode = OutputMode.PRETTY
+    renderer.pretty_stream = _TtyStream()
+    set_renderer(renderer)
+    launch.logs(tail=50)
+    return renderer.pretty_stream.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("contents", "banned"),
+    [
+        # OSC 0 retitles the user's terminal window; BEL-terminated form.
+        ("start\x1b]0;evil\x07end\n", "\x1b]"),
+        # ...and the unterminated form. A terminal would swallow forward looking
+        # for the terminator; on a *replayed* log that would delete every line
+        # below it, so the sanitizer bounds it at the newline instead — hence
+        # the `end` on the following line, which must survive.
+        ("start\x1b]0;evil\nend\n", "\x1b]"),
+        ("start\x1bPdcs never terminated\nend\n", "\x1bP"),
+        ("start\x9d0;evil\nend\n", "\x9d"),
+        # CSI erase-display and cursor-up repaint CLI-owned lines above.
+        ("start\x1b[2Jend\n", "\x1b[2J"),
+        ("start\x1b[3Aend\n", "\x1b[3A"),
+        # 8-bit C1 CSI — not honored by UTF-8 terminals, so it is stripped too.
+        ("start\x9b31mend\n", "\x9b"),
+    ],
+)
+def test_logs_pretty_strips_terminal_control_sequences(monkeypatch, tmp_path, capsys, contents, banned):
+    out = _logs_pretty_out(monkeypatch, tmp_path, capsys, contents)
+
+    assert banned not in out
+    # Text on both sides of the stripped sequence survives: the point is to
+    # remove the bytes the terminal acts on, not to truncate the log there.
+    assert "start" in out
+    assert "end" in out
+
+
+def test_logs_pretty_keeps_lines_below_an_unterminated_introducer(monkeypatch, tmp_path, capsys):
+    # The tail-swallow regression in full: a crashed process dumping one stray
+    # introducer must not silently cut the replay short while the JSON path
+    # still shows the rest.
+    contents = "line one\n\x1b]0;truncator\nline two\nline three\n"
+    out = _logs_pretty_out(monkeypatch, tmp_path, capsys, contents)
+
+    assert "line one" in out
+    assert "line two" in out
+    assert "line three" in out
+
+
+def test_logs_pretty_preserves_sgr_colour(monkeypatch, tmp_path, capsys):
+    # The reason this is `sanitize_terminal_stream` and not `sanitize`: a
+    # coloured ComfyUI log must still be coloured when replayed.
+    out = _logs_pretty_out(monkeypatch, tmp_path, capsys, "\x1b[31mred\x1b[0m\n", tty=True)
+
+    assert "\x1b[31mred\x1b[0m" in out
+
+
+def test_logs_pretty_closes_styles_per_line(monkeypatch, tmp_path, capsys):
+    # A log line that never resets (or conceals with \x1b[8m) would otherwise
+    # style every line replayed after it — and then whatever the user types
+    # next. Closing at the newline, not just once at the end, is what stops one
+    # planted SGR from hiding the log lines below it.
+    out = _logs_pretty_out(monkeypatch, tmp_path, capsys, "\x1b[8mconcealed\nvisible\n", tty=True)
+
+    assert out == "\x1b[8mconcealed\x1b[0m\nvisible\n"
+
+
+def test_logs_pretty_adds_no_reset_when_the_log_has_no_sgr(monkeypatch, tmp_path, capsys):
+    # The overwhelmingly common case stays byte-identical to the pre-sanitize
+    # output: an uncoloured log gains nothing.
+    out = _logs_pretty_out(monkeypatch, tmp_path, capsys, "plain one\nplain two\n")
+
+    assert out == "plain one\nplain two\n"
+
+
+def test_logs_pretty_adds_no_reset_when_the_sink_is_not_a_tty(monkeypatch, tmp_path, capsys):
+    # `comfy logs > file` / `| grep` has no terminal state to protect, so it
+    # must not gain a reset the source file never contained. The log's own SGR
+    # still replays — that byte *was* in the file.
+    out = _logs_pretty_out(monkeypatch, tmp_path, capsys, "\x1b[8mconcealed\n")
+
+    assert out == "\x1b[8mconcealed\n"
+
+
+def test_logs_pretty_preserves_progress_lines_and_layout(monkeypatch, tmp_path, capsys):
+    # Tabs and newlines are layout and survive. The '\r' a tqdm progress line is
+    # recorded with survives the sanitizer too (see the unit tests) — but it
+    # never reaches the sanitizer, because `read_log_tail` opens the file in the
+    # default universal-newline mode, which normalizes '\r' to '\n' one layer
+    # up. That is pre-existing reader behavior shared with the JSON envelope, so
+    # this asserts what the pretty path actually prints rather than pinning a
+    # '\r' the display layer never sees.
+    out = _logs_pretty_out(monkeypatch, tmp_path, capsys, "50%|##   |\r100%|#####|\ncol1\tcol2\n")
+
+    assert "50%|##   |" in out
+    assert "100%|#####|" in out
+    assert "col1\tcol2\n" in out
+
+
+def test_logs_json_lines_are_byte_faithful(monkeypatch, tmp_path, capsys):
+    # The machine path stays raw: stripping here would mutate the data agents
+    # parse, and the envelope is not a terminal — its consumer decodes JSON
+    # rather than acting on control sequences.
+    #
+    # Note the envelope is *not* escape-free the way the pretty path is. The
+    # renderer dumps with `ensure_ascii=False`, which escapes C0 (so `\x1b`
+    # leaves as a six-character `\u` escape) but emits U+0080-U+009F literally — the 8-bit C1
+    # introducers `\x9b`/`\x90`/`\x9d` therefore cross the envelope raw. That is
+    # deliberate for a machine sink; anything that later renders these lines to
+    # a human terminal owes them a trip through `sanitize_terminal_stream`.
+    _force_json_renderer()
+    raw = "\x1b]0;evil\x07\x1b[2J\x1b[31mred\x1b[0m\x9b31m\n"
+    log = tmp_path / "comfyui_8188.log"
+    log.write_text(raw)
+    monkeypatch.setattr(launch, "resolve_background_log_path", lambda port=None: (str(log), "recorded"))
+
+    launch.logs(tail=50)
+
+    env = _envelope(capsys)
+    assert env["data"]["lines"] == [raw]
 
 
 # --------------------------------------------------------------------------- #

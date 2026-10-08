@@ -18,6 +18,11 @@ COMFY_GITHUB_URL = "https://github.com/comfyanonymous/ComfyUI"
 MANAGER_REQUIREMENTS_FILE = "manager_requirements.txt"
 
 DEFAULT_COMFY_MODEL_PATH = "models"
+# ComfyUI's own directory names are singular — `input/` and `output/`, not
+# `inputs/`/`outputs/`. Named here rather than spelled inline so the deploy
+# asset allowlist and the install layout cannot drift apart.
+DEFAULT_COMFY_INPUT_PATH = "input"
+DEFAULT_COMFY_OUTPUT_PATH = "output"
 DEFAULT_COMFY_WORKSPACE = {
     OS.WINDOWS: os.path.join(os.path.expanduser("~"), "Documents", "comfy", "ComfyUI"),
     OS.MACOS: os.path.join(os.path.expanduser("~"), "Documents", "comfy", "ComfyUI"),

@@ -82,8 +82,11 @@ class ConfigManager:
 
         # TODO: We need a policy for clearing the tmp directory.
         tmp_path = os.path.join(self.get_config_path(), "tmp")
-        if not os.path.exists(tmp_path):
-            os.makedirs(tmp_path)
+        # exist_ok: several `comfy` processes can share one HOME and load()
+        # concurrently (the comfy-agent runs read-only tool calls in parallel),
+        # so a check-then-create races — both see the dir missing and the loser
+        # dies with FileExistsError before running its command.
+        os.makedirs(tmp_path, exist_ok=True)
 
         if constants.CONFIG_KEY_BACKGROUND in self.config["DEFAULT"]:
             bg_info = self.config["DEFAULT"][constants.CONFIG_KEY_BACKGROUND].strip("()").split(",")

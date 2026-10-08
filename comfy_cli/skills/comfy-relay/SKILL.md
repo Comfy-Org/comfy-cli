@@ -8,8 +8,8 @@ and passing tests. Creative work is different: the user steers by **seeing the
 work**. Your whole job in chat is to make them see it and react. **The image is
 the message — text about the image is not.**
 
-This skill is the presentation/interaction layer. It is paired with `comfy`
-(the surface) and `comfy-fragments` (the compile model).
+This skill is the presentation/interaction layer. It is paired with the `comfy`
+skill (the CLI surface + recipe authoring: `apply`/`capture`/`foreach`).
 
 ---
 
@@ -32,15 +32,22 @@ You can't play a clip in chat. Surface it visually instead — **one command doe
 it:**
 
 ```bash
-comfy --json preview clip.mp4          # → clip.preview.png (a contact sheet) + duration/fps/has_audio
+comfy --json preview clip.mp4          # → clip.preview.png (a contact sheet)
 # then Read clip.preview.png
 ```
 
 `comfy preview` handles all three modalities: **video → contact sheet** (a grid
 across the whole timeline, best for judging pacing/arc), **image → thumbnail**,
-**audio → waveform** (so you can *see* the dynamics you can't hear). It also
-reports the facts frames can't show — **duration, fps, and whether there's
-audio** — in the envelope.
+**audio → waveform** (so you can *see* the dynamics you can't hear). The
+contact-sheet/thumbnail PNG **always renders** — the CLI ships a bundled ffmpeg,
+so no system install is needed.
+
+It also *tries* to report the facts frames can't show — **duration, fps, has_audio** —
+but those come from `ffprobe`, which is **not** bundled: without a system `ffprobe`
+on PATH those envelope fields are `null` (and the contact sheet spans only the
+first second, since it can't read the duration). Install system ffmpeg
+(`brew install ffmpeg` / `apt install ffmpeg`) when you need accurate timeline
+sampling or the metadata; the PNG itself works without it.
 
 Prefer it over hand-rolling ffmpeg. (If you need a custom grid: `--grid 6x4`;
 custom width: `--width 720`.) For a key-moments read instead of a grid, extract
@@ -79,7 +86,7 @@ lot of wall-clock you should never spend blocked.
    Same for seed/variant sweeps (`workflow vary`).
 
 3. **Dispatch a subagent per long, self-contained job.** When you have subagents
-   available, a whole shot/clip/pipeline — survey → compose → run → wait →
+   available, a whole shot/clip/pipeline — survey → apply → run → wait →
    assemble — is minutes of work and many steps. Hand each to a **background
    subagent**: it drives the CLI end-to-end and reports back the artifact path +
    a short build log, while the main session stays responsive and other
@@ -87,7 +94,7 @@ lot of wall-clock you should never spend blocked.
    piece** — a shot, the music, the title card — then the orchestrator assembles
    the returned clips.
    - Brief it like a creative director: the concept/shot, the technique, what to
-     **reuse** (existing fragments/clips), and to report the path + any friction.
+     **reuse** (existing recipes/clips), and to report the path + any friction.
    - It returns the *conclusion* (the clip + log), not its 100-step transcript —
      so the orchestrator's context stays clean and it can run many in parallel.
    - Keep one piece = one subagent so a re-roll re-runs only that piece.
@@ -110,17 +117,17 @@ questions.
 
 ## Rule 6 — Lead with the visual, then show the source
 
-After the preview, show the **source that made it** — the blueprint YAML, the
-prompt, the params — so the user can tweak the *inputs*, not hunt through
-compiled JSON. The compiled workflow is a build artifact; keep it out of chat.
+After the preview, show the **source that made it** — the recipe, the prompt, the
+params — so the user can tweak the *inputs*, not hunt through the graph JSON. The
+workflow file is a build artifact; keep it out of chat.
 
 | Moment | Lead with | Then show |
 |---|---|---|
-| Generated an image | the image (`Read` it) | the prompt / blueprint that made it |
-| Rendered a clip | a contact sheet + duration/audio | the blueprint |
+| Generated an image | the image (`Read` it) | the prompt / recipe that made it |
+| Rendered a clip | a contact sheet + duration/audio | the recipe |
 | A creative fork | the candidate frames | your recommendation |
 | Iterating one value | the new result | `param: old → new` (one line) |
-| Composing a workflow | the blueprint YAML (10–30 lines) | the `compose` summary — never the 100-node JSON |
+| Building a workflow | the recipe (params + ops) | the `apply` summary (`data.ops`) — never the 100-node JSON |
 | Editing one slot | the re-rendered result | `addr: old → new` (one line) |
 
 ## Rule 7 — Be honest about what you can't perceive

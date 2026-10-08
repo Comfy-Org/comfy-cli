@@ -2,7 +2,7 @@ import json
 import logging
 import os
 
-import requests
+from comfy_cli.http import DEFAULT_HTTP_TIMEOUT
 
 # Reduced global imports from comfy_cli.registry
 from comfy_cli.registry.types import (
@@ -12,6 +12,60 @@ from comfy_cli.registry.types import (
     PublishNodeVersionResponse,
     PyProjectConfig,
 )
+
+MAX_ERROR_BODY_CHARS = 2000
+
+
+def sanitize_error_body(text: str, *, secrets: tuple[str | None, ...] = ()) -> str:
+    """Make an untrusted registry response body safe to log and render.
+
+    The registry is upstream of us: its response body can echo back what we
+    sent (including the publish PAT), embed newlines that forge extra log
+    lines, or be arbitrarily large. Redact known secrets, flatten CR/LF to
+    escapes, and bound the length before the body reaches a log record or a
+    ``renderer.error`` envelope.
+    """
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "***REDACTED***")
+
+    text = text.replace("\r", "\\r").replace("\n", "\\n")
+
+    if len(text) > MAX_ERROR_BODY_CHARS:
+        text = f"{text[:MAX_ERROR_BODY_CHARS]}... [truncated, {len(text)} chars total]"
+
+    return text
+
+
+class RegistryAPIError(Exception):
+    """Raised when a Registry API call fails.
+
+    Carries the HTTP ``status`` and response ``body`` when the failure came
+    from a non-2xx response, so the command boundary can surface a
+    machine-readable ``renderer.error(code=..., details={status, body})``
+    instead of a bare traceback. Client-side validation failures (missing
+    publisher id / project name) carry no status/body.
+    """
+
+    def __init__(self, message: str, *, status: int | None = None, body: str | None = None):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+        self.body = body
+
+
+class NodeFetchError(Exception):
+    """``get_node`` got a non-200 from the registry.
+
+    Carries ``status_code`` so callers can tell a permanent 404 ("no such node")
+    apart from a transient 5xx/proxy failure — the two need different remediation
+    and only one is worth retrying. Subclasses ``Exception`` and keeps the
+    original message, so pre-existing ``except Exception`` callers are unaffected.
+    """
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class RegistryAPI:
@@ -44,10 +98,10 @@ class RegistryAPI:
         """
         # Local import to prevent circular dependency
         if not node_config.tool_comfy.publisher_id:
-            raise Exception("Publisher ID is required in pyproject.toml to publish a node version")
+            raise RegistryAPIError("Publisher ID is required in pyproject.toml to publish a node version")
 
         if not node_config.project.name:
-            raise Exception("Project name is required in pyproject.toml to publish a node version")
+            raise RegistryAPIError("Project name is required in pyproject.toml to publish a node version")
         license_json = serialize_license(node_config.project.license)
         request_body = {
             "personal_access_token": token,
@@ -79,7 +133,11 @@ class RegistryAPI:
         headers = {"Content-Type": "application/json"}
         body = request_body
 
-        response = requests.post(url, headers=headers, data=json.dumps(body))
+        # Imported lazily: requests costs ~30ms to import and this module is
+        # on the import path of every CLI invocation.
+        import requests
+
+        response = requests.post(url, headers=headers, data=json.dumps(body), timeout=DEFAULT_HTTP_TIMEOUT)
 
         if response.status_code == 201:
             data = response.json()
@@ -88,7 +146,14 @@ class RegistryAPI:
                 signedUrl=data["signedUrl"],
             )
         else:
-            raise Exception(f"Failed to publish node version: {response.status_code} {response.text}")
+            # The publish request body carries the PAT, so a registry error that
+            # echoes the payload back would otherwise leak it into logs.
+            safe_body = sanitize_error_body(response.text, secrets=(token,))
+            raise RegistryAPIError(
+                f"Failed to publish node version: {response.status_code} {safe_body}",
+                status=response.status_code,
+                body=safe_body,
+            )
 
     def list_all_nodes(self):
         """
@@ -97,13 +162,20 @@ class RegistryAPI:
         Returns:
           list: A list of Node instances.
         """
+        import requests  # deferred; see publish_node_version
+
         url = f"{self.base_url}/nodes"
-        response = requests.get(url)
+        response = requests.get(url, timeout=DEFAULT_HTTP_TIMEOUT)
         if response.status_code == 200:
             raw_nodes = response.json()["nodes"]
             return [map_node_to_node_class(node) for node in raw_nodes]
         else:
-            raise Exception(f"Failed to retrieve nodes: {response.status_code} - {response.text}")
+            safe_body = sanitize_error_body(response.text)
+            raise RegistryAPIError(
+                f"Failed to retrieve nodes: {response.status_code} - {safe_body}",
+                status=response.status_code,
+                body=safe_body,
+            )
 
     def install_node(self, node_id, version=None):
         """
@@ -116,6 +188,8 @@ class RegistryAPI:
         Returns:
           NodeVersion: Node version data or error message.
         """
+        import requests  # deferred; see publish_node_version
+
         if version is None:
             url = f"{self.base_url}/nodes/{node_id}/install"
         else:
@@ -123,13 +197,18 @@ class RegistryAPI:
 
         # A stalled/blackholed registry must not hang callers indefinitely.
         # A Timeout surfaces as a RequestException for callers to catch.
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=DEFAULT_HTTP_TIMEOUT)
         if response.status_code == 200:
             # Convert the API response to a NodeVersion object
             logging.debug(f"RegistryAPI install_node response: {response.json()}")
             return map_node_version(response.json())
         else:
-            raise Exception(f"Failed to install node: {response.status_code} - {response.text}")
+            safe_body = sanitize_error_body(response.text)
+            raise RegistryAPIError(
+                f"Failed to install node: {response.status_code} - {safe_body}",
+                status=response.status_code,
+                body=safe_body,
+            )
 
     def get_node(self, node_id):
         """
@@ -145,14 +224,19 @@ class RegistryAPI:
         Returns:
           Node: Node data, including ``latest_version`` when the registry has one.
         """
+        import requests  # deferred; see publish_node_version
+
         url = f"{self.base_url}/nodes/{node_id}"
         # Same rationale as install_node: a stalled registry must not hang callers.
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=DEFAULT_HTTP_TIMEOUT)
         if response.status_code == 200:
             logging.debug(f"RegistryAPI get_node response: {response.json()}")
             return map_node_to_node_class(response.json())
         else:
-            raise Exception(f"Failed to retrieve node: {response.status_code} - {response.text}")
+            raise NodeFetchError(
+                f"Failed to retrieve node: {response.status_code} - {response.text}",
+                status_code=response.status_code,
+            )
 
 
 def map_node_version(api_node_version):

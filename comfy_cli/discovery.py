@@ -32,6 +32,43 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy cloud login": "auth",
     "comfy cloud logout": "auth",
     "comfy cloud whoami": "auth",
+    "comfy cloud status": "cloud_status",
+    "comfy build init": "build_init",
+    "comfy build push": "build_push",
+    "comfy build pull": "build_pull",
+    "comfy build status": "build_status",
+    "comfy build ls": "build_ls",
+    "comfy build show": "build_show",
+    "comfy build release create": "build_release_create",
+    "comfy build release ls": "build_release_ls",
+    "comfy build release show": "build_release_show",
+    "comfy build release logs": "build_release_logs",
+    "comfy build release manifest": "build_release_manifest",
+    "comfy build release delete": "build_release_delete",
+    "comfy build validate": "build_validate",
+    "comfy build delete": "build_delete",
+    "comfy build update": "build_update",
+    "comfy build refs resolve": "build_refs_resolve",
+    "comfy build refs base-images": "build_refs_base_images",
+    "comfy build refs build-targets": "build_refs_build_targets",
+    "comfy build refs model-dirs": "build_refs_model_dirs",
+    "comfy build blob ls": "build_blob_ls",
+    "comfy deploy up": "deploy_up",
+    "comfy deploy promote": "deploy_promote",
+    "comfy deploy rollback": "deploy_rollback",
+    "comfy deploy rename": "deploy_rename",
+    "comfy deploy history": "deploy_history",
+    "comfy deploy status": "deploy_status",
+    "comfy deploy ls": "deploy_ls",
+    "comfy deploy show": "deploy_show",
+    "comfy deploy logs": "deploy_logs",
+    "comfy deploy events": "deploy_events",
+    "comfy deploy scale": "deploy_scale",
+    "comfy deploy stop": "deploy_stop",
+    "comfy deploy start": "deploy_start",
+    "comfy deploy delete": "deploy_delete",
+    "comfy deploy run": "deploy_run",
+    "comfy deploy refs compute": "deploy_refs_compute",
     "comfy jobs ls": "jobs",
     "comfy jobs status": "jobs",
     "comfy jobs watch": "jobs",
@@ -40,6 +77,9 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy update": "update",
     # help / validation
     "comfy help": "help",
+    # `comfy workflow validate` is the canonical home; `comfy validate` is the
+    # hidden deprecated alias — both emit the same workflow-validation payload.
+    "comfy workflow validate": "workflow",
     "comfy validate": "workflow",
     # nodes introspection
     "comfy nodes ls": "nodes",
@@ -51,11 +91,28 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy nodes types": "nodes",
     "comfy nodes categories": "nodes",
     "comfy nodes refresh": "nodes",
+    # The widget catalog gets its OWN schema, not `nodes`: `nodes.json` declares
+    # `types` as an array of connection-type names (`nodes types`), and the
+    # catalog's `types` is a class_type→entry map. Same key, different contract.
+    "comfy nodes widget-catalog": "widget_catalog",
     # workflow editing
     "comfy workflow slots": "workflow",
     "comfy workflow set-slot": "workflow",
     "comfy workflow vary": "workflow",
     "comfy workflow notes": "workflow",
+    "comfy workflow print": "workflow",
+    # structured edit primitives + recipes (CRDT op-based authoring)
+    "comfy workflow insert-workflow": "workflow",
+    "comfy workflow add-node": "workflow",
+    "comfy workflow connect": "workflow",
+    "comfy workflow set-widget": "workflow",
+    "comfy workflow set-node-field": "workflow",
+    "comfy workflow delete-node": "workflow",
+    "comfy workflow delete-nodes": "workflow",
+    "comfy workflow ls-nodes": "workflow",
+    "comfy workflow apply": "workflow",
+    "comfy workflow capture": "workflow",
+    "comfy workflow foreach": "workflow",
     # workflow cloud CRUD + fragment composition
     "comfy workflow list": "workflow",
     "comfy workflow get": "workflow",
@@ -67,6 +124,10 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy workflow fragment ls": "workflow",
     "comfy workflow fragment show": "workflow",
     "comfy workflow fragment validate": "workflow",
+    # the local comfy agent's approvals
+    "comfy agent permissions": "agent",
+    "comfy agent allow": "agent",
+    "comfy agent deny": "agent",
     # skill management
     "comfy skills install": "skill",
     "comfy skills uninstall": "skill",
@@ -81,6 +142,14 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy skill show": "skill",
     "comfy skill status": "skill",
     # model discovery (all asset types: checkpoints, loras, controlnets, vae, ...)
+    # Canonical spelling under the `model` noun.
+    "comfy model search": "models",
+    "comfy model show": "models",
+    "comfy model list-folders": "models",
+    "comfy model list-folder": "models",
+    # `comfy models` is the hidden, deprecated plural alias; the discovery
+    # envelopes still carry the `models …` form in `command`, so both spellings
+    # register (mirrors the `skill`/`skills` alias above).
     "comfy models search": "models",
     "comfy models show": "models",
     "comfy models list-folders": "models",
@@ -95,11 +164,22 @@ COMMAND_SCHEMAS: dict[str, str] = {
     # the help tree; agents resolve them through `command_schemas`).
     "comfy generate list": "generate_list",
     "comfy generate schema": "generate_schema",
+    # Terminal result of `comfy generate <model>` / `generate resume` /
+    # sync-mode creates: the partner payload wrapped as
+    # ``data.result`` (+ ``data.saved`` under --download). These are
+    # argv-tail paths too, so they have no help-tree node.
+    "comfy generate": "generate_result",
+    # curated model-knowledge bundle
+    "comfy knowledge status": "knowledge",
+    "comfy knowledge resolve": "knowledge",
+    "comfy knowledge pick": "knowledge",
     # template gallery
     "comfy templates ls": "templates",
     "comfy templates show": "templates",
     "comfy templates fetch": "templates",
+    "comfy templates get": "templates",
     "comfy templates refresh": "templates",
+    "comfy templates check": "templates",
     # lifecycle
     "comfy launch": "launch",
     "comfy stop": "stop",
@@ -110,6 +190,8 @@ COMMAND_SCHEMAS: dict[str, str] = {
     "comfy project init": "project",
     "comfy project status": "project",
     "comfy assets push": "assets",
+    "comfy assets library ls": "assets_library",
+    "comfy assets library ensure": "assets_library",
     # config
     "comfy set-default": "set_default",
     # Not a subcommand: the root `--version` flag emits `command="version"`,
@@ -137,6 +219,13 @@ COMMAND_SCHEMAS: dict[str, str] = {
 STREAM_EVENT_SCHEMAS: dict[str, str] = {
     "comfy run": "run_event",
     "comfy jobs watch": "run_event",
+    # upload progress; under plain --json the same lines go to stderr
+    "comfy build push": "build_push_event",
+    # the deployment coming up; same rule about stderr
+    "comfy deploy up": "deploy_progress_event",
+    "comfy deploy status": "deploy_progress_event",
+    "comfy deploy promote": "deploy_progress_event",
+    "comfy deploy rollback": "deploy_progress_event",
 }
 
 

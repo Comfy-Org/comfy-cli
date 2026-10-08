@@ -1,9 +1,11 @@
+import os
 import subprocess
 import sys
 from unittest.mock import Mock, patch
 
 import pytest
 import requests
+import typer
 from typer.testing import CliRunner
 
 from comfy_cli.cmdline import app, g_exclusivity, g_gpu_exclusivity
@@ -23,6 +25,18 @@ from comfy_cli.command.install import (
     parse_pr_reference,
 )
 from comfy_cli.git_utils import checkout_pr, git_checkout_tag
+
+
+def _env_without_github_token() -> dict[str, str]:
+    """Everything cleared except ``$PATH``, for the no-ambient-credential tests.
+
+    They only need ``GITHUB_TOKEN`` gone (``install._github_get`` reads it).
+    Clearing ``$PATH`` too makes ``shutil.which("git")`` fall back to
+    ``os.defpath`` (``/bin:/usr/bin``), which happens to hold git on FHS
+    distros but not on NixOS and friends — there every real git call in these
+    tests dies with "'git' was not found on PATH".
+    """
+    return {"PATH": os.environ.get("PATH", "")}
 
 
 @pytest.fixture(scope="function")
@@ -238,12 +252,8 @@ class TestGitOperations:
     """Test Git operations for PR checkout"""
 
     @patch("subprocess.run")
-    @patch("os.chdir")
-    @patch("os.getcwd")
-    def test_checkout_pr_fork_success(self, mock_getcwd, mock_chdir, mock_subprocess, sample_pr_info):
+    def test_checkout_pr_fork_success(self, mock_subprocess, sample_pr_info):
         """Test successful checkout of PR from fork"""
-        mock_getcwd.return_value = "/original/dir"
-
         mock_subprocess.side_effect = [
             subprocess.CompletedProcess([], 1),
             subprocess.CompletedProcess([], 0),
@@ -257,18 +267,24 @@ class TestGitOperations:
         assert mock_subprocess.call_count == 4
 
         calls = mock_subprocess.call_args_list
-        assert "git" in calls[0][0][0]
+        # git is spawned by its resolved absolute path, never the bare name
+        # Windows' CreateProcess would look up in the CWD first.
+        for call in calls:
+            argv0 = call[0][0][0]
+            assert os.path.isabs(argv0), argv0
+            assert os.path.basename(argv0).removesuffix(".exe") == "git", argv0
         assert "remote" in calls[1][0][0]
         assert "fetch" in calls[2][0][0]
         assert "checkout" in calls[3][0][0]
+        # ``--`` separates options from the fork-controlled branch refspec (argument-injection guard).
+        fetch_argv = calls[2][0][0]
+        assert fetch_argv[-2:] == ["--", "load-3d-nodes"]
+        # Every git command runs against repo_path via cwd= (no process chdir).
+        assert all(call.kwargs.get("cwd") == "/repo/path" for call in calls)
 
     @patch("subprocess.run")
-    @patch("os.chdir")
-    @patch("os.getcwd")
-    def test_checkout_pr_non_fork_success(self, mock_getcwd, mock_chdir, mock_subprocess):
+    def test_checkout_pr_non_fork_success(self, mock_subprocess):
         """Test successful checkout of PR from same repo"""
-        mock_getcwd.return_value = "/original/dir"
-
         pr_info = PRInfo(
             number=123,
             head_repo_url="https://github.com/comfyanonymous/ComfyUI.git",
@@ -289,14 +305,14 @@ class TestGitOperations:
 
         assert result is True
         assert mock_subprocess.call_count == 2
+        # ``--`` separates options from the branch refspec (argument-injection guard).
+        fetch_argv = mock_subprocess.call_args_list[0][0][0]
+        assert fetch_argv[-2:] == ["--", "feature-branch"]
+        assert all(call.kwargs.get("cwd") == "/repo/path" for call in mock_subprocess.call_args_list)
 
     @patch("subprocess.run")
-    @patch("os.chdir")
-    @patch("os.getcwd")
-    def test_checkout_pr_git_failure(self, mock_getcwd, mock_chdir, mock_subprocess, sample_pr_info):
+    def test_checkout_pr_git_failure(self, mock_subprocess, sample_pr_info):
         """Test Git operation failure"""
-        mock_getcwd.return_value = "/original/dir"
-
         error = subprocess.CalledProcessError(1, "git", stderr="Permission denied")
         mock_subprocess.side_effect = error
 
@@ -553,12 +569,8 @@ class TestEdgeCases:
             assert headers["Authorization"] == "Bearer test-token"
 
     @patch("subprocess.run")
-    @patch("os.chdir")
-    @patch("os.getcwd")
-    def test_checkout_pr_remote_already_exists(self, mock_getcwd, mock_chdir, mock_subprocess, sample_pr_info):
+    def test_checkout_pr_remote_already_exists(self, mock_subprocess, sample_pr_info):
         """Test checkout when remote already exists"""
-        mock_getcwd.return_value = "/dir"
-
         mock_subprocess.side_effect = [
             subprocess.CompletedProcess([], 0),
             subprocess.CompletedProcess([], 0),
@@ -569,6 +581,7 @@ class TestEdgeCases:
 
         assert result is True
         assert mock_subprocess.call_count == 3
+        assert all(call.kwargs.get("cwd") == "/repo" for call in mock_subprocess.call_args_list)
 
 
 class TestGetLatestRelease:
@@ -604,7 +617,7 @@ class TestGetLatestRelease:
         }
         mock_get.return_value = mock_response
 
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", _env_without_github_token(), clear=True):
             get_latest_release("comfyanonymous", "ComfyUI")
 
         headers = mock_get.call_args.kwargs.get("headers", {})
@@ -946,7 +959,7 @@ class TestCheckoutStableComfyUI:
     @patch("comfy_cli.command.install.get_latest_release", return_value=None)
     @patch("comfy_cli.command.install._resolve_latest_tag_from_local", return_value=(None, True))
     def test_latest_exits_when_both_local_and_api_fail(self, mock_local, mock_api, mock_co):
-        with pytest.raises(SystemExit):
+        with pytest.raises(typer.Exit):
             checkout_stable_comfyui("latest", "/repo")
         mock_co.assert_not_called()
 
@@ -971,7 +984,7 @@ class TestCheckoutStableComfyUI:
         mock_api.assert_not_called()
         mock_co.assert_called_once_with("/repo", "v0.20.1")
 
-    @patch("comfy_cli.command.install.requests.get")
+    @patch("requests.get")
     @patch("comfy_cli.command.install.git_checkout_tag", return_value=True)
     def test_latest_with_rate_limited_api_when_no_local_tags(self, mock_co, mock_get, tmp_path):
         """End-to-end repro of issue #440: empty local clone + 60/hr exhausted IP.
@@ -987,20 +1000,20 @@ class TestCheckoutStableComfyUI:
         rate_limited.headers = {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1777415867"}
         mock_get.return_value = rate_limited
 
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", _env_without_github_token(), clear=True):
             with pytest.raises(GitHubRateLimitError, match="1777415867"):
                 checkout_stable_comfyui("latest", str(tmp_path))
 
         mock_co.assert_not_called()
 
-    @patch("comfy_cli.command.install.requests.get")
+    @patch("requests.get")
     @patch("comfy_cli.command.install.git_checkout_tag", return_value=True)
     def test_latest_with_local_tags_no_network_at_all(self, mock_co, mock_get, tmp_path):
         """The pre-fix repro of issue #440: with local tags present, no
         GitHub API call should be made even when the network is hostile."""
         TestResolveLatestTagFromLocal._make_repo(tmp_path, ["v0.19.5", "v0.20.0", "v0.20.1"])
 
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", _env_without_github_token(), clear=True):
             checkout_stable_comfyui("latest", str(tmp_path))
 
         # Resolved locally; never touched the API
@@ -1054,8 +1067,8 @@ class TestInstallExecuteWithLatest:
             )
 
         with (
-            patch.dict("os.environ", {}, clear=True),
-            patch("comfy_cli.command.install.requests.get", side_effect=crash_on_api),
+            patch.dict("os.environ", _env_without_github_token(), clear=True),
+            patch("requests.get", side_effect=crash_on_api),
             patch("comfy_cli.command.install.clone_comfyui") as mock_clone,
             patch("comfy_cli.command.install.ensure_workspace_python", return_value=sys.executable),
             patch("comfy_cli.command.install.pip_install_comfyui_dependencies"),
@@ -1097,9 +1110,9 @@ class TestInstallExecuteWithLatest:
         self._make_comfy_repo(repo_dir)
 
         with (
-            patch.dict("os.environ", {}, clear=True),
+            patch.dict("os.environ", _env_without_github_token(), clear=True),
             patch(
-                "comfy_cli.command.install.requests.get",
+                "requests.get",
                 side_effect=AssertionError("API must not be called for specific versions"),
             ),
             patch(

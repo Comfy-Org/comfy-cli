@@ -113,3 +113,38 @@ def test_classify_handles_empty_input():
 def test_verdict_codes_are_registered():
     for raw in (None, _cloud_error_message("Unauthorized: Please login first to use this node.")):
         assert error_codes.is_registered(execution_errors.classify(raw)["code"])
+
+
+def test_parse_survives_a_non_sequence_traceback():
+    """A server that serves `traceback` as an object/scalar must not raise:
+    `tb[-2:]` on a non-sequence is a TypeError, and the detached cloud watcher
+    calls this outside any guard (`job_watcher._poll_cloud_once`)."""
+    for tb in ({"frame": 1}, 7, object()):
+        parsed = execution_errors.parse_error_message({"exception_message": "boom", "traceback": tb})
+        assert parsed["exception_message"] == "boom"
+        assert len(parsed["traceback_tail"]) == 1
+
+
+def test_redact_record_drops_current_inputs():
+    """`current_inputs` is the failing node's widget values — API keys live
+    there, and the record is emitted into CI/agent logs verbatim."""
+    record = {"exception_message": "boom", "current_inputs": {"api_key": ["sk-secret"]}, "node_id": "5"}
+    redacted = execution_errors.redact_record(record)
+    assert "current_inputs" not in redacted
+    assert redacted == {"exception_message": "boom", "node_id": "5"}
+    # The caller's dict is left alone.
+    assert "current_inputs" in record
+    # Non-dict shapes pass straight through.
+    assert execution_errors.redact_record("plain text") == "plain text"
+    assert execution_errors.redact_record(None) is None
+
+
+def test_trim_record_caps_the_traceback_at_the_tail_budget():
+    """Same two-frame budget `details["traceback_tail"]` uses."""
+    trimmed = execution_errors.trim_record({"traceback": _TRACEBACK, "current_inputs": {"seed": [1]}})
+    assert trimmed["traceback"] == _TRACEBACK[-2:]
+    assert "current_inputs" not in trimmed
+    # A traceback already within budget is untouched, in any shape.
+    assert execution_errors.trim_record({"traceback": ["one"]})["traceback"] == ["one"]
+    assert execution_errors.trim_record({"traceback": "one frame"})["traceback"] == "one frame"
+    assert execution_errors.trim_record({"traceback": {"frame": 1}})["traceback"] == {"frame": 1}

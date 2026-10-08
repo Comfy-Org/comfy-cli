@@ -30,7 +30,7 @@
     "where": {
       "type": ["string", "null"],
       "enum": ["local", "cloud", null],
-      "description": "Backend that handled the command. Null for commands that don't route."
+      "description": "Target the command was routed to. Stamped as soon as routing resolves, so client-side failures that never reached that backend still carry it. Null for commands that don't route, and for errors raised before routing resolves."
     },
     "data": {
       "description": "Command-specific payload. Schema lives in comfy_cli/schemas/<command>.json."

@@ -41,6 +41,17 @@ _YamlLoader.add_implicit_resolver(
     _re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
     list("tTfF"),
 )
+# PyYAML's YAML 1.1 float resolver only recognizes scientific notation when a
+# decimal point is present (e.g. ``1.0e6``). The remote spec is served as JSON,
+# and ``json.dumps`` emits exponent literals WITHOUT a point for very large/small
+# floats (e.g. ``1e+16``, ``1e-07``); without this those numeric defaults/bounds
+# would silently parse as strings and leak that way into flag schemas. Add a
+# resolver for the point-less exponent form so JSON floats round-trip correctly.
+_YamlLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:float",
+    _re.compile(r"^[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+$"),
+    list("-+0123456789"),
+)
 
 PROXY_PREFIX = "/proxy/"
 DEFAULT_BASE_URL = "https://api.comfy.org"
@@ -223,7 +234,7 @@ _ENDPOINT_ALLOWLIST: list[tuple[str, str, str | None]] = [
     # Reve
     ("reve/v1/image/create", "text-to-image", None),
     ("reve/v1/image/edit", "image-edit", None),
-    # Runway (image)
+    # Runway - image
     ("runway/text_to_image", "text-to-image", None),
     # Video — Kling
     ("kling/v1/videos/text2video", "text-to-video", "kling"),
@@ -481,15 +492,114 @@ def _find_property(schema: dict[str, Any], field: str) -> dict[str, Any] | None:
     return None
 
 
+# OpenAI's image request schema types `model` as a free string (no enum), so
+# these names cannot be read off the spec the way other partners' models are
+# (see _model_name_hint). They are the ids ComfyUI's OpenAI image nodes send
+# to the same /proxy/openai/images/* routes the `dalle` aliases call. The value
+# is the Cloud partner node that takes the id as its `model` (None: no node).
+_OPENAI_IMAGE_MODELS: dict[str, str | None] = {
+    "gpt-image-1": "OpenAIGPTImageNodeV2",
+    "gpt-image-1.5": "OpenAIGPTImageNodeV2",
+    "gpt-image-2": "OpenAIGPTImageNodeV2",
+    "dall-e-2": None,
+    "dall-e-3": None,
+}
+
+
+def _direct_route(alias: str, model_id: str) -> str:
+    """The `comfy generate <alias> --model <id>` line, saying whether it can
+    also `--emit-workflow`. A caller building a workflow runs `generate` with
+    `--emit-workflow`, so a route that cannot emit must say so or the hint is a
+    dead end for it."""
+    from comfy_cli.command.generate import emit
+
+    route = f"`comfy generate {alias} --model {model_id} ...`"
+    if emit.is_supported(alias):
+        return f"{route} (also with --emit-workflow)"
+    return f"{route} runs it directly; that alias has no --emit-workflow, so use a partner node for a workflow"
+
+
+def _model_name_hint(name: str) -> str | None:
+    """Explain a name that is a partner MODEL rather than a `generate` alias.
+
+    Agents ask for the model they know ("gpt-image-1", "seedream"), not the
+    alias. `comfy generate <name>` used to give a bare "Unknown model" for the
+    first, and for the second only "Did you mean: seedance", the VIDEO model.
+    The workflow route (a partner node) leads; the direct `comfy generate`
+    route follows. Returns ``None`` when the name matches no known model.
+    """
+    lowered = name.strip().lower()
+    if lowered in _OPENAI_IMAGE_MODELS:
+        node = _OPENAI_IMAGE_MODELS[lowered]
+        direct = _direct_route("dalle", lowered)
+        if node is None:
+            return f"{lowered!r} is an OpenAI image model, not an alias. {direct}."
+        return (
+            f"{lowered!r} is an OpenAI image model, not an alias. For a workflow, add the partner node "
+            f"{node} (`comfy nodes show {node}`) and set its model to {lowered!r}. Without a workflow: {direct} "
+            "(image edits: `dalle-edit`)."
+        )
+    if len(lowered) < 4:
+        return None
+    # Every other partner declares its model ids as an enum on the request
+    # body's `model` field. A name equal to or prefixing one of them is that
+    # partner's model family, whichever route serves it.
+    raw = load_raw_spec()
+    aliased = {v: k for k, v in _ALIASES.items()}
+    hits: list[tuple[str, list[str]]] = []
+    for path, node in (raw.get("paths") or {}).items():
+        if not str(path).startswith(PROXY_PREFIX) or not isinstance(node, dict):
+            continue
+        op = node.get("post")
+        if not isinstance(op, dict):
+            continue
+        content = (op.get("requestBody") or {}).get("content") or {}
+        schema = next((c.get("schema") for c in content.values() if isinstance(c, dict) and c.get("schema")), None)
+        if not schema:
+            continue
+        prop = _find_property(_resolve(raw, schema), "model")
+        values = _extract_enum(prop) if prop else None
+        matched = [v for v in values or [] if v.lower().startswith(lowered)]
+        if matched:
+            hits.append((str(path)[len(PROXY_PREFIX) :], matched))
+    if not hits:
+        return None
+    lines = [
+        f"Partner models matching {lowered!r} (for a workflow, find the partner node: `comfy nodes search {lowered}`):"
+    ]
+    for endpoint_id, values in hits:
+        shown = ", ".join(values[:6])
+        alias = aliased.get(endpoint_id)
+        if alias is not None:
+            lines.append(f"- {shown}: {_direct_route(alias, '<id>')}.")
+        else:
+            lines.append(f"- {shown}: served at {endpoint_id}, which has no `comfy generate` alias.")
+    return "\n".join(lines)
+
+
 def _unknown_endpoint_message(endpoint_id: str) -> str:
-    """Build a helpful error suggesting close matches."""
+    """Build a helpful error: close alias matches first, then (when the name is
+    a partner model id or prefix) where that model is served. The model hint is
+    appended, never a replacement — "flux" prefixes recraft's flux1dev ids but
+    is far more likely a typo of the flux-* aliases."""
     import difflib
+    import re
 
     candidates = list(_registry().keys()) + list(_ALIASES.keys())
     close = difflib.get_close_matches(endpoint_id, candidates, n=3, cutoff=0.5)
+
+    # Add family candidates keyed on the leading token.
+    head = re.split(r"[-_/.]", endpoint_id.lower(), 1)[0]
+    if len(head) >= 3:
+        family = [c for c in candidates if c.lower().startswith(head) and c not in close]
+        close = (close + sorted(family))[:6]
+
     msg = f"Unknown model: {endpoint_id!r}."
     if close:
         msg += "\nDid you mean: " + ", ".join(close) + "?"
+    model_hint = _model_name_hint(endpoint_id)
+    if model_hint is not None:
+        msg += "\n" + model_hint
     msg += "\nRun `comfy generate list` to see available models."
     return msg
 

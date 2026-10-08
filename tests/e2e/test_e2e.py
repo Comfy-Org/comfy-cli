@@ -313,8 +313,8 @@ def test_install_version_latest_no_github_api(tmp_path):
 
     # The actual property under test: we did NOT fall back to the GitHub API.
     # Both fallback messages from checkout_stable_comfyui mention "GitHub API"
-    # ("querying GitHub API" and "trying GitHub API as a last resort"); catch
-    # either via the shared substring so the assertion stays tight even if the
+    # - "querying GitHub API" and "trying GitHub API as a last resort" - so
+    # catch either via the shared substring, keeping the assertion tight even if
     # exact wording changes.
     combined = proc.stdout + proc.stderr
     assert "GitHub API" not in combined, (

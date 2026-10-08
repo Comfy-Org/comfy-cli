@@ -4,15 +4,28 @@
   "title": "comfy jobs --json data payload",
   "description": "Union schema for `jobs ls`, `jobs status`, and `jobs watch`.",
   "type": "object",
-  "required": ["host", "port"],
+  "required": [],
+  "if": {"required": ["base_url"], "properties": {"base_url": {"minLength": 1}}},
+  "then": {},
+  "else": {"required": ["host", "port"]},
   "additionalProperties": true,
   "properties": {
     "host": {"type": "string"},
     "port": {"type": "integer"},
+    "base_url": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Cloud-only counterpart to `host` + `port`: the cloud API base URL a `jobs status`/`jobs watch --where cloud` payload came from. A payload carrying a non-empty one is exempt from the host+port requirement, since cloud has no host/port to report. An empty string identifies no source URL, so it neither satisfies this property nor buys the exemption — the `if` re-checks `minLength` so such a payload falls to the `else` branch and still owes `host` + `port`."
+    },
     "prompt_id": {"type": "string"},
     "status": {
       "type": "string",
-      "enum": ["running", "pending", "queued", "completed", "error", "unknown", "watching"]
+      "description": "`cancelled` is one of `jobs_state.TERMINAL_STATUSES` and is copied verbatim out of a job's state file into a `jobs status` payload, so it belongs in this enum alongside the statuses the live `/queue` + `/history` snapshot produces.",
+      "enum": ["running", "pending", "queued", "completed", "error", "cancelled", "unknown", "watching"]
+    },
+    "status_raw": {
+      "type": ["string", "null"],
+      "description": "`jobs status`/`jobs watch --where cloud`: the server's own status spelling before canonicalization into the closed `status` enum above (e.g. `in_progress` -> `running`, `non_retryable_error` -> `error`). Null when the server reported no status. A cloud status this CLI does not know canonicalizes to `unknown` rather than passing through raw — this field is where that spelling survives, so the enum stays closed without losing what the server actually said."
     },
     "queue_position": {"type": ["integer", "null"]},
     "workflow_size": {"type": ["integer", "null"]},
@@ -27,8 +40,26 @@
       "description": "Cloud status/watch terminal: artifact URLs grouped by blueprint foreach item (via the compose item_map on the job state file). Empty object when no item_map exists.",
       "additionalProperties": {"type": "array", "items": {"type": "string"}}
     },
+    "execution_error": {
+      "type": ["object", "null"],
+      "description": "Cloud `jobs status`/`jobs watch`: the failed job's structured cause from `/api/jobs/<id>` (`JobDetailResponse.execution_error` — `node_id`, `node_type`, `exception_message`, `exception_type`, `traceback`). Null on every job the server reports no execution error for. `current_inputs` is always redacted — the failing node's widget values routinely carry API keys — and on the `jobs watch` terminal envelope `traceback` is capped at its last two frames, the same budget `error.details.traceback_tail` uses; `jobs status` carries it in full. The top-level `error_message` is the same record flattened to one human line; this key is what a `--json` consumer reads to get the fields back without re-parsing that line.",
+      "additionalProperties": true
+    },
+    "scope": {
+      "type": "string",
+      "enum": ["local", "cloud", "all"],
+      "description": "`jobs ls`: which state-file rows the listing includes — only those matching the resolved --where target, or \"all\" targets when `--all` (or `--orphaned`) was passed."
+    },
     "elapsed_seconds": {"type": ["number", "null"]},
     "completed_nodes": {"type": "array", "items": {"type": "string"}},
+    "client_id": {
+      "type": ["string", "null"],
+      "description": "`jobs watch` local terminal: the WS session id this watch listened as. ComfyUI addresses execution events to the submitting session only, so watch re-attaches with the prompt's own client_id when it can resolve one (job state file, /queue, /history) and falls back to a fresh id otherwise."
+    },
+    "attached": {
+      "type": "boolean",
+      "description": "`jobs watch` local terminal: true when `client_id` is the prompt's real submitting session — i.e. live execution events could reach this watch. False means the id could not be resolved and the envelope is snapshot-derived."
+    },
     "count": {"type": "integer"},
     "jobs": {
       "type": "array",
@@ -37,10 +68,24 @@
         "required": ["prompt_id", "status"],
         "properties": {
           "prompt_id": {"type": "string"},
-          "status": {"type": "string"},
+          "status": {
+            "type": "string",
+            "description": "Deliberately unconstrained, unlike the top-level `status`: a cloud status this CLI does not yet know is passed through raw rather than dropped, so a new server-side spelling widens this field instead of breaking the listing."
+          },
           "queue_position": {"type": ["integer", "null"]},
           "workflow_size": {"type": ["integer", "null"]},
-          "outputs": {"type": "integer"}
+          "outputs": {"type": "integer"},
+          "where": {
+            "type": "string",
+            "enum": ["local", "cloud"],
+            "description": "Which target this row's job was submitted to — the per-row discriminator for dispatching a follow-up `jobs status`/`jobs cancel`. Always matches the envelope's `where` for rows the server produced."
+          },
+          "workflow_path": {"type": ["string", "null"]},
+          "updated_at": {"type": ["string", "null"]},
+          "error_code": {
+            "type": ["string", "null"],
+            "description": "Why an `error`/`cancelled` row failed, from the job's state file (`error.code` — e.g. `server_died`, `execution_error`, `watcher_crashed`). Null on every non-failed row, and on failed rows with no state file (the server's `/queue`/`/history` and the cloud job list carry no code of their own, so a row only the server knows about has nothing to attribute). This is what lets `comfy jobs ls` — the escape hatch `jobs status` points at after a server death — name the cause rather than just report `status: \"error\"`."
+          }
         }
       }
     }

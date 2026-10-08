@@ -110,6 +110,24 @@ def _sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
+def _decode_poll_body(resp: httpx.Response) -> dict[str, Any]:
+    """Parse a 200 poll response, turning an unparseable body into an ``ApiError``.
+
+    A proxy/CDN that answers 200 with an HTML error page (or an empty body)
+    used to raise a bare ``ValueError`` out of ``resp.json()``, which is neither
+    ``ApiError`` nor ``httpx.HTTPError`` — so every caller's ``except`` tuple
+    missed it and the run died as an unhandled traceback. Raising ``ApiError``
+    puts it back on the path that already reports poll failures.
+    """
+    try:
+        body = resp.json()
+    except ValueError as e:
+        raise client.ApiError(resp.status_code, resp.text, f"Poll response was not JSON: {resp.text[:200]!r}") from e
+    if not isinstance(body, dict):
+        raise client.ApiError(resp.status_code, resp.text, f"Poll response was not a JSON object: {body!r}")
+    return body
+
+
 def poll_bfl(
     initial: dict[str, Any],
     api_key: str,
@@ -129,7 +147,7 @@ def poll_bfl(
         resp = client.get(url, api_key=api_key)
         if resp.status_code >= 400:
             client.raise_for_status(resp)
-        last_body = resp.json()
+        last_body = _decode_poll_body(resp)
         status = str(last_body.get("status", "")).strip()
         if on_progress is not None:
             progress = last_body.get("progress")
@@ -282,7 +300,7 @@ def poll_generic(
         resp = client.get(url, api_key=api_key)
         if resp.status_code >= 400:
             client.raise_for_status(resp)
-        last_body = resp.json()
+        last_body = _decode_poll_body(resp)
         if on_progress is not None and spec.progress_path:
             p = _dotget(last_body, spec.progress_path)
             if isinstance(p, int | float):
