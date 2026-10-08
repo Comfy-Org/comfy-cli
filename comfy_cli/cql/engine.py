@@ -1858,6 +1858,8 @@ class Graph:
             return None
         for entry in _expand_widget_entries(m, widgets_values or []):
             if entry.name == widget and entry.port is not None:
+                if entry.port.dynamic_options and _is_dynamic_combo_type(entry.port.type):
+                    return _widget_default(entry.port) if entry.port.options.default is not None else None
                 return _widget_default(entry.port)
         return None
 
@@ -2559,6 +2561,20 @@ class Graph:
         }
 
 
+def _declared_dynamic_default(p: Port) -> Any:
+    """The actual option key named by a dynamic combo default, else ``None``."""
+    if p.options.default is None:
+        return None
+    return next(
+        (
+            option.get("key")
+            for option in p.dynamic_options
+            if option.get("key") is not None and str(option.get("key")) == str(p.options.default)
+        ),
+        None,
+    )
+
+
 def _widget_default(p: Port) -> Any:
     """The value a fresh node carries for widget port ``p`` — a dynamic
     combo's declared default (or first key), else the schema default, else the
@@ -2566,9 +2582,9 @@ def _widget_default(p: Port) -> Any:
     if p.is_dynamic_group:
         return p.options.min or 0
     if p.dynamic_options:
-        option_keys = [option.get("key") for option in p.dynamic_options if option.get("key") is not None]
-        if p.options.default is not None and p.options.default in option_keys:
-            return p.options.default
+        declared = _declared_dynamic_default(p)
+        if declared is not None:
+            return declared
         return p.enum_values[0] if p.enum_values else None
     if p.options.default is not None:
         return p.options.default

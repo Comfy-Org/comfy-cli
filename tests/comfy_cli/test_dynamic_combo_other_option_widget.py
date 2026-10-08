@@ -95,7 +95,7 @@ def test_refusal_names_the_option_to_select_first(graph):
     assert f"{nid}.model" in msg, f"must name the selector address to set first: {msg}"
 
 
-def test_refusal_uses_the_schema_default_when_selector_value_is_absent(graph):
+def test_refusal_reports_no_selection_when_absent_selector_has_no_declared_default(graph):
     wf, nid = _fresh(graph)
     wf["nodes"][0]["widgets_values"] = []
 
@@ -103,8 +103,7 @@ def test_refusal_uses_the_schema_default_when_selector_value_is_absent(graph):
         workflow_ops.set_widget(wf, graph, nid, "model.prompt_expansion_mode", "quality")
 
     msg = str(exc.value)
-    assert "'MiniMax H3'" in msg, f"must name the selector's schema default: {msg}"
-    assert "currently None" not in msg, msg
+    assert "model=None" in msg, f"must name the selector value the active layout actually used: {msg}"
 
 
 def test_refusal_uses_a_declared_non_first_dynamic_default():
@@ -117,6 +116,22 @@ def test_refusal_uses_a_declared_non_first_dynamic_default():
     assert "model.prompt_expansion_mode" in graph.widget_order_default("MinimaxHailuo03TextToVideoNode")
     wf, _ = _fresh(graph)
     assert wf["nodes"][0]["widgets_values"][0] == "MiniMax H3 Max"
+
+
+@pytest.mark.parametrize("declared_default", [1.0, True])
+def test_dynamic_default_publishes_an_actual_option_key(declared_default):
+    object_info = copy.deepcopy(OBJECT_INFO)
+    model_options = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"][1]
+    model_options["default"] = declared_default
+    model_options["options"] = [
+        {"key": 1, "inputs": {"required": _SUB}},
+        {"key": 2, "inputs": {"required": _MAX_SUB}},
+    ]
+    graph = Graph.from_object_info(object_info)
+
+    assert graph.dynamic_combo_options("MinimaxHailuo03TextToVideoNode")["model"]["default"] == "1"
+    wf, _ = _fresh(graph)
+    assert wf["nodes"][0]["widgets_values"][0] == 1
 
 
 def test_write_succeeds_once_the_revealing_option_is_selected(graph):
@@ -324,6 +339,11 @@ def test_missing_nested_selector_uses_the_active_outer_options_default():
             },
         }
     }
+    object_info = copy.deepcopy(object_info)
+    active_mode = object_info["NestedComboNode"]["input"]["required"]["model"][1]["options"][1]["inputs"]["required"][
+        "mode"
+    ][1]
+    active_mode["default"] = "quick"
     graph = Graph.from_object_info(object_info)
     wf, nid = _fresh_nested(graph, model="v2")
     wf["nodes"][0]["widgets_values"] = ["v2"]
