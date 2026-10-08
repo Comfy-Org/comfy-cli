@@ -725,7 +725,7 @@ def ls_nodes_cmd(
             declares_real_class = isinstance(properties, dict) and properties.get("Node name for S&R") == node_type
             if node_type in workflow_ops.UI_ONLY_NODE_TYPES:
                 row["ui_only"] = True
-            elif not declares_real_class and (node_type in subgraph_ids or workflow_ops._UUID_RE.match(node_type)):
+            elif workflow_ops._UUID_RE.match(node_type) or (not declares_real_class and node_type in subgraph_ids):
                 row["subgraph"] = True
         rows.append(row)
     payload = {"workflow": str(p), "count": len(rows), "nodes": rows}
