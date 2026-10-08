@@ -303,7 +303,7 @@ class TestSuccessfulRun:
 
     def test_queued_envelope_field_set_local_golden(self, workflow_file, capsys):
         """Golden field set *and order* of the local async ``queued`` envelope.
-        The shared ``_announce_async_queued`` helper (BE-3265) must never
+        The shared ``_announce_async_queued`` helper must never
         silently drop/add/reorder a key — the envelope is a public agent-mode
         JSON contract. Local carries ``host``/``port`` as its locator."""
         with (
