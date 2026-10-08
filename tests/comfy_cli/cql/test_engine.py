@@ -4446,3 +4446,28 @@ class TestCountInstancesShapeChecks:
             "definitions": {"subgraphs": [{"id": "u2", "nodes": [{"id": 9, "type": "u1"}]}]},
         }
         assert _count_instances(wf, "u1") == 2
+
+
+class TestSubgraphDefNodesShapeChecks:
+    """One level deeper: a def whose ``nodes`` is truthy but not a list.
+
+    Every caller walks ``sg.get("nodes") or []``, which only replaces a falsy
+    value, so ``{"nodes": 5}`` raised ``TypeError`` once an instance resolved
+    to it (``slots``) or once a sibling def was scanned (``_count_instances``).
+    """
+
+    @pytest.mark.parametrize("nodes", [5, True, "abc", {"a": 1}], ids=["int", "bool", "str", "dict"])
+    def test_def_with_non_list_nodes_is_not_indexed(self, nodes):
+        wf = {"definitions": {"subgraphs": [{"id": "bad", "nodes": nodes}, {"id": "u1", "nodes": []}]}}
+        assert set(_subgraph_defs_by_id(wf)) == {"u1"}
+
+    def test_def_with_missing_or_null_nodes_is_still_indexed(self):
+        wf = {"definitions": {"subgraphs": [{"id": "u1"}, {"id": "u2", "nodes": None}]}}
+        assert set(_subgraph_defs_by_id(wf)) == {"u1", "u2"}
+
+    def test_count_instances_skips_a_sibling_def_with_non_list_nodes(self):
+        wf = {
+            "nodes": [{"id": 1, "type": "u1"}],
+            "definitions": {"subgraphs": [{"id": "bad", "nodes": 5}, {"id": "u2", "nodes": [{"id": 9, "type": "u1"}]}]},
+        }
+        assert _count_instances(wf, "u1") == 2

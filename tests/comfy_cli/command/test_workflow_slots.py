@@ -1078,6 +1078,19 @@ class TestSlotsCorruptDefinitions:
         assert env["data"]["count"] > 0
         assert "6.text" in {s["address"] for s in env["data"]["slots"]}
 
+    def test_slots_survives_an_instance_of_a_def_with_non_list_nodes(self, patched_graph, tmp_path, capsys):
+        """The def's ``nodes`` is truthy but not a list: the instance must not
+        walk it (``TypeError``) — the def is dropped from the index instead."""
+        wf = dict(_direct_workflow())
+        wf["nodes"] = [*wf["nodes"], {"id": 99, "type": "u1", "inputs": [], "outputs": [], "widgets_values": []}]
+        wf["definitions"] = {"subgraphs": [{"id": "u1", "nodes": 5}]}
+        path = _write_workflow(tmp_path, wf)
+        _captured, _err, result = _invoke(["slots", str(path)], capsys)
+        assert result.exception is None, f"crashed instead of degrading: {result.exception!r}"
+        env = _run(["slots", str(path)], capsys)
+        assert env["ok"] is True
+        assert "6.text" in {s["address"] for s in env["data"]["slots"]}
+
     def test_set_slot_reports_a_domain_error_instead_of_crashing(self, patched_graph, tmp_path, capsys):
         """``set-slot`` reaches the same helper before any of its own guards, so
         it crashed on the same input. It should now fail on the real problem —

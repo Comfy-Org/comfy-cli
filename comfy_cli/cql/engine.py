@@ -2798,7 +2798,9 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
     Containers that are not a ``dict``/``list`` read as "no definitions", so a
     corrupt file degrades to an empty index rather than raising (a truthy
     non-dict ``definitions`` or non-list ``subgraphs``) or walking a string
-    per-character.
+    per-character. A def whose ``nodes`` is present but not a list is dropped
+    too: every caller walks ``sg.get("nodes") or []``, which only replaces a
+    falsy value.
     """
     definitions = workflow.get("definitions")
     if not isinstance(definitions, dict):
@@ -2810,7 +2812,7 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
     name_counts: dict[str, int] = {}
     name_first: dict[str, dict] = {}
     for sg in defs:
-        if not isinstance(sg, dict):
+        if not isinstance(sg, dict) or not isinstance(sg.get("nodes") or [], list):
             continue
         sg_id = sg.get("id")
         if isinstance(sg_id, str) and sg_id:
@@ -3507,8 +3509,9 @@ def _count_instances(workflow: dict, def_id: str) -> int:
     subgraphs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
     if isinstance(subgraphs, list):
         for sg in subgraphs:
-            if isinstance(sg, dict):
-                for n in sg.get("nodes") or []:
+            sg_nodes = sg.get("nodes") if isinstance(sg, dict) else None
+            if isinstance(sg_nodes, list):
+                for n in sg_nodes:
                     if isinstance(n, dict) and str(n.get("type", "")) == def_id:
                         count += 1
     return count

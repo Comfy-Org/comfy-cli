@@ -902,6 +902,17 @@ def test_non_dict_definitions_block_is_ignored_with_warning(sd15_graph):
     assert "workflow: ignoring non-object definitions block" in res.warnings
 
 
+@pytest.mark.parametrize("subgraphs", [5, "abc", {"a": 1}], ids=["int", "str", "dict"])
+def test_non_list_subgraphs_block_is_ignored_with_warning(sd15_graph, subgraphs):
+    # One level below the case above: a dict `definitions` whose `subgraphs` is
+    # truthy but not a list used to be iterated (TypeError on an int).
+    wf = _mini([_node(1, "EmptyLatentImage", widgets=[64, 64, 1])], [])
+    wf["definitions"] = {"subgraphs": subgraphs}
+    res = render_py(wf, sd15_graph)
+    assert "empty_latent_image = EmptyLatentImage(width=64, height=64, batch_size=1)  # 1" in res.source
+    assert "workflow: ignoring non-list definitions.subgraphs block" in res.warnings
+
+
 def test_non_string_output_name_falls_back_to_out_index(sd15_graph):
     # A dict outputs[slot] with a truthy non-string "name" (e.g. an int) used to
     # reach `_IDENT.match(out_name)` and raise TypeError. It must fall back to the

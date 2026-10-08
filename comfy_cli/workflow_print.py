@@ -1282,7 +1282,14 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         # cql.promoted indexes the same block; hand it the sanitized view.
         promoted_workflow = {**workflow, "definitions": None}
     subgraphs = definitions.get("subgraphs") if definitions else None
-    defs_by_id = {sg.get("id"): sg for sg in (subgraphs or []) if isinstance(sg, dict) and sg.get("id")}
+    if subgraphs is not None and not isinstance(subgraphs, list):
+        warnings.append("workflow: ignoring non-list definitions.subgraphs block")
+        subgraphs = None
+    defs_by_id = {
+        sg.get("id"): sg
+        for sg in (subgraphs or [])
+        if isinstance(sg, dict) and sg.get("id") and isinstance(sg.get("nodes") or [], list)
+    }
 
     reasons = _validate(nodes, links)
     if reasons:

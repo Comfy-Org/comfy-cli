@@ -1546,3 +1546,15 @@ def test_workflow_node_types_still_reads_well_formed_subgraph_nodes():
         "definitions": {"subgraphs": [{"id": "u1", "nodes": [{"id": 9, "type": "CLIPTextEncode"}]}]},
     }
     assert templates_cmd._workflow_node_types(wf) == {"KSampler", "CLIPTextEncode"}
+
+
+@pytest.mark.parametrize("nodes", [5, True, "abc"], ids=["int", "bool", "str"])
+def test_workflow_node_types_skips_a_subgraph_with_non_list_nodes(nodes):
+    """A truthy non-list per-subgraph ``nodes`` is skipped, not iterated."""
+    wf = {
+        "nodes": [{"id": 1, "type": "KSampler"}],
+        "definitions": {
+            "subgraphs": [{"id": "bad", "nodes": nodes}, {"id": "u1", "nodes": [{"id": 9, "type": "VAEDecode"}]}]
+        },
+    }
+    assert templates_cmd._workflow_node_types(wf) == {"KSampler", "VAEDecode"}

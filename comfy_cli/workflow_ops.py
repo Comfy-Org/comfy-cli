@@ -1438,7 +1438,8 @@ def capture_recipe(workflow: dict, graph, name: str = "captured", lift: dict | N
     `${param_name}` holes (with a `params` header entry defaulting to the current
     value) even if the value equals the node default — so the fields you want to
     vary are actually parameterizable. No auto-parameterization otherwise."""
-    if (workflow.get("definitions") or {}).get("subgraphs"):
+    definitions = workflow.get("definitions")
+    if isinstance(definitions, dict) and definitions.get("subgraphs"):
         raise RecipeError("capture does not support subgraphs yet — edit/flatten top-level nodes first")
     lift = lift or {}
     all_nodes = [n for n in (workflow.get("nodes") or []) if isinstance(n, dict) and "id" in n]
@@ -2344,7 +2345,8 @@ def canonical(workflow: dict) -> dict:
                     ln[4] = ident
             canon.append(ln)
         w["links"] = sorted(canon, key=lambda ln: str(ln[0]))
-    defs = (w.get("definitions") or {}).get("subgraphs")
+    definitions = w.get("definitions")
+    defs = definitions.get("subgraphs") if isinstance(definitions, dict) else None
     if isinstance(defs, list):
         w["definitions"]["subgraphs"] = sorted(defs, key=lambda sg: str(sg.get("id", "")))
     return w

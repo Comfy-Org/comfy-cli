@@ -1690,6 +1690,15 @@ class TestCapture:
         assert env["ok"] is False
         assert "subgraph" in env["error"]["message"].lower()
 
+    def test_capture_tolerates_a_non_dict_definitions_block(self, patched_graph, tmp_path, capsys):
+        """A truthy non-dict ``definitions`` used to raise AttributeError past the
+        ``RecipeError`` handler; it now reads as "no subgraphs"."""
+        wf = _base_workflow()
+        wf["definitions"] = [1]
+        path = _write(tmp_path, wf)
+        env = _run(["capture", str(path)], capsys)
+        assert env["ok"] is True, env
+
 
 # ---------------------------------------------------------------------------
 # capture ↔ apply agreement on UI-only nodes (review finding 1):
