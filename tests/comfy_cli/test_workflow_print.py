@@ -1354,7 +1354,7 @@ def test_link_row_is_retargeted_to_the_input_that_holds_it(sd15_graph):
     assert "rendered through input 'samples' on node 3" in res.warnings[0]
 
 
-def test_duplicate_link_holder_is_ignored_without_creating_a_false_cycle():
+def test_duplicate_link_holder_preserves_the_real_cycle():
     wf = _mini(
         [
             _node(1, "A", inputs=[{"name": "from_c", "link": 2}], outputs=[{"name": "out", "links": [1]}]),
@@ -1369,12 +1369,8 @@ def test_duplicate_link_holder_is_ignored_without_creating_a_false_cycle():
         [[1, 1, 0, 2, 0], [2, 3, 0, 1, 0]],
     )
 
-    res = render_py(wf, None)
-
-    assert [line.rsplit("# ", 1)[1].split()[0] for line in res.source.splitlines()] == ["3", "1", "2"]
-    assert "b = B(from_a=a" in res.source
-    assert "c = C(duplicate=None" in res.source
-    assert any("ignored duplicate holder input 'duplicate' on node 3" in warning for warning in res.warnings)
+    with pytest.raises(PrintUnsupported, match="link cycle among nodes 1, 2, 3"):
+        render_py(wf, None)
 
 
 def test_in_range_link_row_follows_the_actual_holder(sd15_graph):

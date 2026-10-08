@@ -419,7 +419,6 @@ def _stale_input_slot_links(
     set[str],
     dict[str, tuple[Any, int]],
     dict[str, list[tuple[Any, int]]],
-    set[tuple[str, int]],
 ]:
     """Reconcile link-row targets with the inputs that actually hold each id.
 
@@ -431,7 +430,6 @@ def _stale_input_slot_links(
     warnings: list[str] = []
     ignored: set[str] = set()
     retargeted: dict[str, tuple[Any, int]] = {}
-    ignored_holders: set[tuple[str, int]] = set()
     nodes_by_id = {str(n.get("id")): n for n in nodes}
     input_holders_by_node: dict[str, dict[str, dict]] = {}
     holders_by_link: dict[str, list[tuple[Any, int, dict]]] = {}
@@ -458,16 +456,13 @@ def _stale_input_slot_links(
             ),
         )
         if canonical is not None:
-            dependency_targets[str(link_id)] = [(canonical[0], canonical[1])]
-            for holder_id, holder_slot, holder in locations:
-                if holder_id == canonical[0] and holder_slot == canonical[1]:
-                    continue
-                ignored_holders.add((str(holder_id), holder_slot))
-                warnings.append(
-                    f"link {link_id} is held by multiple inputs; kept input "
-                    f"{str(canonical[2].get('name') or '')!r} on node {qualify(canonical[0])} and ignored "
-                    f"duplicate holder input {str(holder.get('name') or '')!r} on node {qualify(holder_id)}"
+            dependency_targets[str(link_id)] = [(holder_id, holder_slot) for holder_id, holder_slot, _ in locations]
+            if len(locations) > 1:
+                holder_names = ", ".join(
+                    f"input {str(holder.get('name') or '')!r} on node {qualify(holder_id)}"
+                    for holder_id, _holder_slot, holder in locations
                 )
+                warnings.append(f"link {link_id} is held by multiple inputs; every holder remains live: {holder_names}")
         tgt_node = nodes_by_id.get(str(tgt_id))
         if tgt_node is None:
             holder_location = canonical
@@ -554,29 +549,7 @@ def _stale_input_slot_links(
                         else "re-wire it to the input it was meant for"
                     )
                 )
-    return warnings, ignored, retargeted, dependency_targets, ignored_holders
-
-
-def _clear_ignored_link_holders(nodes: list[dict], ignored_holders: set[tuple[str, int]]) -> list[dict]:
-    """Clear duplicate serialized holders without mutating the source workflow."""
-    if not ignored_holders:
-        return nodes
-    out: list[dict] = []
-    for node in nodes:
-        inputs = node.get("inputs")
-        if not isinstance(inputs, list):
-            out.append(node)
-            continue
-        changed = False
-        updated_inputs: list[Any] = []
-        for slot, entry in enumerate(inputs):
-            if (str(node.get("id")), slot) in ignored_holders and isinstance(entry, dict):
-                updated_inputs.append({**entry, "link": None})
-                changed = True
-            else:
-                updated_inputs.append(entry)
-        out.append({**node, "inputs": updated_inputs} if changed else node)
-    return out
+    return warnings, ignored, retargeted, dependency_targets
 
 
 def _input_fed_from(inputs: list, links: list[list], src_id: Any, src_slot: Any, except_id: Any) -> str | None:
@@ -1738,11 +1711,10 @@ def _render_definition_block(
     # proxy (which ``_validate`` does not see): a stale target slot is stale
     # whatever feeds it.
     into_interior = [[lid, oid, oslot, tid, tslot] for lid, (oid, oslot, tid, tslot) in all_links.items()]
-    stale_warnings, stale_ids, retargeted, dependency_targets, ignored_holders = _stale_input_slot_links(
+    stale_warnings, stale_ids, retargeted, dependency_targets = _stale_input_slot_links(
         interior_nodes, into_interior, lambda nid: f"{first_instance}/{nid}", _PROXY_IN
     )
     state.warnings.extend(stale_warnings)
-    interior_nodes = _clear_ignored_link_holders(interior_nodes, ignored_holders)
     all_links = {lid: link for lid, link in all_links.items() if lid not in stale_ids}
     all_links = {
         lid: (oid, oslot, *retargeted.get(lid, (tid, tslot))) for lid, (oid, oslot, tid, tslot) in all_links.items()
@@ -1911,9 +1883,8 @@ def render_py(workflow: dict, graph: Graph | None) -> PrintResult:
         raise PrintUnsupported(reasons)
     broken_warnings, broken, links = _broken_links(nodes, links)
     warnings.extend(broken_warnings)
-    stale_warnings, stale_ids, retargeted, dependency_targets, ignored_holders = _stale_input_slot_links(nodes, links)
+    stale_warnings, stale_ids, retargeted, dependency_targets = _stale_input_slot_links(nodes, links)
     warnings.extend(stale_warnings)
-    nodes = _clear_ignored_link_holders(nodes, ignored_holders)
 
     link_map: dict[str, tuple] = {}
     for link in links:
