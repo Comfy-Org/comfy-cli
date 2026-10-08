@@ -3087,7 +3087,7 @@ def _release_or_path(
     release logs <versionId> --target ...` with no PATH. A path-shaped RELEASE
     with no spec behind it fails as `build_spec_not_found` here, before any
     request, rather than travelling to the builder as an id (unless `--id`
-    names the Build, when PATH is never read).
+    names the Build, when PATH is never read, so it is not probed either).
 
     Whatever id is left is refused when it is blank, only dots, or holds a path
     separator: the read client joins it into the URL unencoded (`Target.url`
@@ -3100,15 +3100,15 @@ def _release_or_path(
         return None, path
     if path is None and release.strip():
         path_shaped = _path_shaped(release)
+        if path_shaped and build_id is not None:
+            # `--id` picks the Build, and PATH is never read then, so a path
+            # is as harmless here as it is after the release id. Checked
+            # before the probe, which raises on a path it cannot look at.
+            return None, release
         spec_file, has_spec = _spec_behind(release, path_shaped=path_shaped)
         if has_spec:
             return None, release
         if path_shaped:
-            if build_id is not None:
-                # `--id` picks the Build, and PATH is never read then, so a
-                # path with no spec behind it is as harmless here as it is
-                # after the release id.
-                return None, release
             if spec_file is not None:
                 error = BuildSpecNotFoundError(spec_file)
                 renderer.error(code=error.code, message=str(error), hint=error.hint, details=error.details)

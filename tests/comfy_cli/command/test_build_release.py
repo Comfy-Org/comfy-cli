@@ -1131,6 +1131,57 @@ def test_a_path_shaped_release_with_no_spec_is_ignored_when_id_names_the_build(
 
 
 @pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+def test_a_path_shaped_release_the_disk_probe_cannot_read_is_ignored_when_id_names_the_build(
+    tmp_path: Path, client: ReleaseBuilder, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str
+) -> None:
+    """`--id` picks the Build and PATH is never read, so the "file name too
+    long" from looking up a spec behind RELEASE must not fail the read."""
+    # Given
+    monkeypatch.chdir(tmp_path)
+    client.releases = [{"id": "release-6", "version": 6}]
+    client.statuses = [{"id": "release-6", "status": "complete"}]
+
+    # When
+    result = invoke_release(verb[0], "./" + "r" * 300, *verb[1:], "--id", "build-9")
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [
+        ("list_releases", "build-9"),
+        (read, "release-6"),
+    ]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod 000 does not deny reads on Windows")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads a chmod 000 folder")
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
+def test_a_path_shaped_release_naming_an_unreadable_folder_is_ignored_when_id_names_the_build(
+    tmp_path: Path, client: ReleaseBuilder, monkeypatch: pytest.MonkeyPatch, verb: tuple[str, ...], read: str
+) -> None:
+    """`--id` picks the Build and PATH is never read, so the `PermissionError`
+    from looking up `locked/comfy-build.yaml` must not fail the read."""
+    # Given
+    monkeypatch.chdir(tmp_path)
+    locked = make_workspace(tmp_path / "locked")
+    write_spec(locked, build_id="build-3", revision="revision-1", models=[], nodes=[])
+    client.releases = [{"id": "release-6", "version": 6}]
+    client.statuses = [{"id": "release-6", "status": "complete"}]
+    locked.chmod(0)
+    try:
+        # When
+        result = invoke_release(verb[0], "locked/", *verb[1:], "--id", "build-9")
+    finally:
+        locked.chmod(0o755)
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert [(call["method"], call["id"]) for call in client.calls] == [
+        ("list_releases", "build-9"),
+        (read, "release-6"),
+    ]
+
+
+@pytest.mark.parametrize(("verb", "read"), READ_VERBS)
 def test_a_path_shaped_release_with_a_spec_is_the_build_path(
     workspace: Path, client: ReleaseBuilder, verb: tuple[str, ...], read: str
 ) -> None:
