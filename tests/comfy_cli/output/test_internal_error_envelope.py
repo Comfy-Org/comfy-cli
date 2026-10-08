@@ -319,6 +319,14 @@ def test_internal_error_scrubber_preserves_ordinary_identifier_diagnostics():
     assert message in _internal_error_message(RuntimeError(message))
 
 
+@pytest.mark.parametrize(
+    "message",
+    ["missing required key: num_inference_steps", "--param must be key=value, got 'x'", "key: Foo(value)"],
+)
+def test_internal_error_scrubber_preserves_standalone_key_diagnostics(message):
+    assert message in _internal_error_message(RuntimeError(message))
+
+
 def test_internal_error_scrubber_marks_truncated_messages():
     message = "x" * 380 + " https://alice:password@example.com/" + "y" * 200
     scrubbed = _internal_error_message(RuntimeError(message))
@@ -328,6 +336,14 @@ def test_internal_error_scrubber_marks_truncated_messages():
 
 def test_internal_error_scrubber_drops_a_credential_split_at_the_input_cap():
     message = "Bearer " + "A" * 3_800 + " https://alice:" + "S" * 300 + "@example.com/x"
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "alice:" not in scrubbed
+    assert "S" * 20 not in scrubbed
+    assert scrubbed.endswith("…")
+
+
+def test_internal_error_scrubber_drops_split_userinfo_after_earlier_redaction_contracts_text():
+    message = "Bearer " + "A" * 3_400 + " https://alice:" + "S" * 700 + "@example.com"
     scrubbed = _internal_error_message(RuntimeError(message))
     assert "alice:" not in scrubbed
     assert "S" * 20 not in scrubbed
@@ -370,6 +386,13 @@ def test_internal_error_scrubber_masks_the_tail_of_multiline_constructors(messag
     scrubbed = _internal_error_message(RuntimeError(message))
     assert scrubbed.endswith("=***")
     assert not any(secret in scrubbed for secret in secrets)
+
+
+def test_internal_error_scrubber_masks_a_multiline_quoted_private_key():
+    message = 'private_key="-----BEGIN PRIVATE KEY-----\nMIIEvQ-LIVE\n-----END PRIVATE KEY-----" request=req-1'
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "MIIEvQ-LIVE" not in scrubbed
+    assert 'private_key="***" request=req-1' in scrubbed
 
 
 def test_internal_error_scrubber_handles_unterminated_escaped_container_with_backslashes():
