@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.parse
 import uuid
@@ -35,6 +36,7 @@ from urllib import request
 import typer
 from rich.progress import BarColumn, Progress, TimeElapsedColumn
 from rich.table import Column, Table
+from websocket import WebSocketTimeoutException
 
 from comfy_cli import execution_errors
 from comfy_cli.caller import usage_source
@@ -46,6 +48,13 @@ from comfy_cli.output.sanitize import sanitize_markup
 from comfy_cli.workspace_manager import WorkspaceManager
 
 workspace_manager = WorkspaceManager()
+
+# Upper bound on how long a single ``recv`` blocks before ``watch_execution``
+# regains control and re-checks the wall clock. Deliberately independent of the
+# user's ``--timeout`` (which can be large for long jobs) so that even a big
+# silence budget can never leave us blocked inside one ``recv`` across a system
+# sleep — see the wall-clock backstop in ``watch_execution``.
+_RECV_POLL_SECONDS = 30
 
 
 def _safe_close(execution: WorkflowExecution) -> None:
@@ -307,9 +316,44 @@ class WorkflowExecution:
     def watch_execution(self):
         if self.ws is None:
             raise RuntimeError("watch_execution called before the websocket was connected")
-        self.ws.settimeout(self.timeout)
+        # ``recv`` blocks on a socket timeout enforced against a MONOTONIC clock,
+        # which stops advancing while the machine is asleep (a laptop lid closed
+        # mid-run). On wake the connection is frequently dead, yet that timeout
+        # has under-counted the sleep, so it never fires and the loop hangs
+        # indefinitely instead of bailing out. Mirror the cloud waiter
+        # (``ComfyClient.wait_for_completion``): bound each ``recv`` to a short
+        # poll so the loop regains control regularly, and enforce the
+        # ``--timeout`` silence budget against the WALL clock, which DID advance
+        # across the sleep. A wake with a dead connection then aborts promptly
+        # (the caller reports ``ws_timeout`` — the server job is resumable via
+        # ``comfy jobs status``) rather than stalling for as long as the machine
+        # slept.
+        #
+        # Silence is the LARGER of the wall and monotonic elapsed times: the
+        # monotonic one keeps a backward wall-clock step (an NTP correction)
+        # from stretching the wait past ``--timeout``.
+        if not self.timeout:
+            self.ws.settimeout(self.timeout)
+        wall_mark, mono_mark = time.time(), time.monotonic()
         while True:
-            message = self.ws.recv()
+            if self.timeout:
+                silent_for = max(time.time() - wall_mark, time.monotonic() - mono_mark)
+                # Never poll past the remaining budget, so the abort lands on
+                # the requested deadline rather than the next poll boundary.
+                self.ws.settimeout(max(min(self.timeout - silent_for, _RECV_POLL_SECONDS), 0.001))
+            try:
+                message = self.ws.recv()
+            except WebSocketTimeoutException:
+                # No frame this poll interval. Give up only once the silence
+                # budget has elapsed in REAL time — a monotonic timer frozen by
+                # a sleep can no longer keep us waiting past it.
+                if not self.timeout or max(time.time() - wall_mark, time.monotonic() - mono_mark) >= self.timeout:
+                    raise
+                continue
+            # Any text or binary frame proves the connection is live, so it
+            # resets the silence budget. (``recv`` answers ping/pong control
+            # frames internally without returning, so those never reach here.)
+            wall_mark, mono_mark = time.time(), time.monotonic()
             if not isinstance(message, str):
                 continue
             try:

@@ -20,6 +20,7 @@ The tests cover:
 from __future__ import annotations
 
 import io
+import itertools
 import json
 import os
 import sys
@@ -479,15 +480,39 @@ class TestWebSocketEvents:
             return _run_execute_capture(workflow_file, capsys)
 
     def test_websocket_timeout(self, workflow_file, capsys):
-        lines, exit_code = self._run_with_ws_messages(
-            workflow_file,
-            WebSocketTimeoutException("timed out"),
-            capsys,
-        )
+        # Advance a fake clock past the 30s budget on the first poll so the
+        # wall-clock backstop fires without a real 30s wait.
+        fake_time = MagicMock()
+        fake_time.time.side_effect = itertools.count(1000.0, 31.0).__next__
+        fake_time.monotonic.side_effect = itertools.count(1000.0, 31.0).__next__
+        with patch("comfy_cli.command.run.execution.time", fake_time):
+            lines, exit_code = self._run_with_ws_messages(
+                workflow_file,
+                WebSocketTimeoutException("timed out"),
+                capsys,
+            )
         assert exit_code == 1
         env = _envelope(lines)
         assert env["error"]["code"] == "ws_timeout"
         assert env["error"]["details"]["timeout"] == 30
+        # A job was queued, so the hint names it for `comfy jobs status`.
+        assert "comfy jobs status p" in env["error"]["hint"]
+
+    def test_connect_timeout_hint_names_no_job(self, workflow_file, capsys):
+        """A timeout raised by the websocket handshake fires before anything is
+        queued, so the hint must not send the user to a job that doesn't exist."""
+        with (
+            patch("comfy_cli.command.run.check_comfy_server_running", return_value=True),
+            patch("comfy_cli.http._AUTHED_OPENER.open"),
+            patch("comfy_cli.command.run.WebSocket") as MockWs,
+        ):
+            MockWs.return_value.connect.side_effect = WebSocketTimeoutException("handshake timed out")
+            lines, exit_code = _run_execute_capture(workflow_file, capsys)
+        assert exit_code == 1
+        env = _envelope(lines)
+        assert env["error"]["code"] == "ws_timeout"
+        assert "prompt_id" not in env["error"]["details"]
+        assert "jobs status" not in env["error"]["hint"]
 
     def test_connection_lost_websocket(self, workflow_file, capsys):
         lines, exit_code = self._run_with_ws_messages(
