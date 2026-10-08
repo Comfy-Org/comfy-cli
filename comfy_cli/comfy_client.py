@@ -26,6 +26,7 @@ from typing import Any
 
 from comfy_cli.caller import usage_source
 from comfy_cli.http import (
+    USAGE_SOURCE_HEADERS,
     NoRedirectHandler,
     ResponseTooLarge,
     build_http_only_opener,
@@ -262,9 +263,8 @@ class Client:
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Accept", "application/json")
-        # Usage-source attribution on every ComfyUI/cloud API request so the
-        # server can tell CLI-originated traffic apart from the web UI (#468).
-        req.add_header("Comfy-Usage-Source", "comfy-cli")
+        for k, v in USAGE_SOURCE_HEADERS.items():
+            req.add_header(k, v)
         if data is not None:
             req.add_header("Content-Type", "application/json")
         # Cloud auth: `target_auth_headers` owns the header selection for

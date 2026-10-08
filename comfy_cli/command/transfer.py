@@ -28,7 +28,7 @@ import typer
 from comfy_cli import jobs_state
 from comfy_cli.comfy_client import Client, Unauthenticated, extract_output_entries
 from comfy_cli.host_port import report_usage_error, validate_host
-from comfy_cli.http import NoRedirectHandler, build_http_only_opener
+from comfy_cli.http import USAGE_SOURCE_HEADERS, NoRedirectHandler, build_http_only_opener
 from comfy_cli.http import target_auth_headers as _auth_headers
 from comfy_cli.output import get_renderer
 from comfy_cli.output import rprint as pprint
@@ -391,7 +391,7 @@ def _upload_file(path: Path, target: Any, *, overwrite: bool) -> dict:
     url = target.url("upload/image")
     req = urllib.request.Request(url, data=body, method="POST")
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
-    for hdr, val in _auth_headers(target).items():
+    for hdr, val in {**USAGE_SOURCE_HEADERS, **_auth_headers(target)}.items():
         req.add_header(hdr, val)
 
     with _TRANSFER_OPENER.open(req, timeout=_UPLOAD_TIMEOUT_S) as resp:
@@ -934,7 +934,7 @@ def execute_download(
     dest = Path(out_dir or _default_out_dir())
     dest.mkdir(parents=True, exist_ok=True)
 
-    auth_hdrs = _auth_headers(target)
+    auth_hdrs = {**USAGE_SOURCE_HEADERS, **_auth_headers(target)}
     saved_files: list[dict[str, Any]] = []
     saved_paths: list[str] = []
     short_id = prompt_id[:8]

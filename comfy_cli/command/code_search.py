@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.text import Text
 
 from comfy_cli import tracking
+from comfy_cli.http import USAGE_SOURCE_HEADERS
 
 app = typer.Typer()
 console = Console()
@@ -43,7 +44,7 @@ def _fetch_results(query: str) -> dict:
     # the import path of every CLI invocation.
     import requests
 
-    response = requests.get(API_URL, params={"query": query}, timeout=REQUEST_TIMEOUT)
+    response = requests.get(API_URL, params={"query": query}, headers=USAGE_SOURCE_HEADERS, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
 

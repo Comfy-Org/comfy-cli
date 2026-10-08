@@ -22,6 +22,7 @@ from typing import Annotated, Any
 import typer
 
 from comfy_cli import execution_errors, jobs_state
+from comfy_cli.http import USAGE_SOURCE_HEADERS
 
 app = typer.Typer(hidden=True)
 
@@ -279,7 +280,9 @@ def _probe_local_server(host: str, port: int) -> str:
 
     try:
         # ``host`` arrives already bracketed from _resolve_watch_target.
-        resp = requests.get(f"http://{host}:{port}/history?max_items=1", timeout=_PROBE_TIMEOUT_S)
+        resp = requests.get(
+            f"http://{host}:{port}/history?max_items=1", headers=USAGE_SOURCE_HEADERS, timeout=_PROBE_TIMEOUT_S
+        )
     except requests.exceptions.Timeout:
         # Listed before ConnectionError: ConnectTimeout subclasses both, and a
         # timeout is never evidence that nothing is listening.
