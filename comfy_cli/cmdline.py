@@ -229,9 +229,11 @@ def _scrub_secret_constructors(text: str) -> str:
                 break
             index += 1
         if depth:
-            # The conservative container rule below owns truncated values.
-            search_from = match.end()
-            continue
+            # A multiline or truncated constructor has no trustworthy end.
+            # Mask the full tail so a later value cannot escape through the
+            # simpler single-line constructor pattern.
+            chunks.extend((text[cursor : match.start()], match.group("prefix"), "***"))
+            return "".join(chunks)
         chunks.extend((text[cursor : match.start()], match.group("prefix"), "***"))
         cursor = index
         search_from = index
