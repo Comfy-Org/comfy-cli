@@ -326,6 +326,37 @@ def test_distinct_nested_paths_are_bounded_by_definition_graph_size():
     assert instance["widgets_values"] == ["keep"]
 
 
+def test_repeated_boundary_link_ids_share_holder_work_and_consume_budget():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [1] * 10_000}],
+        "nodes": [{"id": 7, "type": "PlainNode", "inputs": [{"name": "value", "link": 1}]}],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+
+    with (
+        mock.patch.object(promoted, "_is_slot_index", wraps=promoted._is_slot_index) as slot_check,
+        pytest.raises(promoted.PromotionTraversalLimitError, match="input traversal"),
+    ):
+        promoted.promoted_inputs(sg, {"sg": sg})
+
+    assert slot_check.call_count == 1
+
+
+def test_holder_materialization_is_charged_before_ordering():
+    sg = {"nodes": [{"id": node_id, "inputs": [{"name": "value", "link": 1}]} for node_id in range(3)]}
+    holders = promoted._link_holders(sg)
+
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="safe limit"):
+        promoted.held_link_targets(
+            sg,
+            1,
+            {"target_id": 0, "target_slot": 0},
+            holders,
+            budget=[2],
+        )
+
+
 def test_boundary_target_fanout_is_bounded_by_definition_graph_size():
     definitions: dict[str, dict] = {}
     depth = 18
