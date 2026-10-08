@@ -1693,7 +1693,7 @@ def _render_definition_block(
         validate_links.append([lid, oid, oslot, tid, tslot])
 
     reasons = [f"subgraph {def_id}: {error}" for error in link_errors]
-    reasons.extend(_validate(interior_nodes, validate_links))
+    reasons.extend(f"subgraph {def_id}: {error}" for error in _validate(interior_nodes, validate_links))
     if reasons:
         raise PrintUnsupported(reasons)
     broken_warnings, broken, rest = _broken_links(interior_nodes, validate_links, lambda nid: f"{first_instance}/{nid}")

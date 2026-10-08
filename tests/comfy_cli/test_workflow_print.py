@@ -910,6 +910,25 @@ def test_duplicate_node_id_is_refused(sd15_graph):
     assert e.value.reasons == ["duplicate node id 1"]
 
 
+def test_definition_validation_reasons_identify_the_subgraph():
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    definition = {
+        "id": subgraph_id,
+        "name": "Duplicate nodes",
+        "inputs": [],
+        "outputs": [],
+        "nodes": [_node(1, "First"), _node(1, "Second")],
+        "links": [],
+    }
+    wf = _mini([_node(10, subgraph_id)], [])
+    wf["definitions"] = {"subgraphs": [definition]}
+
+    with pytest.raises(PrintUnsupported) as error:
+        render_py(wf, None)
+
+    assert error.value.reasons == [f"subgraph {subgraph_id}: duplicate node id 1"]
+
+
 def test_nested_definition_expands_through_every_ancestor_instance(sd15_graph):
     # Outer is instantiated TWICE (100, 200); its interior — rendered once,
     # under the first instance — holds Inner at inner id 5. Inner therefore
