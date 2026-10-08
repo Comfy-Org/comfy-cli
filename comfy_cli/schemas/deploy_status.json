@@ -17,10 +17,15 @@
     },
     "deployment": {
       "type": ["object", "null"],
-      "required": ["id", "status", "endpointUrl", "computeConfig", "stopReason", "error"],
+      "required": ["id", "name", "status", "endpointUrl", "computeConfig", "stopReason", "error"],
       "additionalProperties": false,
       "properties": {
         "id": {"type": "string", "minLength": 1},
+        "name": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "The deployment's name, unique among its Build's live deployments; null where it has none or comfy-deploy does not serve names yet."
+        },
         "status": {
           "enum": ["queued", "provisioning", "starting", "ready", "unhealthy", "stopping", "stop_failed", "stopped", "failed"]
         },

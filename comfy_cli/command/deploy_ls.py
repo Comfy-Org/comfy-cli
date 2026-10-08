@@ -15,10 +15,11 @@ from comfy_cli.command.build_spec import BuildSpecInvalidError, JsonObject, Json
 from comfy_cli.command.deploy_resolve import BuildNotPushedError, DeployResolveError
 from comfy_cli.command.deploy_runtime import command_clients as _command_clients
 from comfy_cli.command.deploy_runtime import render_spec_error
-from comfy_cli.command.deploy_types import required_string, server_shape_error
+from comfy_cli.command.deploy_types import deployment_name, required_string, server_shape_error
 from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.http import ResponseTooLarge
 from comfy_cli.output import get_renderer
+from comfy_cli.output.sanitize import sanitize_markup
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +90,8 @@ def run_ls(request: ListRequest) -> None:
                     version = versions[release_id]
                 if not request.include_deleted and row.get("deletedAt") is not None:
                     continue
-                deployments.append(row if version is None else {**row, "releaseVersion": version})
+                named = {**row, "name": deployment_name(row)}
+                deployments.append(named if version is None else {**named, "releaseVersion": version})
                 if len(deployments) == request.limit:
                     break
             if len(deployments) == request.limit:
@@ -101,8 +103,8 @@ def run_ls(request: ListRequest) -> None:
             for deployment in deployments:
                 marker = " (deleted)" if deployment.get("deletedAt") is not None else ""
                 renderer.print(
-                    f"  {required_string(deployment, 'id')}  {required_string(deployment, 'status')}"
-                    f"{_release_column(deployment)}{marker}"
+                    f"  {sanitize_markup(deployment['name'] or '-')}  {required_string(deployment, 'id')}"
+                    f"  {required_string(deployment, 'status')}{_release_column(deployment)}{marker}"
                 )
         payload_rows: list[JsonValue] = [*deployments]
         renderer.emit({"deployments": payload_rows}, command="deploy ls", changed=False)

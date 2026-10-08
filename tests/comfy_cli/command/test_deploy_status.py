@@ -107,6 +107,52 @@ def _schema(name: str) -> JsonObject:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+@pytest.mark.parametrize(
+    ("name", "line"),
+    [("production", "Deployment production (dep-status): ready"), (None, "Deployment dep-status: ready")],
+)
+def test_status_names_the_deployment_it_reports(tmp_path, monkeypatch, name: str | None, line: str) -> None:
+    # Given
+    _install_clients(
+        monkeypatch, FakeBuilder([_release(5)]), RecordingDeploy([{**_status_deployment(), "name": name}]), []
+    )
+
+    # When
+    result = _invoke_pretty(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert line in result.stdout
+
+
+@pytest.mark.parametrize(("served", "name"), [("production", "production"), (None, None), ("", None), (5, None)])
+def test_status_json_carries_the_name_or_null(tmp_path, monkeypatch, served, name: str | None) -> None:
+    # Given a name that is only ever shown, so a malformed one reads as none
+    row = {**_status_deployment(), "name": served}
+    _install_clients(monkeypatch, FakeBuilder([_release(5)]), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    data = _json_envelope(result)["data"]
+    assert data["deployment"]["name"] == name
+    jsonschema.Draft202012Validator(_schema("deploy_status.json")).validate(data)
+
+
+def test_status_json_carries_a_null_name_from_a_comfy_deploy_without_names(tmp_path, monkeypatch) -> None:
+    # Given a deployment row with no name field at all
+    _install_clients(monkeypatch, FakeBuilder([_release(5)]), RecordingDeploy([_status_deployment()]), [])
+
+    # When
+    result = _invoke_json(write_spec(tmp_path))
+
+    # Then
+    assert result.exit_code == 0, result.stderr
+    assert _json_envelope(result)["data"]["deployment"]["name"] is None
+
+
 def test_a_bounds_free_deployment_validates_against_the_published_status_schema(tmp_path, monkeypatch) -> None:
     """A deployment the web UI created stores no `min`/`max`, and `compute_config`
     carries only what the service stored. Requiring the bounds in the schema made
@@ -874,6 +920,18 @@ def test_the_behind_hint_names_the_deployment_up_should_move(tmp_path, monkeypat
 
     # Then
     assert "`comfy deploy up --deployment dep-status` moves this deployment" in " ".join(result.stderr.split())
+
+
+def test_the_behind_warning_names_the_deployment_by_name_and_id(tmp_path, monkeypatch) -> None:
+    # Given production, on release 3 of 5
+    row = {**_status_deployment("release-3"), "name": "production"}
+    _install_clients(monkeypatch, FakeBuilder([_release(3), _release(5)]), RecordingDeploy([row]), [])
+
+    # When
+    result = _invoke_pretty(write_spec(tmp_path))
+
+    # Then
+    assert "Deployment production (dep-status) runs release v3" in " ".join((result.stdout + result.stderr).split())
 
 
 def test_a_failed_update_to_the_newest_release_says_so_and_keeps_the_hint(tmp_path, monkeypatch) -> None:

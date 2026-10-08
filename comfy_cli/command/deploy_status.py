@@ -37,6 +37,8 @@ from comfy_cli.command.deploy_runtime import (
 from comfy_cli.command.deploy_types import (
     DeployUpClient,
     compute_config,
+    deployment_label,
+    deployment_name,
     optional_revision,
     release_label,
     release_summary,
@@ -115,6 +117,7 @@ def _normalized_deployment(deployment: JsonObject) -> JsonObject:
         raise server_shape_error("the deployment has an unknown status", status=status)
     return {
         "id": required_string(deployment, "id"),
+        "name": deployment_name(deployment),
         "status": status,
         "endpointUrl": _nullable_string(deployment, "endpointUrl"),
         "computeConfig": compute_config(deployment),
@@ -361,28 +364,29 @@ def _render_stop_reason(renderer: Renderer, deployment: JsonObject) -> None:
 
 def _render_deployment(renderer: Renderer, deployment: JsonObject) -> str:
     deployment_id = required_string(deployment, "id")
+    label = deployment_label(deployment)
     status = required_string(deployment, "status")
     match status:
         case "ready":
             if renderer.is_pretty():
-                renderer.success(f"Deployment {deployment_id}: ready")
+                renderer.success(f"Deployment {label}: ready")
         case "unhealthy":
             if renderer.is_pretty():
-                renderer.info(f"Deployment {deployment_id}: unhealthy (recoverable)")
+                renderer.info(f"Deployment {label}: unhealthy (recoverable)")
         case "stop_failed":
             renderer.warn(
-                f"Deployment {deployment_id} could not stop and may still be billing.",
+                f"Deployment {label} could not stop and may still be billing.",
                 hint=f"run `comfy deploy stop --deployment {deployment_id}` again",
             )
         case "failed":
             if renderer.is_pretty():
-                renderer.warn(f"Deployment {deployment_id}: failed")
+                renderer.warn(f"Deployment {label}: failed")
         case "stopped":
             if renderer.is_pretty():
-                renderer.info(f"Deployment {deployment_id}: stopped")
+                renderer.info(f"Deployment {label}: stopped")
         case "queued" | "provisioning" | "starting" | "stopping":
             if renderer.is_pretty():
-                renderer.info(f"Deployment {deployment_id}: {status}")
+                renderer.info(f"Deployment {label}: {status}")
         case _:
             raise server_shape_error("the deployment has an unknown status", status=status)
     return status
@@ -447,7 +451,7 @@ def render_status(renderer: Renderer, result: StatusResult) -> None:
         if not isinstance(latest, dict):
             raise server_shape_error("a behind release has no latestDeployable")
         renderer.warn(
-            f"Deployment {required_string(deployment, 'id')} runs release v{required_int(release, 'version')}; "
+            f"Deployment {deployment_label(deployment)} runs release v{required_int(release, 'version')}; "
             f"release v{required_int(latest, 'version')} is deployable.",
             hint=_behind_hint(result, required_string(deployment, "id")),
         )
