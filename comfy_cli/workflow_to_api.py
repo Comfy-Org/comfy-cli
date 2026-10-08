@@ -529,6 +529,8 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
         return links
 
     node_input_updates: dict[str, dict[int, int]] = {}
+    resolution_memo: dict[tuple[str, str], list[tuple[Any, Any]]] = {}
+    resolution_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS]
     updated: list = []
     for link in links:
         if not isinstance(link, (list, tuple)) or len(link) < 6:
@@ -540,7 +542,13 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
         src_id_out, src_slot_out = _resolve_subgraph_output(src_id_str, src_slot, ctx)
 
         tgt_id_str = str(tgt_id)
-        all_targets = _resolve_subgraph_input_all(tgt_id_str, tgt_slot, ctx)
+        all_targets = _resolve_subgraph_input_all(
+            tgt_id_str,
+            tgt_slot,
+            ctx,
+            _memo=resolution_memo,
+            _budget=resolution_budget,
+        )
         # Track input-slot rewrites for ALL targets (one outer input may fan out).
         for resolved_tgt_id, resolved_tgt_slot in all_targets:
             if resolved_tgt_id != tgt_id_str:
@@ -580,7 +588,7 @@ def _resolve_subgraph_input_all(
     slot: Any,
     ctx: _SubgraphCtx,
     depth: int = 0,
-    _memo: dict[tuple[str, str], tuple[tuple[Any, Any], ...]] | None = None,
+    _memo: dict[tuple[str, str], list[tuple[Any, Any]]] | None = None,
     _budget: list[int] | None = None,
 ) -> list[tuple[Any, Any]]:
     if _memo is None:
@@ -589,7 +597,7 @@ def _resolve_subgraph_input_all(
         _budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS]
     memo_key = (node_id_str, repr(slot))
     if memo_key in _memo:
-        return list(_memo[memo_key])
+        return _memo[memo_key]
     if _budget[0] <= 0:
         raise WorkflowConversionError("subgraph input resolution exceeded its safe limit")
     _budget[0] -= 1
@@ -631,9 +639,9 @@ def _resolve_subgraph_input_all(
             _budget[0] -= 1
             seen.add(resolved_key)
             out.append((resolved_node, resolved_slot))
-    result = tuple(out or [(node_id_str, slot)])
+    result = out or [(node_id_str, slot)]
     _memo[memo_key] = result
-    return list(result)
+    return result
 
 
 # ---------------------------------------------------------------------------
