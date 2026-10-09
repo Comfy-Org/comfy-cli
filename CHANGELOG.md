@@ -117,6 +117,15 @@ history.
 
 ### Fixed
 
+- `comfy deploy run --wait` no longer loses a finished job's outputs to a 401
+  when the sign-in token it started with expires mid-run. The token lasts
+  fifteen minutes, and the run sent the one it started with for every request
+  to the deployment, so whichever run was in flight at each expiry failed
+  (more often with several runs in parallel). Each request now reads the
+  sign-in afresh, refreshing it near expiry, and a refused job read refreshes
+  once and reads again. A workspace API key, or a token injected through
+  `COMFY_CLOUD_AUTH_TOKEN`, is sent unchanged. `comfy download` running on the
+  stored sign-in likewise re-reads it before each output of a many-file download.
 - `comfy build release show .` (and `release logs .`, `release manifest .`)
   reads `.` as the build path, the way `release create .` does, and shows that
   Build's newest release. It used to send `.` to the builder as a release id

@@ -91,6 +91,7 @@ class DeployClient:
         # Only a client built from the stored sign-in may swap its token; one
         # handed a token or a key keeps it and lets a 401 surface.
         self._refreshes_on_401 = False
+        self._sign_in_base_url: str | None = None
 
     @classmethod
     def from_credentials(cls, base_url: str | None = None) -> DeployClient:
@@ -115,7 +116,13 @@ class DeployClient:
             raise DeployAuthError
         client = cls(resolved_url, session.access_token)
         client._refreshes_on_401 = True
+        client._sign_in_base_url = session.base_url
         return client
+
+    @property
+    def sign_in_base_url(self) -> str | None:
+        """The environment of the stored sign-in this client's token came from; None for a key or a handed token."""
+        return self._sign_in_base_url if self._refreshes_on_401 else None
 
     def _request(self, request: _Request) -> dict:
         url = self.target.url(*request.parts)

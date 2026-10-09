@@ -48,8 +48,8 @@ class _Sessions:
     def __call__(self, *, refresh=True, force=False, allow_clear=True):
         if force:
             self.forced += 1
-            return SimpleNamespace(access_token=self.after) if self.after else None
-        return SimpleNamespace(access_token=self.first)
+            return SimpleNamespace(access_token=self.after, base_url="https://cloud.comfy.org") if self.after else None
+        return SimpleNamespace(access_token=self.first, base_url="https://cloud.comfy.org")
 
 
 def _install(monkeypatch, server: _Server, sessions: _Sessions) -> None:
