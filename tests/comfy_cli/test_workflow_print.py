@@ -1648,11 +1648,11 @@ def test_null_link_id_is_warned_and_dropped(sd15_graph):
     assert any("link has null id and was ignored" in warning for warning in res.warnings)
 
 
-def test_equivalent_link_rows_ignore_unused_tail_and_id_representation(sd15_graph):
+def test_string_and_integer_link_ids_are_conflicting_duplicates(sd15_graph):
     wf = _stale_slot_workflow([7, 1, 0, 2, 0, "LATENT"])
     wf["links"].append(["7", "1", 0, "2", 0, "DIFFERENT-UNUSED-TYPE"])
-    res = render_py(wf, sd15_graph)
-    assert "samples=empty_latent_image" in res.source
+    with pytest.raises(PrintUnsupported, match="duplicate link id 7"):
+        render_py(wf, sd15_graph)
 
 
 def test_typed_duplicate_link_rows_are_rejected():
@@ -1660,6 +1660,14 @@ def test_typed_duplicate_link_rows_are_rejected():
     wf["links"] = [[7, 1, 0, 2, 0], [7, True, 0, 2, 0]]
     with pytest.raises(PrintUnsupported, match="duplicate link id 7"):
         render_py(wf, None)
+
+    definition_rows = [
+        {"id": 7, "origin_id": 1, "origin_slot": 0, "target_id": 2, "target_slot": 0},
+        {"id": "7", "origin_id": 1, "origin_slot": 0, "target_id": 2, "target_slot": 0},
+    ]
+    errors: list[str] = []
+    workflow_print._def_links({"links": definition_rows}, errors, [])
+    assert errors == ["duplicate link id 7"]
 
 
 def test_duplicate_link_validation_normalizes_each_row_once():
