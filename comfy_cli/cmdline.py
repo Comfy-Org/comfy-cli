@@ -390,7 +390,7 @@ _SECRET_PATTERNS = (
     (
         re.compile(
             rf"((?:{_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)?)"
-            r"-----BEGIN ([A-Z0-9][A-Z0-9 -]*(?:KEY|CERTIFICATE))-----"
+            r"-----BEGIN ([A-Z0-9][A-Z0-9 -]*(?:KEY|CERTIFICATE)[A-Z0-9 -]*)-----"
             r"(?:(?!-----END \2-----)[^\r\n])*(?:-----END \2-----)?"
             r"(?:\r?\n(?!-----END \2-----)[^\r\n]*)*(?:\r?\n-----END \2-----)?",
             re.IGNORECASE,
