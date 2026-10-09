@@ -219,7 +219,7 @@ def test_subgraph_expansion_uses_boundary_link_membership_not_stale_row_slots():
     _nodes, _links, input_targets, output_sources = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
 
     assert input_targets == {1: [(7, 0)]}
-    assert output_sources == {(7, 0): 1}
+    assert output_sources == {1: (7, 0)}
 
 
 @pytest.mark.parametrize("origin_id,origin_slot", [([], 0), ({}, 0), (7, True), (7, 0.0)])
@@ -242,6 +242,46 @@ def test_subgraph_expansion_skips_malformed_output_source_coordinates(origin_id,
     _nodes, _links, _input_targets, output_sources = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
 
     assert output_sources == {}
+
+
+def test_one_interior_output_can_feed_multiple_definition_outputs():
+    definition = {
+        "inputs": [],
+        "outputs": [
+            {"name": "first", "linkIds": [1]},
+            {"name": "second", "linkIds": [1]},
+        ],
+        "nodes": [{"id": 7, "type": "Producer", "inputs": [], "outputs": [{"name": "value"}]}],
+        "links": [{"id": 1, "origin_id": 7, "origin_slot": 0, "target_id": -20, "target_slot": 0}],
+    }
+
+    _nodes, _links, _input_targets, output_sources = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
+
+    assert output_sources == {0: (7, 0), 1: (7, 0)}
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.output_sources["10"] = output_sources
+    external = [[11, 10, 0, 20, 0, "*"], [12, 10, 1, 21, 0, "*"]]
+    rewritten = workflow_to_api._rewrite_links_for_subgraphs(external, ctx, [])
+    assert [link[1:3] for link in rewritten] == [["10:7", 0], ["10:7", 0]]
+
+
+def test_definition_input_to_output_passthrough_uses_the_outer_input_source():
+    definition = {
+        "inputs": [{"name": "value", "linkIds": [1]}],
+        "outputs": [{"name": "result", "linkIds": [1]}],
+        "nodes": [],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": -20, "target_slot": 0}],
+    }
+    _nodes, _links, input_targets, output_sources = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.input_targets["10"] = input_targets
+    ctx.output_sources["10"] = output_sources
+    ctx.outer_to_input_idx["10"] = {0: 0}
+    external = [[11, "producer", 2, 10, 0, "*"], [12, 10, 0, "consumer", 0, "*"]]
+
+    rewritten = workflow_to_api._rewrite_links_for_subgraphs(external, ctx, [])
+
+    assert rewritten[1][1:3] == ["producer", 2]
 
 
 def test_large_serialized_boundary_does_not_consume_the_fanout_reserve():

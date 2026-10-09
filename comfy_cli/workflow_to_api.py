@@ -291,8 +291,10 @@ class _SubgraphCtx:
     def __init__(self) -> None:
         # subgraph_node_id_str -> {subgraph_input_idx: [(internal_node_id, internal_slot), ...]}
         self.input_targets: dict[str, dict[int, list[tuple[Any, int]]]] = {}
-        # subgraph_node_id_str -> {(internal_node_id, internal_slot): output_slot_idx}
-        self.output_sources: dict[str, dict[tuple[Any, int], int]] = {}
+        # subgraph_node_id_str -> {output_slot_idx: (internal_node_id, internal_slot)}
+        self.output_sources: dict[str, dict[int, tuple[Any, int]]] = {}
+        # subgraph_node_id_str -> {subgraph_input_idx: (upstream_node_id, upstream_slot)}
+        self.input_sources: dict[str, dict[int, tuple[Any, Any]]] = {}
         # subgraph_node_id_str -> {outer_slot: subgraph_input_idx} (when names differ in order)
         self.outer_to_input_idx: dict[str, dict[int, int]] = {}
 
@@ -383,7 +385,7 @@ def _is_link_id(value: Any) -> bool:
 
 def _expand_one_subgraph(
     outer_node: dict, sg_def: dict, existing_links: list
-) -> tuple[list[dict], list, dict[int, list[tuple[Any, int]]], dict[tuple[Any, int], int]]:
+) -> tuple[list[dict], list, dict[int, list[tuple[Any, int]]], dict[int, tuple[Any, int]]]:
     outer_id = outer_node.get("id")
     internal_nodes = [n for n in (sg_def.get("nodes") or []) if isinstance(n, dict)]
     internal_links = sg_def.get("links") or []
@@ -459,7 +461,7 @@ def _expand_one_subgraph(
         if targets:
             input_targets[idx] = targets
 
-    output_sources: dict[tuple[Any, int], int] = {}
+    output_sources: dict[int, tuple[Any, int]] = {}
     for idx, out_def in enumerate(sg_def.get("outputs") or []):
         if not isinstance(out_def, dict):
             continue
@@ -471,7 +473,7 @@ def _expand_one_subgraph(
                 origin_id = link.get("origin_id")
                 origin_slot = link.get("origin_slot")
                 if _is_link_id(origin_id) and _is_slot_index(origin_slot):
-                    output_sources[(origin_id, origin_slot)] = idx
+                    output_sources[idx] = (origin_id, origin_slot)
 
     expanded_nodes: list[dict] = []
     for inner in internal_nodes:
@@ -542,6 +544,19 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
     # target, leaf visit, result append). Reserve that serialized baseline;
     # the fixed cap remains available only for fan-out beyond it.
     resolution_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + 4 * len(links)]
+    for link in links:
+        if not isinstance(link, (list, tuple)) or len(link) < 6:
+            continue
+        _link_id, src_id, src_slot, tgt_id, tgt_slot, _link_type = link[:6]
+        tgt_id_str = str(tgt_id)
+        if tgt_id_str not in ctx.output_sources:
+            continue
+        sg_input_idx = tgt_slot
+        outer_map = ctx.outer_to_input_idx.get(tgt_id_str)
+        if outer_map and tgt_slot in outer_map:
+            sg_input_idx = outer_map[tgt_slot]
+        if isinstance(sg_input_idx, int) and not isinstance(sg_input_idx, bool):
+            ctx.input_sources.setdefault(tgt_id_str, {}).setdefault(sg_input_idx, (src_id, src_slot))
     updated: list = []
     for link in links:
         if not isinstance(link, (list, tuple)) or len(link) < 6:
@@ -587,11 +602,19 @@ def _resolve_subgraph_output(node_id_str: str, slot: Any, ctx: _SubgraphCtx, dep
     mapping = ctx.output_sources.get(node_id_str)
     if not mapping:
         return node_id_str, slot
-    for (internal_node, internal_slot), out_slot in mapping.items():
-        if out_slot == slot:
-            new_id = f"{node_id_str}:{internal_node}"
-            return _resolve_subgraph_output(new_id, internal_slot, ctx, depth + 1)
-    return node_id_str, slot
+    if not isinstance(slot, int) or isinstance(slot, bool):
+        return node_id_str, slot
+    source = mapping.get(slot)
+    if source is None:
+        return node_id_str, slot
+    internal_node, internal_slot = source
+    if internal_node == _SUBGRAPH_INPUT_NODE_ID:
+        upstream = ctx.input_sources.get(node_id_str, {}).get(internal_slot)
+        if upstream is None:
+            return node_id_str, slot
+        return _resolve_subgraph_output(str(upstream[0]), upstream[1], ctx, depth + 1)
+    new_id = f"{node_id_str}:{internal_node}"
+    return _resolve_subgraph_output(new_id, internal_slot, ctx, depth + 1)
 
 
 def _resolve_subgraph_input_all(
