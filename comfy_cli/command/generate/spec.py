@@ -353,9 +353,8 @@ def _resolve_schema(
     budget: list[int],
 ) -> tuple[Any, bool]:
     """Return ``(resolved, contains_cycle_placeholder)`` for :func:`_resolve`."""
-    if budget[0] <= 0:
-        raise SpecError("Schema resolution exceeded its safe traversal limit")
-    budget[0] -= 1
+    if not isinstance(node, (dict, list)):
+        return node, False
     if isinstance(node, dict):
         if "$ref" in node:
             ref = node["$ref"]
@@ -369,6 +368,9 @@ def _resolve_schema(
             memo_key = (*shared_key, seen)
             if memo_key in memo:
                 return memo[memo_key]
+            if budget[0] <= 0:
+                raise SpecError("Schema resolution exceeded its safe traversal limit")
+            budget[0] -= 1
             memo[memo_key] = ({"type": "object", "x-recursive-ref": ref}, True)
             resolved = _resolve_ref(spec, ref)
             result = _resolve_schema(spec, resolved, seen | {ref}, memo, budget)
@@ -382,6 +384,9 @@ def _resolve_schema(
         memo_key = ("object", id(node), seen)
         if memo_key in memo:
             return memo[memo_key]
+        if budget[0] <= 0:
+            raise SpecError("Schema resolution exceeded its safe traversal limit")
+        budget[0] -= 1
         memo[memo_key] = ({"type": "object", "x-recursive-object": True}, True)
         value: dict[str, Any] = {}
         cyclic = False
@@ -401,6 +406,9 @@ def _resolve_schema(
         memo_key = ("list", id(node), seen)
         if memo_key in memo:
             return memo[memo_key]
+        if budget[0] <= 0:
+            raise SpecError("Schema resolution exceeded its safe traversal limit")
+        budget[0] -= 1
         memo[memo_key] = ([], True)
         value: list[Any] = []
         cyclic = False
@@ -413,7 +421,7 @@ def _resolve_schema(
         if not cyclic:
             memo[shared_key] = result
         return result
-    return node, False
+    raise AssertionError("unreachable schema node")
 
 
 def _detect_polling(partner: str, response_schema: dict[str, Any]) -> str | None:
@@ -453,13 +461,16 @@ def _registry() -> dict[str, Endpoint]:
             ctype = "multipart/form-data"
         else:
             ctype = next(iter(content.keys()), "application/json")
-        req_schema = _resolve(spec, (content.get(ctype) or {}).get("schema") or {})
+        try:
+            req_schema = _resolve(spec, (content.get(ctype) or {}).get("schema") or {})
 
-        # 200 response
-        resp = (op.get("responses") or {}).get("200") or {}
-        resp_content = resp.get("content") or {}
-        resp_ctype = "application/json" if "application/json" in resp_content else next(iter(resp_content), "")
-        resp_schema = _resolve(spec, (resp_content.get(resp_ctype) or {}).get("schema") or {}) if resp_ctype else {}
+            # 200 response
+            resp = (op.get("responses") or {}).get("200") or {}
+            resp_content = resp.get("content") or {}
+            resp_ctype = "application/json" if "application/json" in resp_content else next(iter(resp_content), "")
+            resp_schema = _resolve(spec, (resp_content.get(resp_ctype) or {}).get("schema") or {}) if resp_ctype else {}
+        except (KeyError, TypeError, SpecError, RecursionError):
+            continue
 
         polling = polling_hint or _detect_polling(partner, resp_schema)
 
