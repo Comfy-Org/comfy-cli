@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from comfy_cli.command.run.loader import _classify_api_workflow
+from comfy_cli.cql import engine as cql_engine
 from comfy_cli.cql.engine import (
     Graph,
     Port,
@@ -44,6 +45,16 @@ def test_subgraph_name_alias_checks_preserve_every_deep_acyclic_definition():
     resolved = _subgraph_defs_by_id(workflow)
 
     assert all(f"Alias{index}" in resolved for index in range(32))
+
+
+def test_subgraph_alias_bit_matrix_fails_closed_above_cap(monkeypatch):
+    definitions = [{"id": f"id-{index}", "name": f"Alias{index}", "nodes": []} for index in range(3)]
+    workflow = {"nodes": [], "definitions": {"subgraphs": definitions}}
+    monkeypatch.setattr(cql_engine, "_MAX_DEFINITION_ALIAS_MASK_BITS", 4)
+
+    resolved = _subgraph_defs_by_id(workflow)
+
+    assert set(resolved) == {"id-0", "id-1", "id-2"}
 
 
 def _object_info() -> dict[str, Any]:

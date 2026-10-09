@@ -244,6 +244,21 @@ def test_registry_ignores_non_string_path_item_method_keys(monkeypatch):
         spec._registry.cache_clear()
 
 
+def test_schema_object_check_memoizes_shared_acyclic_dag():
+    leaf: dict = {"type": "object"}
+    root = leaf
+    for _ in range(20):
+        root = {"allOf": [root, root]}
+
+    with mock.patch.object(spec, "_schema_may_be_object", wraps=spec._schema_may_be_object) as check:
+        assert spec._schema_may_be_object(root) is True
+
+    # One completed result per unique schema plus cheap memo hits for the
+    # duplicated edges. Without a completed-result memo this DAG takes 2**20
+    # recursive calls despite having only 21 distinct schema objects.
+    assert check.call_count <= 42
+
+
 def test_get_endpoint_round_trip():
     ep = spec.get_endpoint("bfl/flux-pro-1.1/generate")
     assert ep.partner == "bfl"

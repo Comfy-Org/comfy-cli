@@ -783,7 +783,11 @@ def model_enum(endpoint_id: str, field: str = "model") -> list[str] | None:
     return _extract_enum(prop)
 
 
-def _schema_may_be_object(schema: Any, _active: set[int] | None = None) -> bool:
+def _schema_may_be_object(
+    schema: Any,
+    _active: set[int] | None = None,
+    _memo: dict[int, bool] | None = None,
+) -> bool:
     """Whether an OpenAPI/JSON Schema branch can describe a request object."""
     if schema is False:
         return False
@@ -791,29 +795,39 @@ def _schema_may_be_object(schema: Any, _active: set[int] | None = None) -> bool:
         return True
     if _active is None:
         _active = set()
+    if _memo is None:
+        _memo = {}
     schema_id = id(schema)
+    if schema_id in _memo:
+        return _memo[schema_id]
     if schema_id in _active:
         return True
     _active.add(schema_id)
     try:
         schema_type = schema.get("type")
         if isinstance(schema_type, str):
-            return schema_type == "object"
-        if isinstance(schema_type, list):
-            return "object" in schema_type
-        if "const" in schema:
-            return isinstance(schema.get("const"), dict)
-        enum = schema.get("enum")
-        if isinstance(enum, list) and enum:
-            return any(isinstance(value, dict) for value in enum)
-        for key in ("anyOf", "oneOf"):
-            variants = schema.get(key)
-            if isinstance(variants, list):
-                return any(_schema_may_be_object(variant, _active) for variant in variants)
-        all_of = schema.get("allOf")
-        if isinstance(all_of, list) and all_of:
-            return all(_schema_may_be_object(variant, _active) for variant in all_of)
-        return True
+            result = schema_type == "object"
+        elif isinstance(schema_type, list):
+            result = "object" in schema_type
+        elif "const" in schema:
+            result = isinstance(schema.get("const"), dict)
+        else:
+            enum = schema.get("enum")
+            if isinstance(enum, list) and enum:
+                result = any(isinstance(value, dict) for value in enum)
+            else:
+                result = True
+                for key in ("anyOf", "oneOf"):
+                    variants = schema.get(key)
+                    if isinstance(variants, list):
+                        result = any(_schema_may_be_object(variant, _active, _memo) for variant in variants)
+                        break
+                else:
+                    all_of = schema.get("allOf")
+                    if isinstance(all_of, list) and all_of:
+                        result = all(_schema_may_be_object(variant, _active, _memo) for variant in all_of)
+        _memo[schema_id] = result
+        return result
     finally:
         _active.remove(schema_id)
 

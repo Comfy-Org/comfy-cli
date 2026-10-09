@@ -198,7 +198,10 @@ _CAMEL_SECRET_KEY_PATTERN = (
     r"[a-z][A-Za-z0-9]{0,63}(?:(?-i:ApiKeys?|Passwords?|Secrets?|Tokens?|Passphrases?))|"
     r"(?:api|app|auth|access|refresh|client|consumer|session|secret|private|signing|oauth|jwt|aws|comfy|"
     r"proxy|credential|master|subscription|hmac|encryption|account|sharedAccess|sshPrivate|service|db)"
-    r"[A-Za-z0-9]{0,32}(?:(?-i:KeyIds?|Keys?|Authorization|Cookies?|Signatures?|SessionIds?)))"
+    r"[A-Za-z0-9]{0,32}(?:(?-i:KeyIds?|Keys?|Authorization|Cookies?|Signatures?|SessionIds?))|"
+    r"(?!(?i:(?:max|prompt|completion|total|input|output|maxoutput|maxcompletion|maxnew)tokens?)\b)"
+    r"(?:(?-i:[A-Z][A-Z0-9]{0,63}(?:PASSWORDS?|SECRETS?|TOKENS?|PASSPHRASES?))|"
+    r"(?-i:[a-z][a-z0-9]{0,63}(?:passwords?|secrets?|tokens?|passphrases?))))"
     r"(?:(?-i:Backup|Value|V[0-9]+))?"
 )
 _ORDINARY_KEY_WORD = (
@@ -218,8 +221,9 @@ _SECRET_ASSIGNMENT_KEY_PATTERN = (
     rf")"
 )
 _OPTIONAL_KEY_CLOSING_QUOTE = r"(?:[\"'](?=[^\S\r\n]*[:=]))?"
+_SECRET_VALUE_SPACE = r"(?:[^\S\r\n]*|[^\S\r\n]*\r?\n[ \t]*(?=[bBuUrR]{0,2}[\"']))"
 _SECRET_CONSTRUCTOR_START = re.compile(
-    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=][^\S\r\n]*)"
+    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
     r"[A-Za-z_][\w.]*\(",
     re.IGNORECASE,
 )
@@ -269,7 +273,7 @@ def _scrub_secret_constructors(text: str) -> str:
 
 
 _SECRET_CONTAINER_START = re.compile(
-    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=][^\S\r\n]*)"
+    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
     r"(?P<opener>[\[({<])",
     re.IGNORECASE,
 )
@@ -315,7 +319,7 @@ def _scrub_secret_containers(text: str) -> str:
 
 
 _SECRET_QUOTED_START = re.compile(
-    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=][^\S\r\n]*)"
+    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
     r"(?P<wrapper>[bBuUrR]{0,2})(?P<quote>\"\"\"|'''|[\"'])",
     re.IGNORECASE,
 )
@@ -454,17 +458,45 @@ def _scrub_url_userinfo(text: str) -> str:
         token_end_match = re.search(r'[\s"]', text[match.end() :])
         token_end = match.end() + token_end_match.start() if token_end_match is not None else len(text)
         token = text[match.end() : token_end]
-        at = token.rfind("@")
+        delimiters = [index for char in "/?#" if (index := token.find(char)) >= 0]
+        first_delimiter = min(delimiters) if delimiters else len(token)
+        # Prefer an @ inside the real authority. A later @ in a path, query,
+        # fragment, or VCS ref must not pull the mask past the delimiter and
+        # erase the query anchor. Only malformed passwords that themselves
+        # crossed a raw delimiter fall back to the final token-wide @.
+        authority_at = token.rfind("@", 0, first_delimiter)
+        standard_userinfo = authority_at >= 0
+        at = authority_at if standard_userinfo else token.rfind("@")
         if at < 0:
             search_from = match.end()
             continue
-        delimiters = [index for char in "/?#" if (index := token.find(char)) >= 0]
-        first_delimiter = min(delimiters) if delimiters else len(token)
-        standard_userinfo = at < first_delimiter
+        later_scheme = _URL_SCHEME_START.search(token, first_delimiter, at)
+        if not standard_userinfo and later_scheme is not None:
+            # A joined/nested URL owns that later @. Let the outer URL go and
+            # resume at the inner scheme rather than treating the entire span
+            # as one malformed password.
+            search_from = match.end() + later_scheme.start()
+            continue
         authority = token[:first_delimiter]
-        malformed_password = ":" in authority and not _looks_like_numbered_network_authority(authority)
+        numbered_authority = _looks_like_numbered_network_authority(authority)
+        if authority.startswith("["):
+            authority_host = authority.partition("]")[0] + "]"
+        else:
+            authority_host = authority.rpartition(":")[0]
+        clearly_network_host = (
+            authority_host in {"host", "localhost"}
+            or "." in authority_host
+            or (authority_host.startswith("[") and authority_host.endswith("]"))
+        )
+        delimiter = token[first_delimiter] if first_delimiter < len(token) else ""
+        malformed_password = ":" in authority and (
+            not numbered_authority or not clearly_network_host or delimiter == "#"
+        )
         if not standard_userinfo and not malformed_password:
-            search_from = token_end
+            # A whitespace-free token can contain another URL (proxy wrappers,
+            # comma-joined indexes). Resume immediately after this scheme so
+            # the next scheme remains discoverable.
+            search_from = match.end()
             continue
         chunks.extend((text[cursor : match.end()], "***@"))
         cursor = match.end() + at + 1
@@ -473,6 +505,34 @@ def _scrub_url_userinfo(text: str) -> str:
         return text
     chunks.append(text[cursor:])
     return "".join(chunks)
+
+
+def _mask_unquoted_secret_assignment(match: re.Match) -> str:
+    """Mask a whitespace-delimited secret token without leaking punctuation.
+
+    Commas, apostrophes, semicolons, and ampersands can all be part of an
+    unquoted credential. Preserve a delimiter only when it unambiguously opens
+    the next ``name=value`` pair, plus structural closing punctuation.
+    """
+    prefix = match.group("prefix")
+    value = match.group("value")
+    key = re.split(r"[:=]", prefix, maxsplit=1)[0]
+    if key.count(".") >= 2 and re.fullmatch(r"[0-9]{1,5}(?:/[^\s]*)?", value):
+        # A dotted hostname plus numeric port is a network authority, not a
+        # dotted secret-key assignment (auth.example.com:443/path).
+        return match.group(0)
+    sibling = re.search(r"[&,;](?=(?:[\"']?[A-Za-z_][\w.-]*[\"']?[:=]))", value)
+    if sibling is not None:
+        return f"{prefix}***{value[sibling.start() :]}"
+    opening_wrapper = (
+        match.string[match.start() - 1] if match.start() and match.string[match.start() - 1] in "\"'" else ""
+    )
+    if opening_wrapper and value.endswith(opening_wrapper):
+        suffix = opening_wrapper
+    else:
+        structural = re.search(r"[\"']?[}\]),]+$", value)
+        suffix = value[structural.start() :] if structural is not None else ""
+    return f"{prefix}***{suffix}"
 
 
 _SECRET_PATTERNS = (
@@ -506,7 +566,7 @@ _SECRET_PATTERNS = (
         # diagnostics, so consume just the constructor (never whitespace plus
         # an ordinary explanatory parenthetical).
         re.compile(
-            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=][^\S\r\n]*)"
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
             r"[A-Za-z_][\w.]*\([^\r\n)]*\)",
             re.IGNORECASE,
         ),
@@ -518,7 +578,7 @@ _SECRET_PATTERNS = (
         # the rest of that line and its indented continuations. This is linear
         # and cannot leak later elements through a premature closer.
         re.compile(
-            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=][^\S\r\n]*)"
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
             r"(?:[\[({]|[A-Za-z_][\w.]*\()[^\r\n]*"
             r"(?:\r?\n(?![ \t]+[A-Za-z][A-Za-z0-9 _-]{0,63}[ \t]*:)[ \t]+[^\r\n]*)*",
             re.IGNORECASE,
@@ -526,14 +586,25 @@ _SECRET_PATTERNS = (
         r"\1***",
     ),
     (
-        # The Bearer scrubber above preserves the scheme; do not remask it as an unquoted token value.
+        # Quoted values stop at their matching quote so later diagnostics stay
+        # visible. Constructors and containers were handled above.
         re.compile(
-            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=][^\S\r\n]*)"
-            r"(?:([bBuUrR]{0,2})((?:\\)?(?:\"\"\"|'''|[\"']))(?:(?!\3)(?:\\.|[^\r\n]))*\3?"
-            r"|(?!Bearer\s)(?:\\(?![\"'])|[^\\\s&\"',;])+)",
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
+            r"([bBuUrR]{0,2})((?:\\)?(?:\"\"\"|'''|[\"']))(?:(?!\3)(?:\\.|[^\r\n]))*\3?",
             re.IGNORECASE,
         ),
-        lambda m: f"{m[1]}{m[2]}{m[3]}***{m[3]}" if m[3] else f"{m[1]}***",
+        lambda m: f"{m[1]}{m[2]}{m[3]}***{m[3]}",
+    ),
+    (
+        # The Bearer scrubber above preserves the scheme; do not remask it as
+        # an unquoted token. Mask punctuation inside every other credential.
+        re.compile(
+            rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}"
+            rf"[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
+            r"(?!Bearer\s)(?![bBuUrR]{0,2}(?:\"\"\"|'''|[\"']))(?P<value>[^\s]+)",
+            re.IGNORECASE,
+        ),
+        _mask_unquoted_secret_assignment,
     ),
     (
         # JSON that has itself been escaped can still carry a nested,

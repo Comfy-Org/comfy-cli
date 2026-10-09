@@ -3522,6 +3522,7 @@ _MAX_SUBGRAPH_DEPTH = 32
 # :func:`split_node_path`, which matches segments against real ids, never with
 # a bare ``str.split``.
 _SUBGRAPH_PATH_SEP = "/"
+_MAX_DEFINITION_ALIAS_MASK_BITS = 8_000_000
 
 
 def split_node_path(workflow: dict, node_path: str) -> list[str]:
@@ -3574,6 +3575,11 @@ def _definition_alias_conflicts(
         if id(definition) not in index_by_identity:
             index_by_identity[id(definition)] = len(unique_definitions)
             unique_definitions.append(definition)
+    # One Python integer per component carries one bit per candidate. Bound
+    # the total logical bit matrix before allocating it; name aliases are an
+    # optional compatibility fallback, so overflow is safely ambiguous.
+    if len(candidates) * len(unique_definitions) > _MAX_DEFINITION_ALIAS_MASK_BITS:
+        return set(candidates)
     edges: list[set[int]] = [set() for _ in unique_definitions]
     bit_by_name = {name: 1 << index for index, name in enumerate(candidates)}
     direct_masks = [0] * len(unique_definitions)
@@ -4372,7 +4378,14 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
                 break
             selector_idx, selector = missing
             widgets.extend([None] * (selector_idx - len(widgets)))
-            widgets.append(_widget_default(selector))
+            selector_default = _widget_default(selector)
+            widgets.append(selector_default)
+            default_values, _default_names = _dynamic_combo_default_values(
+                selector.dynamic_options,
+                selector_default,
+                selector.name,
+            )
+            widgets.extend(default_values)
     order = graph.widget_order_for_node(node_type, widgets)
     entries = _expand_widget_entries(m, widgets)
     if any(e.frontend_injected and e.name == input_name for e in entries):

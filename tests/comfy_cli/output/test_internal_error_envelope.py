@@ -575,6 +575,27 @@ def test_internal_error_scrubber_masks_email_usernames_and_apostrophe_passwords(
 
 
 @pytest.mark.parametrize(
+    ("message", "secret", "kept"),
+    [
+        ("git+https://ghp_TOKEN@github.com/org/repo.git@main", "ghp_TOKEN", "repo.git@main"),
+        ("https://TOKEN@host/x?email=a@b", "TOKEN", "?***"),
+        (
+            "https://alice:secret@example.com/cb?login=bob@corp.com&code=TOPSECRET",
+            "secret",
+            "?***",
+        ),
+        ("https://pypi.org/simple,https://alice:pw@private.example/simple", "pw", "pypi.org/simple"),
+        ("https://proxy.example/fetch/https://user:TOKEN@internal/x", "TOKEN", "proxy.example"),
+        ("redis://a:6379/0,redis://:pw@b:6379/0", "pw", "redis://a:6379/0"),
+    ],
+)
+def test_internal_error_scrubber_handles_authority_at_and_multiple_urls(message, secret, kept):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert secret not in scrubbed
+    assert kept in scrubbed
+
+
+@pytest.mark.parametrize(
     "message",
     [
         "https://accounts.example.com:443/cb?login_hint=bob@corp.com&code=SECRET",
@@ -593,6 +614,20 @@ def test_internal_error_scrubber_masks_apostrophe_inside_query_secret():
     scrubbed = _internal_error_message(RuntimeError("https://example.com?api_key=pa'ss"))
     assert "pa'ss" not in scrubbed
     assert "?***" in scrubbed
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "postgres://admin:1234#Secret@db/x",
+        "https://alice:2024/x@host",
+        "https://alice:2024?x@host",
+    ],
+)
+def test_internal_error_scrubber_fails_closed_for_numeric_passwords_crossing_delimiters(message):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "admin:1234" not in scrubbed
+    assert "alice:2024" not in scrubbed
 
 
 @pytest.mark.parametrize(
@@ -656,6 +691,11 @@ def test_internal_error_scrubber_handles_non_ascii_digit_port_without_crashing()
         "authtoken",
         "apitoken",
         "dbpassword",
+        "DATABASEPASSWORD",
+        "DBPASSWORD",
+        "WEBHOOKSECRET",
+        "GITHUBTOKEN",
+        "stripesecret",
         "api.key",
         "secret.key",
         "signing.key",
@@ -696,6 +736,39 @@ def test_internal_error_scrubber_masks_extended_credential_key_vocabulary(key):
 def test_internal_error_scrubber_preserves_non_secret_key_like_diagnostics(key):
     message = f"{key}=visible"
     assert message in _internal_error_message(RuntimeError(message))
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "https://auth.example.com:8443/callback",
+        "Cannot connect to host oauth.example.com:443 ssl:default",
+        "Cannot connect to host login.auth.example.com:443 ssl:default",
+    ],
+)
+def test_internal_error_scrubber_preserves_secret_named_dotted_host_ports(message):
+    assert message in _internal_error_message(RuntimeError(message))
+
+
+@pytest.mark.parametrize(
+    ("message", "secret", "kept"),
+    [
+        ("password=Xy7;kL9&mQ request=req-1", "kL9&mQ", "request=req-1"),
+        ("password=pa'ss request=req-1", "pa'ss", "request=req-1"),
+        ("API_KEYS=sk-A,sk-B request=req-1", "sk-B", "request=req-1"),
+        ("api_key=LIVE&request=req-1", "LIVE", "&request=req-1"),
+    ],
+)
+def test_internal_error_scrubber_masks_complete_unquoted_credential_tokens(message, secret, kept):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert secret not in scrubbed
+    assert kept in scrubbed
+
+
+def test_internal_error_scrubber_masks_a_quoted_secret_value_on_the_next_line():
+    scrubbed = _internal_error_message(RuntimeError('{"password":\n  "LIVE-CREDENTIAL"} request=req-1'))
+    assert "LIVE-CREDENTIAL" not in scrubbed
+    assert "request=req-1" in scrubbed
 
 
 def test_armored_scrubber_keeps_unicode_offsets_and_masks_the_next_block():
