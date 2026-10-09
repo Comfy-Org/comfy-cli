@@ -144,6 +144,121 @@ def test_every_promotion_resolver_skips_an_unheld_row_before_a_live_one():
     assert promoted.boundary_widget_targets(sg, item, definitions) == [(["8"], "prompt")]
 
 
+def test_every_promotion_resolver_rejects_a_non_proxy_listed_row():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [1]}],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 1}],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": 99, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = sg
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert item.value_index is None
+    assert promoted._promotion_source(sg, sg["inputs"][0], definitions) is None
+    assert promoted.boundary_widget_targets(sg, item, definitions) == []
+
+
+def test_promotion_visit_limit_counts_listed_link_ids():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": list(range(65))}],
+        "nodes": [],
+        "links": [],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = sg
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert item.name == "value"
+    assert item.value_index is None
+
+
+def test_unregistered_root_does_not_reuse_a_smaller_cached_visit_limit():
+    registered = {"id": "registered", "inputs": [], "nodes": [], "links": []}
+    external = {
+        "id": "external",
+        "inputs": [{"name": "value", "linkIds": list(range(100))}],
+        "nodes": [],
+        "links": [],
+    }
+    definitions = _SubgraphDefs()
+    definitions["registered"] = registered
+
+    registered_limit = promoted._promotion_visit_limit(definitions, registered)
+    external_limit = promoted._promotion_visit_limit(definitions, external)
+
+    assert external_limit > registered_limit
+
+
+def test_promotion_caches_do_not_expose_mutable_results():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [1]}],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 1}],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = sg
+
+    first_inputs = promoted.promoted_inputs(sg, definitions)
+    item = first_inputs[0]
+    first_inputs.clear()
+    first_targets = promoted.boundary_widget_targets(sg, item, definitions)
+    first_targets[0][0].append("corrupt")
+    first_targets.clear()
+
+    assert len(promoted.promoted_inputs(sg, definitions)) == 1
+    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["7"], "prompt")]
+
+
+def test_boundary_resolution_treats_non_list_nested_inputs_as_empty():
+    inner = {"id": "inner", "inputs": 5, "nodes": [], "links": []}
+    outer = {
+        "id": "outer",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+        "nodes": [{"id": 7, "type": "inner", "inputs": [{"name": "value", "link": 1}]}],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions.update({"outer": outer, "inner": inner})
+
+    [item] = promoted.promoted_inputs(outer, definitions)
+
+    assert promoted.boundary_widget_targets(outer, item, definitions) == []
+
+
+def test_registered_roots_share_one_budget_per_promotion_operation():
+    left = {"id": "left", "inputs": [], "nodes": [], "links": []}
+    right = {"id": "right", "inputs": [], "nodes": [], "links": []}
+    definitions = _SubgraphDefs()
+    definitions.update({"left": left, "right": right})
+
+    promoted.promoted_inputs(left, definitions)
+    budget = definitions.promotion_inputs_budget
+    assert budget is not None
+    remaining = budget[0]
+    promoted.promoted_inputs(right, definitions)
+
+    assert definitions.promotion_inputs_budget is budget
+    assert budget[0] < remaining
+
+
 def test_every_promotion_resolver_follows_a_holder_when_the_row_target_drifted():
     sg = {
         "id": "sg",
@@ -522,7 +637,7 @@ def test_reused_nested_boundary_paths_charge_each_materialized_copy():
         promoted.boundary_widget_targets(definitions["level-0"], pi, definitions)
 
 
-def test_repeated_boundary_link_ids_share_holder_work_and_consume_budget():
+def test_repeated_boundary_link_ids_share_holder_work_with_serialized_budget():
     sg = {
         "id": "sg",
         "inputs": [{"name": "value", "type": "STRING", "linkIds": [1] * 10_000}],
@@ -530,12 +645,10 @@ def test_repeated_boundary_link_ids_share_holder_work_and_consume_budget():
         "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
     }
 
-    with (
-        mock.patch.object(promoted, "_is_slot_index", wraps=promoted._is_slot_index) as slot_check,
-        pytest.raises(promoted.PromotionTraversalLimitError, match="input traversal"),
-    ):
-        promoted.promoted_inputs(sg, {"sg": sg})
+    with mock.patch.object(promoted, "_is_slot_index", wraps=promoted._is_slot_index) as slot_check:
+        [item] = promoted.promoted_inputs(sg, {"sg": sg})
 
+    assert item.name == "value"
     assert slot_check.call_count == 1
 
 
@@ -640,7 +753,8 @@ def test_definition_index_caches_limit_and_holder_scans():
 
     assert holder_scan.call_count == 1
     assert link_scan.call_count == 1
-    assert second is first
+    assert second == first
+    assert second is not first
     assert definitions.promotion_visit_limit is not None
 
 
@@ -664,7 +778,8 @@ def test_boundary_targets_are_cached_for_the_definition_index():
         first = promoted.boundary_widget_targets(definition, item, definitions)
         second = promoted.boundary_widget_targets(definition, item, definitions)
 
-    assert second is first
+    assert second == first
+    assert second is not first
     assert resolver.call_count == 1
 
 
