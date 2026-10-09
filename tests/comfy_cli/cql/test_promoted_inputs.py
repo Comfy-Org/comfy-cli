@@ -536,12 +536,37 @@ def test_definition_index_caches_limit_and_holder_scans():
         mock.patch.object(promoted, "_link_holders", wraps=promoted._link_holders) as holder_scan,
         mock.patch.object(promoted, "_link_rows_by_id", wraps=promoted._link_rows_by_id) as link_scan,
     ):
-        promoted.promoted_inputs(definition, definitions)
-        promoted.promoted_inputs(definition, definitions)
+        first = promoted.promoted_inputs(definition, definitions)
+        second = promoted.promoted_inputs(definition, definitions)
 
     assert holder_scan.call_count == 1
     assert link_scan.call_count == 1
+    assert second is first
     assert definitions.promotion_visit_limit is not None
+
+
+def test_boundary_targets_are_cached_for_the_definition_index():
+    definition = {
+        "id": "sg",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+        "nodes": [
+            {
+                "id": 7,
+                "inputs": [{"name": "value", "link": 1, "widget": {"name": "value"}}],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = definition
+    item = promoted.PromotedInput("value", "STRING", 0, 0)
+
+    with mock.patch.object(promoted, "_boundary_targets", wraps=promoted._boundary_targets) as resolver:
+        first = promoted.boundary_widget_targets(definition, item, definitions)
+        second = promoted.boundary_widget_targets(definition, item, definitions)
+
+    assert second is first
+    assert resolver.call_count == 1
 
 
 def test_definition_repairs_invalidate_cached_limits_and_holders():
@@ -553,17 +578,26 @@ def test_definition_repairs_invalidate_cached_limits_and_holders():
     }
     definitions = _SubgraphDefs()
     definitions["sg"] = definition
+    other = {"id": "other", "inputs": [], "nodes": [], "links": []}
+    definitions["other"] = other
     original = promoted._cached_link_holders(definition, definitions)
     original_links = promoted._cached_link_rows(definition, definitions)
+    promoted.promoted_inputs(definition, definitions)
+    promoted.promoted_inputs(other, definitions)
+    promoted.boundary_widget_targets(definition, promoted.PromotedInput("value", "STRING", 0, 0), definitions)
     assert promoted._promotion_visit_limit(definitions, definition) > 0
+    assert len(definitions.promotion_inputs) == 2
+    assert definitions.promotion_boundaries
 
     definition["nodes"].append({"id": 8, "inputs": [{"name": "value", "link": 1}]})
     promoted._invalidate_promotion_caches(definitions, definition)
 
     assert promoted._cached_link_holders(definition, definitions) is not original
     assert promoted._cached_link_rows(definition, definitions) is not original_links
-    assert len(promoted._cached_link_holders(definition, definitions)["1"]) == 2
+    assert len(promoted._cached_link_holders(definition, definitions)[1]) == 2
     assert definitions.promotion_visit_limit is None
+    assert definitions.promotion_inputs == {}
+    assert definitions.promotion_boundaries == {}
 
 
 def test_definition_indexes_keep_a_strong_reference_to_an_unregistered_root():
@@ -650,6 +684,29 @@ def test_effective_value_falls_back_to_the_interior_widget(graph):
     assert promoted.effective_value(wf, inst, "width", graph) == 1024
     assert promoted.effective_value(wf, inst, "steps", graph) == 8
     assert promoted.effective_value(wf, inst, "unet_name", graph) == "z_image_turbo_bf16.safetensors"
+
+
+def test_source_value_stops_mutually_recursive_promoted_definitions():
+    def nested_definition(name: str, child: str) -> dict:
+        return {
+            "id": name,
+            "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+            "nodes": [
+                {
+                    "id": 7,
+                    "type": child,
+                    "inputs": [{"name": "value", "widget": {"name": "value"}, "link": 1}],
+                }
+            ],
+            "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+        }
+
+    first = nested_definition("first", "second")
+    second = nested_definition("second", "first")
+    definitions = {"first": first, "second": second}
+    [item] = promoted.promoted_inputs(first, definitions)
+
+    assert promoted.source_value({}, first, item, graph=None, defs=definitions) is promoted.UNSET
 
 
 def test_quarantined_host_value_wins_by_name(graph):

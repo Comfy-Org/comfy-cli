@@ -97,7 +97,8 @@ def _nested_definition(target: dict, defs: dict[str, dict], stack: tuple[int, ..
 
 def _entry_holds_link(entry: dict, link_id: Any) -> bool:
     """Whether LiteGraph will render ``entry`` from this boundary link."""
-    return entry.get("link") is not None and str(entry["link"]) == str(link_id)
+    held = entry.get("link")
+    return _is_link_id(held) and held == link_id
 
 
 def _is_slot_index(value: Any) -> bool:
@@ -125,16 +126,16 @@ def _spend_traversal_budget(budget: list[int] | None, amount: int, message: str)
     budget[0] -= amount
 
 
-def _link_holders(sg: dict) -> dict[str, list[tuple[dict, int, dict]]]:
+def _link_holders(sg: dict) -> dict[Any, list[tuple[dict, int, dict]]]:
     """Every input that actually holds a link id, in serialized node order."""
-    holders: dict[str, list[tuple[dict, int, dict]]] = {}
+    holders: dict[Any, list[tuple[dict, int, dict]]] = {}
     for node in sg.get("nodes") or []:
         if not isinstance(node, dict):
             continue
         inputs = node.get("inputs")
         for slot, entry in enumerate(inputs if isinstance(inputs, list) else []):
-            if isinstance(entry, dict) and entry.get("link") is not None:
-                holders.setdefault(str(entry["link"]), []).append((node, slot, entry))
+            if isinstance(entry, dict) and _is_link_id(entry.get("link")):
+                holders.setdefault(entry["link"], []).append((node, slot, entry))
     return holders
 
 
@@ -157,7 +158,7 @@ def _cached_link_rows(sg: dict, defs: dict[str, dict]) -> dict[Any, dict]:
     return entry[1]
 
 
-def _cached_link_holders(sg: dict, defs: dict[str, dict]) -> dict[str, list[tuple[dict, int, dict]]]:
+def _cached_link_holders(sg: dict, defs: dict[str, dict]) -> dict[Any, list[tuple[dict, int, dict]]]:
     cache = getattr(defs, "promotion_holders", None)
     if cache is None:
         return _link_holders(sg)
@@ -185,13 +186,19 @@ def _invalidate_promotion_caches(defs: dict[str, dict], sg: dict | None = None) 
             cache.clear()
         else:
             cache.pop(id(sg), None)
+    for name in ("promotion_inputs", "promotion_boundaries"):
+        cache = getattr(defs, name, None)
+        if cache is not None:
+            # These results can depend on any nested definition, so repairing
+            # one definition invalidates every root derived through the index.
+            cache.clear()
 
 
 def held_link_targets(
     sg: dict,
     link_id: Any,
     link: dict,
-    holders: dict[str, list[tuple[dict, int, dict]]] | None = None,
+    holders: dict[Any, list[tuple[dict, int, dict]]] | None = None,
     cache: dict[int, tuple[tuple[dict, int, dict], ...]] | None = None,
     budget: list[int] | None = None,
     limit_message: str = "promoted input traversal exceeded its safe limit",
@@ -207,7 +214,7 @@ def held_link_targets(
         result = cache[cache_key]
         _spend_traversal_budget(budget, len(result), limit_message)
         return result
-    locations = (holders if holders is not None else _link_holders(sg)).get(str(link_id), [])
+    locations = (holders if holders is not None else _link_holders(sg)).get(link_id, [])
     _spend_traversal_budget(budget, len(locations), limit_message)
     target_slot = link.get("target_slot")
     preferred = next(
@@ -279,6 +286,12 @@ def promoted_inputs(
     context linear without changing those cycle semantics. ``_budget`` also
     bounds distinct ancestry paths in a malformed definition DAG, proportional
     to the serialized definition graph rather than its path count."""
+    root_call = depth == 0 and not _stack and _memo is None and _budget is None and _name_memo is None
+    root_cache = getattr(defs, "promotion_inputs", None)
+    if root_call and root_cache is not None:
+        cached = root_cache.get(id(sg))
+        if cached is not None and cached[0] is sg:
+            return cached[1]
     if _memo is None:
         _memo = {}
     if _name_memo is None:
@@ -290,9 +303,13 @@ def promoted_inputs(
         result = _memo[memo_key]
         _spend_traversal_budget(_budget, 1, "promoted input traversal exceeded its safe limit")
         return result
-    if _budget[0] <= 0:
-        raise PromotionTraversalLimitError("promoted input traversal exceeded its safe limit")
-    _budget[0] -= 1
+    raw_inputs = sg.get("inputs")
+    inputs = raw_inputs if isinstance(raw_inputs, list) else []
+    _spend_traversal_budget(
+        _budget,
+        1 + len(inputs),
+        "promoted input traversal exceeded its safe limit",
+    )
     _stack = (*_stack, id(sg))
     holders = _cached_link_holders(sg, defs)
     target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
@@ -301,7 +318,7 @@ def promoted_inputs(
     links = _cached_link_rows(sg, defs)
     out: list[PromotedInput] = []
     value_index = 0
-    for idx, inp in enumerate(sg.get("inputs") or []):
+    for idx, inp in enumerate(inputs):
         if not isinstance(inp, dict):
             continue
         name = str(inp.get("name") or "")
@@ -379,6 +396,8 @@ def promoted_inputs(
         )
         value_index += 1
     _memo[memo_key] = out
+    if root_call and root_cache is not None:
+        root_cache[id(sg)] = (sg, out)
     return out
 
 
@@ -470,12 +489,22 @@ def _interior_widget_value(node: dict, widget: str, graph) -> Any:
     return UNSET
 
 
-def source_value(workflow: dict, sg: dict, pi: PromotedInput, graph, defs: dict[str, dict] | None = None) -> Any:
+def source_value(
+    workflow: dict,
+    sg: dict,
+    pi: PromotedInput,
+    graph,
+    defs: dict[str, dict] | None = None,
+    _stack: frozenset[int] = frozenset(),
+) -> Any:
     """The interior value ``pi`` falls back to when the host has none: the
     interior widget, or — through a nested instance — that instance's own
     effective value. :data:`UNSET` when the source cannot be read."""
     if pi.source_node is None:
         return UNSET
+    if id(sg) in _stack:
+        return UNSET
+    stack = _stack | {id(sg)}
     defs = defs if defs is not None else defs_by_id(workflow)
     inner = next((n for n in sg.get("nodes") or [] if str(n.get("id")) == pi.source_node), None)
     if inner is None:
@@ -490,7 +519,7 @@ def source_value(workflow: dict, sg: dict, pi: PromotedInput, graph, defs: dict[
         inner_pi = find_promoted(inner_def, defs, pi.source_input)
         if inner_pi is None:
             return UNSET
-        return source_value(workflow, inner_def, inner_pi, graph, defs)
+        return source_value(workflow, inner_def, inner_pi, graph, defs, stack)
     return _interior_widget_value(inner, str(pi.source_widget), graph)
 
 
@@ -1757,19 +1786,30 @@ def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) 
     """Every concrete ``(interior node path, widget)`` a promoted input feeds —
     all of its boundary links, through nested instances. A repaired primitive
     fan-out has several; :func:`deepest_source` reports only the first."""
+    cache = getattr(defs, "promotion_boundaries", None)
+    cache_key = (id(sg), pi.index)
+    if cache is not None:
+        cached = cache.get(cache_key)
+        if cached is not None and cached[0] is sg:
+            return cached[1]
     inputs = sg.get("inputs") or []
     inp = inputs[pi.index] if 0 <= pi.index < len(inputs) and isinstance(inputs[pi.index], dict) else None
     if inp is None:
         single = deepest_source(sg, pi, defs)
-        return [single] if single is not None else []
-    return _boundary_targets(
-        sg,
-        inp,
-        defs,
-        0,
-        _memo={},
-        _budget=[_promotion_visit_limit(defs, sg)],
-    )
+        result = [single] if single is not None else []
+    else:
+        result = _boundary_targets(
+            sg,
+            inp,
+            defs,
+            0,
+            _memo={},
+            _budget=[_promotion_visit_limit(defs, sg)],
+            _input_name_memo={},
+        )
+    if cache is not None:
+        cache[cache_key] = (sg, result)
+    return result
 
 
 def _boundary_targets(
@@ -1780,6 +1820,7 @@ def _boundary_targets(
     _stack: tuple[int, ...] = (),
     _memo: dict[tuple[int, int, int, tuple[int, ...]], list[tuple[list[str], str]]] | None = None,
     _budget: list[int] | None = None,
+    _input_name_memo: dict[int, dict[Any, dict]] | None = None,
 ) -> list[tuple[list[str], str]]:
     if depth > _MAX_NESTED_PROMOTION_DEPTH:
         return []
@@ -1787,6 +1828,8 @@ def _boundary_targets(
         _memo = {}
     if _budget is None:
         _budget = [_promotion_visit_limit(defs, sg)]
+    if _input_name_memo is None:
+        _input_name_memo = {}
     memo_key = (id(sg), id(inp), depth, _stack)
     if memo_key in _memo:
         result = _memo[memo_key]
@@ -1824,16 +1867,27 @@ def _boundary_targets(
             tid = str(target.get("id"))
             inner_def = _nested_definition(target, defs, _stack)
             if inner_def is not None:
-                inner_inp = next(
-                    (
-                        i
-                        for i in inner_def.get("inputs") or []
-                        if isinstance(i, dict) and i.get("name") == entry.get("name")
-                    ),
-                    None,
-                )
+                inner_inputs = _input_name_memo.get(id(inner_def))
+                if inner_inputs is None:
+                    inner_inputs = {
+                        item["name"]: item
+                        for item in inner_def.get("inputs") or []
+                        if isinstance(item, dict) and isinstance(item.get("name"), str)
+                    }
+                    _input_name_memo[id(inner_def)] = inner_inputs
+                entry_name = entry.get("name")
+                inner_inp = inner_inputs.get(entry_name) if isinstance(entry_name, str) else None
                 if inner_inp is not None:
-                    nested = _boundary_targets(inner_def, inner_inp, defs, depth + 1, _stack, _memo, _budget)
+                    nested = _boundary_targets(
+                        inner_def,
+                        inner_inp,
+                        defs,
+                        depth + 1,
+                        _stack,
+                        _memo,
+                        _budget,
+                        _input_name_memo,
+                    )
                     _spend_traversal_budget(
                         _budget,
                         len(nested),

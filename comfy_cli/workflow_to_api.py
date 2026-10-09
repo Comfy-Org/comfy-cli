@@ -297,6 +297,8 @@ class _SubgraphCtx:
         self.input_sources: dict[str, dict[int, tuple[Any, Any]]] = {}
         # subgraph_node_id_str -> {outer_slot: subgraph_input_idx} (when names differ in order)
         self.outer_to_input_idx: dict[str, dict[int, int]] = {}
+        # subgraph_node_id_str -> {raw held link id: unique subgraph input idx}
+        self.held_input_idx: dict[str, dict[Any, int | None]] = {}
 
 
 def _collect_subgraph_defs(workflow: dict) -> dict[str, dict]:
@@ -348,7 +350,17 @@ def _expand_subgraphs(
                 links.extend(sg_links)
                 ctx.input_targets[str(node.get("id"))] = input_map
                 ctx.output_sources[str(node.get("id"))] = output_map
-                ctx.outer_to_input_idx[str(node.get("id"))] = _outer_slot_to_input_idx(node, subgraph_defs[node_type])
+                node_id = str(node.get("id"))
+                outer_map = _outer_slot_to_input_idx(node, subgraph_defs[node_type])
+                ctx.outer_to_input_idx[node_id] = outer_map
+                held_slots: dict[Any, set[int]] = {}
+                for outer_slot, entry in enumerate(node.get("inputs") or []):
+                    if not isinstance(entry, dict) or not _is_link_id(entry.get("link")):
+                        continue
+                    held_slots.setdefault(entry["link"], set()).add(outer_map.get(outer_slot, outer_slot))
+                ctx.held_input_idx[node_id] = {
+                    link_id: next(iter(slots)) if len(slots) == 1 else None for link_id, slots in held_slots.items()
+                }
             else:
                 expanded.append(node)
         nodes = expanded
@@ -427,6 +439,13 @@ def _expand_one_subgraph(
         if isinstance(entry, dict) and isinstance((link_ids := entry.get("linkIds")), list)
     )
     target_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + 3 * serialized_boundary_links]
+    input_slots_by_link: dict[Any, set[int]] = {}
+    for idx, in_def in enumerate(sg_def.get("inputs") or []):
+        if not isinstance(in_def, dict):
+            continue
+        for link_id in _listed_link_ids(in_def):
+            if _is_link_id(link_id):
+                input_slots_by_link.setdefault(link_id, set()).add(idx)
 
     for idx, in_def in enumerate(sg_def.get("inputs") or []):
         if not isinstance(in_def, dict):
@@ -438,6 +457,8 @@ def _expand_one_subgraph(
                 raise WorkflowConversionError("subgraph input expansion exceeded its safe limit")
             target_budget[0] -= 1
             if not _is_link_id(lid):
+                continue
+            if input_slots_by_link.get(lid) != {idx}:
                 continue
             link = internal_link_map.get(lid)
             if isinstance(link, dict):
@@ -472,8 +493,21 @@ def _expand_one_subgraph(
             if isinstance(link, dict):
                 origin_id = link.get("origin_id")
                 origin_slot = link.get("origin_slot")
-                if _is_link_id(origin_id) and _is_slot_index(origin_slot):
-                    output_sources[idx] = (origin_id, origin_slot)
+                if str(origin_id) == str(_SUBGRAPH_INPUT_NODE_ID):
+                    listed_inputs = input_slots_by_link.get(lid, set())
+                    if len(listed_inputs) == 1:
+                        output_sources[idx] = (_SUBGRAPH_INPUT_NODE_ID, next(iter(listed_inputs)))
+                    continue
+                source = next(
+                    (node for node in internal_nodes if str(node.get("id")) == str(origin_id)),
+                    None,
+                )
+                if not _is_link_id(origin_id) or not _is_slot_index(origin_slot) or origin_slot < 0 or source is None:
+                    continue
+                outputs = source.get("outputs")
+                if isinstance(outputs, list) and origin_slot >= len(outputs):
+                    continue
+                output_sources[idx] = (origin_id, origin_slot)
 
     expanded_nodes: list[dict] = []
     for inner in internal_nodes:
@@ -543,20 +577,36 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
     # A one-to-one boundary row spends four fixed units (root visit, direct
     # target, leaf visit, result append). Reserve that serialized baseline;
     # the fixed cap remains available only for fan-out beyond it.
-    resolution_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + 4 * len(links)]
+    resolution_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + (3 * _MAX_RESOLUTION_DEPTH + 1) * len(links)]
+    source_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + (2 * _MAX_RESOLUTION_DEPTH + 1) * len(links)]
     for link in links:
         if not isinstance(link, (list, tuple)) or len(link) < 6:
             continue
-        _link_id, src_id, src_slot, tgt_id, tgt_slot, _link_type = link[:6]
-        tgt_id_str = str(tgt_id)
-        if tgt_id_str not in ctx.output_sources:
+        link_id, src_id, src_slot, tgt_id, tgt_slot, _link_type = link[:6]
+        if not _is_link_id(link_id):
             continue
-        sg_input_idx = tgt_slot
-        outer_map = ctx.outer_to_input_idx.get(tgt_id_str)
-        if outer_map and tgt_slot in outer_map:
-            sg_input_idx = outer_map[tgt_slot]
-        if isinstance(sg_input_idx, int) and not isinstance(sg_input_idx, bool):
-            ctx.input_sources.setdefault(tgt_id_str, {}).setdefault(sg_input_idx, (src_id, src_slot))
+        tgt_id_str = str(tgt_id)
+        if tgt_id_str not in ctx.output_sources and tgt_id_str not in ctx.input_targets:
+            continue
+        if tgt_id_str in ctx.held_input_idx:
+            held_map = ctx.held_input_idx[tgt_id_str]
+            if link_id not in held_map or held_map[link_id] is None:
+                continue
+            held_idx = held_map[link_id]
+        else:
+            if not ((isinstance(tgt_slot, int) and not isinstance(tgt_slot, bool)) or isinstance(tgt_slot, str)):
+                continue
+            outer_map = ctx.outer_to_input_idx.get(tgt_id_str)
+            held_idx = outer_map.get(tgt_slot, tgt_slot) if outer_map else tgt_slot
+        if not isinstance(held_idx, int) or isinstance(held_idx, bool):
+            continue
+        _record_subgraph_input_source(
+            tgt_id_str,
+            held_idx,
+            (src_id, src_slot),
+            ctx,
+            source_budget,
+        )
     updated: list = []
     for link in links:
         if not isinstance(link, (list, tuple)) or len(link) < 6:
@@ -568,13 +618,27 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
         src_id_out, src_slot_out = _resolve_subgraph_output(src_id_str, src_slot, ctx)
 
         tgt_id_str = str(tgt_id)
+        effective_tgt_slot = tgt_slot
+        expanded_target = (
+            tgt_id_str in ctx.held_input_idx or tgt_id_str in ctx.input_targets or tgt_id_str in ctx.output_sources
+        )
+        if tgt_id_str in ctx.held_input_idx:
+            held_map = ctx.held_input_idx[tgt_id_str]
+            if not _is_link_id(link_id) or link_id not in held_map or held_map[link_id] is None:
+                continue
+            effective_tgt_slot = held_map[link_id]
         all_targets = _resolve_subgraph_input_all(
             tgt_id_str,
-            tgt_slot,
+            effective_tgt_slot,
             ctx,
             _memo=resolution_memo,
             _budget=resolution_budget,
         )
+        if expanded_target and all_targets == [(tgt_id_str, effective_tgt_slot)]:
+            # The expanded-away instance has no live interior holder for this
+            # input. Passthrough outputs already captured its upstream in the
+            # pre-pass; retaining this row would point at a nonexistent node.
+            continue
         # Track input-slot rewrites for ALL targets (one outer input may fan out).
         for resolved_tgt_id, resolved_tgt_slot in all_targets:
             if resolved_tgt_id != tgt_id_str:
@@ -608,13 +672,47 @@ def _resolve_subgraph_output(node_id_str: str, slot: Any, ctx: _SubgraphCtx, dep
     if source is None:
         return node_id_str, slot
     internal_node, internal_slot = source
-    if internal_node == _SUBGRAPH_INPUT_NODE_ID:
+    if str(internal_node) == str(_SUBGRAPH_INPUT_NODE_ID):
         upstream = ctx.input_sources.get(node_id_str, {}).get(internal_slot)
         if upstream is None:
             return node_id_str, slot
         return _resolve_subgraph_output(str(upstream[0]), upstream[1], ctx, depth + 1)
     new_id = f"{node_id_str}:{internal_node}"
     return _resolve_subgraph_output(new_id, internal_slot, ctx, depth + 1)
+
+
+def _record_subgraph_input_source(
+    node_id_str: str,
+    input_idx: int,
+    source: tuple[Any, Any],
+    ctx: _SubgraphCtx,
+    budget: list[int],
+    depth: int = 0,
+    seen: set[tuple[str, int]] | None = None,
+) -> None:
+    """Record one external source on every nested instance boundary it feeds."""
+    if depth > _MAX_RESOLUTION_DEPTH:
+        return
+    if seen is None:
+        seen = set()
+    key = (node_id_str, input_idx)
+    if key in seen:
+        return
+    if budget[0] <= 0:
+        raise WorkflowConversionError("subgraph input-source resolution exceeded its safe limit")
+    budget[0] -= 1
+    seen.add(key)
+    ctx.input_sources.setdefault(node_id_str, {}).setdefault(input_idx, source)
+    for internal_node, internal_slot in ctx.input_targets.get(node_id_str, {}).get(input_idx, []):
+        nested_id = f"{node_id_str}:{internal_node}"
+        if nested_id not in ctx.input_targets and nested_id not in ctx.output_sources:
+            continue
+        nested_idx = internal_slot
+        outer_map = ctx.outer_to_input_idx.get(nested_id)
+        if outer_map:
+            nested_idx = outer_map.get(internal_slot, internal_slot)
+        if isinstance(nested_idx, int) and not isinstance(nested_idx, bool):
+            _record_subgraph_input_source(nested_id, nested_idx, source, ctx, budget, depth + 1, seen)
 
 
 def _resolve_subgraph_input_all(

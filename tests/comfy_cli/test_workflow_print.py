@@ -1284,7 +1284,8 @@ def test_malformed_definition_boundary_slots_warn_and_drop(sd15_graph):
     assert "OUT.IMAGE = None" not in res.source
     warnings = "\n".join(res.warnings)
     assert "input link 1 declares boundary slot '0' but is listed under input slot 0" in warnings
-    assert "invalid target slot -1; it was ignored" in warnings
+    assert "non-integer input slot" not in warnings
+    assert "rendered through input 'vae'" in warnings
     assert "invalid source slot '0'; it was ignored" in warnings
     assert "output link 4 declares boundary slot -1 but is listed under output slot 0" in warnings
     assert "rendered through input 'samples'" not in warnings
@@ -1511,12 +1512,27 @@ def test_in_range_link_row_follows_the_actual_holder(sd15_graph):
     assert "but that input does not hold it" in res.warnings[0]
 
 
-def test_malformed_graph_containers_are_reported_not_crashed():
-    wf = {"nodes": [], "links": 5, "groups": 5, "definitions": {"subgraphs": 5}}
+@pytest.mark.parametrize("malformed", [5, {}, "", False])
+def test_malformed_graph_containers_are_reported_not_crashed(malformed):
+    wf = {"nodes": malformed, "links": malformed, "groups": malformed, "definitions": {"subgraphs": malformed}}
     res = render_py(wf, None)
+    assert "workflow: ignoring non-list nodes block" in res.warnings
     assert "workflow: ignoring non-list links block" in res.warnings
     assert "workflow: ignoring non-list groups block" in res.warnings
     assert "workflow: ignoring non-list subgraphs block" in res.warnings
+
+
+def test_typed_distinct_holder_does_not_retarget_a_link_row():
+    nodes = [
+        _node(1, "Producer", outputs=[{"name": "value", "links": [7]}]),
+        _node(2, "Consumer", inputs=[{"name": "value", "link": "7"}]),
+    ]
+
+    warnings, broken, rest = workflow_print._broken_links(nodes, [[7, 1, 0, 999, 0, "*"]])
+
+    assert broken == {}
+    assert rest == []
+    assert warnings == ["link 7 targets missing node 999; it feeds nothing and was ignored"]
 
 
 def test_definition_non_list_link_ids_are_reported_and_treated_as_empty():
@@ -1615,13 +1631,6 @@ def test_unlisted_typed_or_ambiguous_input_boundary_membership_is_ignored(defini
     [
         ([{"name": "value", "type": "STRING", "linkIds": []}], "no definition output lists it"),
         ([{"name": "value", "type": "STRING", "linkIds": ["1"]}], "no definition output lists it"),
-        (
-            [
-                {"name": "first", "type": "STRING", "linkIds": [1]},
-                {"name": "second", "type": "STRING", "linkIds": [1]},
-            ],
-            "several definition outputs list it",
-        ),
     ],
 )
 def test_unlisted_typed_or_ambiguous_output_boundary_membership_is_ignored(definition_outputs, warning):
@@ -1640,6 +1649,27 @@ def test_unlisted_typed_or_ambiguous_output_boundary_membership_is_ignored(defin
 
     assert not any(line.startswith("    OUT.") and " = example" in line for line in result.source.splitlines())
     assert any(warning in item for item in result.warnings)
+
+
+def test_one_interior_source_can_render_multiple_definition_outputs():
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    definition = {
+        "id": subgraph_id,
+        "inputs": [],
+        "outputs": [
+            {"name": "first", "type": "STRING", "linkIds": [1]},
+            {"name": "second", "type": "STRING", "linkIds": [1]},
+        ],
+        "nodes": [_node(7, "Example", outputs=[{"name": "value", "type": "STRING", "links": [1]}])],
+        "links": [{"id": 1, "origin_id": 7, "origin_slot": 0, "target_id": -20, "target_slot": 0}],
+    }
+    workflow = _mini([_node(10, subgraph_id)], [])
+    workflow["definitions"] = {"subgraphs": [definition]}
+
+    result = render_py(workflow, None)
+
+    assert "OUT.first = example" in result.source
+    assert "OUT.second = example" in result.source
 
 
 def test_null_link_id_is_warned_and_dropped(sd15_graph):
