@@ -55,6 +55,42 @@ def test_registry_loads_and_has_entries():
     assert len(eps) > 20, "expected the v1 allowlist to resolve >20 endpoints"
 
 
+def test_registry_skips_an_endpoint_whose_schema_cannot_be_resolved(monkeypatch):
+    bad_id = "bad/endpoint"
+    good_id = "good/endpoint"
+    raw = {
+        "paths": {
+            f"/proxy/{bad_id}": {
+                "post": {
+                    "requestBody": {"content": {"application/json": {"schema": {"bad": True}}}},
+                    "responses": {},
+                }
+            },
+            f"/proxy/{good_id}": {
+                "post": {
+                    "requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}},
+                    "responses": {},
+                }
+            },
+        }
+    }
+    real_resolve = spec._resolve
+
+    def resolve(raw_spec, schema, *args, **kwargs):
+        if schema.get("bad"):
+            raise spec.SpecError("schema resolution exceeded its safe traversal limit")
+        return real_resolve(raw_spec, schema, *args, **kwargs)
+
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(bad_id, "test", None), (good_id, "test", None)])
+    monkeypatch.setattr(spec, "_resolve", resolve)
+    spec._registry.cache_clear()
+    try:
+        assert list(spec._registry()) == [good_id]
+    finally:
+        spec._registry.cache_clear()
+
+
 def test_get_endpoint_round_trip():
     ep = spec.get_endpoint("bfl/flux-pro-1.1/generate")
     assert ep.partner == "bfl"

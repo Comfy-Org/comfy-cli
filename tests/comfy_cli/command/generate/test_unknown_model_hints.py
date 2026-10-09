@@ -347,6 +347,12 @@ def test_resolve_memoizes_shared_inline_alias_branches():
     assert resolve.call_count <= depth * 3 + 2
 
 
+def test_resolve_budget_charges_containers_not_scalar_enum_members():
+    schema = {"type": "string", "enum": [f"model-{index}" for index in range(2_000)]}
+
+    assert spec._resolve({}, schema) == schema
+
+
 def test_resolve_shares_cycle_free_targets_across_different_ref_ancestries():
     schemas: dict[str, dict] = {"S40": {"type": "string"}}
     for level in reversed(range(40)):
