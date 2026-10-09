@@ -538,9 +538,10 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
 
     node_input_updates: dict[str, dict[int, int]] = {}
     resolution_memo: dict[tuple[str, str], list[tuple[Any, Any]]] = {}
-    # Plain link rows cost one unit each; the fixed reserve is for actual
-    # boundary fan-out beyond that serialized baseline.
-    resolution_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + len(links)]
+    # A one-to-one boundary row spends four fixed units (root visit, direct
+    # target, leaf visit, result append). Reserve that serialized baseline;
+    # the fixed cap remains available only for fan-out beyond it.
+    resolution_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + 4 * len(links)]
     updated: list = []
     for link in links:
         if not isinstance(link, (list, tuple)) or len(link) < 6:
