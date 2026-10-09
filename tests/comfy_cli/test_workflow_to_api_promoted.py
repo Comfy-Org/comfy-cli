@@ -533,6 +533,133 @@ def test_repeated_instances_reuse_definition_boundary_indexes():
     assert holders.call_count == 1
 
 
+def test_expansion_preserves_raw_input_slots_for_boundary_updates():
+    definition = {
+        "inputs": [{"name": "value", "linkIds": [1]}],
+        "outputs": [],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "Example",
+                "inputs": ["malformed", {"name": "value", "link": 1}],
+                "outputs": [],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 1}],
+    }
+
+    nodes, _links, input_targets, _outputs = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.input_targets["10"] = input_targets
+    workflow_to_api._rewrite_links_for_subgraphs([[7, "source", 0, 10, 0, "*"]], ctx, nodes)
+
+    assert nodes[0]["inputs"][0] == "malformed"
+    assert nodes[0]["inputs"][1]["link"] == 7
+
+
+@pytest.mark.parametrize("target_slot", [[], {}, True, 1.0])
+def test_plain_malformed_or_stale_target_slots_do_not_overwrite_holders(target_slot):
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.input_targets["unrelated-subgraph"] = {0: [(7, 0)]}
+    nodes = [
+        {
+            "id": "plain",
+            "inputs": [
+                {"name": "other", "link": 9},
+                {"name": "actual", "link": 7},
+            ],
+        }
+    ]
+
+    rewritten = workflow_to_api._rewrite_links_for_subgraphs([[7, "source", 0, "plain", target_slot, "*"]], ctx, nodes)
+
+    assert nodes[0]["inputs"][0]["link"] == 9
+    assert nodes[0]["inputs"][1]["link"] == 7
+    assert rewritten[0][3:5] == ["plain", 1]
+
+
+def test_plain_holder_keeps_a_row_when_an_expanded_holder_resolves_nowhere():
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.input_targets["10"] = {}
+    ctx.input_holders[7] = [("10", 0)]
+    nodes = [{"id": "plain", "inputs": [{"name": "value", "link": 7}]}]
+
+    rewritten = workflow_to_api._rewrite_links_for_subgraphs([[7, "source", 0, 10, 0, "*"]], ctx, nodes)
+
+    assert rewritten == [[7, "source", 0, "plain", 0, "*"]]
+
+
+def test_dangling_interior_link_id_is_cleared_before_outer_scope_indexing():
+    assert workflow_to_api._rewrite_internal_input(
+        {"name": "value", "link": 7},
+        internal_link_map={},
+        link_id_remap={},
+    ) == {"name": "value", "link": None}
+
+
+def test_string_input_proxy_row_is_not_expanded_as_an_interior_edge():
+    definition = {
+        "inputs": [{"name": "value", "linkIds": [1]}],
+        "outputs": [],
+        "nodes": [{"id": 7, "type": "Example", "inputs": [{"name": "value", "link": 1}], "outputs": []}],
+        "links": [{"id": 1, "origin_id": "-10", "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+
+    nodes, links, input_targets, _outputs = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
+
+    assert links == []
+    assert input_targets == {0: [(7, 0)]}
+    assert nodes[0]["inputs"][0]["link"] is None
+
+
+def test_duplicate_output_rows_resolve_each_link_id_once():
+    class CountingNode(dict):
+        output_reads = 0
+
+        def get(self, key, default=None):
+            if key == "outputs":
+                type(self).output_reads += 1
+            return super().get(key, default)
+
+    count = 200
+    node = CountingNode(id=7, type="Example", inputs=[], outputs=[{"name": "value"}])
+    definition = {
+        "inputs": [],
+        "outputs": [{"name": f"out-{index}", "linkIds": [1]} for index in range(count)],
+        "nodes": [node],
+        "links": [
+            {"id": 1, "origin_id": 7, "origin_slot": 0, "target_id": -20, "target_slot": 0} for _ in range(count)
+        ],
+    }
+
+    _nodes, _links, _inputs, outputs = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
+
+    assert len(outputs) == count
+    assert CountingNode.output_reads == 1
+
+
+def test_duplicate_outer_rows_use_the_link_maps_last_source():
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.input_targets["10"] = {0: [(7, 0)]}
+    ctx.input_holders[5] = [("10", 0)]
+
+    workflow_to_api._rewrite_links_for_subgraphs(
+        [[5, "first", 0, 10, 0, "*"], [5, "last", 1, 10, 0, "*"]],
+        ctx,
+        [],
+    )
+
+    assert ctx.input_sources["10"][0] == ("last", 1)
+
+
+def test_input_source_budget_charges_plain_fanout_targets():
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.input_targets["10"] = {0: [(7, 0), (8, 0)]}
+
+    with pytest.raises(workflow_to_api.WorkflowConversionError, match="input-source resolution exceeded"):
+        workflow_to_api._record_subgraph_input_source("10", 0, ("source", 0), ctx, budget=[2])
+
+
 def test_promotion_traversal_limit_is_a_structured_conversion_failure(object_info):
     with (
         mock.patch(

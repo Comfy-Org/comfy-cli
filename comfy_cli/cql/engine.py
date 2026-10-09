@@ -3493,6 +3493,7 @@ class _SubgraphDefs(dict[str, dict]):
         self.promotion_visit_limit: int | None = None
         self.promotion_holders: dict[int, tuple[dict, dict[Any, list[tuple[dict, int, dict]]]]] = {}
         self.promotion_links: dict[int, tuple[dict, dict[Any, dict]]] = {}
+        self.promotion_input_positions: dict[int, tuple[dict, dict[int, int]]] = {}
         self.promotion_input_memberships: dict[int, tuple[dict, dict[Any, set[int]]]] = {}
         self.promotion_sources: dict[
             int,
@@ -3500,6 +3501,13 @@ class _SubgraphDefs(dict[str, dict]):
         ] = {}
         self.promotion_inputs: dict[int, tuple[dict, list[Any]]] = {}
         self.promotion_boundaries: dict[tuple[int, int], tuple[dict, list[tuple[list[str], str]]]] = {}
+        self.promotion_inputs_budget: list[int] | None = None
+        self.promotion_sources_budget: list[int] | None = None
+        self.promotion_boundary_budget: list[int] | None = None
+        self.promotion_inputs_memo: dict[tuple[int, int, tuple[int, ...]], list[Any]] = {}
+        self.promotion_inputs_names: dict[int, dict[str, Any]] = {}
+        self.promotion_boundary_memo: dict[tuple[int, int, int, tuple[int, ...]], list[tuple[list[str], str]]] = {}
+        self.promotion_boundary_names: dict[int, dict[Any, dict]] = {}
 
 
 def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
