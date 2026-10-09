@@ -1626,23 +1626,23 @@ def _render_definition_block(
     for link in sg_def.get("links") or []:
         if isinstance(link, dict) and link.get("id") is not None:
             raw_link_id_by_normalized[str(link["id"])] = link["id"]
-    input_slots_by_link: dict[Any, list[int]] = {}
-    output_slots_by_link: dict[Any, list[int]] = {}
+    input_slots_by_link: dict[Any, set[int]] = {}
+    output_slots_by_link: dict[Any, set[int]] = {}
     for slot, entry in enumerate(definition_inputs):
         link_ids = entry.get("linkIds") if isinstance(entry, dict) else None
         for link_id in link_ids if isinstance(link_ids, list) else []:
             if _is_link_id(link_id):
-                input_slots_by_link.setdefault(link_id, []).append(slot)
+                input_slots_by_link.setdefault(link_id, set()).add(slot)
     for slot, entry in enumerate(definition_outputs):
         link_ids = entry.get("linkIds") if isinstance(entry, dict) else None
         for link_id in link_ids if isinstance(link_ids, list) else []:
             if _is_link_id(link_id):
-                output_slots_by_link.setdefault(link_id, []).append(slot)
+                output_slots_by_link.setdefault(link_id, set()).add(slot)
     for lid, (oid, oslot, tid, tslot) in all_links.items():
         from_input_proxy = str(oid) == _PROXY_IN
         to_output_proxy = str(tid) == _PROXY_OUT
         raw_lid = raw_link_id_by_normalized.get(str(lid))
-        listed_input_slots = input_slots_by_link.get(raw_lid, []) if _is_link_id(raw_lid) else []
+        listed_input_slots = input_slots_by_link.get(raw_lid, set()) if _is_link_id(raw_lid) else set()
         if from_input_proxy:
             if len(listed_input_slots) != 1:
                 boundary_ignored.add(str(lid))
@@ -1651,14 +1651,14 @@ def _render_definition_block(
                 )
                 state.warnings.append(f"subgraph {def_id}: input boundary link {lid} was ignored because {reason}")
             else:
-                listed_input_slot = listed_input_slots[0]
+                listed_input_slot = next(iter(listed_input_slots))
                 if not _is_slot_index(oslot) or oslot != listed_input_slot:
                     state.warnings.append(
                         f"subgraph {def_id}: input link {lid} declares boundary slot {oslot!r} but is listed under "
                         f"input slot {listed_input_slot}; the listed input was used"
                     )
                     oslot = listed_input_slot
-        listed_output_slots = output_slots_by_link.get(raw_lid, []) if _is_link_id(raw_lid) else []
+        listed_output_slots = output_slots_by_link.get(raw_lid, set()) if _is_link_id(raw_lid) else set()
         if to_output_proxy:
             if len(listed_output_slots) != 1:
                 boundary_ignored.add(str(lid))
@@ -1667,7 +1667,7 @@ def _render_definition_block(
                 )
                 state.warnings.append(f"subgraph {def_id}: output boundary link {lid} was ignored because {reason}")
             else:
-                listed_output_slot = listed_output_slots[0]
+                listed_output_slot = next(iter(listed_output_slots))
                 if not _is_slot_index(tslot) or tslot != listed_output_slot:
                     state.warnings.append(
                         f"subgraph {def_id}: output link {lid} declares boundary slot {tslot!r} but is listed under "

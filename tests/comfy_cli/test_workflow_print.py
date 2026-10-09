@@ -1800,6 +1800,42 @@ def test_definition_input_to_output_passthrough_is_never_retargeted():
     assert "OUT.IMAGE = IN.value" in res.source
 
 
+def test_duplicate_boundary_membership_in_one_slot_is_not_ambiguous():
+    uuid = "aaaaaaaa-0000-4000-8000-aaaaaaaaaaaa"
+    wf = {
+        "nodes": [{"id": 10, "type": uuid, "inputs": [], "outputs": []}],
+        "links": [],
+        "definitions": {
+            "subgraphs": [
+                {
+                    "id": uuid,
+                    "name": "Repeated membership",
+                    "inputs": [{"name": "value", "type": "STRING", "linkIds": [1, 1]}],
+                    "outputs": [{"name": "result", "type": "STRING", "linkIds": [2, 2]}],
+                    "nodes": [
+                        {
+                            "id": 3,
+                            "type": "Transform",
+                            "inputs": [{"name": "value", "type": "STRING", "link": 1}],
+                            "outputs": [{"name": "result", "type": "STRING", "links": [2]}],
+                        }
+                    ],
+                    "links": [
+                        {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 3, "target_slot": 0},
+                        {"id": 2, "origin_id": 3, "origin_slot": 0, "target_id": -20, "target_slot": 0},
+                    ],
+                }
+            ]
+        },
+    }
+
+    result = render_py(wf, None)
+
+    assert "value=IN.value" in result.source
+    assert "OUT.result = transform" in result.source
+    assert not any("several definition" in warning for warning in result.warnings)
+
+
 def test_missing_definition_target_warns_only_once():
     wf = json.loads((FIXTURES / "subgraph_template_ui.json").read_text())
     graph = Graph.from_object_info(json.loads((FIXTURES / "subgraph_object_info.json").read_text()))
