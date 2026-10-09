@@ -464,15 +464,45 @@ def _internal_error_message(error: BaseException) -> str:
         # that anchor, drop the incomplete credential token before earlier
         # scrubbers contract the message and pull it into the visible prefix.
         partial_userinfo = re.search(
-            r"(?<![\w])[A-Za-z][A-Za-z0-9+.-]*://(?P<user>[^\s/'\"?#:]+):(?P<tail>[^\s/'\"?#]*)$",
+            r"(?<![\w])[A-Za-z][A-Za-z0-9+.-]*://(?P<authority>[^\s/'\"?#]*)$",
             text,
         )
         if partial_userinfo is not None:
-            user = partial_userinfo.group("user")
-            tail = partial_userinfo.group("tail")
-            looks_like_host_port = tail.isdigit() and (user == "localhost" or "." in user or user.startswith("["))
-            complete_host = tail.rsplit("@", 1)[1] if "@" in tail else None
-            should_trim = not looks_like_host_port and (complete_host is None or len(complete_host) > 253)
+            authority = partial_userinfo.group("authority")
+            userinfo, separator, host_port = authority.rpartition("@")
+            if separator:
+                host = host_port
+                if host.startswith("[") and "]" in host:
+                    close = host.index("]")
+                    remainder = host[close + 1 :]
+                    complete_host = not remainder or (remainder.startswith(":") and remainder[1:].isdigit())
+                else:
+                    host, port_separator, port = host.rpartition(":")
+                    if not port_separator:
+                        host = host_port
+                    complete_host = (not port_separator or port.isdigit()) and (
+                        host == "localhost"
+                        or (
+                            "." in host
+                            and len(host) <= 253
+                            and all(
+                                label
+                                and label[0].isalnum()
+                                and label[-1].isalnum()
+                                and all(char.isalnum() or char == "-" for char in label)
+                                for label in host.split(".")
+                            )
+                        )
+                    )
+                should_trim = ":" in userinfo and not complete_host
+            else:
+                host, port_separator, port = authority.rpartition(":")
+                looks_like_host_port = (
+                    bool(port_separator)
+                    and port.isdigit()
+                    and (host == "localhost" or "." in host or (host.startswith("[") and "]" in host))
+                )
+                should_trim = bool(port_separator) and not looks_like_host_port
         else:
             should_trim = False
         if should_trim:

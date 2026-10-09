@@ -447,6 +447,21 @@ def test_internal_error_scrubber_preserves_host_ports_and_complete_userinfo_at_t
         assert scrubbed == expected
 
 
+@pytest.mark.parametrize(
+    "tail",
+    [
+        " https://alice:p@ssw0",
+        " redis://:SECRET",
+        " https://alice:p:ss",
+    ],
+)
+def test_internal_error_scrubber_drops_incomplete_userinfo_that_looks_like_a_host(tail):
+    prefix = "Bearer " + "A" * (_INTERNAL_ERROR_SCRUB_INPUT_CAP - len("RuntimeError: ") - len("Bearer ") - len(tail))
+    scrubbed = _internal_error_message(RuntimeError(prefix + tail + " overflow"))
+    assert tail.strip() not in scrubbed
+    assert scrubbed.endswith("…")
+
+
 def test_internal_error_scrubber_handles_long_non_secret_camel_names_without_backtracking():
     name = "ComfyApiNodeExecutionContextManager" + "ProfileSettings" * 40
     scrubbed = _internal_error_message(RuntimeError(f"{name} has no attribute x"))
