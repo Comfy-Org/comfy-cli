@@ -515,9 +515,11 @@ def test_wide_reused_definition_does_not_exhaust_the_linear_budget():
     definitions = _SubgraphDefs()
     definitions.update({"outer": outer, "child": child})
 
-    [item] = promoted.promoted_inputs(outer, definitions)
+    with mock.patch.object(promoted, "_promoted_name_index", wraps=promoted._promoted_name_index) as index:
+        [item] = promoted.promoted_inputs(outer, definitions)
 
     assert item.value_index is None
+    assert index.call_count == 1
 
 
 def test_definition_index_caches_limit_and_holder_scans():

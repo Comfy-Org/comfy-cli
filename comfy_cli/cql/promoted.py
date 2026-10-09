@@ -249,6 +249,11 @@ def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
     return limit
 
 
+def _promoted_name_index(inputs: list[PromotedInput]) -> dict[str, PromotedInput]:
+    """Build the per-result name index once, including across memo hits."""
+    return {promoted_input.name: promoted_input for promoted_input in inputs}
+
+
 def promoted_inputs(
     sg: dict,
     defs: dict[str, dict],
@@ -333,7 +338,10 @@ def promoted_inputs(
                             _budget,
                             _name_memo,
                         )
-                        inner_by_name = _name_memo.setdefault(id(inner), {p.name: p for p in inner})
+                        inner_key = id(inner)
+                        if inner_key not in _name_memo:
+                            _name_memo[inner_key] = _promoted_name_index(inner)
+                        inner_by_name = _name_memo[inner_key]
                         inner_pi = inner_by_name.get(str(entry.get("name")))
                         if inner_pi is not None and inner_pi.is_widget:
                             source = (str(target.get("id")), str(entry.get("name")), None, True)
