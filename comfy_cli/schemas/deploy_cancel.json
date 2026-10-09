@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://comfy.org/schemas/deploy_cancel.json",
+  "title": "comfy deploy cancel --json data payload",
+  "type": "object",
+  "required": [
+    "deployment",
+    "release",
+    "cancelledUpdate"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "deployment": {
+      "type": "object",
+      "required": [
+        "id",
+        "status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "provisioning",
+            "starting",
+            "ready",
+            "unhealthy",
+            "stopping",
+            "stop_failed",
+            "stopped",
+            "failed"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "release": {
+      "type": "object",
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "description": "The release the deployment serves, before and after the cancel. `version` is absent for a release the Build no longer lists."
+    },
+    "cancelledUpdate": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "required": [
+            "release",
+            "baseRevision",
+            "kind"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "release": {
+              "type": "object",
+              "required": [
+                "id"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "version": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "description": "The release the cancelled update was moving the deployment to."
+            },
+            "baseRevision": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "The revision the cancelled update was asked against."
+            },
+            "kind": {
+              "enum": [
+                "update",
+                "rollback"
+              ],
+              "description": "Closed: `rollback` for a rollback, and `update` for an update, a promote, or any kind the service adds later."
+            }
+          }
+        }
+      ],
+      "description": "The update the cancel ended: whichever waited when the service took the cancel, which may be a newer one than the caller saw. Null where nothing waited, and nothing changed."
+    }
+  }
+}

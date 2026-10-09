@@ -1,6 +1,6 @@
 ---
 name: comfy-deploy
-description: "Run a Comfy Build release as a serverless deployment with comfy-cli. Use whenever the user wants to deploy, serve, host, or expose a ComfyUI build as an endpoint, scale or stop workers, submit a workflow to a deployment, check whether a deployment is healthy or running a stale release, or work out why one is still costing money. Covers `comfy deploy up / run / status / scale / stop / start / delete / ls / show / logs / events / refs`. Assumes a green release already exists — `comfy-build` is the skill that produces one."
+description: "Run a Comfy Build release as a serverless deployment with comfy-cli. Use whenever the user wants to deploy, serve, host, or expose a ComfyUI build as an endpoint, scale or stop workers, submit a workflow to a deployment, check whether a deployment is healthy or running a stale release, or work out why one is still costing money. Covers `comfy deploy up / promote / rollback / history / cancel / run / status / scale / stop / start / delete / ls / show / logs / events / refs`. Assumes a green release already exists — `comfy-build` is the skill that produces one."
 ---
 
 # comfy-deploy
@@ -25,8 +25,9 @@ bills by time.**
   a Build. This single fact drives most of what follows.
 - **The Build is the addressing scheme.** Nearly every command takes the install
   directory or spec path as its argument and defaults to the current directory,
-  reading the Build id out of `comfy-build.yaml`. `--deployment <id>` overrides
-  that whenever the Build has more than one.
+  reading the Build id out of `comfy-build.yaml`. `--deployment <name or id>`
+  overrides that whenever the Build has more than one, and
+  `--deployment <build>/<name>` reaches a deployment from outside its folder.
 - **`comfy-build` produced the release.** If there is no green release yet, that
   skill is the one to run: `comfy skills show comfy-build`.
 - **The failure material is a reference skill.** When a command is refused or a
@@ -37,6 +38,11 @@ bills by time.**
 
 ```
 up      Create or reconcile a deployment for the selected Build release.   SPENDS
+promote Move TARGET onto the release SOURCE serves, keeping its URL.      SPENDS
+rollback Move a deployment back to an earlier release, keeping its URL.  SPENDS
+rename  Give a deployment a new name, keeping its id and URL.
+history The releases a deployment ran, newest first, and what moved it.
+cancel  End the update a deployment waits on; it keeps its release.
 run     Submit an API-format workflow to a ready deployment.               SPENDS
 status  Deployment health, release freshness, and serving activity.
 scale   Edit worker bounds, or GPU/region on a stopped deployment.
@@ -66,11 +72,25 @@ deploy*.
 
 ## The cost model, which is the whole risk
 
-**`up` on a release that has no deployment creates one. `up` on a release that
-already has one reconciles that one.** A deployment is matched by release id, so
-cutting a new release and running `up` again does **not** move the existing
-deployment forward — it creates a **second** deployment, and the first keeps
-running and keeps billing.
+**Whether `up` on a new release moves the existing deployment or adds a second
+one depends on the workspace.** The output says which: a deployment that carries
+`revision` is in a workspace with deployment updates on.
+
+- **Updates on:** `up` on a new release **moves the Build's one deployment onto
+  it**, keeping its id and URL, and reports `previousRelease`. The old release
+  keeps serving until the new one is ready. With two or more deployments, `up`
+  refuses with `deploy_ambiguous_deployment`, listing each one's name, release
+  and status, until `--deployment <name>` names one;
+  `--create` adds a separate deployment instead. If the new release fails to come
+  up, `up` exits 1 with `deploy_update_failed` and the old release still serves.
+  On a deploy service that lets a newer update replace a waiting one, a newer
+  `up`, `promote` or `rollback` while one waits replaces it: the watch of the
+  first exits 1 with `deploy_update_replaced`, naming the newer release. An
+  older service refuses the newer move while one waits.
+- **Updates off:** a deployment is matched by release id, so cutting a new
+  release and running `up` again does **not** move the existing deployment
+  forward. It creates a **second** deployment, and the first keeps running and
+  keeps billing.
 
 The CLI tells you this: `up` returns a `supersedes` array naming every other
 live deployment of this Build still holding compute, with its id, status and
@@ -157,8 +177,27 @@ fixes — say so rather than restarting into the same wall.
 
 ```shell
 comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
-                       [--release <id>] [--deployment <id>] [--no-watch]
+                       [--release <id>] [--deployment <name|id>] [--create [--name <name>]] [--no-watch]
+comfy deploy rename [PATH] <name> [--deployment <name|id>]
 ```
+
+- **With deployment updates on, it moves the existing deployment** (see *The
+  cost model*), a stopped or failed one included, since the move starts the new
+  release for it. A move keeps gpu and region, refuses a `stopping` or
+  `stop_failed` deployment with `deploy_conflict`, and applies `--min`/`--max`
+  only after the move lands, so with `--no-watch` they are refused. A bounds
+  edit the service then refuses is reported as bounds that had no effect.
+- **`--create` is not idempotent:** every run adds one more deployment, so after
+  a lost response read `comfy deploy ls` before running it again.
+- **`--name` names the deployment a create makes**, the Build's first included;
+  without it comfy-deploy names the first `production` and later ones
+  `deployment-N`. A name is 1 to 40 lowercase letters, digits and hyphens,
+  starting and ending with a letter or digit, never starting with `dep-`, and
+  unique among the Build's live deployments
+  (`deploy_invalid_name`, `deploy_name_taken`). The same `up --name` run again
+  finds the deployment holding that name. `up` refuses `--name` when it would
+  update a deployment holding another name: `comfy deploy rename` names an
+  existing one, and without `--deployment` renames the Build's only one.
 
 - **It selects the newest deployable release of the Build** unless `--release`
   names one. `deployable` means a `linux/nvidia` artifact reached `ready` with an
@@ -200,6 +239,69 @@ comfy deploy up [PATH] --gpu <class> --region <region> [--min N --max N]
   has the estimate switched off; that is not an error, so never retry for it or
   mention its absence.
 
+## `comfy deploy promote`
+
+```shell
+comfy deploy promote SOURCE TARGET [--no-watch]
+```
+
+- **It moves deployment TARGET onto the release deployment SOURCE serves**,
+  keeping TARGET's id and URL: test on a staging deployment, then promote it to
+  production. The service resolves SOURCE's release itself.
+- **SOURCE and TARGET each take a name or an id**: a bare name in the Build's
+  folder, or `<build>/<name>` anywhere, the Build given by its name or id.
+- **It needs deployment updates on.** Without them it refuses with
+  `deploy_updates_unavailable`; use `comfy deploy up --create` instead.
+- **It follows the move like `up` does**: exit 1 with `deploy_update_failed`
+  when the new release does not come up, and TARGET still serves its old one,
+  or with `deploy_update_replaced` when a newer update replaced it.
+
+## `comfy deploy rollback` and `comfy deploy history`
+
+```shell
+comfy deploy rollback [PATH] [--deployment <name|id>] [--to vN|<release-id>] [--no-watch]
+comfy deploy history [PATH] [--deployment <name|id>]
+```
+
+- **`rollback` moves the deployment back to the release before its current
+  one**, keeping its id and URL, so a second `rollback` undoes the first.
+  `--to vN` returns to the latest earlier revision that ran vN, and refuses a
+  release the deployment never ran. A release the Build no longer lists has no
+  version to name; pass its id from `history` instead.
+- **`--json --no-watch` says `waiting: true`** while the earlier release's copy
+  starts; the deployment serves `previousRelease` until it lands.
+- **It picks the deployment as `up` does**: the one `--deployment` names, else
+  the Build's only running one, refusing two with
+  `deploy_ambiguous_deployment`.
+- **It follows the move like `up` does**: exit 1 with `deploy_update_failed`
+  when the earlier release does not come back up, or with
+  `deploy_update_replaced` when a newer update replaced it.
+- **`history` lists each revision newest first**, the current one marked `*`:
+  its release version, what made it (`create`, `update`, `rollback`), who and
+  when. Run it before `rollback --to` to see what is there to return to.
+- **Both need deployment updates on** (`deploy_updates_unavailable` otherwise).
+
+## `comfy deploy cancel`
+
+```shell
+comfy deploy cancel [PATH] [--deployment <name|id>]
+```
+
+- **It ends the update a deployment waits on**, an `up`, `promote` or
+  `rollback` whose release is still coming up, and stops that copy. The
+  deployment keeps serving the release it served, at the same revision.
+- **It names what it ended:** `--json` carries `cancelledUpdate`, the release
+  that update moved to, its `baseRevision` and `kind`. That is whichever update
+  waited when the service took the cancel, which can be a newer one than you
+  saw, so read it rather than assuming.
+- **Nothing waiting is not an error:** it exits 0 with `changed: false` and
+  `cancelledUpdate: null`, as a second cancel does.
+- **It picks the deployment as `rollback` does.** A deploy service too old for
+  cancel refuses with `deploy_updates_unavailable`; wait for the update to land
+  or fail instead.
+- **A cancelled move back to a kept release leaves that release as it was:**
+  one you stopped stays stopped and yours, and one on its way out still goes.
+
 ## `comfy deploy run`
 
 ```shell
@@ -234,7 +336,8 @@ comfy deploy run [PATH] --workflow <api-workflow>.json
 - **It waits and downloads by default.** Outputs land in `./outputs/` unless
   `--output-dir` says otherwise, and each is reported with its `node_id`, `name`,
   `type` and `path`. `--no-wait` returns the job id immediately instead.
-  `--timeout` bounds the wait.
+  `--timeout` bounds the wait. `job.releaseVersion` names the release that ran
+  the job, and is absent where the gateway does not report it.
 - **Job statuses are** `queued`, `running`, `succeeded`, `canceling`, `canceled`,
   `failed`, `expired`.
 - **Each `run` is a fresh idempotency key, so a resubmit is a second billed job.**
@@ -259,8 +362,14 @@ comfy deploy status <dir>
   `error`.
 - **`release`** — the deployed release's id and version, plus **`behind`** and
   **`latestDeployable`**. `behind: true` means a newer deployable release exists
-  and this deployment is not running it. Moving to it means a **new deployment**
-  with a new endpoint URL, and retiring the old one — see the cost model above.
+  and this deployment is not running it. Where the workspace has deployment
+  updates (the deployment carries a `revision`), `comfy deploy up` moves this
+  deployment to it and the endpoint URL stays; elsewhere moving to it means a
+  **new deployment** with a new endpoint URL, and retiring the old one — see the
+  cost model above.
+- **`update`** — present only while the deployment waits on a move: the
+  `release` it moves to, its copy's `status`, `since`, and `kind` (`update` or
+  `rollback`). The deployment keeps serving `release` until that copy is ready.
 - **`serving`**: `capacity` (`ready`, `busy` and `starting` workers, the same on
   every GPU provider), `jobsInQueue`, and `sampledAt`. It is a sample, not a live
   feed; `sampledAt` is how stale it is. A deprecated `workers` object carries the
@@ -273,12 +382,16 @@ The rest are narrower:
 - **`logs`** — ComfyUI's captured log snapshot with a `capturedAt`. Periodic, not
   real-time, and `capturedAt` may be null if nothing was ever captured.
 - **`events`** — the ordered status transitions with timestamps and messages.
-  This is how you find out *why* something reached `failed`, which `status` only
-  reports as a state.
-- **`ls`** — live deployments of this Build. `--all` includes soft-deleted ones,
-  `--workspace` covers every Build, `--status` filters server-side, `--limit`
-  defaults to 20 and caps at 100. Reach for `--workspace` when hunting for
-  compute nobody accounted for.
+  After a move it carries every copy's transitions, each with its `releaseId`;
+  `--release v5` keeps one release's (it needs deployment updates and exits
+  `deploy_updates_unavailable` without them). Only `events` takes a version
+  there; `up --release` takes a release id. This is how you find out *why*
+  something reached `failed`, which `status` only reports as a state.
+- **`ls`** — live deployments of this Build, each row with its `releaseVersion`.
+  `--all` includes soft-deleted ones, `--workspace` covers every Build (rows there
+  keep only the `releaseId`), `--status` filters server-side, `--limit` defaults
+  to 20 and caps at 100. Reach for `--workspace` when hunting for compute nobody
+  accounted for.
 
 ## Giving compute back
 

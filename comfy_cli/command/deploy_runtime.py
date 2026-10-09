@@ -46,6 +46,9 @@ _UNANSWERED_WINDOW: Final = 60.0
 # A watch that gave out knows nothing about the deployment, so it must not exit
 # 1, which says the deployment failed. 75 is EX_TEMPFAIL in sysexits.h.
 EXIT_WATCH_LOST: Final = 75
+# How long `up` follows a move onto another release before handing it back.
+# Staging a large release's models can take tens of minutes.
+MOVE_WATCH_SECONDS: Final = 3600.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +60,9 @@ class _BuilderReleaseAdapter:
 
     def list_releases(self, build_id: str) -> list[JsonObject]:
         return _refusal_as_deploy_error(lambda: self.client.list_releases(build_id))
+
+    def list_builds(self) -> list[JsonObject]:
+        return _refusal_as_deploy_error(self.client.list_builds)
 
 
 def _refusal_as_deploy_error(call: Callable[[], T]) -> T:
@@ -115,8 +121,10 @@ def terminal_status_error(deployment_id: str, status: str) -> JsonObject:
 class DeployWatchLostError(Exception):
     """The deploy API left a watch's reads unanswered for the whole retry window."""
 
-    def __init__(self, deployment_id: str, cause: Exception) -> None:
-        super().__init__(f"the deploy API stopped answering while following deployment {deployment_id} ({cause})")
+    def __init__(self, deployment_id: str, cause: Exception | None = None, *, message: str | None = None) -> None:
+        super().__init__(
+            message or f"the deploy API stopped answering while following deployment {deployment_id} ({cause})"
+        )
         self.deployment_id = deployment_id
 
 
@@ -131,12 +139,12 @@ def _unanswered(error: Exception) -> bool:
     return error.code == "deploy_server_error" and (error.status is None or error.status >= 500)
 
 
-def exit_watch_lost(renderer: Renderer, error: DeployWatchLostError) -> NoReturn:
+def exit_watch_lost(renderer: Renderer, error: DeployWatchLostError, hint: str | None = None) -> NoReturn:
     """Say it is the watch that gave out, not the deployment, and how to pick it up again."""
     renderer.error(
         code="deploy_watch_lost",
         message=f"{error}; the deployment may still be coming up",
-        hint=f"run `{reattach_hint(error.deployment_id)}` to watch it again",
+        hint=hint or f"run `{reattach_hint(error.deployment_id)}` to watch it again",
         details={"deployment_id": error.deployment_id},
         exit_code=EXIT_WATCH_LOST,
     )
@@ -150,16 +158,29 @@ def poll_deployment(
     on_snapshot: Callable[[JsonObject], None] | None = None,
     on_unanswered: Callable[[], None] | None = None,
     clock: Callable[[], float] = time.monotonic,
+    settled: Callable[[JsonObject], bool] | None = None,
+    limit: float | None = None,
 ) -> JsonObject:
     """Read the deployment until it settles, handing each read to ``on_snapshot``.
+
+    ``settled`` replaces the status test when the watch waits on something
+    else, such as a move onto another release, which keeps a ready deployment
+    ready throughout; it may count across reads, so each watch passes its own.
+    ``limit`` bounds the whole watch in seconds, since such a wait has no
+    status of its own to end on.
 
     The progress a watcher shows rides the same read the loop already makes, so
     watching costs the service nothing it was not already answering. A read the
     service does not answer is retried, and the first of each run of them goes to
     ``on_unanswered``; past the window this raises ``DeployWatchLostError``.
     """
-    failures, since = 0, 0.0
+    failures, since, started = 0, 0.0, clock()
     while True:
+        if limit is not None and clock() - started >= limit:
+            raise DeployWatchLostError(
+                deployment_id,
+                message=f"deployment {deployment_id} was still updating after {int(limit // 60)} minutes",
+            )
         try:
             snapshot = client.get_deployment(deployment_id)
         # The client maps a timeout, but a connection dropped before the status
@@ -180,7 +201,9 @@ def poll_deployment(
         if on_snapshot is not None:
             on_snapshot(snapshot)
         status = required_string(snapshot, "status")
-        if status in _WATCH_TERMINAL:
+        if settled is not None and settled(snapshot):
+            return snapshot
+        if settled is None and status in _WATCH_TERMINAL:
             return snapshot
         if status not in _STATUS_RANK:
             raise server_shape_error("the deployment has an unknown status", status=status)
