@@ -123,6 +123,34 @@ class TestLookup:
         assert knowledge._resolve_tokens(b, "please video upscale this") == "narrow"
         assert knowledge._resolve_tokens(b, "just a video") == "broad"
 
+    def test_distinct_overlap_breaks_a_tie_against_a_repeated_word_key(self):
+        """Pins the `len(overlap)` tie-break, which nothing covered before.
+
+        Both keys score a full 1.0 here: "video to video" is literally present so
+        its repeated `video` counts twice (hit 3, missing 0), and "upscale video"
+        also matches fully (hit 2, missing 0). The ratio cannot separate them. What
+        separates them is that the specialist matched two *different* words while
+        the repeated key leaned on one generic noun twice -- which is exactly what
+        the tie-break encodes.
+
+        Verified to fail without it: neutralising `len(overlap)` in the score tuple
+        makes this resolve to None, because the two capabilities tie and a tie is
+        not an answer. Before this case, reverting the tie-break left all 160 tests
+        green (comfy-cli owner review, 2026-10-07).
+        """
+        data = {
+            "models": {},
+            "capabilities": {
+                "repeated": {"aliases": ["video to video"]},
+                "specialist": {"aliases": ["upscale video"]},
+            },
+        }
+        b = knowledge._index(data, None, source="env", stale=False, path="x", mtime=0.0)
+        assert knowledge._resolve_tokens(b, "upscale video to video") == "specialist"
+        # Same shape with the phrase order reversed, where neutralising the
+        # tie-break picks the repeated key outright rather than tying.
+        assert knowledge._resolve_tokens(b, "video to video upscale") == "specialist"
+
     def test_non_english_input_never_resolves_by_accident(self):
         """The agent answers in the user's language, so it searches in it too.
         Non-ASCII is dropped by the character class (as :func:`_normalize`
@@ -365,8 +393,8 @@ class TestPhrasedQueries:
         assert knowledge._stem("3d") == "3d"
         assert knowledge._stem("musical") != knowledge._stem("music")
         assert knowledge._tokens("generating an image") == knowledge._tokens("generate an image")
-        assert knowledge._query_tokens("lip sync") >= {"lip", "sync", "lipsync"}
-        assert "lipsync" not in knowledge._query_tokens("lip or sync")
+        assert set(knowledge._query_counts("lip sync")) >= {"lip", "sync", "lipsync"}
+        assert "lipsync" not in knowledge._query_counts("lip or sync")
 
 
 class TestScalarGuards:
@@ -1091,3 +1119,74 @@ class TestQueryLog:
 
         monkeypatch.setattr(tracking, "track_event", boom)
         assert _attach(command="nodes search", queries=["testvid"])["knowledge"]["models"]
+
+
+def _repeated_word_key_bundle():
+    """The shipped ``video-edit`` row's own keys, which repeat "video" in one alias.
+
+    Reproduced from ``canon/capabilities/video-edit.yaml`` rather than invented, so
+    the catch-all this guards against is the one a real bundle carries.
+    """
+    capabilities = {
+        "video-edit": {
+            "aliases": ["Video Edit", "Video Editing", "V2V", "Video to Video", "Video Extend", "Video Object Removal"],
+            "description": (
+                "Two jobs on a clip you already have: instruction edit, and extend - plus masked removal, "
+                "which is ranked here too."
+            ),
+        },
+        "image-to-video": {"description": "Animate a supplied still into a clip."},
+        "text-to-video": {"description": "Make a clip from a prompt with no source image."},
+        "upscale": {
+            "aliases": ["Video Upscale"],
+            "description": "Add resolution or restore detail after generation or editing.",
+        },
+    }
+    return knowledge._index(
+        {"models": {}, "capabilities": capabilities}, None, source="env", stale=False, path="x", mtime=0.0
+    )
+
+
+class TestRepeatedWordKeys:
+    """A key that repeats a word must not be fully matched by one of it.
+
+    Set-deduplicating "Video to Video" to ``{video}`` made ``video-edit`` a full
+    match for any query carrying the bare word, and a full match skips the
+    description test entirely - so one generic noun turned its capability into a
+    catch-all. The shipped bundle is the only one in canon with such a key, and it
+    sent "replace a person in a video with a character" to the instruction-editor
+    row, whose top pick re-clothes the subject instead of replacing it.
+    """
+
+    def test_a_repeated_word_key_counts_each_word(self):
+        assert knowledge._counts("Video to Video") == {"video": 2}
+        assert knowledge._tokens("Video to Video") == {"video"}
+
+    def test_pair_joins_are_not_counted_twice(self):
+        assert knowledge._query_counts("lip sync")["lipsync"] == 1
+        assert set(knowledge._query_counts("lip sync")) >= {"lip", "sync", "lipsync"}
+
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            # The word "video" alone must not reach video-edit through "Video to Video".
+            ("4K video generation", None),
+            ("a video of a cat", None),
+            ("replace a person in a video with a character", None),
+            ("swap the person in this video for my character", None),
+            ("replace the person in this video with a character from another video", None),
+            ("make a video of a video game character", None),
+            ("compare video to videogame graphics", None),
+            # The keys that are actually worded still resolve.
+            ("video edit", "video-edit"),
+            ("editing this video", "video-edit"),
+            ("video to video", "video-edit"),
+            ("extend this video", "video-edit"),
+            ("upscale this video", "upscale"),
+            ("upscale this video to a 4k video", "upscale"),
+            ("image to video", "image-to-video"),
+            ("text to video", "text-to-video"),
+        ],
+    )
+    def test_the_repeated_word_is_not_a_catch_all(self, query, expected):
+        assert knowledge._resolve_tokens(_repeated_word_key_bundle(), query) == expected
