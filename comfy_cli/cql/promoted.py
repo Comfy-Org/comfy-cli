@@ -203,7 +203,7 @@ def held_link_targets(
     cache_key = id(link)
     if cache is not None and cache_key in cache:
         result = cache[cache_key]
-        _spend_traversal_budget(budget, 1, limit_message)
+        _spend_traversal_budget(budget, len(result), limit_message)
         return result
     locations = (holders if holders is not None else _link_holders(sg)).get(str(link_id), [])
     _spend_traversal_budget(budget, len(locations), limit_message)
