@@ -475,6 +475,62 @@ def test_extract_enum_deduplicates_repeated_cached_branches_linearly():
     assert extract.call_count <= 2_001
 
 
+def test_extract_enum_supports_const_and_finite_null_branches():
+    schema = {
+        "anyOf": [
+            {"enum": ["v1"]},
+            {"const": "v2", "type": "string"},
+            {"enum": [None]},
+            {"const": None},
+        ]
+    }
+    assert spec._extract_enum(schema) == ["v1", "v2"]
+
+
+def test_unconstrained_string_check_memoizes_a_shared_non_string_dag():
+    schema: dict = {"type": "integer"}
+    for _ in range(32):
+        schema = {"anyOf": [schema, schema]}
+
+    with mock.patch.object(
+        spec,
+        "_schema_admits_unconstrained_string",
+        wraps=spec._schema_admits_unconstrained_string,
+    ) as admits:
+        assert spec._extract_enum({"anyOf": [{"enum": ["v1"]}, schema]}) == ["v1"]
+
+    assert admits.call_count <= 140
+
+
+@pytest.mark.parametrize("container", ["ref", "object", "list"])
+def test_failed_resolution_does_not_leave_an_in_progress_memo_entry(container):
+    missing = {"$ref": "#/components/schemas/Missing"}
+    node = {"$ref": "#/components/schemas/Outer"}
+    if container == "ref":
+        outer: object = missing
+    elif container == "object":
+        outer = {"child": missing}
+    else:
+        outer = [missing]
+    raw = {"components": {"schemas": {"Outer": outer}}}
+    memo: dict = {}
+    with pytest.raises(KeyError):
+        spec._resolve(raw, node, memo=memo)
+
+    raw["components"]["schemas"]["Missing"] = {"type": "string"}
+    resolved = spec._resolve(raw, node, memo=memo)
+    assert "x-recursive-ref" not in repr(resolved)
+
+
+def test_model_hint_tolerates_non_mapping_paths(monkeypatch):
+    def load_raw_spec():
+        return {"paths": ["malformed"]}
+
+    load_raw_spec.cache_clear = lambda: None  # type: ignore[attr-defined]
+    monkeypatch.setattr(spec, "load_raw_spec", load_raw_spec)
+    assert spec._model_name_hint("example") is None
+
+
 def test_ref_memo_does_not_reuse_a_cycle_pruned_resolution():
     outer_ref = "#/components/schemas/Outer"
     inner_ref = "#/components/schemas/Inner"

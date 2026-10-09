@@ -1439,6 +1439,19 @@ class TestLsNodes:
         types = {n["type"] for n in env["data"]["nodes"]}
         assert types == {"KSampler", "EmptyLatentImage"}
 
+    def test_pretty_table_surfaces_node_state(self, patched_graph, tmp_path, capsys):
+        workflow = _base_workflow()
+        workflow["nodes"][0]["mode"] = 4
+        workflow["nodes"].append({"id": 20, "type": "Reroute", "inputs": [], "outputs": []})
+        path = _write(tmp_path, workflow)
+
+        out, _err, result = _invoke_raw(["ls-nodes", str(path)], capsys, _force_pretty_renderer)
+
+        assert result.exit_code == 0
+        assert "state" in out
+        assert "bypass" in out
+        assert "ui-only" in out
+
 
 # ---------------------------------------------------------------------------
 # apply — batch with aliases

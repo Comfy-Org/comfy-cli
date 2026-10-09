@@ -674,7 +674,7 @@ def ls_nodes_cmd(
     renderer = get_renderer()
     renderer.command = "workflow ls-nodes"
     p, workflow = _load_workflow_or_fail(renderer, file)
-    from comfy_cli.cql.engine import _def_contains_type
+    from comfy_cli.cql.engine import _def_contains_type, _definition_alias_budget
 
     nodes = [node for node in workflow.get("nodes") or [] if isinstance(node, dict)]
     node_types = {node.get("type") for node in nodes if isinstance(node.get("type"), str)}
@@ -693,8 +693,13 @@ def ls_nodes_cmd(
         if isinstance(name, str) and name in node_types:
             name_counts[name] = name_counts.get(name, 0) + 1
             name_first.setdefault(name, definition)
+    alias_budget = _definition_alias_budget(subgraphs)
     for name, count in name_counts.items():
-        if count == 1 and name not in ids_only and not _def_contains_type(name_first[name], name, ids_only):
+        if (
+            count == 1
+            and name not in ids_only
+            and not _def_contains_type(name_first[name], name, ids_only, budget=alias_budget)
+        ):
             subgraph_ids.add(name)
     rows = []
     for n in nodes:
@@ -737,8 +742,18 @@ def ls_nodes_cmd(
         tbl.add_column("id", no_wrap=True)
         tbl.add_column("type")
         tbl.add_column("title", style="dim")
+        tbl.add_column("state", style="yellow")
         for r in rows:
-            tbl.add_row(str(r["id"]), str(r["type"]), str(r["title"] or ""))
+            state = ", ".join(
+                value
+                for value in (
+                    r.get("mode"),
+                    "ui-only" if r.get("ui_only") else None,
+                    "subgraph" if r.get("subgraph") else None,
+                )
+                if value
+            )
+            tbl.add_row(str(r["id"]), str(r["type"]), str(r["title"] or ""), state)
         renderer.console().print(tbl)
     renderer.emit(payload, command="workflow ls-nodes")
 

@@ -182,7 +182,8 @@ def _emit_internal_error_envelope(error: BaseException, ctx: click.Context | Non
 _INTERNAL_ERROR_MESSAGE_CAP = 500
 _INTERNAL_ERROR_SCRUB_INPUT_CAP = _INTERNAL_ERROR_MESSAGE_CAP * 8
 _SECRET_KEY_PATTERN = (
-    r"(?:proxy-)?authorization|auth|api[ _-]?key|token|access[ _-]?token|refresh[ _-]?token|secret|password|"
+    r"(?:proxy-)?authorization|auth|api[ _-]?keys?|token|access[ _-]?tokens?|refresh[ _-]?tokens?|secrets?|"
+    r"passwords?|passphrases?|private[ _-]?keys?|(?<!max_)(?<!max-)(?<!max )tokens|"
     r"session(?:[ _-]?(?:id|key))?|sid|sig|signature|passphrase|passwd|pwd|credentials?|creds|jwt|oauth|"
     r"(?:set-)?cookies?"
 )
@@ -191,24 +192,26 @@ _SECRET_KEY_QUALIFIER = (
     r"auth|key|id|token|secret|credentials?|cookies?|session|value|private|public|signing|oauth|jwt|aws"
 )
 _CAMEL_SECRET_KEY_PATTERN = (
+    r"(?:[a-z][A-Za-z0-9]{0,63}(?:(?-i:Password|Secret|Token|Passphrase))|"
     r"(?:api|app|auth|access|refresh|client|consumer|session|secret|private|signing|oauth|jwt|aws|comfy|"
-    r"proxy|credential|master|subscription|hmac|encryption)"
-    r"(?=[A-Za-z0-9]*(?:KeyId|Key|Secret|Token|Password|Passphrase|Authorization|Cookie|Signature|SessionId))"
-    r"(?![A-Za-z0-9]*(?:Count|Length|Algorithm)\b)[A-Za-z0-9]+"
+    r"proxy|credential|master|subscription|hmac|encryption|account|sharedAccess|sshPrivate)"
+    r"[A-Za-z0-9]{0,32}(?:(?-i:KeyId|Key|Authorization|Cookie|Signature|SessionId)))"
+    r"(?:(?-i:Backup|Value|V[0-9]+))?"
 )
 _ORDINARY_KEY_WORD = (
     r"(?<!primary_)(?<!primary-)(?<!foreign_)(?<!foreign-)(?<!sort_)(?<!sort-)"
     r"(?<!cache_)(?<!cache-)(?<!hash_)(?<!hash-)key"
 )
+_SECRET_KEY_TAIL = r"(?:[_-]+(?!(?:count|length|algorithm)\b)[^\W_]+){0,8}"
 _SECRET_ASSIGNMENT_KEY_PATTERN = (
     rf"(?<![\w-])(?:"
     rf"(?:[\w-]+[_-]{_ORDINARY_KEY_WORD}"
-    rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})){{0,8}})"
+    rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})){{0,8}}{_SECRET_KEY_TAIL})"
     rf"|(?:(?:{_SECRET_KEY_QUALIFIER})(?:[ _-]+(?:{_SECRET_KEY_QUALIFIER})){{0,8}}[ _-]+key"
-    rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})){{0,8}})"
+    rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})){{0,8}}{_SECRET_KEY_TAIL})"
     rf"|{_CAMEL_SECRET_KEY_PATTERN}"
     rf"|(?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})"
-    rf"(?:[_-]+(?!(?:count|length|algorithm)\b)[^\W_]+)*"
+    rf"{_SECRET_KEY_TAIL}"
     rf")"
 )
 _OPTIONAL_KEY_CLOSING_QUOTE = r"(?:[\"'](?=[^\S\r\n]*[:=]))?"
@@ -362,7 +365,6 @@ def _scrub_armored_blocks(text: str) -> str:
     chunks: list[str] = []
     cursor = 0
     search_from = 0
-    lowered = text.lower()
     while match := _ARMORED_BLOCK_BEGIN.search(text, search_from):
         label_start = match.end()
         label_end = text.find("-----", label_start, label_start + 165)
@@ -373,12 +375,12 @@ def _scrub_armored_blocks(text: str) -> str:
         if not _ARMORED_BLOCK_LABEL.fullmatch(label) or not re.search(r"key|certificate", label, re.IGNORECASE):
             search_from = label_end + 5
             continue
-        end_marker = f"-----end {label.lower()}-----"
-        end_start = lowered.find(end_marker, label_end + 5)
+        end_marker = re.compile(re.escape(f"-----END {label}-----"), re.IGNORECASE)
+        end_match = end_marker.search(text, label_end + 5)
         chunks.extend((text[cursor : match.start()], "***"))
-        if end_start < 0:
+        if end_match is None:
             return "".join(chunks)
-        cursor = end_start + len(end_marker)
+        cursor = end_match.end()
         search_from = cursor
     if not chunks:
         return text
@@ -387,6 +389,12 @@ def _scrub_armored_blocks(text: str) -> str:
 
 
 _SECRET_PATTERNS = (
+    # Run userinfo before the HTTP query scrubber. A raw ``?`` can be the
+    # character that made a password-bearing URL fail to parse, not a query
+    # delimiter, and the query pass would otherwise remove the closing ``@``
+    # that anchors the credential scrub.
+    (re.compile(r"(://)[^\s/'\"@?#]*:[^\s'\"]*@"), r"\1***@"),
+    (re.compile(r"(://)[^\s/'\"@?#]+@"), r"\1***@"),
     (re.compile(r"(https?://[^\s?#'\"]+)\?[^\s'\"]*", re.IGNORECASE), r"\1?***"),
     (re.compile(r"(Bearer\s+)[A-Za-z0-9._~+/=\-]+", re.IGNORECASE), r"\1***"),
     # An `Authorization:` value is `<scheme> <credential>` for ANY scheme
@@ -481,8 +489,6 @@ _SECRET_PATTERNS = (
         ),
         r"\1***",
     ),
-    (re.compile(r"(://)[^\s/'\"@?#]*:[^\s/'\"@]*@"), r"\1***@"),
-    (re.compile(r"(://)[^\s/'\"@?#]+@"), r"\1***@"),
 )
 
 
@@ -501,26 +507,25 @@ def _internal_error_message(error: BaseException) -> str:
         # A userinfo scrub needs its closing ``@``. If the input cap removed
         # that anchor, drop the incomplete credential token before earlier
         # scrubbers contract the message and pull it into the visible prefix.
-        partial_userinfo = re.search(
-            r"(?<![\w])[A-Za-z][A-Za-z0-9+.-]*://(?P<authority>[^\s/'\"?#]*)$",
-            text,
-        )
+        partial_userinfo = re.search(r"(?<![\w])[A-Za-z][A-Za-z0-9+.-]*://(?P<tail>[^\s'\"]*)$", text)
         if partial_userinfo is not None:
-            authority = partial_userinfo.group("authority")
-            userinfo, separator, host_port = authority.rpartition("@")
-            if separator:
+            tail = partial_userinfo.group("tail")
+            authority = re.split(r"[/?#]", tail, maxsplit=1)[0]
+            if "@" in tail:
                 # The cap may have removed a later ``@host``. Even a DNS-like
                 # suffix after the last visible @ can still be part of the
                 # password, so the only safe boundary is the URL start.
                 should_trim = True
             else:
                 host, port_separator, port = authority.rpartition(":")
+                ascii_port = re.fullmatch(r"[0-9]{1,5}", port)
+                common_port = bool(ascii_port) and int(port) in {80, 443, 3000, 5000, 8000, 8080, 8188, 8443}
                 looks_like_host_port = (
                     bool(port_separator)
-                    and port.isdigit()
-                    and int(port) <= 65_535
-                    and (host == "localhost" or "." in host or (host.startswith("[") and "]" in host))
+                    and common_port
+                    and (host == "localhost" or "." in host or (host.startswith("[") and host.endswith("]")))
                 )
+                looks_like_bare_ipv6 = authority.startswith("[") and authority.endswith("]")
                 looks_like_hostname = authority == "localhost" or (
                     "." in authority
                     and len(authority) <= 253
@@ -532,7 +537,7 @@ def _internal_error_message(error: BaseException) -> str:
                         for label in authority.split(".")
                     )
                 )
-                should_trim = not looks_like_host_port and not looks_like_hostname
+                should_trim = not looks_like_host_port and not looks_like_bare_ipv6 and not looks_like_hostname
         else:
             should_trim = False
         if should_trim:
