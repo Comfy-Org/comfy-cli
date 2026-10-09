@@ -195,6 +195,36 @@ def test_registry_gives_each_endpoint_a_fresh_decrementing_resolution_budget(mon
         spec._registry.cache_clear()
 
 
+def test_registry_bounds_aggregate_failed_resolution_work(monkeypatch):
+    endpoint_ids = [f"partner/{index}" for index in range(10)]
+    raw = {
+        "paths": {
+            f"/proxy/{endpoint_id}": {
+                "post": {"requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}}}
+            }
+            for endpoint_id in endpoint_ids
+        }
+    }
+    calls = 0
+
+    def exhaust(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        kwargs["budget"][0] = 0
+        raise spec.SpecError("pathological schema")
+
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None) for endpoint_id in endpoint_ids])
+    monkeypatch.setattr(spec, "_schema_resolution_budget", lambda _raw: 10)
+    monkeypatch.setattr(spec, "_resolve", exhaust)
+    spec._registry.cache_clear()
+    try:
+        assert spec._registry() == {}
+        assert calls == 4
+    finally:
+        spec._registry.cache_clear()
+
+
 def test_registry_ignores_non_string_path_item_method_keys(monkeypatch):
     endpoint_id = "one/endpoint"
     raw = {
@@ -412,6 +442,7 @@ def test_extract_enum_walks_items_and_variants():
     assert spec._extract_enum({"enum": [1, 2.5]}) == ["1", "2.5"]
     assert spec._extract_enum({"enum": [True, False]}) is None
     assert spec._extract_enum({"type": "string"}) is None
+    assert spec._extract_enum({"anyOf": [{"enum": ["v1"]}, False]}) == ["v1"]
 
 
 def test_extract_enum_unions_anyof_and_intersects_allof():
@@ -429,6 +460,10 @@ def test_extract_enum_unions_anyof_and_intersects_allof():
     assert spec._extract_enum(
         {"anyOf": [{"type": "string"}, {"enum": ["ignored"]}], "allOf": [{"enum": ["kept"]}]}
     ) == ["kept"]
+    assert spec._schema_admits_unconstrained_string({"type": "string", "allOf": [{"enum": ["v2"]}]}) is False
+    assert (
+        spec._schema_admits_unconstrained_string({"anyOf": [{"type": "string"}], "allOf": [{"const": "v2"}]}) is False
+    )
 
 
 def test_find_property_descends_top_level_composition():
@@ -480,3 +515,15 @@ def test_find_property_treats_an_enumless_declared_union_branch_as_unconstrained
     }
 
     assert spec._extract_enum(spec._find_property(schema, "model")) is None
+
+
+@pytest.mark.parametrize("non_object", [{"type": "null"}, {"type": "array", "items": {"type": "object"}}, False])
+def test_find_property_skips_union_branches_that_cannot_be_request_objects(non_object):
+    schema = {
+        "anyOf": [
+            {"type": "object", "properties": {"model": {"enum": ["v1"]}}},
+            non_object,
+        ]
+    }
+
+    assert spec._extract_enum(spec._find_property(schema, "model")) == ["v1"]

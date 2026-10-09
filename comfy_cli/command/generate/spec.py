@@ -351,12 +351,25 @@ def _schema_resolution_budget(spec: dict[str, Any], node: Any = None) -> int:
     return max(1_024, len(containers) * 64)
 
 
+def _resolution_attempt_budget(limit: int, aggregate: list[int]) -> tuple[list[int], int]:
+    """Allocate one isolated attempt without removing the operation-wide cap."""
+    if aggregate[0] <= 0:
+        raise SpecError("Schema resolution exceeded its aggregate safe traversal limit")
+    allowance = min(limit, aggregate[0])
+    return [allowance], allowance
+
+
+def _charge_resolution_attempt(aggregate: list[int], allowance: int, remaining: list[int]) -> None:
+    aggregate[0] -= allowance - remaining[0]
+
+
 def _resolve_schema(
     spec: dict[str, Any],
     node: Any,
     seen: frozenset[str],
     memo: dict[tuple[Any, ...], tuple[Any, bool]],
     budget: list[int],
+    active_inline: frozenset[int] = frozenset(),
 ) -> tuple[Any, bool]:
     """Return ``(resolved, contains_cycle_placeholder)`` for :func:`_resolve`."""
     if not isinstance(node, (dict, list)):
@@ -368,10 +381,13 @@ def _resolve_schema(
                 raise SpecError(f"Invalid non-string $ref: {ref!r}")
             if ref in seen:
                 return {"type": "object", "x-recursive-ref": ref}, True
+            if id(node) in active_inline:
+                return {"type": "object", "x-recursive-object": True}, True
+            child_active = active_inline | {id(node)}
             shared_key = ("ref", ref)
             if shared_key in memo:
                 return memo[shared_key]
-            memo_key = (*shared_key, seen)
+            memo_key = (*shared_key, seen, active_inline)
             if memo_key in memo:
                 return memo[memo_key]
             if budget[0] <= 0:
@@ -380,7 +396,7 @@ def _resolve_schema(
             memo[memo_key] = ({"type": "object", "x-recursive-ref": ref}, True)
             try:
                 resolved = _resolve_ref(spec, ref)
-                result = _resolve_schema(spec, resolved, seen | {ref}, memo, budget)
+                result = _resolve_schema(spec, resolved, seen | {ref}, memo, budget, child_active)
             except BaseException:
                 # The placeholder means "currently resolving", not "resolved
                 # successfully". Shared registry/hint memos must never reuse it
@@ -391,10 +407,12 @@ def _resolve_schema(
             if not result[1]:
                 memo[shared_key] = result
             return result
+        if id(node) in active_inline:
+            return {"type": "object", "x-recursive-object": True}, True
         shared_key = ("object", id(node))
         if shared_key in memo:
             return memo[shared_key]
-        memo_key = ("object", id(node), seen)
+        memo_key = ("object", id(node), seen, active_inline)
         if memo_key in memo:
             return memo[memo_key]
         if budget[0] <= 0:
@@ -405,7 +423,9 @@ def _resolve_schema(
         cyclic = False
         try:
             for key, child in node.items():
-                resolved_child, child_cyclic = _resolve_schema(spec, child, seen, memo, budget)
+                resolved_child, child_cyclic = _resolve_schema(
+                    spec, child, seen, memo, budget, active_inline | {id(node)}
+                )
                 value[key] = resolved_child
                 cyclic = cyclic or child_cyclic
         except BaseException:
@@ -417,10 +437,12 @@ def _resolve_schema(
             memo[shared_key] = result
         return result
     if isinstance(node, list):
+        if id(node) in active_inline:
+            return [], True
         shared_key = ("list", id(node))
         if shared_key in memo:
             return memo[shared_key]
-        memo_key = ("list", id(node), seen)
+        memo_key = ("list", id(node), seen, active_inline)
         if memo_key in memo:
             return memo[memo_key]
         if budget[0] <= 0:
@@ -431,7 +453,7 @@ def _resolve_schema(
         cyclic = False
         try:
             for item in node:
-                resolved_item, item_cyclic = _resolve_schema(spec, item, seen, memo, budget)
+                resolved_item, item_cyclic = _resolve_schema(spec, item, seen, memo, budget, active_inline | {id(node)})
                 value.append(resolved_item)
                 cyclic = cyclic or item_cyclic
         except BaseException:
@@ -475,8 +497,11 @@ def _registry() -> dict[str, Endpoint]:
         return {}
     registry: dict[str, Endpoint] = {}
     resolution_budget_limit = _schema_resolution_budget(spec)
+    aggregate_resolution_budget = [resolution_budget_limit * 4]
     resolution_memo: dict[tuple[Any, ...], tuple[Any, bool]] = {}
     for endpoint_id, category, polling_hint in _ENDPOINT_ALLOWLIST:
+        if aggregate_resolution_budget[0] <= 0:
+            break
         path = PROXY_PREFIX + endpoint_id
         node = paths.get(path)
         if not isinstance(node, dict) or not node:
@@ -512,8 +537,12 @@ def _registry() -> dict[str, Endpoint]:
         if not isinstance(request_media, dict):
             continue
         # Request and response share one allowance for this endpoint, but a
-        # malformed endpoint cannot starve every endpoint that follows it.
-        resolution_budget = [resolution_budget_limit]
+        # malformed endpoint cannot starve every endpoint that follows it. A
+        # constant-factor operation-wide allowance prevents many independently
+        # failing endpoints from multiplying traversal and memo growth.
+        resolution_budget, resolution_allowance = _resolution_attempt_budget(
+            resolution_budget_limit, aggregate_resolution_budget
+        )
         try:
             req_schema = _resolve(
                 spec,
@@ -522,6 +551,7 @@ def _registry() -> dict[str, Endpoint]:
                 budget=resolution_budget,
             )
         except (AttributeError, KeyError, TypeError, SpecError, RecursionError):
+            _charge_resolution_attempt(aggregate_resolution_budget, resolution_allowance, resolution_budget)
             continue
 
         # A malformed response affects only polling detection; it must not
@@ -543,6 +573,7 @@ def _registry() -> dict[str, Endpoint]:
                     )
         except (AttributeError, KeyError, TypeError, SpecError, RecursionError):
             resp_schema = {}
+        _charge_resolution_attempt(aggregate_resolution_budget, resolution_allowance, resolution_budget)
 
         polling = polling_hint or _detect_polling(partner, resp_schema)
 
@@ -642,6 +673,13 @@ def _extract_enum(
         merged_results: set[int] = set()
         unconstrained = False
         for variant in variants:
+            if variant is False:
+                # Boolean false accepts nothing, so it contributes no values
+                # and cannot make a finite union unconstrained.
+                continue
+            if variant is True:
+                unconstrained = True
+                break
             found = _extract_enum(variant, _memo, _string_memo) if isinstance(variant, dict) else None
             if not found:
                 if not isinstance(variant, dict) or _schema_admits_unconstrained_string(variant, _memo=_string_memo):
@@ -699,25 +737,27 @@ def _schema_admits_unconstrained_string(
             elif isinstance(schema_type, list):
                 result = "string" in schema_type
             else:
-                result = True
-                for key in ("anyOf", "oneOf"):
-                    variants = schema.get(key)
-                    if isinstance(variants, list):
-                        result = any(
-                            not isinstance(variant, dict)
-                            or _schema_admits_unconstrained_string(variant, _active, _memo)
-                            for variant in variants
-                        )
-                        break
-                else:
-                    all_of = schema.get("allOf")
-                    if isinstance(all_of, list) and all_of:
-                        result = all(
-                            isinstance(variant, dict) and _schema_admits_unconstrained_string(variant, _active, _memo)
-                            for variant in all_of
-                        )
-                    elif "items" in schema or "properties" in schema:
-                        result = False
+                result = "items" not in schema and "properties" not in schema
+            # JSON Schema composition keywords are conjunctive with their
+            # siblings. A free-form ``type: string`` does not override a finite
+            # sibling ``allOf``, and an ``anyOf``/``oneOf`` only admits arbitrary
+            # strings when at least one of its own branches does.
+            for key in ("anyOf", "oneOf"):
+                variants = schema.get(key)
+                if isinstance(variants, list):
+                    result = result and any(
+                        variant is True
+                        or (isinstance(variant, dict) and _schema_admits_unconstrained_string(variant, _active, _memo))
+                        or (variant is not False and not isinstance(variant, dict))
+                        for variant in variants
+                    )
+            all_of = schema.get("allOf")
+            if isinstance(all_of, list) and all_of:
+                result = result and all(
+                    variant is True
+                    or (isinstance(variant, dict) and _schema_admits_unconstrained_string(variant, _active, _memo))
+                    for variant in all_of
+                )
         _memo[schema_id] = result
         return result
     finally:
@@ -741,6 +781,41 @@ def model_enum(endpoint_id: str, field: str = "model") -> list[str] | None:
     if prop is None:
         return None
     return _extract_enum(prop)
+
+
+def _schema_may_be_object(schema: Any, _active: set[int] | None = None) -> bool:
+    """Whether an OpenAPI/JSON Schema branch can describe a request object."""
+    if schema is False:
+        return False
+    if schema is True or not isinstance(schema, dict):
+        return True
+    if _active is None:
+        _active = set()
+    schema_id = id(schema)
+    if schema_id in _active:
+        return True
+    _active.add(schema_id)
+    try:
+        schema_type = schema.get("type")
+        if isinstance(schema_type, str):
+            return schema_type == "object"
+        if isinstance(schema_type, list):
+            return "object" in schema_type
+        if "const" in schema:
+            return isinstance(schema.get("const"), dict)
+        enum = schema.get("enum")
+        if isinstance(enum, list) and enum:
+            return any(isinstance(value, dict) for value in enum)
+        for key in ("anyOf", "oneOf"):
+            variants = schema.get(key)
+            if isinstance(variants, list):
+                return any(_schema_may_be_object(variant, _active) for variant in variants)
+        all_of = schema.get("allOf")
+        if isinstance(all_of, list) and all_of:
+            return all(_schema_may_be_object(variant, _active) for variant in all_of)
+        return True
+    finally:
+        _active.remove(schema_id)
 
 
 def _find_property(
@@ -784,8 +859,10 @@ def _find_property(
         for variant in variants:
             found = _find_property(variant, field, _memo, _active) if isinstance(variant, dict) else None
             if found is None:
-                matches = []
-                break
+                if _schema_may_be_object(variant):
+                    matches = []
+                    break
+                continue
             matches.append(found)
         if matches:
             candidates.append(matches[0] if len(matches) == 1 else {key: matches})
@@ -856,10 +933,13 @@ def _model_name_hint(name: str) -> str | None:
     if not isinstance(paths, dict):
         return None
     resolution_budget_limit = _schema_resolution_budget(raw)
+    aggregate_resolution_budget = [resolution_budget_limit * 4]
     resolution_memo: dict[tuple[Any, ...], tuple[Any, bool]] = {}
     aliased = {v: k for k, v in _ALIASES.items()}
     hits: list[tuple[str, str, list[str]]] = []
     for path, node in paths.items():
+        if aggregate_resolution_budget[0] <= 0:
+            break
         if not str(path).startswith(PROXY_PREFIX) or not isinstance(node, dict):
             continue
         op = node.get("post")
@@ -878,8 +958,11 @@ def _model_name_hint(name: str) -> str | None:
         schema = media.get("schema")
         if not schema:
             continue
+        resolution_budget, resolution_allowance = _resolution_attempt_budget(
+            resolution_budget_limit, aggregate_resolution_budget
+        )
         try:
-            resolved = _resolve(raw, schema, memo=resolution_memo, budget=[resolution_budget_limit])
+            resolved = _resolve(raw, schema, memo=resolution_memo, budget=resolution_budget)
             if not isinstance(resolved, dict):
                 continue
             for field in ("model", "model_name", "model_id"):
@@ -891,6 +974,8 @@ def _model_name_hint(name: str) -> str | None:
                     break
         except (KeyError, TypeError, SpecError, RecursionError):
             continue
+        finally:
+            _charge_resolution_attempt(aggregate_resolution_budget, resolution_allowance, resolution_budget)
     if not hits:
         return None
     lines = [

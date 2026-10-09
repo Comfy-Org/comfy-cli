@@ -356,6 +356,7 @@ def test_missing_nested_selector_uses_the_active_outer_options_default():
     graph = Graph.from_object_info(object_info)
     wf, nid = _fresh_nested(graph, model="v2")
     wf["nodes"][0]["widgets_values"] = ["v2"]
+    before = list(wf["nodes"][0]["widgets_values"])
 
     with pytest.raises(ValueError) as exc:
         workflow_ops.set_widget(wf, graph, nid, "model.mode.refine", True)
@@ -363,3 +364,4 @@ def test_missing_nested_selector_uses_the_active_outer_options_default():
     msg = str(exc.value)
     assert "model.mode='quick'" in msg, msg
     assert "'detailed'" in msg, msg
+    assert wf["nodes"][0]["widgets_values"] == before

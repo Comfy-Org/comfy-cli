@@ -674,7 +674,7 @@ def ls_nodes_cmd(
     renderer = get_renderer()
     renderer.command = "workflow ls-nodes"
     p, workflow = _load_workflow_or_fail(renderer, file)
-    from comfy_cli.cql.engine import _def_contains_type, _definition_alias_budget
+    from comfy_cli.cql.engine import _definition_alias_conflicts
 
     nodes = [node for node in workflow.get("nodes") or [] if isinstance(node, dict)]
     node_types = {node.get("type") for node in nodes if isinstance(node.get("type"), str)}
@@ -693,13 +693,10 @@ def ls_nodes_cmd(
         if isinstance(name, str) and name in node_types:
             name_counts[name] = name_counts.get(name, 0) + 1
             name_first.setdefault(name, definition)
-    alias_budget = _definition_alias_budget(subgraphs)
+    candidates = {name: name_first[name] for name, count in name_counts.items() if count == 1 and name not in ids_only}
+    conflicts = _definition_alias_conflicts(subgraphs, ids_only, candidates)
     for name, count in name_counts.items():
-        if (
-            count == 1
-            and name not in ids_only
-            and not _def_contains_type(name_first[name], name, ids_only, budget=alias_budget)
-        ):
+        if count == 1 and name not in ids_only and name not in conflicts:
             subgraph_ids.add(name)
     rows = []
     for n in nodes:

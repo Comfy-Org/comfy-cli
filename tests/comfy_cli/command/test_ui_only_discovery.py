@@ -129,6 +129,32 @@ def test_ls_nodes_marks_a_unique_definition_name_used_as_the_instance_type(patch
     assert row.get("subgraph") is True, row
 
 
+def test_ls_nodes_preserves_all_deep_acyclic_definition_name_aliases(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    depth = 32
+    wf["definitions"] = {
+        "subgraphs": [
+            {
+                "id": f"id-{index}",
+                "name": f"Alias{index}",
+                "nodes": ([{"id": index, "type": f"id-{index + 1}"}] if index + 1 < depth else []),
+                "links": [],
+                "inputs": [],
+                "outputs": [],
+            }
+            for index in range(depth)
+        ]
+    }
+    wf["nodes"].extend(
+        {"id": 100 + index, "type": f"Alias{index}", "pos": [0, 0], "inputs": [], "outputs": []}
+        for index in range(depth)
+    )
+
+    rows = _ls_rows(tmp_path, capsys, wf)
+
+    assert all(rows[100 + index].get("subgraph") is True for index in range(depth))
+
+
 @pytest.mark.parametrize(
     "definitions",
     [[], {"subgraphs": 1}, {"subgraphs": [{"id": "x", "name": "KSampler", "nodes": 1}]}],

@@ -406,6 +406,35 @@ def test_model_hint_computes_one_resolution_budget_for_all_paths(monkeypatch):
     assert budget.call_count == 1
 
 
+def test_model_hint_bounds_aggregate_failed_path_work(monkeypatch):
+    raw = {
+        "paths": {
+            f"/proxy/partner/{index}": {
+                "post": {"requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}}}
+            }
+            for index in range(10)
+        }
+    }
+    calls = 0
+
+    def load_raw_spec():
+        return raw
+
+    def exhaust(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        kwargs["budget"][0] = 0
+        raise spec.SpecError("pathological schema")
+
+    load_raw_spec.cache_clear = lambda: None  # type: ignore[attr-defined]
+    monkeypatch.setattr(spec, "load_raw_spec", load_raw_spec)
+    monkeypatch.setattr(spec, "_schema_resolution_budget", lambda _raw: 10)
+    monkeypatch.setattr(spec, "_resolve", exhaust)
+
+    assert spec._model_name_hint("example") is None
+    assert calls == 4
+
+
 def test_resolve_memoizes_shared_inline_alias_branches():
     schema: dict = {"type": "string"}
     depth = 32
@@ -417,6 +446,19 @@ def test_resolve_memoizes_shared_inline_alias_branches():
 
     assert isinstance(resolved, dict)
     assert resolve.call_count <= depth * 3 + 2
+
+
+def test_inline_alias_cycle_results_are_scoped_to_the_active_ancestry():
+    left: dict = {"a_value": {"type": "string"}}
+    right: dict = {"b_value": {"type": "integer"}}
+    left["next"] = right
+    right["next"] = left
+
+    resolved = spec._resolve({}, {"anyOf": [left, right]})
+
+    sibling_right = resolved["anyOf"][1]
+    assert sibling_right["next"]["a_value"] == {"type": "string"}
+    assert sibling_right["next"]["next"]["x-recursive-object"] is True
 
 
 def test_resolve_budget_charges_containers_not_scalar_enum_members():

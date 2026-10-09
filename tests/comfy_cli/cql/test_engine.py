@@ -9,7 +9,6 @@ from __future__ import annotations
 import copy
 import json
 from typing import Any
-from unittest import mock
 
 import pytest
 
@@ -18,7 +17,6 @@ from comfy_cli.cql.engine import (
     Graph,
     Port,
     _apply_one_slot,
-    _def_contains_type,
     _extract_frontend_slots,
     _subgraph_defs_by_id,
     _write_widget,
@@ -29,7 +27,7 @@ from comfy_cli.cql.engine import (
 # ---------------------------------------------------------------------------
 
 
-def test_subgraph_name_alias_checks_share_one_serialized_graph_budget():
+def test_subgraph_name_alias_checks_preserve_every_deep_acyclic_definition():
     definitions = [
         {
             "id": f"id-{index}",
@@ -43,13 +41,9 @@ def test_subgraph_name_alias_checks_share_one_serialized_graph_budget():
         "definitions": {"subgraphs": definitions},
     }
 
-    with mock.patch("comfy_cli.cql.engine._def_contains_type", wraps=_def_contains_type) as contains:
-        _subgraph_defs_by_id(workflow)
+    resolved = _subgraph_defs_by_id(workflow)
 
-    budgets = [call.kwargs["budget"] for call in contains.call_args_list]
-    assert budgets
-    assert len({id(budget) for budget in budgets}) == 1
-    assert budgets[0][0] >= 0
+    assert all(f"Alias{index}" in resolved for index in range(32))
 
 
 def _object_info() -> dict[str, Any]:

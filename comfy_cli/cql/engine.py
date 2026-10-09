@@ -3554,6 +3554,114 @@ def split_node_path(workflow: dict, node_path: str) -> list[str]:
     return segments
 
 
+def _definition_alias_conflicts(
+    definitions: list[dict],
+    by_id: dict[str, dict],
+    candidates: dict[str, dict],
+) -> set[str]:
+    """Candidate names reachable as real node types from their own definition.
+
+    Collapse the definition-id graph into strongly connected components, then
+    propagate candidate-name bitsets once over the resulting DAG. This makes
+    every alias query an O(1) bit lookup after one serialized-graph walk,
+    including long chains and cycles.
+    """
+    if not candidates:
+        return set()
+    unique_definitions: list[dict] = []
+    index_by_identity: dict[int, int] = {}
+    for definition in definitions:
+        if id(definition) not in index_by_identity:
+            index_by_identity[id(definition)] = len(unique_definitions)
+            unique_definitions.append(definition)
+    edges: list[set[int]] = [set() for _ in unique_definitions]
+    bit_by_name = {name: 1 << index for index, name in enumerate(candidates)}
+    direct_masks = [0] * len(unique_definitions)
+    for index, definition in enumerate(unique_definitions):
+        raw_nodes = definition.get("nodes")
+        for node in raw_nodes if isinstance(raw_nodes, list) else []:
+            if not isinstance(node, dict):
+                continue
+            node_type = node.get("type")
+            if isinstance(node_type, str):
+                direct_masks[index] |= bit_by_name.get(node_type, 0)
+                nested = by_id.get(node_type)
+                nested_index = index_by_identity.get(id(nested)) if nested is not None else None
+                if nested_index is not None:
+                    edges[index].add(nested_index)
+
+    # Kosaraju's two iterative passes avoid Python recursion limits on hostile
+    # or simply very deep definition graphs.
+    order: list[int] = []
+    seen: set[int] = set()
+    for start in range(len(unique_definitions)):
+        if start in seen:
+            continue
+        stack = [(start, False)]
+        while stack:
+            node, expanded = stack.pop()
+            if expanded:
+                order.append(node)
+                continue
+            if node in seen:
+                continue
+            seen.add(node)
+            stack.append((node, True))
+            stack.extend((child, False) for child in edges[node] if child not in seen)
+
+    reverse_edges: list[set[int]] = [set() for _ in unique_definitions]
+    for parent, children in enumerate(edges):
+        for child in children:
+            reverse_edges[child].add(parent)
+    component = [-1] * len(unique_definitions)
+    component_count = 0
+    for start in reversed(order):
+        if component[start] >= 0:
+            continue
+        component[start] = component_count
+        stack = [start]
+        while stack:
+            node = stack.pop()
+            for parent in reverse_edges[node]:
+                if component[parent] < 0:
+                    component[parent] = component_count
+                    stack.append(parent)
+        component_count += 1
+
+    component_masks = [0] * component_count
+    component_edges: list[set[int]] = [set() for _ in range(component_count)]
+    for node, children in enumerate(edges):
+        source_component = component[node]
+        component_masks[source_component] |= direct_masks[node]
+        for child in children:
+            target_component = component[child]
+            if source_component != target_component:
+                component_edges[source_component].add(target_component)
+    indegree = [0] * component_count
+    for children in component_edges:
+        for child in children:
+            indegree[child] += 1
+    ready = [index for index, degree in enumerate(indegree) if degree == 0]
+    topological: list[int] = []
+    while ready:
+        current = ready.pop()
+        topological.append(current)
+        for child in component_edges[current]:
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                ready.append(child)
+    for current in reversed(topological):
+        for child in component_edges[current]:
+            component_masks[current] |= component_masks[child]
+
+    conflicts: set[str] = set()
+    for name, definition in candidates.items():
+        definition_index = index_by_identity.get(id(definition))
+        if definition_index is not None and component_masks[component[definition_index]] & bit_by_name[name]:
+            conflicts.add(name)
+    return conflicts
+
+
 def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
     """Index subgraph definitions so an instance's ``type`` resolves to its def.
 
@@ -3580,13 +3688,11 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
             name_counts[name] = name_counts.get(name, 0) + 1
             name_first.setdefault(name, sg)
     ids_only = dict(by_id)
-    alias_budget = _definition_alias_budget([definition for definition in defs if isinstance(definition, dict)])
+    definitions = [definition for definition in defs if isinstance(definition, dict)]
+    candidates = {name: name_first[name] for name, count in name_counts.items() if count == 1 and name not in by_id}
+    conflicts = _definition_alias_conflicts(definitions, ids_only, candidates)
     for name, count in name_counts.items():
-        if (
-            count == 1
-            and name not in by_id
-            and not _def_contains_type(name_first[name], name, ids_only, budget=alias_budget)
-        ):
+        if count == 1 and name not in by_id and name not in conflicts:
             by_id[name] = name_first[name]
     return by_id
 
@@ -4236,12 +4342,10 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
     m = graph.node(node_type)
     if m is None:
         raise ValueError(f"unknown node type {node_type!r} for node {node.get('id')}")
-    widgets = _widgets_as_positional(node.get("widgets_values"), graph, node_type)
-    if not isinstance(node.get("widgets_values"), list):
-        # Persist the positional projection so downstream re-reads (the
-        # dynamic-combo selector path re-reads from the node) see the same
-        # values this write is about to index against.
-        node["widgets_values"] = widgets
+    # Stage normalization, padding, and selector defaults locally. A refused or
+    # invalid write promises that nothing changed, so none of this may reach the
+    # node before the target exists and its value has validated.
+    widgets = list(_widgets_as_positional(node.get("widgets_values"), graph, node_type))
     if extend:
         # A truncated positional array can omit a dynamic selector while its
         # declared default makes a nested sub-widget virtually addressable.
@@ -4269,7 +4373,6 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
             selector_idx, selector = missing
             widgets.extend([None] * (selector_idx - len(widgets)))
             widgets.append(_widget_default(selector))
-            node["widgets_values"] = widgets
     order = graph.widget_order_for_node(node_type, widgets)
     entries = _expand_widget_entries(m, widgets)
     if any(e.frontend_injected and e.name == input_name for e in entries):
@@ -4300,7 +4403,16 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         port = next((p for p in m.inputs if p.name == input_name), None)
 
     if port is not None and _is_dynamic_combo_type(port.type) and port.dynamic_options:
-        return _write_dynamic_combo_selector(node, port, input_name, widget_idx, value, entries, extend=extend)
+        return _write_dynamic_combo_selector(
+            node,
+            port,
+            input_name,
+            widget_idx,
+            value,
+            entries,
+            widgets=widgets,
+            extend=extend,
+        )
 
     if widget_idx >= len(widgets):
         if not extend:
@@ -4371,7 +4483,15 @@ def _unknown_dynamic_sub_warning(
 
 
 def _write_dynamic_combo_selector(
-    node: dict, port: Port, input_name: str, widget_idx: int, value: Any, entries: list[_WidgetEntry], *, extend: bool
+    node: dict,
+    port: Port,
+    input_name: str,
+    widget_idx: int,
+    value: Any,
+    entries: list[_WidgetEntry],
+    *,
+    widgets: list[Any] | None = None,
+    extend: bool,
 ) -> list[dict]:
     """Write a dynamic combo's selector, rebuilding the sub-widget roster when
     the selected option changes.
@@ -4383,7 +4503,7 @@ def _write_dynamic_combo_selector(
     defaults (option sub-spec ``default``; first enum option for combos), and
     keep the trailing values (seed/marker/watermark/…) aligned after them.
     """
-    widgets = _widgets_as_list(node.get("widgets_values"))
+    widgets = list(widgets) if widgets is not None else _widgets_as_list(node.get("widgets_values"))
     if value not in port.enum_values:
         valid = ", ".join(repr(k) for k in port.enum_values)
         raise ValueError(f"{input_name}: {value!r} is not a known option; valid options: {valid}")
