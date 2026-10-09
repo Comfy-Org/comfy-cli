@@ -209,7 +209,14 @@ def test_subgraph_expansion_uses_boundary_link_membership_not_stale_row_slots():
     definition = {
         "inputs": [{"name": "wrong", "linkIds": []}, {"name": "right", "linkIds": [1]}],
         "outputs": [{"name": "wrong_out", "linkIds": []}, {"name": "right_out", "linkIds": [2]}],
-        "nodes": [{"id": 7, "type": "Example", "inputs": [{"name": "value", "link": 1}], "outputs": []}],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "Example",
+                "inputs": [{"name": "value", "link": 1}],
+                "outputs": [{"name": "result"}],
+            }
+        ],
         "links": [
             {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0},
             {"id": 2, "origin_id": 7, "origin_slot": 0, "target_id": -20, "target_slot": 0},
@@ -232,6 +239,28 @@ def test_subgraph_expansion_skips_malformed_output_source_coordinates(origin_id,
             {
                 "id": 1,
                 "origin_id": origin_id,
+                "origin_slot": origin_slot,
+                "target_id": -20,
+                "target_slot": 0,
+            }
+        ],
+    }
+
+    _nodes, _links, _input_targets, output_sources = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
+
+    assert output_sources == {}
+
+
+@pytest.mark.parametrize("origin_slot", [-1, 1])
+def test_subgraph_expansion_skips_out_of_range_output_sources(origin_slot):
+    definition = {
+        "inputs": [],
+        "outputs": [{"name": "result", "linkIds": [1]}],
+        "nodes": [{"id": 7, "type": "Producer", "inputs": [], "outputs": [{"name": "value"}]}],
+        "links": [
+            {
+                "id": 1,
+                "origin_id": 7,
                 "origin_slot": origin_slot,
                 "target_id": -20,
                 "target_slot": 0,
@@ -281,7 +310,56 @@ def test_definition_input_to_output_passthrough_uses_the_outer_input_source():
 
     rewritten = workflow_to_api._rewrite_links_for_subgraphs(external, ctx, [])
 
-    assert rewritten[1][1:3] == ["producer", 2]
+    assert next(link for link in rewritten if link[0] == 12)[1:3] == ["producer", 2]
+
+
+def test_passthrough_uses_the_held_outer_input_not_stale_row_order():
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.output_sources["10"] = {0: (-10, 1)}
+    ctx.held_input_idx["10"] = {2: 1}
+    links = [
+        [1, "stale", 0, 10, 1, "*"],
+        [2, "live", 3, 10, 0, "*"],
+        [3, 10, 0, "consumer", 0, "*"],
+    ]
+
+    rewritten = workflow_to_api._rewrite_links_for_subgraphs(links, ctx, [])
+
+    assert next(link for link in rewritten if link[0] == 3)[1:3] == ["live", 3]
+    assert all(link[0] != 1 for link in rewritten)
+
+
+def test_nested_input_to_output_passthrough_inherits_the_parent_source():
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.input_targets["10"] = {0: [(7, 0)]}
+    ctx.output_sources["10"] = {0: (7, 0)}
+    ctx.input_targets["10:7"] = {}
+    ctx.output_sources["10:7"] = {0: ("-10", 0)}
+    ctx.held_input_idx["10"] = {1: 0}
+    links = [
+        [1, "producer", 2, 10, 0, "*"],
+        [2, 10, 0, "consumer", 0, "*"],
+    ]
+
+    rewritten = workflow_to_api._rewrite_links_for_subgraphs(links, ctx, [])
+
+    assert next(link for link in rewritten if link[0] == 2)[1:3] == ["producer", 2]
+
+
+def test_passthrough_uses_input_membership_and_accepts_string_proxy_id():
+    definition = {
+        "inputs": [
+            {"name": "wrong", "linkIds": []},
+            {"name": "right", "linkIds": [1]},
+        ],
+        "outputs": [{"name": "result", "linkIds": [1]}],
+        "nodes": [],
+        "links": [{"id": 1, "origin_id": "-10", "origin_slot": 0, "target_id": -20, "target_slot": 0}],
+    }
+
+    _nodes, _links, _inputs, output_sources = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
+
+    assert output_sources == {0: (-10, 1)}
 
 
 def test_large_serialized_boundary_does_not_consume_the_fanout_reserve():
