@@ -1206,6 +1206,20 @@ def run(
             ),
         ),
     ] = False,
+    client_id: Annotated[
+        str | None,
+        typer.Option(
+            "--client-id",
+            show_default=False,
+            help=(
+                "Local-only: submit as this already-connected WebSocket clientId instead of a fresh "
+                "one. ComfyUI sends a prompt's execution events only to the socket that submitted it, "
+                "so passing a browser tab's clientId is what makes that tab show node highlights, "
+                "progress and outputs for a run it did not start. This invocation then cannot watch "
+                "the run itself, so it cannot be combined with --wait."
+            ),
+        ),
+    ] = None,
 ):
     # Snapshot kwargs before the body mutates api_key/host/port — analytics should record what user actually supplied.
     _track_props = tracking.filter_command_kwargs(dict(locals()))
@@ -1250,6 +1264,34 @@ def run(
         # cloud run from a local one even when --where was defaulted (the raw
         # `where` kwarg is None then). Rides on the execution_success/_error events.
         _track_props["target"] = "cloud" if decision.target is where_module.WhereTarget.CLOUD else "local"
+
+        if client_id is not None and not client_id.strip():
+            renderer.error(
+                code="client_id_rejected",
+                message="--client-id must not be empty",
+                hint="pass the connected browser client's id, or omit --client-id",
+                details={"reason": "empty"},
+            )
+            raise typer.Exit(code=1)
+        client_id = client_id.strip() if client_id is not None else None
+        if client_id:
+            rejection = None
+            if decision.target is where_module.WhereTarget.CLOUD:
+                rejection = ("cloud", "--client-id addresses a local ComfyUI socket and has no meaning on cloud")
+            elif wait:
+                rejection = (
+                    "wait",
+                    "--client-id hands this run's events to another client, so --wait would watch a silent socket",
+                )
+            if rejection is not None:
+                reason, message = rejection
+                renderer.error(
+                    code="client_id_rejected",
+                    message=message,
+                    hint="drop --client-id, or drop the conflicting flag",
+                    details={"reason": reason},
+                )
+                raise typer.Exit(code=1)
 
         # Default for --notify: on when a human is at the terminal, off for
         # agents (they shouldn't get surprise side-channel processes they didn't
@@ -1348,6 +1390,7 @@ def run(
                 print_prompt=print_prompt,
                 preloaded=preloaded,
                 allow_spend=allow_spend,
+                client_id=client_id,
             )
     except typer.Exit as e:
         if (e.exit_code or 0) == 0:

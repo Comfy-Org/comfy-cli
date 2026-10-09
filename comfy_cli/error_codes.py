@@ -308,6 +308,39 @@ REGISTRY: tuple[ErrorCode, ...] = (
         "background server is bad — clear it with `comfy stop`",
     ),
     ErrorCode(
+        "client_id_rejected",
+        "`--client-id` was combined with something it cannot serve. The flag names an "
+        "ALREADY-CONNECTED client (normally a browser tab) so ComfyUI addresses a run's execution "
+        "events to that client rather than to the invocation that submitted it. ComfyUI's `/ws` "
+        "handler evicts any socket already registered under an incoming clientId, so nothing may "
+        "attach as a borrowed id without silencing the very client the flag exists to feed. "
+        "Raised by two commands, and `details.reason` says which case. Both raise `empty` (the flag "
+        "was passed with a blank value). `comfy run` adds `cloud` (local-only — cloud fans execution "
+        "events out per user/workspace regardless of submitter) and `wait` (`--wait` would watch a "
+        "socket this run's events are deliberately not sent to). `comfy jobs watch` adds `borrowed` "
+        "(the prompt is marked as having borrowed a live client's id, so it is poll-only and no "
+        "override is honoured) and `indeterminate` (nothing vouched for the run — no readable job "
+        "state file, and the prompt's own server record could not be read, whether because the fetch "
+        "failed, the body was the wrong shape, or neither `/queue` nor `/history` mentions it, so the "
+        "marker was never ruled out). An override is honoured only once the state file or the "
+        "prompt's server record has positively cleared it. Refused before anything is submitted or "
+        "any socket is opened. `borrowed` covers the id as well as the prompt: naming a borrowed "
+        "client's id while watching a different, ordinary prompt is refused too, since attaching "
+        "evicts that client either way. Those ids come from `/queue`, and an override is refused "
+        "as `indeterminate` when that read did not come back whole, since an empty list of them "
+        "means 'nobody is borrowing' only once the queue was walked. Bounded by what a READ "
+        "`/queue` still shows — an id fed by a run that has already left the queue cannot be "
+        "recognised — and limited to runs comfy-cli submitted, since a browser tab submitting its "
+        "own prompt stamps no marker. A prompt that "
+        "is already terminal short-circuits earlier, where a NON-EMPTY flag is ignored rather than "
+        "refused because no socket is opened at all (`empty` is still raised there).",
+        "pass a non-empty id, or drop the conflicting flag: `--client-id` cannot be combined with "
+        "`--wait` or a cloud target, and `comfy jobs watch` on a borrowed run takes no `--client-id` "
+        "at all — poll it with `comfy jobs status`; on `indeterminate`, retry once the server answers "
+        "again, or drop `--client-id` to poll safely now — but if the prompt_id is a typo or already "
+        "pruned it stays unreadable and no id will work",
+    ),
+    ErrorCode(
         "host_flag_cloud",
         "`--host`/`--port` were combined with an effective `cloud` target. They address a local "
         "ComfyUI only; the cloud address comes from the signed-in account. `details` carries the "

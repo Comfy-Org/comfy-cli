@@ -11,7 +11,7 @@ submitted the prompt (``send_sync(..., server.client_id)`` in ComfyUI's
 ``execution.py``, delivered by ``PromptServer.send_json`` only to that one
 ``sid``). A watcher that connects with a *fresh* ``clientId`` therefore receives
 nothing at all — so ``jobs watch`` re-attaches with the submitting client_id
-(see ``_resolve_watch_client_id``).
+(see ``_select_watch_client_id``).
 
 Three subcommands:
 
@@ -27,6 +27,7 @@ Three subcommands:
 
 from __future__ import annotations
 
+import http.client
 import json
 import time
 import urllib.error
@@ -35,7 +36,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NamedTuple
 
 import typer
 from websocket import WebSocket, WebSocketException, WebSocketTimeoutException
@@ -156,12 +157,21 @@ def _http_get_json(url: str, *, timeout: float = 10.0) -> Any:
     ``/history`` can't OOM the CLI. Every failure — unreachable, oversize,
     non-JSON — leaves as a ``RuntimeError``, which is the single family every
     call site below already catches.
+
+    That promise is why the net is ``OSError`` rather than ``URLError`` (a
+    subclass of it). urllib only wraps what the *request* raises; a server that
+    accepts the connection and hangs up before answering surfaces as a raw
+    ``http.client.RemoteDisconnected`` out of ``getresponse()``, which is an
+    ordinary transient — a restarting ComfyUI, a reset connection — and has no
+    business reaching a caller as an uncaught traceback. ``HTTPException``
+    covers its siblings that are not ``OSError`` at all (``IncompleteRead``,
+    ``BadStatusLine``).
     """
     req = urllib.request.Request(url)
     try:
         with plain_urlopen(req, timeout=timeout) as resp:
             return json.loads(read_capped(resp, url))
-    except urllib.error.URLError as e:
+    except (OSError, http.client.HTTPException) as e:
         raise RuntimeError(f"failed to GET {url}: {e}") from e
     except ResponseTooLarge as e:
         raise RuntimeError(str(e)) from e
@@ -1072,7 +1082,7 @@ def _server_confirms_no_record(host: str, port: int, prompt_id: str) -> bool:
     """
     try:
         q = _http_get_json(f"http://{host}:{port}/queue")
-        hist = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
+        hist = _http_get_json(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
     except RuntimeError:
         return False
     if not isinstance(q, dict) or not isinstance(hist, dict):
@@ -1261,7 +1271,7 @@ def _snapshot(host: str, port: int, prompt_id: str) -> dict | None:
 
     # Then: history.
     try:
-        h = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
+        h = _http_get_json(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
     except RuntimeError:
         return None
     if not isinstance(h, dict) or prompt_id not in h:
@@ -1861,56 +1871,262 @@ def _client_id_from_extra_data(extra: Any) -> str | None:
     return None
 
 
-def _resolve_watch_client_id(host: str, port: int, prompt_id: str) -> str | None:
-    """Find the ``client_id`` this prompt was submitted with, or None.
+def _borrowed_from_extra_data(extra: Any) -> bool:
+    """Read ``comfy run --client-id``'s marker back off a queue/history entry.
+
+    The marker rides ``extra_data`` rather than only our own state file because
+    the submitter and the watcher are routinely different processes with
+    different config roots — the in-app agent runs the CLI under a sandboxed
+    ``HOME`` it deletes at turn end, so the user's own `jobs watch` can never
+    see that run's state file. ComfyUI preserves unknown ``extra_data`` keys
+    (only the two credential keys are stripped) and exposes the slot through
+    both ``/queue`` and ``/history``, so this is the one signal every watcher
+    can read.
+    """
+    return isinstance(extra, dict) and extra.get(jobs_state.BORROWED_CLIENT_ID_KEY) is True
+
+
+# Why a watch polls instead of attaching. `borrowed` is a positive finding: the
+# prompt carries the marker. `indeterminate` is the absence of one we could not
+# confirm — see `_select_watch_client_id`. They are not interchangeable: only
+# the first licenses "drop --client-id", the second asks for a retry.
+_PollReason = Literal["borrowed", "indeterminate"]
+
+
+# Four distinct situations collapse into the two published `reason` values, and
+# the advice differs even where the reason does not: dropping `--client-id`
+# makes a run whose own marker is set POLL, but makes the other three ATTACH
+# under their own resolved id. A single message per reason told half of them the
+# opposite of what happens. `reason` stays the documented pair; the cause only
+# picks the wording.
+_RejectCause = Literal["prompt_borrowed", "id_borrowed", "census_unread", "nothing_vouched"]
+
+_REJECTION_TEXT: dict[_RejectCause, tuple[_PollReason, str, str]] = {
+    "prompt_borrowed": (
+        "borrowed",
+        "This run borrowed another client's live socket and can only be watched by polling",
+        "drop --client-id; comfy jobs watch will poll this run safely",
+    ),
+    "id_borrowed": (
+        "borrowed",
+        "--client-id names a client that another queued run is feeding on purpose; attaching as it "
+        "would cut that client off",
+        "drop --client-id — this prompt resolves its own submitting client and attaches normally",
+    ),
+    "census_unread": (
+        "indeterminate",
+        "Could not confirm --client-id is free to attach as: the /queue read that lists the clients "
+        "other runs are feeding did not come back whole",
+        "retry once the server answers, or drop --client-id to attach as this prompt's own submitting client",
+    ),
+    "nothing_vouched": (
+        "indeterminate",
+        "Could not confirm that --client-id is safe to attach as: this prompt has no record we "
+        "could read, so whether it borrowed a live client's socket is unknown",
+        "drop --client-id and comfy jobs watch will poll this run safely; if the server was "
+        "briefly unreachable, retry — if the prompt_id is a typo or already pruned, no id works",
+    ),
+}
+
+
+class _ClientIdRejected(ValueError):
+    """An explicit ``--client-id`` the watch must not honour, and why.
+
+    Subclasses ValueError so the cause rides the exception rather than being
+    re-derived at the call site, where the second lookup it would need could
+    disagree with the one that made the decision.
+    """
+
+    def __init__(self, cause: _RejectCause) -> None:
+        super().__init__(cause)
+        self.cause: _RejectCause = cause
+        self.reason: _PollReason = _REJECTION_TEXT[cause][0]
+
+    @property
+    def text(self) -> tuple[str, str]:
+        """The message and hint this cause should be reported with."""
+        return _REJECTION_TEXT[self.cause][1:]
+
+
+# How long a poll-only watch waits before reconciling. The ordinary `--timeout`
+# is a silence budget for a socket that SHOULD be receiving events; here there
+# is no socket at all, so it would be dead air. This raises the reconcile
+# cadence for the whole watch, not just the first read, which is affordable
+# against a loopback/LAN ComfyUI.
+_POLL_ONLY_WATCH_POLL_S = 2.0
+
+
+def _get_json_object(url: str) -> dict[str, Any]:
+    """GET a JSON **object**, or an empty one if anything at all went wrong.
+
+    A failed fetch and a 200 carrying valid JSON of the wrong shape (a proxy
+    error page, a captive portal) collapse to the same empty mapping on
+    purpose: neither is a record, and the only caller treats "no record" as "we
+    did not establish anything".
+    """
+    try:
+        body = _http_get_json(url)
+    except RuntimeError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+class _SubmittedRecord(NamedTuple):
+    """Everything one pass over the server's two stores established.
+
+    ``borrowed_ids`` comes from the same ``/queue`` body as ``extra`` because
+    the two answer different questions and both are needed before a socket
+    opens: the marker rides a PROMPT, but what it protects is a SOCKET, and a
+    caller can name a live client's id while watching a different prompt
+    entirely. Collected in one pass so the two cannot disagree.
+
+    Each has its own "we actually read it" flag, and they are NOT the same
+    fact. ``read`` covers this prompt's own record; ``queue_read`` covers the
+    queue-wide census behind ``borrowed_ids``, which is empty both when no run
+    has borrowed anything and when the fetch failed. Collapsing them would let
+    a blipped ``/queue`` pass for "nobody is borrowing" — the same absence-of-
+    evidence reasoning the rest of this module exists to refuse.
+    """
+
+    extra: Any
+    read: bool
+    borrowed_ids: frozenset[str]
+    queue_read: bool
+
+
+def _submitted_extra_data(host: str, port: int, prompt_id: str) -> _SubmittedRecord:
+    """This prompt's ``extra_data`` as the SERVER has it, and whether that record
+    was POSITIVELY READ.
+
+    Reads ``/queue`` while the prompt is pending or running, then ``/history``
+    once it has finished. The flag is the part that matters for safety: a
+    caller deciding whether a prompt is marked borrowed must not read the
+    failure to find the record as proof the marker is not on it. Mirrors
+    ``_server_confirms_no_record`` — a negative needs a positive confirmation,
+    never an absence of evidence.
+
+    Only one thing counts as having read the record: matching ``prompt_id`` in
+    one of the two stores AND being able to reach its ``extra_data`` slot. Every
+    other outcome is reported as "not read" — the fetch failed, the body was the
+    wrong shape, a queue section was missing or unwalkable, the prompt was
+    nowhere to be found, or the matched entry was too short to carry the slot.
+    Deliberately NOT reasoning about which endpoints answered: that invites
+    treating a body that merely failed to mention the prompt as a conclusive
+    absence, which is the very inference this exists to refuse.
+    """
+    queue = _get_json_object(f"http://{host}:{port}/queue")
+    sections = [queue.get(key) for key in ("queue_running", "queue_pending")]
+    # Both, not either: a borrowed run sitting in the section we could not walk
+    # would be missing from the census without the census knowing it.
+    queue_read = all(isinstance(entries, list) for entries in sections)
+
+    borrowed: set[str] = set()
+    hit: tuple[Any, bool] | None = None
+    for entries in sections:
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            # entry layout: number, prompt_id, prompt, extra_data, outputs_to_execute
+            if not (isinstance(entry, list) and len(entry) > 1):
+                continue
+            extra = entry[3] if len(entry) > 3 else None
+            if _borrowed_from_extra_data(extra):
+                fed = _client_id_from_extra_data(extra)
+                if fed:
+                    borrowed.add(fed)
+            if hit is None and entry[1] == prompt_id:
+                hit = (extra, True) if isinstance(extra, dict) else (None, False)
+
+    if hit is not None:
+        return _SubmittedRecord(hit[0], hit[1], frozenset(borrowed), queue_read)
+
+    history = _get_json_object(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
+    body = history.get(prompt_id)
+    prompt = body.get("prompt") if isinstance(body, dict) else None
+    if isinstance(prompt, list) and len(prompt) > 3 and isinstance(prompt[3], dict):
+        return _SubmittedRecord(prompt[3], True, frozenset(borrowed), queue_read)
+    return _SubmittedRecord(None, False, frozenset(borrowed), queue_read)
+
+
+def _select_watch_client_id(
+    host: str, port: int, prompt_id: str, requested: str | None
+) -> tuple[str | None, _PollReason | None]:
+    """Pick the socket identity to attach as, or a reason to poll instead.
 
     ComfyUI delivers execution events only to the submitting session's socket
     (see the module docstring), so watching with a fresh id yields silence. The
-    submitting id is recoverable from three places, cheapest first:
-
-    1. our own on-disk job state, written at submit time by ``comfy run``;
-    2. ``/queue`` ``extra_data`` while the prompt is running or pending;
-    3. ``/history`` ``prompt[3]`` once it has finished.
+    submitting id is recoverable from our own on-disk job state, written at
+    submit time by ``comfy run``, and from the ``extra_data`` the server echoes
+    back through ``/queue`` and ``/history``.
 
     Reconnecting under an existing id is ComfyUI's own session-resume mechanism
     (its ``/ws`` handler pops the previous socket for that id), which is exactly
     what we want for a prompt whose submitter has exited — the common case, since
     ``comfy run --async`` returns immediately. The caveat is that a submitter
     still holding that socket (a browser tab, a blocking ``comfy run``) stops
-    receiving events until it reconnects; pass ``--client-id`` to override the
-    resolution when that matters.
-    """
-    from comfy_cli import jobs_state
+    receiving events until it reconnects.
 
+    A run submitted via ``comfy run --client-id`` is the one case where that
+    caveat is a certainty rather than a risk: the recorded id belongs to a live
+    client that is being fed on purpose. Those poll instead, and an explicit
+    override is refused rather than honoured — a marked prompt exists precisely
+    to feed another live socket, so attaching under the caller's id performs the
+    eviction the marker exists to prevent.
+
+    **Absence of that marker is evidence only once every place it could have
+    been read answered.** A failed read is not an unmarked record: the state
+    file is routinely invisible to the watcher (submitter and watcher run under
+    different config roots — the in-app agent uses a sandboxed ``HOME`` it
+    deletes at turn end), so a transient ``/queue`` + ``/history`` failure would
+    otherwise leave a borrowed run looking ordinary and let an explicit
+    ``--client-id`` evict the live client. Unverifiable ownership polls too, and
+    says so with its own reason, because the alternatives are asymmetric: a
+    retry costs a moment, a wrong attach silences the tab the run was for.
+
+    Reads the state file and the server record once each. Looking up the marker
+    and the client id separately leaves a queue-to-history transition between
+    them where an explicit borrowed id can be accepted after the marker vanishes
+    from the first endpoint but before it appears in the second.
+    """
     try:
         job = jobs_state.read(prompt_id)
     except (ValueError, OSError):  # unsafe prompt_id / unreadable state dir
         job = None
-    if job is not None and isinstance(job.client_id, str) and job.client_id.strip():
-        return job.client_id
+    record = _submitted_extra_data(host, port, prompt_id)
+    extra, record_read = record.extra, record.read
 
-    try:
-        q = _http_get_json(f"http://{host}:{port}/queue")
-    except RuntimeError:
-        q = {}
-    if isinstance(q, dict):
-        for key in ("queue_running", "queue_pending"):
-            for entry in q.get(key) or []:
-                # entry layout: number, prompt_id, prompt, extra_data, outputs_to_execute
-                if isinstance(entry, list) and len(entry) > 3 and entry[1] == prompt_id:
-                    cid = _client_id_from_extra_data(entry[3])
-                    if cid:
-                        return cid
+    if (job is not None and job.client_id_borrowed) or _borrowed_from_extra_data(extra):
+        if requested:
+            raise _ClientIdRejected("prompt_borrowed")
+        return None, "borrowed"
 
-    try:
-        h = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
-    except RuntimeError:
-        return None
-    body = h.get(prompt_id) if isinstance(h, dict) else None
-    prompt = body.get("prompt") if isinstance(body, dict) else None
-    if isinstance(prompt, list) and len(prompt) > 3:
-        return _client_id_from_extra_data(prompt[3])
-    return None
+    # The watched prompt is clean, but the id the caller named may not be: it
+    # can belong to a client some OTHER queued run is feeding on purpose.
+    # Attaching would evict it just the same, so the id is checked against
+    # every borrowed run the queue is carrying, not only against this prompt.
+    if requested and requested in record.borrowed_ids:
+        raise _ClientIdRejected("id_borrowed")
+
+    # ...and that check is worth exactly as much as the read behind it. An
+    # empty census means "nobody is borrowing" only once the queue was actually
+    # walked; otherwise it means "we have no idea", which must not read as
+    # consent. Deliberately not folded into the state-file test below: a local
+    # record vouches for THIS run, and says nothing about whose socket the
+    # caller just named.
+    if requested and not record.queue_read:
+        raise _ClientIdRejected("census_unread")
+
+    # A state file is its own positive evidence: `comfy run` wrote it, and it
+    # says this run did not borrow. Failing that, only the prompt's own server
+    # record can clear it — a record we could not read says nothing, and a
+    # server that simply never mentioned the prompt says nothing either.
+    if job is None and not record_read:
+        if requested:
+            raise _ClientIdRejected("nothing_vouched")
+        return None, "indeterminate"
+
+    recorded = job.client_id if job is not None and isinstance(job.client_id, str) and job.client_id.strip() else None
+    return requested or recorded or _client_id_from_extra_data(extra), None
 
 
 def _history_completed_nodes(host: str, port: int, prompt_id: str) -> set[str]:
@@ -1924,7 +2140,7 @@ def _history_completed_nodes(host: str, port: int, prompt_id: str) -> set[str]:
     """
     nodes: set[str] = set()
     try:
-        h = _http_get_json(f"http://{host}:{port}/history/{prompt_id}")
+        h = _http_get_json(f"http://{host}:{port}/history/{urllib.parse.quote(prompt_id, safe='')}")
     except RuntimeError:
         return nodes
     body = h.get(prompt_id) if isinstance(h, dict) else None
@@ -2146,7 +2362,16 @@ def watch_cmd(
     prompt_id: Annotated[str, typer.Argument(help="The prompt_id returned by `comfy run`.")],
     host: Annotated[str | None, typer.Option()] = None,
     port: Annotated[int | None, typer.Option()] = None,
-    timeout: Annotated[int, typer.Option(help="Per-recv (or per-poll) timeout in seconds.")] = 30,
+    timeout: Annotated[
+        int,
+        typer.Option(
+            help=(
+                "Per-recv (or per-poll) timeout in seconds. A watch that polls instead of "
+                "attaching (a borrowed run, or one whose record cannot be read) has no recv to "
+                "time out: it reconciles every 2s, and this only sizes its not-found deadline."
+            )
+        ),
+    ] = 30,
     where: Annotated[
         str | None,
         typer.Option("--where", help="'local' (WebSocket) or 'cloud' (HTTP polling)."),
@@ -2166,12 +2391,32 @@ def watch_cmd(
             help=(
                 "Local-only: attach as this WS client_id instead of the submitting one. "
                 "ComfyUI sends execution events only to the submitting session, so watch "
-                "resolves that id automatically; override it if resolution picks wrong."
+                "resolves that id automatically; override it as a last resort if resolution "
+                "picks wrong. Refused on a run that borrowed a live client's socket, on an id "
+                "another queued run borrowed, and whenever the records that would show either "
+                "cannot be read — attaching could cut that client off."
             ),
         ),
     ] = None,
 ):
     renderer = get_renderer()
+
+    # Ahead of the cloud branch and the server probe, because this needs
+    # neither: it reads one string. `comfy run` validates it just as early, and
+    # anywhere later the flag is silently dropped on the paths that return
+    # first — a cloud target, or a local server that is down. Left unstripped,
+    # "  " would be attached as a literal client_id that can never receive
+    # anything.
+    if client_id is not None and not client_id.strip():
+        renderer.error(
+            code="client_id_rejected",
+            message="--client-id must not be empty",
+            hint="pass the submitting client's id, or omit --client-id to resolve it automatically",
+            details={"reason": "empty"},
+        )
+        raise typer.Exit(code=1)
+    client_id = client_id.strip() if client_id is not None else None
+
     if _stamp_where(renderer, where) == "cloud":
         return _cloud_watch(prompt_id, poll_interval=poll_interval, max_wait=max_wait)
 
@@ -2191,31 +2436,55 @@ def watch_cmd(
         # ended, so no session was attached and there is no id to report.
         snap["client_id"] = None
         snap["attached"] = False
+        # No socket, but not withheld either — the prompt simply ended first.
+        # The key is still published so a consumer that branches on it never
+        # hits a missing one, as with `client_id` and `attached`.
+        snap["poll_reason"] = None
         if renderer.is_pretty():
             renderer.console().print(f"[dim]Prompt {prompt_id} already {snap['status']}; nothing more to watch.[/dim]")
+            # Before the promotion below, which moves the key this renders from.
             _render_status_pretty(snap, host=h, port=p)
+        # Same promotion the live path does when it ends. `_emit_terminal`
+        # keys its trimming and redaction on `execution_error`, so a failure
+        # left where `_snapshot` puts it reaches the envelope whole — full
+        # traceback, and a `current_inputs` that can hold an api_key.
+        if isinstance(snap.get("error"), dict):
+            snap["execution_error"] = snap.pop("error")
         _emit_terminal(renderer, snap, command="jobs watch")
         return
 
-    ws = WebSocket()
     # Re-attach as the submitting session, otherwise the server addresses every
     # execution event to a socket we are not holding and this watch sees nothing.
-    attached_client_id = client_id or _resolve_watch_client_id(h, p, prompt_id)
-    ws_client_id = attached_client_id or str(uuid.uuid4())
     try:
-        ws.connect(f"ws://{h}:{p}/ws?clientId={urllib.parse.quote(ws_client_id, safe='')}")
-    except (WebSocketException, ConnectionError, OSError) as e:
+        attached_client_id, poll_reason = _select_watch_client_id(h, p, prompt_id, client_id)
+    except _ClientIdRejected as e:
+        message, hint = e.text
         renderer.error(
-            code="ws_disconnected",
-            message=f"Could not open WebSocket: {e}",
-            hint="check the server is reachable; try `comfy jobs status` instead",
+            code="client_id_rejected",
+            message=message,
+            hint=hint,
+            details={"reason": e.reason},
         )
         raise typer.Exit(code=1)
 
+    poll_only = poll_reason is not None
     token = cancellation.get_token()
-    token.on_cancel(lambda: _safe_close_ws(ws))
-
-    ws.settimeout(timeout)
+    ws = None
+    ws_client_id = None
+    if not poll_only:
+        ws = WebSocket()
+        ws_client_id = attached_client_id or str(uuid.uuid4())
+        try:
+            ws.connect(f"ws://{h}:{p}/ws?clientId={urllib.parse.quote(ws_client_id, safe='')}")
+        except (WebSocketException, ConnectionError, OSError) as e:
+            renderer.error(
+                code="ws_disconnected",
+                message=f"Could not open WebSocket: {e}",
+                hint="check the server is reachable; try `comfy jobs status` instead",
+            )
+            raise typer.Exit(code=1)
+        token.on_cancel(lambda: _safe_close_ws(ws))
+        ws.settimeout(timeout)
 
     state = _WatchState(renderer=renderer, prompt_id=prompt_id, host=h, port=p)
     saw_any_event = False
@@ -2224,7 +2493,19 @@ def watch_cmd(
 
     if renderer.is_pretty():
         renderer.console().print(f"[bold]Watching prompt[/bold] {prompt_id} on {h}:{p}   [dim](Ctrl-C to stop)[/dim]")
-        if attached_client_id is None:
+        if poll_reason == "borrowed":
+            renderer.console().print(
+                "[yellow]![/yellow] [dim]this run was submitted for another client (comfy run "
+                "--client-id) so that client receives its live events; attaching as it would cut "
+                "it off, so this watch polls status instead[/dim]"
+            )
+        elif poll_reason == "indeterminate":
+            renderer.console().print(
+                "[yellow]![/yellow] [dim]could not confirm whether this run was submitted for another "
+                "client — no record of it could be read, so no socket was opened and this watch polls "
+                "status instead[/dim]"
+            )
+        elif attached_client_id is None:
             renderer.console().print(
                 "[yellow]![/yellow] [dim]could not resolve the submitting client_id — the server "
                 "may not send live events for this prompt; pass --client-id if you know it[/dim]"
@@ -2232,9 +2513,31 @@ def watch_cmd(
 
     try:
         while True:
-            try:
-                raw = ws.recv()
-            except WebSocketTimeoutException:
+            raw = None
+            poll_now = poll_only
+            if poll_only:
+                if token.wait(_POLL_ONLY_WATCH_POLL_S):
+                    state.end_reason = "cancelled"
+                    break
+            else:
+                try:
+                    raw = ws.recv()
+                except WebSocketTimeoutException:
+                    poll_now = True
+                except (WebSocketException, ConnectionError, OSError) as e:
+                    # Cancellation closes the socket out from under recv(). Check
+                    # the token before classifying as "server disconnected".
+                    if token.is_set():
+                        state.end_reason = "cancelled"
+                        break
+                    renderer.error(
+                        code="ws_disconnected",
+                        message=f"Lost connection while watching {prompt_id}: {e}",
+                        hint="re-run `comfy jobs status` to check final state",
+                    )
+                    raise typer.Exit(code=1) from e
+
+            if poll_now:
                 # If the job moved to completed between recvs, exit cleanly.
                 snap = _snapshot(h, p, prompt_id)
                 if snap and snap["status"] in {"completed", "error", "cancelled"}:
@@ -2261,18 +2564,6 @@ def watch_cmd(
                 else:
                     missing_deadline = None
                 continue
-            except (WebSocketException, ConnectionError, OSError) as e:
-                # Cancellation closes the socket out from under recv(). Check
-                # the token before classifying as "server disconnected".
-                if token.is_set():
-                    state.end_reason = "cancelled"
-                    break
-                renderer.error(
-                    code="ws_disconnected",
-                    message=f"Lost connection while watching {prompt_id}: {e}",
-                    hint="re-run `comfy jobs status` to check final state",
-                )
-                raise typer.Exit(code=1) from e
             if not isinstance(raw, str):
                 continue
             try:
@@ -2293,7 +2584,8 @@ def watch_cmd(
                 if state.terminal:
                     break
     finally:
-        _safe_close_ws(ws)
+        if ws is not None:
+            _safe_close_ws(ws)
 
     elapsed = time.time() - start
     final_status = state.end_reason or ("completed" if state.completed_nodes else "unknown")
@@ -2326,9 +2618,17 @@ def watch_cmd(
         # silence, so it belongs in the envelope rather than only in the logs.
         "client_id": ws_client_id,
         "attached": attached_client_id is not None,
+        # Why no socket was opened, when none was. Pretty mode explains this in
+        # prose; without it here a --json consumer sees `attached: false` and
+        # cannot tell the two apart, though they want opposite responses —
+        # `borrowed` means drop --client-id, `indeterminate` means retry.
+        "poll_reason": poll_reason,
     }
     if state.end_details is not None:
-        payload["details"] = state.end_details if isinstance(state.end_details, dict) else {"raw": state.end_details}
+        details = dict(state.end_details) if isinstance(state.end_details, dict) else {"raw": state.end_details}
+        if final_status == "error" and isinstance(details.get("error"), dict):
+            payload["execution_error"] = details.pop("error")
+        payload["details"] = details
     if not saw_any_event and final_status == "unknown":
         payload["hint"] = "watch returned without events; the prompt may already have completed"
     _emit_terminal(renderer, payload, command="jobs watch")
