@@ -110,10 +110,14 @@ def test_refusal_uses_a_declared_non_first_dynamic_default():
     object_info = copy.deepcopy(OBJECT_INFO)
     model_options = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"][1]
     model_options["default"] = "MiniMax H3 Max"
-    model_options["options"][2]["inputs"]["required"]["turbo_only"] = ["BOOLEAN", {"default": False}]
+    turbo_inputs = dict(model_options["options"][2]["inputs"]["required"])
+    turbo_inputs["turbo_only"] = ["BOOLEAN", {"default": False}]
+    model_options["options"][2]["inputs"]["required"] = turbo_inputs
     graph = Graph.from_object_info(object_info)
     assert graph.widget_default_for_node("MinimaxHailuo03TextToVideoNode", "model", []) == "MiniMax H3 Max"
-    assert "model.prompt_expansion_mode" in graph.widget_order_default("MinimaxHailuo03TextToVideoNode")
+    default_order = graph.widget_order_default("MinimaxHailuo03TextToVideoNode")
+    assert "model.prompt_expansion_mode" in default_order
+    assert "model.turbo_only" not in default_order
     wf, _ = _fresh(graph)
     assert wf["nodes"][0]["widgets_values"][0] == "MiniMax H3 Max"
 
@@ -131,7 +135,9 @@ def test_dynamic_default_publishes_an_actual_option_key(declared_default):
 
     assert graph.dynamic_combo_options("MinimaxHailuo03TextToVideoNode")["model"]["default"] == "1"
     wf, _ = _fresh(graph)
-    assert wf["nodes"][0]["widgets_values"][0] == 1
+    selected = wf["nodes"][0]["widgets_values"][0]
+    assert type(selected) is int
+    assert selected == 1
 
 
 def test_write_succeeds_once_the_revealing_option_is_selected(graph):
