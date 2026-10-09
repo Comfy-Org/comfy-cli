@@ -389,6 +389,40 @@ def test_distinct_nested_paths_are_bounded_by_definition_graph_size():
     assert instance["widgets_values"] == ["keep"]
 
 
+def test_reused_nested_boundary_paths_charge_each_materialized_copy():
+    definitions: dict[str, dict] = {
+        "leaf": {
+            "id": "leaf",
+            "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+            "nodes": [
+                {
+                    "id": 0,
+                    "type": "PlainNode",
+                    "inputs": [{"name": "value", "link": 1, "widget": {"name": "value"}}],
+                }
+            ],
+            "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 0, "target_slot": 0}],
+        }
+    }
+    for level in reversed(range(20)):
+        child = "leaf" if level == 19 else f"level-{level + 1}"
+        definitions[f"level-{level}"] = {
+            "id": f"level-{level}",
+            "inputs": [{"name": "value", "type": "STRING", "linkIds": [1, 2]}],
+            "nodes": [
+                {"id": index, "type": child, "inputs": [{"name": "value", "link": index + 1}]} for index in range(2)
+            ],
+            "links": [
+                {"id": index + 1, "origin_id": -10, "origin_slot": 0, "target_id": index, "target_slot": 0}
+                for index in range(2)
+            ],
+        }
+
+    pi = promoted.PromotedInput("value", "STRING", index=0, value_index=0)
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="boundary traversal"):
+        promoted.boundary_widget_targets(definitions["level-0"], pi, definitions)
+
+
 def test_repeated_boundary_link_ids_share_holder_work_and_consume_budget():
     sg = {
         "id": "sg",

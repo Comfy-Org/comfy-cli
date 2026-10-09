@@ -1824,6 +1824,11 @@ def _boundary_targets(
                 )
                 if inner_inp is not None:
                     nested = _boundary_targets(inner_def, inner_inp, defs, depth + 1, _stack, _memo, _budget)
+                    _spend_traversal_budget(
+                        _budget,
+                        len(nested),
+                        "promoted widget boundary traversal exceeded its safe limit",
+                    )
                     out.extend(([tid, *path], widget) for path, widget in nested)
                 continue
             marker = entry.get("widget")
