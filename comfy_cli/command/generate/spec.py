@@ -314,6 +314,7 @@ def _resolve(
     node: Any,
     seen: frozenset[str] = frozenset(),
     memo: dict[tuple[Any, ...], tuple[Any, bool]] | None = None,
+    budget_limit: int | None = None,
 ) -> Any:
     """Recursively inline $refs in a schema. Cycles are broken with a placeholder.
 
@@ -327,14 +328,16 @@ def _resolve(
         node,
         seen,
         memo if memo is not None else {},
-        [_schema_resolution_budget(spec, node)],
+        [budget_limit if budget_limit is not None else _schema_resolution_budget(spec, node)],
     )
     return value
 
 
-def _schema_resolution_budget(spec: dict[str, Any], node: Any) -> int:
+def _schema_resolution_budget(spec: dict[str, Any], node: Any = None) -> int:
     """A linear call budget for malformed ref graphs, including object cycles."""
-    stack = [spec, node]
+    stack = [spec]
+    if node is not None:
+        stack.append(node)
     containers: set[int] = set()
     while stack:
         current = stack.pop()
@@ -443,6 +446,7 @@ def _registry() -> dict[str, Endpoint]:
     spec = load_raw_spec()
     paths = spec.get("paths") or {}
     registry: dict[str, Endpoint] = {}
+    resolution_budget = _schema_resolution_budget(spec)
     for endpoint_id, category, polling_hint in _ENDPOINT_ALLOWLIST:
         path = PROXY_PREFIX + endpoint_id
         node = paths.get(path)
@@ -462,13 +466,25 @@ def _registry() -> dict[str, Endpoint]:
         else:
             ctype = next(iter(content.keys()), "application/json")
         try:
-            req_schema = _resolve(spec, (content.get(ctype) or {}).get("schema") or {})
+            req_schema = _resolve(
+                spec,
+                (content.get(ctype) or {}).get("schema") or {},
+                budget_limit=resolution_budget,
+            )
 
             # 200 response
             resp = (op.get("responses") or {}).get("200") or {}
             resp_content = resp.get("content") or {}
             resp_ctype = "application/json" if "application/json" in resp_content else next(iter(resp_content), "")
-            resp_schema = _resolve(spec, (resp_content.get(resp_ctype) or {}).get("schema") or {}) if resp_ctype else {}
+            resp_schema = (
+                _resolve(
+                    spec,
+                    (resp_content.get(resp_ctype) or {}).get("schema") or {},
+                    budget_limit=resolution_budget,
+                )
+                if resp_ctype
+                else {}
+            )
         except (KeyError, TypeError, SpecError, RecursionError):
             continue
 
@@ -712,6 +728,7 @@ def _model_name_hint(name: str) -> str | None:
     # body's `model` field. A name equal to or prefixing one of them is that
     # partner's model family, whichever route serves it.
     raw = load_raw_spec()
+    resolution_budget = _schema_resolution_budget(raw)
     aliased = {v: k for k, v in _ALIASES.items()}
     hits: list[tuple[str, str, list[str]]] = []
     for path, node in (raw.get("paths") or {}).items():
@@ -730,7 +747,7 @@ def _model_name_hint(name: str) -> str | None:
         if not schema:
             continue
         try:
-            resolved = _resolve(raw, schema)
+            resolved = _resolve(raw, schema, budget_limit=resolution_budget)
             if not isinstance(resolved, dict):
                 continue
             for field in ("model", "model_name", "model_id"):

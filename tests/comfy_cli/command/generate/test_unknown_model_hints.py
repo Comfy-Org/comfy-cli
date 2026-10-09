@@ -334,6 +334,35 @@ def test_model_hint_memoizes_a_wide_ref_diamond(monkeypatch):
     assert "example-model-v1" in hint
 
 
+def test_model_hint_computes_one_resolution_budget_for_all_paths(monkeypatch):
+    raw = {
+        "paths": {
+            f"/proxy/partner/{index}": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {"model": {"enum": [f"example-model-{index}"]}},
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            for index in range(8)
+        }
+    }
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+
+    with mock.patch.object(spec, "_schema_resolution_budget", wraps=spec._schema_resolution_budget) as budget:
+        hint = spec._model_name_hint("example")
+
+    assert hint is not None
+    assert budget.call_count == 1
+
+
 def test_resolve_memoizes_shared_inline_alias_branches():
     schema: dict = {"type": "string"}
     depth = 32
