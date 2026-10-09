@@ -418,6 +418,13 @@ def test_internal_error_scrubber_masks_pem_without_any_key_assignment():
     assert "could not deserialize ***" in scrubbed
 
 
+def test_internal_error_scrubber_masks_single_line_pem_body():
+    message = "could not deserialize -----BEGIN PRIVATE " + "KEY-----MIIEvQsecret"
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "MIIEvQsecret" not in scrubbed
+    assert "could not deserialize ***" in scrubbed
+
+
 def test_internal_error_scrubber_preserves_host_ports_and_complete_userinfo_at_the_input_cap():
     cases = [
         (" retrying https://api.comfy.org:8443", "RuntimeError: Bearer *** retrying https://api.comfy.org:8443…"),
