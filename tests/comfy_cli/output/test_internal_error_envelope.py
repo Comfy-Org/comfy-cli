@@ -544,6 +544,89 @@ def test_internal_error_scrubber_masks_userinfo_password_punctuation(message):
     assert "://***@" in scrubbed
 
 
+@pytest.mark.parametrize(
+    ("message", "leaked"),
+    [
+        ("https://alice:pa?ss@example.com/x", "alice:pa"),
+        ("https://alice:pa/ss@example.com/x", "pa/ss"),
+        ("https://alice:p@ssword@example.com/x", "ssword"),
+    ],
+)
+def test_internal_error_scrubber_masks_http_userinfo_before_query_parsing(message, leaked):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert leaked not in scrubbed
+    assert "://***@" in scrubbed
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        " https://alice:pa?ss",
+        " https://alice:pa#ss",
+        " https://alice:pa/ss",
+        " https://john.doe:12345",
+    ],
+)
+def test_internal_error_scrubber_drops_truncated_punctuation_and_port_shaped_passwords(tail):
+    prefix = "Bearer " + "A" * (_INTERNAL_ERROR_SCRUB_INPUT_CAP - len("RuntimeError: ") - len("Bearer ") - len(tail))
+    scrubbed = _internal_error_message(RuntimeError(prefix + tail + " overflow"))
+    assert tail.strip() not in scrubbed
+
+
+def test_internal_error_scrubber_preserves_bare_ipv6_at_the_input_cap():
+    tail = " http://[::1]"
+    prefix = "Bearer " + "A" * (_INTERNAL_ERROR_SCRUB_INPUT_CAP - len("RuntimeError: ") - len("Bearer ") - len(tail))
+    scrubbed = _internal_error_message(RuntimeError(prefix + tail + " overflow"))
+    assert scrubbed.endswith("http://[::1]…")
+
+
+def test_internal_error_scrubber_handles_non_ascii_digit_port_without_crashing():
+    tail = " https://example.com:²"
+    prefix = "Bearer " + "A" * (_INTERNAL_ERROR_SCRUB_INPUT_CAP - len("RuntimeError: ") - len("Bearer ") - len(tail))
+    assert _internal_error_message(RuntimeError(prefix + tail + " overflow")).endswith("…")
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "databasePassword",
+        "githubToken",
+        "sshPrivateKey",
+        "stripeSecret",
+        "AccountKey",
+        "SharedAccessKey",
+        "api_keys",
+        "secrets",
+        "passwords",
+        "access_tokens",
+        "private_keys",
+        "private_key_b64",
+        "signing_key_hex",
+        "encryption_key_v2",
+        "aws_access_key_id_prod",
+    ],
+)
+def test_internal_error_scrubber_masks_extended_credential_key_vocabulary(key):
+    scrubbed = _internal_error_message(RuntimeError(f"{key}=LIVE-CREDENTIAL"))
+    assert "LIVE-CREDENTIAL" not in scrubbed
+
+
+@pytest.mark.parametrize("key", ["appMonkey", "apiKeyboardLayout", "max_tokens", "maxTokens"])
+def test_internal_error_scrubber_preserves_non_secret_key_like_diagnostics(key):
+    message = f"{key}=visible"
+    assert message in _internal_error_message(RuntimeError(message))
+
+
+def test_armored_scrubber_keeps_unicode_offsets_and_masks_the_next_block():
+    message = (
+        "C:/İlkİz/bundle.pem: -----BEGIN CERTIFICATE-----cert-----END CERTIFICATE-----\n"
+        "-----BEGIN PRIVATE KEY-----MIIE-LIVE"
+    )
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "MIIE-LIVE" not in scrubbed
+    assert scrubbed.count("***") == 2
+
+
 def test_internal_error_scrubber_masks_triple_quoted_secret():
     scrubbed = _internal_error_message(RuntimeError('password="""hunter2""" request=req-1'))
     assert "hunter2" not in scrubbed

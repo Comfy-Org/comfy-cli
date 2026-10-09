@@ -3580,8 +3580,13 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
             name_counts[name] = name_counts.get(name, 0) + 1
             name_first.setdefault(name, sg)
     ids_only = dict(by_id)
+    alias_budget = _definition_alias_budget([definition for definition in defs if isinstance(definition, dict)])
     for name, count in name_counts.items():
-        if count == 1 and name not in by_id and not _def_contains_type(name_first[name], name, ids_only):
+        if (
+            count == 1
+            and name not in by_id
+            and not _def_contains_type(name_first[name], name, ids_only, budget=alias_budget)
+        ):
             by_id[name] = name_first[name]
     return by_id
 
@@ -3592,7 +3597,13 @@ def _leading_token(value: Any) -> str:
     return str(value).strip().partition(" ")[0]
 
 
-def _def_contains_type(sg: dict, type_name: str, by_id: dict[str, dict]) -> bool:
+def _def_contains_type(
+    sg: dict,
+    type_name: str,
+    by_id: dict[str, dict],
+    *,
+    budget: list[int] | None = None,
+) -> bool:
     """Whether definition ``sg`` holds a node typed ``type_name`` at any depth.
 
     The walk descends into nested instances by definition id (``by_id`` holds
@@ -3610,6 +3621,13 @@ def _def_contains_type(sg: dict, type_name: str, by_id: dict[str, dict]) -> bool
     seen: set[int] = set()
     stack = [sg]
     while stack:
+        if budget is not None:
+            if budget[0] <= 0:
+                # A name fallback is optional compatibility. On hostile graphs,
+                # ambiguity is safer than spending quadratic work to prove the
+                # alias clean.
+                return True
+            budget[0] -= 1
         cur = stack.pop()
         if id(cur) in seen:
             continue
@@ -3625,6 +3643,16 @@ def _def_contains_type(sg: dict, type_name: str, by_id: dict[str, dict]) -> bool
             if nested is not None:
                 stack.append(nested)
     return False
+
+
+def _definition_alias_budget(definitions: list[dict]) -> list[int]:
+    """One serialized-graph-sized allowance shared by all name-alias checks."""
+    size = len(definitions)
+    for definition in definitions:
+        nodes = definition.get("nodes")
+        if isinstance(nodes, list):
+            size += len(nodes)
+    return [max(1, size)]
 
 
 def _widgets_as_list(widgets_values: Any) -> list[Any]:
@@ -4214,6 +4242,34 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
         # dynamic-combo selector path re-reads from the node) see the same
         # values this write is about to index against.
         node["widgets_values"] = widgets
+    if extend:
+        # A truncated positional array can omit a dynamic selector while its
+        # declared default makes a nested sub-widget virtually addressable.
+        # Materialize every missing selector ancestor first; otherwise padding
+        # writes the sub-value beside ``None`` and the next layout drops or
+        # reinterprets it.
+        for _ in range(_MAX_DYNAMIC_COMBO_DEPTH):
+            entries_now = _expand_widget_entries(m, widgets)
+            target_idx = next((idx for idx, entry in enumerate(entries_now) if entry.name == input_name), None)
+            missing = next(
+                (
+                    (idx, entry.port)
+                    for idx, entry in enumerate(entries_now)
+                    if idx >= len(widgets)
+                    and entry.port is not None
+                    and entry.port.dynamic_options
+                    and _is_dynamic_combo_type(entry.port.type)
+                    and entry.port.options.default is not None
+                    and (input_name.startswith(f"{entry.name}.") or (target_idx is not None and idx < target_idx))
+                ),
+                None,
+            )
+            if missing is None:
+                break
+            selector_idx, selector = missing
+            widgets.extend([None] * (selector_idx - len(widgets)))
+            widgets.append(_widget_default(selector))
+            node["widgets_values"] = widgets
     order = graph.widget_order_for_node(node_type, widgets)
     entries = _expand_widget_entries(m, widgets)
     if any(e.frontend_injected and e.name == input_name for e in entries):

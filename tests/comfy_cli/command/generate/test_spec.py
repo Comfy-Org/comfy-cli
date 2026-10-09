@@ -163,7 +163,7 @@ def test_registry_computes_one_resolution_budget_per_spec(monkeypatch):
         spec._registry.cache_clear()
 
 
-def test_registry_shares_one_decrementing_resolution_budget(monkeypatch):
+def test_registry_gives_each_endpoint_a_fresh_decrementing_resolution_budget(monkeypatch):
     endpoint_ids = ["one/endpoint", "two/endpoint"]
     raw = {
         "paths": {
@@ -189,7 +189,27 @@ def test_registry_shares_one_decrementing_resolution_budget(monkeypatch):
     spec._registry.cache_clear()
     try:
         assert list(spec._registry()) == endpoint_ids
-        assert budgets and all(budget is budgets[0] for budget in budgets)
+        assert len(budgets) == len(endpoint_ids)
+        assert budgets[0] is not budgets[1]
+    finally:
+        spec._registry.cache_clear()
+
+
+def test_registry_ignores_non_string_path_item_method_keys(monkeypatch):
+    endpoint_id = "one/endpoint"
+    raw = {
+        "paths": {
+            f"/proxy/{endpoint_id}": {
+                200: {"unexpected": True},
+                "post": {"requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+            }
+        }
+    }
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None)])
+    spec._registry.cache_clear()
+    try:
+        assert list(spec._registry()) == [endpoint_id]
     finally:
         spec._registry.cache_clear()
 

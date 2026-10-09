@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import json
 from typing import Any
+from unittest import mock
 
 import pytest
 
@@ -17,13 +18,38 @@ from comfy_cli.cql.engine import (
     Graph,
     Port,
     _apply_one_slot,
+    _def_contains_type,
     _extract_frontend_slots,
+    _subgraph_defs_by_id,
     _write_widget,
 )
 
 # ---------------------------------------------------------------------------
 # Shared fixture: a small but realistic object_info
 # ---------------------------------------------------------------------------
+
+
+def test_subgraph_name_alias_checks_share_one_serialized_graph_budget():
+    definitions = [
+        {
+            "id": f"id-{index}",
+            "name": f"Alias{index}",
+            "nodes": ([{"id": index, "type": f"id-{index + 1}"}] if index < 31 else []),
+        }
+        for index in range(32)
+    ]
+    workflow = {
+        "nodes": [{"id": index, "type": f"Alias{index}"} for index in range(32)],
+        "definitions": {"subgraphs": definitions},
+    }
+
+    with mock.patch("comfy_cli.cql.engine._def_contains_type", wraps=_def_contains_type) as contains:
+        _subgraph_defs_by_id(workflow)
+
+    budgets = [call.kwargs["budget"] for call in contains.call_args_list]
+    assert budgets
+    assert len({id(budget) for budget in budgets}) == 1
+    assert budgets[0][0] >= 0
 
 
 def _object_info() -> dict[str, Any]:
@@ -676,6 +702,28 @@ class TestDynamicComboImplicitControlAfterGenerate:
         node = {"id": 1, "type": "PrefixedDynNode", "widgets_values": []}
         with pytest.raises(ValueError, match="out of range"):
             _write_widget(node, "mode", "a", graph, extend=False)
+
+    def test_writing_subwidget_materializes_a_missing_selector_default(self):
+        info = _dynamic_combo_implicit_seed_object_info()
+        info["SeedComboNode"]["input"]["required"]["mode"][1]["default"] = "a"
+        seed_graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "SeedComboNode", "widgets_values": []}
+
+        _write_widget(node, "mode.seed", 42, seed_graph, extend=True)
+
+        assert node["widgets_values"] == ["a", 42]
+        assert seed_graph.widget_order_for_node("SeedComboNode", node["widgets_values"]) == ["mode", "mode.seed"]
+
+    def test_writing_nested_subwidget_materializes_every_missing_selector(self):
+        info = _dynamic_combo_object_info()
+        beta_inputs = info["DynNode"]["input"]["required"]["model"][1]["options"][1]["inputs"]["required"]
+        beta_inputs["mode"][1]["default"] = "fast"
+        dyn_graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "DynNode", "widgets_values": ["prompt", "beta"]}
+
+        _write_widget(node, "model.mode.steps", 77, dyn_graph, extend=True)
+
+        assert node["widgets_values"][:4] == ["prompt", "beta", "fast", 77]
 
 
 # ===========================================================================
