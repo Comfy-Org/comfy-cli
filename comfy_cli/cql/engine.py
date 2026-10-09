@@ -3491,8 +3491,8 @@ class _SubgraphDefs(dict[str, dict]):
     def __init__(self) -> None:
         super().__init__()
         self.promotion_visit_limit: int | None = None
-        self.promotion_holders: dict[int, dict[str, list[tuple[dict, int, dict]]]] = {}
-        self.promotion_links: dict[int, dict[Any, dict]] = {}
+        self.promotion_holders: dict[int, tuple[dict, dict[str, list[tuple[dict, int, dict]]]]] = {}
+        self.promotion_links: dict[int, tuple[dict, dict[Any, dict]]] = {}
 
 
 def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:

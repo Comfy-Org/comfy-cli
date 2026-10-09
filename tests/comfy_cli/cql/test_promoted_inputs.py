@@ -566,6 +566,22 @@ def test_definition_repairs_invalidate_cached_limits_and_holders():
     assert definitions.promotion_visit_limit is None
 
 
+def test_definition_indexes_keep_a_strong_reference_to_an_unregistered_root():
+    definition = {
+        "id": "root",
+        "inputs": [{"name": "value", "linkIds": [1]}],
+        "nodes": [{"id": 7, "inputs": [{"name": "value", "link": 1}]}],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+
+    promoted._cached_link_holders(definition, definitions)
+    promoted._cached_link_rows(definition, definitions)
+
+    assert definitions.promotion_holders[id(definition)][0] is definition
+    assert definitions.promotion_links[id(definition)][0] is definition
+
+
 def test_promotion_traversal_limit_is_a_value_error_for_command_boundaries():
     assert issubclass(promoted.PromotionTraversalLimitError, ValueError)
 
