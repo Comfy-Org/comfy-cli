@@ -27,6 +27,7 @@ from collections import Counter, defaultdict
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -657,6 +658,23 @@ def _lookup(bundle: Bundle, queries: Iterable[str]) -> tuple[list[tuple[str, str
     return models, caps
 
 
+@lru_cache(maxsize=4096)
+def _key_counter(count_items: tuple[tuple[str, int], ...]) -> Counter:
+    """Counter for a capability key's word multiset, built once per distinct key.
+
+    :data:`Bundle.capability_tokens` stores the multiset as a sorted tuple so the
+    frozen dataclass stays hashable, which means a ``Counter`` cannot live in the
+    field itself. Rebuilding one per capability *per lookup* made each lookup about
+    13x slower than it needs to be (comfy-cli owner review, 2026-10-07): the keys do
+    not change between calls, only the query does.
+
+    The returned Counter is SHARED across callers, so treat it as read-only.
+    :func:`_resolve_tokens` only ever uses ``-`` and ``&``, which return new Counters
+    and leave the operand untouched.
+    """
+    return Counter(dict(count_items))
+
+
 def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
     """Capability whose id or alias is worded inside ``query``; ``None`` if none is.
 
@@ -686,7 +704,7 @@ def _resolve_tokens(bundle: Bundle, query: str) -> str | None:
     literal = _normalize(query)
     scored: dict[str, tuple[float, int, int, int]] = {}
     for count_items, key_norm, cid in bundle.capability_tokens:
-        key_counts = Counter(dict(count_items))
+        key_counts = _key_counter(count_items)
         # Normalization intentionally ignores punctuation, but a normalized key
         # may also be a prefix of a longer word ("video to videogame").  A
         # repeated-word key is literal only when the query contains enough

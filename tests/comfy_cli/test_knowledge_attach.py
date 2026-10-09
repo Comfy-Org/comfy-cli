@@ -123,6 +123,34 @@ class TestLookup:
         assert knowledge._resolve_tokens(b, "please video upscale this") == "narrow"
         assert knowledge._resolve_tokens(b, "just a video") == "broad"
 
+    def test_distinct_overlap_breaks_a_tie_against_a_repeated_word_key(self):
+        """Pins the `len(overlap)` tie-break, which nothing covered before.
+
+        Both keys score a full 1.0 here: "video to video" is literally present so
+        its repeated `video` counts twice (hit 3, missing 0), and "upscale video"
+        also matches fully (hit 2, missing 0). The ratio cannot separate them. What
+        separates them is that the specialist matched two *different* words while
+        the repeated key leaned on one generic noun twice -- which is exactly what
+        the tie-break encodes.
+
+        Verified to fail without it: neutralising `len(overlap)` in the score tuple
+        makes this resolve to None, because the two capabilities tie and a tie is
+        not an answer. Before this case, reverting the tie-break left all 160 tests
+        green (comfy-cli owner review, 2026-10-07).
+        """
+        data = {
+            "models": {},
+            "capabilities": {
+                "repeated": {"aliases": ["video to video"]},
+                "specialist": {"aliases": ["upscale video"]},
+            },
+        }
+        b = knowledge._index(data, None, source="env", stale=False, path="x", mtime=0.0)
+        assert knowledge._resolve_tokens(b, "upscale video to video") == "specialist"
+        # Same shape with the phrase order reversed, where neutralising the
+        # tie-break picks the repeated key outright rather than tying.
+        assert knowledge._resolve_tokens(b, "video to video upscale") == "specialist"
+
     def test_non_english_input_never_resolves_by_accident(self):
         """The agent answers in the user's language, so it searches in it too.
         Non-ASCII is dropped by the character class (as :func:`_normalize`
