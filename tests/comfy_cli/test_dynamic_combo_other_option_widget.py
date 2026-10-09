@@ -122,22 +122,25 @@ def test_refusal_uses_a_declared_non_first_dynamic_default():
     assert wf["nodes"][0]["widgets_values"][0] == "MiniMax H3 Max"
 
 
-@pytest.mark.parametrize("declared_default", [1.0, True])
-def test_dynamic_default_publishes_an_actual_option_key(declared_default):
+@pytest.mark.parametrize(
+    ("declared_default", "expected"),
+    [(1.0, 1), (2.0, 2), (True, 2), ("1", 1)],
+)
+def test_dynamic_default_publishes_an_actual_option_key(declared_default, expected):
     object_info = copy.deepcopy(OBJECT_INFO)
     model_options = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"][1]
     model_options["default"] = declared_default
     model_options["options"] = [
-        {"key": 1, "inputs": {"required": _SUB}},
         {"key": 2, "inputs": {"required": _MAX_SUB}},
+        {"key": 1, "inputs": {"required": _SUB}},
     ]
     graph = Graph.from_object_info(object_info)
 
-    assert graph.dynamic_combo_options("MinimaxHailuo03TextToVideoNode")["model"]["default"] == "1"
+    assert graph.dynamic_combo_options("MinimaxHailuo03TextToVideoNode")["model"]["default"] == str(expected)
     wf, _ = _fresh(graph)
     selected = wf["nodes"][0]["widgets_values"][0]
     assert type(selected) is int
-    assert selected == 1
+    assert selected == expected
 
 
 def test_write_succeeds_once_the_revealing_option_is_selected(graph):

@@ -327,6 +327,7 @@ def test_internal_error_scrubber_preserves_ordinary_identifier_diagnostics():
         "key: Foo(value)",
         'primary_key: "user-42"',
         "foreign_key=value sort_key=value cache_key=value hash-key=value",
+        "primary_key_id=42 foreign_key_id=7 cache_key_value=data sort_key_id=3 node_primary_key=1",
         "partitionKey=us-east-1 objectKey: artifact idempotencyKey=req-1 translationKey=home.title nodeSortKey=4",
         "methodSignature=(self, x) -> None",
     ],
@@ -390,6 +391,14 @@ def test_internal_error_scrubber_drops_any_anchorless_userinfo_tail(tail):
         "hmac_key=sk-LIVE",
         "app_key=sk-LIVE",
         "encryption_key=sk-LIVE",
+        "masterKey=sk-LIVE",
+        "subscriptionKey=sk-LIVE",
+        "hmacKey=sk-LIVE",
+        "appKey=sk-LIVE",
+        "encryptionKey=sk-LIVE",
+        "apiKeyBackup=sk-LIVE",
+        "accessTokenV2=sk-LIVE",
+        "clientSecretBackup=sk-LIVE",
         "api_key_backup=sk-LIVE",
         "token_v2=sk-LIVE",
         "api_key_2=sk-LIVE",
@@ -402,6 +411,24 @@ def test_internal_error_scrubber_masks_spaced_and_camel_case_credentials(message
     scrubbed = _internal_error_message(RuntimeError(message))
     assert "sk-LIVE" not in scrubbed
     assert "PRIVATE " + "KEY-----" not in scrubbed
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "credentials=BasicAuth('alice', 'hunter2')",
+        "credentials=('alice', 'hunter2')",
+        "creds={'username': 'alice', 'password': 'hunter2'}",
+        "jwt=eyJhbGciOiJIUzI1NiJ9.secret",
+        "oauth=oauth-secret",
+    ],
+)
+def test_internal_error_scrubber_masks_bare_credential_heads(message):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "alice" not in scrubbed
+    assert "hunter2" not in scrubbed
+    assert "eyJhbGci" not in scrubbed
+    assert "oauth-secret" not in scrubbed
 
 
 def test_internal_error_scrubber_masks_unlabelled_pem_and_preserves_following_diagnostic():
@@ -433,6 +460,23 @@ def test_internal_error_scrubber_masks_single_line_pem_body():
     assert "could not deserialize ***" in scrubbed
 
 
+def test_internal_error_scrubber_preserves_diagnostics_after_single_line_pem():
+    message = (
+        "invalid key: -----BEGIN PRIVATE KEY-----MIISECRET-----END PRIVATE KEY-----\nCaused by: HTTP 502 from the proxy"
+    )
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "MIISECRET" not in scrubbed
+    assert "invalid key: ***" in scrubbed
+    assert "Caused by: HTTP 502 from the proxy" in scrubbed
+
+
+def test_internal_error_scrubber_masks_cr_only_pem():
+    message = "invalid key: -----BEGIN PRIVATE KEY-----\rMIISECRET\r-----END PRIVATE KEY-----\rrequest=req-1"
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "MIISECRET" not in scrubbed
+    assert "request=req-1" in scrubbed
+
+
 @pytest.mark.parametrize("label", ["PGP PRIVATE KEY BLOCK", "PGP SECRET KEY BLOCK", "OPENVPN STATIC KEY V1"])
 def test_internal_error_scrubber_masks_armored_private_key_labels(label):
     message = f"could not import -----BEGIN {label}-----\nc2VjcmV0"
@@ -445,7 +489,7 @@ def test_internal_error_scrubber_preserves_host_ports_and_complete_userinfo_at_t
     cases = [
         (" retrying https://api.comfy.org:8443", "RuntimeError: Bearer *** retrying https://api.comfy.org:8443…"),
         (" retrying http://localhost:8188/prompt", "RuntimeError: Bearer *** retrying http://localhost:8188/prompt…"),
-        (" retrying https://alice:secret@example.com", "RuntimeError: Bearer *** retrying https://***@example.com…"),
+        (" retrying https://alice:secret@example.com", "RuntimeError: Bearer *** retrying …"),
     ]
     for tail, expected in cases:
         prefix = "Bearer " + "A" * (
@@ -468,6 +512,54 @@ def test_internal_error_scrubber_drops_incomplete_userinfo_that_looks_like_a_hos
     scrubbed = _internal_error_message(RuntimeError(prefix + tail + " overflow"))
     assert tail.strip() not in scrubbed
     assert scrubbed.endswith("…")
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        " https://ghp_LIVE_TOKEN",
+        " https://john.doe:123456",
+        " https://alice:p@secret.example",
+    ],
+)
+def test_internal_error_scrubber_drops_ambiguous_userinfo_at_the_input_cap(tail):
+    prefix = "Bearer " + "A" * (_INTERNAL_ERROR_SCRUB_INPUT_CAP - len("RuntimeError: ") - len("Bearer ") - len(tail))
+    scrubbed = _internal_error_message(RuntimeError(prefix + tail + " overflow"))
+    assert tail.strip() not in scrubbed
+    assert scrubbed.endswith("…")
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "postgres://alice:pa#ss@db/x",
+        "https://alice:pa#ss@example.com",
+        "redis://:p?ss@cache",
+    ],
+)
+def test_internal_error_scrubber_masks_userinfo_password_punctuation(message):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "pa#ss" not in scrubbed
+    assert "p?ss" not in scrubbed
+    assert "://***@" in scrubbed
+
+
+def test_internal_error_scrubber_masks_triple_quoted_secret():
+    scrubbed = _internal_error_message(RuntimeError('password="""hunter2""" request=req-1'))
+    assert "hunter2" not in scrubbed
+    assert 'password="""***""" request=req-1' in scrubbed
+
+
+def test_internal_error_scrubber_masks_cookie_assignment_through_semicolons():
+    scrubbed = _internal_error_message(RuntimeError("cookie=sid=abc; remember_me=LONGTOKEN"))
+    assert "abc" not in scrubbed
+    assert "LONGTOKEN" not in scrubbed
+
+
+def test_internal_error_scrubber_masks_folded_authorization_header():
+    scrubbed = _internal_error_message(RuntimeError("Authorization: Basic\r\n dXNlcjpwYXNz\r\nrequest=req-1"))
+    assert "dXNlcjpwYXNz" not in scrubbed
+    assert "request=req-1" in scrubbed
 
 
 def test_internal_error_scrubber_handles_long_non_secret_camel_names_without_backtracking():

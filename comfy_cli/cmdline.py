@@ -183,19 +183,26 @@ _INTERNAL_ERROR_MESSAGE_CAP = 500
 _INTERNAL_ERROR_SCRUB_INPUT_CAP = _INTERNAL_ERROR_MESSAGE_CAP * 8
 _SECRET_KEY_PATTERN = (
     r"(?:proxy-)?authorization|auth|api[ _-]?key|token|access[ _-]?token|refresh[ _-]?token|secret|password|"
-    r"session(?:[ _-]?(?:id|key))?|sid|sig|signature|passphrase|passwd|pwd|(?:set-)?cookies?"
+    r"session(?:[ _-]?(?:id|key))?|sid|sig|signature|passphrase|passwd|pwd|credentials?|creds|jwt|oauth|"
+    r"(?:set-)?cookies?"
 )
 _SECRET_KEY_QUALIFIER = (
     r"comfy|org|organization|workspace|project|account|user|client|partner|service|cloud|api|access|refresh|"
     r"auth|key|id|token|secret|credentials?|cookies?|session|value|private|public|signing|oauth|jwt|aws"
 )
 _CAMEL_SECRET_KEY_PATTERN = (
-    r"(?:api|auth|access|refresh|client|consumer|session|secret|private|signing|oauth|jwt|aws|comfy|proxy|credential)"
-    r"[A-Za-z0-9]*(?:KeyId|Key|Secret|Token|Password|Passphrase|Authorization|Cookie|Signature|SessionId)"
+    r"(?:api|app|auth|access|refresh|client|consumer|session|secret|private|signing|oauth|jwt|aws|comfy|"
+    r"proxy|credential|master|subscription|hmac|encryption)"
+    r"(?=[A-Za-z0-9]*(?:KeyId|Key|Secret|Token|Password|Passphrase|Authorization|Cookie|Signature|SessionId))"
+    r"(?![A-Za-z0-9]*(?:Count|Length|Algorithm)\b)[A-Za-z0-9]+"
+)
+_ORDINARY_KEY_WORD = (
+    r"(?<!primary_)(?<!primary-)(?<!foreign_)(?<!foreign-)(?<!sort_)(?<!sort-)"
+    r"(?<!cache_)(?<!cache-)(?<!hash_)(?<!hash-)key"
 )
 _SECRET_ASSIGNMENT_KEY_PATTERN = (
     rf"(?<![\w-])(?:"
-    rf"(?:(?!(?:primary|foreign|sort|cache|hash)[_-]+key\b)[\w-]+[_-]key"
+    rf"(?:[\w-]+[_-]{_ORDINARY_KEY_WORD}"
     rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})){{0,8}})"
     rf"|(?:(?:{_SECRET_KEY_QUALIFIER})(?:[ _-]+(?:{_SECRET_KEY_QUALIFIER})){{0,8}}[ _-]+key"
     rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})){{0,8}})"
@@ -204,8 +211,9 @@ _SECRET_ASSIGNMENT_KEY_PATTERN = (
     rf"(?:[_-]+(?!(?:count|length|algorithm)\b)[^\W_]+)*"
     rf")"
 )
+_OPTIONAL_KEY_CLOSING_QUOTE = r"(?:[\"'](?=[^\S\r\n]*[:=]))?"
 _SECRET_CONSTRUCTOR_START = re.compile(
-    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
+    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=][^\S\r\n]*)"
     r"[A-Za-z_][\w.]*\(",
     re.IGNORECASE,
 )
@@ -255,7 +263,7 @@ def _scrub_secret_constructors(text: str) -> str:
 
 
 _SECRET_CONTAINER_START = re.compile(
-    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
+    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=][^\S\r\n]*)"
     r"(?P<opener>[\[({<])",
     re.IGNORECASE,
 )
@@ -301,8 +309,8 @@ def _scrub_secret_containers(text: str) -> str:
 
 
 _SECRET_QUOTED_START = re.compile(
-    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
-    r"(?P<wrapper>[bBuUrR]{0,2})(?P<quote>[\"'])",
+    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=][^\S\r\n]*)"
+    r"(?P<wrapper>[bBuUrR]{0,2})(?P<quote>\"\"\"|'''|[\"'])",
     re.IGNORECASE,
 )
 
@@ -322,7 +330,7 @@ def _scrub_secret_quoted_values(text: str) -> str:
                 escaped = False
             elif char == "\\":
                 escaped = True
-            elif char == quote:
+            elif text.startswith(quote, index):
                 break
             index += 1
         chunks.extend(
@@ -337,7 +345,40 @@ def _scrub_secret_quoted_values(text: str) -> str:
         if index >= len(text):
             return "".join(chunks)
         chunks.append(quote)
-        cursor = index + 1
+        cursor = index + len(quote)
+        search_from = cursor
+    if not chunks:
+        return text
+    chunks.append(text[cursor:])
+    return "".join(chunks)
+
+
+_ARMORED_BLOCK_BEGIN = re.compile(r"-----BEGIN ", re.IGNORECASE)
+_ARMORED_BLOCK_LABEL = re.compile(r"[A-Z0-9][A-Z0-9 -]*", re.IGNORECASE)
+
+
+def _scrub_armored_blocks(text: str) -> str:
+    """Mask complete or truncated key/certificate armor without eating later diagnostics."""
+    chunks: list[str] = []
+    cursor = 0
+    search_from = 0
+    lowered = text.lower()
+    while match := _ARMORED_BLOCK_BEGIN.search(text, search_from):
+        label_start = match.end()
+        label_end = text.find("-----", label_start, label_start + 165)
+        if label_end < 0:
+            search_from = label_start
+            continue
+        label = text[label_start:label_end]
+        if not _ARMORED_BLOCK_LABEL.fullmatch(label) or not re.search(r"key|certificate", label, re.IGNORECASE):
+            search_from = label_end + 5
+            continue
+        end_marker = f"-----end {label.lower()}-----"
+        end_start = lowered.find(end_marker, label_end + 5)
+        chunks.extend((text[cursor : match.start()], "***"))
+        if end_start < 0:
+            return "".join(chunks)
+        cursor = end_start + len(end_marker)
         search_from = cursor
     if not chunks:
         return text
@@ -360,7 +401,8 @@ _SECRET_PATTERNS = (
     # and swallowed the headers after it.
     (
         re.compile(
-            r"((?:proxy-)?authorization[\"']?\s*[:=]\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n]+)",
+            r"((?:proxy-)?authorization[\"']?\s*[:=]\s*)"
+            r"(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n]+(?:\r?\n[ \t]+[^\r\n]*)*)",
             re.IGNORECASE,
         ),
         lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
@@ -370,7 +412,8 @@ _SECRET_PATTERNS = (
         # diagnostics, so consume just the constructor (never whitespace plus
         # an ordinary explanatory parenthetical).
         re.compile(
-            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)[A-Za-z_][\w.]*\([^\r\n)]*\)",
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=][^\S\r\n]*)"
+            r"[A-Za-z_][\w.]*\([^\r\n)]*\)",
             re.IGNORECASE,
         ),
         r"\1***",
@@ -381,18 +424,8 @@ _SECRET_PATTERNS = (
         # the rest of that line and its indented continuations. This is linear
         # and cannot leak later elements through a premature closer.
         re.compile(
-            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=][^\S\r\n]*)"
             r"(?:[\[({]|[A-Za-z_][\w.]*\()[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*",
-            re.IGNORECASE,
-        ),
-        r"\1***",
-    ),
-    (
-        re.compile(
-            rf"((?:{_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)?)"
-            r"-----BEGIN ([A-Z0-9][A-Z0-9 -]*(?:KEY|CERTIFICATE)[A-Z0-9 -]*)-----"
-            r"(?:(?!-----END \2-----)[^\r\n])*(?:-----END \2-----)?"
-            r"(?:\r?\n(?!-----END \2-----)[^\r\n]*)*(?:\r?\n-----END \2-----)?",
             re.IGNORECASE,
         ),
         r"\1***",
@@ -400,8 +433,9 @@ _SECRET_PATTERNS = (
     (
         # The Bearer scrubber above preserves the scheme; do not remask it as an unquoted token value.
         re.compile(
-            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}[\"']?[^\S\r\n]*[:=][^\S\r\n]*)"
-            r"(?:([bBuUrR]{0,2})((?:\\)?[\"'])(?:(?!\3)(?:\\.|[^\r\n]))*\3?|(?!Bearer\s)(?:\\(?![\"'])|[^\\\s&\"',;])+)",
+            rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=][^\S\r\n]*)"
+            r"(?:([bBuUrR]{0,2})((?:\\)?(?:\"\"\"|'''|[\"']))(?:(?!\3)(?:\\.|[^\r\n]))*\3?"
+            r"|(?!Bearer\s)(?:\\(?![\"'])|[^\\\s&\"',;])+)",
             re.IGNORECASE,
         ),
         lambda m: f"{m[1]}{m[2]}{m[3]}***{m[3]}" if m[3] else f"{m[1]}***",
@@ -435,30 +469,34 @@ _SECRET_PATTERNS = (
     ),
     (
         re.compile(
-            r"((?:set-)?cookie[\"']\s*:\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n,]+)",
+            r"((?:set-)?cookie[\"']\s*[:=]\s*)(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n,]+)",
             re.IGNORECASE,
         ),
         lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
     ),
     (
         re.compile(
-            r"((?:set-)?cookie\s*:\s*)[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*",
+            r"((?:set-)?cookie\s*[:=]\s*)[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*",
             re.IGNORECASE,
         ),
         r"\1***",
     ),
-    (re.compile(r"(://)[^\s/'\"?#]+@"), r"\1***@"),
+    (re.compile(r"(://)[^\s/'\"@?#]*:[^\s/'\"@]*@"), r"\1***@"),
+    (re.compile(r"(://)[^\s/'\"@?#]+@"), r"\1***@"),
 )
 
 
 def _internal_error_message(error: BaseException) -> str:
+    prefix = f"{type(error).__name__}: "
     try:
         detail = str(error)
     except Exception:
         detail = "unprintable exception"
-    raw_text = f"{type(error).__name__}: {detail}"
-    scrub_input_truncated = len(raw_text) > _INTERNAL_ERROR_SCRUB_INPUT_CAP
-    text = raw_text[:_INTERNAL_ERROR_SCRUB_INPUT_CAP]
+    detail_cap = max(0, _INTERNAL_ERROR_SCRUB_INPUT_CAP - len(prefix))
+    scrub_input_truncated = len(detail) > detail_cap
+    # ``str(error)`` necessarily materializes the exception's value, but do not
+    # create a second unbounded copy merely to prepend its type name.
+    text = prefix + detail[:detail_cap]
     if scrub_input_truncated:
         # A userinfo scrub needs its closing ``@``. If the input cap removed
         # that anchor, drop the incomplete credential token before earlier
@@ -471,38 +509,30 @@ def _internal_error_message(error: BaseException) -> str:
             authority = partial_userinfo.group("authority")
             userinfo, separator, host_port = authority.rpartition("@")
             if separator:
-                host = host_port
-                if host.startswith("[") and "]" in host:
-                    close = host.index("]")
-                    remainder = host[close + 1 :]
-                    complete_host = not remainder or (remainder.startswith(":") and remainder[1:].isdigit())
-                else:
-                    host, port_separator, port = host.rpartition(":")
-                    if not port_separator:
-                        host = host_port
-                    complete_host = (not port_separator or port.isdigit()) and (
-                        host == "localhost"
-                        or (
-                            "." in host
-                            and len(host) <= 253
-                            and all(
-                                label
-                                and label[0].isalnum()
-                                and label[-1].isalnum()
-                                and all(char.isalnum() or char == "-" for char in label)
-                                for label in host.split(".")
-                            )
-                        )
-                    )
-                should_trim = ":" in userinfo and not complete_host
+                # The cap may have removed a later ``@host``. Even a DNS-like
+                # suffix after the last visible @ can still be part of the
+                # password, so the only safe boundary is the URL start.
+                should_trim = True
             else:
                 host, port_separator, port = authority.rpartition(":")
                 looks_like_host_port = (
                     bool(port_separator)
                     and port.isdigit()
+                    and int(port) <= 65_535
                     and (host == "localhost" or "." in host or (host.startswith("[") and "]" in host))
                 )
-                should_trim = bool(port_separator) and not looks_like_host_port
+                looks_like_hostname = authority == "localhost" or (
+                    "." in authority
+                    and len(authority) <= 253
+                    and all(
+                        label
+                        and label[0].isalnum()
+                        and label[-1].isalnum()
+                        and all(char.isalnum() or char == "-" for char in label)
+                        for label in authority.split(".")
+                    )
+                )
+                should_trim = not looks_like_host_port and not looks_like_hostname
         else:
             should_trim = False
         if should_trim:
@@ -510,6 +540,7 @@ def _internal_error_message(error: BaseException) -> str:
     text = _scrub_secret_constructors(text)
     text = _scrub_secret_containers(text)
     text = _scrub_secret_quoted_values(text)
+    text = _scrub_armored_blocks(text)
     for pattern, repl in _SECRET_PATTERNS:
         text = pattern.sub(repl, text)
     if len(text) > _INTERNAL_ERROR_MESSAGE_CAP:

@@ -191,7 +191,7 @@ def test_ls_nodes_does_not_treat_a_real_class_as_a_self_named_subgraph(patched_g
         {"id": _SG_UUID, "name": "KSampler", "nodes": [], "links": [], "inputs": [], "outputs": []},
     ],
 )
-def test_ls_nodes_class_identity_wins_over_a_definition_collision(patched_graph, tmp_path, capsys, definition):
+def test_ls_nodes_matches_editor_resolution_for_a_definition_collision(patched_graph, tmp_path, capsys, definition):
     wf = _base_workflow()
     wf["definitions"] = {"subgraphs": [definition]}
     ksampler_node = next(node for node in wf["nodes"] if node["type"] == "KSampler")
@@ -199,7 +199,7 @@ def test_ls_nodes_class_identity_wins_over_a_definition_collision(patched_graph,
 
     rows = _ls_rows(tmp_path, capsys, wf)
     ksampler = next(row for row in rows.values() if row["type"] == "KSampler")
-    assert "subgraph" not in ksampler, ksampler
+    assert ksampler["subgraph"] is True
 
 
 def test_ls_nodes_real_classes_stay_clean(patched_graph, tmp_path, capsys):
