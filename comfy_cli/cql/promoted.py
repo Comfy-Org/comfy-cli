@@ -149,22 +149,24 @@ def _cached_link_rows(sg: dict, defs: dict[str, dict]) -> dict[Any, dict]:
     cache = getattr(defs, "promotion_links", None)
     if cache is None:
         return _link_rows_by_id(sg)
-    links = cache.get(id(sg))
-    if links is None:
+    entry = cache.get(id(sg))
+    if entry is None or entry[0] is not sg:
         links = _link_rows_by_id(sg)
-        cache[id(sg)] = links
-    return links
+        entry = (sg, links)
+        cache[id(sg)] = entry
+    return entry[1]
 
 
 def _cached_link_holders(sg: dict, defs: dict[str, dict]) -> dict[str, list[tuple[dict, int, dict]]]:
     cache = getattr(defs, "promotion_holders", None)
     if cache is None:
         return _link_holders(sg)
-    holders = cache.get(id(sg))
-    if holders is None:
+    entry = cache.get(id(sg))
+    if entry is None or entry[0] is not sg:
         holders = _link_holders(sg)
-        cache[id(sg)] = holders
-    return holders
+        entry = (sg, holders)
+        cache[id(sg)] = entry
+    return entry[1]
 
 
 def _invalidate_promotion_caches(defs: dict[str, dict], sg: dict | None = None) -> None:
