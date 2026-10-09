@@ -307,7 +307,7 @@ def test_model_enum_returns_none_without_enum():
 def test_extract_enum_walks_items_and_variants():
     assert spec._extract_enum({"enum": ["a", "b"]}) == ["a", "b"]
     assert spec._extract_enum({"type": "array", "items": {"enum": ["x"]}}) == ["x"]
-    assert spec._extract_enum({"anyOf": [{"type": "integer"}, {"enum": ["y"]}]}) == ["y"]
+    assert spec._extract_enum({"anyOf": [{"type": "integer"}, {"enum": ["y"]}]}) is None
     assert spec._extract_enum({"oneOf": [{"items": {"enum": ["z"]}}]}) == ["z"]
     # Numeric members coerce to their string form (unquoted YAML values);
     # bools and enum-less schemas don't count.
@@ -367,3 +367,14 @@ def test_find_property_treats_a_non_declaring_union_branch_as_unconstrained():
     }
 
     assert spec._extract_enum(spec._find_property(schema, "model")) == ["a", "b"]
+
+
+def test_find_property_treats_an_enumless_declared_union_branch_as_unconstrained():
+    schema = {
+        "anyOf": [
+            {"properties": {"model": {"enum": ["v1"]}}},
+            {"properties": {"model": {"type": "string"}}},
+        ]
+    }
+
+    assert spec._extract_enum(spec._find_property(schema, "model")) is None

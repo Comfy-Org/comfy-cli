@@ -534,11 +534,12 @@ def get_endpoint(endpoint_id: str) -> Endpoint:
 def _extract_enum(prop: dict[str, Any], _memo: dict[int, list[str] | None] | None = None) -> list[str] | None:
     """Pull a string enum out of a resolved property schema — directly, from
     ``items`` (array-typed fields), or from ``anyOf``/``oneOf``/``allOf``
-    variants. ``anyOf``/``oneOf`` branches are unioned (a spec may split the
-    model set across variants) while ``allOf`` branches are intersected (every
-    constraint must hold). Numeric members are coerced to their string form so
-    an unquoted YAML value like ``3.5`` isn't silently dropped. Returns None
-    when no non-empty string enum is found."""
+    variants. ``anyOf``/``oneOf`` branches are unioned only when every branch
+    carries a finite enum (one free-form branch makes the union unconstrained),
+    while ``allOf`` branches are intersected because every constraint must
+    hold. Numeric members are coerced to their string form so an unquoted YAML
+    value like ``3.5`` isn't silently dropped. Returns None when no finite,
+    non-empty string enum is found."""
     if _memo is None:
         _memo = {}
     memo_key = id(prop)
@@ -571,14 +572,15 @@ def _extract_enum(prop: dict[str, Any], _memo: dict[int, list[str] | None] | Non
         merged_values: set[str] = set()
         merged_results: set[int] = set()
         for variant in variants:
-            if isinstance(variant, dict):
-                found = _extract_enum(variant, _memo)
-                if found and id(found) not in merged_results:
-                    merged_results.add(id(found))
-                    for value in found:
-                        if value not in merged_values:
-                            merged_values.add(value)
-                            merged.append(value)
+            found = _extract_enum(variant, _memo) if isinstance(variant, dict) else None
+            if not found:
+                return finish(None)
+            if id(found) not in merged_results:
+                merged_results.add(id(found))
+                for value in found:
+                    if value not in merged_values:
+                        merged_values.add(value)
+                        merged.append(value)
         if merged:
             return finish(merged)
     all_of = prop.get("allOf")
