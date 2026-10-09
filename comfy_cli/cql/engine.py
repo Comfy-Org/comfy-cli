@@ -3490,6 +3490,7 @@ class _SubgraphDefs(dict[str, dict]):
 
     def __init__(self) -> None:
         super().__init__()
+        self.registered_definition_ids: set[int] = set()
         self.promotion_visit_limit: int | None = None
         self.promotion_holders: dict[int, tuple[dict, dict[Any, list[tuple[dict, int, dict]]]]] = {}
         self.promotion_links: dict[int, tuple[dict, dict[Any, dict]]] = {}
@@ -3505,9 +3506,51 @@ class _SubgraphDefs(dict[str, dict]):
         self.promotion_sources_budget: list[int] | None = None
         self.promotion_boundary_budget: list[int] | None = None
         self.promotion_inputs_memo: dict[tuple[int, int, tuple[int, ...]], list[Any]] = {}
+        self.promotion_inputs_stable_memo: dict[tuple[int, int], list[Any]] = {}
+        self.promotion_inputs_cycle_memo: dict[tuple[int, int, tuple[int, ...]], bool] = {}
         self.promotion_inputs_names: dict[int, dict[str, Any]] = {}
         self.promotion_boundary_memo: dict[tuple[int, int, int, tuple[int, ...]], list[tuple[list[str], str]]] = {}
+        self.promotion_boundary_stable_memo: dict[tuple[int, int, int], list[tuple[list[str], str]]] = {}
+        self.promotion_boundary_cycle_memo: dict[tuple[int, int, int, tuple[int, ...]], bool] = {}
         self.promotion_boundary_names: dict[int, dict[Any, dict]] = {}
+
+    def _refresh_registered_definition_ids(self) -> None:
+        self.registered_definition_ids = {id(value) for value in self.values() if isinstance(value, dict)}
+
+    def __setitem__(self, key: str, value: dict) -> None:
+        previous = self.get(key)
+        super().__setitem__(key, value)
+        if previous is not None and previous is not value and all(item is not previous for item in self.values()):
+            self.registered_definition_ids.discard(id(previous))
+        if isinstance(value, dict):
+            self.registered_definition_ids.add(id(value))
+
+    def __delitem__(self, key: str) -> None:
+        super().__delitem__(key)
+        self._refresh_registered_definition_ids()
+
+    def update(self, *args, **kwargs) -> None:
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
+
+    def clear(self) -> None:
+        super().clear()
+        self.registered_definition_ids.clear()
+
+    def pop(self, key: str, *args):
+        value = super().pop(key, *args)
+        self._refresh_registered_definition_ids()
+        return value
+
+    def popitem(self):
+        item = super().popitem()
+        self._refresh_registered_definition_ids()
+        return item
+
+    def setdefault(self, key: str, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
 
 
 def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:

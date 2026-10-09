@@ -259,6 +259,68 @@ def test_registered_roots_share_one_budget_per_promotion_operation():
     assert budget[0] < remaining
 
 
+def test_registered_root_lookup_is_constant_time_after_limit_is_cached():
+    class CountingDefs(_SubgraphDefs):
+        values_calls = 0
+
+        def values(self):
+            self.values_calls += 1
+            return super().values()
+
+    definition = {"id": "sg", "inputs": [], "nodes": [], "links": []}
+    definitions = CountingDefs()
+    definitions["sg"] = definition
+
+    promoted._promotion_visit_limit(definitions, definition)
+    calls = definitions.values_calls
+    promoted._shared_promotion_budget(definitions, definition, "promotion_inputs_budget")
+
+    assert definitions.values_calls == calls
+
+
+@pytest.mark.parametrize("field", ["nodes", "links"])
+def test_promotion_indexes_treat_non_list_definition_containers_as_empty(field):
+    definition = {"id": "sg", "inputs": [], "nodes": [], "links": []}
+    definition[field] = 5
+    definitions = _SubgraphDefs()
+    definitions["sg"] = definition
+
+    assert promoted.promoted_inputs(definition, definitions) == []
+    assert promoted._promotion_source_indexes(definition, definitions) == ({}, {})
+
+
+def test_acyclic_shared_children_reuse_stable_promotion_results_across_roots():
+    child = {
+        "id": "child",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+        "nodes": [
+            {
+                "id": 9,
+                "type": "Widget",
+                "inputs": [{"name": "value", "link": 1, "widget": {"name": "value"}}],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 9, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["child"] = child
+    roots = []
+    for index in range(70):
+        root = {
+            "id": f"root-{index}",
+            "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+            "nodes": [{"id": 7, "type": "child", "inputs": [{"name": "value", "link": 1}]}],
+            "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+        }
+        definitions[root["id"]] = root
+        roots.append(root)
+
+    for root in roots:
+        [item] = promoted.promoted_inputs(root, definitions)
+        assert item.is_widget
+        assert promoted.boundary_widget_targets(root, item, definitions) == [(["7", "9"], "value")]
+
+
 def test_every_promotion_resolver_follows_a_holder_when_the_row_target_drifted():
     sg = {
         "id": "sg",
@@ -598,7 +660,7 @@ def test_distinct_nested_paths_are_bounded_by_definition_graph_size():
 
     instance = {"id": 7, "type": "left-0", "widgets_values": ["keep"]}
     workflow = {"nodes": [instance], "definitions": {"subgraphs": list(definitions.values())}}
-    with pytest.raises(promoted.PromotionTraversalLimitError, match="input traversal"):
+    with pytest.raises(ValueError, match="link input, not a widget"):
         promoted.set_host_value(workflow, instance, "value", "replace", graph=None)
     assert instance["widgets_values"] == ["keep"]
 

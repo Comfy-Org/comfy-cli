@@ -332,6 +332,20 @@ def _expand_subgraphs(
         return nodes, links, ctx
 
     definition_cache: dict[int, tuple[Any, ...]] = {}
+    # Interior rows minted during expansion must not collide with either a
+    # concrete outer row or a stale id that an outer input still holds. A
+    # single allocator also avoids rescanning the growing link list once per
+    # instance.
+    max_link_id = 0
+    for link in links:
+        if isinstance(link, (list, tuple)) and link and _is_slot_index(link[0]):
+            max_link_id = max(max_link_id, link[0])
+    for node in nodes:
+        raw_inputs = node.get("inputs")
+        for entry in raw_inputs if isinstance(raw_inputs, list) else []:
+            if isinstance(entry, dict) and _is_slot_index(entry.get("link")):
+                max_link_id = max(max_link_id, entry["link"])
+    link_id_counter = [max_link_id + 1]
     for _iteration in range(_MAX_SUBGRAPH_ITERATIONS):
         expanded: list[dict] = []
         found_any = False
@@ -354,13 +368,18 @@ def _expand_subgraphs(
                     subgraph_defs[node_type],
                     links,
                     _definition_cache=definition_cache,
+                    _link_id_counter=link_id_counter,
                 )
                 expanded.extend(sg_nodes)
                 links.extend(sg_links)
                 ctx.input_targets[str(node.get("id"))] = input_map
                 ctx.output_sources[str(node.get("id"))] = output_map
                 node_id = str(node.get("id"))
-                outer_map = _outer_slot_to_input_idx(node, subgraph_defs[node_type])
+                outer_map = _outer_slot_to_input_idx(
+                    node,
+                    subgraph_defs[node_type],
+                    _definition_cache=definition_cache,
+                )
                 ctx.outer_to_input_idx[node_id] = outer_map
                 held_slots: dict[Any, set[int]] = {}
                 raw_outer_inputs = node.get("inputs")
@@ -382,14 +401,23 @@ def _expand_subgraphs(
     return nodes, links, ctx
 
 
-def _outer_slot_to_input_idx(outer_node: dict, sg_def: dict) -> dict[int, int]:
+def _outer_slot_to_input_idx(
+    outer_node: dict,
+    sg_def: dict,
+    *,
+    _definition_cache: dict[int, tuple[Any, ...]] | None = None,
+) -> dict[int, int]:
     """Map the outer node's input slots to subgraph-definition input indices."""
-    sg_input_names: dict[Any, int] = {}
-    raw_definition_inputs = sg_def.get("inputs")
-    definition_inputs = raw_definition_inputs if isinstance(raw_definition_inputs, list) else []
-    for idx, inp in enumerate(definition_inputs):
-        if isinstance(inp, dict):
-            sg_input_names[inp.get("name")] = idx
+    cached = _definition_cache.get(id(sg_def)) if _definition_cache is not None else None
+    if cached is not None and cached[0] is sg_def and len(cached) >= 11:
+        sg_input_names = cached[10]
+    else:
+        sg_input_names = {}
+        raw_definition_inputs = sg_def.get("inputs")
+        definition_inputs = raw_definition_inputs if isinstance(raw_definition_inputs, list) else []
+        for idx, inp in enumerate(definition_inputs):
+            if isinstance(inp, dict):
+                sg_input_names[inp.get("name")] = idx
     mapping: dict[int, int] = {}
     raw_outer_inputs = outer_node.get("inputs")
     outer_inputs = raw_outer_inputs if isinstance(raw_outer_inputs, list) else []
@@ -421,6 +449,7 @@ def _expand_one_subgraph(
     existing_links: list,
     *,
     _definition_cache: dict[int, tuple[Any, ...]] | None = None,
+    _link_id_counter: list[int] | None = None,
 ) -> tuple[list[dict], list, dict[int, list[tuple[Any, int]]], dict[int, tuple[Any, int]]]:
     from comfy_cli.cql.promoted import _link_holders, _listed_link_ids, held_link_targets
 
@@ -466,20 +495,23 @@ def _expand_one_subgraph(
         input_slots_by_link,
         serialized_boundary_links,
         interior_by_id,
-    ) = cached
+    ) = cached[:8]
 
-    # Subgraph internal link IDs may collide with the outer workflow's IDs.
-    # Allocate fresh IDs starting above the current maximum.
-    max_link_id = 0
-    for link in existing_links:
-        if isinstance(link, (list, tuple)) and link:
-            lid = link[0]
-            if isinstance(lid, int) and lid > max_link_id:
-                max_link_id = lid
-    next_id = max_link_id + 1
+    # Direct callers that do not share the expansion allocator still get an id
+    # above concrete rows and every integer id held by this instance.
+    if _link_id_counter is None:
+        max_link_id = 0
+        for link in existing_links:
+            if isinstance(link, (list, tuple)) and link and _is_slot_index(link[0]):
+                max_link_id = max(max_link_id, link[0])
+        raw_outer_inputs = outer_node.get("inputs")
+        for entry in raw_outer_inputs if isinstance(raw_outer_inputs, list) else []:
+            if isinstance(entry, dict) and _is_slot_index(entry.get("link")):
+                max_link_id = max(max_link_id, entry["link"])
+        _link_id_counter = [max_link_id + 1]
 
-    link_id_remap: dict[int, int] = {}
-    internal_link_map: dict[int, dict] = {}
+    link_id_remap: dict[Any, int] = {}
+    internal_link_map: dict[Any, dict] = {}
     for link in internal_links:
         old_id = link.get("id")
         # link_id_remap[old_id] / internal_link_map[old_id] need a hashable key
@@ -488,93 +520,95 @@ def _expand_one_subgraph(
         # before the per-node try/except wrapper).
         if not _is_link_id(old_id):
             continue
-        link_id_remap[old_id] = next_id
-        next_id += 1
+        link_id_remap[old_id] = _link_id_counter[0]
+        _link_id_counter[0] += 1
         internal_link_map[old_id] = link
 
-    input_targets: dict[int, list[tuple[Any, int]]] = {}
-    target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
-    target_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + 3 * serialized_boundary_links]
-
-    for idx, in_def in enumerate(definition_inputs):
-        if not isinstance(in_def, dict):
-            continue
-        targets = []
-        seen_targets: set[tuple[str, int]] = set()
-        for lid in _listed_link_ids(in_def):
-            if target_budget[0] <= 0:
-                raise WorkflowConversionError("subgraph input expansion exceeded its safe limit")
-            target_budget[0] -= 1
-            if not _is_link_id(lid):
+    if len(cached) >= 11:
+        input_targets, output_sources, _definition_input_names = cached[8:11]
+    else:
+        input_targets = {}
+        target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
+        target_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + 3 * serialized_boundary_links]
+        for idx, in_def in enumerate(definition_inputs):
+            if not isinstance(in_def, dict):
                 continue
-            if input_slots_by_link.get(lid) != {idx}:
-                continue
-            link = internal_link_map.get(lid)
-            if isinstance(link, dict) and str(link.get("origin_id")) == str(_SUBGRAPH_INPUT_NODE_ID):
-                for target, target_slot, _entry in held_link_targets(
-                    sg_def,
-                    lid,
-                    link,
-                    holders,
-                    target_cache,
-                    target_budget,
-                    "subgraph input expansion exceeded its safe limit",
-                ):
-                    target_key = (str(target.get("id")), target_slot)
-                    if target_key in seen_targets:
-                        continue
-                    if target_budget[0] <= 0:
-                        raise WorkflowConversionError("subgraph input expansion exceeded its safe limit")
-                    target_budget[0] -= 1
-                    seen_targets.add(target_key)
-                    targets.append((target.get("id"), target_slot))
-        if targets:
-            input_targets[idx] = targets
+            targets = []
+            seen_targets: set[tuple[str, int]] = set()
+            for lid in _listed_link_ids(in_def):
+                if target_budget[0] <= 0:
+                    raise WorkflowConversionError("subgraph input expansion exceeded its safe limit")
+                target_budget[0] -= 1
+                if not _is_link_id(lid) or input_slots_by_link.get(lid) != {idx}:
+                    continue
+                link = internal_link_map.get(lid)
+                if isinstance(link, dict) and str(link.get("origin_id")) == str(_SUBGRAPH_INPUT_NODE_ID):
+                    for target, target_slot, _entry in held_link_targets(
+                        sg_def,
+                        lid,
+                        link,
+                        holders,
+                        target_cache,
+                        target_budget,
+                        "subgraph input expansion exceeded its safe limit",
+                    ):
+                        target_key = (str(target.get("id")), target_slot)
+                        if target_key in seen_targets:
+                            continue
+                        if target_budget[0] <= 0:
+                            raise WorkflowConversionError("subgraph input expansion exceeded its safe limit")
+                        target_budget[0] -= 1
+                        seen_targets.add(target_key)
+                        targets.append((target.get("id"), target_slot))
+            if targets:
+                input_targets[idx] = targets
 
-    output_sources: dict[int, tuple[Any, int]] = {}
-    raw_outputs = sg_def.get("outputs")
-    definition_outputs = raw_outputs if isinstance(raw_outputs, list) else []
-    output_slots_by_link: dict[Any, set[int]] = {}
-    for idx, out_def in enumerate(definition_outputs):
-        if not isinstance(out_def, dict):
-            continue
-        for lid in _listed_link_ids(out_def):
-            if _is_link_id(lid):
-                output_slots_by_link.setdefault(lid, set()).add(idx)
-    # Definition-link order is the renderer's established deterministic
-    # precedence. A row can legitimately alias several outputs; each output
-    # keeps the first valid row that lists it. Once a link id has produced a
-    # valid source, duplicate rows for that id cannot improve the result and
-    # must not multiply work by the number of listed output slots.
-    resolved_output_link_ids: set[Any] = set()
-    for link in internal_links:
-        lid = link.get("id")
-        output_slots = output_slots_by_link.get(lid, set()) if _is_link_id(lid) else set()
-        if (
-            not output_slots
-            or lid in resolved_output_link_ids
-            or str(link.get("target_id")) != str(_SUBGRAPH_OUTPUT_NODE_ID)
-        ):
-            continue
-        origin_id = link.get("origin_id")
-        origin_slot = link.get("origin_slot")
-        if str(origin_id) == str(_SUBGRAPH_INPUT_NODE_ID):
-            listed_inputs = input_slots_by_link.get(lid, set())
-            if len(listed_inputs) == 1:
-                source = (_SUBGRAPH_INPUT_NODE_ID, next(iter(listed_inputs)))
-                for output_slot in output_slots:
-                    output_sources.setdefault(output_slot, source)
-                resolved_output_link_ids.add(lid)
-            continue
-        source_node = interior_by_id.get(str(origin_id))
-        if not _is_link_id(origin_id) or not _is_slot_index(origin_slot) or origin_slot < 0 or source_node is None:
-            continue
-        outputs = source_node.get("outputs")
-        if isinstance(outputs, list) and origin_slot >= len(outputs):
-            continue
-        for output_slot in output_slots:
-            output_sources.setdefault(output_slot, (origin_id, origin_slot))
-        resolved_output_link_ids.add(lid)
+        output_sources = {}
+        raw_outputs = sg_def.get("outputs")
+        definition_outputs = raw_outputs if isinstance(raw_outputs, list) else []
+        output_slots_by_link: dict[Any, set[int]] = {}
+        for idx, out_def in enumerate(definition_outputs):
+            if not isinstance(out_def, dict):
+                continue
+            for lid in _listed_link_ids(out_def):
+                if _is_link_id(lid):
+                    output_slots_by_link.setdefault(lid, set()).add(idx)
+        resolved_output_link_ids: set[Any] = set()
+        for link in internal_links:
+            lid = link.get("id")
+            output_slots = output_slots_by_link.get(lid, set()) if _is_link_id(lid) else set()
+            if (
+                not output_slots
+                or lid in resolved_output_link_ids
+                or str(link.get("target_id")) != str(_SUBGRAPH_OUTPUT_NODE_ID)
+            ):
+                continue
+            origin_id = link.get("origin_id")
+            origin_slot = link.get("origin_slot")
+            if str(origin_id) == str(_SUBGRAPH_INPUT_NODE_ID):
+                listed_inputs = input_slots_by_link.get(lid, set())
+                if len(listed_inputs) == 1:
+                    source = (_SUBGRAPH_INPUT_NODE_ID, next(iter(listed_inputs)))
+                    for output_slot in output_slots:
+                        output_sources.setdefault(output_slot, source)
+                    resolved_output_link_ids.add(lid)
+                continue
+            source_node = interior_by_id.get(str(origin_id))
+            if not _is_link_id(origin_id) or not _is_slot_index(origin_slot) or origin_slot < 0 or source_node is None:
+                continue
+            outputs = source_node.get("outputs")
+            if isinstance(outputs, list) and origin_slot >= len(outputs):
+                continue
+            for output_slot in output_slots:
+                output_sources.setdefault(output_slot, (origin_id, origin_slot))
+            resolved_output_link_ids.add(lid)
+
+        definition_input_names = {
+            entry.get("name"): idx for idx, entry in enumerate(definition_inputs) if isinstance(entry, dict)
+        }
+        cached = (*cached, input_targets, output_sources, definition_input_names)
+        if _definition_cache is not None:
+            _definition_cache[id(sg_def)] = cached
 
     expanded_nodes: list[dict] = []
     for inner in internal_nodes:
@@ -659,6 +693,45 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
     # the fixed cap remains available only for fan-out beyond it.
     resolution_budget = [3 * _MAX_RESOLVED_SUBGRAPH_INPUTS + (3 * _MAX_RESOLUTION_DEPTH + 1) * len(links)]
     source_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + (2 * _MAX_RESOLUTION_DEPTH + 1) * len(links)]
+    # Holder routing depends only on a typed link id, not on which duplicate
+    # row carried it. Materialize each fanout once so repeated rows cannot turn
+    # K serialized holders into K² work.
+    routed_holder_targets: dict[Any, tuple[list[tuple[Any, Any]], set[tuple[str, int]]]] = {}
+    routed_link_ids = {
+        link[0] for link in links if isinstance(link, (list, tuple)) and len(link) >= 6 and _is_link_id(link[0])
+    }
+    for routed_link_id in routed_link_ids:
+        holder_specs = ctx.input_holders.get(routed_link_id, [])
+        live_holder_specs = live_input_holders.get(routed_link_id, [])
+        if not holder_specs and not live_holder_specs:
+            continue
+        targets: list[tuple[Any, Any]] = []
+        update_targets: set[tuple[str, int]] = set()
+        for holder_id, held_idx in holder_specs:
+            resolved = _resolve_subgraph_input_all(
+                holder_id,
+                held_idx,
+                ctx,
+                _memo=resolution_memo,
+                _budget=resolution_budget,
+                _definition_slot=True,
+            )
+            if resolved != [(holder_id, held_idx)]:
+                targets.extend(resolved)
+                update_targets.update(
+                    (str(resolved_id), resolved_slot)
+                    for resolved_id, resolved_slot in resolved
+                    if _is_slot_index(resolved_slot)
+                )
+        targets.extend(live_holder_specs)
+        deduped: list[tuple[Any, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for target in targets:
+            key = (str(target[0]), repr(target[1]))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(target)
+        routed_holder_targets[routed_link_id] = (deduped, update_targets)
     # Concrete link lookup is last-row-wins. Walk in reverse and process each
     # typed id once so passthrough source recording uses that same row and
     # duplicate rows cannot multiply boundary-fanout work.
@@ -700,6 +773,7 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
             source_budget,
         )
     updated: list = []
+    applied_holder_updates: set[Any] = set()
     for link in links:
         if not isinstance(link, (list, tuple)) or len(link) < 6:
             updated.append(link)
@@ -719,28 +793,13 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
             or tgt_id_str in ctx.input_targets
             or tgt_id_str in ctx.output_sources
         )
-        all_targets: list[tuple[Any, Any]] = []
-        update_targets: set[tuple[str, int]] = set()
-        if holder_specs:
-            for holder_id, held_idx in holder_specs:
-                resolved = _resolve_subgraph_input_all(
-                    holder_id,
-                    held_idx,
-                    ctx,
-                    _memo=resolution_memo,
-                    _budget=resolution_budget,
-                    _definition_slot=True,
-                )
-                if resolved != [(holder_id, held_idx)]:
-                    all_targets.extend(resolved)
-                    update_targets.update(
-                        (str(resolved_id), resolved_slot)
-                        for resolved_id, resolved_slot in resolved
-                        if _is_slot_index(resolved_slot)
-                    )
-        if live_holder_specs:
-            all_targets.extend(live_holder_specs)
-        if not holder_specs and not live_holder_specs:
+        holder_route = routed_holder_targets.get(link_id) if _is_link_id(link_id) else None
+        if holder_route is not None:
+            all_targets = holder_route[0]
+            update_targets = holder_route[1]
+        else:
+            all_targets = []
+            update_targets = set()
             if tgt_id_str in ctx.held_input_idx:
                 if not _is_link_id(link_id):
                     continue
@@ -776,14 +835,15 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
                     if _is_slot_index(resolved_slot)
                     and (str(resolved_id) != tgt_id_str or resolved_slot != effective_tgt_slot)
                 )
-        deduped_targets: list[tuple[Any, Any]] = []
-        seen_targets: set[tuple[str, str]] = set()
-        for resolved_target in all_targets:
-            key = (str(resolved_target[0]), repr(resolved_target[1]))
-            if key not in seen_targets:
-                seen_targets.add(key)
-                deduped_targets.append(resolved_target)
-        all_targets = deduped_targets
+        if holder_route is None:
+            deduped_targets: list[tuple[Any, Any]] = []
+            seen_targets: set[tuple[str, str]] = set()
+            for resolved_target in all_targets:
+                key = (str(resolved_target[0]), repr(resolved_target[1]))
+                if key not in seen_targets:
+                    seen_targets.add(key)
+                    deduped_targets.append(resolved_target)
+            all_targets = deduped_targets
         if expanded_target and not all_targets:
             # The expanded-away instance has no live interior holder for this
             # input. Passthrough outputs already captured its upstream in the
@@ -792,13 +852,16 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
         if not all_targets:
             all_targets = [(tgt_id_str, effective_tgt_slot)]
         # Track input-slot rewrites for ALL targets (one outer input may fan out).
-        for resolved_tgt_id, resolved_tgt_slot in all_targets:
-            if (
-                _is_slot_index(resolved_tgt_slot)
-                and (str(resolved_tgt_id), resolved_tgt_slot) in update_targets
-                and str(resolved_tgt_id) in expanded_node_ids
-            ):
-                node_input_updates.setdefault(str(resolved_tgt_id), {})[resolved_tgt_slot] = link_id
+        if not _is_link_id(link_id) or link_id not in applied_holder_updates:
+            for resolved_tgt_id, resolved_tgt_slot in all_targets:
+                if (
+                    _is_slot_index(resolved_tgt_slot)
+                    and (str(resolved_tgt_id), resolved_tgt_slot) in update_targets
+                    and str(resolved_tgt_id) in expanded_node_ids
+                ):
+                    node_input_updates.setdefault(str(resolved_tgt_id), {})[resolved_tgt_slot] = link_id
+            if _is_link_id(link_id):
+                applied_holder_updates.add(link_id)
 
         first_tgt_id, first_tgt_slot = all_targets[0]
         updated.append([link_id, src_id_out, src_slot_out, first_tgt_id, first_tgt_slot, link_type])

@@ -527,10 +527,44 @@ def test_repeated_instances_reuse_definition_boundary_indexes():
     ]
     from comfy_cli.cql import promoted
 
-    with mock.patch.object(promoted, "_link_holders", wraps=promoted._link_holders) as holders:
+    with (
+        mock.patch.object(promoted, "_link_holders", wraps=promoted._link_holders) as holders,
+        mock.patch.object(promoted, "_listed_link_ids", wraps=promoted._listed_link_ids) as listed,
+    ):
         workflow_to_api._expand_subgraphs(nodes, [], {subgraph_id: definition})
 
     assert holders.call_count == 1
+    assert listed.call_count == 2
+
+
+def test_dangling_outer_holder_ids_are_reserved_before_interior_links_are_minted():
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    definition = {
+        "id": subgraph_id,
+        "inputs": [{"name": "value", "linkIds": [1]}],
+        "outputs": [],
+        "nodes": [
+            {"id": 7, "type": "Source", "inputs": [{"name": "value", "link": 1}], "outputs": [{}]},
+            {"id": 8, "type": "Target", "inputs": [{"name": "value", "link": 2}], "outputs": []},
+        ],
+        "links": [
+            {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0},
+            {"id": 2, "origin_id": 7, "origin_slot": 0, "target_id": 8, "target_slot": 0},
+        ],
+    }
+    nodes = [
+        {
+            "id": 10,
+            "type": subgraph_id,
+            "inputs": [{"name": "value", "link": 3}],
+            "outputs": [],
+        }
+    ]
+
+    _nodes, links, ctx = workflow_to_api._expand_subgraphs(nodes, [], {subgraph_id: definition})
+
+    assert ctx.input_holders[3] == [("10", 0)]
+    assert links and all(link[0] > 3 for link in links)
 
 
 def test_expansion_preserves_raw_input_slots_for_boundary_updates():
@@ -587,6 +621,25 @@ def test_plain_holder_keeps_a_row_when_an_expanded_holder_resolves_nowhere():
     rewritten = workflow_to_api._rewrite_links_for_subgraphs([[7, "source", 0, 10, 0, "*"]], ctx, nodes)
 
     assert rewritten == [[7, "source", 0, "plain", 0, "*"]]
+
+
+def test_duplicate_rows_reuse_one_materialized_holder_route():
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.input_targets["10"] = {0: [(7, 0)]}
+    ctx.input_holders[5] = [("10", 0)]
+    nodes = [{"id": "10:7", "inputs": [{"name": "value", "link": None}]}]
+    links = [[5, f"source-{index}", 0, 10, 0, "*"] for index in range(100)]
+
+    with mock.patch.object(
+        workflow_to_api,
+        "_resolve_subgraph_input_all",
+        wraps=workflow_to_api._resolve_subgraph_input_all,
+    ) as resolve:
+        workflow_to_api._rewrite_links_for_subgraphs(links, ctx, nodes)
+
+    # One root and one leaf visit, independent of the 100 duplicate rows.
+    assert resolve.call_count == 2
+    assert nodes[0]["inputs"][0]["link"] == 5
 
 
 def test_dangling_interior_link_id_is_cleared_before_outer_scope_indexing():
