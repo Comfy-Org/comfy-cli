@@ -316,7 +316,8 @@ def test_definition_input_to_output_passthrough_uses_the_outer_input_source():
 def test_passthrough_uses_the_held_outer_input_not_stale_row_order():
     ctx = workflow_to_api._SubgraphCtx()
     ctx.output_sources["10"] = {0: (-10, 1)}
-    ctx.held_input_idx["10"] = {2: 1}
+    ctx.held_input_idx["10"] = {2: (1,)}
+    ctx.input_holders[2] = [("10", 1)]
     links = [
         [1, "stale", 0, 10, 1, "*"],
         [2, "live", 3, 10, 0, "*"],
@@ -335,7 +336,8 @@ def test_nested_input_to_output_passthrough_inherits_the_parent_source():
     ctx.output_sources["10"] = {0: (7, 0)}
     ctx.input_targets["10:7"] = {}
     ctx.output_sources["10:7"] = {0: ("-10", 0)}
-    ctx.held_input_idx["10"] = {1: 0}
+    ctx.held_input_idx["10"] = {1: (0,)}
+    ctx.input_holders[1] = [("10", 0)]
     links = [
         [1, "producer", 2, 10, 0, "*"],
         [2, 10, 0, "consumer", 0, "*"],
@@ -394,6 +396,141 @@ def test_subgraph_input_resolution_fails_closed_at_materialization_cap():
 
     with pytest.raises(workflow_to_api.WorkflowConversionError, match="input resolution exceeded"):
         workflow_to_api._resolve_subgraph_input_all("root", 0, ctx)
+
+
+def test_held_definition_index_is_not_mapped_through_outer_order_twice():
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.input_targets["10"] = {0: [("a", 0)], 1: [("b", 0)]}
+    ctx.outer_to_input_idx["10"] = {0: 1, 1: 0}
+    ctx.held_input_idx["10"] = {7: (1,)}
+    ctx.input_holders[7] = [("10", 1)]
+    nodes = [
+        {"id": "10:a", "inputs": [{"name": "value", "link": None}]},
+        {"id": "10:b", "inputs": [{"name": "value", "link": None}]},
+    ]
+
+    rewritten = workflow_to_api._rewrite_links_for_subgraphs([[7, "source", 0, 10, 0, "*"]], ctx, nodes)
+
+    assert rewritten[0][3:5] == ["10:b", 0]
+    assert nodes[0]["inputs"][0]["link"] is None
+    assert nodes[1]["inputs"][0]["link"] == 7
+
+
+def test_expanded_holder_recovers_a_stale_declared_target():
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.input_targets["10"] = {0: [("inside", 0)]}
+    ctx.held_input_idx["10"] = {7: (0,)}
+    ctx.input_holders[7] = [("10", 0)]
+    nodes = [{"id": "10:inside", "inputs": [{"name": "value", "link": None}]}]
+
+    rewritten = workflow_to_api._rewrite_links_for_subgraphs([[7, "source", 0, "missing", 9, "*"]], ctx, nodes)
+
+    assert rewritten[0][3:5] == ["10:inside", 0]
+    assert nodes[0]["inputs"][0]["link"] == 7
+
+
+def test_one_outer_link_fans_out_to_every_instance_input_holder():
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.input_targets["10"] = {0: [("a", 0)], 1: [("b", 0)]}
+    ctx.held_input_idx["10"] = {7: (0, 1)}
+    ctx.input_holders[7] = [("10", 0), ("10", 1)]
+    nodes = [
+        {"id": "10:a", "inputs": [{"name": "value", "link": None}]},
+        {"id": "10:b", "inputs": [{"name": "value", "link": None}]},
+    ]
+
+    workflow_to_api._rewrite_links_for_subgraphs([[7, "source", 0, 10, 0, "*"]], ctx, nodes)
+
+    assert [node["inputs"][0]["link"] for node in nodes] == [7, 7]
+
+
+def test_definition_membership_requires_the_boundary_proxy_endpoints():
+    definition = {
+        "inputs": [{"name": "value", "linkIds": [1]}],
+        "outputs": [{"name": "result", "linkIds": [2]}],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "Example",
+                "inputs": [{"name": "value", "link": 1}],
+                "outputs": [{"name": "result"}],
+            }
+        ],
+        "links": [
+            {"id": 1, "origin_id": 99, "origin_slot": 0, "target_id": 7, "target_slot": 0},
+            {"id": 2, "origin_id": 7, "origin_slot": 0, "target_id": 99, "target_slot": 0},
+        ],
+    }
+
+    _nodes, _links, inputs, outputs = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
+
+    assert inputs == {}
+    assert outputs == {}
+
+
+def test_first_live_definition_link_for_an_output_wins():
+    definition = {
+        "inputs": [],
+        "outputs": [{"name": "result", "linkIds": [2, 1]}],
+        "nodes": [
+            {"id": 7, "type": "First", "inputs": [], "outputs": [{"name": "value"}]},
+            {"id": 8, "type": "Second", "inputs": [], "outputs": [{"name": "value"}]},
+        ],
+        "links": [
+            {"id": 1, "origin_id": 7, "origin_slot": 0, "target_id": -20, "target_slot": 0},
+            {"id": 2, "origin_id": 8, "origin_slot": 0, "target_id": -20, "target_slot": 0},
+        ],
+    }
+
+    _nodes, _links, _inputs, outputs = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
+
+    assert outputs == {0: (7, 0)}
+
+
+@pytest.mark.parametrize("field", ["inputs", "outputs", "nodes", "links"])
+def test_subgraph_expansion_treats_non_list_containers_as_empty(field):
+    definition = {"inputs": [], "outputs": [], "nodes": [], "links": []}
+    definition[field] = 5
+
+    nodes, links, inputs, outputs = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
+
+    assert isinstance(nodes, list)
+    assert isinstance(links, list)
+    assert inputs == {}
+    assert outputs == {}
+
+
+def test_materialization_cap_allows_the_documented_direct_fanout():
+    count = 3_434
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.input_targets["10"] = {0: [(index, 0) for index in range(count)]}
+    nodes = [{"id": f"10:{index}", "inputs": [{"name": "value", "link": None}]} for index in range(count)]
+
+    rewritten = workflow_to_api._rewrite_links_for_subgraphs([[7, "source", 0, 10, 0, "*"]], ctx, nodes)
+
+    assert len(rewritten) == 1
+    assert all(node["inputs"][0]["link"] == 7 for node in nodes)
+
+
+def test_repeated_instances_reuse_definition_boundary_indexes():
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    definition = {
+        "id": subgraph_id,
+        "inputs": [{"name": "value", "linkIds": [1]}],
+        "outputs": [],
+        "nodes": [{"id": 7, "type": "Example", "inputs": [{"name": "value", "link": 1}], "outputs": []}],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    nodes = [
+        {"id": 10, "type": subgraph_id, "inputs": [], "outputs": []},
+        {"id": 11, "type": subgraph_id, "inputs": [], "outputs": []},
+    ]
+    from comfy_cli.cql import promoted
+
+    with mock.patch.object(promoted, "_link_holders", wraps=promoted._link_holders) as holders:
+        workflow_to_api._expand_subgraphs(nodes, [], {subgraph_id: definition})
+
+    assert holders.call_count == 1
 
 
 def test_promotion_traversal_limit_is_a_structured_conversion_failure(object_info):

@@ -170,6 +170,27 @@ def _cached_link_holders(sg: dict, defs: dict[str, dict]) -> dict[Any, list[tupl
     return entry[1]
 
 
+def _input_link_memberships(sg: dict, defs: dict[str, dict]) -> dict[Any, set[int]]:
+    """Raw link id -> every definition input that lists it."""
+    cache = getattr(defs, "promotion_input_memberships", None)
+    if cache is not None:
+        entry = cache.get(id(sg))
+        if entry is not None and entry[0] is sg:
+            return entry[1]
+    raw_inputs = sg.get("inputs")
+    inputs = raw_inputs if isinstance(raw_inputs, list) else []
+    memberships: dict[Any, set[int]] = {}
+    for index, inp in enumerate(inputs):
+        if not isinstance(inp, dict):
+            continue
+        for link_id in _listed_link_ids(inp):
+            if _is_link_id(link_id):
+                memberships.setdefault(link_id, set()).add(index)
+    if cache is not None:
+        cache[id(sg)] = (sg, memberships)
+    return memberships
+
+
 def _invalidate_promotion_caches(defs: dict[str, dict], sg: dict | None = None) -> None:
     """Drop derived indexes after an in-place definition repair."""
     if hasattr(defs, "promotion_visit_limit"):
@@ -186,7 +207,12 @@ def _invalidate_promotion_caches(defs: dict[str, dict], sg: dict | None = None) 
             cache.clear()
         else:
             cache.pop(id(sg), None)
-    for name in ("promotion_inputs", "promotion_boundaries"):
+    for name in (
+        "promotion_inputs",
+        "promotion_boundaries",
+        "promotion_input_memberships",
+        "promotion_sources",
+    ):
         cache = getattr(defs, name, None)
         if cache is not None:
             # These results can depend on any nested definition, so repairing
@@ -252,6 +278,12 @@ def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
         for field_name in ("inputs", "nodes", "links"):
             values = definition.get(field_name)
             graph_size += len(values) if isinstance(values, list) else 0
+        nodes = definition.get("nodes")
+        for node in nodes if isinstance(nodes, list) else []:
+            if not isinstance(node, dict):
+                continue
+            node_inputs = node.get("inputs")
+            graph_size += len(node_inputs) if isinstance(node_inputs, list) else 0
     limit = max(1, graph_size) * (_MAX_NESTED_PROMOTION_DEPTH + 1)
     if hasattr(defs, "promotion_visit_limit") and any(definition is root for definition in defs.values()):
         defs.promotion_visit_limit = limit
@@ -260,7 +292,10 @@ def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
 
 def _promoted_name_index(inputs: list[PromotedInput]) -> dict[str, PromotedInput]:
     """Build the per-result name index once, including across memo hits."""
-    return {promoted_input.name: promoted_input for promoted_input in inputs}
+    out: dict[str, PromotedInput] = {}
+    for promoted_input in inputs:
+        out.setdefault(promoted_input.name, promoted_input)
+    return out
 
 
 def promoted_inputs(
@@ -312,6 +347,7 @@ def promoted_inputs(
     )
     _stack = (*_stack, id(sg))
     holders = _cached_link_holders(sg, defs)
+    memberships = _input_link_memberships(sg, defs)
     target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
     # Only hashable ids can be looked up; a malformed (list/dict) id is skipped
     # rather than crashing conversion of the whole workflow.
@@ -330,6 +366,8 @@ def promoted_inputs(
         for link_id in _listed_link_ids(inp):
             _spend_traversal_budget(_budget, 1, "promoted input traversal exceeded its safe limit")
             if not _is_link_id(link_id):
+                continue
+            if memberships.get(link_id) != {idx}:
                 continue
             link = links.get(link_id)
             if not isinstance(link, dict):
@@ -425,12 +463,19 @@ def link_exists(scope: dict, link_id: Any) -> bool:
     """Whether ``link_id`` is a live link in ``scope`` — the workflow (top-level
     links are ``[id, src, slot, dst, slot, type]`` arrays) or a subgraph
     definition (interior links are ``{"id": …}`` dicts)."""
-    for link in scope.get("links") or []:
+    if not _is_link_id(link_id):
+        return False
+    raw_links = scope.get("links")
+    links = raw_links if isinstance(raw_links, list) else []
+    for link in links:
         if isinstance(link, dict):
-            if link.get("id") == link_id:
+            candidate = link.get("id")
+            if _is_link_id(candidate) and type(candidate) is type(link_id) and candidate == link_id:
                 return True
-        elif isinstance(link, (list, tuple)) and link and link[0] == link_id:
-            return True
+        elif isinstance(link, (list, tuple)) and link:
+            candidate = link[0]
+            if _is_link_id(candidate) and type(candidate) is type(link_id) and candidate == link_id:
+                return True
     return False
 
 
@@ -1112,41 +1157,78 @@ def _is_preview_pseudo_widget(widget: str) -> bool:
     return widget.startswith("$$") or widget in _PREVIEW_PSEUDO_WIDGET_NAMES
 
 
-def _promotion_source(sg: dict, inp: dict, defs: dict[str, dict]) -> tuple[str, str] | None:
-    """``resolvePromotionSource``: the ``(interior node, widget)`` a subgraph
-    input projects — the first of its links that lands on a nested instance's
-    input or on a widget-backed input slot."""
+def _promotion_source_indexes(
+    sg: dict,
+    defs: dict[str, dict],
+) -> tuple[dict[int, tuple[str, str]], dict[tuple[str, str], str]]:
+    """Build source indexes once for all inputs of ``sg``.
+
+    The forward map is keyed by input object identity; the reverse map keeps
+    the first serialized input for a concrete source. Sharing holders, target
+    cache, and one traversal allowance prevents legacy proxy repair from
+    rescanning every holder for every tuple and every input.
+    """
+    cache = getattr(defs, "promotion_sources", None)
+    if cache is not None:
+        cached = cache.get(id(sg))
+        if cached is not None and cached[0] is sg:
+            return cached[1], cached[2]
     links = _cached_link_rows(sg, defs)
     holders = _cached_link_holders(sg, defs)
+    memberships = _input_link_memberships(sg, defs)
     target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
     budget = [_promotion_visit_limit(defs, sg)]
-    for link_id in _listed_link_ids(inp):
-        _spend_traversal_budget(budget, 1, "promotion source traversal exceeded its safe limit")
-        link = links.get(link_id) if _is_link_id(link_id) else None
-        if link is None:
+    by_input: dict[int, tuple[str, str]] = {}
+    reverse: dict[tuple[str, str], str] = {}
+    raw_inputs = sg.get("inputs")
+    inputs = raw_inputs if isinstance(raw_inputs, list) else []
+    for input_index, inp in enumerate(inputs):
+        if not isinstance(inp, dict):
             continue
-        for target, _slot, entry in held_link_targets(
-            sg,
-            link_id,
-            link,
-            holders,
-            target_cache,
-            budget,
-            "promotion source traversal exceeded its safe limit",
-        ):
-            if str(target.get("type", "")) in defs:
-                return str(target.get("id")), str(entry.get("name"))
-            marker = entry.get("widget")
-            if isinstance(marker, dict) and marker.get("name"):
-                return str(target.get("id")), str(marker["name"])
-    return None
+        source: tuple[str, str] | None = None
+        for link_id in _listed_link_ids(inp):
+            _spend_traversal_budget(budget, 1, "promotion source traversal exceeded its safe limit")
+            if not _is_link_id(link_id) or memberships.get(link_id) != {input_index}:
+                continue
+            link = links.get(link_id)
+            if link is None:
+                continue
+            for target, _slot, entry in held_link_targets(
+                sg,
+                link_id,
+                link,
+                holders,
+                target_cache,
+                budget,
+                "promotion source traversal exceeded its safe limit",
+            ):
+                if str(target.get("type", "")) in defs:
+                    source = str(target.get("id")), str(entry.get("name"))
+                    break
+                marker = entry.get("widget")
+                if isinstance(marker, dict) and marker.get("name"):
+                    source = str(target.get("id")), str(marker["name"])
+                    break
+            if source is not None:
+                break
+        if source is None:
+            continue
+        by_input[id(inp)] = source
+        reverse.setdefault(source, str(inp.get("name")))
+    if cache is not None:
+        cache[id(sg)] = (sg, by_input, reverse)
+    return by_input, reverse
+
+
+def _promotion_source(sg: dict, inp: dict, defs: dict[str, dict]) -> tuple[str, str] | None:
+    """``resolvePromotionSource`` for one actual definition input."""
+    by_input, _reverse = _promotion_source_indexes(sg, defs)
+    return by_input.get(id(inp))
 
 
 def _find_host_input_for_promotion(sg: dict, defs: dict[str, dict], node_id: str, widget: str) -> str | None:
-    for inp in sg.get("inputs") or []:
-        if isinstance(inp, dict) and _promotion_source(sg, inp, defs) == (node_id, widget):
-            return str(inp.get("name"))
-    return None
+    _by_input, reverse = _promotion_source_indexes(sg, defs)
+    return reverse.get((node_id, widget))
 
 
 def _subgraph_input_target(inner_def: dict, defs: dict[str, dict], input_name: str) -> tuple[str, str] | None:
@@ -1203,7 +1285,7 @@ def _resolve_source_widget(
     """
     inner_def = defs.get(str(source.get("type", "")))
     if inner_def is not None:
-        by_name = {p.name: p for p in promoted_inputs(inner_def, defs)}
+        by_name = _promoted_name_index(promoted_inputs(inner_def, defs))
         for inp in inner_def.get("inputs") or []:
             if not isinstance(inp, dict):
                 continue
@@ -1788,12 +1870,18 @@ def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) 
     fan-out has several; :func:`deepest_source` reports only the first."""
     cache = getattr(defs, "promotion_boundaries", None)
     cache_key = (id(sg), pi.index)
-    if cache is not None:
+    raw_inputs = sg.get("inputs")
+    inputs = raw_inputs if isinstance(raw_inputs, list) else []
+    cacheable = (
+        0 <= pi.index < len(inputs)
+        and isinstance(inputs[pi.index], dict)
+        and str(inputs[pi.index].get("name") or "") == pi.name
+    )
+    if cache is not None and cacheable:
         cached = cache.get(cache_key)
         if cached is not None and cached[0] is sg:
             return cached[1]
-    inputs = sg.get("inputs") or []
-    inp = inputs[pi.index] if 0 <= pi.index < len(inputs) and isinstance(inputs[pi.index], dict) else None
+    inp = inputs[pi.index] if cacheable else None
     if inp is None:
         single = deepest_source(sg, pi, defs)
         result = [single] if single is not None else []
@@ -1807,7 +1895,7 @@ def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) 
             _budget=[_promotion_visit_limit(defs, sg)],
             _input_name_memo={},
         )
-    if cache is not None:
+    if cache is not None and cacheable:
         cache[cache_key] = (sg, result)
     return result
 
@@ -1845,10 +1933,16 @@ def _boundary_targets(
     _stack = (*_stack, id(sg))
     links = _cached_link_rows(sg, defs)
     holders = _cached_link_holders(sg, defs)
+    memberships = _input_link_memberships(sg, defs)
+    raw_inputs = sg.get("inputs")
+    inputs = raw_inputs if isinstance(raw_inputs, list) else []
+    input_index = next((index for index, candidate in enumerate(inputs) if candidate is inp), None)
     target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
     out: list[tuple[list[str], str]] = []
     for link_id in _listed_link_ids(inp):
         _spend_traversal_budget(_budget, 1, "promoted widget boundary traversal exceeded its safe limit")
+        if input_index is None or not _is_link_id(link_id) or memberships.get(link_id) != {input_index}:
+            continue
         link = links.get(link_id) if _is_link_id(link_id) else None
         targets = (
             held_link_targets(
@@ -1869,11 +1963,10 @@ def _boundary_targets(
             if inner_def is not None:
                 inner_inputs = _input_name_memo.get(id(inner_def))
                 if inner_inputs is None:
-                    inner_inputs = {
-                        item["name"]: item
-                        for item in inner_def.get("inputs") or []
-                        if isinstance(item, dict) and isinstance(item.get("name"), str)
-                    }
+                    inner_inputs = {}
+                    for item in inner_def.get("inputs") or []:
+                        if isinstance(item, dict) and isinstance(item.get("name"), str):
+                            inner_inputs.setdefault(item["name"], item)
                     _input_name_memo[id(inner_def)] = inner_inputs
                 entry_name = entry.get("name")
                 inner_inp = inner_inputs.get(entry_name) if isinstance(entry_name, str) else None

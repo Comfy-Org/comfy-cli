@@ -189,6 +189,105 @@ def test_boundary_targets_keep_every_duplicate_holder_live():
     assert promoted.boundary_widget_targets(sg, item, definitions) == [(["7"], "prompt"), (["8"], "prompt")]
 
 
+def test_shared_definition_input_membership_is_not_promoted_or_resolved():
+    shared_input = {"name": "first", "type": "STRING", "linkIds": [2]}
+    sg = {
+        "id": "sg",
+        "inputs": [shared_input, {"name": "second", "type": "STRING", "linkIds": [2]}],
+        "nodes": [
+            {
+                "id": 8,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 2}],
+            }
+        ],
+        "links": [{"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = sg
+
+    items = promoted.promoted_inputs(sg, definitions)
+
+    assert [item.value_index for item in items] == [None, None]
+    assert promoted._promotion_source(sg, shared_input, definitions) is None
+    assert promoted.boundary_widget_targets(sg, items[0], definitions) == []
+
+
+def test_promoted_name_index_keeps_the_first_duplicate():
+    first = promoted.PromotedInput("value", "STRING", 0, 0, source_node="first")
+    second = promoted.PromotedInput("value", "STRING", 1, 1, source_node="second")
+
+    assert promoted._promoted_name_index([first, second])["value"] is first
+
+
+def test_synthetic_boundary_targets_do_not_share_the_minus_one_cache_key():
+    sg = {"inputs": []}
+    definitions = _SubgraphDefs()
+    first = promoted.PromotedInput("first", "STRING", -1, 0, source_node="a", source_widget="x")
+    second = promoted.PromotedInput("second", "STRING", -1, 0, source_node="b", source_widget="y")
+
+    with mock.patch.object(promoted, "deepest_source", side_effect=[(["a"], "x"), (["b"], "y")]) as deepest:
+        assert promoted.boundary_widget_targets(sg, first, definitions) == [(["a"], "x")]
+        assert promoted.boundary_widget_targets(sg, second, definitions) == [(["b"], "y")]
+
+    assert deepest.call_count == 2
+
+
+def test_promotion_source_reverse_index_is_reused():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [2]}],
+        "nodes": [
+            {
+                "id": 8,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 2}],
+            }
+        ],
+        "links": [{"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = sg
+
+    with mock.patch.object(promoted, "held_link_targets", wraps=promoted.held_link_targets) as targets:
+        assert promoted._find_host_input_for_promotion(sg, definitions, "8", "prompt") == "prompt"
+        first_count = targets.call_count
+        assert promoted._find_host_input_for_promotion(sg, definitions, "8", "prompt") == "prompt"
+
+    assert first_count > 0
+    assert targets.call_count == first_count
+
+
+def test_live_external_link_keeps_boolean_and_integer_ids_distinct():
+    scope = {"links": [[1, "source", 0, 10, 0, "*"]]}
+    instance = {"inputs": [{"name": "value", "link": True}]}
+
+    assert promoted.live_external_link(scope, instance, "value") is None
+
+
+def test_duplicate_holder_fanout_fits_the_serialized_traversal_budget():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [2]}],
+        "nodes": [
+            {
+                "id": 8,
+                "type": "PromptNode",
+                "inputs": [
+                    {"name": f"value-{index}", "widget": {"name": f"value-{index}"}, "link": 2} for index in range(66)
+                ],
+            }
+        ],
+        "links": [{"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = sg
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert len(promoted.boundary_widget_targets(sg, item, definitions)) == 66
+
+
 @pytest.mark.parametrize("malformed_slot", [True, False, 0.0])
 def test_malformed_target_slot_does_not_exact_match_a_holder(malformed_slot):
     sg = {
