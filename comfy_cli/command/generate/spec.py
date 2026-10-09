@@ -315,6 +315,7 @@ def _resolve(
     seen: frozenset[str] = frozenset(),
     memo: dict[tuple[Any, ...], tuple[Any, bool]] | None = None,
     budget_limit: int | None = None,
+    budget: list[int] | None = None,
 ) -> Any:
     """Recursively inline $refs in a schema. Cycles are broken with a placeholder.
 
@@ -328,7 +329,9 @@ def _resolve(
         node,
         seen,
         memo if memo is not None else {},
-        [budget_limit if budget_limit is not None else _schema_resolution_budget(spec, node)],
+        budget
+        if budget is not None
+        else [budget_limit if budget_limit is not None else _schema_resolution_budget(spec, node)],
     )
     return value
 
@@ -441,52 +444,86 @@ def _detect_polling(partner: str, response_schema: dict[str, Any]) -> str | None
     return None
 
 
+def _preferred_media_type(content: dict[str, Any]) -> str:
+    if "application/json" in content:
+        return "application/json"
+    if "multipart/form-data" in content:
+        return "multipart/form-data"
+    return next(iter(content), "application/json")
+
+
 @lru_cache(maxsize=1)
 def _registry() -> dict[str, Endpoint]:
     spec = load_raw_spec()
     paths = spec.get("paths") or {}
+    if not isinstance(paths, dict):
+        return {}
     registry: dict[str, Endpoint] = {}
-    resolution_budget = _schema_resolution_budget(spec)
+    resolution_budget = [_schema_resolution_budget(spec)]
+    resolution_memo: dict[tuple[Any, ...], tuple[Any, bool]] = {}
     for endpoint_id, category, polling_hint in _ENDPOINT_ALLOWLIST:
         path = PROXY_PREFIX + endpoint_id
         node = paths.get(path)
-        if not node:
+        if not isinstance(node, dict) or not node:
             continue  # spec drift — skip silently, surfaced via `comfy generate list`
         # All image endpoints are POST; pick the first defined method anyway.
-        method = "post" if "post" in node else next(iter(node.keys()))
+        method = (
+            "post"
+            if isinstance(node.get("post"), dict)
+            else next(
+                (
+                    key
+                    for key, value in node.items()
+                    if key.lower() in {"get", "put", "patch", "delete", "options", "head", "trace"}
+                    and isinstance(value, dict)
+                ),
+                None,
+            )
+        )
+        if method is None:
+            continue
         op = node[method]
         partner = endpoint_id.split("/", 1)[0]
 
         req_body = op.get("requestBody") or {}
+        if not isinstance(req_body, dict):
+            continue
         content = req_body.get("content") or {}
-        if "application/json" in content:
-            ctype = "application/json"
-        elif "multipart/form-data" in content:
-            ctype = "multipart/form-data"
-        else:
-            ctype = next(iter(content.keys()), "application/json")
+        if not isinstance(content, dict):
+            continue
+        ctype = _preferred_media_type(content)
+        request_media = content.get(ctype) or {}
+        if not isinstance(request_media, dict):
+            continue
         try:
             req_schema = _resolve(
                 spec,
-                (content.get(ctype) or {}).get("schema") or {},
-                budget_limit=resolution_budget,
+                request_media.get("schema") or {},
+                memo=resolution_memo,
+                budget=resolution_budget,
             )
-
-            # 200 response
-            resp = (op.get("responses") or {}).get("200") or {}
-            resp_content = resp.get("content") or {}
-            resp_ctype = "application/json" if "application/json" in resp_content else next(iter(resp_content), "")
-            resp_schema = (
-                _resolve(
-                    spec,
-                    (resp_content.get(resp_ctype) or {}).get("schema") or {},
-                    budget_limit=resolution_budget,
-                )
-                if resp_ctype
-                else {}
-            )
-        except (KeyError, TypeError, SpecError, RecursionError):
+        except (AttributeError, KeyError, TypeError, SpecError, RecursionError):
             continue
+
+        # A malformed response affects only polling detection; it must not
+        # remove an otherwise usable request endpoint from the generate catalog.
+        resp_schema: Any = {}
+        try:
+            responses = op.get("responses") or {}
+            resp = (responses.get("200") or {}) if isinstance(responses, dict) else {}
+            resp_content = (resp.get("content") or {}) if isinstance(resp, dict) else {}
+            if isinstance(resp_content, dict) and resp_content:
+                resp_ctype = _preferred_media_type(resp_content)
+                response_media = resp_content.get(resp_ctype) or {}
+                if isinstance(response_media, dict):
+                    resp_schema = _resolve(
+                        spec,
+                        response_media.get("schema") or {},
+                        memo=resolution_memo,
+                        budget=resolution_budget,
+                    )
+        except (AttributeError, KeyError, TypeError, SpecError, RecursionError):
+            resp_schema = {}
 
         polling = polling_hint or _detect_polling(partner, resp_schema)
 
@@ -534,12 +571,13 @@ def get_endpoint(endpoint_id: str) -> Endpoint:
 def _extract_enum(prop: dict[str, Any], _memo: dict[int, list[str] | None] | None = None) -> list[str] | None:
     """Pull a string enum out of a resolved property schema — directly, from
     ``items`` (array-typed fields), or from ``anyOf``/``oneOf``/``allOf``
-    variants. ``anyOf``/``oneOf`` branches are unioned only when every branch
-    carries a finite enum (one free-form branch makes the union unconstrained),
-    while ``allOf`` branches are intersected because every constraint must
-    hold. Numeric members are coerced to their string form so an unquoted YAML
-    value like ``3.5`` isn't silently dropped. Returns None when no finite,
-    non-empty string enum is found."""
+    variants. ``anyOf``/``oneOf`` branches are unioned across their
+    string-accepting branches; a free-form string branch makes that union
+    unconstrained, while null/integer/object alternatives do not. ``allOf``
+    branches and sibling keywords are intersected because every constraint
+    must hold. Numeric members are coerced to their string form so an unquoted
+    YAML value like ``3.5`` isn't silently dropped. Returns None when no
+    finite, non-empty string enum is found."""
     if _memo is None:
         _memo = {}
     memo_key = id(prop)
@@ -553,17 +591,18 @@ def _extract_enum(prop: dict[str, Any], _memo: dict[int, list[str] | None] | Non
         _memo[memo_key] = value
         return value
 
+    constraints: list[list[str]] = []
     enum = prop.get("enum")
     if isinstance(enum, list):
         values = [str(v) if isinstance(v, int | float) and not isinstance(v, bool) else v for v in enum]
         values = [v for v in values if isinstance(v, str)]
         if values:
-            return finish(values)
+            constraints.append(values)
     items = prop.get("items")
     if isinstance(items, dict):
         found = _extract_enum(items, _memo)
         if found:
-            return finish(found)
+            constraints.append(found)
     for key in ("anyOf", "oneOf"):
         variants = prop.get(key)
         if not isinstance(variants, list):
@@ -571,35 +610,71 @@ def _extract_enum(prop: dict[str, Any], _memo: dict[int, list[str] | None] | Non
         merged: list[str] = []
         merged_values: set[str] = set()
         merged_results: set[int] = set()
+        unconstrained = False
         for variant in variants:
             found = _extract_enum(variant, _memo) if isinstance(variant, dict) else None
             if not found:
-                return finish(None)
+                if not isinstance(variant, dict) or _schema_admits_unconstrained_string(variant):
+                    unconstrained = True
+                    break
+                continue
             if id(found) not in merged_results:
                 merged_results.add(id(found))
                 for value in found:
                     if value not in merged_values:
                         merged_values.add(value)
                         merged.append(value)
-        if merged:
-            return finish(merged)
+        if merged and not unconstrained:
+            constraints.append(merged)
     all_of = prop.get("allOf")
     if isinstance(all_of, list):
-        branch_enums: list[list[str]] = []
         branch_results: set[int] = set()
         for variant in all_of:
             found = _extract_enum(variant, _memo) if isinstance(variant, dict) else None
             if found and id(found) not in branch_results:
                 branch_results.add(id(found))
-                branch_enums.append(found)
-        if branch_enums:
-            allowed = set(branch_enums[0])
-            for branch in branch_enums[1:]:
-                allowed.intersection_update(branch)
-            intersected = [value for value in branch_enums[0] if value in allowed]
-            if intersected:
-                return finish(intersected)
-    return finish(None)
+                constraints.append(found)
+    if not constraints:
+        return finish(None)
+    allowed = set(constraints[0])
+    for constraint in constraints[1:]:
+        allowed.intersection_update(constraint)
+    intersected = [value for value in constraints[0] if value in allowed]
+    return finish(intersected or None)
+
+
+def _schema_admits_unconstrained_string(schema: dict[str, Any], _active: set[int] | None = None) -> bool:
+    """Whether ``schema`` can accept arbitrary strings rather than a finite enum."""
+    if _active is None:
+        _active = set()
+    schema_id = id(schema)
+    if schema_id in _active:
+        return True
+    _active.add(schema_id)
+    try:
+        schema_type = schema.get("type")
+        if isinstance(schema_type, str):
+            return schema_type == "string"
+        if isinstance(schema_type, list):
+            return "string" in schema_type
+        for key in ("anyOf", "oneOf"):
+            variants = schema.get(key)
+            if isinstance(variants, list):
+                return any(
+                    not isinstance(variant, dict) or _schema_admits_unconstrained_string(variant, _active)
+                    for variant in variants
+                )
+        all_of = schema.get("allOf")
+        if isinstance(all_of, list) and all_of:
+            return all(
+                isinstance(variant, dict) and _schema_admits_unconstrained_string(variant, _active)
+                for variant in all_of
+            )
+        if "items" in schema or "properties" in schema:
+            return False
+        return True
+    finally:
+        _active.remove(schema_id)
 
 
 def model_enum(endpoint_id: str, field: str = "model") -> list[str] | None:
@@ -730,7 +805,8 @@ def _model_name_hint(name: str) -> str | None:
     # body's `model` field. A name equal to or prefixing one of them is that
     # partner's model family, whichever route serves it.
     raw = load_raw_spec()
-    resolution_budget = _schema_resolution_budget(raw)
+    resolution_budget = [_schema_resolution_budget(raw)]
+    resolution_memo: dict[tuple[Any, ...], tuple[Any, bool]] = {}
     aliased = {v: k for k, v in _ALIASES.items()}
     hits: list[tuple[str, str, list[str]]] = []
     for path, node in (raw.get("paths") or {}).items():
@@ -745,11 +821,15 @@ def _model_name_hint(name: str) -> str | None:
         content = request_body.get("content") or {}
         if not isinstance(content, dict):
             continue
-        schema = next((c.get("schema") for c in content.values() if isinstance(c, dict) and c.get("schema")), None)
+        ctype = _preferred_media_type(content)
+        media = content.get(ctype) or {}
+        if not isinstance(media, dict):
+            continue
+        schema = media.get("schema")
         if not schema:
             continue
         try:
-            resolved = _resolve(raw, schema, budget_limit=resolution_budget)
+            resolved = _resolve(raw, schema, memo=resolution_memo, budget=resolution_budget)
             if not isinstance(resolved, dict):
                 continue
             for field in ("model", "model_name", "model_id"):

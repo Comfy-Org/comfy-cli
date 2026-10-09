@@ -2549,14 +2549,20 @@ def _declared_dynamic_default(p: Port) -> Any:
     """The actual option key named by a dynamic combo default, else ``None``."""
     if p.options.default is None:
         return None
-    return next(
-        (
-            option.get("key")
-            for option in p.dynamic_options
-            if option.get("key") is not None and str(option.get("key")) == str(p.options.default)
-        ),
-        None,
-    )
+    keys = [option.get("key") for option in p.dynamic_options if option.get("key") is not None]
+    default = p.options.default
+    exact = next((key for key in keys if type(key) is type(default) and key == default), None)
+    if exact is not None:
+        return exact
+    if isinstance(default, int | float) and not isinstance(default, bool):
+        numeric = next(
+            (key for key in keys if isinstance(key, int | float) and not isinstance(key, bool) and key == default),
+            None,
+        )
+        if numeric is not None:
+            return numeric
+    string_matches = [key for key in keys if str(key) == str(default)]
+    return string_matches[0] if len(string_matches) == 1 else None
 
 
 def _widget_default(p: Port) -> Any:
@@ -4377,9 +4383,7 @@ def _dynamic_combo_default_values(
     for sub in _dynamic_combo_sub_ports(dynamic_options, selector, prefix):
         if sub.is_link:
             continue
-        default = sub.options.default
-        if default is None and sub.enum_values:
-            default = sub.enum_values[0]
+        default = _widget_default(sub)
         values.append(default)
         names.append(sub.name)
         if _is_dynamic_combo_type(sub.type) and sub.dynamic_options:

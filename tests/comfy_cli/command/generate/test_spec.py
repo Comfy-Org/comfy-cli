@@ -93,6 +93,52 @@ def test_registry_skips_an_endpoint_whose_schema_cannot_be_resolved(monkeypatch)
         spec._registry.cache_clear()
 
 
+@pytest.mark.parametrize(
+    "path_item",
+    ["invalid", {"parameters": []}, {"post": "invalid"}, {"post": {"requestBody": "invalid"}}],
+)
+def test_registry_skips_malformed_path_and_operation_shapes(monkeypatch, path_item):
+    endpoint_id = "bad/endpoint"
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: {"paths": {f"/proxy/{endpoint_id}": path_item}})
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None)])
+    spec._registry.cache_clear()
+    try:
+        assert spec._registry() == {}
+    finally:
+        spec._registry.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        "invalid",
+        {"content": "invalid"},
+        {"content": {"application/json": "invalid"}},
+        {"content": {"application/json": {"schema": {"$ref": "#/components/schemas/Missing"}}}},
+    ],
+)
+def test_registry_keeps_endpoint_when_only_response_schema_is_malformed(monkeypatch, response):
+    endpoint_id = "usable/endpoint"
+    raw = {
+        "paths": {
+            f"/proxy/{endpoint_id}": {
+                "post": {
+                    "requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}},
+                    "responses": {"200": response},
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None)])
+    spec._registry.cache_clear()
+    try:
+        assert list(spec._registry()) == [endpoint_id]
+        assert spec._registry()[endpoint_id].response_schema == {}
+    finally:
+        spec._registry.cache_clear()
+
+
 def test_registry_computes_one_resolution_budget_per_spec(monkeypatch):
     endpoint_ids = ["one/endpoint", "two/endpoint"]
     raw = {
@@ -113,6 +159,37 @@ def test_registry_computes_one_resolution_budget_per_spec(monkeypatch):
         with mock.patch.object(spec, "_schema_resolution_budget", wraps=spec._schema_resolution_budget) as budget:
             assert list(spec._registry()) == endpoint_ids
         assert budget.call_count == 1
+    finally:
+        spec._registry.cache_clear()
+
+
+def test_registry_shares_one_decrementing_resolution_budget(monkeypatch):
+    endpoint_ids = ["one/endpoint", "two/endpoint"]
+    raw = {
+        "paths": {
+            f"/proxy/{endpoint_id}": {
+                "post": {
+                    "requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}},
+                    "responses": {},
+                }
+            }
+            for endpoint_id in endpoint_ids
+        }
+    }
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None) for endpoint_id in endpoint_ids])
+    budgets: list[list[int]] = []
+    real_resolve = spec._resolve
+
+    def resolve(*args, **kwargs):
+        budgets.append(kwargs["budget"])
+        return real_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(spec, "_resolve", resolve)
+    spec._registry.cache_clear()
+    try:
+        assert list(spec._registry()) == endpoint_ids
+        assert budgets and all(budget is budgets[0] for budget in budgets)
     finally:
         spec._registry.cache_clear()
 
@@ -307,7 +384,8 @@ def test_model_enum_returns_none_without_enum():
 def test_extract_enum_walks_items_and_variants():
     assert spec._extract_enum({"enum": ["a", "b"]}) == ["a", "b"]
     assert spec._extract_enum({"type": "array", "items": {"enum": ["x"]}}) == ["x"]
-    assert spec._extract_enum({"anyOf": [{"type": "integer"}, {"enum": ["y"]}]}) is None
+    assert spec._extract_enum({"anyOf": [{"type": "integer"}, {"enum": ["y"]}]}) == ["y"]
+    assert spec._extract_enum({"anyOf": [{"type": "null"}, {"enum": ["optional"]}]}) == ["optional"]
     assert spec._extract_enum({"oneOf": [{"items": {"enum": ["z"]}}]}) == ["z"]
     # Numeric members coerce to their string form (unquoted YAML values);
     # bools and enum-less schemas don't count.
@@ -327,6 +405,10 @@ def test_extract_enum_unions_anyof_and_intersects_allof():
     assert spec._extract_enum({"allOf": [{"enum": ["a"]}, {"enum": ["b"]}]}) is None
     # An enum-less allOf branch constrains nothing.
     assert spec._extract_enum({"allOf": [{"type": "string"}, {"enum": ["k"]}]}) == ["k"]
+    assert spec._extract_enum({"enum": ["a", "b"], "allOf": [{"enum": ["a"]}]}) == ["a"]
+    assert spec._extract_enum(
+        {"anyOf": [{"type": "string"}, {"enum": ["ignored"]}], "allOf": [{"enum": ["kept"]}]}
+    ) == ["kept"]
 
 
 def test_find_property_descends_top_level_composition():

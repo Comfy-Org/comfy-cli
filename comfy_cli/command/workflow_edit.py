@@ -724,13 +724,9 @@ def ls_nodes_cmd(
         # show` cannot take that type. Only set when true, like `mode`.
         node_type = n.get("type")
         if isinstance(node_type, str):
-            # A serialized core/custom node names its executable class here.
-            # That is stronger evidence than an unrelated definition whose
-            # cosmetic name or unusual non-UUID id happens to collide.
-            declares_real_class = isinstance(properties, dict) and properties.get("Node name for S&R") == node_type
             if node_type in workflow_ops.UI_ONLY_NODE_TYPES:
                 row["ui_only"] = True
-            elif workflow_ops._UUID_RE.match(node_type) or (not declares_real_class and node_type in subgraph_ids):
+            elif workflow_ops._UUID_RE.match(node_type) or node_type in subgraph_ids:
                 row["subgraph"] = True
         rows.append(row)
     payload = {"workflow": str(p), "count": len(rows), "nodes": rows}

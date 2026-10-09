@@ -595,6 +595,21 @@ class TestWidgetOrderDynamicCombo:
         # alpha's defaults (size first-enum, width default).
         assert out["nodes"][0]["widgets_values"] == ["p", "alpha", "S", 512, 7, "fixed"]
 
+    def test_outer_selector_change_normalizes_nested_numeric_default(self):
+        info = _dynamic_combo_object_info()
+        model_options = info["DynNode"]["input"]["required"]["model"][1]["options"]
+        mode = model_options[1]["inputs"]["required"]["mode"][1]
+        mode["default"] = 2.0
+        mode["options"][0]["key"] = 1
+        mode["options"][1]["key"] = 2
+        graph = Graph.from_object_info(info)
+        wf = {"nodes": [{"id": 1, "type": "DynNode", "widgets_values": ["p", "alpha", "S", 512, 7, "fixed"]}]}
+
+        out, warnings = graph.apply_slots(wf, {"1.model": "beta"})
+
+        assert [warning["code"] for warning in warnings] == ["dynamic_combo_roster_rebuilt"]
+        assert out["nodes"][0]["widgets_values"] == ["p", "beta", 2, 50, True, 7, "fixed"]
+
 
 def _dynamic_combo_implicit_seed_object_info() -> dict:
     """A COMFY_DYNAMICCOMBO_V3 option whose sub-input is an implicit
