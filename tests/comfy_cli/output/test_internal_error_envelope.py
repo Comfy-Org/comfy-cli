@@ -487,7 +487,7 @@ def test_internal_error_scrubber_masks_armored_private_key_labels(label):
 
 def test_internal_error_scrubber_preserves_host_ports_and_complete_userinfo_at_the_input_cap():
     cases = [
-        (" retrying https://api.comfy.org:8443", "RuntimeError: Bearer *** retrying https://api.comfy.org:8443…"),
+        (" retrying https://api.comfy.org:8443", "RuntimeError: Bearer *** retrying …"),
         (" retrying http://localhost:8188/prompt", "RuntimeError: Bearer *** retrying http://localhost:8188/prompt…"),
         (" retrying https://alice:secret@example.com", "RuntimeError: Bearer *** retrying …"),
     ]
@@ -519,6 +519,8 @@ def test_internal_error_scrubber_drops_incomplete_userinfo_that_looks_like_a_hos
     [
         " https://ghp_LIVE_TOKEN",
         " https://john.doe:123456",
+        " https://john.doe:8080",
+        " https://eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0",
         " https://alice:p@secret.example",
     ],
 )
@@ -556,6 +558,41 @@ def test_internal_error_scrubber_masks_http_userinfo_before_query_parsing(messag
     scrubbed = _internal_error_message(RuntimeError(message))
     assert leaked not in scrubbed
     assert "://***@" in scrubbed
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "smtp://me@gmail.com:app-pass@smtp.gmail.com:587",
+        "https://alice:pa'ss@example.com/x",
+    ],
+)
+def test_internal_error_scrubber_masks_email_usernames_and_apostrophe_passwords(message):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "app-pass" not in scrubbed
+    assert "pa'ss" not in scrubbed
+    assert "://***@" in scrubbed
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "https://accounts.example.com:443/cb?login_hint=bob@corp.com&code=SECRET",
+        "http://127.0.0.1:8188/view?filename=img@2x.png",
+        "amqp://host:5672?opt=user@example.com",
+    ],
+)
+def test_internal_error_scrubber_keeps_ported_authorities_when_query_contains_at(message):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    authority = message.split("?", 1)[0]
+    assert authority in scrubbed
+    assert "?***" in scrubbed
+
+
+def test_internal_error_scrubber_masks_apostrophe_inside_query_secret():
+    scrubbed = _internal_error_message(RuntimeError("https://example.com?api_key=pa'ss"))
+    assert "pa'ss" not in scrubbed
+    assert "?***" in scrubbed
 
 
 @pytest.mark.parametrize(
@@ -604,6 +641,28 @@ def test_internal_error_scrubber_handles_non_ascii_digit_port_without_crashing()
         "signing_key_hex",
         "encryption_key_v2",
         "aws_access_key_id_prod",
+        "encryption_keys",
+        "master_keys",
+        "clientSecrets",
+        "apiTokens",
+        "serviceTokens",
+        "dbPasswords",
+        "accessKeys",
+        "xApiKey",
+        "PGPASSWORD",
+        "NGROK_AUTHTOKEN",
+        "CLIENTSECRET",
+        "SECRETKEY",
+        "authtoken",
+        "apitoken",
+        "dbpassword",
+        "api.key",
+        "secret.key",
+        "signing.key",
+        "private.key",
+        "encryption key",
+        "master key",
+        "HMAC key",
     ],
 )
 def test_internal_error_scrubber_masks_extended_credential_key_vocabulary(key):
@@ -611,7 +670,29 @@ def test_internal_error_scrubber_masks_extended_credential_key_vocabulary(key):
     assert "LIVE-CREDENTIAL" not in scrubbed
 
 
-@pytest.mark.parametrize("key", ["appMonkey", "apiKeyboardLayout", "max_tokens", "maxTokens"])
+@pytest.mark.parametrize(
+    "key",
+    [
+        "appMonkey",
+        "apiKeyboardLayout",
+        "max_tokens",
+        "maxToken",
+        "maxTokens",
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "input_tokens",
+        "output_tokens",
+        "max_output_tokens",
+        "max_completion_tokens",
+        "max_new_tokens",
+        "tokens",
+        "token_counts",
+        "token_counter",
+        "secret_lengths",
+        "key_algorithms",
+    ],
+)
 def test_internal_error_scrubber_preserves_non_secret_key_like_diagnostics(key):
     message = f"{key}=visible"
     assert message in _internal_error_message(RuntimeError(message))
@@ -625,6 +706,26 @@ def test_armored_scrubber_keeps_unicode_offsets_and_masks_the_next_block():
     scrubbed = _internal_error_message(RuntimeError(message))
     assert "MIIE-LIVE" not in scrubbed
     assert scrubbed.count("***") == 2
+
+
+def test_armored_scrubber_rescans_a_valid_header_inside_a_rejected_label():
+    message = "expected header, got: -----BEGIN DATA -----BEGIN PRIVATE KEY-----MIIE-LIVE"
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "MIIE-LIVE" not in scrubbed
+
+
+def test_internal_error_scrubber_preserves_indented_sibling_headers():
+    message = "Request headers:\n  Authorization: Bearer LIVE\n  X-Request-Id: req-1\n  Content-Type: json"
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "LIVE" not in scrubbed
+    assert "X-Request-Id: req-1" in scrubbed
+    assert "Content-Type: json" in scrubbed
+
+
+def test_internal_error_scrubber_masks_twice_escaped_json_secret():
+    message = r'{"detail": "{\\"api_key\\": \\"sk-LIVE\\"}"}'
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "sk-LIVE" not in scrubbed
 
 
 def test_internal_error_scrubber_masks_triple_quoted_secret():
