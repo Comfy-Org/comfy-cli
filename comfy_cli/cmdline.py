@@ -201,7 +201,7 @@ _SECRET_ASSIGNMENT_KEY_PATTERN = (
     rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})){{0,8}})"
     rf"|{_CAMEL_SECRET_KEY_PATTERN}"
     rf"|(?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})"
-    rf"(?:[_-](?!(?:count|length|algorithm)\b)[\w-]+)*"
+    rf"(?:[_-]+(?!(?:count|length|algorithm)\b)[^\W_]+)*"
     rf")"
 )
 _SECRET_CONSTRUCTOR_START = re.compile(

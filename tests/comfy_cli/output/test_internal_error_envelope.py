@@ -534,3 +534,12 @@ def test_internal_error_scrubber_bounds_long_non_secret_key_scans():
     started = time.perf_counter()
     _internal_error_message(RuntimeError(message))
     assert time.perf_counter() - started < 0.2
+
+
+@pytest.mark.parametrize("message", ["token" + "_a" * 60 + " missing", "token" + "_" * 60 + "x"])
+def test_internal_error_scrubber_bounds_secret_heads_with_long_tails(message):
+    import time
+
+    started = time.perf_counter()
+    _internal_error_message(RuntimeError(message))
+    assert time.perf_counter() - started < 0.2
