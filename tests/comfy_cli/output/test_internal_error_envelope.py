@@ -390,6 +390,12 @@ def test_internal_error_scrubber_drops_any_anchorless_userinfo_tail(tail):
         "hmac_key=sk-LIVE",
         "app_key=sk-LIVE",
         "encryption_key=sk-LIVE",
+        "api_key_backup=sk-LIVE",
+        "token_v2=sk-LIVE",
+        "api_key_2=sk-LIVE",
+        "private_key_passphrase=hunter2",
+        "passwd=hunter2",
+        "pwd=hunter2",
     ],
 )
 def test_internal_error_scrubber_masks_spaced_and_camel_case_credentials(message):

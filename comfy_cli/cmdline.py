@@ -183,7 +183,7 @@ _INTERNAL_ERROR_MESSAGE_CAP = 500
 _INTERNAL_ERROR_SCRUB_INPUT_CAP = _INTERNAL_ERROR_MESSAGE_CAP * 8
 _SECRET_KEY_PATTERN = (
     r"(?:proxy-)?authorization|auth|api[ _-]?key|token|access[ _-]?token|refresh[ _-]?token|secret|password|"
-    r"session(?:[ _-]?(?:id|key))?|sid|sig|signature|(?:set-)?cookies?"
+    r"session(?:[ _-]?(?:id|key))?|sid|sig|signature|passphrase|passwd|pwd|(?:set-)?cookies?"
 )
 _SECRET_KEY_QUALIFIER = (
     r"comfy|org|organization|workspace|project|account|user|client|partner|service|cloud|api|access|refresh|"
@@ -201,7 +201,7 @@ _SECRET_ASSIGNMENT_KEY_PATTERN = (
     rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})){{0,8}})"
     rf"|{_CAMEL_SECRET_KEY_PATTERN}"
     rf"|(?:[\w-]*[_-])?(?:{_SECRET_KEY_PATTERN})"
-    rf"(?:[_-](?:{_SECRET_KEY_QUALIFIER})){{0,8}}"
+    rf"(?:[_-](?!(?:count|length|algorithm)\b)[\w-]+)*"
     rf")"
 )
 _SECRET_CONSTRUCTOR_START = re.compile(
