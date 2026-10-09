@@ -425,6 +425,14 @@ def test_internal_error_scrubber_masks_single_line_pem_body():
     assert "could not deserialize ***" in scrubbed
 
 
+@pytest.mark.parametrize("label", ["PGP PRIVATE KEY BLOCK", "PGP SECRET KEY BLOCK", "OPENVPN STATIC KEY V1"])
+def test_internal_error_scrubber_masks_armored_private_key_labels(label):
+    message = f"could not import -----BEGIN {label}-----\nc2VjcmV0"
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "c2VjcmV0" not in scrubbed
+    assert "could not import ***" in scrubbed
+
+
 def test_internal_error_scrubber_preserves_host_ports_and_complete_userinfo_at_the_input_cap():
     cases = [
         (" retrying https://api.comfy.org:8443", "RuntimeError: Bearer *** retrying https://api.comfy.org:8443…"),
