@@ -19,6 +19,7 @@ from comfy_cli.command.transfer import (
     _collision_safe_path,
     _stream_http_one,
 )
+from comfy_cli.credentials import DataPlaneToken
 from comfy_cli.deploy_api_errors import DeployAPIError
 from comfy_cli.http import build_http_only_opener
 from comfy_cli.output.renderer import Renderer
@@ -221,7 +222,9 @@ def safe_output_path(output_dir: Path, original_name: str) -> Path:
 class OutputDownloadRequest:
     outputs: tuple[JsonObject, ...]
     endpoint_origin: str
-    token: str
+    # A DataPlaneToken is read afresh for each output, so a long download
+    # outlives the sign-in token it started with.
+    token: str | DataPlaneToken
     output_dir: Path
 
 
@@ -252,7 +255,11 @@ def download_job_outputs(request: OutputDownloadRequest, renderer: Renderer) -> 
         output_type = _output_string(output, "type")
         output_id = _output_string(output, "id")
         destination = safe_output_path(request.output_dir, name)
-        auth_headers = {"Authorization": f"Bearer {request.token}"} if initial_origin == request.endpoint_origin else {}
+        if initial_origin == request.endpoint_origin:
+            token = request.token if isinstance(request.token, str) else request.token.current()
+            auth_headers = {"Authorization": f"Bearer {token}"}
+        else:
+            auth_headers = {}
         # transfer._assert_download_url checks only the scheme; the allowlist above
         # and DeploymentRedirectHandler supply the destination guard it lacks.
         _stream_http_one(url, index, destination, auth_headers, renderer, opener=opener)
