@@ -327,6 +327,8 @@ def test_internal_error_scrubber_preserves_ordinary_identifier_diagnostics():
         "key: Foo(value)",
         'primary_key: "user-42"',
         "foreign_key=value sort_key=value cache_key=value hash-key=value",
+        "partitionKey=us-east-1 objectKey: artifact idempotencyKey=req-1 translationKey=home.title nodeSortKey=4",
+        "methodSignature=(self, x) -> None",
     ],
 )
 def test_internal_error_scrubber_preserves_standalone_key_diagnostics(message):
