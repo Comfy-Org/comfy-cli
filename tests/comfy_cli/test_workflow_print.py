@@ -1672,6 +1672,29 @@ def test_one_interior_source_can_render_multiple_definition_outputs():
     assert "OUT.second = example" in result.source
 
 
+def test_definition_output_uses_the_first_live_definition_link():
+    subgraph_id = "22222222-3333-4444-5555-666666666666"
+    definition = {
+        "id": subgraph_id,
+        "inputs": [],
+        "outputs": [{"name": "result", "type": "STRING", "linkIds": [2, 1]}],
+        "nodes": [
+            _node(7, "FirstSource", outputs=[{"name": "value", "type": "STRING", "links": [1]}]),
+            _node(8, "SecondSource", outputs=[{"name": "value", "type": "STRING", "links": [2]}]),
+        ],
+        "links": [
+            {"id": 1, "origin_id": 7, "origin_slot": 0, "target_id": -20, "target_slot": 0},
+            {"id": 2, "origin_id": 8, "origin_slot": 0, "target_id": -20, "target_slot": 0},
+        ],
+    }
+    workflow = _mini([_node(10, subgraph_id)], [])
+    workflow["definitions"] = {"subgraphs": [definition]}
+
+    result = render_py(workflow, None)
+
+    assert "OUT.result = first_source" in result.source
+
+
 def test_null_link_id_is_warned_and_dropped(sd15_graph):
     wf = _stale_slot_workflow([None, 1, 0, 2, 1, "LATENT"])
     res = render_py(wf, sd15_graph)

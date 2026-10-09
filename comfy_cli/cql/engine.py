@@ -3493,6 +3493,11 @@ class _SubgraphDefs(dict[str, dict]):
         self.promotion_visit_limit: int | None = None
         self.promotion_holders: dict[int, tuple[dict, dict[Any, list[tuple[dict, int, dict]]]]] = {}
         self.promotion_links: dict[int, tuple[dict, dict[Any, dict]]] = {}
+        self.promotion_input_memberships: dict[int, tuple[dict, dict[Any, set[int]]]] = {}
+        self.promotion_sources: dict[
+            int,
+            tuple[dict, dict[int, tuple[str, str]], dict[tuple[str, str], str]],
+        ] = {}
         self.promotion_inputs: dict[int, tuple[dict, list[Any]]] = {}
         self.promotion_boundaries: dict[tuple[int, int], tuple[dict, list[tuple[list[str], str]]]] = {}
 

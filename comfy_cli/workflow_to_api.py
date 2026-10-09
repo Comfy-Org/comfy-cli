@@ -297,8 +297,11 @@ class _SubgraphCtx:
         self.input_sources: dict[str, dict[int, tuple[Any, Any]]] = {}
         # subgraph_node_id_str -> {outer_slot: subgraph_input_idx} (when names differ in order)
         self.outer_to_input_idx: dict[str, dict[int, int]] = {}
-        # subgraph_node_id_str -> {raw held link id: unique subgraph input idx}
-        self.held_input_idx: dict[str, dict[Any, int | None]] = {}
+        # subgraph_node_id_str -> {raw held link id: every subgraph input idx}
+        self.held_input_idx: dict[str, dict[Any, tuple[int, ...]]] = {}
+        # raw link id -> every expanded instance/input that actually holds it.
+        # This recovers rows whose declared target drifted away from the holder.
+        self.input_holders: dict[Any, list[tuple[str, int]]] = {}
 
 
 def _collect_subgraph_defs(workflow: dict) -> dict[str, dict]:
@@ -328,6 +331,7 @@ def _expand_subgraphs(
     if not subgraph_defs:
         return nodes, links, ctx
 
+    definition_cache: dict[int, tuple[Any, ...]] = {}
     for _iteration in range(_MAX_SUBGRAPH_ITERATIONS):
         expanded: list[dict] = []
         found_any = False
@@ -345,7 +349,12 @@ def _expand_subgraphs(
                     expanded.append(node)
                     continue
                 found_any = True
-                sg_nodes, sg_links, input_map, output_map = _expand_one_subgraph(node, subgraph_defs[node_type], links)
+                sg_nodes, sg_links, input_map, output_map = _expand_one_subgraph(
+                    node,
+                    subgraph_defs[node_type],
+                    links,
+                    _definition_cache=definition_cache,
+                )
                 expanded.extend(sg_nodes)
                 links.extend(sg_links)
                 ctx.input_targets[str(node.get("id"))] = input_map
@@ -354,13 +363,15 @@ def _expand_subgraphs(
                 outer_map = _outer_slot_to_input_idx(node, subgraph_defs[node_type])
                 ctx.outer_to_input_idx[node_id] = outer_map
                 held_slots: dict[Any, set[int]] = {}
-                for outer_slot, entry in enumerate(node.get("inputs") or []):
+                raw_outer_inputs = node.get("inputs")
+                outer_inputs = raw_outer_inputs if isinstance(raw_outer_inputs, list) else []
+                for outer_slot, entry in enumerate(outer_inputs):
                     if not isinstance(entry, dict) or not _is_link_id(entry.get("link")):
                         continue
                     held_slots.setdefault(entry["link"], set()).add(outer_map.get(outer_slot, outer_slot))
-                ctx.held_input_idx[node_id] = {
-                    link_id: next(iter(slots)) if len(slots) == 1 else None for link_id, slots in held_slots.items()
-                }
+                ctx.held_input_idx[node_id] = {link_id: tuple(sorted(slots)) for link_id, slots in held_slots.items()}
+                for link_id, slots in ctx.held_input_idx[node_id].items():
+                    ctx.input_holders.setdefault(link_id, []).extend((node_id, slot) for slot in slots)
             else:
                 expanded.append(node)
         nodes = expanded
@@ -374,11 +385,15 @@ def _expand_subgraphs(
 def _outer_slot_to_input_idx(outer_node: dict, sg_def: dict) -> dict[int, int]:
     """Map the outer node's input slots to subgraph-definition input indices."""
     sg_input_names: dict[Any, int] = {}
-    for idx, inp in enumerate(sg_def.get("inputs") or []):
+    raw_definition_inputs = sg_def.get("inputs")
+    definition_inputs = raw_definition_inputs if isinstance(raw_definition_inputs, list) else []
+    for idx, inp in enumerate(definition_inputs):
         if isinstance(inp, dict):
             sg_input_names[inp.get("name")] = idx
     mapping: dict[int, int] = {}
-    for outer_idx, outer_input in enumerate(outer_node.get("inputs") or []):
+    raw_outer_inputs = outer_node.get("inputs")
+    outer_inputs = raw_outer_inputs if isinstance(raw_outer_inputs, list) else []
+    for outer_idx, outer_input in enumerate(outer_inputs):
         if not isinstance(outer_input, dict):
             continue
         name = outer_input.get("name")
@@ -396,11 +411,57 @@ def _is_link_id(value: Any) -> bool:
 
 
 def _expand_one_subgraph(
-    outer_node: dict, sg_def: dict, existing_links: list
+    outer_node: dict,
+    sg_def: dict,
+    existing_links: list,
+    *,
+    _definition_cache: dict[int, tuple[Any, ...]] | None = None,
 ) -> tuple[list[dict], list, dict[int, list[tuple[Any, int]]], dict[int, tuple[Any, int]]]:
+    from comfy_cli.cql.promoted import _is_slot_index, _link_holders, _listed_link_ids, held_link_targets
+
     outer_id = outer_node.get("id")
-    internal_nodes = [n for n in (sg_def.get("nodes") or []) if isinstance(n, dict)]
-    internal_links = sg_def.get("links") or []
+    cached = _definition_cache.get(id(sg_def)) if _definition_cache is not None else None
+    if cached is None or cached[0] is not sg_def:
+        raw_nodes = sg_def.get("nodes")
+        internal_nodes = [n for n in raw_nodes if isinstance(n, dict)] if isinstance(raw_nodes, list) else []
+        raw_links = sg_def.get("links")
+        internal_links = [link for link in raw_links if isinstance(link, dict)] if isinstance(raw_links, list) else []
+        raw_inputs = sg_def.get("inputs")
+        definition_inputs = raw_inputs if isinstance(raw_inputs, list) else []
+        holders = _link_holders({"nodes": internal_nodes})
+        input_slots_by_link: dict[Any, set[int]] = {}
+        serialized_boundary_links = 0
+        for idx, entry in enumerate(definition_inputs):
+            if not isinstance(entry, dict):
+                continue
+            listed = _listed_link_ids(entry)
+            serialized_boundary_links += len(listed)
+            for link_id in listed:
+                if _is_link_id(link_id):
+                    input_slots_by_link.setdefault(link_id, set()).add(idx)
+        interior_by_id = {str(node.get("id")): node for node in internal_nodes}
+        cached = (
+            sg_def,
+            internal_nodes,
+            internal_links,
+            definition_inputs,
+            holders,
+            input_slots_by_link,
+            serialized_boundary_links,
+            interior_by_id,
+        )
+        if _definition_cache is not None:
+            _definition_cache[id(sg_def)] = cached
+    (
+        _definition,
+        internal_nodes,
+        internal_links,
+        definition_inputs,
+        holders,
+        input_slots_by_link,
+        serialized_boundary_links,
+        interior_by_id,
+    ) = cached
 
     # Subgraph internal link IDs may collide with the outer workflow's IDs.
     # Allocate fresh IDs starting above the current maximum.
@@ -415,8 +476,6 @@ def _expand_one_subgraph(
     link_id_remap: dict[int, int] = {}
     internal_link_map: dict[int, dict] = {}
     for link in internal_links:
-        if not isinstance(link, dict):
-            continue
         old_id = link.get("id")
         # link_id_remap[old_id] / internal_link_map[old_id] need a hashable key
         # (see _is_link_id). Skip the entry entirely on a missing/unhashable/
@@ -429,25 +488,10 @@ def _expand_one_subgraph(
         internal_link_map[old_id] = link
 
     input_targets: dict[int, list[tuple[Any, int]]] = {}
-    from comfy_cli.cql.promoted import _is_slot_index, _link_holders, _listed_link_ids, held_link_targets
-
-    holders = _link_holders(sg_def)
     target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
-    serialized_boundary_links = sum(
-        len(link_ids)
-        for entry in sg_def.get("inputs") or []
-        if isinstance(entry, dict) and isinstance((link_ids := entry.get("linkIds")), list)
-    )
     target_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + 3 * serialized_boundary_links]
-    input_slots_by_link: dict[Any, set[int]] = {}
-    for idx, in_def in enumerate(sg_def.get("inputs") or []):
-        if not isinstance(in_def, dict):
-            continue
-        for link_id in _listed_link_ids(in_def):
-            if _is_link_id(link_id):
-                input_slots_by_link.setdefault(link_id, set()).add(idx)
 
-    for idx, in_def in enumerate(sg_def.get("inputs") or []):
+    for idx, in_def in enumerate(definition_inputs):
         if not isinstance(in_def, dict):
             continue
         targets = []
@@ -461,7 +505,7 @@ def _expand_one_subgraph(
             if input_slots_by_link.get(lid) != {idx}:
                 continue
             link = internal_link_map.get(lid)
-            if isinstance(link, dict):
+            if isinstance(link, dict) and str(link.get("origin_id")) == str(_SUBGRAPH_INPUT_NODE_ID):
                 for target, target_slot, _entry in held_link_targets(
                     sg_def,
                     lid,
@@ -483,45 +527,56 @@ def _expand_one_subgraph(
             input_targets[idx] = targets
 
     output_sources: dict[int, tuple[Any, int]] = {}
-    for idx, out_def in enumerate(sg_def.get("outputs") or []):
+    raw_outputs = sg_def.get("outputs")
+    definition_outputs = raw_outputs if isinstance(raw_outputs, list) else []
+    output_slots_by_link: dict[Any, set[int]] = {}
+    for idx, out_def in enumerate(definition_outputs):
         if not isinstance(out_def, dict):
             continue
         for lid in _listed_link_ids(out_def):
-            if not _is_link_id(lid):
-                continue
-            link = internal_link_map.get(lid)
-            if isinstance(link, dict):
-                origin_id = link.get("origin_id")
-                origin_slot = link.get("origin_slot")
-                if str(origin_id) == str(_SUBGRAPH_INPUT_NODE_ID):
-                    listed_inputs = input_slots_by_link.get(lid, set())
-                    if len(listed_inputs) == 1:
-                        output_sources[idx] = (_SUBGRAPH_INPUT_NODE_ID, next(iter(listed_inputs)))
-                    continue
-                source = next(
-                    (node for node in internal_nodes if str(node.get("id")) == str(origin_id)),
-                    None,
-                )
-                if not _is_link_id(origin_id) or not _is_slot_index(origin_slot) or origin_slot < 0 or source is None:
-                    continue
-                outputs = source.get("outputs")
-                if isinstance(outputs, list) and origin_slot >= len(outputs):
-                    continue
-                output_sources[idx] = (origin_id, origin_slot)
+            if _is_link_id(lid):
+                output_slots_by_link.setdefault(lid, set()).add(idx)
+    # Definition-link order is the renderer's established deterministic
+    # precedence. A row can legitimately alias several outputs; each output
+    # keeps the first valid row that lists it.
+    for link in internal_links:
+        lid = link.get("id")
+        output_slots = output_slots_by_link.get(lid, set()) if _is_link_id(lid) else set()
+        if not output_slots or str(link.get("target_id")) != str(_SUBGRAPH_OUTPUT_NODE_ID):
+            continue
+        origin_id = link.get("origin_id")
+        origin_slot = link.get("origin_slot")
+        if str(origin_id) == str(_SUBGRAPH_INPUT_NODE_ID):
+            listed_inputs = input_slots_by_link.get(lid, set())
+            if len(listed_inputs) == 1:
+                source = (_SUBGRAPH_INPUT_NODE_ID, next(iter(listed_inputs)))
+                for output_slot in output_slots:
+                    output_sources.setdefault(output_slot, source)
+            continue
+        source_node = interior_by_id.get(str(origin_id))
+        if not _is_link_id(origin_id) or not _is_slot_index(origin_slot) or origin_slot < 0 or source_node is None:
+            continue
+        outputs = source_node.get("outputs")
+        if isinstance(outputs, list) and origin_slot >= len(outputs):
+            continue
+        for output_slot in output_slots:
+            output_sources.setdefault(output_slot, (origin_id, origin_slot))
 
     expanded_nodes: list[dict] = []
     for inner in internal_nodes:
         expanded = inner.copy()
         expanded["id"] = f"{outer_id}:{inner.get('id')}"
+        raw_inner_inputs = inner.get("inputs")
+        inner_inputs = raw_inner_inputs if isinstance(raw_inner_inputs, list) else []
         expanded["inputs"] = [
-            _rewrite_internal_input(inp, internal_link_map, link_id_remap) for inp in inner.get("inputs", []) or []
+            _rewrite_internal_input(inp, internal_link_map, link_id_remap)
+            for inp in inner_inputs
+            if isinstance(inp, dict)
         ]
         expanded_nodes.append(expanded)
 
     expanded_links: list = []
     for link in internal_links:
-        if not isinstance(link, dict):
-            continue
         origin_id = link.get("origin_id")
         target_id = link.get("target_id")
         if origin_id in (_SUBGRAPH_INPUT_NODE_ID, _SUBGRAPH_OUTPUT_NODE_ID):
@@ -573,11 +628,12 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
         return links
 
     node_input_updates: dict[str, dict[int, int]] = {}
-    resolution_memo: dict[tuple[str, str], list[tuple[Any, Any]]] = {}
+    expanded_node_ids = {str(node.get("id")) for node in nodes}
+    resolution_memo: dict[tuple[str, str, bool], list[tuple[Any, Any]]] = {}
     # A one-to-one boundary row spends four fixed units (root visit, direct
     # target, leaf visit, result append). Reserve that serialized baseline;
     # the fixed cap remains available only for fan-out beyond it.
-    resolution_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + (3 * _MAX_RESOLUTION_DEPTH + 1) * len(links)]
+    resolution_budget = [3 * _MAX_RESOLVED_SUBGRAPH_INPUTS + (3 * _MAX_RESOLUTION_DEPTH + 1) * len(links)]
     source_budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS + (2 * _MAX_RESOLUTION_DEPTH + 1) * len(links)]
     for link in links:
         if not isinstance(link, (list, tuple)) or len(link) < 6:
@@ -586,13 +642,20 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
         if not _is_link_id(link_id):
             continue
         tgt_id_str = str(tgt_id)
+        holder_specs = ctx.input_holders.get(link_id, [])
+        if holder_specs:
+            for holder_id, held_idx in holder_specs:
+                _record_subgraph_input_source(holder_id, held_idx, (src_id, src_slot), ctx, source_budget)
+            continue
         if tgt_id_str not in ctx.output_sources and tgt_id_str not in ctx.input_targets:
             continue
         if tgt_id_str in ctx.held_input_idx:
-            held_map = ctx.held_input_idx[tgt_id_str]
-            if link_id not in held_map or held_map[link_id] is None:
+            held_slots = ctx.held_input_idx[tgt_id_str].get(link_id)
+            if not held_slots:
                 continue
-            held_idx = held_map[link_id]
+            for held_idx in held_slots:
+                _record_subgraph_input_source(tgt_id_str, held_idx, (src_id, src_slot), ctx, source_budget)
+            continue
         else:
             if not ((isinstance(tgt_slot, int) and not isinstance(tgt_slot, bool)) or isinstance(tgt_slot, str)):
                 continue
@@ -619,30 +682,71 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
 
         tgt_id_str = str(tgt_id)
         effective_tgt_slot = tgt_slot
+        holder_specs = ctx.input_holders.get(link_id, []) if _is_link_id(link_id) else []
         expanded_target = (
-            tgt_id_str in ctx.held_input_idx or tgt_id_str in ctx.input_targets or tgt_id_str in ctx.output_sources
+            bool(holder_specs)
+            or tgt_id_str in ctx.held_input_idx
+            or tgt_id_str in ctx.input_targets
+            or tgt_id_str in ctx.output_sources
         )
-        if tgt_id_str in ctx.held_input_idx:
-            held_map = ctx.held_input_idx[tgt_id_str]
-            if not _is_link_id(link_id) or link_id not in held_map or held_map[link_id] is None:
-                continue
-            effective_tgt_slot = held_map[link_id]
-        all_targets = _resolve_subgraph_input_all(
-            tgt_id_str,
-            effective_tgt_slot,
-            ctx,
-            _memo=resolution_memo,
-            _budget=resolution_budget,
-        )
-        if expanded_target and all_targets == [(tgt_id_str, effective_tgt_slot)]:
+        all_targets: list[tuple[Any, Any]] = []
+        if holder_specs:
+            for holder_id, held_idx in holder_specs:
+                resolved = _resolve_subgraph_input_all(
+                    holder_id,
+                    held_idx,
+                    ctx,
+                    _memo=resolution_memo,
+                    _budget=resolution_budget,
+                    _definition_slot=True,
+                )
+                if resolved != [(holder_id, held_idx)]:
+                    all_targets.extend(resolved)
+        else:
+            if tgt_id_str in ctx.held_input_idx:
+                if not _is_link_id(link_id):
+                    continue
+                held_slots = ctx.held_input_idx[tgt_id_str].get(link_id)
+                if not held_slots:
+                    continue
+                for held_idx in held_slots:
+                    all_targets.extend(
+                        _resolve_subgraph_input_all(
+                            tgt_id_str,
+                            held_idx,
+                            ctx,
+                            _memo=resolution_memo,
+                            _budget=resolution_budget,
+                            _definition_slot=True,
+                        )
+                    )
+            else:
+                all_targets = _resolve_subgraph_input_all(
+                    tgt_id_str,
+                    effective_tgt_slot,
+                    ctx,
+                    _memo=resolution_memo,
+                    _budget=resolution_budget,
+                )
+        deduped_targets: list[tuple[Any, Any]] = []
+        seen_targets: set[tuple[str, str]] = set()
+        for resolved_target in all_targets:
+            key = (str(resolved_target[0]), repr(resolved_target[1]))
+            if key not in seen_targets:
+                seen_targets.add(key)
+                deduped_targets.append(resolved_target)
+        all_targets = deduped_targets
+        if expanded_target and not all_targets:
             # The expanded-away instance has no live interior holder for this
             # input. Passthrough outputs already captured its upstream in the
             # pre-pass; retaining this row would point at a nonexistent node.
             continue
+        if not all_targets:
+            all_targets = [(tgt_id_str, effective_tgt_slot)]
         # Track input-slot rewrites for ALL targets (one outer input may fan out).
         for resolved_tgt_id, resolved_tgt_slot in all_targets:
-            if resolved_tgt_id != tgt_id_str:
-                node_input_updates.setdefault(resolved_tgt_id, {})[resolved_tgt_slot] = link_id
+            if str(resolved_tgt_id) in expanded_node_ids:
+                node_input_updates.setdefault(str(resolved_tgt_id), {})[resolved_tgt_slot] = link_id
 
         first_tgt_id, first_tgt_slot = all_targets[0]
         updated.append([link_id, src_id_out, src_slot_out, first_tgt_id, first_tgt_slot, link_type])
@@ -653,8 +757,10 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
         if node_id_str not in node_input_updates:
             continue
         slot_to_link = node_input_updates[node_id_str]
-        for slot_idx, input_info in enumerate(node.get("inputs", []) or []):
-            if slot_idx in slot_to_link:
+        raw_inputs = node.get("inputs")
+        inputs = raw_inputs if isinstance(raw_inputs, list) else []
+        for slot_idx, input_info in enumerate(inputs):
+            if slot_idx in slot_to_link and isinstance(input_info, dict):
                 input_info["link"] = slot_to_link[slot_idx]
 
     return updated
@@ -720,14 +826,15 @@ def _resolve_subgraph_input_all(
     slot: Any,
     ctx: _SubgraphCtx,
     depth: int = 0,
-    _memo: dict[tuple[str, str], list[tuple[Any, Any]]] | None = None,
+    _memo: dict[tuple[str, str, bool], list[tuple[Any, Any]]] | None = None,
     _budget: list[int] | None = None,
+    _definition_slot: bool = False,
 ) -> list[tuple[Any, Any]]:
     if _memo is None:
         _memo = {}
     if _budget is None:
         _budget = [_MAX_RESOLVED_SUBGRAPH_INPUTS]
-    memo_key = (node_id_str, repr(slot))
+    memo_key = (node_id_str, repr(slot), _definition_slot)
     if memo_key in _memo:
         result = _memo[memo_key]
         if len(result) > _budget[0]:
@@ -748,7 +855,7 @@ def _resolve_subgraph_input_all(
 
     sg_input_idx = slot
     outer_map = ctx.outer_to_input_idx.get(node_id_str)
-    if outer_map and slot in outer_map:
+    if not _definition_slot and outer_map and slot in outer_map:
         sg_input_idx = outer_map[slot]
 
     targets = mapping.get(sg_input_idx)

@@ -501,8 +501,9 @@ def _stale_input_slot_links(
             declared_input = inputs[tgt_slot]
             if (
                 isinstance(declared_input, dict)
-                and declared_input.get("link") is not None
-                and str(declared_input["link"]) == str(link_id)
+                and _is_link_id(declared_input.get("link"))
+                and _is_link_id(link_id)
+                and _link_key(declared_input["link"]) == _link_key(link_id)
             ):
                 continue
             where = (
@@ -1600,6 +1601,20 @@ def _build_bindings(order: list[dict], defs_by_id: dict[str, dict]) -> dict[str,
     return binding_by_id
 
 
+def _definition_output_sources(
+    all_links: dict[str, tuple],
+    output_aliases: dict[str, set[int]],
+) -> dict[Any, tuple]:
+    """Definition output slot -> first live source in definition-link order."""
+    out_sources: dict[Any, tuple] = {}
+    for lid, (oid, oslot, tid, tslot) in all_links.items():
+        if str(tid) != _PROXY_OUT:
+            continue
+        for output_slot in output_aliases.get(str(lid), {tslot}):
+            out_sources.setdefault(output_slot, (oid, oslot))
+    return out_sources
+
+
 def _render_definition_block(
     def_id: str, sg_def: dict, graph: Graph | None, state: _State, depth: int
 ) -> tuple[list[str], int]:
@@ -1845,13 +1860,7 @@ def _render_definition_block(
     for g in sorted(def_groups, key=lambda g: _sort_key(str(g.get("id")))):
         lines.append(_group_comment(g, interior_nodes))
 
-    out_sources: dict[Any, tuple] = {}
-    for lid, (oid, oslot, tid, tslot) in all_links.items():
-        if str(tid) != _PROXY_OUT:
-            continue
-        for output_slot in output_aliases.get(str(lid), {tslot}):
-            if output_slot not in out_sources:
-                out_sources[output_slot] = (oid, oslot)
+    out_sources = _definition_output_sources(all_links, output_aliases)
     declared_out_slots = [slot for slot, output in enumerate(sg_def.get("outputs") or []) if isinstance(output, dict)]
     output_slots = declared_out_slots + [
         slot for slot in sorted(out_sources, key=_sort_key) if slot not in declared_out_slots
