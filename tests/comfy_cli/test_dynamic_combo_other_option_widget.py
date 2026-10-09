@@ -150,6 +150,24 @@ def test_write_succeeds_once_the_revealing_option_is_selected(graph):
     assert op["value"] == "quality"
 
 
+def test_missing_selector_materializes_the_whole_default_option_roster():
+    object_info = copy.deepcopy(OBJECT_INFO)
+    model = object_info["MinimaxHailuo03TextToVideoNode"]["input"]["required"]["model"]
+    model[1]["default"] = "MiniMax H3"
+    model[1]["options"][0]["inputs"]["required"] = {
+        "first": ["INT", {"default": 11}],
+        "second": ["INT", {"default": 22}],
+    }
+    default_graph = Graph.from_object_info(object_info)
+    node = {"id": 1, "type": "MinimaxHailuo03TextToVideoNode", "widgets_values": []}
+
+    from comfy_cli.cql.engine import _write_widget
+
+    _write_widget(node, "model.second", 99, default_graph, extend=True)
+
+    assert node["widgets_values"] == ["MiniMax H3", 11, 99]
+
+
 def test_unknown_sub_widget_keeps_the_plain_refusal(graph):
     wf, nid = _fresh(graph)
     with pytest.raises(ValueError) as exc:
