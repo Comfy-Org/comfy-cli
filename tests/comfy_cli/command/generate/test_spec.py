@@ -1,6 +1,8 @@
 """Tests for the openapi registry — verify the curated image allowlist resolves
 against the vendored spec and classifies each endpoint correctly."""
 
+from unittest import mock
+
 import pytest
 import yaml
 
@@ -87,6 +89,30 @@ def test_registry_skips_an_endpoint_whose_schema_cannot_be_resolved(monkeypatch)
     spec._registry.cache_clear()
     try:
         assert list(spec._registry()) == [good_id]
+    finally:
+        spec._registry.cache_clear()
+
+
+def test_registry_computes_one_resolution_budget_per_spec(monkeypatch):
+    endpoint_ids = ["one/endpoint", "two/endpoint"]
+    raw = {
+        "paths": {
+            f"/proxy/{endpoint_id}": {
+                "post": {
+                    "requestBody": {"content": {"application/json": {"schema": {"type": "object"}}}},
+                    "responses": {"200": {"content": {"application/json": {"schema": {"type": "object"}}}}},
+                }
+            }
+            for endpoint_id in endpoint_ids
+        }
+    }
+    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+    monkeypatch.setattr(spec, "_ENDPOINT_ALLOWLIST", [(endpoint_id, "test", None) for endpoint_id in endpoint_ids])
+    spec._registry.cache_clear()
+    try:
+        with mock.patch.object(spec, "_schema_resolution_budget", wraps=spec._schema_resolution_budget) as budget:
+            assert list(spec._registry()) == endpoint_ids
+        assert budget.call_count == 1
     finally:
         spec._registry.cache_clear()
 
