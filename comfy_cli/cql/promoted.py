@@ -134,7 +134,8 @@ def _spend_traversal_budget(budget: list[int] | None, amount: int, message: str)
 def _link_holders(sg: dict) -> dict[Any, list[tuple[dict, int, dict]]]:
     """Every input that actually holds a link id, in serialized node order."""
     holders: dict[Any, list[tuple[dict, int, dict]]] = {}
-    for node in sg.get("nodes") or []:
+    raw_nodes = sg.get("nodes")
+    for node in raw_nodes if isinstance(raw_nodes, list) else []:
         if not isinstance(node, dict):
             continue
         inputs = node.get("inputs")
@@ -146,8 +147,11 @@ def _link_holders(sg: dict) -> dict[Any, list[tuple[dict, int, dict]]]:
 
 def _link_rows_by_id(sg: dict) -> dict[Any, dict]:
     """Hashable, non-boolean serialized link rows keyed by their raw ids."""
+    raw_links = sg.get("links")
     return {
-        link.get("id"): link for link in sg.get("links") or [] if isinstance(link, dict) and _is_link_id(link.get("id"))
+        link.get("id"): link
+        for link in (raw_links if isinstance(raw_links, list) else [])
+        if isinstance(link, dict) and _is_link_id(link.get("id"))
     }
 
 
@@ -219,8 +223,12 @@ def _invalidate_promotion_caches(defs: dict[str, dict], sg: dict | None = None) 
         "promotion_input_memberships",
         "promotion_sources",
         "promotion_inputs_memo",
+        "promotion_inputs_stable_memo",
+        "promotion_inputs_cycle_memo",
         "promotion_inputs_names",
         "promotion_boundary_memo",
+        "promotion_boundary_stable_memo",
+        "promotion_boundary_cycle_memo",
         "promotion_boundary_names",
     ):
         cache = getattr(defs, name, None)
@@ -278,9 +286,16 @@ def held_link_targets(
     return result
 
 
+def _root_is_registered(defs: dict[str, dict], root: dict) -> bool:
+    registered = getattr(defs, "registered_definition_ids", None)
+    if isinstance(registered, set):
+        return id(root) in registered
+    return any(definition is root for definition in defs.values())
+
+
 def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
     """A linear cap for malformed definition DAGs with exponentially many paths."""
-    root_registered = any(definition is root for definition in defs.values())
+    root_registered = _root_is_registered(defs, root)
     cached = getattr(defs, "promotion_visit_limit", None) if root_registered else None
     if cached is not None:
         return cached
@@ -311,7 +326,7 @@ def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
 def _shared_promotion_budget(defs: dict[str, dict], root: dict, attribute: str) -> list[int]:
     """One serialized-graph allowance per resolver operation on a defs index."""
     limit = _promotion_visit_limit(defs, root)
-    if not hasattr(defs, attribute) or not any(definition is root for definition in defs.values()):
+    if not hasattr(defs, attribute) or not _root_is_registered(defs, root):
         return [limit]
     budget = getattr(defs, attribute)
     if budget is None:
@@ -351,6 +366,8 @@ def promoted_inputs(
     _memo: dict[tuple[int, int, tuple[int, ...]], list[PromotedInput]] | None = None,
     _budget: list[int] | None = None,
     _name_memo: dict[int, dict[str, PromotedInput]] | None = None,
+    _cycle_memo: dict[tuple[int, int, tuple[int, ...]], bool] | None = None,
+    _cycle_state: list[bool] | None = None,
 ) -> list[PromotedInput]:
     """Every declared input of definition ``sg`` in declaration order, with the
     host value slot each widget-backed one owns — the frontend's own rule
@@ -366,7 +383,15 @@ def promoted_inputs(
     context linear without changing those cycle semantics. ``_budget`` also
     bounds distinct ancestry paths in a malformed definition DAG, proportional
     to the serialized definition graph rather than its path count."""
-    root_call = depth == 0 and not _stack and _memo is None and _budget is None and _name_memo is None
+    root_call = (
+        depth == 0
+        and not _stack
+        and _memo is None
+        and _budget is None
+        and _name_memo is None
+        and _cycle_memo is None
+        and _cycle_state is None
+    )
     root_cache = getattr(defs, "promotion_inputs", None)
     if root_call and root_cache is not None:
         cached = root_cache.get(id(sg))
@@ -378,11 +403,23 @@ def promoted_inputs(
     if _name_memo is None:
         shared_names = getattr(defs, "promotion_inputs_names", None) if root_call else None
         _name_memo = shared_names if shared_names is not None else {}
+    if _cycle_memo is None:
+        shared_cycles = getattr(defs, "promotion_inputs_cycle_memo", None) if root_call else None
+        _cycle_memo = shared_cycles if shared_cycles is not None else {}
+    if _cycle_state is None:
+        _cycle_state = [False]
     if _budget is None:
         _budget = _shared_promotion_budget(defs, sg, "promotion_inputs_budget")
     memo_key = (id(sg), depth, _stack)
+    stable_cache = getattr(defs, "promotion_inputs_stable_memo", None)
+    stable_key = (id(sg), depth)
+    if stable_cache is not None and stable_key in stable_cache:
+        _spend_traversal_budget(_budget, 1, "promoted input traversal exceeded its safe limit")
+        return stable_cache[stable_key]
     if memo_key in _memo:
         result = _memo[memo_key]
+        if _cycle_memo.get(memo_key, False):
+            _cycle_state[0] = True
         _spend_traversal_budget(_budget, 1, "promoted input traversal exceeded its safe limit")
         return result
     raw_inputs = sg.get("inputs")
@@ -400,6 +437,7 @@ def promoted_inputs(
     # rather than crashing conversion of the whole workflow.
     links = _cached_link_rows(sg, defs)
     out: list[PromotedInput] = []
+    cycle_sensitive = False
     value_index = 0
     for idx, inp in enumerate(inputs):
         if not isinstance(inp, dict):
@@ -425,12 +463,17 @@ def promoted_inputs(
                 target_cache,
                 _budget,
             ):
+                candidate = defs.get(str(target.get("type", "")))
+                if candidate is not None and id(candidate) in _stack:
+                    cycle_sensitive = True
                 inner_def = _nested_definition(target, defs, _stack)
                 if inner_def is not None:
                     # The target is itself a subgraph instance: its input entry
                     # carries a widget marker when promoted, but the concrete
                     # widget lives deeper — resolve through its own promotion.
                     if depth < _MAX_NESTED_PROMOTION_DEPTH:
+                        child_cycle = [False]
+                        child_memo_key = (id(inner_def), depth + 1, _stack)
                         inner = promoted_inputs(
                             inner_def,
                             defs,
@@ -439,7 +482,10 @@ def promoted_inputs(
                             _memo,
                             _budget,
                             _name_memo,
+                            _cycle_memo,
+                            child_cycle,
                         )
+                        cycle_sensitive = cycle_sensitive or child_cycle[0] or _cycle_memo.get(child_memo_key, False)
                         inner_key = id(inner)
                         if inner_key not in _name_memo:
                             _name_memo[inner_key] = _promoted_name_index(inner)
@@ -479,6 +525,10 @@ def promoted_inputs(
         )
         value_index += 1
     _memo[memo_key] = out
+    _cycle_memo[memo_key] = cycle_sensitive
+    _cycle_state[0] = _cycle_state[0] or cycle_sensitive
+    if not cycle_sensitive and stable_cache is not None:
+        stable_cache[stable_key] = out
     if root_call and root_cache is not None:
         root_cache[id(sg)] = (sg, list(out))
         return list(out)
@@ -1942,6 +1992,8 @@ def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) 
             _memo=shared_memo if shared_memo is not None else {},
             _budget=_shared_promotion_budget(defs, sg, "promotion_boundary_budget"),
             _input_name_memo=shared_names if shared_names is not None else {},
+            _cycle_memo=getattr(defs, "promotion_boundary_cycle_memo", None),
+            _cycle_state=[False],
         )
     if cache is not None and cacheable:
         cache[cache_key] = (sg, [(list(path), widget) for path, widget in result])
@@ -1957,6 +2009,8 @@ def _boundary_targets(
     _memo: dict[tuple[int, int, int, tuple[int, ...]], list[tuple[list[str], str]]] | None = None,
     _budget: list[int] | None = None,
     _input_name_memo: dict[int, dict[Any, dict]] | None = None,
+    _cycle_memo: dict[tuple[int, int, int, tuple[int, ...]], bool] | None = None,
+    _cycle_state: list[bool] | None = None,
 ) -> list[tuple[list[str], str]]:
     if depth > _MAX_NESTED_PROMOTION_DEPTH:
         return []
@@ -1966,9 +2020,25 @@ def _boundary_targets(
         _budget = [_promotion_visit_limit(defs, sg)]
     if _input_name_memo is None:
         _input_name_memo = {}
+    if _cycle_memo is None:
+        shared_cycles = getattr(defs, "promotion_boundary_cycle_memo", None)
+        _cycle_memo = shared_cycles if shared_cycles is not None else {}
+    if _cycle_state is None:
+        _cycle_state = [False]
     memo_key = (id(sg), id(inp), depth, _stack)
+    stable_cache = getattr(defs, "promotion_boundary_stable_memo", None)
+    stable_key = (id(sg), id(inp), depth)
+    if stable_cache is not None and stable_key in stable_cache:
+        _spend_traversal_budget(
+            _budget,
+            1,
+            "promoted widget boundary traversal exceeded its safe limit",
+        )
+        return stable_cache[stable_key]
     if memo_key in _memo:
         result = _memo[memo_key]
+        if _cycle_memo.get(memo_key, False):
+            _cycle_state[0] = True
         _spend_traversal_budget(
             _budget,
             1,
@@ -1985,6 +2055,7 @@ def _boundary_targets(
     input_index = _input_position_index(sg, defs).get(id(inp))
     target_cache: dict[int, tuple[tuple[dict, int, dict], ...]] = {}
     out: list[tuple[list[str], str]] = []
+    cycle_sensitive = False
     for link_id in _listed_link_ids(inp):
         _spend_traversal_budget(_budget, 1, "promoted widget boundary traversal exceeded its safe limit")
         if input_index is None or not _is_link_id(link_id) or memberships.get(link_id) != {input_index}:
@@ -2007,6 +2078,9 @@ def _boundary_targets(
         )
         for target, _slot, entry in targets:
             tid = str(target.get("id"))
+            candidate = defs.get(str(target.get("type", "")))
+            if candidate is not None and id(candidate) in _stack:
+                cycle_sensitive = True
             inner_def = _nested_definition(target, defs, _stack)
             if inner_def is not None:
                 inner_inputs = _input_name_memo.get(id(inner_def))
@@ -2020,6 +2094,8 @@ def _boundary_targets(
                 entry_name = entry.get("name")
                 inner_inp = inner_inputs.get(entry_name) if isinstance(entry_name, str) else None
                 if inner_inp is not None:
+                    child_cycle = [False]
+                    child_memo_key = (id(inner_def), id(inner_inp), depth + 1, _stack)
                     nested = _boundary_targets(
                         inner_def,
                         inner_inp,
@@ -2029,7 +2105,10 @@ def _boundary_targets(
                         _memo,
                         _budget,
                         _input_name_memo,
+                        _cycle_memo,
+                        child_cycle,
                     )
+                    cycle_sensitive = cycle_sensitive or child_cycle[0] or _cycle_memo.get(child_memo_key, False)
                     _spend_traversal_budget(
                         _budget,
                         len(nested),
@@ -2045,4 +2124,8 @@ def _boundary_targets(
                 widget = marker.get("name") if isinstance(marker, dict) else None
                 out.append(([tid], str(widget or entry.get("name"))))
     _memo[memo_key] = out
+    _cycle_memo[memo_key] = cycle_sensitive
+    _cycle_state[0] = _cycle_state[0] or cycle_sensitive
+    if not cycle_sensitive and stable_cache is not None:
+        stable_cache[stable_key] = out
     return out
