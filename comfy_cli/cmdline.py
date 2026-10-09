@@ -190,8 +190,8 @@ _SECRET_KEY_QUALIFIER = (
     r"auth|key|id|token|secret|credentials?|cookies?|session|value|private|public|signing|oauth|jwt|aws"
 )
 _CAMEL_SECRET_KEY_PATTERN = (
-    r"(?-i:(?!(?i:primary|foreign|sort|cache|hash)(?:KeyId|Key)\b)"
-    r"[A-Za-z][A-Za-z0-9]*(?:KeyId|Key|Secret|Token|Password|Authorization|Cookie|Signature|SessionId))"
+    r"(?:api|auth|access|refresh|client|consumer|session|secret|private|signing|oauth|jwt|aws|comfy|proxy|credential)"
+    r"[A-Za-z0-9]*(?:KeyId|Key|Secret|Token|Password|Passphrase|Authorization|Cookie|Signature|SessionId)"
 )
 _SECRET_ASSIGNMENT_KEY_PATTERN = (
     rf"(?<![\w-])(?:"
