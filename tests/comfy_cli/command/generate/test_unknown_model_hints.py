@@ -354,7 +354,12 @@ def test_model_hint_computes_one_resolution_budget_for_all_paths(monkeypatch):
             for index in range(8)
         }
     }
-    monkeypatch.setattr(spec, "load_raw_spec", lambda: raw)
+
+    def load_raw_spec():
+        return raw
+
+    load_raw_spec.cache_clear = lambda: None  # type: ignore[attr-defined]
+    monkeypatch.setattr(spec, "load_raw_spec", load_raw_spec)
 
     with mock.patch.object(spec, "_schema_resolution_budget", wraps=spec._schema_resolution_budget) as budget:
         hint = spec._model_name_hint("example")
