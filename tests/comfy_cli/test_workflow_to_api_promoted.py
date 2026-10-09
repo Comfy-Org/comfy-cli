@@ -262,6 +262,10 @@ def test_large_serialized_boundary_does_not_consume_the_fanout_reserve():
     _nodes, _links, input_targets, _output_sources = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
 
     assert len(input_targets) == count
+    outer_links = [[10_000 + index, "source", 0, 10, index, "*"] for index in range(count)]
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.input_targets["10"] = input_targets
+    assert len(workflow_to_api._rewrite_links_for_subgraphs(outer_links, ctx, [])) == count
 
 
 def test_subgraph_input_resolution_fails_closed_at_materialization_cap():
