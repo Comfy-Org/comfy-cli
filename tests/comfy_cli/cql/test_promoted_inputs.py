@@ -454,7 +454,7 @@ def test_holder_materialization_is_charged_before_ordering():
         )
 
 
-def test_holder_cache_hits_use_constant_budget():
+def test_holder_cache_hits_charge_each_target_consumed_by_the_caller():
     sg = {"nodes": [{"id": node_id, "inputs": [{"name": "value", "link": 1}]} for node_id in range(3)]}
     holders = promoted._link_holders(sg)
     link = {"id": 1, "target_id": 0, "target_slot": 0}
@@ -464,9 +464,9 @@ def test_holder_cache_hits_use_constant_budget():
     first = promoted.held_link_targets(sg, 1, link, holders, cache, budget)
     assert budget == [3]
     assert promoted.held_link_targets(sg, 1, link, holders, cache, budget) is first
-    assert budget == [2]
-    assert promoted.held_link_targets(sg, 1, link, holders, cache, budget) is first
-    assert budget == [1]
+    assert budget == [0]
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="safe limit"):
+        promoted.held_link_targets(sg, 1, link, holders, cache, budget)
 
 
 def test_promoted_input_memo_hits_use_constant_budget_and_cached_name_index():
