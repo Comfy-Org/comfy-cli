@@ -257,7 +257,7 @@ def test_boundary_resolution_treats_non_list_nested_inputs_as_empty():
     assert promoted.boundary_widget_targets(outer, item, definitions) == []
 
 
-def test_registered_roots_share_one_budget_per_promotion_operation():
+def test_registered_roots_receive_independent_promotion_budgets():
     left = {"id": "left", "inputs": [], "nodes": [], "links": []}
     right = {
         "id": "right",
@@ -268,14 +268,12 @@ def test_registered_roots_share_one_budget_per_promotion_operation():
     definitions = _SubgraphDefs()
     definitions.update({"left": left, "right": right})
 
-    promoted.promoted_inputs(left, definitions)
-    budget = definitions.promotion_inputs_budget
-    assert budget is not None
-    remaining = budget[0]
-    promoted.promoted_inputs(right, definitions)
+    left_budget = promoted._shared_promotion_budget(definitions, left, "promotion_inputs_budget")
+    left_budget[0] = 0
+    right_budget = promoted._shared_promotion_budget(definitions, right, "promotion_inputs_budget")
 
-    assert definitions.promotion_inputs_budget is budget
-    assert budget[0] > remaining
+    assert right_budget is not left_budget
+    assert right_budget[0] == promoted._promotion_visit_limit(definitions, right)
 
 
 def test_shared_child_definition_metrics_are_computed_once():
@@ -891,6 +889,73 @@ def test_boundary_materialization_has_an_absolute_cap(monkeypatch):
 
     with pytest.raises(promoted.PromotionTraversalLimitError, match="safe limit"):
         promoted.boundary_widget_targets(root, item, definitions)
+
+
+def test_boundary_output_allowance_does_not_accumulate_across_roots(monkeypatch):
+    def root(name: str, width: int) -> dict:
+        return {
+            "id": name,
+            "inputs": [{"name": "value", "type": "STRING", "linkIds": list(range(width))}],
+            "nodes": [
+                {
+                    "id": index,
+                    "type": "Plain",
+                    "inputs": [{"name": "value", "link": index, "widget": {"name": "value"}}],
+                }
+                for index in range(width)
+            ],
+            "links": [{"id": index, "origin_id": -10, "target_id": index, "target_slot": 0} for index in range(width)],
+        }
+
+    small = root("small", 1)
+    wide = root("wide", 3)
+    definitions = _SubgraphDefs()
+    definitions.update({"small": small, "wide": wide})
+    monkeypatch.setattr(promoted, "_MAX_BOUNDARY_MATERIALIZATIONS", 2)
+
+    [small_item] = promoted.promoted_inputs(small, definitions)
+    assert len(promoted.boundary_widget_targets(small, small_item, definitions)) == 1
+    [wide_item] = promoted.promoted_inputs(wide, definitions)
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="safe limit"):
+        promoted.boundary_widget_targets(wide, wide_item, definitions)
+
+
+def test_boundary_cache_hits_are_charged_before_copying(monkeypatch):
+    root = {"id": "root", "inputs": [{"name": "value"}], "nodes": [], "links": []}
+    definitions = _SubgraphDefs()
+    definitions["root"] = root
+    item = promoted.PromotedInput("value", "STRING", 0, 0)
+    definitions.promotion_boundaries[(id(root), 0)] = (
+        root,
+        [(["1"], "value"), (["2"], "value"), (["3"], "value")],
+    )
+    monkeypatch.setattr(promoted, "_MAX_BOUNDARY_MATERIALIZATIONS", 2)
+
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="safe limit"):
+        promoted.boundary_widget_targets(root, item, definitions)
+
+
+def test_nested_null_input_name_uses_the_normalized_source_key():
+    child = {
+        "id": "child",
+        "inputs": [{"name": None, "type": "STRING", "linkIds": [1]}],
+        "nodes": [{"id": 9, "type": "Plain", "inputs": [{"name": None, "link": 1, "widget": {"name": "value"}}]}],
+        "links": [{"id": 1, "origin_id": -10, "target_id": 9, "target_slot": 0}],
+    }
+    parent = {
+        "id": "parent",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [2]}],
+        "nodes": [{"id": 7, "type": "child", "inputs": [{"name": None, "link": 2}]}],
+        "links": [{"id": 2, "origin_id": -10, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions.update({"child": child, "parent": parent})
+
+    [item] = promoted.promoted_inputs(parent, definitions)
+
+    assert item.nested is True
+    assert item.source_input == ""
+    assert promoted.find_promoted(child, definitions, item.source_input) is not None
 
 
 def test_repeated_boundary_link_ids_share_holder_work_with_serialized_budget():

@@ -726,6 +726,32 @@ def test_duplicate_output_rows_resolve_each_link_id_once():
     assert CountingNode.output_reads == 1
 
 
+@pytest.mark.parametrize(
+    ("last_row", "expected"),
+    [
+        ({"id": 1, "origin_id": 8, "origin_slot": 0, "target_id": -20, "target_slot": 0}, (8, 0)),
+        ({"id": 1, "origin_id": 8, "origin_slot": 0, "target_id": 7, "target_slot": 0}, None),
+    ],
+)
+def test_duplicate_definition_output_rows_use_the_last_owner(last_row, expected):
+    definition = {
+        "inputs": [],
+        "outputs": [{"name": "out", "linkIds": [1]}],
+        "nodes": [
+            {"id": 7, "type": "First", "inputs": [], "outputs": [{}]},
+            {"id": 8, "type": "Last", "inputs": [], "outputs": [{}]},
+        ],
+        "links": [
+            {"id": 1, "origin_id": 7, "origin_slot": 0, "target_id": -20, "target_slot": 0},
+            last_row,
+        ],
+    }
+
+    _nodes, _links, _inputs, outputs = workflow_to_api._expand_one_subgraph({"id": 10}, definition, [])
+
+    assert outputs.get(0) == expected
+
+
 def test_duplicate_outer_rows_use_the_link_maps_last_source():
     ctx = workflow_to_api._SubgraphCtx()
     ctx.input_targets["10"] = {0: [(7, 0)]}
@@ -738,6 +764,14 @@ def test_duplicate_outer_rows_use_the_link_maps_last_source():
     )
 
     assert ctx.input_sources["10"][0] == ("last", 1)
+
+
+def test_unwired_authoritative_passthrough_drops_every_duplicate_outer_row():
+    ctx = workflow_to_api._SubgraphCtx()
+    ctx.output_sources["10"] = {0: (-10, 0)}
+    links = [[5, "stale", 0, 20, 0, "*"], [5, 10, 0, 20, 0, "*"]]
+
+    assert workflow_to_api._rewrite_links_for_subgraphs(links, ctx, []) == []
 
 
 @pytest.mark.parametrize("name", [["unhashable"], {"nested": "name"}, 7])
@@ -848,6 +882,42 @@ def test_node_expansion_cost_counts_copied_mapping_keys_and_id_bytes():
     assert workflow_to_api._node_expansion_cost(node) >= len(node) + len("long-id") + 3
 
 
+def test_instance_expansion_cost_charges_each_repeated_outer_id_prefix():
+    definition = {
+        "nodes": [{"id": 1, "inputs": []}, {"id": 2, "inputs": []}],
+        "links": [
+            {"id": 1, "origin_id": 1, "target_id": 2},
+            {"id": 2, "origin_id": 2, "target_id": 1},
+        ],
+    }
+    outer_id = "x" * 1000
+
+    extra = workflow_to_api._instance_expansion_cost(definition, outer_id) - workflow_to_api._definition_expansion_cost(
+        definition
+    )
+
+    assert extra == (len(outer_id) + 1) * (2 + 2 * 2)
+
+
+def test_expansion_budget_is_clamped_to_an_absolute_cap(monkeypatch):
+    definition_id = "00000000-0000-4000-8000-000000000001"
+    definition = {
+        "id": definition_id,
+        "inputs": [],
+        "outputs": [],
+        "nodes": [{"id": index, "type": "Plain", "inputs": [], "outputs": []} for index in range(20)],
+        "links": [],
+    }
+    monkeypatch.setattr(workflow_to_api, "_MAX_SUBGRAPH_EXPANSION_BUDGET", 10)
+
+    with pytest.raises(workflow_to_api.WorkflowConversionError, match="proportional safe limit"):
+        workflow_to_api._expand_subgraphs(
+            [{"id": "x" * 1000, "type": definition_id, "inputs": [], "outputs": []}],
+            [],
+            {definition_id: definition},
+        )
+
+
 def test_expansion_budget_has_a_floor_for_legitimate_reuse(monkeypatch):
     definition_id = "00000000-0000-4000-8000-000000000001"
     definition = {
@@ -913,6 +983,42 @@ def test_iteration_cap_tolerates_an_unhashable_sibling_type():
         workflow_to_api._expand_subgraphs(
             [{"id": 1, "type": definition_id, "inputs": [], "outputs": []}], [], {definition_id: definition}
         )
+
+
+def test_iteration_cap_ignores_a_non_uuid_definition_name_after_uuid_expansion():
+    def uuid_for(level: int) -> str:
+        return f"00000000-0000-4000-8000-{level:012d}"
+
+    definitions = {
+        uuid_for(level): {
+            "id": uuid_for(level),
+            "inputs": [],
+            "outputs": [],
+            "nodes": [
+                {
+                    "id": level,
+                    "type": uuid_for(level + 1) if level < 9 else "named-definition",
+                    "inputs": [],
+                    "outputs": [],
+                }
+            ],
+            "links": [],
+        }
+        for level in range(10)
+    }
+    definitions["named-definition"] = {
+        "id": "named-definition",
+        "inputs": [],
+        "outputs": [],
+        "nodes": [],
+        "links": [],
+    }
+
+    nodes, _links, _ctx = workflow_to_api._expand_subgraphs(
+        [{"id": 1, "type": uuid_for(0), "inputs": [], "outputs": []}], [], definitions
+    )
+
+    assert [node["type"] for node in nodes] == ["named-definition"]
 
 
 def test_input_source_budget_charges_plain_fanout_targets():
