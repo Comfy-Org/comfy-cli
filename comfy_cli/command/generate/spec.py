@@ -836,15 +836,15 @@ def _schema_may_be_object(
                 result = any(isinstance(value, dict) for value in enum)
             else:
                 result = True
-            # Composition keywords constrain their siblings; none suppresses
-            # a sibling allOf merely by appearing first.
-            for key in ("anyOf", "oneOf"):
-                variants = schema.get(key)
-                if isinstance(variants, list):
-                    result = result and any(_schema_may_be_object(variant, _active, _memo) for variant in variants)
-            all_of = schema.get("allOf")
-            if isinstance(all_of, list) and all_of:
-                result = result and all(_schema_may_be_object(variant, _active, _memo) for variant in all_of)
+        # Composition keywords constrain their siblings, including an
+        # explicit ``type`` or ``const`` sibling.
+        for key in ("anyOf", "oneOf"):
+            variants = schema.get(key)
+            if isinstance(variants, list):
+                result = result and any(_schema_may_be_object(variant, _active, _memo) for variant in variants)
+        all_of = schema.get("allOf")
+        if isinstance(all_of, list) and all_of:
+            result = result and all(_schema_may_be_object(variant, _active, _memo) for variant in all_of)
         _memo[schema_id] = result
         return result
     finally:

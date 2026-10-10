@@ -587,6 +587,17 @@ def test_schema_object_check_combines_union_and_allof_siblings():
     assert spec._schema_may_be_object(schema) is False
 
 
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"type": "object", "allOf": [{"type": "string"}]},
+        {"const": {}, "oneOf": [{"type": "array"}]},
+    ],
+)
+def test_schema_object_check_applies_composition_to_explicit_base_constraints(schema):
+    assert spec._schema_may_be_object(schema) is False
+
+
 def test_find_property_shares_the_object_memo_across_union_branches(monkeypatch):
     leaf: dict = {"type": "object"}
     shared = leaf

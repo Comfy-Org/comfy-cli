@@ -4401,7 +4401,18 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
             selector_idx, selector = missing
             for gap_idx in range(len(widgets), selector_idx):
                 gap_port = entries_now[gap_idx].port if gap_idx < len(entries_now) else None
-                widgets.append(_widget_default(gap_port) if gap_port is not None else None)
+                # The current layout was expanded with an absent selector.
+                # Choosing its first option here would insert sub-slots on the
+                # next expansion and shift the intended target widget.
+                if (
+                    gap_port is not None
+                    and gap_port.dynamic_options
+                    and _is_dynamic_combo_type(gap_port.type)
+                    and _declared_dynamic_default(gap_port) is None
+                ):
+                    widgets.append(None)
+                else:
+                    widgets.append(_widget_default(gap_port) if gap_port is not None else None)
             selector_default = _widget_default(selector)
             widgets.append(selector_default)
             default_values, _default_names = _dynamic_combo_default_values(

@@ -756,6 +756,50 @@ class TestDynamicComboImplicitControlAfterGenerate:
 
         assert node["widgets_values"][:4] == ["prompt", "beta", "fast", 77]
 
+    def test_padding_keeps_an_earlier_no_default_selector_absent(self):
+        info = {
+            "TwoDynNode": {
+                "input": {
+                    "required": {
+                        "a": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "options": [
+                                    {
+                                        "key": "a1",
+                                        "inputs": {"required": {"p": ["INT", {"default": 1}]}},
+                                    }
+                                ]
+                            },
+                        ],
+                        "b": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "default": "b1",
+                                "options": [
+                                    {
+                                        "key": "b1",
+                                        "inputs": {"required": {"q": ["INT", {"default": 2}]}},
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                },
+                "input_order": {"required": ["a", "b"]},
+                "output": ["IMAGE"],
+                "output_name": ["IMAGE"],
+                "python_module": "nodes",
+            }
+        }
+        graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "TwoDynNode", "widgets_values": []}
+
+        _write_widget(node, "b.q", 7, graph, extend=True)
+
+        assert node["widgets_values"] == [None, "b1", 7]
+        assert graph.widget_order_for_node("TwoDynNode", node["widgets_values"]) == ["a", "b", "b.q"]
+
 
 # ===========================================================================
 # TestTraversal
