@@ -485,10 +485,10 @@ def test_internal_error_scrubber_masks_armored_private_key_labels(label):
     assert "could not import ***" in scrubbed
 
 
-def test_internal_error_scrubber_preserves_host_ports_and_complete_userinfo_at_the_input_cap():
+def test_internal_error_scrubber_fails_closed_on_ambiguous_host_ports_at_the_input_cap():
     cases = [
         (" retrying https://api.comfy.org:8443", "RuntimeError: Bearer *** retrying …"),
-        (" retrying http://localhost:8188/prompt", "RuntimeError: Bearer *** retrying http://localhost:8188/prompt…"),
+        (" retrying http://localhost:8188/prompt", "RuntimeError: Bearer *** retrying …"),
         (" retrying https://alice:secret@example.com", "RuntimeError: Bearer *** retrying …"),
     ]
     for tail, expected in cases:
@@ -727,6 +727,9 @@ def test_internal_error_scrubber_handles_non_ascii_digit_port_without_crashing()
         "DBPASSWORD",
         "WEBHOOKSECRET",
         "GITHUBTOKEN",
+        "githubAPIKey",
+        "openaiAPIKey",
+        "GITHUBAPIKEY",
         "stripesecret",
         "api.key",
         "secret.key",
@@ -811,6 +814,18 @@ def test_internal_error_scrubber_masks_complete_unquoted_credential_tokens(messa
     assert kept in scrubbed
 
 
+def test_internal_error_scrubber_rescans_after_an_allowlisted_sibling():
+    scrubbed = _internal_error_message(RuntimeError("api_key=A&request=req-1&client_secret=B"))
+    assert "=A" not in scrubbed and "=B" not in scrubbed
+    assert "request=req-1" in scrubbed
+
+
+def test_internal_error_scrubber_masks_a_multiword_unquoted_passphrase():
+    scrubbed = _internal_error_message(RuntimeError("passphrase=correct horse battery staple request=req-1"))
+    assert "correct" not in scrubbed and "battery" not in scrubbed
+    assert "request=req-1" in scrubbed
+
+
 def test_internal_error_scrubber_masks_a_quoted_secret_value_on_the_next_line():
     scrubbed = _internal_error_message(RuntimeError('{"password":\n  "LIVE-CREDENTIAL"} request=req-1'))
     assert "LIVE-CREDENTIAL" not in scrubbed
@@ -829,6 +844,62 @@ def test_internal_error_scrubber_masks_unquoted_yaml_values_on_the_next_line(mes
     scrubbed = _internal_error_message(RuntimeError(message))
     assert not any(secret in scrubbed for secret in secrets)
     assert "request: req-1" in scrubbed
+
+
+@pytest.mark.parametrize(
+    ("message", "secrets"),
+    [
+        ("api_keys:\n  - sk-A\n  - sk-B\nrequest: req-1", ("sk-A", "sk-B")),
+        ("password: |\n  alpha\n  beta\nrequest: req-1", ("alpha", "beta")),
+        ("password: >-\n  alpha\n  beta\nrequest: req-1", ("alpha", "beta")),
+        ("auth:\n  alice:hunter2\nrequest: req-1", ("alice:hunter2",)),
+    ],
+)
+def test_internal_error_scrubber_masks_complete_yaml_secret_blocks(message, secrets):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert not any(secret in scrubbed for secret in secrets)
+    assert "request: req-1" in scrubbed
+
+
+def test_internal_error_scrubber_requires_indentation_before_a_next_line_value():
+    message = 'Failed to refresh auth:\n{"error":"invalid_grant"}'
+    assert message in _internal_error_message(RuntimeError(message))
+
+
+def test_internal_error_scrubber_supports_cr_only_yaml_lines():
+    scrubbed = _internal_error_message(RuntimeError("password:\r  LIVE\rrequest: req-1"))
+    assert "LIVE" not in scrubbed
+    assert "request: req-1" in scrubbed
+
+
+def test_internal_error_scrubber_masks_doubled_single_quote_escapes():
+    scrubbed = _internal_error_message(RuntimeError("password: 'alpha''LIVE' request=req-1"))
+    assert "alpha" not in scrubbed and "LIVE" not in scrubbed
+    assert "request=req-1" in scrubbed
+
+
+def test_internal_error_scrubber_preserves_deep_secret_named_host_ports():
+    message = "https://a.b.auth.com:443/callback"
+    assert message in _internal_error_message(RuntimeError(message))
+
+
+def test_internal_error_scrubber_does_not_exempt_out_of_range_ports():
+    scrubbed = _internal_error_message(RuntimeError("https://a.b.auth.com:70000/callback"))
+    assert ":70000" not in scrubbed
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "postgres://me@corp.com:1234#Secret@db/x",
+        "redis://:P@ss#1@cache",
+        "postgres://admin:Pa@ss/w0rd@db",
+    ],
+)
+def test_internal_error_scrubber_prefers_the_later_at_for_malformed_passwords(message):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "Secret" not in scrubbed and "P@ss" not in scrubbed and "Pa@ss" not in scrubbed
+    assert "://***@" in scrubbed
 
 
 def test_internal_error_scrubber_checks_the_last_url_when_input_is_truncated():

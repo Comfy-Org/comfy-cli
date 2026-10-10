@@ -130,11 +130,16 @@ def send_request(
         json_body, files, data = _split_payload(values, flags, endpoint.request_content_type)
     headers = _auth_headers(api_key)
     try:
-        if endpoint.method.lower() == "get":
+        method = endpoint.method.lower()
+        if method == "get":
             return httpx.get(url, params=values, headers=headers, timeout=timeout)
-        if endpoint.request_content_type == "application/json":
+        if method == "post" and endpoint.request_content_type == "application/json":
             return httpx.post(url, json=json_body, headers=headers, timeout=timeout)
-        return httpx.post(url, files=files, data=data, headers=headers, timeout=timeout)
+        if method == "post":
+            return httpx.post(url, files=files, data=data, headers=headers, timeout=timeout)
+        if endpoint.request_content_type == "application/json":
+            return httpx.request(method.upper(), url, json=json_body, headers=headers, timeout=timeout)
+        return httpx.request(method.upper(), url, files=files, data=data, headers=headers, timeout=timeout)
     finally:
         # Ensure file handles from multipart are closed even on httpx errors.
         if files:

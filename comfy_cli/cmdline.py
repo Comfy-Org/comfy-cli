@@ -195,12 +195,12 @@ _SECRET_KEY_QUALIFIER = (
 )
 _CAMEL_SECRET_KEY_PATTERN = (
     r"(?:(?!(?-i:(?:max|prompt|completion|total|input|output|maxOutput|maxCompletion|maxNew)Tokens?)\b)"
-    r"[a-z][A-Za-z0-9]{0,63}(?:(?-i:ApiKeys?|Passwords?|Secrets?|Tokens?|Passphrases?))|"
+    r"[a-z][A-Za-z0-9]{0,63}(?:(?-i:(?:Api|API)Keys?|Passwords?|Secrets?|Tokens?|Passphrases?))|"
     r"(?:api|app|auth|access|refresh|client|consumer|session|secret|private|signing|oauth|jwt|aws|comfy|"
     r"proxy|credential|master|subscription|hmac|encryption|account|sharedAccess|sshPrivate|service|db)"
     r"[A-Za-z0-9]{0,32}(?:(?-i:KeyIds?|Keys?|Authorization|Cookies?|Signatures?|SessionIds?))|"
     r"(?!(?i:(?:max|prompt|completion|total|input|output|maxoutput|maxcompletion|maxnew)tokens?)\b)"
-    r"(?:(?-i:[A-Z][A-Z0-9]{0,63}(?:PASSWORDS?|SECRETS?|TOKENS?|PASSPHRASES?))|"
+    r"(?:(?-i:[A-Z][A-Z0-9]{0,63}(?:APIKEYS?|PASSWORDS?|SECRETS?|TOKENS?|PASSPHRASES?))|"
     r"(?-i:[a-z][a-z0-9]{0,63}(?:passwords?|secrets?|tokens?|passphrases?))))"
     r"(?:(?-i:Backup|Value|V[0-9]+))?"
 )
@@ -223,9 +223,9 @@ _SECRET_ASSIGNMENT_KEY_PATTERN = (
 _OPTIONAL_KEY_CLOSING_QUOTE = r"(?:[\"'](?=[^\S\r\n]*[:=]))?"
 _SECRET_NEXT_LINE_VALUE = (
     r"(?:[bBuUrR]{0,2}[\"']|[\[{]|"
-    r"(?!(?:\(|[A-Za-z_][\w .-]{0,63}[ \t]*:))[^\s])"
+    r"(?!(?:\(|[A-Za-z_][\w .-]{0,63}[ \t]*:(?=[ \t\r\n]|$)))[^\s])"
 )
-_SECRET_VALUE_SPACE = rf"(?:[^\S\r\n]*|[^\S\r\n]*\r?\n[ \t]*(?:-[ \t]+)?(?={_SECRET_NEXT_LINE_VALUE}))"
+_SECRET_VALUE_SPACE = rf"(?:[^\S\r\n]*|[^\S\r\n]*(?:\r\n|\r|\n)[ \t]+(?:-[ \t]+)?(?={_SECRET_NEXT_LINE_VALUE}))"
 _SECRET_CONSTRUCTOR_START = re.compile(
     rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
     r"[A-Za-z_][\w.]*\(",
@@ -344,6 +344,11 @@ def _scrub_secret_quoted_values(text: str) -> str:
                 escaped = False
             elif char == "\\":
                 escaped = True
+            elif len(quote) == 1 and text.startswith(quote * 2, index):
+                # YAML/SQL single-quoted scalars escape a quote by doubling it.
+                # The pair is data, not the end of the secret value.
+                index += 2
+                continue
             elif text.startswith(quote, index):
                 break
             index += 1
@@ -365,6 +370,58 @@ def _scrub_secret_quoted_values(text: str) -> str:
         return text
     chunks.append(text[cursor:])
     return "".join(chunks)
+
+
+_YAML_SECRET_LINE = re.compile(
+    rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*:)"
+    r"(?P<space>[^\S\r\n]*)(?P<value>[^\r\n]*)$",
+    re.IGNORECASE,
+)
+
+
+def _scrub_yaml_secret_blocks(text: str) -> str:
+    """Mask YAML block scalars and every item in a secret sequence.
+
+    The scalar/sequence body is indentation-delimited. Handling it line by
+    line avoids a closer-dependent regex and preserves the next sibling
+    diagnostic verbatim, including CR-only input.
+    """
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        content = line.rstrip("\r\n")
+        ending = line[len(content) :]
+        match = _YAML_SECRET_LINE.search(content)
+        if match is None:
+            out.append(line)
+            index += 1
+            continue
+        value = match.group("value").strip()
+        key_indent = len(content) - len(content.lstrip(" \t"))
+        block_scalar = bool(re.fullmatch(r"[|>][+-]?(?:[ \t]+#.*)?", value))
+        next_is_sequence = False
+        if not value and index + 1 < len(lines):
+            next_content = lines[index + 1].rstrip("\r\n")
+            next_indent = len(next_content) - len(next_content.lstrip(" \t"))
+            next_is_sequence = next_indent > key_indent and next_content.lstrip(" \t").startswith("- ")
+        if not block_scalar and not next_is_sequence:
+            out.append(line)
+            index += 1
+            continue
+        out.append(content[: match.start("value")] + "***" + ending)
+        index += 1
+        while index < len(lines):
+            child = lines[index].rstrip("\r\n")
+            if not child.strip():
+                index += 1
+                continue
+            child_indent = len(child) - len(child.lstrip(" \t"))
+            if child_indent <= key_indent:
+                break
+            index += 1
+    return "".join(out)
 
 
 _ARMORED_BLOCK_BEGIN = re.compile(r"-----BEGIN ", re.IGNORECASE)
@@ -429,7 +486,7 @@ def _looks_like_numbered_network_authority(authority: str) -> bool:
             )
         )
     )
-    return valid_host and bool(re.fullmatch(r"[0-9]{1,5}", port))
+    return valid_host and bool(re.fullmatch(r"[0-9]{1,5}", port)) and int(port) <= 65_535
 
 
 def _looks_like_hostname(authority: str) -> bool:
@@ -476,10 +533,23 @@ def _scrub_url_userinfo(text: str) -> str:
             # An email-form username supplies an early @. If what follows it
             # cannot be a host (``corp.com:pa``), a later @ owns the authority
             # and everything before it is malformed userinfo.
-            if later_at > authority_at and not (
-                _looks_like_hostname(candidate_host) or _looks_like_numbered_network_authority(candidate_host)
-            ):
-                standard_userinfo = False
+            if later_at > authority_at:
+                crossed = token[first_delimiter:later_at]
+                query_shaped = "?" in crossed and "=" in crossed
+                early_userinfo = token[:authority_at]
+                candidate_is_host = _looks_like_hostname(candidate_host) or _looks_like_numbered_network_authority(
+                    candidate_host
+                )
+                # A later delimiter owns malformed userinfo when the early
+                # prefix already has a password, or a host:port-looking middle
+                # is followed by a fragment. Keep token-only userinfo to
+                # underscore/trailing-dot hosts masked through the early @.
+                if (":" in early_userinfo and not query_shaped) or (
+                    _looks_like_numbered_network_authority(candidate_host) and "#" in crossed
+                ):
+                    standard_userinfo = False
+                elif not candidate_is_host and ":" in candidate_host:
+                    standard_userinfo = False
         at = authority_at if standard_userinfo else token.rfind("@")
         if at < 0:
             search_from = match.end()
@@ -536,34 +606,66 @@ def _mask_unquoted_secret_assignment(match: re.Match) -> str:
     """
     prefix = match.group("prefix")
     value = match.group("value")
+    if re.match(r"[ \t]*[\"']?\*{3}", value):
+        # An earlier structured rule already masked this value. Do not parse
+        # the remaining diagnostic as part of its replacement.
+        return match.group(0)
     host_match = re.fullmatch(r"(?P<host>[^\s:=]+):", prefix)
-    port = value.partition("/")[0]
+    port = re.split(r"[\s/]", value.lstrip(), maxsplit=1)[0]
     context = match.string[: match.start()]
+    authority_prefix = re.search(r"(?:[A-Za-z][A-Za-z0-9+.-]*://|\bhost[ \t]+)(?P<labels>[^\s/:]*\.)*$", context, re.I)
+    full_host = (
+        f"{authority_prefix.group('labels') or ''}{host_match.group('host')}" if authority_prefix and host_match else ""
+    )
     if (
         host_match is not None
-        and (context.endswith("://") or re.search(r"\bhost[ \t]+$", context, re.IGNORECASE))
-        and _looks_like_numbered_network_authority(f"{host_match.group('host')}:{port}")
+        and authority_prefix is not None
+        and _looks_like_numbered_network_authority(f"{full_host}:{port}")
     ):
         # Only an actual URL/``host ...`` authority earns the exemption. An
         # ``=`` assignment with a numeric value is still a credential.
         return match.group(0)
-    sibling = re.search(r"[&;](?P<key>[\"']?[A-Za-z_][\w.-]*[\"']?)[:=]", value)
-    if sibling is not None:
-        sibling_key = sibling.group("key").strip("\"'").lower()
-        if sibling_key in {"request", "request_id", "request-id", "trace", "trace_id", "trace-id"}:
-            return f"{prefix}***{value[sibling.start() :]}"
-        # A generic short key can be a member inside the credential (for
-        # example ``password=X&k=Y``). A second secret key is sensitive by
-        # definition. Mask either ambiguous tail with the original value.
-        return f"{prefix}***"
+    siblings = list(
+        re.finditer(
+            r"(?P<sep>[&;]|,[ \t]*|[ \t]+)(?P<key>[\"']?[A-Za-z_][\w.-]*[\"']?)(?P<assign>[:=])",
+            value,
+        )
+    )
+    if siblings:
+        safe_keys = {
+            "request",
+            "request_id",
+            "request-id",
+            "x-request-id",
+            "trace",
+            "trace_id",
+            "trace-id",
+            "content-type",
+        }
+        rendered = [f"{prefix}***"]
+        for idx, sibling in enumerate(siblings):
+            key = sibling.group("key").strip("\"'")
+            end = siblings[idx + 1].start() if idx + 1 < len(siblings) else len(value)
+            secret_key = re.fullmatch(_SECRET_ASSIGNMENT_KEY_PATTERN, key, re.IGNORECASE) is not None
+            separator = sibling.group("sep")
+            quoted_mapping_key = separator.startswith(",") and sibling.group("key").startswith(("'", '"'))
+            if key.lower() in safe_keys or (not secret_key and (separator[0].isspace() or quoted_mapping_key)):
+                rendered.append(value[sibling.start() : end])
+            else:
+                rendered.append(f"{separator}{sibling.group('key')}{sibling.group('assign')}***")
+        return "".join(rendered)
     opening_wrapper = (
         match.string[match.start() - 1] if match.start() and match.string[match.start() - 1] in "\"'" else ""
     )
-    if opening_wrapper and value.endswith(opening_wrapper):
-        suffix = opening_wrapper
+    if opening_wrapper and (closing := value.find(opening_wrapper)) >= 0:
+        suffix = value[closing:]
     else:
-        structural = re.search(r"[\"']?[}\]),]+$", value)
-        suffix = value[structural.start() :] if structural is not None else ""
+        explanation = re.search(r"[ \t]+\([^\r\n()]*\)$", value)
+        if explanation is not None:
+            suffix = value[explanation.start() :]
+        else:
+            structural = re.search(r"[\"']?[}\]),]+$", value)
+            suffix = value[structural.start() :] if structural is not None else ""
     return f"{prefix}***{suffix}"
 
 
@@ -633,7 +735,7 @@ _SECRET_PATTERNS = (
         re.compile(
             rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}"
             rf"[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
-            r"(?!Bearer\s)(?![bBuUrR]{0,2}(?:\"\"\"|'''|[\"']))(?P<value>[^\s]+)",
+            r"(?!Bearer\s)(?![bBuUrR]{0,2}(?:\"\"\"|'''|[\"']))(?P<value>[^\r\n]+)",
             re.IGNORECASE,
         ),
         _mask_unquoted_secret_assignment,
@@ -716,11 +818,8 @@ def _internal_error_message(error: BaseException) -> str:
                 should_trim = True
             else:
                 boundary_visible = len(authority) < len(tail)
-                looks_like_host_port = _looks_like_numbered_network_authority(authority)
                 looks_like_bare_ipv6 = authority.startswith("[") and authority.endswith("]")
-                complete_network_authority = boundary_visible and (
-                    looks_like_host_port or _looks_like_hostname(authority)
-                )
+                complete_network_authority = boundary_visible and _looks_like_hostname(authority)
                 # With no visible path/query/fragment boundary, a dotted token
                 # or ``user:common-port`` cut before ``@host`` is
                 # indistinguishable from a complete hostname. Fail closed; an
@@ -730,6 +829,7 @@ def _internal_error_message(error: BaseException) -> str:
             should_trim = False
         if should_trim:
             text = text[: partial_userinfo.start()]
+    text = _scrub_yaml_secret_blocks(text)
     text = _scrub_secret_constructors(text)
     text = _scrub_secret_containers(text)
     text = _scrub_secret_quoted_values(text)
