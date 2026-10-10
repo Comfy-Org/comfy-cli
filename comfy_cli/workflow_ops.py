@@ -2986,8 +2986,17 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
                 # counter) — the widget may undercount until the next
                 # explicit set_widget or connect on this node corrects it.
                 _apply_inputcount_bump(workflow, dst, op, graph, inputcount["widget"], inputcount["value"])
-        if not dynamic_wins:
-            return
+        if not grow.get("promoted"):
+            if dynamic_wins:
+                _pop_pending_dynamic_connect(workflow, identity_op)
+            else:
+                pending = _pop_pending_dynamic_connect(workflow, identity_op)
+                if pending is None:
+                    return
+                # The reconnect already won this grow-id register before the
+                # creating connect materialized its slot. Finish that deferred
+                # write now that the destination identity exists.
+                op = pending
     else:
         ins = dst.get("inputs")
         grow_id = op.get("grow_id")
@@ -2998,6 +3007,31 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
             )
         else:
             to_idx = op["to_slot"]
+        if grow_id is not None and isinstance(ins, list) and to_idx is None:
+            # A reconnect may arrive before the connect that creates its grown
+            # input. Claim the identity register now and retain the winning
+            # write until that creator materializes the slot. Recording only
+            # op_id here would otherwise make the reconnect unreplayable.
+            if not _lww_gate(workflow, op):
+                return
+            _lww_commit(workflow, op)
+            src = _find_by_str(workflow, op["from_node"])
+            outs = (src or {}).get("outputs")
+            from_slot = op["from_slot"]
+            if (
+                src is not None
+                and isinstance(outs, list)
+                and isinstance(from_slot, int)
+                and not isinstance(from_slot, bool)
+                and 0 <= from_slot < len(outs)
+                and isinstance(outs[from_slot], dict)
+            ):
+                workflow.setdefault("_pending_dynamic_connects", {})[json.dumps(_write_target(op), default=str)] = (
+                    copy.deepcopy(op)
+                )
+            else:
+                _pop_pending_dynamic_connect(workflow, op)
+            return
         # Slot drift: a replay against a document whose destination SLOT no
         # longer exists (or never did — a node minted from a different catalog
         # generation) must be as total as a vanished node. There is no register
@@ -3031,6 +3065,7 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
         # survives would depend on whether the concurrent delete of THIS op's
         # source had arrived yet.
         _lww_commit(workflow, op)
+        _pop_pending_dynamic_connect(workflow, op)
         prev = dst["inputs"][to_idx].get("link")
         if prev is not None and prev != op["link_id"]:
             _remove_link(workflow, prev)
@@ -3071,6 +3106,17 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
         out_links.append(op["link_id"])
 
 
+def _pop_pending_dynamic_connect(workflow: dict, identity_op: dict) -> dict | None:
+    """Remove and return a deferred grown-input reconnect for one register."""
+    pending = workflow.get("_pending_dynamic_connects")
+    if not isinstance(pending, dict):
+        return None
+    result = pending.pop(json.dumps(_write_target(identity_op), default=str), None)
+    if not pending:
+        workflow.pop("_pending_dynamic_connects", None)
+    return result
+
+
 def _remove_link(workflow: dict, link_id: Any) -> None:
     """Drop a link tuple and scrub every input/output reference to it."""
     workflow["links"] = [ln for ln in workflow.get("links") or [] if ln[0] != link_id]
@@ -3098,6 +3144,7 @@ def _apply_disconnect(workflow: dict, op: dict) -> None:
         if not _lww_gate(workflow, op):
             return
         _lww_commit(workflow, op)
+        _pop_pending_dynamic_connect(workflow, op)
         if not isinstance(ins, list):
             return
         if grow_id is not None:
@@ -3345,6 +3392,7 @@ def canonical(workflow: dict) -> dict:
     w = copy.deepcopy(workflow)
     w.pop("_applied_ops", None)
     w.pop("_widget_stamps", None)
+    w.pop("_pending_dynamic_connects", None)
     nodes = w.get("nodes")
     # Capture each node's original index -> slot identity BEFORE reordering
     # inputs, so links (which reference the raw index) can be rewritten.
