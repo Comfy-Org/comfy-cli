@@ -336,6 +336,205 @@ def test_matching_explicit_form_remains_valid_after_standalone_resize():
     }
 
 
+def test_named_group_ignores_rows_beyond_saved_count():
+    case = FIXTURE["cases"]["populated"]
+    workflow = copy.deepcopy(case["workflow"])
+    node = workflow["nodes"][0]
+    node["widgets_values"] = {**node["widgets_values_named"], "loras": 1}
+    expected = {key: value for key, value in case["expected_inputs"].items() if not key.startswith("loras.1.")}
+
+    assert workflow_to_api.convert_ui_to_api(workflow, FIXTURE["object_info"])["1"]["inputs"] == expected
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    edited, _ = workflow_ops.set_widget(workflow, graph, 1, "loras.0.strength", 0.9)
+    assert workflow_to_api.convert_ui_to_api(edited, FIXTURE["object_info"])["1"]["inputs"] == {
+        **expected,
+        "loras.0.strength": 0.9,
+    }
+
+
+def test_named_group_optional_fields_do_not_occupy_required_map_keys():
+    case = FIXTURE["cases"]["populated"]
+    workflow = copy.deepcopy(case["workflow"])
+    node = workflow["nodes"][0]
+    node["widgets_values"] = {
+        key: value for key, value in node["widgets_values_named"].items() if not key.endswith(".enabled")
+    }
+    expected = {key: value for key, value in case["expected_inputs"].items() if not key.endswith(".enabled")}
+
+    assert workflow_to_api.convert_ui_to_api(workflow, FIXTURE["object_info"])["1"]["inputs"] == expected
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+    slots = graph.get_template_schema("example", workflow)["slots"]
+    values = {slot["address"]: slot["current_value"] for slot in slots}
+    assert values["1.loras.1.strength"] == 0.5
+    assert values["1.after"] == "tail"
+
+
+def test_empty_named_group_has_no_prompt_inputs():
+    info = copy.deepcopy(FIXTURE["object_info"])
+    info["DevToolsNodeWithDynamicGroup"]["input"]["required"] = {
+        "loras": info["DevToolsNodeWithDynamicGroup"]["input"]["required"]["loras"]
+    }
+    workflow = copy.deepcopy(FIXTURE["cases"]["empty"]["workflow"])
+    workflow["nodes"][0]["widgets_values"] = {}
+
+    assert workflow_to_api.convert_ui_to_api(workflow, info)["1"]["inputs"] == {}
+    slots = Graph.from_object_info(info).get_template_schema("example", workflow)["slots"]
+    assert {slot["address"]: slot["current_value"] for slot in slots} == {"1.loras": 0}
+
+
+def test_controllerless_positional_group_is_refused():
+    workflow = copy.deepcopy(FIXTURE["cases"]["empty"]["workflow"])
+    workflow["nodes"][0]["widgets_values"] = []
+
+    with pytest.raises(workflow_to_api.WorkflowConversionError, match="DynamicGroup"):
+        workflow_to_api.convert_ui_to_api(workflow, FIXTURE["object_info"])
+
+
+@pytest.mark.parametrize("count", [1, 1_000_000])
+def test_named_group_controller_requires_represented_rows(count):
+    workflow = copy.deepcopy(FIXTURE["cases"]["empty"]["workflow"])
+    workflow["nodes"][0]["widgets_values"] = {
+        "before": "head",
+        "loras": count,
+        "after": "tail",
+        "unrelated_1": "extra",
+        "unrelated_2": "extra",
+    }
+
+    with pytest.raises(workflow_to_api.WorkflowConversionError, match="DynamicGroup"):
+        workflow_to_api.convert_ui_to_api(workflow, FIXTURE["object_info"])
+
+
+@pytest.mark.parametrize("successor", ["same_row", "next_row", "trailing"])
+def test_row_seed_keeps_successor_control_keyword(successor):
+    info = copy.deepcopy(FIXTURE["object_info"])
+    group = info["DevToolsNodeWithDynamicGroup"]["input"]["required"]["loras"][1]
+    seed = ["INT", {"default": 5}]
+    mode = [["fixed", "randomize"], {}]
+    if successor == "same_row":
+        fields = {"variation_seed": seed, "mode": mode}
+        values = ["head", 1, 5, "fixed", "tail"]
+        expected = {"before": "head", "loras.0.variation_seed": 5, "loras.0.mode": "fixed", "after": "tail"}
+    elif successor == "next_row":
+        fields = {"mode": mode, "variation_seed": seed}
+        values = ["head", 2, "fixed", 5, "randomize", 6, "tail"]
+        expected = {
+            "before": "head",
+            "loras.0.mode": "fixed",
+            "loras.0.variation_seed": 5,
+            "loras.1.mode": "randomize",
+            "loras.1.variation_seed": 6,
+            "after": "tail",
+        }
+    else:
+        fields = {"variation_seed": seed}
+        values = ["head", 1, 5, "fixed"]
+        expected = {"before": "head", "loras.0.variation_seed": 5, "after": "fixed"}
+    group["template"] = {"required": fields}
+    workflow = copy.deepcopy(FIXTURE["cases"]["empty"]["workflow"])
+    workflow["nodes"][0]["widgets_values"] = values
+
+    assert workflow_to_api.convert_ui_to_api(workflow, info)["1"]["inputs"] == expected
+
+
+@pytest.mark.parametrize("explicit_form", [False, True])
+def test_combo_edit_keeps_group_form_and_named_values_in_sync(explicit_form):
+    case = FIXTURE["cases"]["composite"]
+    workflow = copy.deepcopy(case["workflow"])
+    node = workflow["nodes"][0]
+    if explicit_form:
+        node["widgets_values_form"] = {"order": case["widget_order"].copy()}
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+
+    edited, _ = workflow_ops.set_widget(workflow, graph, 1, "mode", "basic")
+
+    node = edited["nodes"][0]
+    expected_named = {
+        key: value for key, value in case["workflow"]["nodes"][0]["widgets_values_named"].items() if key != "mode.steps"
+    }
+    expected_named["mode"] = "basic"
+    assert node["widgets_values_named"] == expected_named
+    if explicit_form:
+        assert node["widgets_values_form"] == {"order": [name for name in case["widget_order"] if name != "mode.steps"]}
+    expected = {key: value for key, value in case["expected_inputs"].items() if key != "mode.steps"}
+    expected["mode"] = "basic"
+    assert workflow_to_api.convert_ui_to_api(edited, FIXTURE["object_info"])["1"]["inputs"] == expected
+    slots = graph.get_template_schema("example", edited)["slots"]
+    assert {slot["address"]: slot["current_value"] for slot in slots}["1.after"] == "tail"
+
+    edited, _ = workflow_ops.set_widget(edited, graph, 1, "weights.0.weight", 0.9, base_version=1)
+    restored, _ = workflow_ops.set_widget(edited, graph, 1, "mode", "advanced", base_version=2)
+    assert workflow_to_api.convert_ui_to_api(restored, FIXTURE["object_info"])["1"]["inputs"] == {
+        **case["expected_inputs"],
+        "mode.steps": 4,
+        "weights.0.weight": 0.9,
+    }
+    assert restored["nodes"][0]["widgets_values_named"]["mode.steps"] == 4
+    if explicit_form:
+        assert restored["nodes"][0]["widgets_values_form"] == {"order": case["widget_order"]}
+
+
+@pytest.mark.parametrize("linked_position", ["after", "named_after", "before", "unlinked"])
+def test_group_shrink_preserves_surviving_linked_input_indices(linked_position):
+    workflow = copy.deepcopy(FIXTURE["cases"]["populated"]["workflow"])
+    node = workflow["nodes"][0]
+    if linked_position == "named_after":
+        node["widgets_values"] = node["widgets_values_named"].copy()
+    extra = {
+        "name": "before" if linked_position == "before" else "after",
+        "type": "STRING",
+        "widget": {"name": "before" if linked_position == "before" else "after"},
+        "link": None if linked_position == "unlinked" else 10,
+    }
+    if linked_position == "before":
+        node["inputs"].insert(0, extra)
+    else:
+        node["inputs"].append(extra)
+    if extra["link"] is not None:
+        workflow["links"] = [[10, 2, 0, 1, node["inputs"].index(extra), "STRING"]]
+    original = copy.deepcopy(workflow)
+    graph = Graph.from_object_info(FIXTURE["object_info"])
+
+    if linked_position in ("after", "named_after"):
+        with pytest.raises(ValueError, match="disconnect"):
+            workflow_ops.set_widget(workflow, graph, 1, "loras", 1)
+        assert workflow["nodes"] == original["nodes"]
+        assert workflow["links"] == original["links"]
+    else:
+        shrunk, _ = workflow_ops.set_widget(workflow, graph, 1, "loras", 1)
+        assert [slot["name"] for slot in shrunk["nodes"][0]["inputs"]] == [
+            slot["name"] for slot in original["nodes"][0]["inputs"] if not slot["name"].startswith("loras.1.")
+        ]
+        assert shrunk["links"] == original["links"]
+        assert shrunk["nodes"][0]["widgets_values"][-1] == "tail"
+
+
+@pytest.mark.parametrize(
+    "field_spec",
+    [
+        ["IMAGE", {}],
+        ["COMBO", {"options": ["A"], "forceInput": True}],
+        ["COMFY_DYNAMICCOMBO_V3", {"options": [{"key": "basic", "inputs": {"required": {}}}]}],
+        ["COMFY_AUTOGROW_V3", {"template": {"input": {"required": {"image": ["IMAGE", {}]}}}}],
+        ["COMFY_DYNAMICGROUP_V3", {"template": {"required": {"value": ["INT", {}]}}}],
+    ],
+    ids=["socket", "forced_widget", "combo", "autogrow", "group"],
+)
+@pytest.mark.parametrize("operation", ["catalog", "conversion"])
+def test_group_rejects_unsupported_template_fields(field_spec, operation):
+    info = copy.deepcopy(FIXTURE["object_info"])
+    info["DevToolsNodeWithDynamicGroup"]["input"]["required"]["loras"][1]["template"] = {
+        "required": {"value": field_spec}
+    }
+    error_type = workflow_to_api.WorkflowConversionError if operation == "conversion" else ValueError
+
+    with pytest.raises(error_type, match="template"):
+        if operation == "catalog":
+            build_catalog(Graph.from_object_info(info))
+        else:
+            workflow_to_api.convert_ui_to_api(FIXTURE["cases"]["empty"]["workflow"], info)
+
+
 @pytest.mark.parametrize(
     ("inputs", "minimum", "error_field"),
     [

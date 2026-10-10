@@ -1301,8 +1301,11 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
                 fields = [(n, s) for section in ("required", "optional") for n, s in template.get(section, {}).items()]
                 count = _dynamic_group_row_count(value, len(widget_values) - vidx, len(fields))
                 for row in range(count):
-                    for field, field_spec in fields:
-                        consume(f"{name}.{row}.{field}", field_spec, depth + 1)
+                    for j, (field, field_spec) in enumerate(fields):
+                        field_next = next_widget_spec(fields, j + 1)
+                        if field_next is None:
+                            field_next = next_widget_spec(fields, 0) if row + 1 < count else next_spec
+                        consume(f"{name}.{row}.{field}", field_spec, depth + 1, field_next)
                 return
             pairs.append((name, value))
             if is_dynamic:
@@ -1615,18 +1618,28 @@ def _collect_widget_inputs(
 
     out: dict[str, Any] = {}
     schema = _schema_for(node_type, node, object_info)
+    input_specs = [
+        spec
+        for section in ("required", "optional")
+        for section_def in [_schema_input_def(schema).get(section)]
+        if isinstance(section_def, dict)
+        for spec in section_def.values()
+    ]
     group_ui_names: set[str] = set()
+    group_prefixes: tuple[str, ...] = ()
+    group_entry_names: set[str] = set()
     if schema and any(
         isinstance(spec, (list, tuple))
         and spec
         and isinstance(spec[0], str)
         and spec[0].startswith("COMFY_DYNAMICGROUP")
-        for section in ("required", "optional")
-        for spec in _schema_input_def(schema).get(section, {}).values()
+        for spec in input_specs
     ):
         morphism = _parse_morphism(node_type, schema)
         entries = _validate_dynamic_group_layout(node, morphism) or []
         fields = {p.name: {f.name for f in _dynamic_group_fields(p)} for p in morphism.inputs if p.is_dynamic_group}
+        group_prefixes = tuple(f"{name}." for name in fields)
+        group_entry_names = {entry.name for entry in entries if entry.owner in fields}
         group_ui_names.update(fields)
         group_ui_names.update(
             e.name
@@ -1637,6 +1650,8 @@ def _collect_widget_inputs(
         # Already self-describing; drop UI-only keys and respect link overrides.
         for key, value in widget_values.items():
             if key in group_ui_names:
+                continue
+            if group_prefixes and key.startswith(group_prefixes) and key not in group_entry_names:
                 continue
             spec = _declared_input_spec(_schema_input_def(schema), key)
             if spec and spec[0] == "COMFY_DYNAMICGROUP_V3":
@@ -1662,15 +1677,7 @@ def _collect_widget_inputs(
     # (e.g. ``COMFY_AUTOGROW_V3`` images) so they never consume a value slot.
     schema = _schema_for(node_type, node, object_info)
     pairs = _schema_widget_pairs(schema, widget_values) if schema else []
-    schema_widgets = (
-        any(
-            _is_widget_input(spec)[0]
-            for section in ("required", "optional")
-            for spec in _schema_input_def(schema).get(section, {}).values()
-        )
-        if schema
-        else False
-    )
+    schema_widgets = any(_is_widget_input(spec)[0] for spec in input_specs) if schema else False
     if pairs or schema_widgets:
         for name, value in pairs:
             if not name or name in link_inputs:
