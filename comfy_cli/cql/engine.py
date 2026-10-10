@@ -4399,7 +4399,9 @@ def _write_widget(node: dict, input_name: str, value: Any, graph: Graph, *, exte
             if missing is None:
                 break
             selector_idx, selector = missing
-            widgets.extend([None] * (selector_idx - len(widgets)))
+            for gap_idx in range(len(widgets), selector_idx):
+                gap_port = entries_now[gap_idx].port if gap_idx < len(entries_now) else None
+                widgets.append(_widget_default(gap_port) if gap_port is not None else None)
             selector_default = _widget_default(selector)
             widgets.append(selector_default)
             default_values, _default_names = _dynamic_combo_default_values(

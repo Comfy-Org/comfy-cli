@@ -377,6 +377,7 @@ _YAML_SECRET_LINE = re.compile(
     r"(?P<space>[^\S\r\n]*)(?P<value>[^\r\n]*)$",
     re.IGNORECASE,
 )
+_YAML_MAPPING_LINE = re.compile(r"[A-Za-z_][\w .-]{0,63}[ \t]*:(?=[ \t]|$)")
 
 
 def _scrub_yaml_secret_blocks(text: str) -> str:
@@ -400,18 +401,31 @@ def _scrub_yaml_secret_blocks(text: str) -> str:
             continue
         value = match.group("value").strip()
         key_indent = len(content) - len(content.lstrip(" \t"))
-        block_scalar = bool(re.fullmatch(r"[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:[ \t]+#.*)?", value))
+        block_scalar = bool(
+            re.fullmatch(
+                r"(?:(?:![^\s]+|&[^\s]+)[ \t]+)*[|>](?:[1-9][+-]?|[+-][1-9]?)?(?:[ \t]+#.*)?",
+                value,
+            )
+        )
         next_is_sequence = False
-        next_is_scalar = False
+        next_is_continuation = False
         probe = index + 1
         while probe < len(lines) and not lines[probe].rstrip("\r\n").strip():
             probe += 1
-        if (not value or value.startswith("#")) and probe < len(lines):
+        if probe < len(lines):
             next_content = lines[probe].rstrip("\r\n")
             next_indent = len(next_content) - len(next_content.lstrip(" \t"))
-            next_is_sequence = next_indent >= key_indent and next_content.lstrip(" \t").startswith("- ")
-            next_is_scalar = value.startswith("#") and next_indent > key_indent
-        if not block_scalar and not next_is_sequence and not next_is_scalar:
+            stripped_next = next_content.lstrip(" \t")
+            next_is_sequence = (
+                (not value or value.startswith("#")) and next_indent >= key_indent and stripped_next.startswith("- ")
+            )
+            next_is_continuation = (
+                next_indent > key_indent
+                and not stripped_next.startswith("(")
+                and not stripped_next.startswith(("'", '"'))
+                and _YAML_MAPPING_LINE.fullmatch(stripped_next) is None
+            )
+        if not block_scalar and not next_is_sequence and not next_is_continuation:
             out.append(line)
             index += 1
             continue
@@ -423,11 +437,16 @@ def _scrub_yaml_secret_blocks(text: str) -> str:
                 index += 1
                 continue
             child_indent = len(child) - len(child.lstrip(" \t"))
-            child_is_sequence = child.lstrip(" \t").startswith("- ")
+            stripped_child = child.lstrip(" \t")
+            child_is_sequence = stripped_child.startswith("- ")
             if next_is_sequence:
                 if child_indent < key_indent or (child_indent == key_indent and not child_is_sequence):
                     break
             elif child_indent <= key_indent:
+                break
+            elif not block_scalar and (
+                stripped_child.startswith("(") or _YAML_MAPPING_LINE.fullmatch(stripped_child) is not None
+            ):
                 break
             index += 1
     return "".join(out)
@@ -558,10 +577,17 @@ def _render_assignment_siblings(prefix: str, value: str, *, mask_leading: bool) 
         separator = sibling.group("sep")
         quoted_mapping_key = separator.startswith(",") and sibling.group("key").startswith(("'", '"'))
         if key.lower() in safe_keys or (not secret_key and (separator[0].isspace() or quoted_mapping_key)):
-            rendered.append(value[sibling.start() : end])
+            rendered.append(_scrub_secret_tail(value[sibling.start() : end]))
         else:
             rendered.append(f"{separator}{sibling.group('key')}{sibling.group('assign')}***")
     return "".join(rendered)
+
+
+def _scrub_secret_tail(text: str) -> str:
+    """Re-run scalar rules over a suffix preserved by a broader match."""
+    for pattern, replacement in _SECRET_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
 
 
 def _scrub_url_userinfo(text: str) -> str:
@@ -668,7 +694,7 @@ def _mask_unquoted_secret_assignment(match: re.Match) -> str:
     prefix = match.group("prefix")
     value = match.group("value")
     host_match = re.fullmatch(r"(?P<host>[^\s:=]+):", prefix)
-    port = re.split(r"[\s/]", value.lstrip(), maxsplit=1)[0]
+    port = re.split(r"[\s/?#]", value.lstrip(), maxsplit=1)[0]
     context = match.string[: match.start()]
     authority_labels = _authority_labels_before(context) if host_match is not None else None
     full_host = f"{authority_labels}{host_match.group('host')}" if authority_labels is not None and host_match else ""
@@ -679,8 +705,11 @@ def _mask_unquoted_secret_assignment(match: re.Match) -> str:
     ):
         # Only an actual URL/``host ...`` authority earns the exemption. An
         # ``=`` assignment with a numeric value is still a credential. Preserve
-        # this authority, but continue masking later assignments on the line.
-        return _render_assignment_siblings(prefix, value, mask_leading=False) or match.group(0)
+        # only the authority/path token, then rescan its query, fragment, and
+        # following diagnostics for credentials.
+        boundaries = [idx for idx, char in enumerate(value) if char.isspace() or char in "?#"]
+        safe_end = min(boundaries) if boundaries else len(value)
+        return f"{prefix}{value[:safe_end]}{_scrub_secret_tail(value[safe_end:])}"
     already_masked = re.match(r"[ \t]*[\"']?\*{3}", value) is not None
     rendered_siblings = _render_assignment_siblings(prefix, value, mask_leading=not already_masked)
     if rendered_siblings is not None:
@@ -730,7 +759,7 @@ _SECRET_PATTERNS = (
         re.compile(
             r"((?:proxy-)?authorization[\"']?\s*[:=]\s*)"
             r"(?:([\"'])(?:\\.|(?!\2)[^\r\n\\])*\2?|[^\r\n]+"
-            r"(?:\r?\n(?![ \t]+[A-Za-z][A-Za-z0-9 _-]{0,63}[ \t]*:)[ \t]+[^\r\n]*)*)",
+            r"(?:(?:\r\n|\r|\n)(?![ \t]+[A-Za-z][A-Za-z0-9 _-]{0,63}[ \t]*:)[ \t]+[^\r\n]*)*)",
             re.IGNORECASE,
         ),
         lambda m: f"{m[1]}{m[2]}***{m[2]}" if m[2] else f"{m[1]}***",
@@ -754,7 +783,7 @@ _SECRET_PATTERNS = (
         re.compile(
             rf"({_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
             r"(?:[\[({]|[A-Za-z_][\w.]*\()[^\r\n]*"
-            r"(?:\r?\n(?![ \t]+[A-Za-z][A-Za-z0-9 _-]{0,63}[ \t]*:)[ \t]+[^\r\n]*)*",
+            r"(?:(?:\r\n|\r|\n)(?![ \t]+[A-Za-z][A-Za-z0-9 _-]{0,63}[ \t]*:)[ \t]+[^\r\n]*)*",
             re.IGNORECASE,
         ),
         r"\1***",
@@ -817,7 +846,7 @@ _SECRET_PATTERNS = (
     (
         re.compile(
             r"((?:set-)?cookie\s*[:=]\s*)[^\r\n]*"
-            r"(?:\r?\n(?![ \t]+[A-Za-z][A-Za-z0-9 _-]{0,63}[ \t]*:)[ \t]+[^\r\n]*)*",
+            r"(?:(?:\r\n|\r|\n)(?![ \t]+[A-Za-z][A-Za-z0-9 _-]{0,63}[ \t]*:)[ \t]+[^\r\n]*)*",
             re.IGNORECASE,
         ),
         r"\1***",
