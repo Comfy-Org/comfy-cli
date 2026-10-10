@@ -695,11 +695,19 @@ def test_group_inside_dynamic_combo_is_explicitly_unsupported_by_cli(operation):
 
 
 @pytest.mark.parametrize("template", ["invalid", {"required": ["invalid"]}])
-def test_malformed_group_template_returns_validation_error(template):
+@pytest.mark.parametrize("row_value", [0.5, ["2", 0]])
+def test_malformed_group_template_returns_validation_error(template, row_value):
     info = copy.deepcopy(FIXTURE["object_info"])
     info["DevToolsNodeWithDynamicGroup"]["output_node"] = True
     info["DevToolsNodeWithDynamicGroup"]["input"]["required"]["loras"][1]["template"] = template
-    prompt = {"1": {"class_type": "DevToolsNodeWithDynamicGroup", "inputs": {"before": "head", "after": "tail"}}}
+    info["ScalarSource"] = {"input": {"required": {}}, "output": ["FLOAT"]}
+    prompt = {
+        "1": {
+            "class_type": "DevToolsNodeWithDynamicGroup",
+            "inputs": {"before": "head", "after": "tail", "loras.0.strength": row_value},
+        },
+        "2": {"class_type": "ScalarSource", "inputs": {}},
+    }
     result = Graph.from_object_info(info).validate_workflow(prompt)
     assert not result["valid"]
     assert any(error["code"] == "invalid_dynamic_group_schema" for error in result["errors"])

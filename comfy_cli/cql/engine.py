@@ -3828,7 +3828,11 @@ def _resolve_dotted_under(port: Port, dotted: str, node_inputs: dict, depth: int
         suffix = dotted[len(port.name) + 1 :]
         index, sep, field = suffix.partition(".")
         if sep and index.isascii() and index.isdecimal() and (len(index) == 1 or not index.startswith("0")):
-            return next((p for p in _dynamic_group_fields(port, f"{port.name}.{index}") if p.name == dotted), None)
+            try:
+                fields = _dynamic_group_fields(port, f"{port.name}.{index}")
+            except DynamicGroupBindingError:
+                return None
+            return next((p for p in fields if p.name == dotted), None)
         return None
     if port.is_autogrow:
         element = port.autogrow_element_type
