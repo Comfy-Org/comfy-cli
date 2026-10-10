@@ -596,9 +596,26 @@ def test_internal_error_scrubber_handles_authority_at_and_multiple_urls(message,
 
 
 @pytest.mark.parametrize(
+    ("message", "secrets"),
+    [
+        ("refresh_token=rt-LIVE&client_secret=cs-LIVE request=req-1", ("rt-LIVE", "cs-LIVE")),
+        ("#access_token=A&id_token=B request=req-1", ("access_token=A", "id_token=B")),
+        ("auth=alice:pw1,bob:pw2 request=req-1", ("pw1", "pw2")),
+        ("API_KEYS=prod=sk-A,dev=sk-B request=req-1", ("sk-A", "sk-B")),
+        ("password=Xy7&k=9mQ request=req-1", ("Xy7", "9mQ")),
+    ],
+)
+def test_internal_error_scrubber_masks_every_value_in_compound_credentials(message, secrets):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert not any(secret in scrubbed for secret in secrets)
+    assert "request=req-1" in scrubbed
+
+
+@pytest.mark.parametrize(
     "message",
     [
         "https://accounts.example.com:443/cb?login_hint=bob@corp.com&code=SECRET",
+        "http://keycloak:8080/cb?login_hint=bob@corp.com&code=SECRET",
         "http://127.0.0.1:8188/view?filename=img@2x.png",
         "amqp://host:5672?opt=user@example.com",
     ],
@@ -608,6 +625,21 @@ def test_internal_error_scrubber_keeps_ported_authorities_when_query_contains_at
     authority = message.split("?", 1)[0]
     assert authority in scrubbed
     assert "?***" in scrubbed
+
+
+@pytest.mark.parametrize(
+    ("message", "secret"),
+    [
+        ("postgres://me@corp.com:pa#ss@db/x", "pa#ss"),
+        ("smtp://me@gmail.com:pa/ss@smtp.gmail.com:587", "pa/ss"),
+        ("https://alice:pa/ss@host/cb?login=bob@corp.com&code=SECRET", "SECRET"),
+    ],
+)
+def test_internal_error_scrubber_masks_malformed_userinfo_and_its_query_tail(message, secret):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert secret not in scrubbed
+    assert "me@corp.com:pa" not in scrubbed
+    assert "me@gmail.com:pa" not in scrubbed
 
 
 def test_internal_error_scrubber_masks_apostrophe_inside_query_secret():
@@ -742,12 +774,26 @@ def test_internal_error_scrubber_preserves_non_secret_key_like_diagnostics(key):
     "message",
     [
         "https://auth.example.com:8443/callback",
+        "https://auth.com:443/callback",
         "Cannot connect to host oauth.example.com:443 ssl:default",
+        "Cannot connect to host oauth.internal:8443 ssl:default",
         "Cannot connect to host login.auth.example.com:443 ssl:default",
     ],
 )
 def test_internal_error_scrubber_preserves_secret_named_dotted_host_ports(message):
     assert message in _internal_error_message(RuntimeError(message))
+
+
+@pytest.mark.parametrize(
+    ("message", "secret"),
+    [
+        ("spring.datasource.password=12345", "12345"),
+        ("api.key.prod=4821", "4821"),
+        ("jwt.signing.secret=7/AbCdEf", "7/AbCdEf"),
+    ],
+)
+def test_internal_error_scrubber_does_not_treat_numeric_assignments_as_host_ports(message, secret):
+    assert secret not in _internal_error_message(RuntimeError(message))
 
 
 @pytest.mark.parametrize(
@@ -769,6 +815,30 @@ def test_internal_error_scrubber_masks_a_quoted_secret_value_on_the_next_line():
     scrubbed = _internal_error_message(RuntimeError('{"password":\n  "LIVE-CREDENTIAL"} request=req-1'))
     assert "LIVE-CREDENTIAL" not in scrubbed
     assert "request=req-1" in scrubbed
+
+
+@pytest.mark.parametrize(
+    ("message", "secrets"),
+    [
+        ("password:\n  hunter2\nrequest: req-1", ("hunter2",)),
+        ("api_keys:\n  - sk-A\nrequest: req-1", ("sk-A",)),
+        ("api_keys:\n  [sk-A, sk-B]\nrequest: req-1", ("sk-A", "sk-B")),
+    ],
+)
+def test_internal_error_scrubber_masks_unquoted_yaml_values_on_the_next_line(message, secrets):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert not any(secret in scrubbed for secret in secrets)
+    assert "request: req-1" in scrubbed
+
+
+def test_internal_error_scrubber_checks_the_last_url_when_input_is_truncated():
+    tail = " --extra-index-url https://pypi.org/simple,https://alice:LIVE-PASSWORD"
+    prefix = "Bearer " + "A" * (_INTERNAL_ERROR_SCRUB_INPUT_CAP - len("RuntimeError: ") - len("Bearer ") - len(tail))
+
+    scrubbed = _internal_error_message(RuntimeError(prefix + tail + " overflow"))
+
+    assert "LIVE-PASSWORD" not in scrubbed
+    assert "https://pypi.org/simple" in scrubbed
 
 
 def test_armored_scrubber_keeps_unicode_offsets_and_masks_the_next_block():

@@ -3695,11 +3695,21 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
             name_first.setdefault(name, sg)
     ids_only = dict(by_id)
     definitions = [definition for definition in defs if isinstance(definition, dict)]
-    candidates = {name: name_first[name] for name, count in name_counts.items() if count == 1 and name not in by_id}
+    used_types: set[str] = set()
+    node_blocks = [workflow.get("nodes"), *(definition.get("nodes") for definition in definitions)]
+    for raw_nodes in node_blocks:
+        for node in raw_nodes if isinstance(raw_nodes, list) else []:
+            if isinstance(node, dict) and isinstance(node.get("type"), str):
+                used_types.add(node["type"])
+    candidates = {
+        name: name_first[name]
+        for name, count in name_counts.items()
+        if count == 1 and name not in by_id and name in used_types
+    }
     conflicts = _definition_alias_conflicts(definitions, ids_only, candidates)
-    for name, count in name_counts.items():
-        if count == 1 and name not in by_id and name not in conflicts:
-            by_id[name] = name_first[name]
+    for name, definition in candidates.items():
+        if name not in conflicts:
+            by_id[name] = definition
     return by_id
 
 

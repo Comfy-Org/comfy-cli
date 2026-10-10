@@ -57,6 +57,18 @@ def test_subgraph_alias_bit_matrix_fails_closed_above_cap(monkeypatch):
     assert set(resolved) == {"id-0", "id-1", "id-2"}
 
 
+def test_subgraph_alias_bit_matrix_ignores_unused_definition_names(monkeypatch):
+    definitions = [{"id": f"id-{index}", "name": f"Alias{index}", "nodes": []} for index in range(3)]
+    workflow = {"nodes": [{"id": 1, "type": "Alias0"}], "definitions": {"subgraphs": definitions}}
+    monkeypatch.setattr(cql_engine, "_MAX_DEFINITION_ALIAS_MASK_BITS", 4)
+
+    resolved = _subgraph_defs_by_id(workflow)
+
+    assert resolved["Alias0"] is definitions[0]
+    assert "Alias1" not in resolved
+    assert "Alias2" not in resolved
+
+
 def _object_info() -> dict[str, Any]:
     """Covers: link inputs, widget inputs, COMBO/ENUM, control_after_generate,
     force_input, output_node, api_node, multiple output types."""
