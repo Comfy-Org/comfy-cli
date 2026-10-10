@@ -1148,6 +1148,38 @@ def test_internal_error_scrubber_masks_folded_authorization_header():
     assert "request=req-1" in scrubbed
 
 
+def test_internal_error_scrubber_masks_quoted_folded_authorization_header():
+    scrubbed = _internal_error_message(RuntimeError('Authorization: "Digest realm=x\r\n response=LIVE"'))
+    assert "LIVE" not in scrubbed
+
+
+def test_internal_error_scrubber_masks_multiline_escaped_json_value():
+    scrubbed = _internal_error_message(RuntimeError('body={\\"password\\": \\"first\r  SECOND-SECRET\\"}'))
+    assert "SECOND-SECRET" not in scrubbed
+
+
+def test_internal_error_scrubber_masks_outer_numeric_userinfo_before_nested_url():
+    message = "https://alice:2024/x@proxy/fetch/https://u:p@internal/y"
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "alice" not in scrubbed
+    assert "2024" not in scrubbed
+    assert "proxy/fetch" in scrubbed
+
+
+@pytest.mark.parametrize("message", ["password=Pa(ss);word123 request=req-1", "api_key=[a],TAIL user=x"])
+def test_internal_error_scrubber_does_not_trust_punctuation_after_a_masked_wrapper(message):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "word123" not in scrubbed
+    assert "TAIL" not in scrubbed
+
+
+def test_internal_error_scrubber_does_not_treat_exception_type_as_a_secret_key():
+    class MissingApiKey(RuntimeError):
+        pass
+
+    assert _internal_error_message(MissingApiKey("config not loaded")) == "MissingApiKey: config not loaded"
+
+
 def test_internal_error_scrubber_handles_long_non_secret_camel_names_without_backtracking():
     name = "ComfyApiNodeExecutionContextManager" + "ProfileSettings" * 40
     scrubbed = _internal_error_message(RuntimeError(f"{name} has no attribute x"))

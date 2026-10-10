@@ -210,6 +210,25 @@ def test_ls_nodes_does_not_treat_a_real_class_as_a_self_named_subgraph(patched_g
     assert "subgraph" not in ksampler, ksampler
 
 
+def test_ls_nodes_uses_the_editor_alias_conflict_resolution(patched_graph, tmp_path, capsys):
+    wf = _base_workflow()
+    wf["nodes"].append({"id": 20, "type": "Outer", "inputs": [], "outputs": []})
+    wf["definitions"] = {
+        "subgraphs": [
+            {"id": "outer-id", "name": "Outer", "nodes": [{"id": 1, "type": "KSampler"}]},
+            {
+                "id": "sampler-id",
+                "name": "KSampler",
+                "nodes": [{"id": 2, "type": "KSampler"}, {"id": 3, "type": "Outer"}],
+            },
+        ]
+    }
+
+    row = _ls_rows(tmp_path, capsys, wf)[20]
+
+    assert row["subgraph"] is True
+
+
 @pytest.mark.parametrize(
     "definition",
     [

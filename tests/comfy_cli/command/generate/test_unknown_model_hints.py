@@ -164,6 +164,38 @@ def test_model_hint_uses_the_same_preferred_media_type_as_registry(monkeypatch):
     assert "wrong-model" not in hint
 
 
+def test_model_hint_resolves_referenced_request_bodies_on_non_post_operations(monkeypatch):
+    raw = {
+        "paths": {"/proxy/partner/route": {"put": {"requestBody": {"$ref": "#/components/requestBodies/Generate"}}}},
+        "components": {
+            "requestBodies": {
+                "Generate": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {"model": {"enum": ["example-model-v1"]}},
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    }
+
+    def load_raw_spec():
+        return raw
+
+    load_raw_spec.cache_clear = lambda: None  # type: ignore[attr-defined]
+    monkeypatch.setattr(spec, "load_raw_spec", load_raw_spec)
+
+    hint = spec._model_name_hint("example")
+
+    assert hint is not None
+    assert "example-model-v1" in hint
+    assert "served at partner/route" in hint
+
+
 def test_unhashable_ref_raises_the_schema_error():
     with pytest.raises(spec.SpecError, match="Invalid non-string \\$ref"):
         spec._resolve({}, {"$ref": ["not", "a", "reference"]})
