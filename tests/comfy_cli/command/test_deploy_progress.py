@@ -69,6 +69,12 @@ def _step(step: str, **over) -> JsonObject:
 # ----- the wording -----
 
 
+def _every_byte_in(**over) -> JsonObject:
+    # The last byte has landed: nothing moves, so the service quotes no rate.
+    fields: dict = {"bytesDone": 7 * GB, "modelsDone": 2, "currentModel": None, "bytesPerSecond": None}
+    return _staging(**{"etaSeconds": None, **fields, **over})
+
+
 @pytest.mark.parametrize(
     ("progress", "now", "expected"),
     [
@@ -101,6 +107,30 @@ def _step(step: str, **over) -> JsonObject:
             NOW,
             "Staging models: model 1 of 2 sd_xl_base_1.0.safetensors, 0 B of 7.0 GB",
             id="the first seconds have no rate",
+        ),
+        pytest.param(
+            _every_byte_in(etaSeconds=40, placingModels=True),
+            NOW,
+            "Staging models: 7.0 GB of 7.0 GB, finishing: putting the models in place and preparing the image, 40s left",
+            id="every byte in, the service says the step is finishing and how long it has left",
+        ),
+        pytest.param(
+            _every_byte_in(placingModels=True),
+            NOW,
+            "Staging models: 7.0 GB of 7.0 GB, finishing: putting the models in place and preparing the image",
+            id="past the finishing countdown the words stay, with no time left",
+        ),
+        pytest.param(
+            _every_byte_in(),
+            NOW,
+            "Staging models: 7.0 GB of 7.0 GB",
+            id="every byte in from an older service: the CLI does not work out the finishing from the bytes",
+        ),
+        pytest.param(
+            _every_byte_in(placingModels="true"),
+            NOW,
+            "Staging models: 7.0 GB of 7.0 GB",
+            id="only a placingModels of true says the step is finishing",
         ),
         pytest.param(
             _step("creating_endpoint"),
@@ -688,6 +718,27 @@ def test_at_80_columns_the_live_line_keeps_the_time_left_and_cuts_the_model_name
     assert len(line) <= 80
     assert "Staging models: 3.0 GB of 7.0 GB, 44.0 MB/s, 1m 25s left" in line
     assert "safetensors" not in line
+
+
+def test_at_80_columns_the_live_line_keeps_the_time_left_ahead_of_the_finishing_words() -> None:
+    # Given every byte in and the service saying the step is finishing
+    progress = _every_byte_in(etaSeconds=40, placingModels=True)
+
+    # When
+    line = _draw(progress, width=80, now=NOW)
+
+    # Then: every number survives the crop, the words come after them
+    assert len(line) <= 80
+    assert "Staging models: 7.0 GB of 7.0 GB, 40s left, finishing: putting the" in line
+
+
+@pytest.mark.parametrize("name", ["deploy_status.json", "deploy_up.json", "deploy_progress_event.json"])
+def test_every_schema_reads_placing_models_as_a_boolean(name) -> None:
+    validator = jsonschema.Draft202012Validator(_schema(name)["properties"]["progress"])
+
+    validator.validate(_every_byte_in(etaSeconds=40, placingModels=True))
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(_every_byte_in(placingModels="yes"))
 
 
 def test_the_live_line_says_a_step_restarted_and_a_sample_went_quiet() -> None:
