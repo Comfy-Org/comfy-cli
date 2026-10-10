@@ -124,7 +124,9 @@ field:
 * `grow_id` is present for an ordinary autogrow or widget-converted input and
   preserves the creating connect's collision-free slot identity; it claims
   `("input", to_node, "grow_id", grow_id)`. A reconnect to that existing input
-  carries the same `grow_id` and therefore shares the register.
+  carries the same `grow_id` and therefore shares the register. For an interior
+  input, the target is path-scoped as
+  `("input", tuple(path), to_node, "grow_id", grow_id)`.
 
 For either dynamic form, replay uses the identity field above rather than
 treating the observed numeric `to_slot` as a concrete-slot register.

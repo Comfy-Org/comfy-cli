@@ -1729,6 +1729,9 @@ def _connect_interior(
         to_slot=in_idx,
         link_type=link_type,
     )
+    grow_id = (dst.get("inputs") or [])[in_idx].get("grow_id")
+    if grow_id is not None:
+        op["grow_id"] = grow_id
     return apply_op(workflow, op, graph), op
 
 
@@ -1772,6 +1775,8 @@ def _disconnect_interior(
         to_node=dst.get("id"),
         to_slot=in_idx,
     )
+    if inp.get("grow_id") is not None:
+        op["grow_id"] = inp["grow_id"]
     return apply_op(workflow, op, graph), op
 
 
@@ -1793,8 +1798,15 @@ def _apply_interior_connect(workflow: dict, op: dict) -> None:
     dst = nodes.get(str(op["to_node"]))
     if dst is None:
         return
-    to_idx = op["to_slot"]
     ins = dst.get("inputs")
+    grow_id = op.get("grow_id")
+    if grow_id is not None and isinstance(ins, list):
+        to_idx = next(
+            (index for index, inp in enumerate(ins) if isinstance(inp, dict) and inp.get("grow_id") == grow_id),
+            None,
+        )
+    else:
+        to_idx = op["to_slot"]
     if (
         not isinstance(ins, list)
         or not isinstance(to_idx, int)
@@ -3136,8 +3148,22 @@ def _apply_interior_disconnect(workflow: dict, op: dict) -> None:
     )
     if dst is None:
         return
-    to_idx = op["to_slot"]
     ins = dst.get("inputs")
+    grow_id = op.get("grow_id")
+    if grow_id is not None:
+        if not _lww_gate(workflow, op):
+            return
+        _lww_commit(workflow, op)
+        if not isinstance(ins, list):
+            return
+        to_idx = next(
+            (index for index, inp in enumerate(ins) if isinstance(inp, dict) and inp.get("grow_id") == grow_id),
+            None,
+        )
+        if to_idx is None:
+            return
+    else:
+        to_idx = op["to_slot"]
     if (
         not isinstance(ins, list)
         or not isinstance(to_idx, int)
@@ -3146,9 +3172,10 @@ def _apply_interior_disconnect(workflow: dict, op: dict) -> None:
         or not isinstance(ins[to_idx], dict)
     ):
         return
-    if not _lww_gate(workflow, op):
-        return
-    _lww_commit(workflow, op)
+    if grow_id is None:
+        if not _lww_gate(workflow, op):
+            return
+        _lww_commit(workflow, op)
     current = ins[to_idx].get("link")
     if current is not None:
         _remove_interior_link(definition, current)
@@ -3256,6 +3283,14 @@ def _write_target(op: dict) -> tuple:
         if op.get("grow_id") is not None:
             # A reconnect or disconnect of an existing grown input claims the
             # same identity register as its creating connect.
+            if op.get("path"):
+                return (
+                    "input",
+                    tuple(str(seg) for seg in op["path"]),
+                    str(op["to_node"]),
+                    "grow_id",
+                    op["grow_id"],
+                )
             return ("input", str(op["to_node"]), "grow_id", op["grow_id"])
         if op.get("path"):
             # An interior input is its own register, scoped by the instance path
