@@ -13,6 +13,7 @@ from comfy_cli.command.code_search import (
     MAX_QUERY_BYTES,
     MAX_RESPONSE_BYTES,
     REQUEST_TIMEOUT,
+    TOTAL_REQUEST_DEADLINE,
     QueryRejectedError,
     SearchUnavailableError,
     _build_query,
@@ -150,6 +151,27 @@ class TestBuildQuery:
                 _validate_query(query, None)
         with pytest.raises(ValueError):
             _validate_query("x", "ComfyUI count:99")
+
+    def test_rejects_grouped_and_aliased_repo_filters(self):
+        """Sourcegraph supports grouped expressions and a `r:` alias for `repo:`;
+        both must be rejected at expression boundaries, not just after whitespace."""
+        for query in (
+            "foo OR (repo:github.com/other/project)",
+            "foo OR(repo:evil)",
+            "(repo:evil)",
+            "((repo:evil))",
+            "foo r:evil",
+            "foo -repo:evil",
+            "foo -r:evil",
+            "foo NOT repo:evil",
+        ):
+            with pytest.raises(ValueError):
+                _validate_query(query, None)
+
+    def test_does_not_reject_benign_lookalike_tokens(self):
+        """Filter names that merely contain 'repo' as a substring must not be rejected."""
+        for query in ("reporter:evil x", "myrepo:evil x", "repoman:evil x"):
+            _validate_query(query, None)  # must not raise
 
     def test_rejects_query_over_byte_limit(self):
         with pytest.raises(ValueError):
@@ -334,6 +356,45 @@ class TestFetchResults:
         with pytest.raises(SearchUnavailableError):
             _fetch_results("x")
 
+    @patch("time.monotonic")
+    @patch("requests.get")
+    def test_enforces_total_deadline_despite_steady_trickle(self, mock_get, mock_monotonic):
+        """A service sending small chunks more often than REQUEST_TIMEOUT never
+        trips requests' inactivity timeout, but must still trip the total
+        wall-clock deadline covering connection + full body read."""
+        response = mock_get.return_value
+        response.is_redirect = response.is_permanent_redirect = False
+        response.raise_for_status.return_value = None
+        # One chunk per "tick"; each tick advances well past TOTAL_REQUEST_DEADLINE
+        # in aggregate even though no single gap exceeds REQUEST_TIMEOUT.
+        clock = iter([0] + [i * (TOTAL_REQUEST_DEADLINE / 4) for i in range(1, 8)] + [TOTAL_REQUEST_DEADLINE * 10])
+        mock_monotonic.side_effect = lambda: next(clock)
+        response.iter_content.return_value = (b"x" for _ in range(8))
+
+        with pytest.raises(requests.Timeout):
+            _fetch_results("slow-trickle")
+
+    @pytest.mark.parametrize(
+        "exc_cls", [requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError]
+    )
+    @patch("requests.get")
+    def test_stream_decode_errors_become_search_unavailable(self, mock_get, exc_cls):
+        """A truncated/invalid stream must route to the classified unavailable
+        error, not surface as a raw unhandled exception."""
+        response = mock_get.return_value
+        response.is_redirect = response.is_permanent_redirect = False
+        response.raise_for_status.return_value = None
+
+        def raising_iter_content(chunk_size):
+            yield b"partial"
+            raise exc_cls("stream broke")
+
+        response.iter_content.side_effect = raising_iter_content
+        with pytest.raises(SearchUnavailableError) as exc_info:
+            _fetch_results("truncated")
+        # The raw exception text must not leak into the message shown to the user.
+        assert "stream broke" not in str(exc_info.value)
+
 
 class TestDecodeSearch:
     def test_graphql_errors_are_query_rejected(self):
@@ -351,6 +412,16 @@ class TestDecodeSearch:
     def test_empty_response_is_unavailable(self):
         with pytest.raises(SearchUnavailableError):
             _decode_search({})
+
+    def test_list_shaped_results_is_unavailable(self):
+        """A list-shaped `results` must not reach `.get("alert")` (AttributeError)."""
+        with pytest.raises(SearchUnavailableError):
+            _decode_search({"data": {"search": {"results": []}}})
+
+    def test_missing_results_is_unavailable(self):
+        """An absent `results` must not silently read as an empty, successful result set."""
+        with pytest.raises(SearchUnavailableError):
+            _decode_search({"data": {"search": {}}})
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +514,43 @@ class TestPrintResults:
         assert "Comfy-Org/ComfyUI / nodes.py" in visible
         assert "L   42" in visible
         assert "class LoadImage:" in visible
+
+    def test_tty_handles_missing_branch_without_style_error(self):
+        """When defaultBranch is missing, file_url and match url are "". The TTY
+        path must not build a Rich `link ` style with an empty URL (StyleSyntaxError)."""
+        import io
+
+        from rich.console import Console
+
+        search = {
+            "results": {
+                "results": [
+                    {
+                        "__typename": "FileMatch",
+                        "repository": {"name": "github.com/Comfy-Org/ComfyUI", "defaultBranch": None},
+                        "file": {"path": "test.py"},
+                        "lineMatches": [{"preview": "hello", "lineNumber": 0, "offsetAndLengths": []}],
+                    }
+                ]
+            }
+        }
+        results = _format_results(search)
+        stats = _get_stats(search)
+        assert results[0]["file_url"] == ""
+        assert results[0]["matches"][0]["url"] == ""
+
+        buf = io.StringIO()
+        fake_console = Console(file=buf, force_terminal=True, width=200, color_system="truecolor")
+        with (
+            patch("comfy_cli.command.code_search.console", fake_console),
+            patch("comfy_cli.command.code_search.sys.stdout.isatty", return_value=True),
+        ):
+            # Must not raise rich.errors.StyleSyntaxError.
+            _print_results(results, stats, json_output=False)
+
+        output = buf.getvalue()
+        assert "test.py" in output
+        assert "hello" in output
 
     def test_non_tty_ignores_force_color_env(self, capsys, search_response, monkeypatch):
         """FORCE_COLOR / TTY_COMPATIBLE must not leak OSC 8 into a piped stream."""

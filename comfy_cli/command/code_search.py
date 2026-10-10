@@ -19,6 +19,11 @@ console = Console()
 API_URL = "https://comfy-codesearch.vercel.app/api/search/code"
 DEFAULT_COUNT = 20
 REQUEST_TIMEOUT = 30
+# REQUEST_TIMEOUT is an inactivity timeout (requests resets it on every byte
+# received), so a slow-trickling response can stay open indefinitely. This
+# bounds the whole request — connect through full body read — regardless of
+# how the bytes arrive.
+TOTAL_REQUEST_DEADLINE = 60
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_QUERY_BYTES = 512
 UNTRUSTED_CONTENT_NOTE = (
@@ -28,7 +33,10 @@ UNTRUSTED_CONTENT_NOTE = (
 
 
 _TYPE_FILTER_RE = re.compile(r"(^|\s)type:")
-_INJECTED_FILTER_RE = re.compile(r"(^|\s)(count|repo|timeout):", re.IGNORECASE)
+# Matches at any expression boundary Sourcegraph recognizes a filter after:
+# start of query, whitespace, or an opening paren (grouped expressions), with
+# an optional `-` negation prefix. Includes the `r:` alias for `repo:`.
+_INJECTED_FILTER_RE = re.compile(r"(^|[\s(])-?(count|repo|r|timeout):", re.IGNORECASE)
 
 
 class SearchUnavailableError(Exception):
@@ -69,7 +77,11 @@ def _build_query(query: str, repo: str | None, count: int) -> str:
 def _fetch_results(query: str) -> dict:
     # Imported lazily: requests costs ~30ms to import and this module is on
     # the import path of every CLI invocation.
+    import time
+
     import requests
+
+    deadline = time.monotonic() + TOTAL_REQUEST_DEADLINE
 
     response = requests.get(
         API_URL,
@@ -83,10 +95,15 @@ def _fetch_results(query: str) -> dict:
         raise SearchUnavailableError("code search refused an unexpected redirect")
 
     body = bytearray()
-    for chunk in response.iter_content(chunk_size=64 * 1024):
-        body.extend(chunk)
-        if len(body) > MAX_RESPONSE_BYTES:
-            raise SearchUnavailableError("code search response exceeded the size limit")
+    try:
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            body.extend(chunk)
+            if len(body) > MAX_RESPONSE_BYTES:
+                raise SearchUnavailableError("code search response exceeded the size limit")
+            if time.monotonic() > deadline:
+                raise requests.Timeout("code search exceeded the total request deadline")
+    except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError) as exc:
+        raise SearchUnavailableError("code search response stream was truncated or invalid") from exc
     try:
         data = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as exc:
@@ -110,7 +127,10 @@ def _decode_search(data: dict) -> dict:
     search = payload["search"]
     if not isinstance(search, dict):
         raise SearchUnavailableError("code search returned malformed search data")
-    alert = (search.get("results") or {}).get("alert")
+    results = search.get("results")
+    if not isinstance(results, dict):
+        raise SearchUnavailableError("code search returned malformed results data")
+    alert = results.get("alert")
     if alert:
         if isinstance(alert, dict):
             message = ": ".join(str(alert[key]) for key in ("title", "description") if alert.get(key))
@@ -197,7 +217,11 @@ def _print_results(results: list[dict], stats: dict, json_output: bool) -> None:
         header = Text()
         if is_tty:
             # Humans: clickable OSC 8 hyperlink, URL hidden from visible output.
-            header.append(f"{repo} / {path}", style=f"bold cyan link {file_url}")
+            # Rich's `link` style requires a URL — omit it when there isn't one
+            # (e.g. defaultBranch missing) instead of emitting `link ` and
+            # raising a StyleSyntaxError.
+            style = f"bold cyan link {file_url}" if file_url else "bold cyan"
+            header.append(f"{repo} / {path}", style=style)
         else:
             # Non-TTY (pipes, AI agents): print the raw URL once per file so
             # agents can synthesize #L<line> anchors themselves.
@@ -207,7 +231,7 @@ def _print_results(results: list[dict], stats: dict, json_output: bool) -> None:
 
         for match in file_result["matches"]:
             line_text = Text("  ")
-            line_style = f"green link {match['url']}" if is_tty else "green"
+            line_style = f"green link {match['url']}" if is_tty and match["url"] else "green"
             line_text.append(f"L{match['line']:>5}", style=line_style)
             line_text.append(f"  {match['preview']}")
             console.print(line_text)
