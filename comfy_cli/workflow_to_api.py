@@ -24,7 +24,16 @@ import random
 import re
 from typing import Any
 
-from comfy_cli.cql.engine import _FRONTEND_DOM_WIDGET_TYPES, LOAD_3D_BUTTON_VALUES
+from comfy_cli.cql.engine import (
+    _FRONTEND_DOM_WIDGET_TYPES,
+    LOAD_3D_BUTTON_VALUES,
+    DynamicGroupBindingError,
+    _dynamic_group_fields,
+    _dynamic_group_row_count,
+    _parse_morphism,
+    _validate_dynamic_group_layout,
+    _validate_dynamic_group_schema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +181,8 @@ def convert_ui_to_api(workflow: dict, object_info: dict) -> dict:
                 bypassed=bypassed,
                 nodes_to_exclude=nodes_to_exclude,
             )
+        except DynamicGroupBindingError as exc:
+            raise WorkflowConversionError(f"Node {node_id_str} ({node_type}): {exc}") from exc
         except Exception:
             # An individual malformed node should not torpedo the whole prompt.
             # The executor will fail loudly on missing nodes if this matters.
@@ -1117,7 +1128,7 @@ def _is_widget_input(input_spec: Any) -> tuple[bool, bool]:
         # ``widgets_values`` slot. A letter-case guess here once gave the
         # mixed-case link ``VHS_LoadVideo.meta_batch`` (``VHS_BatchManager``) a
         # slot, shifting the ``format`` value into it and crashing the node.
-        if input_type in {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO"}:
+        if input_type in {"INT", "FLOAT", "STRING", "BOOLEAN", "COMBO", "COMFY_DYNAMICGROUP_V3"}:
             return True, False
         if input_type in _FRONTEND_DOM_WIDGET_TYPES:
             # Uppercase DOM widgets that serialize a slot (Load3D.image);
@@ -1285,8 +1296,19 @@ def _schema_widget_pairs(schema: Any, widget_values: list[Any]) -> list[tuple[st
                 short = True
                 return
             value = widget_values[vidx]
-            pairs.append((name, value))
             vidx += 1
+            if spec[0] == "COMFY_DYNAMICGROUP_V3":
+                template = spec[1].get("template", {})
+                fields = [(n, s) for section in ("required", "optional") for n, s in template.get(section, {}).items()]
+                count = _dynamic_group_row_count(value, len(widget_values) - vidx, len(fields))
+                for row in range(count):
+                    for j, (field, field_spec) in enumerate(fields):
+                        field_next = next_widget_spec(fields, j + 1)
+                        if field_next is None:
+                            field_next = next_widget_spec(fields, 0) if row + 1 < count else next_spec
+                        consume(f"{name}.{row}.{field}", field_spec, depth + 1, field_next)
+                return
+            pairs.append((name, value))
             if is_dynamic:
                 subs = _dynamic_combo_selected_subs(name, spec, value)
                 if not subs and value not in _dynamic_combo_option_keys(spec):
@@ -1596,9 +1618,46 @@ def _collect_widget_inputs(
         return _wrap_widget_value(value)
 
     out: dict[str, Any] = {}
+    schema = _schema_for(node_type, node, object_info)
+    input_specs = [
+        spec
+        for section in ("required", "optional")
+        for section_def in [_schema_input_def(schema).get(section)]
+        if isinstance(section_def, dict)
+        for spec in section_def.values()
+    ]
+    group_ui_names: set[str] = set()
+    group_prefixes: tuple[str, ...] = ()
+    group_entry_names: set[str] = set()
+    if schema and any(
+        isinstance(spec, (list, tuple))
+        and spec
+        and isinstance(spec[0], str)
+        and (spec[0].startswith("COMFY_DYNAMICGROUP") or spec[0] == "COMFY_DYNAMICCOMBO_V3")
+        for spec in input_specs
+    ):
+        morphism = _parse_morphism(node_type, schema)
+        _validate_dynamic_group_schema(morphism)
+        entries = _validate_dynamic_group_layout(node, morphism) or []
+        fields = {p.name: {f.name for f in _dynamic_group_fields(p)} for p in morphism.inputs if p.is_dynamic_group}
+        group_prefixes = tuple(f"{name}." for name in fields)
+        group_entry_names = {entry.name for entry in entries if entry.owner in fields}
+        group_ui_names.update(fields)
+        group_ui_names.update(
+            e.name
+            for e in entries
+            if e.owner in fields and e.name[len(e.owner) + 1 :].partition(".")[2] not in fields[e.owner]
+        )
     if isinstance(widget_values, dict):
         # Already self-describing; drop UI-only keys and respect link overrides.
         for key, value in widget_values.items():
+            if key in group_ui_names:
+                continue
+            if group_prefixes and key.startswith(group_prefixes) and key not in group_entry_names:
+                continue
+            spec = _declared_input_spec(_schema_input_def(schema), key)
+            if spec and spec[0] == "COMFY_DYNAMICGROUP_V3":
+                continue
             if key in ("videopreview", "preview"):
                 continue
             if key in link_inputs:
@@ -1620,7 +1679,8 @@ def _collect_widget_inputs(
     # (e.g. ``COMFY_AUTOGROW_V3`` images) so they never consume a value slot.
     schema = _schema_for(node_type, node, object_info)
     pairs = _schema_widget_pairs(schema, widget_values) if schema else []
-    if pairs:
+    schema_widgets = any(_is_widget_input(spec)[0] for spec in input_specs) if schema else False
+    if pairs or schema_widgets:
         for name, value in pairs:
             if not name or name in link_inputs:
                 continue

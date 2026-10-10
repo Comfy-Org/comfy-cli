@@ -17,6 +17,10 @@ history.
 
 ### Added
 
+- DynamicGroup workflow conversion, row editing and validation, including row
+  templates in node discovery and the widget catalog. Refuse incompatible saved
+  widget layouts and ambiguous names instead of editing a different widget.
+
 - `comfy deploy cancel [PATH] [--deployment <name|id>]` ends the update a
   deployment waits on and keeps it serving the release it served; `--json`
   names the update it ended in `cancelledUpdate`, and nothing waiting exits 0

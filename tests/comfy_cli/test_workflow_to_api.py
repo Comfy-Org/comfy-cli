@@ -997,6 +997,22 @@ class TestMalformedInputHardening:
             result = convert_ui_to_api(workflow, object_info)
             assert "1" in result
 
+    @pytest.mark.parametrize("bad_section", [None, [], "malformed"])
+    @pytest.mark.parametrize("valid_section", ["required", "optional"])
+    def test_widget_conversion_keeps_valid_sibling_section(self, object_info, bad_section, valid_section):
+        schema = object_info["EmptyLatentImage"]
+        fields = schema["input"]["required"]
+        schema["input"] = {
+            valid_section: fields,
+            "optional" if valid_section == "required" else "required": bad_section,
+        }
+        schema["input_order"] = {valid_section: ["width", "height", "batch_size"]}
+        workflow = {"nodes": [_node(1, "EmptyLatentImage", widgets=[640, 480, 2])], "links": []}
+
+        result = convert_ui_to_api(workflow, object_info)
+
+        assert result["1"]["inputs"] == {"width": 640, "height": 480, "batch_size": 2}
+
     def test_single_bad_node_does_not_abort_conversion(self, object_info, caplog):
         # We can't easily induce _build_api_node to throw on real input, so
         # monkeypatch it for this test.

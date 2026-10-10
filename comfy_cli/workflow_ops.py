@@ -3294,10 +3294,18 @@ class FatalFindingError(ValueError):
 def _validate_widget(graph, class_type: str, widget: str, value: Any) -> list[dict]:
     """Shape-validate a widget value (hard error) and collect catalog warnings
     (soft — e.g. unknown COMBO option, out-of-range number)."""
+    from comfy_cli.cql.engine import SEVERITY_ERROR, _dynamic_group_widgets
+
     m = graph.node(class_type)
     if m is None:
         return []
     port = next((p for p in m.inputs if p.name == widget), None)
+    if port is None:
+        group = next((p for p in m.inputs if p.is_dynamic_group and widget.startswith(f"{p.name}.")), None)
+        if group is not None:
+            row, separator, _field = widget[len(group.name) + 1 :].partition(".")
+            if separator and row.isascii() and row.isdecimal() and (len(row) == 1 or not row.startswith("0")):
+                port = next((p for p in _dynamic_group_widgets(group, f"{group.name}.{row}") if p.name == widget), None)
     if port is None:
         return []
     err = port.validate_shape(value)
@@ -3308,8 +3316,6 @@ def _validate_widget(graph, class_type: str, widget: str, value: Any) -> list[di
     # already refused these (`Graph._validate_catalog_value` puts them in
     # `errors`); the edit path was the last surface still writing them and
     # returning ok:true.
-    from comfy_cli.cql.engine import SEVERITY_ERROR
-
     fatal = next((f for f in findings if f.get("severity") == SEVERITY_ERROR), None)
     if fatal is not None:
         raise FatalFindingError(fatal)
