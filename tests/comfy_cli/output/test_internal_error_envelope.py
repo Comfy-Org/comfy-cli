@@ -1045,6 +1045,33 @@ def test_yaml_scrubber_does_not_consume_secret_named_url_authority_or_following_
     assert message in _internal_error_message(RuntimeError(message))
 
 
+@pytest.mark.parametrize(
+    ("message", "secret"),
+    [
+        ("GET https://auth.example.com:443/cb password:\n  hunter2", "hunter2"),
+        ("GET https://auth.example.com:443/cb password: |\n  hunter2", "hunter2"),
+        ("GET https://auth.example.com:443/cb api_keys:\n  - sk-A", "sk-A"),
+        ('api_keys:\n  "openai": "sk-A"\nrequest: req-1', "sk-A"),
+        ("secrets:\n  'prod': sk-A\nrequest: req-1", "sk-A"),
+    ],
+)
+def test_yaml_scrubber_masks_blocks_after_url_authorities_and_quoted_mapping_keys(message, secret):
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert secret not in scrubbed
+
+
+def test_nested_url_scrubber_masks_through_the_true_outer_userinfo_delimiter():
+    message = "https://user@corp.com:pa#ss@real-host/x/https://a:b@internal/y"
+    scrubbed = _internal_error_message(RuntimeError(message))
+    assert "pa#ss" not in scrubbed and ":b@" not in scrubbed
+    assert "real-host/x/" in scrubbed
+
+
+def test_escaped_json_scrubber_uses_the_matching_backslash_quote_delimiter():
+    scrubbed = _internal_error_message(RuntimeError(r"body={\"password\": \"ab\\\"cd-LEAK\"}"))
+    assert "cd-LEAK" not in scrubbed
+
+
 def test_internal_error_scrubber_checks_the_last_url_when_input_is_truncated():
     tail = " --extra-index-url https://pypi.org/simple,https://alice:LIVE-PASSWORD"
     prefix = "Bearer " + "A" * (_INTERNAL_ERROR_SCRUB_INPUT_CAP - len("RuntimeError: ") - len("Bearer ") - len(tail))

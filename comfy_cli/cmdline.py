@@ -395,19 +395,22 @@ def _scrub_yaml_secret_blocks(text: str) -> str:
         line = lines[index]
         content = line.rstrip("\r\n")
         ending = line[len(content) :]
-        match = _YAML_SECRET_LINE.search(content)
+        search_from = 0
+        match = _YAML_SECRET_LINE.search(content, search_from)
+        while match is not None:
+            # Secret-shaped labels can also be ordinary URL authority labels
+            # (``https://auth.example.com:443/...``). Skip only that match so
+            # a real secret block later on the same line is still found.
+            authority_labels = _authority_labels_before(content[: match.start()])
+            key = match.group("prefix").rstrip(" \t")[:-1].strip("\"'")
+            port = re.split(r"[\s/?#;&,]", match.group("value").lstrip(), maxsplit=1)[0]
+            if authority_labels is None or not _looks_like_numbered_network_authority(
+                f"{authority_labels}{key}:{port}"
+            ):
+                break
+            search_from = match.end("prefix")
+            match = _YAML_SECRET_LINE.search(content, search_from)
         if match is None:
-            out.append(line)
-            index += 1
-            continue
-        # Secret-shaped labels can also be ordinary URL authority labels
-        # (``https://auth.example.com:443/...``). Do not let the YAML pass
-        # consume those before the scalar scrubber applies its host:port
-        # exemption.
-        authority_labels = _authority_labels_before(content[: match.start()])
-        key = match.group("prefix").rstrip(" \t")[:-1].strip("\"'")
-        port = re.split(r"[\s/?#;&,]", match.group("value").lstrip(), maxsplit=1)[0]
-        if authority_labels is not None and _looks_like_numbered_network_authority(f"{authority_labels}{key}:{port}"):
             out.append(line)
             index += 1
             continue
@@ -431,7 +434,10 @@ def _scrub_yaml_secret_blocks(text: str) -> str:
             next_is_sequence = (
                 (not value or value.startswith("#")) and next_indent >= key_indent and stripped_next.startswith("- ")
             )
-            next_is_continuation = next_indent > key_indent and not stripped_next.startswith(("(", "'", '"'))
+            quoted_mapping = re.match(r"""(?:"(?:\\.|[^"])*"|'(?:''|[^'])*')[ \t]*:""", stripped_next)
+            next_is_continuation = next_indent > key_indent and (
+                not stripped_next.startswith(("(", "'", '"')) or quoted_mapping is not None
+            )
         if not block_scalar and not next_is_sequence and not next_is_continuation:
             out.append(line)
             index += 1
@@ -676,11 +682,12 @@ def _scrub_url_userinfo(text: str) -> str:
             # mask it before preserving the proxy path.
             inner_start = match.end() + later_scheme.start()
             if authority_at >= 0:
+                outer_at = token.rfind("@", authority_at, later_scheme.start())
                 chunks.extend(
                     (
                         text[cursor : match.end()],
                         "***@",
-                        token[authority_at + 1 : later_scheme.start()],
+                        token[outer_at + 1 : later_scheme.start()],
                     )
                 )
                 cursor = inner_start
@@ -860,11 +867,13 @@ _SECRET_PATTERNS = (
     ),
     (
         re.compile(
-            rf"(\\+[\"'](?:{_SECRET_ASSIGNMENT_KEY_PATTERN})"
-            r"\\+[\"']\s*[:=]\s*\\+[\"'])((?:\\\\.|\\(?![\"'])|[^\\])*?)(\\+[\"']|[\r\n]|$)",
+            rf"(?P<prefix>\\+[\"'](?:{_SECRET_ASSIGNMENT_KEY_PATTERN})"
+            r"\\+[\"']\s*[:=]\s*)(?P<slashes>\\+)(?P<quote>[\"'])"
+            r"(?:(?:\\\\.)|\\(?![\"'])|(?!(?P=slashes)(?P=quote))[^\\])*?"
+            r"(?P<closer>(?P=slashes)(?P=quote)|[\r\n]|$)",
             re.IGNORECASE,
         ),
-        r"\1***\3",
+        r"\g<prefix>\g<slashes>\g<quote>***\g<closer>",
     ),
     (
         re.compile(
