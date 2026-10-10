@@ -1142,9 +1142,10 @@ class TestConnect:
         )
         wf["links"].append([41, 7, 0, 3, len(sampler["inputs"]) - 1, "FLOAT"])
 
-        _updated, op = workflow_ops.disconnect(wf, patched_graph, 3, "cfg")
+        updated, op = workflow_ops.disconnect(wf, patched_graph, 3, "cfg")
 
         assert op["grow_id"] == 41
+        assert all(link[0] != 41 for link in updated["links"])
 
     def test_autogrow_rejects_malformed_slot_targets(self, patched_graph, tmp_path, capsys):
         """A dotted autogrow target that is not the next sequential slot — an index gap
