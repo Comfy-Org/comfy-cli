@@ -1442,6 +1442,7 @@ def disconnect(
     base_version: int = 0,
 ) -> tuple[dict, dict]:
     """Remove the link occupying one concrete input slot."""
+    to_node = _template_id(workflow, to_node, graph)
     try:
         interior = _interior_disconnect_scope(workflow, to_node)
         if interior is not None:
