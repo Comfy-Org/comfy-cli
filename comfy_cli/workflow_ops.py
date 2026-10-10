@@ -1529,6 +1529,12 @@ def _connect_impl(
     )
     if grow is not None:
         op["grow"] = grow  # autogrow: apply appends this input slot, then wires it
+    elif in_idx is not None:
+        grow_id = (dst.get("inputs") or [])[in_idx].get("grow_id")
+        if grow_id is not None:
+            # Reconnecting an existing grown input writes the same identity
+            # register as the connect that created it and a later disconnect.
+            op["grow_id"] = grow_id
     return apply_op(workflow, op, graph), op
 
 
@@ -2971,8 +2977,15 @@ def _apply_connect(workflow: dict, op: dict, graph) -> None:
         if not dynamic_wins:
             return
     else:
-        to_idx = op["to_slot"]
         ins = dst.get("inputs")
+        grow_id = op.get("grow_id")
+        if grow_id is not None and isinstance(ins, list):
+            to_idx = next(
+                (index for index, inp in enumerate(ins) if isinstance(inp, dict) and inp.get("grow_id") == grow_id),
+                None,
+            )
+        else:
+            to_idx = op["to_slot"]
         # Slot drift: a replay against a document whose destination SLOT no
         # longer exists (or never did — a node minted from a different catalog
         # generation) must be as total as a vanished node. There is no register
@@ -3240,10 +3253,9 @@ def _write_target(op: dict) -> tuple:
             # under a dynamic combo (``model.reference_images.image_1``) must
             # not share a target with its sibling (``model.reference_videos``).
             return ("input", str(op["to_node"]), "grow", _autogrow_base(str(grow["name"])))
-        if kind == "disconnect" and op.get("grow_id") is not None:
-            # The disconnect half of the autogrow family, so it precedes the
-            # interior-path case for the same reason ``grow`` does: the
-            # tombstone has to share the creating connect's register.
+        if op.get("grow_id") is not None:
+            # A reconnect or disconnect of an existing grown input claims the
+            # same identity register as its creating connect.
             return ("input", str(op["to_node"]), "grow_id", op["grow_id"])
         if op.get("path"):
             # An interior input is its own register, scoped by the instance path

@@ -479,6 +479,42 @@ def test_dynamic_disconnect_tombstone_survives_reversed_replay(grow: dict[str, A
         assert grown["widget"] == {"name": grow["widget"]}
 
 
+def test_grown_input_reconnect_and_disconnect_share_one_register():
+    base = _autogrow_base()
+    grown = base["nodes"][-1]["inputs"][0]
+    grown["grow_id"] = 9751
+    _, reconnect = ops.connect(
+        copy.deepcopy(base),
+        None,
+        500,
+        0,
+        700,
+        "images.image0",
+        actor=AGENT,
+        base_version=5,
+    )
+    assert reconnect["grow_id"] == 9751
+    assert "grow" not in reconnect
+    disconnect = {
+        "op": "disconnect",
+        "op_id": _op_id("grd2"),
+        "actor": HUMAN,
+        "base_version": 9,
+        "stamp": [9, HUMAN],
+        "link_id": reconnect["link_id"],
+        "to_node": 700,
+        "to_slot": 0,
+        "grow_id": 9751,
+    }
+
+    forward = _run(base, [reconnect, disconnect])
+    reverse = _run(base, [disconnect, reconnect])
+
+    assert _comparable(forward) == _comparable(reverse)
+    assert _link_ids(forward) == []
+    assert forward["nodes"][-1]["inputs"][0]["link"] is None
+
+
 # ---------------------------------------------------------------------------
 # 5. generated interleavings — breadth over the hand-picked cases
 # ---------------------------------------------------------------------------
