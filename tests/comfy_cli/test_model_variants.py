@@ -364,7 +364,7 @@ class TestResolveWorkflowModels:
 
         assert workflow == before
 
-    def test_malformed_promotion_dag_fails_before_model_mutation(self, graph):
+    def test_promotion_budget_failure_happens_before_model_mutation(self, graph, monkeypatch):
         definitions: dict[str, dict] = {}
         depth = 18
         for level in reversed(range(depth)):
@@ -402,6 +402,10 @@ class TestResolveWorkflowModels:
             "definitions": {"subgraphs": list(definitions.values())},
         }
         before = copy.deepcopy(workflow)
+
+        # Keep this transactional-failure regression independent of traversal
+        # optimizations: shared acyclic DAGs are intentionally memoized now.
+        monkeypatch.setattr("comfy_cli.cql.promoted._promotion_visit_limit", lambda *_args: 1)
 
         with pytest.raises(ModelVariantResolutionError, match="input traversal"):
             resolve_workflow_models(workflow, graph)
