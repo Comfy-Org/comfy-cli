@@ -18,8 +18,53 @@ from comfy_cli.cql.engine import (
     Port,
     _apply_one_slot,
     _extract_frontend_slots,
+    _SubgraphDefs,
     _write_widget,
 )
+
+
+def test_subgraph_definition_registration_uses_identity_refcounts():
+    definitions = _SubgraphDefs()
+    shared = {"id": "shared"}
+    replacement = {"id": "replacement"}
+    definitions["id"] = shared
+    definitions["alias"] = shared
+
+    definitions["id"] = replacement
+    assert id(shared) in definitions.registered_definition_ids
+    assert definitions._registered_definition_refcounts[id(shared)] == 1
+
+    del definitions["alias"]
+    assert id(shared) not in definitions.registered_definition_ids
+    assert id(replacement) in definitions.registered_definition_ids
+
+
+@pytest.mark.parametrize("mutation", ["overwrite", "delete", "pop", "popitem", "clear"])
+def test_subgraph_definition_membership_changes_invalidate_derived_caches(mutation):
+    definitions = _SubgraphDefs()
+    original = {"id": "original", "inputs": [], "nodes": [], "links": []}
+    definitions["id"] = original
+    definitions.promotion_visit_limits[id(original)] = 7
+    definitions.promotion_inputs[id(original)] = (original, ["stale"])
+    definitions.promotion_budget_roots["promotion_inputs_budget"] = {id(original)}
+    definitions.promotion_inputs_budget = [99]
+
+    if mutation == "overwrite":
+        definitions["id"] = {"id": "replacement"}
+    elif mutation == "delete":
+        del definitions["id"]
+    elif mutation == "pop":
+        definitions.pop("id")
+    elif mutation == "popitem":
+        definitions.popitem()
+    else:
+        definitions.clear()
+
+    assert definitions.promotion_visit_limits == {}
+    assert definitions.promotion_inputs == {}
+    assert definitions.promotion_budget_roots == {}
+    assert definitions.promotion_inputs_budget is None
+
 
 # ---------------------------------------------------------------------------
 # Shared fixture: a small but realistic object_info

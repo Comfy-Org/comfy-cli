@@ -3485,6 +3485,123 @@ def split_node_path(workflow: dict, node_path: str) -> list[str]:
     return segments
 
 
+class _SubgraphDefs(dict[str, dict]):
+    """Definition index with per-index promotion traversal caches."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.registered_definition_ids: set[int] = set()
+        self._registered_definition_refcounts: dict[int, int] = {}
+        self.promotion_visit_limit: int | None = None
+        self.promotion_visit_limits: dict[int, int] = {}
+        self.promotion_definition_metrics: dict[int, tuple[dict, int, tuple[dict, ...]]] = {}
+        self.promotion_budget_roots: dict[str, set[int]] = {}
+        self.promotion_holders: dict[int, tuple[dict, dict[Any, list[tuple[dict, int, dict]]]]] = {}
+        self.promotion_links: dict[int, tuple[dict, dict[Any, dict]]] = {}
+        self.promotion_input_positions: dict[int, tuple[dict, dict[int, int]]] = {}
+        self.promotion_input_memberships: dict[int, tuple[dict, dict[Any, set[int]]]] = {}
+        self.promotion_sources: dict[
+            int,
+            tuple[dict, dict[int, tuple[str, str]], dict[tuple[str, str], str]],
+        ] = {}
+        self.promotion_inputs: dict[int, tuple[dict, list[Any]]] = {}
+        self.promotion_boundaries: dict[tuple[int, int], tuple[dict, list[tuple[list[str], str]]]] = {}
+        self.promotion_inputs_budget: list[int] | None = None
+        self.promotion_sources_budget: list[int] | None = None
+        self.promotion_boundary_budget: list[int] | None = None
+        self.promotion_inputs_memo: dict[tuple[int, int, tuple[int, ...]], list[Any]] = {}
+        self.promotion_inputs_stable_memo: dict[tuple[int, int], tuple[list[Any], frozenset[int]]] = {}
+        self.promotion_inputs_dependencies: dict[tuple[int, int, tuple[int, ...]], frozenset[int]] = {}
+        self.promotion_inputs_cycle_memo: dict[tuple[int, int, tuple[int, ...]], bool] = {}
+        self.promotion_inputs_names: dict[int, dict[str, Any]] = {}
+        self.promotion_boundary_memo: dict[tuple[int, int, int, tuple[int, ...]], list[tuple[list[str], str]]] = {}
+        self.promotion_boundary_stable_memo: dict[
+            tuple[int, int, int], tuple[list[tuple[list[str], str]], frozenset[int]]
+        ] = {}
+        self.promotion_boundary_dependencies: dict[tuple[int, int, int, tuple[int, ...]], frozenset[int]] = {}
+        self.promotion_boundary_cycle_memo: dict[tuple[int, int, int, tuple[int, ...]], bool] = {}
+        self.promotion_boundary_names: dict[int, dict[Any, dict]] = {}
+        self.promotion_boundary_output_budget: list[int] | None = None
+
+    def _invalidate_derived_state(self) -> None:
+        # Local import avoids an engine/promoted import cycle. Definition
+        # membership changes can otherwise leave id-keyed results attached to
+        # a later object that reuses the removed definition's address.
+        from comfy_cli.cql.promoted import _invalidate_promotion_caches
+
+        _invalidate_promotion_caches(self)
+
+    def _add_registered_definition(self, value: object) -> None:
+        if not isinstance(value, dict):
+            return
+        identity = id(value)
+        self._registered_definition_refcounts[identity] = self._registered_definition_refcounts.get(identity, 0) + 1
+        self.registered_definition_ids.add(identity)
+
+    def _remove_registered_definition(self, value: object) -> None:
+        if not isinstance(value, dict):
+            return
+        identity = id(value)
+        remaining = self._registered_definition_refcounts.get(identity, 0) - 1
+        if remaining > 0:
+            self._registered_definition_refcounts[identity] = remaining
+        else:
+            self._registered_definition_refcounts.pop(identity, None)
+            self.registered_definition_ids.discard(identity)
+
+    def __setitem__(self, key: str, value: dict) -> None:
+        exists = key in self
+        previous = self.get(key)
+        if exists and previous is value:
+            return
+        if exists:
+            self._remove_registered_definition(previous)
+        super().__setitem__(key, value)
+        self._add_registered_definition(value)
+        self._invalidate_derived_state()
+
+    def __delitem__(self, key: str) -> None:
+        previous = self[key]
+        super().__delitem__(key)
+        self._remove_registered_definition(previous)
+        self._invalidate_derived_state()
+
+    def update(self, *args, **kwargs) -> None:
+        for key, value in dict(*args, **kwargs).items():
+            self[key] = value
+
+    def clear(self) -> None:
+        changed = bool(self)
+        super().clear()
+        self.registered_definition_ids.clear()
+        self._registered_definition_refcounts.clear()
+        if changed:
+            self._invalidate_derived_state()
+
+    def pop(self, key: str, *args):
+        exists = key in self
+        value = super().pop(key, *args)
+        if exists:
+            self._remove_registered_definition(value)
+            self._invalidate_derived_state()
+        return value
+
+    def popitem(self):
+        item = super().popitem()
+        self._remove_registered_definition(item[1])
+        self._invalidate_derived_state()
+        return item
+
+    def setdefault(self, key: str, default=None):
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+    def __ior__(self, other):
+        self.update(other)
+        return self
+
+
 def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
     """Index subgraph definitions so an instance's ``type`` resolves to its def.
 
@@ -3497,7 +3614,7 @@ def _subgraph_defs_by_id(workflow: dict) -> dict[str, dict]:
     name-typed templates that predate UUID ids.
     """
     defs = (workflow.get("definitions") or {}).get("subgraphs") or []
-    by_id: dict[str, dict] = {}
+    by_id: dict[str, dict] = _SubgraphDefs()
     name_counts: dict[str, int] = {}
     name_first: dict[str, dict] = {}
     for sg in defs:

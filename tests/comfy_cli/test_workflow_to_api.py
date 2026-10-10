@@ -798,6 +798,31 @@ class TestMalformedInputHardening:
                     },
                 },
             ),
+            (
+                "subgraph_linkIds_scalar",
+                {
+                    "nodes": [
+                        {
+                            "id": 1,
+                            "type": "11111111-2222-3333-4444-555555555555",
+                            "inputs": [],
+                            "outputs": [],
+                        }
+                    ],
+                    "links": [],
+                    "definitions": {
+                        "subgraphs": [
+                            {
+                                "id": "11111111-2222-3333-4444-555555555555",
+                                "nodes": [],
+                                "links": [],
+                                "inputs": [{"name": "x", "linkIds": 1}],
+                                "outputs": [],
+                            }
+                        ]
+                    },
+                },
+            ),
         ]
         for _label, workflow in cases:
             # Should not raise — each malformed link is silently skipped.
@@ -899,6 +924,58 @@ class TestMalformedInputHardening:
         }
         # Should not raise.
         convert_ui_to_api(workflow, object_info)
+
+    def test_overlay_accepts_scalar_definition_nodes_and_instance_inputs(self, object_info):
+        sg_uuid = "11111111-2222-3333-4444-555555555555"
+        workflow = {
+            "nodes": [{"id": 1, "type": sg_uuid, "inputs": 1, "outputs": []}],
+            "links": [],
+            "definitions": {"subgraphs": [{"id": sg_uuid, "nodes": 1, "links": [], "inputs": []}]},
+        }
+
+        assert convert_ui_to_api(workflow, object_info) == {}
+
+    def test_definition_expansion_metrics_are_computed_once_per_definition(self, monkeypatch):
+        from comfy_cli import workflow_to_api as converter
+
+        sg_uuid = "11111111-2222-3333-4444-555555555555"
+        definition = {"id": sg_uuid, "nodes": [0, 0, 0], "links": [0, 0], "inputs": [], "outputs": []}
+        calls = 0
+        original = converter._definition_expansion_metrics
+
+        def counted(candidate):
+            nonlocal calls
+            calls += 1
+            return original(candidate)
+
+        monkeypatch.setattr(converter, "_definition_expansion_metrics", counted)
+        converter._expand_subgraphs(
+            [{"id": index, "type": sg_uuid, "inputs": [], "outputs": []} for index in range(20)],
+            [],
+            {sg_uuid: definition},
+        )
+
+        assert calls == 1
+
+    def test_promoted_overlay_has_one_per_conversion_visit_budget(self, monkeypatch):
+        from comfy_cli import workflow_to_api as converter
+
+        sg_uuid = "11111111-2222-3333-4444-555555555555"
+        definition = {
+            "id": sg_uuid,
+            "nodes": [{"id": 1, "type": "Foo"}, {"id": 2, "type": "Foo"}],
+            "links": [],
+            "inputs": [],
+        }
+        workflow = {
+            "nodes": [{"id": 1, "type": sg_uuid, "inputs": [], "outputs": []}],
+            "links": [],
+            "definitions": {"subgraphs": [definition]},
+        }
+        monkeypatch.setattr(converter, "_MAX_SUBGRAPH_EXPANSION_BUDGET", 2)
+
+        with pytest.raises(WorkflowConversionError, match="overlay exceeded"):
+            converter._overlay_promoted_host_values({}, workflow, {sg_uuid: definition})
 
     def test_v3_combo_option_with_non_dict_inputs_keeps_node(self):
         # A V3 dynamic combo option whose ``inputs`` field is malformed

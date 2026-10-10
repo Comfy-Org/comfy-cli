@@ -31,11 +31,12 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 from comfy_cli.cql import promoted
-from comfy_cli.cql.engine import Graph
+from comfy_cli.cql.engine import Graph, _SubgraphDefs
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 _GALLERY = _FIXTURES / "gallery"
@@ -94,6 +95,1160 @@ def test_socket_inputs_own_no_host_slot():
     assert len(inst["widgets_values"]) == len([p for p in pis if p.value_index is not None])
 
 
+def test_unheld_boundary_row_does_not_promote_a_widget():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [1]}],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": None}],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+
+    [item] = promoted.promoted_inputs(sg, {"sg": sg})
+    assert item.name == "prompt"
+    assert item.value_index is None
+
+
+def test_every_promotion_resolver_skips_an_unheld_row_before_a_live_one():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [1, 2]}],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "PromptNode",
+                "inputs": [{"name": "stale", "type": "STRING", "widget": {"name": "stale"}, "link": None}],
+            },
+            {
+                "id": 8,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "type": "STRING", "widget": {"name": "prompt"}, "link": 2}],
+            },
+        ],
+        "links": [
+            {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0},
+            {"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0},
+        ],
+    }
+    definitions = {"sg": sg}
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert item.source_node == "8"
+    assert promoted._promotion_source(sg, sg["inputs"][0], definitions) == ("8", "prompt")
+    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["8"], "prompt")]
+
+
+def test_every_promotion_resolver_rejects_a_non_proxy_listed_row():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [1]}],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 1}],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": 99, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = sg
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert item.value_index is None
+    assert promoted._promotion_source(sg, sg["inputs"][0], definitions) is None
+    assert promoted.boundary_widget_targets(sg, item, definitions) == []
+
+
+def test_promotion_visit_limit_counts_listed_link_ids():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": list(range(65))}],
+        "nodes": [],
+        "links": [],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = sg
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert item.name == "value"
+    assert item.value_index is None
+
+
+def test_unregistered_root_does_not_reuse_a_smaller_cached_visit_limit():
+    registered = {"id": "registered", "inputs": [], "nodes": [], "links": []}
+    external = {
+        "id": "external",
+        "inputs": [{"name": "value", "linkIds": list(range(100))}],
+        "nodes": [],
+        "links": [],
+    }
+    definitions = _SubgraphDefs()
+    definitions["registered"] = registered
+
+    registered_limit = promoted._promotion_visit_limit(definitions, registered)
+    external_limit = promoted._promotion_visit_limit(definitions, external)
+
+    assert external_limit > registered_limit
+
+
+def test_promotion_visit_limit_ignores_unreachable_definitions():
+    root = {"id": "root", "inputs": [], "nodes": [], "links": []}
+    unrelated = {
+        "id": "unrelated",
+        "inputs": [{"name": "padding", "linkIds": list(range(10_000))}],
+        "nodes": [],
+        "links": [],
+    }
+    definitions = _SubgraphDefs()
+    definitions.update({"root": root, "unrelated": unrelated})
+
+    assert promoted._promotion_visit_limit(definitions, root) == promoted._MAX_NESTED_PROMOTION_DEPTH + 1
+
+
+def test_promotion_caches_do_not_expose_mutable_results():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [1]}],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 1}],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = sg
+
+    first_inputs = promoted.promoted_inputs(sg, definitions)
+    item = first_inputs[0]
+    first_inputs.clear()
+    first_targets = promoted.boundary_widget_targets(sg, item, definitions)
+    first_targets[0][0].append("corrupt")
+    first_targets.clear()
+
+    assert len(promoted.promoted_inputs(sg, definitions)) == 1
+    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["7"], "prompt")]
+
+
+def test_boundary_resolution_treats_non_list_nested_inputs_as_empty():
+    inner = {"id": "inner", "inputs": 5, "nodes": [], "links": []}
+    outer = {
+        "id": "outer",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+        "nodes": [{"id": 7, "type": "inner", "inputs": [{"name": "value", "link": 1}]}],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions.update({"outer": outer, "inner": inner})
+
+    [item] = promoted.promoted_inputs(outer, definitions)
+
+    assert promoted.boundary_widget_targets(outer, item, definitions) == []
+
+
+def test_registered_roots_share_one_non_creditable_index_budget():
+    left = {"id": "left", "inputs": [], "nodes": [], "links": []}
+    right = {
+        "id": "right",
+        "inputs": [{"name": f"value-{index}", "type": "STRING", "linkIds": []} for index in range(20)],
+        "nodes": [],
+        "links": [],
+    }
+    definitions = _SubgraphDefs()
+    definitions.update({"left": left, "right": right})
+
+    left_budget = promoted._shared_promotion_budget(definitions, left, "promotion_inputs_budget")
+    left_budget[0] -= 1
+    remaining = left_budget[0]
+    right_budget = promoted._shared_promotion_budget(definitions, right, "promotion_inputs_budget")
+
+    assert right_budget is left_budget
+    assert right_budget[0] == remaining
+
+
+def test_shared_child_definition_metrics_are_computed_once():
+    child = {
+        "id": "child",
+        "inputs": [{"name": f"value-{index}", "linkIds": []} for index in range(100)],
+        "nodes": [],
+        "links": [],
+    }
+    left = {"id": "left", "inputs": [], "nodes": [{"id": 1, "type": "child"}], "links": []}
+    right = {"id": "right", "inputs": [], "nodes": [{"id": 2, "type": "child"}], "links": []}
+    definitions = _SubgraphDefs()
+    definitions.update({"child": child, "left": left, "right": right})
+
+    promoted._promotion_visit_limit(definitions, left)
+    promoted._promotion_visit_limit(definitions, right)
+
+    assert len(definitions.promotion_definition_metrics) == 3
+
+
+def test_registered_root_lookup_is_constant_time_after_limit_is_cached():
+    class CountingDefs(_SubgraphDefs):
+        values_calls = 0
+
+        def values(self):
+            self.values_calls += 1
+            return super().values()
+
+    definition = {"id": "sg", "inputs": [], "nodes": [], "links": []}
+    definitions = CountingDefs()
+    definitions["sg"] = definition
+
+    promoted._promotion_index_limit(definitions)
+    calls = definitions.values_calls
+    promoted._shared_promotion_budget(definitions, definition, "promotion_inputs_budget")
+
+    assert definitions.values_calls == calls
+
+
+@pytest.mark.parametrize("field", ["nodes", "links"])
+def test_promotion_indexes_treat_non_list_definition_containers_as_empty(field):
+    definition = {"id": "sg", "inputs": [], "nodes": [], "links": []}
+    definition[field] = 5
+    definitions = _SubgraphDefs()
+    definitions["sg"] = definition
+
+    assert promoted.promoted_inputs(definition, definitions) == []
+    assert promoted._promotion_source_indexes(definition, definitions) == ({}, {})
+
+
+def test_acyclic_shared_children_reuse_stable_promotion_results_across_roots():
+    child = {
+        "id": "child",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+        "nodes": [
+            {
+                "id": 9,
+                "type": "Widget",
+                "inputs": [{"name": "value", "link": 1, "widget": {"name": "value"}}],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 9, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["child"] = child
+    roots = []
+    for index in range(70):
+        root = {
+            "id": f"root-{index}",
+            "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+            "nodes": [{"id": 7, "type": "child", "inputs": [{"name": "value", "link": 1}]}],
+            "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+        }
+        definitions[root["id"]] = root
+        roots.append(root)
+
+    for root in roots:
+        [item] = promoted.promoted_inputs(root, definitions)
+        assert item.is_widget
+        assert promoted.boundary_widget_targets(root, item, definitions) == [(["7", "9"], "value")]
+
+
+def test_every_promotion_resolver_follows_a_holder_when_the_row_target_drifted():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [2]}],
+        "nodes": [
+            {"id": 7, "type": "Other", "inputs": [{"name": "other", "link": None}]},
+            {
+                "id": 8,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 2}],
+            },
+        ],
+        "links": [{"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = {"sg": sg}
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert item.source_node == "8"
+    assert promoted._promotion_source(sg, sg["inputs"][0], definitions) == ("8", "prompt")
+    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["8"], "prompt")]
+
+
+def test_boundary_targets_keep_every_duplicate_holder_live():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [2]}],
+        "nodes": [
+            {
+                "id": node_id,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 2}],
+            }
+            for node_id in (7, 8)
+        ],
+        "links": [{"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = {"sg": sg}
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert item.source_node == "7"
+    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["7"], "prompt"), (["8"], "prompt")]
+
+
+def test_shared_definition_input_membership_is_not_promoted_or_resolved():
+    shared_input = {"name": "first", "type": "STRING", "linkIds": [2]}
+    sg = {
+        "id": "sg",
+        "inputs": [shared_input, {"name": "second", "type": "STRING", "linkIds": [2]}],
+        "nodes": [
+            {
+                "id": 8,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 2}],
+            }
+        ],
+        "links": [{"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = sg
+
+    items = promoted.promoted_inputs(sg, definitions)
+
+    assert [item.value_index for item in items] == [None, None]
+    assert promoted._promotion_source(sg, shared_input, definitions) is None
+    assert promoted.boundary_widget_targets(sg, items[0], definitions) == []
+
+
+def test_promoted_name_index_keeps_the_first_duplicate():
+    first = promoted.PromotedInput("value", "STRING", 0, 0, source_node="first")
+    second = promoted.PromotedInput("value", "STRING", 1, 1, source_node="second")
+
+    assert promoted._promoted_name_index([first, second])["value"] is first
+
+
+def test_synthetic_boundary_targets_do_not_share_the_minus_one_cache_key():
+    sg = {"inputs": []}
+    definitions = _SubgraphDefs()
+    first = promoted.PromotedInput("first", "STRING", -1, 0, source_node="a", source_widget="x")
+    second = promoted.PromotedInput("second", "STRING", -1, 0, source_node="b", source_widget="y")
+
+    with mock.patch.object(promoted, "deepest_source", side_effect=[(["a"], "x"), (["b"], "y")]) as deepest:
+        assert promoted.boundary_widget_targets(sg, first, definitions) == [(["a"], "x")]
+        assert promoted.boundary_widget_targets(sg, second, definitions) == [(["b"], "y")]
+
+    assert deepest.call_count == 2
+
+
+def test_promotion_source_reverse_index_is_reused():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [2]}],
+        "nodes": [
+            {
+                "id": 8,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 2}],
+            }
+        ],
+        "links": [{"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = sg
+
+    with mock.patch.object(promoted, "held_link_targets", wraps=promoted.held_link_targets) as targets:
+        assert promoted._find_host_input_for_promotion(sg, definitions, "8", "prompt") == "prompt"
+        first_count = targets.call_count
+        assert promoted._find_host_input_for_promotion(sg, definitions, "8", "prompt") == "prompt"
+
+    assert first_count > 0
+    assert targets.call_count == first_count
+
+
+def test_live_external_link_keeps_boolean_and_integer_ids_distinct():
+    scope = {"links": [[1, "source", 0, 10, 0, "*"]]}
+    instance = {"inputs": [{"name": "value", "link": True}]}
+
+    assert promoted.live_external_link(scope, instance, "value") is None
+
+
+def test_duplicate_holder_fanout_fits_the_serialized_traversal_budget():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [2]}],
+        "nodes": [
+            {
+                "id": 8,
+                "type": "PromptNode",
+                "inputs": [
+                    {"name": f"value-{index}", "widget": {"name": f"value-{index}"}, "link": 2} for index in range(66)
+                ],
+            }
+        ],
+        "links": [{"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = sg
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert len(promoted.boundary_widget_targets(sg, item, definitions)) == 66
+
+
+@pytest.mark.parametrize("malformed_slot", [True, False, 0.0])
+def test_malformed_target_slot_does_not_exact_match_a_holder(malformed_slot):
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [2]}],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "PromptNode",
+                "inputs": [
+                    {"name": "first", "widget": {"name": "first"}, "link": 2},
+                    {"name": "second", "widget": {"name": "second"}, "link": 2},
+                ],
+            }
+        ],
+        "links": [{"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": malformed_slot}],
+    }
+    definitions = {"sg": sg}
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert item.source_widget == "first"
+    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["7"], "first"), (["7"], "second")]
+
+
+def test_promotion_resolvers_ignore_unhashable_link_ids():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [[], 2]}],
+        "nodes": [
+            {
+                "id": 8,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 2}],
+            }
+        ],
+        "links": [
+            {"id": [], "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0},
+            {"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0},
+        ],
+    }
+    definitions = {"sg": sg}
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert promoted._promotion_source(sg, sg["inputs"][0], definitions) == ("8", "prompt")
+    assert promoted.boundary_widget_targets(sg, item, definitions) == [(["8"], "prompt")]
+
+
+def test_promotion_resolvers_do_not_alias_boolean_link_ids_to_integers():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": [True]}],
+        "nodes": [
+            {
+                "id": 8,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 1}],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0}],
+    }
+    definitions = {"sg": sg}
+
+    [item] = promoted.promoted_inputs(sg, definitions)
+
+    assert item.value_index is None
+    assert promoted._promotion_source(sg, sg["inputs"][0], definitions) is None
+    assert promoted.boundary_widget_targets(sg, item, definitions) == []
+
+
+def test_promotion_resolvers_treat_non_list_link_ids_as_empty():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "prompt", "type": "STRING", "linkIds": 2}],
+        "nodes": [
+            {
+                "id": 8,
+                "type": "PromptNode",
+                "inputs": [{"name": "prompt", "widget": {"name": "prompt"}, "link": 2}],
+            }
+        ],
+        "links": [{"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 8, "target_slot": 0}],
+    }
+
+    [item] = promoted.promoted_inputs(sg, {"sg": sg})
+
+    assert item.value_index is None
+    assert promoted._promotion_source(sg, sg["inputs"][0], {"sg": sg}) is None
+    assert promoted.boundary_widget_targets(sg, item, {"sg": sg}) == []
+
+
+def test_primitive_targets_ignore_unhashable_listed_link_ids():
+    primitive = {"id": 7, "outputs": [{"links": [True, [], 2]}]}
+    subgraph = {
+        "links": [
+            {"id": True, "origin_id": 7, "origin_slot": 0, "target_id": 8, "target_slot": 0},
+            {"id": [], "origin_id": 7, "origin_slot": 0, "target_id": 8, "target_slot": 0},
+            {"id": 2, "origin_id": 7, "origin_slot": 0, "target_id": 9, "target_slot": 1},
+        ]
+    }
+
+    assert promoted._primitive_targets(subgraph, primitive) == [("9", 1)]
+
+
+def test_holder_cache_distinguishes_typed_link_rows_with_different_targets():
+    sg = {
+        "nodes": [
+            {"id": 7, "inputs": [{"name": "first", "link": 1}]},
+            {"id": 8, "inputs": [{"name": "second", "link": "1"}]},
+        ]
+    }
+    holders = promoted._link_holders(sg)
+    first_link = {"id": 1, "target_id": 7, "target_slot": 0}
+    second_link = {"id": "1", "target_id": 8, "target_slot": 0}
+    cache: dict = {}
+
+    first = promoted.held_link_targets(sg, 1, first_link, holders, cache)
+    second = promoted.held_link_targets(sg, "1", second_link, holders, cache)
+
+    assert first[0][0]["id"] == 7
+    assert second[0][0]["id"] == 8
+
+
+def test_nested_fanout_memoizes_repeated_definition_walks():
+    definitions: dict[str, dict] = {}
+    depth = 10
+    width = 4
+    for level in reversed(range(depth)):
+        definition_id = f"level-{level}"
+        child_id = f"level-{level + 1}"
+        nodes = []
+        links = []
+        for index in range(width):
+            link_id = index + 1
+            node_type = child_id if level + 1 < depth else "PlainNode"
+            nodes.append(
+                {
+                    "id": index,
+                    "type": node_type,
+                    "inputs": [{"name": "value", "type": "STRING", "link": link_id}],
+                }
+            )
+            links.append({"id": link_id, "origin_id": -10, "origin_slot": 0, "target_id": index, "target_slot": 0})
+        definitions[definition_id] = {
+            "id": definition_id,
+            "inputs": [{"name": "value", "type": "STRING", "linkIds": list(range(1, width + 1))}],
+            "nodes": nodes,
+            "links": links,
+        }
+
+    with mock.patch.object(promoted, "_nested_definition", wraps=promoted._nested_definition) as resolver:
+        [item] = promoted.promoted_inputs(definitions["level-0"], definitions)
+
+    assert item.value_index is None
+    assert resolver.call_count == depth * width
+
+
+def test_distinct_nested_paths_are_bounded_by_definition_graph_size():
+    definitions: dict[str, dict] = {}
+    depth = 18
+    for level in reversed(range(depth)):
+        for side in ("left", "right"):
+            definition_id = f"{side}-{level}"
+            next_level = level + 1
+            child_types = (
+                (f"left-{next_level}", f"right-{next_level}") if next_level < depth else ("PlainLeft", "PlainRight")
+            )
+            definitions[definition_id] = {
+                "id": definition_id,
+                "inputs": [{"name": "value", "type": "STRING", "linkIds": [1, 2]}],
+                "nodes": [
+                    {
+                        "id": index,
+                        "type": child_type,
+                        "inputs": [{"name": "value", "type": "STRING", "link": index + 1}],
+                    }
+                    for index, child_type in enumerate(child_types)
+                ],
+                "links": [
+                    {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 0, "target_slot": 0},
+                    {"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": 0},
+                ],
+            }
+
+    with (
+        mock.patch.object(promoted, "_nested_definition", wraps=promoted._nested_definition) as resolver,
+        pytest.raises(promoted.PromotionTraversalLimitError, match="input traversal"),
+    ):
+        promoted.promoted_inputs(definitions["left-0"], definitions)
+
+    assert resolver.call_count <= promoted._promotion_visit_limit(definitions, definitions["left-0"]) * 2
+
+    instance = {"id": 7, "type": "left-0", "widgets_values": ["keep"]}
+    workflow = {"nodes": [instance], "definitions": {"subgraphs": list(definitions.values())}}
+    with pytest.raises(ValueError, match="link input, not a widget"):
+        promoted.set_host_value(workflow, instance, "value", "replace", graph=None)
+    assert instance["widgets_values"] == ["keep"]
+
+
+def test_reused_nested_boundary_paths_charge_each_materialized_copy():
+    definitions: dict[str, dict] = {
+        "leaf": {
+            "id": "leaf",
+            "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+            "nodes": [
+                {
+                    "id": 0,
+                    "type": "PlainNode",
+                    "inputs": [{"name": "value", "link": 1, "widget": {"name": "value"}}],
+                }
+            ],
+            "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 0, "target_slot": 0}],
+        }
+    }
+    for level in reversed(range(20)):
+        child = "leaf" if level == 19 else f"level-{level + 1}"
+        definitions[f"level-{level}"] = {
+            "id": f"level-{level}",
+            "inputs": [{"name": "value", "type": "STRING", "linkIds": [1, 2]}],
+            "nodes": [
+                {"id": index, "type": child, "inputs": [{"name": "value", "link": index + 1}]} for index in range(2)
+            ],
+            "links": [
+                {"id": index + 1, "origin_id": -10, "origin_slot": 0, "target_id": index, "target_slot": 0}
+                for index in range(2)
+            ],
+        }
+
+    pi = promoted.PromotedInput("value", "STRING", index=0, value_index=0)
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="boundary traversal"):
+        promoted.boundary_widget_targets(definitions["level-0"], pi, definitions)
+
+
+def test_valid_six_level_four_way_boundary_fanout_uses_the_output_budget():
+    definitions: dict[str, dict] = {
+        "leaf": {
+            "id": "leaf",
+            "inputs": [{"name": "value", "linkIds": [1]}],
+            "nodes": [
+                {"id": 9, "type": "Plain", "inputs": [{"name": "value", "link": 1, "widget": {"name": "value"}}]}
+            ],
+            "links": [{"id": 1, "origin_id": -10, "target_id": 9, "target_slot": 0}],
+        }
+    }
+    for level in reversed(range(6)):
+        child = "leaf" if level == 5 else f"level-{level + 1}"
+        definitions[f"level-{level}"] = {
+            "id": f"level-{level}",
+            "inputs": [{"name": "value", "linkIds": [1, 2, 3, 4]}],
+            "nodes": [
+                {"id": index, "type": child, "inputs": [{"name": "value", "link": index + 1}]} for index in range(4)
+            ],
+            "links": [{"id": index + 1, "origin_id": -10, "target_id": index, "target_slot": 0} for index in range(4)],
+        }
+
+    targets = promoted.boundary_widget_targets(
+        definitions["level-0"],
+        promoted.PromotedInput("value", "STRING", 0, 0),
+        definitions,
+    )
+
+    assert len(targets) == 4**6
+
+
+def test_stable_boundary_cache_revalidates_ancestor_dependencies():
+    ancestor = {
+        "id": "ancestor",
+        "inputs": [{"name": "value", "linkIds": [1]}],
+        "nodes": [{"id": 9, "type": "Plain", "inputs": [{"name": "value", "link": 1, "widget": {"name": "value"}}]}],
+        "links": [{"id": 1, "origin_id": -10, "target_id": 9, "target_slot": 0}],
+    }
+    shared_input = {"name": "value", "linkIds": [2]}
+    shared = {
+        "id": "shared",
+        "inputs": [shared_input],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "ancestor",
+                "inputs": [{"name": "value", "link": 2, "widget": {"name": "fallback"}}],
+            }
+        ],
+        "links": [{"id": 2, "origin_id": -10, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions.update({"ancestor": ancestor, "shared": shared})
+
+    assert promoted._boundary_targets(shared, shared_input, definitions, 1) == [(["7", "9"], "value")]
+    assert promoted._boundary_targets(shared, shared_input, definitions, 1, _stack=(id(ancestor),)) == [
+        (["7"], "fallback")
+    ]
+
+
+def test_stable_promoted_input_cache_revalidates_ancestor_dependencies():
+    ancestor = {
+        "id": "ancestor",
+        "inputs": [{"name": "value", "linkIds": [1]}],
+        "nodes": [
+            {
+                "id": 9,
+                "type": "Plain",
+                "inputs": [{"name": "value", "link": 1, "widget": {"name": "value"}}],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": -10, "target_id": 9, "target_slot": 0}],
+    }
+    shared = {
+        "id": "shared",
+        "inputs": [{"name": "value", "linkIds": [2]}],
+        "nodes": [
+            {
+                "id": 7,
+                "type": "ancestor",
+                "inputs": [{"name": "value", "link": 2, "widget": {"name": "fallback"}}],
+            }
+        ],
+        "links": [{"id": 2, "origin_id": -10, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions.update({"ancestor": ancestor, "shared": shared})
+
+    [ordinary] = promoted.promoted_inputs(shared, definitions, depth=1)
+    [under_ancestor] = promoted.promoted_inputs(shared, definitions, depth=1, _stack=(id(ancestor),))
+
+    assert ordinary.nested is True
+    assert under_ancestor.nested is False
+    assert under_ancestor.source_widget == "fallback"
+
+
+def test_nested_boundary_names_use_consistent_string_coercion():
+    leaf = {
+        "id": "leaf",
+        "inputs": [{"name": 7, "linkIds": [1]}],
+        "nodes": [{"id": 9, "type": "Plain", "inputs": [{"name": 7, "link": 1, "widget": {"name": 7}}]}],
+        "links": [{"id": 1, "origin_id": -10, "target_id": 9, "target_slot": 0}],
+    }
+    root_input = {"name": 7, "linkIds": [2]}
+    root = {
+        "id": "root",
+        "inputs": [root_input],
+        "nodes": [{"id": 8, "type": "leaf", "inputs": [{"name": 7, "link": 2}]}],
+        "links": [{"id": 2, "origin_id": -10, "target_id": 8, "target_slot": 0}],
+    }
+
+    assert promoted._boundary_targets(root, root_input, {"root": root, "leaf": leaf}, 0) == [(["8", "9"], "7")]
+
+
+def test_falsy_boundary_name_stays_cacheable_and_preserves_fanout():
+    root = {
+        "id": "root",
+        "inputs": [{"name": 0, "type": "STRING", "linkIds": [1, 2]}],
+        "nodes": [
+            {"id": 7, "type": "Plain", "inputs": [{"name": 0, "link": 1, "widget": {"name": 0}}]},
+            {"id": 8, "type": "Plain", "inputs": [{"name": 0, "link": 2, "widget": {"name": 0}}]},
+        ],
+        "links": [
+            {"id": 1, "origin_id": -10, "target_id": 7, "target_slot": 0},
+            {"id": 2, "origin_id": -10, "target_id": 8, "target_slot": 0},
+        ],
+    }
+    definitions = _SubgraphDefs()
+    definitions["root"] = root
+    [item] = promoted.promoted_inputs(root, definitions)
+
+    assert promoted.boundary_widget_targets(root, item, definitions) == [(["7"], "0"), (["8"], "0")]
+
+
+def test_boundary_materialization_has_an_absolute_cap(monkeypatch):
+    root = {
+        "id": "root",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [1, 2, 3]}],
+        "nodes": [
+            {
+                "id": node_id,
+                "type": "Plain",
+                "inputs": [{"name": "value", "link": node_id, "widget": {"name": "value"}}],
+            }
+            for node_id in (1, 2, 3)
+        ],
+        "links": [{"id": node_id, "origin_id": -10, "target_id": node_id, "target_slot": 0} for node_id in (1, 2, 3)],
+    }
+    definitions = _SubgraphDefs()
+    definitions["root"] = root
+    [item] = promoted.promoted_inputs(root, definitions)
+    monkeypatch.setattr(promoted, "_MAX_BOUNDARY_MATERIALIZATIONS", 2)
+
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="safe limit"):
+        promoted.boundary_widget_targets(root, item, definitions)
+
+
+def test_boundary_output_allowance_does_not_accumulate_across_roots(monkeypatch):
+    def root(name: str, width: int) -> dict:
+        return {
+            "id": name,
+            "inputs": [{"name": "value", "type": "STRING", "linkIds": list(range(width))}],
+            "nodes": [
+                {
+                    "id": index,
+                    "type": "Plain",
+                    "inputs": [{"name": "value", "link": index, "widget": {"name": "value"}}],
+                }
+                for index in range(width)
+            ],
+            "links": [{"id": index, "origin_id": -10, "target_id": index, "target_slot": 0} for index in range(width)],
+        }
+
+    small = root("small", 1)
+    wide = root("wide", 3)
+    definitions = _SubgraphDefs()
+    definitions.update({"small": small, "wide": wide})
+    monkeypatch.setattr(promoted, "_MAX_BOUNDARY_MATERIALIZATIONS", 2)
+
+    [small_item] = promoted.promoted_inputs(small, definitions)
+    assert len(promoted.boundary_widget_targets(small, small_item, definitions)) == 1
+    [wide_item] = promoted.promoted_inputs(wide, definitions)
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="safe limit"):
+        promoted.boundary_widget_targets(wide, wide_item, definitions)
+
+
+def test_boundary_cache_hits_do_not_spend_the_distinct_materialization_budget(monkeypatch):
+    root = {"id": "root", "inputs": [{"name": "value"}], "nodes": [], "links": []}
+    definitions = _SubgraphDefs()
+    definitions["root"] = root
+    item = promoted.PromotedInput("value", "STRING", 0, 0)
+    definitions.promotion_boundaries[(id(root), 0)] = (
+        root,
+        [(["1"], "value"), (["2"], "value"), (["3"], "value")],
+    )
+    monkeypatch.setattr(promoted, "_MAX_BOUNDARY_MATERIALIZATIONS", 2)
+
+    assert promoted.boundary_widget_targets(root, item, definitions) == [
+        (["1"], "value"),
+        (["2"], "value"),
+        (["3"], "value"),
+    ]
+
+
+def test_nested_null_input_name_uses_the_normalized_source_key():
+    child = {
+        "id": "child",
+        "inputs": [{"name": None, "type": "STRING", "linkIds": [1]}],
+        "nodes": [{"id": 9, "type": "Plain", "inputs": [{"name": None, "link": 1, "widget": {"name": "value"}}]}],
+        "links": [{"id": 1, "origin_id": -10, "target_id": 9, "target_slot": 0}],
+    }
+    parent = {
+        "id": "parent",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [2]}],
+        "nodes": [{"id": 7, "type": "child", "inputs": [{"name": None, "link": 2}]}],
+        "links": [{"id": 2, "origin_id": -10, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions.update({"child": child, "parent": parent})
+
+    [item] = promoted.promoted_inputs(parent, definitions)
+
+    assert item.nested is True
+    assert item.source_input == ""
+    assert promoted.find_promoted(child, definitions, item.source_input) is not None
+    _child_by_input, child_reverse = promoted._promotion_source_indexes(child, definitions)
+    parent_by_input, _parent_reverse = promoted._promotion_source_indexes(parent, definitions)
+    assert child_reverse[("9", "value")] == ""
+    assert parent_by_input[id(parent["inputs"][0])] == ("7", "")
+
+
+def test_resolve_write_uses_last_link_row_and_declared_input_membership():
+    sg_id = "11111111-2222-3333-4444-555555555555"
+    definition = {
+        "id": sg_id,
+        "inputs": [
+            {"name": "seed", "type": "INT", "linkIds": []},
+            {"name": "cfg", "type": "FLOAT", "linkIds": [5]},
+        ],
+        "nodes": [
+            {
+                "id": "inner",
+                "type": "Plain",
+                "inputs": [{"name": "value", "type": "FLOAT", "link": 5, "widget": {"name": "value"}}],
+                "widgets_values": [1.0],
+            }
+        ],
+        "links": [
+            {"id": 5, "origin_id": 99, "origin_slot": 0, "target_id": "inner", "target_slot": 0},
+            {"id": 5, "origin_id": -10, "origin_slot": 0, "target_id": "inner", "target_slot": 0},
+        ],
+    }
+    workflow = {
+        "nodes": [{"id": "host", "type": sg_id, "inputs": [], "widgets_values": [7.5]}],
+        "links": [],
+        "definitions": {"subgraphs": [definition]},
+    }
+    graph = Graph.from_object_info(
+        {
+            "Plain": {
+                "input": {"required": {"value": ["FLOAT", {"default": 1.0}]}},
+                "input_order": {"required": ["value"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+            }
+        }
+    )
+
+    target = promoted.resolve_write(workflow, graph, ["host", "inner"], "value")
+
+    assert target.kind == "host"
+    assert target.widget == "cfg"
+    assert target.redirected_from == "host/inner.value"
+
+
+def test_repeated_boundary_link_ids_share_holder_work_with_serialized_budget():
+    sg = {
+        "id": "sg",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [1] * 10_000}],
+        "nodes": [{"id": 7, "type": "PlainNode", "inputs": [{"name": "value", "link": 1}]}],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+
+    with mock.patch.object(promoted, "_is_slot_index", wraps=promoted._is_slot_index) as slot_check:
+        [item] = promoted.promoted_inputs(sg, {"sg": sg})
+
+    assert item.name == "value"
+    assert slot_check.call_count == 1
+
+
+def test_holder_materialization_is_charged_before_ordering():
+    sg = {"nodes": [{"id": node_id, "inputs": [{"name": "value", "link": 1}]} for node_id in range(3)]}
+    holders = promoted._link_holders(sg)
+
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="safe limit"):
+        promoted.held_link_targets(
+            sg,
+            1,
+            {"target_id": 0, "target_slot": 0},
+            holders,
+            budget=[2],
+        )
+
+
+def test_holder_cache_hits_charge_each_target_consumed_by_the_caller():
+    sg = {"nodes": [{"id": node_id, "inputs": [{"name": "value", "link": 1}]} for node_id in range(3)]}
+    holders = promoted._link_holders(sg)
+    link = {"id": 1, "target_id": 0, "target_slot": 0}
+    cache: dict = {}
+    budget = [6]
+
+    first = promoted.held_link_targets(sg, 1, link, holders, cache, budget)
+    assert budget == [3]
+    assert promoted.held_link_targets(sg, 1, link, holders, cache, budget) is first
+    assert budget == [0]
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="safe limit"):
+        promoted.held_link_targets(sg, 1, link, holders, cache, budget)
+
+
+def test_promoted_input_memo_hits_use_constant_budget_and_cached_name_index():
+    child = {
+        "id": "child",
+        "inputs": [{"name": f"value-{index}", "type": "STRING", "linkIds": []} for index in range(50)],
+        "nodes": [],
+        "links": [],
+    }
+    memo: dict = {}
+    budget = [200]
+
+    first = promoted.promoted_inputs(child, {"child": child}, 1, (123,), memo, budget)
+    remaining = budget[0]
+    second = promoted.promoted_inputs(child, {"child": child}, 1, (123,), memo, budget)
+
+    assert second is first
+    assert budget[0] == remaining - 1
+
+
+def test_wide_reused_definition_does_not_exhaust_the_linear_budget():
+    width = 100
+    instances = 300
+    child = {
+        "id": "child",
+        "inputs": [{"name": f"value-{index}", "type": "STRING", "linkIds": []} for index in range(width)],
+        "nodes": [],
+        "links": [],
+    }
+    outer = {
+        "id": "outer",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": list(range(instances))}],
+        "nodes": [
+            {
+                "id": index,
+                "type": "child",
+                "inputs": [{"name": "value-0", "link": index}],
+            }
+            for index in range(instances)
+        ],
+        "links": [
+            {"id": index, "origin_id": -10, "origin_slot": 0, "target_id": index, "target_slot": 0}
+            for index in range(instances)
+        ],
+    }
+    definitions = _SubgraphDefs()
+    definitions.update({"outer": outer, "child": child})
+
+    with mock.patch.object(promoted, "_promoted_name_index", wraps=promoted._promoted_name_index) as index:
+        [item] = promoted.promoted_inputs(outer, definitions)
+
+    assert item.value_index is None
+    assert index.call_count == 1
+
+
+def test_definition_index_caches_limit_and_holder_scans():
+    definition = {
+        "id": "sg",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+        "nodes": [{"id": 7, "inputs": [{"name": "value", "link": 1}]}],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = definition
+
+    with (
+        mock.patch.object(promoted, "_link_holders", wraps=promoted._link_holders) as holder_scan,
+        mock.patch.object(promoted, "_link_rows_by_id", wraps=promoted._link_rows_by_id) as link_scan,
+    ):
+        first = promoted.promoted_inputs(definition, definitions)
+        second = promoted.promoted_inputs(definition, definitions)
+
+    assert holder_scan.call_count == 1
+    assert link_scan.call_count == 1
+    assert second == first
+    assert second is not first
+    assert definitions.promotion_visit_limit is not None
+
+
+def test_boundary_targets_are_cached_for_the_definition_index():
+    definition = {
+        "id": "sg",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+        "nodes": [
+            {
+                "id": 7,
+                "inputs": [{"name": "value", "link": 1, "widget": {"name": "value"}}],
+            }
+        ],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = definition
+    item = promoted.PromotedInput("value", "STRING", 0, 0)
+
+    with mock.patch.object(promoted, "_boundary_targets", wraps=promoted._boundary_targets) as resolver:
+        first = promoted.boundary_widget_targets(definition, item, definitions)
+        second = promoted.boundary_widget_targets(definition, item, definitions)
+
+    assert second == first
+    assert second is not first
+    assert resolver.call_count == 1
+
+
+def test_definition_repairs_invalidate_cached_limits_and_holders():
+    definition = {
+        "id": "sg",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+        "nodes": [{"id": 7, "inputs": [{"name": "value", "link": 1}]}],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+    definitions["sg"] = definition
+    other = {"id": "other", "inputs": [], "nodes": [], "links": []}
+    definitions["other"] = other
+    original = promoted._cached_link_holders(definition, definitions)
+    original_links = promoted._cached_link_rows(definition, definitions)
+    promoted.promoted_inputs(definition, definitions)
+    promoted.promoted_inputs(other, definitions)
+    promoted.boundary_widget_targets(definition, promoted.PromotedInput("value", "STRING", 0, 0), definitions)
+    assert promoted._promotion_visit_limit(definitions, definition) > 0
+    assert len(definitions.promotion_inputs) == 2
+    assert definitions.promotion_boundaries
+
+    definition["nodes"].append({"id": 8, "inputs": [{"name": "value", "link": 1}]})
+    promoted._invalidate_promotion_caches(definitions, definition)
+
+    assert promoted._cached_link_holders(definition, definitions) is not original
+    assert promoted._cached_link_rows(definition, definitions) is not original_links
+    assert len(promoted._cached_link_holders(definition, definitions)[1]) == 2
+    assert definitions.promotion_visit_limit is None
+    assert definitions.promotion_inputs == {}
+    assert definitions.promotion_boundaries == {}
+
+
+def test_definition_indexes_keep_a_strong_reference_to_an_unregistered_root():
+    definition = {
+        "id": "root",
+        "inputs": [{"name": "value", "linkIds": [1]}],
+        "nodes": [{"id": 7, "inputs": [{"name": "value", "link": 1}]}],
+        "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+    }
+    definitions = _SubgraphDefs()
+
+    promoted._cached_link_holders(definition, definitions)
+    promoted._cached_link_rows(definition, definitions)
+
+    assert definitions.promotion_holders[id(definition)][0] is definition
+    assert definitions.promotion_links[id(definition)][0] is definition
+
+
+def test_promotion_traversal_limit_is_a_value_error_for_command_boundaries():
+    assert issubclass(promoted.PromotionTraversalLimitError, ValueError)
+
+
+def test_boundary_target_fanout_is_bounded_by_definition_graph_size():
+    definitions: dict[str, dict] = {}
+    depth = 18
+    for level in reversed(range(depth)):
+        for side in ("left", "right"):
+            definition_id = f"{side}-{level}"
+            next_level = level + 1
+            child_types = (
+                (f"left-{next_level}", f"right-{next_level}") if next_level < depth else ("PlainLeft", "PlainRight")
+            )
+            definitions[definition_id] = {
+                "id": definition_id,
+                "inputs": [{"name": "value", "type": "STRING", "linkIds": [1, 2]}],
+                "nodes": [
+                    {
+                        "id": index,
+                        "type": child_type,
+                        "inputs": [
+                            {
+                                "name": "value",
+                                "type": "STRING",
+                                "widget": {"name": "value"},
+                                "link": index + 1,
+                            }
+                        ],
+                    }
+                    for index, child_type in enumerate(child_types)
+                ],
+                "links": [
+                    {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 0, "target_slot": 0},
+                    {"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": 0},
+                ],
+            }
+
+    root = definitions["left-0"]
+    item = promoted.PromotedInput("value", "STRING", 0, 0)
+
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="boundary traversal"):
+        promoted.boundary_widget_targets(root, item, definitions)
+
+
 # --------------------------------------------------------------------------- #
 # reads: host value wins, interior is the fallback
 # --------------------------------------------------------------------------- #
@@ -117,6 +1272,29 @@ def test_effective_value_falls_back_to_the_interior_widget(graph):
     assert promoted.effective_value(wf, inst, "width", graph) == 1024
     assert promoted.effective_value(wf, inst, "steps", graph) == 8
     assert promoted.effective_value(wf, inst, "unet_name", graph) == "z_image_turbo_bf16.safetensors"
+
+
+def test_source_value_stops_mutually_recursive_promoted_definitions():
+    def nested_definition(name: str, child: str) -> dict:
+        return {
+            "id": name,
+            "inputs": [{"name": "value", "type": "STRING", "linkIds": [1]}],
+            "nodes": [
+                {
+                    "id": 7,
+                    "type": child,
+                    "inputs": [{"name": "value", "widget": {"name": "value"}, "link": 1}],
+                }
+            ],
+            "links": [{"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 7, "target_slot": 0}],
+        }
+
+    first = nested_definition("first", "second")
+    second = nested_definition("second", "first")
+    definitions = {"first": first, "second": second}
+    [item] = promoted.promoted_inputs(first, definitions)
+
+    assert promoted.source_value({}, first, item, graph=None, defs=definitions) is promoted.UNSET
 
 
 def test_quarantined_host_value_wins_by_name(graph):

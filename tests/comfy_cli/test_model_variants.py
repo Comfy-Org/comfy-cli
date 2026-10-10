@@ -27,7 +27,12 @@ from typer.testing import CliRunner
 from comfy_cli.caller import Caller
 from comfy_cli.command import templates as templates_cmd
 from comfy_cli.cql.engine import Graph
-from comfy_cli.model_variants import precision_key, precision_sibling, resolve_workflow_models
+from comfy_cli.model_variants import (
+    ModelVariantResolutionError,
+    precision_key,
+    precision_sibling,
+    resolve_workflow_models,
+)
 from comfy_cli.output.renderer import OutputMode, Renderer, reset_renderer_for_testing, set_renderer
 
 VAES = [
@@ -329,6 +334,109 @@ class TestResolveWorkflowModels:
         assert resolve_workflow_models(wf, graph) == ([], [])
         assert wf == before
 
+    def test_top_level_only_resolution_is_staged_transactionally(self, graph):
+        missing = "minimax_h3_video_vae_int8_convrot.safetensors"
+        node = {
+            "id": 1,
+            "type": "VAELoader",
+            "widgets_values": [missing],
+            "properties": {"models": 5},
+        }
+        workflow = {"nodes": [node]}
+
+        substitutions, unavailable = resolve_workflow_models(workflow, graph)
+
+        assert substitutions and not unavailable
+        assert workflow["nodes"][0] is not node
+        assert workflow["nodes"][0]["widgets_values"] == ["minimax_h3_video_vae_fp16.safetensors"]
+        assert node["widgets_values"] == [missing]
+
+    def test_promoted_resolution_reports_deepcopy_recursion_without_mutation(self, graph, monkeypatch):
+        workflow = _template()
+        before = copy.deepcopy(workflow)
+
+        def recursive_copy(_workflow):
+            raise RecursionError("workflow nesting is too deep")
+
+        monkeypatch.setattr("comfy_cli.model_variants.copy.deepcopy", recursive_copy)
+
+        with pytest.raises(ModelVariantResolutionError, match="workflow nesting is too deep"):
+            resolve_workflow_models(workflow, graph)
+
+        assert workflow == before
+
+    def test_promotion_budget_failure_happens_before_model_mutation(self, graph, monkeypatch):
+        definitions: dict[str, dict] = {}
+        depth = 18
+        for level in reversed(range(depth)):
+            for side in ("left", "right"):
+                definition_id = f"{side}-{level}"
+                next_level = level + 1
+                child_types = (
+                    (f"left-{next_level}", f"right-{next_level}") if next_level < depth else ("PlainLeft", "PlainRight")
+                )
+                definitions[definition_id] = {
+                    "id": definition_id,
+                    "inputs": [{"name": "value", "type": "STRING", "linkIds": [1, 2]}],
+                    "nodes": [
+                        {
+                            "id": index,
+                            "type": child_type,
+                            "inputs": [{"name": "value", "type": "STRING", "link": index + 1}],
+                        }
+                        for index, child_type in enumerate(child_types)
+                    ],
+                    "links": [
+                        {"id": 1, "origin_id": -10, "origin_slot": 0, "target_id": 0, "target_slot": 0},
+                        {"id": 2, "origin_id": -10, "origin_slot": 0, "target_id": 1, "target_slot": 0},
+                    ],
+                }
+        definitions["left-0"]["nodes"].append(
+            {
+                "id": 99,
+                "type": "VAELoader",
+                "widgets_values": ["minimax_h3_video_vae_int8_convrot.safetensors"],
+            }
+        )
+        workflow = {
+            "nodes": [{"id": 100, "type": "left-0", "widgets_values": []}],
+            "definitions": {"subgraphs": list(definitions.values())},
+        }
+        before = copy.deepcopy(workflow)
+
+        # Keep this transactional-failure regression independent of traversal
+        # optimizations: shared acyclic DAGs are intentionally memoized now.
+        monkeypatch.setattr("comfy_cli.cql.promoted._promotion_index_limit", lambda *_args: 1)
+
+        with pytest.raises(ModelVariantResolutionError, match="input traversal"):
+            resolve_workflow_models(workflow, graph)
+
+        assert workflow == before
+
+    def test_unrelated_definition_is_not_preflighted(self, graph, monkeypatch):
+        from comfy_cli.cql import promoted
+
+        wf = _template()
+        wf["definitions"]["subgraphs"].append({"id": "unrelated", "inputs": [], "nodes": [], "links": []})
+        original = promoted.promoted_inputs
+        visited: list[str] = []
+
+        def guarded(definition, definitions, *args, **kwargs):
+            definition_id = str(definition.get("id"))
+            visited.append(definition_id)
+            if definition_id == "unrelated":
+                raise promoted.PromotionTraversalLimitError("unrelated definition was traversed")
+            return original(definition, definitions, *args, **kwargs)
+
+        monkeypatch.setattr(promoted, "promoted_inputs", guarded)
+
+        substitutions, unavailable = resolve_workflow_models(wf, graph)
+
+        assert substitutions
+        assert unavailable
+        assert "sg-1" in visited
+        assert "unrelated" not in visited
+
 
 # ---------------------------------------------------------------------------
 # templates fetch
@@ -406,6 +514,22 @@ class TestTemplatesFetch:
         assert env["ok"] is True
         assert "could not load object_info" in env["data"]["model_check_skipped"]
         assert json.loads(out.read_text()) == _template()
+
+    def test_promotion_limit_skips_model_check_with_structured_reason(self, tmp_path: Path, monkeypatch):
+        info = tmp_path / "object_info.json"
+        info.write_text(json.dumps(_object_info()))
+        workflow = _template()
+        before = copy.deepcopy(workflow)
+
+        def fail_resolution(*_args, **_kwargs):
+            raise ModelVariantResolutionError("promoted input traversal exceeded its safe limit")
+
+        monkeypatch.setattr("comfy_cli.model_variants.resolve_workflow_models", fail_resolution)
+
+        notes = templates_cmd._resolve_template_models(workflow, str(info))
+
+        assert "promoted input traversal exceeded" in notes["model_check_skipped"]
+        assert workflow == before
 
 
 # ---------------------------------------------------------------------------

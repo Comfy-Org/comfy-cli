@@ -19,6 +19,7 @@ folder, two candidate precisions) is not a match.
 
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any
 
@@ -41,6 +42,10 @@ _WORD_TAIL = re.compile(r"(?:^|[_\-.])(?P<tok>[^_\-.]+)$")
 
 #: File extensions a model loader option carries.
 MODEL_FILE = re.compile(r"\.(safetensors|sft|ckpt|pt|pth|bin|gguf|onnx)$", re.IGNORECASE)
+
+
+class ModelVariantResolutionError(RuntimeError):
+    """A malformed promoted-widget graph prevented safe model substitution."""
 
 
 def _parse(name: str) -> tuple[tuple[str, str, str], tuple[str, ...]] | None:
@@ -157,8 +162,25 @@ def resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dic
     ``model_unavailable`` warning (with the closest options) per model file
     that has no unique sibling and is left as it was. A subgraph instance that
     carries the same filename as a promoted value, and the ``properties.models``
-    download list, follow the rewrite.
+    download list, follow the rewrite. Top-level-only replacements are applied
+    directly; a replacement that must propagate through promoted subgraph
+    values is staged on a copy so a traversal failure leaves the input intact.
     """
+    from comfy_cli.cql.promoted import PromotionTraversalLimitError
+
+    try:
+        candidate = copy.deepcopy(workflow)
+        result = _resolve_workflow_models(candidate, graph)
+    except (PromotionTraversalLimitError, RecursionError) as exc:
+        raise ModelVariantResolutionError(str(exc)) from exc
+    workflow.clear()
+    workflow.update(candidate)
+    return result
+
+
+def _resolve_workflow_models(workflow: dict, graph) -> tuple[list[dict], list[dict]]:
+    """Transactional implementation for :func:`resolve_workflow_models`."""
+
     subs: list[dict] = []
     unavailable: list[dict] = []
     # Per subgraph definition: (interior node id, widget) -> (old, new). An
@@ -209,7 +231,8 @@ def _rename_download(node: dict, old: str, new: str) -> None:
 
     The download URL and hash describe the replaced file, so they go."""
     props = node.get("properties")
-    for entry in (props.get("models") if isinstance(props, dict) else None) or []:
+    raw_models = props.get("models") if isinstance(props, dict) else None
+    for entry in raw_models if isinstance(raw_models, list) else []:
         if isinstance(entry, dict) and entry.get("name") == old:
             entry["name"] = new
             entry.pop("url", None)
@@ -225,10 +248,10 @@ def _rename_promoted(workflow: dict, renamed: dict[str, dict[tuple[str, str], tu
     A rewritten slot on an instance that itself sits inside a definition is a
     swap of that definition too, so a widget promoted through nested subgraphs
     is followed out to the outermost host."""
-    from comfy_cli.cql.promoted import defs_by_id, promoted_inputs
+    from comfy_cli.cql.promoted import _MAX_NESTED_PROMOTION_DEPTH, defs_by_id, promoted_inputs
 
     defs = defs_by_id(workflow)
-    for _ in range(16):  # nesting depth bound, as the engine's promotion walk
+    for _ in range(_MAX_NESTED_PROMOTION_DEPTH + 1):
         grown = False
         for node, sg_loc in _workflow_nodes(workflow):
             sg_id = str(node.get("type", ""))
@@ -247,3 +270,4 @@ def _rename_promoted(workflow: dict, renamed: dict[str, dict[tuple[str, str], tu
                         grown = True
         if not grown:
             return
+    raise ModelVariantResolutionError("promoted model propagation exceeded its nesting safe limit")
