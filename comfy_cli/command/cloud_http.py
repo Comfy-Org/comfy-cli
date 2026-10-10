@@ -46,11 +46,32 @@ def _authed_request(
     return req
 
 
+class ResponseUnparseable(Exception):
+    """A non-empty response body that was not valid JSON.
+
+    Only raised when a caller opts in via ``http_request(..., strict_json=True)``;
+    otherwise a decode failure keeps collapsing to ``None`` as it always has.
+    """
+
+
 def http_request(
-    url: str, target, *, method: str = "GET", body: dict | None = None, timeout: float = 30.0
+    url: str,
+    target,
+    *,
+    method: str = "GET",
+    body: dict | None = None,
+    timeout: float = 30.0,
+    strict_json: bool = False,
 ) -> tuple[int, dict | None]:
     """Authed HTTP call returning (status, parsed_json_or_none). Raises
-    urllib errors verbatim so callers can surface the right error code."""
+    urllib errors verbatim so callers can surface the right error code.
+
+    An *empty* body is reported as ``None``. A *non-empty* body that fails to
+    decode is reported as ``None`` too, unless ``strict_json`` is set — then it
+    raises ``ResponseUnparseable``. The two are different answers ("nothing to
+    say" vs. "a malformed answer"), and a listing caller that conflates them
+    reports a proxy or captive-portal error page as a successful empty listing.
+    """
     import urllib.request
 
     data = json.dumps(body).encode("utf-8") if body is not None else None
@@ -59,11 +80,28 @@ def http_request(
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         status = resp.status
         raw = resp.read(64 * 1024 * 1024)  # 64 MiB cap
-    if not raw:
+    # `.strip()` so a whitespace-only body counts as empty rather than as a
+    # decode failure: identical to the old behaviour on the default path (it
+    # collapsed to `None` either way), but it keeps `strict_json` from calling a
+    # server that answers `b"\n"` malformed.
+    if not raw.strip():
         return status, None
     try:
         return status, json.loads(raw)
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError) as e:
+        # Catch the ``ValueError`` BASE, not ``JSONDecodeError``: handed raw bytes,
+        # ``json.loads`` rejects a malformed body with three different exceptions and
+        # only one of them is a ``JSONDecodeError``. Non-UTF-8 bytes (``b"\xff"``, a
+        # binary error page) raise ``UnicodeDecodeError``; a JSON integer past
+        # CPython's 4300-digit int/str limit raises a bare ``ValueError``; both
+        # subclass ``ValueError``. Pathologically nested input raises
+        # ``RecursionError``, which does not — the 64 MiB read permits deep nesting.
+        # Narrowing to ``JSONDecodeError`` let those escape past ``strict_json`` and
+        # past every call site's ``except``, crashing the CLI with a raw traceback
+        # for exactly the malformed response this helper exists to classify. Same
+        # reasoning, and the same catch, as the sibling helper in ``workflow.py``.
+        if strict_json:
+            raise ResponseUnparseable(f"non-JSON response body from {url}") from e
         return status, None
 
 
