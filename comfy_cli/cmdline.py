@@ -221,7 +221,11 @@ _SECRET_ASSIGNMENT_KEY_PATTERN = (
     rf")"
 )
 _OPTIONAL_KEY_CLOSING_QUOTE = r"(?:[\"'](?=[^\S\r\n]*[:=]))?"
-_SECRET_VALUE_SPACE = r"(?:[^\S\r\n]*|[^\S\r\n]*\r?\n[ \t]*(?=[bBuUrR]{0,2}[\"']))"
+_SECRET_NEXT_LINE_VALUE = (
+    r"(?:[bBuUrR]{0,2}[\"']|[\[{]|"
+    r"(?!(?:\(|[A-Za-z_][\w .-]{0,63}[ \t]*:))[^\s])"
+)
+_SECRET_VALUE_SPACE = rf"(?:[^\S\r\n]*|[^\S\r\n]*\r?\n[ \t]*(?:-[ \t]+)?(?={_SECRET_NEXT_LINE_VALUE}))"
 _SECRET_CONSTRUCTOR_START = re.compile(
     rf"(?P<prefix>{_SECRET_ASSIGNMENT_KEY_PATTERN}{_OPTIONAL_KEY_CLOSING_QUOTE}[^\S\r\n]*[:=]{_SECRET_VALUE_SPACE})"
     r"[A-Za-z_][\w.]*\(",
@@ -466,6 +470,16 @@ def _scrub_url_userinfo(text: str) -> str:
         # crossed a raw delimiter fall back to the final token-wide @.
         authority_at = token.rfind("@", 0, first_delimiter)
         standard_userinfo = authority_at >= 0
+        if standard_userinfo:
+            candidate_host = token[authority_at + 1 : first_delimiter]
+            later_at = token.rfind("@")
+            # An email-form username supplies an early @. If what follows it
+            # cannot be a host (``corp.com:pa``), a later @ owns the authority
+            # and everything before it is malformed userinfo.
+            if later_at > authority_at and not (
+                _looks_like_hostname(candidate_host) or _looks_like_numbered_network_authority(candidate_host)
+            ):
+                standard_userinfo = False
         at = authority_at if standard_userinfo else token.rfind("@")
         if at < 0:
             search_from = match.end()
@@ -479,27 +493,33 @@ def _scrub_url_userinfo(text: str) -> str:
             continue
         authority = token[:first_delimiter]
         numbered_authority = _looks_like_numbered_network_authority(authority)
-        if authority.startswith("["):
-            authority_host = authority.partition("]")[0] + "]"
-        else:
-            authority_host = authority.rpartition(":")[0]
-        clearly_network_host = (
-            authority_host in {"host", "localhost"}
-            or "." in authority_host
-            or (authority_host.startswith("[") and authority_host.endswith("]"))
-        )
-        delimiter = token[first_delimiter] if first_delimiter < len(token) else ""
-        malformed_password = ":" in authority and (
-            not numbered_authority or not clearly_network_host or delimiter == "#"
-        )
+        crossed_tail = token[first_delimiter:at]
+        # A valid host:port followed by a query-shaped @ belongs to a normal
+        # path/query, including single-label Docker and Kubernetes services.
+        # A bare path/fragment remains ambiguous with a password and therefore
+        # fails closed.
+        clear_network_tail = numbered_authority and "?" in crossed_tail and "=" in crossed_tail
+        malformed_password = ":" in authority and not clear_network_tail
         if not standard_userinfo and not malformed_password:
             # A whitespace-free token can contain another URL (proxy wrappers,
             # comma-joined indexes). Resume immediately after this scheme so
             # the next scheme remains discoverable.
             search_from = match.end()
             continue
-        chunks.extend((text[cursor : match.end()], "***@"))
-        cursor = match.end() + at + 1
+        post_at = token[at + 1 :]
+        if (
+            not standard_userinfo
+            and any(char in token[:at] for char in "?#")
+            and re.search(r"[&;][A-Za-z_][\w.-]*[:=]", post_at)
+        ):
+            # The fallback crossed a query or fragment anchor. Keeping the
+            # post-@ tail could expose another key/value pair that no later
+            # query scrubber can recognize, so mask the rest of this token.
+            chunks.extend((text[cursor : match.end()], "***"))
+            cursor = token_end
+        else:
+            chunks.extend((text[cursor : match.end()], "***@"))
+            cursor = match.end() + at + 1
         search_from = cursor
     if not chunks:
         return text
@@ -516,14 +536,26 @@ def _mask_unquoted_secret_assignment(match: re.Match) -> str:
     """
     prefix = match.group("prefix")
     value = match.group("value")
-    key = re.split(r"[:=]", prefix, maxsplit=1)[0]
-    if key.count(".") >= 2 and re.fullmatch(r"[0-9]{1,5}(?:/[^\s]*)?", value):
-        # A dotted hostname plus numeric port is a network authority, not a
-        # dotted secret-key assignment (auth.example.com:443/path).
+    host_match = re.fullmatch(r"(?P<host>[^\s:=]+):", prefix)
+    port = value.partition("/")[0]
+    context = match.string[: match.start()]
+    if (
+        host_match is not None
+        and (context.endswith("://") or re.search(r"\bhost[ \t]+$", context, re.IGNORECASE))
+        and _looks_like_numbered_network_authority(f"{host_match.group('host')}:{port}")
+    ):
+        # Only an actual URL/``host ...`` authority earns the exemption. An
+        # ``=`` assignment with a numeric value is still a credential.
         return match.group(0)
-    sibling = re.search(r"[&,;](?=(?:[\"']?[A-Za-z_][\w.-]*[\"']?[:=]))", value)
+    sibling = re.search(r"[&;](?P<key>[\"']?[A-Za-z_][\w.-]*[\"']?)[:=]", value)
     if sibling is not None:
-        return f"{prefix}***{value[sibling.start() :]}"
+        sibling_key = sibling.group("key").strip("\"'").lower()
+        if sibling_key in {"request", "request_id", "request-id", "trace", "trace_id", "trace-id"}:
+            return f"{prefix}***{value[sibling.start() :]}"
+        # A generic short key can be a member inside the credential (for
+        # example ``password=X&k=Y``). A second secret key is sensitive by
+        # definition. Mask either ambiguous tail with the original value.
+        return f"{prefix}***"
     opening_wrapper = (
         match.string[match.start() - 1] if match.start() and match.string[match.start() - 1] in "\"'" else ""
     )
@@ -666,9 +698,16 @@ def _internal_error_message(error: BaseException) -> str:
         # A userinfo scrub needs its closing ``@``. If the input cap removed
         # that anchor, drop the incomplete credential token before earlier
         # scrubbers contract the message and pull it into the visible prefix.
-        partial_userinfo = re.search(r"(?<![\w])[A-Za-z][A-Za-z0-9+.-]*://(?P<tail>[^\s\"]*)$", text)
+        partial_userinfo = next(
+            (
+                scheme
+                for scheme in reversed(list(_URL_SCHEME_START.finditer(text)))
+                if re.fullmatch(r'[^\s"]*', text[scheme.end() :])
+            ),
+            None,
+        )
         if partial_userinfo is not None:
-            tail = partial_userinfo.group("tail")
+            tail = text[partial_userinfo.end() :]
             authority = re.split(r"[/?#]", tail, maxsplit=1)[0]
             if "@" in tail:
                 # The cap may have removed a later ``@host``. Even a DNS-like
