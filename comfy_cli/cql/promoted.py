@@ -360,42 +360,19 @@ def _promotion_visit_limit(defs: dict[str, dict], root: dict) -> int:
 
 
 def _shared_promotion_budget(defs: dict[str, dict], root: dict, attribute: str) -> list[int]:
-    """One serialized-graph allowance per resolver operation on a defs index."""
+    """A root-local serialized-graph allowance for one resolver operation."""
     limit = _promotion_visit_limit(defs, root)
-    if not hasattr(defs, attribute) or not _root_is_registered(defs, root):
-        return [limit]
-    budget = getattr(defs, attribute)
-    if budget is None:
-        budget = [0]
+    budget = [limit]
+    if hasattr(defs, attribute) and _root_is_registered(defs, root):
         setattr(defs, attribute, budget)
-    roots_by_attribute = getattr(defs, "promotion_budget_roots", None)
-    if isinstance(roots_by_attribute, dict):
-        credited = roots_by_attribute.setdefault(attribute, set())
-        if id(root) not in credited:
-            budget[0] += limit
-            credited.add(id(root))
-    elif budget[0] == 0:
-        budget[0] = limit
     return budget
 
 
 def _shared_boundary_output_budget(defs: dict[str, dict], root: dict) -> list[int]:
-    """Bound materialized boundary paths separately from graph traversal."""
-    limit = _MAX_BOUNDARY_MATERIALIZATIONS
-    if not hasattr(defs, "promotion_boundary_output_budget") or not _root_is_registered(defs, root):
-        return [limit]
-    budget = defs.promotion_boundary_output_budget
-    if budget is None:
-        budget = [0]
+    """Bound paths materialized by one boundary-resolution operation."""
+    budget = [_MAX_BOUNDARY_MATERIALIZATIONS]
+    if hasattr(defs, "promotion_boundary_output_budget") and _root_is_registered(defs, root):
         defs.promotion_boundary_output_budget = budget
-    roots_by_attribute = getattr(defs, "promotion_budget_roots", None)
-    if isinstance(roots_by_attribute, dict):
-        credited = roots_by_attribute.setdefault("promotion_boundary_output_budget", set())
-        if id(root) not in credited:
-            budget[0] += limit
-            credited.add(id(root))
-    elif budget[0] == 0:
-        budget[0] = limit
     return budget
 
 
@@ -581,7 +558,7 @@ def promoted_inputs(
                         inner_by_name = _name_memo[inner_key]
                         inner_pi = inner_by_name.get(_input_name(entry.get("name")))
                         if inner_pi is not None and inner_pi.is_widget:
-                            source = (str(target.get("id")), str(entry.get("name")), None, True)
+                            source = (str(target.get("id")), _input_name(entry.get("name")), None, True)
                             break
                     continue
                 marker = entry.get("widget")
@@ -2065,9 +2042,15 @@ def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) 
         and isinstance(inputs[pi.index], dict)
         and _input_name(inputs[pi.index].get("name")) == pi.name
     )
+    output_budget = _shared_boundary_output_budget(defs, sg)
     if cache is not None and cacheable:
         cached = cache.get(cache_key)
         if cached is not None and cached[0] is sg:
+            _spend_traversal_budget(
+                output_budget,
+                len(cached[1]),
+                "promoted input boundary traversal exceeded its safe limit",
+            )
             return [(list(path), widget) for path, widget in cached[1]]
     inp = inputs[pi.index] if cacheable else None
     if inp is None:
@@ -2086,7 +2069,7 @@ def boundary_widget_targets(sg: dict, pi: PromotedInput, defs: dict[str, dict]) 
             _input_name_memo=shared_names if shared_names is not None else {},
             _cycle_memo=getattr(defs, "promotion_boundary_cycle_memo", None),
             _cycle_state=[False],
-            _output_budget=_shared_boundary_output_budget(defs, sg),
+            _output_budget=output_budget,
             _dependency_memo=getattr(defs, "promotion_boundary_dependencies", None),
             _dependency_state=[set()],
         )

@@ -3523,6 +3523,14 @@ class _SubgraphDefs(dict[str, dict]):
         self.promotion_boundary_names: dict[int, dict[Any, dict]] = {}
         self.promotion_boundary_output_budget: list[int] | None = None
 
+    def _invalidate_derived_state(self) -> None:
+        # Local import avoids an engine/promoted import cycle. Definition
+        # membership changes can otherwise leave id-keyed results attached to
+        # a later object that reuses the removed definition's address.
+        from comfy_cli.cql.promoted import _invalidate_promotion_caches
+
+        _invalidate_promotion_caches(self)
+
     def _add_registered_definition(self, value: object) -> None:
         if not isinstance(value, dict):
             return
@@ -3550,31 +3558,38 @@ class _SubgraphDefs(dict[str, dict]):
             self._remove_registered_definition(previous)
         super().__setitem__(key, value)
         self._add_registered_definition(value)
+        self._invalidate_derived_state()
 
     def __delitem__(self, key: str) -> None:
         previous = self[key]
         super().__delitem__(key)
         self._remove_registered_definition(previous)
+        self._invalidate_derived_state()
 
     def update(self, *args, **kwargs) -> None:
         for key, value in dict(*args, **kwargs).items():
             self[key] = value
 
     def clear(self) -> None:
+        changed = bool(self)
         super().clear()
         self.registered_definition_ids.clear()
         self._registered_definition_refcounts.clear()
+        if changed:
+            self._invalidate_derived_state()
 
     def pop(self, key: str, *args):
         exists = key in self
         value = super().pop(key, *args)
         if exists:
             self._remove_registered_definition(value)
+            self._invalidate_derived_state()
         return value
 
     def popitem(self):
         item = super().popitem()
         self._remove_registered_definition(item[1])
+        self._invalidate_derived_state()
         return item
 
     def setdefault(self, key: str, default=None):

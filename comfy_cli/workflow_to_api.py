@@ -53,6 +53,7 @@ _MAX_RESOLUTION_DEPTH = 100
 _MAX_SUBGRAPH_ITERATIONS = 10
 _MAX_SUBGRAPH_EXPANSION_RATIO = 128
 _MIN_SUBGRAPH_EXPANSION_BUDGET = 100_000
+_MAX_SUBGRAPH_EXPANSION_BUDGET = 1_000_000
 _MAX_RESOLVED_SUBGRAPH_INPUTS = 10_000
 
 # Strings that ComfyUI appends after seed-like INT widgets to control how the
@@ -355,7 +356,12 @@ def _expand_subgraphs(
             continue
         seen_definitions.add(id(definition))
         serialized_size += 1 + _definition_expansion_cost(definition)
-    expansion_budget = [max(_MIN_SUBGRAPH_EXPANSION_BUDGET, serialized_size * _MAX_SUBGRAPH_EXPANSION_RATIO)]
+    expansion_budget = [
+        min(
+            _MAX_SUBGRAPH_EXPANSION_BUDGET,
+            max(_MIN_SUBGRAPH_EXPANSION_BUDGET, serialized_size * _MAX_SUBGRAPH_EXPANSION_RATIO),
+        )
+    ]
     for _iteration in range(_MAX_SUBGRAPH_ITERATIONS):
         expanded: list[dict] = []
         found_any = False
@@ -373,7 +379,7 @@ def _expand_subgraphs(
                     expanded.append(node)
                     continue
                 found_any = True
-                generated = _definition_expansion_cost(subgraph_defs[node_type])
+                generated = _instance_expansion_cost(subgraph_defs[node_type], node.get("id"))
                 if generated > expansion_budget[0]:
                     raise WorkflowConversionError("subgraph expansion exceeded its proportional safe limit")
                 expansion_budget[0] -= generated
@@ -414,6 +420,7 @@ def _expand_subgraphs(
     if any(
         node.get("mode") not in (_MODE_MUTED, _MODE_BYPASS)
         and isinstance(node.get("type"), str)
+        and is_subgraph_uuid(node.get("type"))
         and node.get("type") in subgraph_defs
         for node in nodes
     ):
@@ -441,6 +448,16 @@ def _definition_expansion_cost(definition: dict) -> int:
     nodes = [node for node in raw_nodes if isinstance(node, dict)] if isinstance(raw_nodes, list) else []
     links = [link for link in raw_links if isinstance(link, dict)] if isinstance(raw_links, list) else []
     return sum(_node_expansion_cost(node) for node in nodes) + len(links)
+
+
+def _instance_expansion_cost(definition: dict, outer_id: Any) -> int:
+    """Copied work for one instance, including its repeated id prefix."""
+    raw_nodes = definition.get("nodes")
+    raw_links = definition.get("links")
+    node_count = sum(isinstance(node, dict) for node in raw_nodes) if isinstance(raw_nodes, list) else 0
+    link_count = sum(isinstance(link, dict) for link in raw_links) if isinstance(raw_links, list) else 0
+    prefix_size = len(str(outer_id)) + 1
+    return _definition_expansion_cost(definition) + prefix_size * (node_count + 2 * link_count)
 
 
 def _last_wins_interior_links(internal_links: list[dict], link_map: dict[Any, dict]) -> list[dict]:
@@ -646,6 +663,7 @@ def _expand_one_subgraph(
             output_slots = output_slots_by_link.get(lid, set()) if _is_link_id(lid) else set()
             if (
                 not output_slots
+                or internal_link_map.get(lid) is not link
                 or lid in resolved_output_link_ids
                 or str(link.get("target_id")) != str(_SUBGRAPH_OUTPUT_NODE_ID)
             ):
@@ -843,6 +861,16 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
             ctx,
             source_budget,
         )
+    # If the authoritative last row for an id resolves to an unwired
+    # passthrough, every duplicate row with that id is stale and must be
+    # removed. Otherwise an earlier duplicate becomes the effective row.
+    last_rows: dict[Any, tuple | list] = {}
+    for link in links:
+        if isinstance(link, (list, tuple)) and len(link) >= 6 and _is_link_id(link[0]):
+            last_rows[link[0]] = link
+    dropped_unwired_ids = {
+        link_id for link_id, link in last_rows.items() if _resolve_subgraph_output(str(link[1]), link[2], ctx) is None
+    }
     updated: list = []
     applied_holder_updates: set[Any] = set()
     for link in links:
@@ -850,6 +878,8 @@ def _rewrite_links_for_subgraphs(links: list, ctx: _SubgraphCtx, nodes: list[dic
             updated.append(link)
             continue
         link_id, src_id, src_slot, tgt_id, tgt_slot, link_type = link[:6]
+        if _is_link_id(link_id) and link_id in dropped_unwired_ids:
+            continue
 
         src_id_str = str(src_id)
         resolved_source = _resolve_subgraph_output(src_id_str, src_slot, ctx)
