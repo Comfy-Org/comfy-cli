@@ -84,6 +84,22 @@ def test_subgraph_alias_conflicts_follow_name_typed_definition_edges():
     assert "LeafAlias" not in resolved
 
 
+def test_rejected_name_alias_does_not_hide_an_unrelated_valid_alias():
+    outer = {"id": "outer-id", "name": "Outer", "nodes": [{"id": 1, "type": "KSampler"}]}
+    conflicting = {
+        "id": "sampler-id",
+        "name": "KSampler",
+        "nodes": [{"id": 2, "type": "KSampler"}, {"id": 3, "type": "Outer"}],
+    }
+
+    resolved = _subgraph_defs_by_id(
+        {"nodes": [{"id": 4, "type": "Outer"}], "definitions": {"subgraphs": [outer, conflicting]}}
+    )
+
+    assert resolved["Outer"] is outer
+    assert "KSampler" not in resolved
+
+
 def _object_info() -> dict[str, Any]:
     """Covers: link inputs, widget inputs, COMBO/ENUM, control_after_generate,
     force_input, output_node, api_node, multiple output types."""
@@ -735,6 +751,39 @@ class TestDynamicComboImplicitControlAfterGenerate:
         with pytest.raises(ValueError, match="out of range"):
             _write_widget(node, "mode", "a", graph, extend=False)
 
+    def test_selector_write_pads_earlier_widgets_with_frontend_defaults(self):
+        info = {
+            "PaddedSelector": {
+                "input": {
+                    "required": {
+                        "seed": ["INT", {"default": 0, "control_after_generate": True}],
+                        "cfg": ["FLOAT", {"default": 8.0}],
+                        "model": [
+                            "COMFY_DYNAMICCOMBO_V3",
+                            {
+                                "default": "a",
+                                "options": [
+                                    {"key": "a", "inputs": {"required": {}}},
+                                    {"key": "b", "inputs": {"required": {"size": ["INT", {"default": 512}]}}},
+                                ],
+                            },
+                        ],
+                    }
+                },
+                "input_order": {"required": ["seed", "cfg", "model"]},
+                "output": [],
+                "output_name": [],
+                "output_node": True,
+                "python_module": "nodes",
+            }
+        }
+        graph = Graph.from_object_info(info)
+        node = {"id": 1, "type": "PaddedSelector", "widgets_values": []}
+
+        _write_widget(node, "model", "b", graph, extend=True)
+
+        assert node["widgets_values"] == [0, "fixed", 8.0, "b", 512]
+
     def test_writing_subwidget_materializes_a_missing_selector_default(self):
         info = _dynamic_combo_implicit_seed_object_info()
         info["SeedComboNode"]["input"]["required"]["mode"][1]["default"] = "a"
@@ -876,7 +925,7 @@ class TestDynamicComboImplicitControlAfterGenerate:
 
         assert node["widgets_values"][-2:] == ["a", 99]
 
-    def test_boolean_and_numeric_dynamic_keys_select_distinct_layouts(self):
+    def test_frontend_layout_is_type_strict_but_server_validation_uses_python_equality(self):
         info = {
             "BoolKeys": {
                 "input": {
@@ -902,7 +951,7 @@ class TestDynamicComboImplicitControlAfterGenerate:
         graph = Graph.from_object_info(info)
 
         assert graph.widget_order_for_node("BoolKeys", [True, 2]) == ["mode", "mode.boolean"]
-        result = graph.validate_workflow({"1": {"class_type": "BoolKeys", "inputs": {"mode": True, "mode.boolean": 2}}})
+        result = graph.validate_workflow({"1": {"class_type": "BoolKeys", "inputs": {"mode": True, "mode.number": 2}}})
         assert result["valid"] is True, result["errors"]
         assert not [warning for warning in result["warnings"] if warning["code"] == "unknown_input"]
 

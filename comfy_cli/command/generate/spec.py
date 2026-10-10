@@ -840,6 +840,11 @@ def _schema_may_be_object(
                 result = any(isinstance(value, dict) for value in enum)
             else:
                 result = True
+        enum = schema.get("enum")
+        if isinstance(enum, list):
+            # Sibling keywords are conjunctive: an empty enum accepts
+            # nothing, and a scalar-only enum cannot satisfy object type.
+            result = result and any(isinstance(value, dict) for value in enum)
         # Composition keywords constrain their siblings, including an
         # explicit ``type`` or ``const`` sibling.
         for key in ("anyOf", "oneOf"):

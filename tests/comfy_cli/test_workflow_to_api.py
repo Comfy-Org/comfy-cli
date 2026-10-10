@@ -939,7 +939,7 @@ class TestMalformedInputHardening:
         assert result["1"]["class_type"] == "Foo"
         assert result["1"]["inputs"]["shape"] == "square"
 
-    def test_v3_combo_boolean_key_does_not_match_numeric_key(self):
+    def test_v3_combo_conversion_matches_server_boolean_numeric_equality(self):
         object_info = {
             "Foo": {
                 "input": {
@@ -976,7 +976,7 @@ class TestMalformedInputHardening:
 
         result = convert_ui_to_api(workflow, object_info)
 
-        assert result["1"]["inputs"] == {"shape": True, "shape.boolean": 7}
+        assert result["1"]["inputs"] == {"shape": True, "shape.number": 7}
 
     def test_malformed_schema_input_does_not_crash(self):
         # Several helpers do ``schema.get("input") or {}`` then ``.get(section)``.

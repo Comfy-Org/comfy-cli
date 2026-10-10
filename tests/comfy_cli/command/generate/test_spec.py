@@ -625,6 +625,29 @@ def test_schema_object_check_applies_composition_to_explicit_base_constraints(sc
     assert spec._schema_may_be_object(schema) is False
 
 
+@pytest.mark.parametrize(
+    "schema",
+    [
+        {"enum": []},
+        {"type": "object", "enum": ["scalar-only"]},
+        {"const": {}, "enum": ["scalar-only"]},
+    ],
+)
+def test_schema_object_check_rejects_unsatisfiable_object_enums(schema):
+    assert spec._schema_may_be_object(schema) is False
+
+
+def test_unsatisfiable_union_branch_does_not_hide_a_real_property():
+    schema = {
+        "anyOf": [
+            {"enum": []},
+            {"type": "object", "properties": {"model": {"enum": ["m1"]}}},
+        ]
+    }
+
+    assert spec._extract_enum(spec._find_property(schema, "model")) == ["m1"]
+
+
 def test_find_property_shares_the_object_memo_across_union_branches(monkeypatch):
     leaf: dict = {"type": "object"}
     shared = leaf
