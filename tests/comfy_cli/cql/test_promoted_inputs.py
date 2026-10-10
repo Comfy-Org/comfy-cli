@@ -200,6 +200,20 @@ def test_unregistered_root_does_not_reuse_a_smaller_cached_visit_limit():
     assert external_limit > registered_limit
 
 
+def test_promotion_visit_limit_ignores_unreachable_definitions():
+    root = {"id": "root", "inputs": [], "nodes": [], "links": []}
+    unrelated = {
+        "id": "unrelated",
+        "inputs": [{"name": "padding", "linkIds": list(range(10_000))}],
+        "nodes": [],
+        "links": [],
+    }
+    definitions = _SubgraphDefs()
+    definitions.update({"root": root, "unrelated": unrelated})
+
+    assert promoted._promotion_visit_limit(definitions, root) == promoted._MAX_NESTED_PROMOTION_DEPTH + 1
+
+
 def test_promotion_caches_do_not_expose_mutable_results():
     sg = {
         "id": "sg",
@@ -811,6 +825,49 @@ def test_nested_boundary_names_use_consistent_string_coercion():
     }
 
     assert promoted._boundary_targets(root, root_input, {"root": root, "leaf": leaf}, 0) == [(["8", "9"], "7")]
+
+
+def test_falsy_boundary_name_stays_cacheable_and_preserves_fanout():
+    root = {
+        "id": "root",
+        "inputs": [{"name": 0, "type": "STRING", "linkIds": [1, 2]}],
+        "nodes": [
+            {"id": 7, "type": "Plain", "inputs": [{"name": 0, "link": 1, "widget": {"name": 0}}]},
+            {"id": 8, "type": "Plain", "inputs": [{"name": 0, "link": 2, "widget": {"name": 0}}]},
+        ],
+        "links": [
+            {"id": 1, "origin_id": -10, "target_id": 7, "target_slot": 0},
+            {"id": 2, "origin_id": -10, "target_id": 8, "target_slot": 0},
+        ],
+    }
+    definitions = _SubgraphDefs()
+    definitions["root"] = root
+    [item] = promoted.promoted_inputs(root, definitions)
+
+    assert promoted.boundary_widget_targets(root, item, definitions) == [(["7"], "0"), (["8"], "0")]
+
+
+def test_boundary_materialization_has_an_absolute_cap(monkeypatch):
+    root = {
+        "id": "root",
+        "inputs": [{"name": "value", "type": "STRING", "linkIds": [1, 2, 3]}],
+        "nodes": [
+            {
+                "id": node_id,
+                "type": "Plain",
+                "inputs": [{"name": "value", "link": node_id, "widget": {"name": "value"}}],
+            }
+            for node_id in (1, 2, 3)
+        ],
+        "links": [{"id": node_id, "origin_id": -10, "target_id": node_id, "target_slot": 0} for node_id in (1, 2, 3)],
+    }
+    definitions = _SubgraphDefs()
+    definitions["root"] = root
+    [item] = promoted.promoted_inputs(root, definitions)
+    monkeypatch.setattr(promoted, "_MAX_BOUNDARY_MATERIALIZATIONS", 2)
+
+    with pytest.raises(promoted.PromotionTraversalLimitError, match="safe limit"):
+        promoted.boundary_widget_targets(root, item, definitions)
 
 
 def test_repeated_boundary_link_ids_share_holder_work_with_serialized_budget():
